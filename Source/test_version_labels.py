@@ -26,6 +26,12 @@ class VersionLabelTests(unittest.TestCase):
                 }]}, self.settings(identifier))
                 self.assertEqual(rows[0]["display_name"], expected)
                 self.assertEqual(rows[0]["id"], "mistral/" + identifier)
+        # A shared billing family must not discard a known model patch version.
+        leanstral = project_catalogue("mistral", {"models": [{
+            "id": "labs-leanstral-1-5-1", "display_name": "labs-leanstral-1-5-1",
+            "billing_model_name": "labs-leanstral-1-5",
+        }]}, self.settings("labs-leanstral-1-5-1"))[0]
+        self.assertEqual(leanstral["display_name"], "Leanstral 1.5.1 · Labs")
 
     def test_latest_alias_uses_reported_version_without_changing_route(self):
         row = {

@@ -12,7 +12,7 @@ import re
 
 from providers import PROVIDERS, provider_defaults, validate_connection
 from branding import resolve_presentation, validate_overrides
-from model_names import friendly_model_name
+from model_names import PINNED_LABELS, friendly_model_name
 
 MODEL_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:/+\-]{0,299}\Z")
 MAX_CREDENTIAL_REVISION = 9_007_199_254_740_991
@@ -279,8 +279,8 @@ def project_catalogue(provider_id: str, inventory: dict, settings: dict, observa
         # billing-model identifier. Use it for presentation, never for routing.
         label_identifier = canonical
         billing_model = item.get("billing_model_name")
-        if (provider_id == "mistral" and isinstance(billing_model, str)
-                and MODEL_ID.fullmatch(billing_model)
+        if (provider_id == "mistral" and canonical not in PINNED_LABELS
+                and isinstance(billing_model, str) and MODEL_ID.fullmatch(billing_model)
                 and re.search(r"(?:^|[-_.])\d", billing_model)):
             label_identifier = billing_model
         # Repeated raw IDs are not human labels and must not suppress known
