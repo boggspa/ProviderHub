@@ -183,6 +183,7 @@ class ProfileTests(unittest.TestCase):
         self.assertTrue(self.profile.active())
         self.assertEqual(read_json(self.profile.normal)["mcpServers"], {"keep": {}})
         self.assertEqual(read_json(self.profile.profile)["inferenceCredentialKind"], "static")
+        self.assertIs(read_json(self.profile.profile)["modelPrefer1mContext"], True)
         result = self.profile.restore(require_closed=False)
         self.assertTrue(result["restored"])
         self.assertEqual(read_json(self.profile.meta), self.previous)

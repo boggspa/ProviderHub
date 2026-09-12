@@ -43,7 +43,11 @@ final class BridgeModel: ObservableObject {
     @Published var vibeConfigured: [String] = []
     @Published var availableModels: [ModelEntry] = []
     @Published var friendlyNames: [String: String] = [:]
-    @Published var catalogueSummary = "Refresh models to load provider limits."
+    @Published var catalogueSummary = "Loading provider models…"
+    @Published var catalogueRefreshing = false
+    @Published var catalogueNotice = ""
+    @Published var providerRefreshIssues: [String: String] = [:]
+    var catalogueRefreshTask: Task<Void, Never>?
     @Published var claudeInstalled = false
     @Published var claudeRunning = false
     @Published var profileActive = false
@@ -183,7 +187,8 @@ final class BridgeModel: ObservableObject {
                     try process.run()
                     if let input { try stdin.fileHandleForWriting.write(contentsOf: input) }
                     try stdin.fileHandleForWriting.close()
-                    DispatchQueue.global().asyncAfter(deadline: .now() + 45) {
+                    let timeout: Double = ["refresh-all", "prepare-launch", "discover", "activate"].contains(command) ? 120 : 45
+                    DispatchQueue.global().asyncAfter(deadline: .now() + timeout) {
                         if process.isRunning { process.terminate() }
                     }
                     let data = output.fileHandleForReading.readDataToEndOfFile()
@@ -213,6 +218,7 @@ final class BridgeModel: ObservableObject {
         guard !busy else { return }
         busy = true
         defer { busy = false }
+        await waitForCatalogueRefresh()
         python = Self.findPython(); runtimeFound = python != nil
         do {
             let info = try await command("inspect")
@@ -239,23 +245,72 @@ final class BridgeModel: ObservableObject {
                 try await startGateway()
                 hasObservedOwnedClaude = true
                 tell("Reconnected the gateway for the existing hub’s Claude session.")
-            } else if !recover { tell("Provider settings reloaded. Refresh a catalogue to check available models.") }
+            } else if !recover { tell("Provider settings reloaded. Updating model catalogues…") }
+            beginCatalogueRefresh()
         } catch { tell(error.localizedDescription, error: true) }
         loadActivity()
     }
 
+    func applyCatalogueDiagnostics(_ result: [String: Any]) {
+        guard let lifecycle = result["catalogue_lifecycle"] as? [String: Any],
+              let providers = lifecycle["providers"] as? [String: [String: Any]] else { return }
+        for (identifier, state) in providers {
+            if ["refreshed", "current", "skipped_unconfigured"].contains(state["status"] as? String ?? "") { providerRefreshIssues.removeValue(forKey: identifier) }
+            if let error = (state["error"] as? [String: Any])?["message"] as? String { providerRefreshIssues[identifier] = error }
+            else if let warning = (state["warning"] as? [String: Any])?["message"] as? String { providerRefreshIssues[identifier] = warning }
+        }
+        let count = (lifecycle["refreshed_provider_ids"] as? [String])?.count ?? 0
+        let failures = (lifecycle["errors"] as? [[String: Any]])?.count ?? 0
+        if lifecycle["mode"] as? String == "prepare_launch", lifecycle["ready"] as? Bool == true {
+            catalogueNotice = "Selected models are ready for Claude"
+        } else {
+            catalogueNotice = failures == 0 ? "Updated \(count) provider catalogues" : "Updated \(count) providers · \(failures) need attention"
+        }
+    }
+
+    func beginCatalogueRefresh(userInitiated: Bool = false) {
+        guard catalogueRefreshTask == nil, runtimeFound, !shuttingDown else { return }
+        catalogueRefreshing = true
+        catalogueNotice = "Updating provider models…"
+        catalogueRefreshTask = Task { [weak self] in
+            guard let self else { return }
+            defer { self.catalogueRefreshing = false; self.catalogueRefreshTask = nil }
+            do {
+                let result = try await self.command("refresh-all")
+                self.readCatalogue(result, modelsKey: "models")
+                self.applyCatalogueDiagnostics(result)
+                if let info = try? await self.command("inspect") { self.readCatalogue(info, modelsKey: "catalog") }
+                if userInitiated { self.tell(self.catalogueNotice + ". Each provider card shows any refresh issue.") }
+            } catch {
+                self.catalogueNotice = "Could not refresh models; saved catalogues remain available."
+                if userInitiated { self.tell(error.localizedDescription, error: true) }
+            }
+        }
+    }
+
+    func waitForCatalogueRefresh() async {
+        if let task = catalogueRefreshTask { await task.value }
+    }
+
     func discover() async {
         guard !busy else { return }
+        let providerID = selectedProvider
         busy = true; defer { busy = false }
+        await waitForCatalogueRefresh()
         do {
             if changed { try await save() }
-            let result = try await command("discover", provider: selectedProvider)
+            let result = try await command("discover", provider: providerID)
             readCatalogue(result, modelsKey: "models")
-            tell("Catalogue refreshed. This checks model metadata; use Test on a mapping to make an inference request.")
-        } catch { tell(error.localizedDescription, error: true) }
+            providerRefreshIssues.removeValue(forKey: providerID)
+            tell("Models refreshed. Your next Claude launch will load this catalogue automatically.")
+        } catch {
+            providerRefreshIssues[providerID] = error.localizedDescription
+            tell(error.localizedDescription, error: true)
+        }
     }
 
     func save() async throws {
+        await waitForCatalogueRefresh()
         updateClaudeRunning()
         if running { try await checkIdleGateway() }
         if activeRequests > 0 || (claudeRunning && profileActive) {
@@ -381,7 +436,13 @@ final class BridgeModel: ObservableObject {
         guard !busy else { return }
         busy = true; defer { busy = false }
         do {
+            await waitForCatalogueRefresh()
             if changed { try await save() }
+            updateClaudeRunning()
+            if running && !(claudeRunning && profileActive) {
+                try await checkIdleGateway()
+                await stopGateway()
+            }
             try await startGateway()
             var body: [String: Any] = [
                 "model": slot, "max_tokens": 512,
@@ -418,7 +479,13 @@ final class BridgeModel: ObservableObject {
         }
         do {
             if recoveryNeeded { _ = try await command("restore"); recoveryNeeded = false }
+            tell("Preparing the selected models for Claude…")
             try await save()
+            let prepared = try await command("prepare-launch")
+            readCatalogue(prepared, modelsKey: "models")
+            applyCatalogueDiagnostics(prepared)
+            // save() stops an idle gateway before preparation. The new worker
+            // must snapshot the prepared catalogue, not the old startup cache.
             try await startGateway()
             _ = try await command("activate")
             profileActive = true; recoveryNeeded = true
@@ -513,6 +580,7 @@ final class BridgeModel: ObservableObject {
         let key = secretDraft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !key.isEmpty else { tell("Enter the provider API key first.", error: true); return }
         busy = true; defer { busy = false }
+        await waitForCatalogueRefresh()
         do {
             updateClaudeRunning()
             if running { try await checkIdleGateway() }
@@ -542,7 +610,16 @@ final class BridgeModel: ObservableObject {
             secretDraft = ""; settings = proposed
             try await save()
             if let info = try? await command("inspect") { readCatalogue(info, modelsKey: "catalog") }
-            tell("Key saved in macOS Keychain. Refresh this provider’s catalogue before choosing its models.")
+            do {
+                let catalogue = try await command("discover", provider: providerID)
+                readCatalogue(catalogue, modelsKey: "models")
+                providerRefreshIssues.removeValue(forKey: providerID)
+                let count = availableModels.filter { $0.provider_id == providerID }.count
+                tell("Key saved. \(count) \(provider.name) models are ready to choose.")
+            } catch {
+                providerRefreshIssues[providerID] = error.localizedDescription
+                tell("Key saved. Model discovery needs attention: " + error.localizedDescription, error: true)
+            }
         } catch { tell(error.localizedDescription, error: true) }
     }
 
@@ -598,7 +675,7 @@ struct BridgeWindow: View {
                 Spacer()
                 VStack(alignment: .leading, spacing: 9) {
                     StatusPill(text: model.running ? "Gateway ready" : model.gatewayState, good: model.running)
-                    Text("0.3.0 · WORKTREE PREVIEW").font(.system(size: 9, weight: .medium)).tracking(1).foregroundStyle(.tertiary)
+                    Text("0.3.1 · PROVIDER HUB").font(.system(size: 9, weight: .medium)).tracking(1).foregroundStyle(.tertiary)
                 }
             }.padding(20).frame(width: 200).background(Color.black.opacity(0.15))
             Rectangle().fill(Color.white.opacity(0.07)).frame(width: 1)
@@ -654,7 +731,12 @@ struct BridgeWindow: View {
                     Spacer()
                     Button("Provider catalogues") { model.page = .connection }.disabled(model.busy)
                 }
-                Text(model.catalogueSummary).font(.system(size: 11)).foregroundStyle(.secondary)
+                HStack {
+                    Text(model.catalogueSummary).font(.system(size: 11)).foregroundStyle(.secondary)
+                    Spacer()
+                    if model.catalogueRefreshing { ProgressView().controlSize(.small) }
+                    Button("Refresh all") { model.beginCatalogueRefresh(userInitiated: true) }.disabled(model.busy || model.catalogueRefreshing)
+                }
                 ForEach(slots, id: \.id) { slot in
                     HStack(spacing: 10) {
                         VStack(alignment: .leading, spacing: 4) { Text(slot.label).font(.system(size: 12, weight: .medium)); if model.showRoutingIDs { Text(slot.id).font(.system(size: 8, design: .monospaced)).foregroundStyle(.tertiary) } }.frame(width: 100, alignment: .leading)
@@ -730,6 +812,7 @@ struct BridgeWindow: View {
                 Toggle(isOn: $model.settings.auto_stop) { VStack(alignment: .leading, spacing: 5) { Text("Stop gateway when Claude quits").font(.system(size: 13, weight: .medium)); Text("The menu bar app stays available for your next session.").font(.caption).foregroundStyle(.secondary) } }.toggleStyle(.switch)
                 Divider()
                 Toggle(isOn: $model.settings.auto_mode) { VStack(alignment: .leading, spacing: 5) { Text("Enable Claude Auto mode").font(.system(size: 13, weight: .medium)); Text("Use Claude’s approval classifier through the configured gateway. Claude chooses its reviewer model internally.").font(.caption).foregroundStyle(.secondary) } }.toggleStyle(.switch)
+                Text("Claude adds a standard and a 1M choice for models that support long context. New selections prefer 1M; existing session choices are preserved.").font(.caption).foregroundStyle(.secondary).lineSpacing(3)
                 Text("This uses Claude’s native third-party profile system, like Ollama. It switches the installed app’s profile; it does not create a simultaneous second Claude app. Existing Ollama and Claude conversations are retained.").font(.caption).foregroundStyle(.secondary).lineSpacing(3)
             }
             HStack { Spacer(); Button("Save preferences") { Task { await model.saveFromUI() } }.disabled(model.busy || !model.changed) }

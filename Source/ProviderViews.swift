@@ -24,6 +24,12 @@ struct ProviderPage: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
+            HStack(spacing: 8) {
+                if model.catalogueRefreshing { ProgressView().controlSize(.small) }
+                Text(model.catalogueNotice.isEmpty ? "Models update automatically when the app opens." : model.catalogueNotice).font(.caption).foregroundStyle(.secondary)
+                Spacer()
+                Button("Refresh all") { model.beginCatalogueRefresh(userInitiated: true) }.disabled(model.busy || model.catalogueRefreshing)
+            }
             LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: 3), spacing: 10) {
                 ForEach(model.providerDefinitions) { provider in
                     Button {
@@ -102,6 +108,9 @@ struct ProviderPage: View {
                         Text("\(allModels.count) models").font(.caption).foregroundStyle(.secondary)
                         Button("Refresh catalogue") { Task { await model.discover() } }.disabled(model.busy)
                     }
+                    if let issue = model.providerRefreshIssues[provider.id] {
+                        Text(issue).font(.caption).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
+                    }
                     if allModels.count > 8 { TextField("Find a model…", text: $modelSearch).textFieldStyle(.roundedBorder) }
                     if let summary = model.providerSummaries[provider.id] {
                         Text(sourceLabel(summary)).font(.caption).foregroundStyle(.secondary)
@@ -110,7 +119,7 @@ struct ProviderPage: View {
                         }
                     }
                     if inventory.isEmpty {
-                        Text("Refresh to load available model names and their reported limits. This fetches metadata without sending a chat request.").font(.caption).foregroundStyle(.secondary).lineSpacing(3)
+                        Text("Models load automatically for configured accounts. Refresh to retry discovery; this fetches metadata without sending a chat request.").font(.caption).foregroundStyle(.secondary).lineSpacing(3)
                     } else {
                         ForEach(inventory) { entry in
                             VStack(alignment: .leading, spacing: 5) {

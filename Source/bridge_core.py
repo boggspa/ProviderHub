@@ -287,6 +287,9 @@ def cached_catalogue(settings, root=None):
                         vibe = {}
                     bare_settings = {"mappings": {slot: split_route(route)[1] for slot, route in settings["mappings"].items() if split_route(route)[0] == "mistral"}}
                     inventory = build_catalogue(legacy["raw"], bare_settings, vibe)
+                    # Rebuilding a legacy projection must not make old metadata
+                    # appear freshly fetched on every read.
+                    inventory["fetched_at"] = legacy.get("fetched_at")
                 else:
                     inventory = legacy
                 inventory["source"] = "imported-provider-metadata"
@@ -351,6 +354,10 @@ class ClaudeProfile:
             "inferenceGatewayApiKey": token, "inferenceGatewayAuthScheme": "bearer",
             "deploymentDisplayName": app_display_name(), "chatTabEnabled": True,
             "modelDiscoveryEnabled": True, "disableDeploymentModeChooser": True,
+            # Claude preserves explicit existing context choices; this asks new
+            # selections to prefer a truthful advertised 1M variant when one
+            # exists, without fabricating a separate fixed-context model.
+            "modelPrefer1mContext": True,
             "disableEssentialTelemetry": True, "disableNonessentialTelemetry": True,
             "autoModeEnabled": settings.get("auto_mode", False),
             # Chat Completions has no hosted WebSearch tool; local WebFetch and

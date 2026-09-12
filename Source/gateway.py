@@ -24,6 +24,10 @@ import urllib.request
 
 from bridge_core import (BridgeError, ClaudeProfile, atomic_json, attach_model_specs, bootstrap_metadata, cached_catalogue, credentials, discover_provider, gateway_token,
                          inspect_state, load_settings, model_labels, private_directory, private_token, read_json, ssl_context, state_root, validate_settings)
+from catalogue_lifecycle import (CataloguePreparationError, catalogue_fingerprint,
+                                 prepare_launch, refresh_all, require_prepared,
+                                 runtime_fingerprint_error,
+                                 validate_prepared_launch)
 from catalogue import build_catalogue, read_observations
 from hub_config import connection_signature, provider_presentations, qualify, split_route
 from providers import PROVIDERS, prepare_request, ProviderError
@@ -38,6 +42,11 @@ class Runtime:
     def __init__(self, root: Path, upstream_url=None, key=None, request_planner=None):
         self.root = root
         self.settings, self.catalogue = attach_model_specs(load_settings(root), root)
+        # Runtime deliberately snapshots model planning metadata at startup.
+        # Activation checks this fingerprint after launch preparation so a
+        # newly refreshed selected route cannot be served by an older snapshot.
+        self.catalogue_fingerprint = catalogue_fingerprint(
+            self.settings, root, model_specs=self.settings["_model_specs"])
         self.token = gateway_token(root)
         self.replay_key = private_token(root, "reasoning-signing-key")
         self.key = key
@@ -119,6 +128,7 @@ class Runtime:
                     "input_tokens": self.input_tokens, "output_tokens": self.output_tokens,
                     "last_error": self.last_error, "last_model": self.last_model,
                     "credential_source": self.source, "uptime_seconds": int(time.time() - self.started), "pid": os.getpid(),
+                    "catalogue_fingerprint": self.catalogue_fingerprint,
                     "providers": {key: dict(value) for key, value in self.provider_counts.items()}}
 
     def record(self, kind, model="", code=None, usage=None, model_unavailable=False):
@@ -177,7 +187,7 @@ def error_type(status):
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "ProviderHub/0.3.0"
+    server_version = "ProviderHub/0.3.1"
 
     @property
     def runtime(self):
@@ -225,7 +235,7 @@ class Handler(BaseHTTPRequestHandler):
         if not self.allowed(health=path == "/_bridge/health"):
             return
         if path == "/_bridge/health":
-            self.json_response(200, {"service": "mistral-bridge", "version": "0.3.0"})
+            self.json_response(200, {"service": "mistral-bridge", "version": "0.3.1"})
         elif path == "/_bridge/status":
             self.json_response(200, self.runtime.status())
         elif path == "/v1/models":
@@ -536,9 +546,21 @@ def serve(root, parent_pipe=False):
     lock.close()
 
 
+def catalogue_command_result(settings, root, lifecycle):
+    inventory = cached_catalogue(settings, root)
+    return {
+        "models": inventory.get("models", []),
+        "friendly_names": model_labels(settings, inventory.get("models", [])),
+        "catalog_summary": {key: value for key, value in inventory.items()
+                            if key not in {"models", "raw"}},
+        "provider_definitions": provider_presentations(settings),
+        "catalogue_lifecycle": lifecycle,
+    }
+
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=["inspect", "validate", "save", "discover", "activate", "restore", "serve"])
+    parser.add_argument("command", choices=["inspect", "validate", "save", "discover", "refresh-all", "prepare-launch", "activate", "restore", "serve"])
     parser.add_argument("--provider", choices=list(PROVIDERS), default="mistral")
     parser.add_argument("--parent-pipe", action="store_true")
     args = parser.parse_args()
@@ -565,24 +587,35 @@ def main():
         inventory = cached_catalogue(settings, root)
         result = {"models": inventory["models"], "credential_source": source, "friendly_names": model_labels(settings, inventory["models"]),
                   "catalog_summary": {k: v for k, v in inventory.items() if k not in {"models", "raw"}}}
+    elif args.command in {"refresh-all", "prepare-launch"}:
+        settings = load_settings(root)
+        lifecycle = (refresh_all(settings, root) if args.command == "refresh-all"
+                     else prepare_launch(settings, root))
+        if args.command == "prepare-launch":
+            require_prepared(lifecycle)
+        result = catalogue_command_result(settings, root, lifecycle)
     elif args.command == "activate":
         settings = load_settings(root)
-        enriched, _ = attach_model_specs(settings, root)
-        if any(identifier not in enriched["_model_specs"] for identifier in settings["mappings"].values()):
-            raise BridgeError("Refresh provider models before launching Claude so every selected route has catalogue metadata.")
-        for provider_id in {split_route(route)[0] for route in settings["mappings"].values()}:
-            credentials(settings, provider_id)
+        lifecycle = require_prepared(validate_prepared_launch(settings, root))
         token = gateway_token(root)
         # Authenticate the readiness probe so an unrelated process on this port
         # cannot be mistaken for this app's gateway.
         request = urllib.request.Request(f"http://127.0.0.1:{settings['port']}/_bridge/status", headers={"Authorization": "Bearer " + token})
         try:
             with urllib.request.urlopen(request, timeout=3) as response:
-                if not json.load(response).get("running"):
+                runtime_status = json.load(response)
+                if not runtime_status.get("running"):
                     raise ValueError()
         except Exception as exc:
             raise BridgeError("Start the gateway before launching Claude.") from exc
+        fingerprint_error = runtime_fingerprint_error(
+            lifecycle["catalogue_fingerprint"],
+            runtime_status.get("catalogue_fingerprint"), settings,
+        )
+        if fingerprint_error:
+            raise BridgeError(fingerprint_error)
         result = ClaudeProfile(root).activate(settings, token)
+        result["catalogue_lifecycle"] = lifecycle
     else:
         result = ClaudeProfile(root).restore()
     print(json.dumps({"ok": True, **result}))
@@ -591,6 +624,10 @@ def main():
 if __name__ == "__main__":
     try:
         main()
+    except CataloguePreparationError as exc:
+        print(json.dumps({"ok": False, "error": str(exc),
+                          "catalogue_lifecycle": exc.result}), flush=True)
+        sys.exit(1)
     except (BridgeError, OSError, ValueError, subprocess.TimeoutExpired) as exc:
         message = str(exc) if isinstance(exc, (BridgeError, CerebrasReplayError)) else "The operation could not finish. Check the local runtime and configuration."
         print(json.dumps({"ok": False, "error": message}), flush=True)
