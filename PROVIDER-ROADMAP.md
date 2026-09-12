@@ -1,10 +1,16 @@
 **Provider Hub integration status — 12 September 2026**
 
-The preview implements seven model API connections behind one native menu bar app: Mistral, Kimi Code subscription API keys, Xiaomi MiMo Token Plan, the existing Ollama daemon, DeepSeek API, Cerebras API, and Muse through the Meta Model API. Provider identity, credentials, metadata, and quota attribution remain separate from TaskWraith-derived display branding.
+The preview implements eight model API connections behind one native menu bar app: Mistral, Kimi Code subscription API keys, Xiaomi MiMo Token Plan, the existing Ollama daemon, DeepSeek API, Cerebras API, Muse through the Meta Model API, and Grok through the xAI PAYG API. Provider identity, credentials, metadata, and quota attribution remain separate from TaskWraith-derived display branding.
 
 The current implementation includes model discovery/provenance, exact context where known, readable names, alias grouping, Claude slot mappings, native and translated Messages streaming/tool history, per-provider account settings, effort/Fast compatibility handling, profile launch/recovery, and metadata-only activity logs. See `README.md` for setup and `VERIFICATION.md` for actual evidence.
 
-Grok Build's browser-authenticated subscription path is ACP (`grok agent stdio`). Muse Code's subscription path is MSP (`muse serve`). Neither is established as a reusable raw model API token. TaskWraith hosts their agent sessions with lifecycle, permission, and cancellation management. A future delegated-agent tool can reuse that architecture, but must not re-present already-executed native tools as pending Claude tool calls. The Meta Model API-key route is implemented as Muse in 0.3.2; a separate xAI API-key route remains a possible addition. The detailed first-party research and TaskWraith file references are in `NATIVE-AGENTS.md`.
+Grok Build's browser-authenticated subscription path is ACP (`grok agent stdio`). Muse Code's subscription path is MSP (`muse serve`). Neither is established as a reusable raw model API token. TaskWraith hosts their agent sessions with lifecycle, permission, and cancellation management. A future delegated-agent tool can reuse that architecture, but must not re-present already-executed native tools as pending Claude tool calls. The Meta Model API-key route is implemented as Muse in 0.3.2; Grok PAYG API access is implemented in 0.3.3. The detailed first-party research and TaskWraith file references are in `NATIVE-AGENTS.md`.
+
+The next harness candidate is the installed Codex/ChatGPT Desktop app. Ollama's
+current launcher configures a Responses provider and a custom model catalogue,
+with backup/restoration. `HARNESS-OPTIONS.md` records the exact local versions,
+source evidence, and proposed protocol/catalogue/launcher slices. The current
+gateway does not yet expose `/v1/responses` or launch this harness.
 
 Claude Auto works through the normal gateway mapping, but the current client exposes no supported independent classifier model selector or reliable classifier request marker. Preserve the existing opt-in and native permission handling. Do not route by prompt heuristics or claim that enabling the selector qualifies an arbitrary model as a reviewer.
 
