@@ -1,110 +1,83 @@
-**Mistral Bridge 0.2.0**
+**Provider Hub Preview 0.3.0**
 
-A native macOS menu bar app that connects Claude Desktop to the Mistral API using your existing Vibe sign-in. This is a locally built prototype for Apple Silicon Macs, with its Swift and Python source included.
+A native macOS menu bar app that connects Claude Desktop to model APIs from Mistral, Kimi Code, Xiaomi MiMo Token Plan, Ollama, DeepSeek, and Cerebras. Configure accounts, pick readable model names, and launch Claude through its native third-party profile system.
 
-The app has been tested with Claude Desktop 1.52386.3 and Mistral Vibe 2.25.0. An actual Claude Code session completed a read → edit → read verification through `mistral-vibe-cli-latest`.
+This repository contains the multi-provider extension to Mistral Bridge, merged into `main`. The app remains labelled Preview while the remaining provider accounts are qualified. The stable Mistral app and the preview have separate bundle IDs, settings directories, Keychain namespaces, gateway ports, and Claude profile IDs. The preview does not replace the stable app.
 
-**Start using it**
+**Start using the preview**
 
-1. Open Mistral Vibe and sign in if needed. Vibe supplies the saved model configuration and credentials; its agent does not need to keep running during inference.
-2. Open **Mistral Bridge.app**. Its icon appears in the menu bar. You can move the app into Applications if you want to keep it there.
-3. In **Connection**, check that it says **Connected through Vibe Keychain**, Vibe environment, or Vibe .env. A separate Mistral API key can also be stored in macOS Keychain.
-4. In **Models**, click **Refresh models** and choose friendly model names for each Claude slot. Enable **Show technical IDs** to see or edit exact API IDs, or choose **Enter a custom model ID…** in a selector. **Use Vibe for all** maps every slot to the actual API ID behind Vibe’s selected model. **Test** sends a small request to the selected route.
-5. Finish any current work in Claude and quit Claude. Click **Launch Claude** in Mistral Bridge. The app saves the mappings, starts the gateway, waits for it to be ready, switches to its Mistral profile, and opens Claude.
-6. Use Claude normally. Quitting Claude restores the previous profile configuration and, by default, stops the gateway. Mistral Bridge stays in the menu bar.
+1. Open **Provider Hub Preview.app**. It requires an Apple Silicon Mac, macOS 14 or newer, and Python 3.11 or newer. The existing Mistral Vibe installation can supply Python; Vibe's agent does not need to keep running.
+2. Select a provider in **Providers**. Mistral can use Vibe's saved credentials. Enter other provider API keys with **Save key** to store them in the preview's macOS Keychain namespace. Ollama connects to the existing local daemon. MiMo's account region selects its official Token Plan endpoint.
+3. Use **Refresh catalogue**. This fetches model metadata, not a chat completion. Kimi and MiMo use a documented catalogue because an account-scoped list endpoint has not been established. Their presence in the picker does not prove that the current account can use them.
+4. In **Models**, choose a provider and model behind each Claude option. The same underlying model is shown once when several Claude slots use it. **Test** makes a small inference request. Exact provider/model IDs remain available under **Show technical IDs**.
+5. Finish current work in Claude and quit Claude. Choose **Launch Claude**. The app saves the mappings, starts the gateway, verifies readiness, switches to its dedicated profile, and opens the installed Claude app.
+6. Quitting Claude restores the prior profile selection and normally stops the gateway. The menu bar app remains available.
 
-The default mappings use the installed Vibe model. On the Mac where this build was tested, the displayed alias `mistral-medium-3.5` resolves to API model `mistral-vibe-cli-latest`. The current model catalogue advertises 31 chat IDs, which describe 10 distinct model/context combinations. The app groups 21 duplicate aliases. Discovery does not prove that a model currently has available quota or supports every Claude tool.
+The main repository is `/Users/chrisizatt/Documents/Mistral Bridge`. Build there to create `Provider Hub Preview.app` alongside the original Mistral app. The development worktree remains at `/Users/chrisizatt/Documents/Mistral Bridge-worktrees/provider-hub` on `feature/provider-hub`. The original Mistral baseline was committed in three slices before development began. The provider extension was subsequently split into provider adapters/reasoning replay, branding/model names, app/gateway integration, and documentation before its fast-forward merge. The original two feature commits remain available on `archive/provider-hub-before-split`.
 
-**Friendly model names**
+**Provider connections**
 
-Labels use provider metadata and Vibe's active display name where available. A small fallback parser recognises brand spelling, versions, parameter sizes, date suffixes, and qualifiers such as Latest, Preview, and Cloud. For example:
+| Provider | Credential | Outbound interface | Catalogue evidence |
+| --- | --- | --- | --- |
+| Mistral | Vibe sign-in or Mistral API key | Mistral Chat Completions | Authenticated `/v1/models`; canonical aliases grouped; archived/retired IDs omitted |
+| Kimi Code | Subscription API key from Kimi Code console | Native Anthropic-compatible Messages | Documented models; membership controls availability/context |
+| MiMo Token Plan | Token Plan API key for CN, Singapore, or Amsterdam | Native Anthropic-compatible Messages | Documented Token Plan models |
+| Ollama | Existing local daemon/login | Native Anthropic-compatible Messages | `/api/tags` plus `/api/show`; no downloads performed |
+| DeepSeek | DeepSeek API key | Native Anthropic-compatible Messages | Authenticated model list plus documented capabilities |
+| Cerebras | Cerebras API key | Chat Completions with authenticated reasoning replay | Authenticated list enriched with public model metadata |
 
-| API ID | Display label |
-| --- | --- |
-| `mistral-vibe-cli-latest` | Mistral Medium 3.5, using this installation's Vibe metadata and its canonical model group |
-| `zai-glm-5-2` | GLM 5.2 |
-| `codestral-2508` | Codestral · Aug 2025 |
-| `model-name-v1-2504` | Model Name V1 · Apr 2025 |
+No CLI OAuth tokens are extracted to impersonate model API credentials. Grok Build and Muse Code subscriptions expose stateful ACP/MSP agent sessions; hosting those agents is a separate feature from changing the model behind Claude's agent. See `NATIVE-AGENTS.md` for the researched paths, source links, and implementation boundary. Separate xAI and Meta Model API credentials would support future API adapters, with their own API billing.
 
-The exact API IDs remain unchanged in settings and requests. Labels are also returned in the local `/v1/models` catalogue for Claude's picker. An existing Claude instance may need its normal next launch to refresh that catalogue. Raw IDs remain available in tooltips and under **Show technical IDs**.
+**Names, branding, context, and model controls**
 
-**Context, availability, and Claude controls**
+The display-name parser recognizes provider spelling, versions, sizes, release dates, and qualifiers such as Cloud and Preview. Provider metadata and explicit display overrides take precedence. Examples: `model-name-v1-2504` becomes `Model Name V1 · Apr 2025`; `gpt-oss:120b-cloud` becomes `GPT OSS · 120B Cloud`. Routing always uses the original ID.
 
-Context limits come directly from each model's `max_context_length`; there is no user-editable context slider or override. Current examples are 262,144 tokens for Medium, 1,048,576 for GLM 5.2, 131,072 for Ministral 3B, and 256,000 for Codestral. Models sharing a family name but reporting different context limits remain separate catalogue entries. The same upstream model mapped to several Claude slots is advertised once in Claude's picker; the internal slot routes remain valid.
+The appearance layer reuses TaskWraith's provider presentation schema: `displayProvider`, `hueKey`, `accent`, `shortCode`, `modelLabels`, and optional bundled `logo` assets. It is keyed by immutable runtime provider identity. Provider names, accents, initials, and model labels can be edited in **Appearance**. An Ollama-hosted upstream brand can have its own logo and accent while the route still identifies Ollama as the account/provider. Logos and palette values were copied from the read-only AGBench source; that checkout was not changed.
 
-Retired or archived models identified by provider metadata are omitted from the default catalogue. None of the 10 current model groups has a past retirement date in the inspected metadata. Each route is labelled **Advertised · not tested**, **Previously responded**, **Quota or rate limited**, or **Rejected by provider**, based on actual local observations. A quota error does not mark a model as retired. Only the Medium/Vibe route has completed the recorded live tests; no inference sweep of the other models was performed.
+Context is read-only. Exact integer values come from provider metadata or exact documented fixed-ID limits. Genuine context variants remain separate entries. Plan-dependent or imprecise limits remain provider-managed instead of inventing a number. Ollama's architectural maximum and effective runtime allocation are distinct: `/api/show` does not establish the latter. Claude's own context meter can still use Claude-specific presets; the gateway cannot fully customize it through discovery.
 
-Use Claude's own Effort control. The bridge reads `output_config.effort` and follows the installed Vibe Mistral backend's coarse mapping: Low → `none`, Medium/High/Extra/Max → `high`. Explicitly disabling thinking also selects `none`. Models whose metadata says they do not support reasoning omit the parameter. The slider positions are not advertised as different models or falsely presented as five distinct Mistral reasoning levels.
+Effort is translated only through established provider controls, using Claude's own request fields. Mistral retains Vibe's coarse Low → standard, Medium and above → reasoning behavior. Effort values are never manufactured as extra models. Fast requests require a documented same-model capability and never silently change the selected model. Kimi's high-speed model has a distinct ID/context and remains a distinct catalogue entry.
 
-Claude Fast mode is not mapped in this Mistral connection. `mistral-vibe-cli-fast` is an alias of Mistral Small, not a faster service tier of Medium. Mistral's separate Priority Tier needs eligible account/model capacity; no such entitlement was established here. A request explicitly asking for unsupported fast speed receives an explanatory error rather than silently changing models or claiming acceleration.
+A listed model is labelled as advertised or documented until an actual inference succeeds. Historical errors distinguish quota/rate limiting from model rejection. Refreshing the catalogue does not run an inference sweep.
 
-Claude itself currently retains some Claude-specific UI assumptions. The bridge publishes exact provider limits and applies those limits to requests, but the inspected Desktop discovery code only derives its 1M-context marker from that metadata; its own context meter can still use a Claude preset such as 200k. Arbitrary context-meter values and per-provider Fast/effort UI affordances are not fully configurable through the documented gateway interface. The app does not patch Claude to change those assumptions.
+**Claude Auto mode**
 
-The development copy lives at `/Users/chrisizatt/Documents/Mistral Bridge/`, with the runnable app, source, verification notes, and provider roadmap together. Git is initialized there for ongoing work. Account credentials and runtime state remain in the separate application-support directory and are not included in the shareable ZIP.
+The existing **Enable Claude Auto mode** toggle is preserved and defaults off. It enables Claude's native approval classifier through the ordinary gateway route. It does not select an independent reviewer model.
 
-**How Claude isolation works**
+Claude Desktop 1.52386.3 and the inspected Claude Code builds choose the classifier model internally, using server configuration and provider/model fallbacks. The gateway receives no stable Auto-specific request-role marker. Mapping the classifier's Claude-facing ID affects every request using that ID, including main/background traffic if they share it. Consequently this preview has no misleading independent reviewer picker and does not infer reviewer role from prompt text. **Accept edits**, **Auto**, and **Bypass permissions** remain different Claude permission modes. See `NATIVE-AGENTS.md` for the installed-code trace and current official documentation.
 
-This follows the native third-party profile approach used by Ollama. It switches the installed Claude app between configurations; it does not launch two independent Claude apps simultaneously. Standard Claude history and third-party history are stored separately by Claude. Mistral and Ollama use the third-party history store, so their saved conversations can appear together. Starting a new conversation leaves existing ones intact.
+**Sessions and isolation**
 
-Mistral Bridge creates its own profile ID. It leaves Ollama’s profile file intact, records the prior selection and deployment modes before activation, and restores the settings it still owns. It refuses to switch an already-running Claude instance. If another app selects a different profile, that selection is preserved. An interrupted transaction is recovered at the next Bridge launch; a running Mistral Claude session can reconnect to its gateway after a Bridge restart.
+The app uses the native third-party profile mechanism used by Ollama. It switches the installed Claude app's profile; it does not launch a concurrent cloned Claude instance. Claude stores first-party and third-party history separately. Ollama and this gateway share Claude's third-party history store, so existing third-party conversations can appear together. Start a fresh conversation when changing incompatible providers or reasoning models.
 
-The profile manager never reads, copies, or writes conversation transcripts. The test recorded 201 existing session files: 200 were byte-identical afterwards, and the remaining usage ledger retained all its original bytes with new usage records appended. The original Ollama profile and profile-selection metadata were byte-identical after restoration.
+Profile activation records a recovery journal before changing the dedicated profile, selection metadata, and deployment-mode fields. Restoration changes only still-owned values and preserves changes another manager made in the meantime. An already-running Claude on another profile must be closed before switching. Transcripts are never read, copied, or edited by the profile manager.
 
-**Capabilities in this prototype**
+**Local data and privacy**
 
-| Capability | Status |
-| --- | --- |
-| Native menu bar and configuration window | Implemented and visually checked |
-| Existing Vibe credentials | Verified against macOS Keychain |
-| Model discovery and editable Claude slot mappings | 31 advertised IDs grouped into 10 models; exact routes retained |
-| Non-streaming text and streaming text | Live tested |
-| Claude Desktop Code tools | Live Read/Edit/Read cycle passed |
-| Tool IDs, partial JSON arguments, multi-turn results | Covered by live and offline tests |
-| System messages between Claude tool turns | Supported and regression tested |
-| Cancellation, truncated streams, upstream errors | Offline integration tested |
-| Images in user messages | Translation tested offline; not verified live in Claude |
-| Reasoning | Uses Claude's Effort request with Vibe's none/high mapping; Claude thinking/signature display is not implemented |
-| Token counting | Local estimate; actual usage figures come from Mistral |
-| Context limit | Provider-reported for each model; no manual context setting |
-| PDF/document uploads | Text documents supported; PDF/base64 documents rejected with a clear error |
-| Hosted web search | Disabled in this profile; no hosted search service is provided |
-| Cowork VM, audio, advanced hosted tools | Not validated in this prototype |
-| Codex Responses API | Not implemented in this Claude-first version |
+Preview state lives under `~/Library/Application Support/Provider Hub Preview/`. Its default port is 11438; its profile ID is `14c58c94-d7e8-4a15-96b8-81668956e474`. Production Mistral Bridge continues to use its original state directory, port 11436, Keychain namespace, and profile ID.
 
-The adapter supports the Messages subset needed for the verified coding workflow. It rejects unsupported content and hosted tools explicitly. It does not run Vibe’s agent loop, tools, or skills. Claude remains responsible for tool execution and permissions.
+- `settings.json`: provider connections, credential-source modes/revisions, model mappings, appearance overrides, and preferences; no API keys.
+- `catalogues/*.json`: metadata scoped to the provider connection and credential revision. Key replacement invalidates that provider's catalogue.
+- `catalog.json`: optional metadata-only import from the stable Mistral build. No keys or transcripts are imported.
+- `gateway-token`: private local authentication credential supplied to Claude's profile.
+- `reasoning-signing-key`: separate private key used to authenticate Cerebras reasoning replay; never supplied to Claude as a credential.
+- `activity.jsonl`: event, real provider/model, HTTP status, and usage metadata. No prompts, tool arguments, response text, or authorization headers.
+- `last-request-shape.json`: field/role/content-type names only.
+- `profile-transaction.json`: temporary restoration journal, removed after successful recovery.
 
-**Local data and runtime**
+The gateway binds to literal loopback, authenticates desktop requests, rejects browser-origin requests, and uses the selected provider's credentials for outbound inference. Hosted endpoints are constrained to official HTTPS URLs; Ollama accepts literal loopback HTTP. Native Messages requests preserve protocol version/beta headers, tools, thinking, and IDs without forwarding the local gateway token.
 
-Mistral inference goes to `https://api.mistral.ai/v1/chat/completions`. The local gateway listens only on `127.0.0.1` (port 11436 by default), requires a local token, and rejects browser-origin requests. The Mistral API key is held in worker memory. The bridge does not put it in Claude’s profile or in logs.
+Cerebras reasoning tool turns need replayable assistant reasoning. The adapter returns a thinking block signed over the exact provider/model/account scope, reasoning, visible text, tool IDs/names, and arguments. The next turn validates it before replaying the provider's reasoning field. Foreign or edited traces fail explicitly. Cerebras streams are buffered until the complete envelope can be signed, while gateway ping events keep the connection active. This adds time before visible content compared with native streaming.
 
-App data lives under `~/Library/Application Support/Mistral Bridge/`:
+**Build and verification**
 
-- `settings.json`: model mappings and preferences.
-- `catalog.json`: the latest provider metadata, canonical model groups, aliases, context limits, and capabilities.
-- `gateway-token`: a private credential for the local gateway, separate from the Mistral key.
-- `activity.jsonl`: event, model, status, and usage metadata; no prompts, tool arguments, responses, or authorization headers.
-- `last-request-shape.json`: field names, message roles, content-type names, and tool-format names for compatibility diagnostics; no message content.
-- `profile-transaction.json`: temporary recovery journal, removed after restoration.
-
-Claude’s own third-party mode stores conversations under its normal `Claude-3p` application-support directory. The Bridge transaction changes only its dedicated profile, selection metadata, and deployment-mode fields.
-
-The app uses the Python runtime supplied by an existing Vibe installation. The tested installation uses `uv` under `~/.local/`. No LiteLLM installation, Docker daemon, local model download, additional OpenAI key, or Ollama dependency is required. No login item is installed. This build targets Apple Silicon and macOS 14 or newer and is ad-hoc signed for local use, not notarized for broad distribution.
-
-**Build and verify**
-
-The source requires the macOS command-line developer tools and Python 3.11 or newer. From the included `Source` folder:
+From the repository root:
 
 ```bash
-bash build.sh
-python3 -m unittest -v test_bridge
+bash Source/build.sh
+python3 -m unittest discover -s Source -v
 ```
 
-Use Vibe’s Python if the shell’s `python3` is older than 3.11. Set `MISTRAL_BRIDGE_BUILD_DIR` to choose an alternate location for Swift’s intermediate files. The application bundle is generated next to the Source directory.
+Use Python 3.11 or newer; on this Mac the Vibe runtime is `/Users/chrisizatt/.local/share/uv/tools/mistral-vibe/bin/python3`. Building requires Apple's command-line developer tools. The build is ad-hoc signed for local development, not notarized, and does not bundle Python.
 
-The implementation consists of a SwiftUI/AppKit frontend, a Python standard-library HTTP worker, provider catalogue and label handling, protocol translation, and a transactional Claude profile manager. No changes are made to the installed Claude application bundle, its code signature, Chromium switches, system trust store, or the user’s HOME environment.
-
-For recovery, quit Claude and choose **Restore previous setup** in the app. If the app cannot open, the included worker also exposes a `restore` command through Vibe’s Python. Keep the Bridge data folder until restoration has completed. Removing the app alone does not delete any Claude conversation.
-
-Integration references: [Claude Desktop gateway](https://claude.com/docs/third-party/claude-desktop/gateway), [Claude third-party architecture](https://claude.com/docs/third-party/claude-desktop/overview), [Ollama’s Claude Desktop integration](https://docs.ollama.com/integrations/claude-desktop), [Ollama’s public launcher implementation](https://github.com/ollama/ollama/blob/main/cmd/launch/claude_desktop.go), [Mistral Chat API](https://docs.mistral.ai/api/endpoint/chat).
-
-Mistral Bridge is an independent prototype, not a product published by Mistral, Anthropic, or Ollama.
+`VERIFICATION.md` records the actual tests and their limits. The stable Mistral baseline completed a live Claude read → edit → read cycle before this branch. The preview adds native protocol, credential separation, alias/context, replay, cancellation, and UI checks. It must not be described as live-tested on accounts that have not been configured. No new Mistral inference was spent for this expansion.

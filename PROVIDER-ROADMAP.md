@@ -1,53 +1,47 @@
-**Provider expansion assessment — 12 September 2026**
+**Provider Hub integration status — 12 September 2026**
 
-One menu bar app with provider tabs is the best fit. Five of the requested connections have a straightforward model-API route. Grok Build and Muse also have plausible integrations, but preserving their CLI subscriptions points to hosting their agent sessions. A subscription-backed agent session and a raw model completion API are different interfaces.
+The preview implements six model API connections behind one native menu bar app: Mistral, Kimi Code subscription API keys, Xiaomi MiMo Token Plan, the existing Ollama daemon, DeepSeek API, and Cerebras API. Provider identity, credentials, metadata, and quota attribution remain separate from TaskWraith-derived display branding.
 
-| Requested provider | Route to investigate first | Assessment for Claude Desktop |
+The current implementation includes model discovery/provenance, exact context where known, readable names, alias grouping, Claude slot mappings, native and translated Messages streaming/tool history, per-provider account settings, effort/Fast compatibility handling, profile launch/recovery, and metadata-only activity logs. See `README.md` for setup and `VERIFICATION.md` for actual evidence.
+
+Grok Build's browser-authenticated subscription path is ACP (`grok agent stdio`). Muse Code's subscription path is MSP (`muse serve`). Neither is established as a reusable raw model API token. TaskWraith hosts their agent sessions with lifecycle, permission, and cancellation management. A future delegated-agent tool can reuse that architecture, but must not re-present already-executed native tools as pending Claude tool calls. Separate xAI/Meta API keys are a simpler future model-provider addition. The detailed first-party research and TaskWraith file references are in `NATIVE-AGENTS.md`.
+
+Claude Auto works through the normal gateway mapping, but the current client exposes no supported independent classifier model selector or reliable classifier request marker. Preserve the existing opt-in and native permission handling. Do not route by prompt heuristics or claim that enabling the selector qualifies an arbitrary model as a reviewer.
+
+Remaining qualification work is account-specific: live Kimi/MiMo/DeepSeek/Cerebras access, every selected model's tool behavior, advanced native reasoning compatibility, Claude's provider-specific UI affordances, and any future delegated ACP/MSP integrations. Those capabilities must be reported from evidence as they are tested; catalogue presence alone is not a passing test.
+
+**Proposed native-agent slices: Muse first**
+
+These are implementation boundaries for follow-up work; native subscription
+adapters are not included in the current six-provider model gateway. The
+supported experience is a Muse or Grok agent hosted by Provider Hub, optionally
+called as a delegated tool from Claude. The outer Claude conversation still
+uses one of the configured model APIs.
+
+| Slice | User-visible result | Evidence required before completion |
 | --- | --- | --- |
-| Kimi Code subscription | Kimi Code's documented Anthropic-compatible coding API, using a subscription API key from its console | High plausibility. Account/tier and model-ID checks remain necessary. A CLI OAuth login and a coding API key are distinct setup paths. |
-| Xiaomi MiMo Token Plan | The plan's regional Anthropic-compatible endpoint and Token Plan key | High plausibility. Keep the account's CN, Singapore, or Europe endpoint paired with the plan key. |
-| Grok Build subscription | Native Grok ACP session | Plausible as a delegated agent. Reusing its subscription as Claude's raw inference backend is not established by the documentation inspected. xAI also offers a separate model API route with an API key. |
-| Ollama | The existing daemon's Anthropic-compatible `/v1/messages` API | High plausibility. Reuse the daemon, installed models, and its supported cloud routing. The Bridge should be the single active owner of its Claude profile while selected. |
-| Meta Muse Code subscription | Muse Session Protocol through `muse serve` / the Muse Code SDK | Plausible as a stateful delegated agent. A raw completion endpoint that can consume the same subscription credentials has not been established here. |
-| DeepSeek API | DeepSeek's documented Anthropic-compatible endpoint | High plausibility. Explicitly map exact DeepSeek model IDs: the upstream has its own Claude-name fallback mappings. |
-| Cerebras API | Its OpenAI-compatible Chat Completions API | High plausibility with a provider-specific Messages-to-Chat adapter. Reasoning fields, context/output limits, images, and rate handling need model-specific treatment. |
+| 1. Muse connection and model discovery | Detect the installed Muse CLI, use its normal sign-in, and show the host's advertised models/capabilities. | Complete MSP initialization and model listing without a model turn; verify host shutdown and unavailable-SDK diagnostics. |
+| 2. Muse session lifecycle | Start a task in a selected working directory, stream its progress/result, cancel, and resume sessions owned by the hub. | A disposable read-only task, cancellation/process-close checks, reconnect/resume, and retry tests proving a lost reply does not submit a second turn. |
+| 3. Muse approvals and native task UI | Show permission requests and agent questions in the app with explicit allow/deny/cancel controls and the existing Muse branding. | Disposable read/edit/read, denied write, user-question response, cancellation during an approval, and host-exit handling. |
+| 4. Claude delegation | Claude can invoke an explicit Muse task tool and receive its result and execution summary. | A complete Claude-to-Muse task, continuation/cancellation, clear provider attribution, and no replay of already-executed Muse tools as pending Claude tool calls. |
+| 5. Grok ACP adapter | Add Grok's existing-login agent sessions to the same native task UI and delegation layer. | ACP initialize/authenticate/session/prompt/update/permission/cancel lifecycle, normal local login, and the same fixture and failure cases as Muse. |
 
-The API-compatible routes still need a complete Desktop tool-use test. Claude's actual message envelopes include extensions such as system messages between tool turns, so protocol compatibility alone is not full application compatibility.
+Muse's [official SDK quickstart](https://meta-models.github.io/muse-code-sdk/guides/quickstart/)
+explicitly uses a configured Muse login and `muse serve`; it demonstrates
+streaming, permission decisions, cancellation, and reloading a session in a new
+process. It also documents a host exit when that build's experimental SDK tier
+is unavailable. The first slice must detect that condition and report it.
+Fingerprint differences should be surfaced and assessed against required
+protocol capabilities; the SDK documents them as warnings, not an automatic
+reason to reject every newer host.
 
-Kimi Code documents both `https://api.kimi.com/coding/v1/chat/completions` and `https://api.kimi.com/coding/v1/messages`, with subscription API keys available from the Kimi Code console. Use that coding product's credentials and entitlement rules, rather than assuming an ordinary Moonshot platform key or copied CLI login is interchangeable. [Kimi Code API access](https://www.kimi.com/code/docs/en/#api-access)
+Grok's [official ACP example](https://docs.x.ai/build/cli/headless-scripting#acp)
+uses `grok agent stdio` and the CLI's existing local authentication. This is a
+credible subscription-preserving integration path. Exact entitlement still
+needs qualification with the selected account; no API-billing equivalence is
+assumed.
 
-MiMo documents dedicated Token Plan endpoints in China, Singapore, and Europe, including an Anthropic-compatible route. The Token Plan and pay-as-you-go keys are separate products. The app should ask for the endpoint shown on the user's plan page and preserve that selection. [MiMo Token Plan quick access](https://mimo.mi.com/docs/en-US/tokenplan/Token%20Plan/quick-access)
-
-DeepSeek documents `https://api.deepseek.com/anthropic` and explicitly discusses Claude Desktop gateway use. Its automatic Claude-name mapping is another reason for our router to resolve the requested slot to an exact upstream model ID. [DeepSeek Anthropic compatibility](https://api-docs.deepseek.com/guides/anthropic_api/)
-
-Ollama already documents streaming, tool calls, tool results, thinking, and its local/cloud model support through the Messages API. We can call the existing daemon from a provider module; there is no need to modify the installed Ollama app to obtain inference. [Ollama Anthropic compatibility](https://docs.ollama.com/api/anthropic-compatibility)
-
-Cerebras documents its OpenAI-compatible API at `https://api.cerebras.ai/v1`, with explicit model-specific differences. For example, reasoning controls vary by model, and supported image inputs use data URIs rather than external image URLs. Our current Mistral-specific defaults should not be carried over unchanged. [Cerebras compatibility guide](https://inference-docs.cerebras.ai/resources/openai)
-
-Grok Build documents ACP integration, browser authentication, and a separately available xAI model API. That establishes an agent-hosting route and an API-key route; it does not establish that the browser subscription credential is a general-purpose completion key. [Grok Build overview](https://docs.x.ai/build/overview)
-
-Muse Code's published SDK controls agent sessions over MSP. The SDK is currently described as a developer preview, so integrations should use an explicit supported protocol/runtime version and surface session and approval failures accurately. [Muse Code SDK](https://github.com/meta-models/muse-code-sdk)
-
-**What TaskWraith contributes**
-
-The local AGBench checkout contains concrete reusable designs for different integration classes:
-
-- Kimi generation detection and the ACP transport boundary in `src/main/providers/KimiFlavour.ts`.
-- Grok ACP turn, permission, and cancellation handling in `src/main/grok/GrokAcpClient.ts`.
-- Muse MSP dispatch and session resume handling in `src/main/muse/MuseIpcBridge.ts` and `src/main/muse/MuseMspRun.ts`.
-- Pi model/brand mappings for Xiaomi Token Plan regions, DeepSeek, and Cerebras in `src/shared/piBrandTable.ts`.
-- Cerebras dispatch pacing and completion-cap handling under `src/main/pi/` and the Pi dispatch path in `src/main/index.ts`.
-
-These findings concern the inspected source checkout, not a claim that every integration has been validated in a particular shipped TaskWraith build. The existing adapter modules provide useful protocol knowledge. They do not turn an agent-session transport into a model-completions transport automatically.
-
-**Proposed implementation**
-
-Keep one shared Claude profile manager, model-mapping interface, local listener, and activity view. Each provider module owns authentication, model discovery, request format, streaming, errors, and capabilities. Where an upstream already speaks the Anthropic Messages protocol, use that route with only the required Desktop-specific normalization. Keep a separate Chat Completions translator for providers such as Mistral and Cerebras.
-
-Store each route as an exact provider/account/model tuple, with a friendly label kept separately. A user's visible selection should be sufficient to identify which account receives the request and which provider handles inference. Mixed-provider Claude slots are possible once those routes are explicit. Credentials, quotas, and errors should remain attributable to the selected provider.
-
-Add native agent integrations as a distinct feature. A Grok or Muse MCP delegation tool would manage a resumable native session, stream progress, forward approvals, and return a result. Claude would still require its own primary model for the outer conversation. Approvals and executed tool results must retain their real origin; an agent bridge should not present already-executed actions as unexecuted Claude model tool calls.
-
-Model context, reasoning, and speed should remain provider capabilities. The current app now groups model aliases, loads context limits from Mistral, and maps the Effort value sent by Claude. Future providers should supply their real effort ranges and genuine service-tier options. Claude's own UI does not expose an arbitrary provider capability schema for every control, so native Fast and exact context-meter behavior may require desktop support beyond request translation. Model variants should be listed separately only when the underlying model or context entitlement actually differs.
-
-My suggested order is Kimi Code and MiMo first, followed by Ollama and DeepSeek, then the Cerebras-specific adapter. Investigate Grok and Muse subscription sessions as a parallel design track after defining the delegated-agent experience. This assessment does not add or enable any new provider in the current app; version 0.2.0 still connects Mistral only.
+Using either subscription as a transparent replacement for every model request
+inside Claude's own agent loop remains unproven. The native-agent slices above
+can be pursued through the published session protocols without extracting
+browser credentials or disguising completed agent activity as model tool calls.

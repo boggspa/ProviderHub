@@ -1,33 +1,55 @@
-**Mistral Bridge — verification on 12 September 2026**
+**Provider Hub Preview 0.3.0 — verification record**
 
-**0.2.0 update:** 27 offline tests pass. These include exact per-model context limits, preserving distinct context variants, alias grouping, retirement metadata, treating a 429 as a quota/rate event rather than model retirement, mapping Claude's Effort request without changing the model, and refusing to fabricate Fast mode. A fresh metadata-only `/v1/models` read returned 31 chat IDs grouped into 10 model/context combinations, with 21 aliases grouped and zero IDs marked retired. No additional inference requests were made for this update because the user's quota may be exhausted. The native context/effort sliders in the Bridge app have been removed. Claude's own exact context-meter and Fast-mode UI limitations are documented in the guide.
+Verified locally on 12 September 2026 on Apple Silicon macOS.
 
-**0.1.1 update:** rebuilt and opened from `/Users/chrisizatt/Documents/Mistral Bridge/`. The 22 existing protocol, cancellation, and restoration tests pass. The native model controls display friendly labels, and the local `/v1/models` endpoint returns `Mistral Medium 3.5 · Vibe` while preserving all five routing IDs. The model display changes do not alter upstream model selection. Claude was not restarted for this display-only update; its next launch will refresh the model catalogue. The live Desktop read/edit/read evidence below was established with 0.1.0.
+**Live checks completed**
 
-The app was compiled for Apple Silicon with Swift 6.2.4, opened through macOS, and tested with Claude Desktop 1.52386.3 and Vibe 2.25.0.
+| Check | Result | Scope |
+| --- | --- | --- |
+| Native preview build and code signature | Passed | Swift/AppKit/SwiftUI arm64 target, macOS 14+, ad-hoc signature |
+| Preview launch and provider UI | Passed | Six provider cards, distinct preview identity/port/state, TaskWraith assets |
+| Existing Mistral metadata import | Passed | Ten model/context groups; metadata only; no new Mistral inference |
+| Kimi catalogue UI | Passed | Four documented routes; no API key configured, no claim of account access |
+| MiMo catalogue UI | Passed | Two documented Token Plan routes and region selection; no inference |
+| Ollama catalogue discovery | Passed | 49 available models from the existing daemon, enriched with `/api/show`; no model downloads |
+| Shared gateway → Ollama → model tool cycle | Passed | `deepseek-v4-flash:cloud`: Read → Edit → Read → final confirmation |
+| Desktop-managed Claude Code → gateway → Ollama → model | Passed | Real Read/Edit tools and adaptive thinking/High effort, isolated configuration and fixture |
 
-| Check | Result |
-| --- | --- |
-| Offline regression suite | 27 tests passed in 0.2.0 |
-| App signature | Ad-hoc signature verified with `codesign --verify --strict` |
-| Existing credential | Vibe Keychain credential resolved without printing or copying it to the app bundle |
-| Live Mistral discovery | 31 chat models returned |
-| Live app Test connection button | Returned “Mistral Bridge is connected.” |
-| Live adapter test | Four streamed turns: read file, write file, read again, final confirmation |
-| Actual Claude deployment | Account menu displayed Mistral Bridge; model picker displayed `mistral-vibe-cli-latest` |
-| Actual Claude Code tool cycle | Read, edit, read back, and final confirmation completed |
-| Fixture result | `colour=blue` became `colour=green` |
-| Automatic restoration | Previous deployment-mode values and selected profile restored after Claude quit |
-| Automatic gateway shutdown | App showed Stopped after the Claude test ended |
-| Saved Ollama profile | Byte-identical to the pre-test file |
-| Profile selection metadata | Byte-identical to the pre-test file |
-| Existing session files | 200 unchanged; the one changed usage ledger retained all original bytes and appended 343 bytes of new usage records |
-| Existing session files deleted | Zero |
+The direct gateway tool cycle made four successful requests and used 2,012 input tokens and 222 output tokens. The model read a disposable `settings.txt`, changed `colour=blue` to `colour=green`, read it again, and confirmed the change.
 
-The actual Desktop test found that Claude inserts system messages between tool turns. The adapter now preserves those messages, and an offline regression test covers the behavior. An earlier rejected request remains visible in the disposable test conversation; the subsequent retry completed successfully after the correction.
+The managed harness used:
 
-The standalone streamed API test used 582 reported input tokens and 67 output tokens over four requests. These figures cover that small synthetic test only, not model discovery, the UI’s connection tests, or Claude’s larger coding prompts.
+`~/Library/Application Support/Claude-3p/claude-code/2.1.266/claude.app/Contents/MacOS/claude`
 
-The offline suite checks structured messages, instruction roles, image translation, tool-name normalization, tool-call ID consistency, parallel tool calls, interleaved JSON deltas, nullable tool arrays, truncated streams, cancellation, rate-limit translation, local authentication, Origin/Host rejection, context budgeting, profile restoration, concurrent configuration changes, interrupted writes, symlink rejection, and refusing to switch a running Claude instance.
+It ran in print/restricted/bare mode with only Read and Edit, an isolated `CLAUDE_CONFIG_DIR`, no session persistence, no loaded user/project settings or MCP servers, and a temporary working directory. The real requests sent `thinking.type=adaptive`, `thinking.display=omitted`, and `output_config.effort=high`. The adapter normalized these to the provider's supported control. All four requests succeeded, with 2,558 input tokens and 218 output tokens. The final response was “The verified colour is **green**.” The open Claude Desktop window and its profile were not restarted or changed for this test.
 
-Live tests established the coding workflow with the Vibe Medium route. They do not establish compatibility with every discovered model or with Cowork, audio, PDF uploads, hosted web search, or all future Claude protocol extensions.
+Two pre-inference harness attempts exposed the native Effort/adaptive normalization issue and were rejected locally before any model inference. Those failures were fixed and covered by regression tests before the successful run.
+
+**Offline coverage**
+
+The complete unittest suite covers:
+
+- Mistral Chat translation, tool names/IDs, continuation, images, completion signals, errors and cancellation.
+- Provider-qualified routes, account-specific credentials, exact upstream IDs, official endpoint and MiMo region validation.
+- Provider metadata provenance, deprecation, context variants, deterministic alias grouping and ambiguity handling.
+- Strict settings types, credential revisions, cache invalidation, display-only branding and model label overrides.
+- Native Messages JSON/SSE reasoning/signature/tool preservation over complete multi-turn HTTP cycles.
+- Native protocol header forwarding without local bearer token, local API key or arbitrary identity header forwarding.
+- HTTP 429/503, credential redaction, stream errors and cancellation cleanup without false success.
+- Cerebras JSON/SSE reasoning authentication over text/tool envelopes, signature tamper detection, scope/model binding, multi-tool replay and streamed completion.
+- A separate persistent signing key that is never supplied to Claude or forwarded upstream.
+- Claude profile activation/recovery/restoration in temporary application-support directories, including external changes.
+
+The final suite passed **102/102 tests** with ResourceWarnings promoted to errors on Python 3.13. A Python 3.11 run passed the HTTP provider/replay suite before the final native-control additions. All tests are offline, use temporary directories and mocked provider credentials, and avoid the user's real Claude profiles.
+
+**What has not been live-qualified**
+
+Kimi, MiMo, DeepSeek-direct, and Cerebras accounts are not configured in this preview, so their protocol tests are mocked and their live account entitlements remain unverified. Ollama-hosted DeepSeek is a distinct provider route from DeepSeek's direct API. Mistral's live GUI baseline predates this worktree; no additional Mistral inference was spent during the expansion.
+
+No arbitrary non-Claude model has been qualified as an independently elected Auto reviewer. The existing Auto opt-in is preserved; an independent reviewer picker is not implemented because the inspected clients expose no supported routing control or stable request-role marker. The Auto trace was checked against Desktop-managed Claude Code 2.1.266 and standalone CLI 2.1.268; these are different binaries. See `NATIVE-AGENTS.md`.
+
+PDF/base64 uploads on Chat-translated routes, hosted web search, Cowork VM behavior, audio, advanced hosted tools, and Codex Responses are outside this preview's validated scope. Cerebras streams are buffered to authenticate complete reasoning/tool envelopes. Claude's own context meter and picker affordances retain client-side assumptions that a gateway cannot fully override.
+
+**Stable Mistral baseline**
+
+Before this worktree, Mistral Bridge 0.2.0 completed a live Claude Desktop Code read → edit → read workflow through `mistral-vibe-cli-latest`. The original profile was restored afterwards. Of 201 preexisting session files, 200 remained byte-identical and the usage ledger retained its original bytes with new usage appended. The profile manager never reads or changes transcripts. The baseline commits remain in history. The provider extension was split into four coherent commits and merged into main after the full 102-test suite passed again; its source tree matches the live-tested preview exactly.
