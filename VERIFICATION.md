@@ -1,4 +1,4 @@
-**Provider Hub Preview 0.3.1 — verification record**
+**Provider Hub Preview 0.3.2 — verification record**
 
 Verified locally on 12 September 2026 on Apple Silicon macOS.
 
@@ -89,3 +89,36 @@ profiles. A suffixed discovery ID creates incorrect double expansion. The
 supported `modelPrefer1mContext` preference changes defaults only and retains
 saved selections. No duplicate-suppression workaround or false capability flag
 was introduced; exact-context and generic Kimi plan limitations remain visible.
+
+
+**0.3.2 Muse API and version labels**
+
+Muse is added as a Meta Model API-key connection through native Anthropic
+Messages. Model discovery is authenticated and account-scoped; only IDs actually
+returned by the account list are published. Meta's first-party documentation
+enriches the exact `muse-spark-1.3` ID with 1,048,576 context and 131,072 maximum
+output. Other model IDs retain separate metadata and unknown values remain
+unknown.
+
+Ten provider tests and two complete HTTP JSON/SSE tool-cycle tests cover the
+new route, including bearer authentication, local-token separation, exact model
+IDs, native thinking/signatures, adaptive thinking, and Claude Max mapping to
+Meta High. Forced tool choices, unsupported reasoning disable, and Fast fail
+with explicit compatibility messages. No Meta Model API key was read and no
+paid Meta inference was run during implementation; account qualification follows
+user key entry in the app.
+
+Four regression tests restore Mistral Medium 3.5, Small 4, Large 3 and other known
+version labels after a fresh catalogue projection. Medium's version comes from
+its returned billing-model identifier; unknown latest aliases are not assigned
+a guessed version. Distinct reported version identities remain separate and
+user display overrides continue to win. All API routing IDs remain unchanged.
+
+
+The Vibe credential control is labelled **Vibe saved API key** to match the
+implemented key reuse. Public Mistral docs confirm shared included usage across
+the API and Vibe, but no claim is made about the selected account's active plan.
+No private plan lookup, credential change, or paid inference was performed for
+this clarification.
+
+The combined 0.3.2 suite passed **133/133 tests** with ResourceWarnings treated as errors. The native Swift build and ad-hoc signature verification passed.

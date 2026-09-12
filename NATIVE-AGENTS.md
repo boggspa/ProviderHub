@@ -17,17 +17,43 @@ There are two distinct integrations:
    ACP and MSP expose that session; they do not turn it into a raw completion
    endpoint.
 
-The current six-provider API target remains Mistral, Kimi, MiMo, Ollama,
-DeepSeek, and Cerebras. Grok and Muse can join that API list when the user
-supplies the corresponding model-API credential. Reusing the user's flat-rate
-coding-agent subscription is a separate native-agent feature.
+The current API providers are Mistral, Kimi, MiMo, Ollama, DeepSeek, Cerebras,
+and Muse through the Meta Model API. Muse's ordinary API-key route is implemented
+in 0.3.2; a separate xAI API-key adapter remains a possible addition. Reusing a
+flat-rate coding-agent subscription is a separate native-agent feature.
 
 | Product and credential | Genuine model API? | Subscription-preserving integration | Current conclusion |
 | --- | --- | --- | --- |
 | Grok Build browser login / SuperGrok allowance | A separate xAI model API exists, but the cached Build login is not documented as a public API credential. | `grok agent stdio` over ACP | Native agent only unless the user separately configures an xAI API key. |
 | xAI API key | Yes: Responses and Chat Completions, including `grok-4.6` and `grok-build-0.1`. | Not needed | Eligible for a future model-API adapter, with API billing and exact model capability checks. |
 | Muse Code login / flat-rate Muse Code plan | A separate Meta Model API exists, but no public source inspected establishes that the Muse Code login is a reusable Model API key. | `muse serve` over MSP | Native agent only unless the user separately configures a Model API key. |
-| Meta Model API key | Yes: OpenAI-compatible API at `https://api.meta.ai/v1`, including `muse-spark-1.3`. | Not needed | Eligible for a future model-API adapter, with Model API entitlement and billing kept distinct. |
+| Meta Model API key | Yes: OpenAI-compatible API at `https://api.meta.ai/v1`, including `muse-spark-1.3`. | Not needed | Implemented as Muse (Meta Model API) in 0.3.2, with API entitlement and billing kept distinct. |
+
+## Why the Vibe connection uses a saved API key
+
+Vibe 2.25.0 browser sign-in exchanges the completed browser flow for an API key,
+then persists it as `MISTRAL_API_KEY`. Its Mistral backend uses that credential
+with the ordinary `https://api.mistral.ai/v1` Chat API. The relevant installed
+source modules are `setup/auth/http_browser_sign_in_gateway.py`,
+`setup/auth/api_key_persistence.py`, and `core/llm/backend/mistral.py`.
+
+Mistral's [API-key and profile documentation](https://docs.mistral.ai/vibe/code/cli/api-keys-profiles)
+explicitly shares included monthly usage across Studio, its API, and Vibe Code.
+Its [key-scope documentation](https://docs.mistral.ai/admin/identity-access/api-keys#api-key-scope)
+associates API usage with the key's workspace. The bridge therefore keeps the
+server-side billing identity of whichever configured key it resolves; it does
+not prove or select a subscription tier itself.
+
+The current resolver can select an environment key or a Vibe `.env` key before
+the Keychain credential. Storage location is not enough to prove a particular
+billing plan. The app now calls this option **Vibe saved API key** rather than
+implying that it performs its own sign-in or verifies a subscription.
+
+Muse also uses an API-key-backed account flow internally. The relevant
+integration difference is the documented credential scope and billing product,
+not a blanket technical distinction between API keys and OAuth. Meta scopes its
+special subscription key to Muse Code; Grok's raw-model use of CLI OAuth remains
+unverified. The supported native session integrations remain MSP and ACP.
 
 ## Grok Build
 
@@ -130,9 +156,9 @@ accidentally injecting an inherited PAYG key. See
 [Muse authentication and billing](https://dev.meta.ai/docs/muse-code/auth/).
 These documentation pages require login in their ordinary web view.
 
-A future UI should make the products explicit: **Muse Code subscription** uses
-the supported Muse login/MSP path; **Meta Model API PAYG** uses a user-created
-API key and raw inference adapter. The automatically connected subscription key
+The products remain explicit: **Muse Code subscription** uses the supported
+Muse login/MSP path as proposed follow-up work; **Muse (Meta Model API)** is the
+implemented user-created API-key connection for raw inference in 0.3.2. The automatically connected subscription key
 is not a supported general-purpose BYOK option unless Meta publishes an
 external-client contract for it. This corrects the earlier uncertainty about
 whether the subscription has a key, while retaining the documented client and

@@ -1,13 +1,13 @@
-**Provider Hub Preview 0.3.1**
+**Provider Hub Preview 0.3.2**
 
-A native macOS menu bar app that connects Claude Desktop to model APIs from Mistral, Kimi Code, Xiaomi MiMo Token Plan, Ollama, DeepSeek, and Cerebras. Configure accounts, pick readable model names, and launch Claude through its native third-party profile system.
+A native macOS menu bar app that connects Claude Desktop to model APIs from Mistral, Kimi Code, Xiaomi MiMo Token Plan, Ollama, DeepSeek, Cerebras, and Muse through the Meta Model API. Configure accounts, pick readable model names, and launch Claude through its native third-party profile system.
 
 This repository contains the multi-provider extension to Mistral Bridge, merged into `main`. The app remains labelled Preview while the remaining provider accounts are qualified. The stable Mistral app and the preview have separate bundle IDs, settings directories, Keychain namespaces, gateway ports, and Claude profile IDs. The preview does not replace the stable app.
 
 **Start using the preview**
 
 1. Open **Provider Hub Preview.app**. It requires an Apple Silicon Mac, macOS 14 or newer, and Python 3.11 or newer. The existing Mistral Vibe installation can supply Python; Vibe's agent does not need to keep running.
-2. Select a provider in **Providers**. Mistral can use Vibe's saved credentials. **Save key** stores an API key in the preview's macOS Keychain namespace and immediately fetches that provider's models. Ollama connects to the existing local daemon. MiMo's account region selects its official Token Plan endpoint.
+2. Select a provider in **Providers**. Mistral can use the API key configured in Vibe. **Save key** stores an API key in the preview's macOS Keychain namespace and immediately fetches that provider's models. Ollama connects to the existing local daemon. MiMo's account region selects its official Token Plan endpoint.
 3. Catalogues refresh in the background when the app opens. **Refresh all** and the provider card's **Refresh catalogue** remain available for retrying. Refreshes fetch metadata without generating a chat completion. Each provider reports its own errors; an unrelated provider's failed refresh does not discard other catalogues. Kimi and MiMo use documented catalogues because an account-scoped list endpoint has not been established.
 4. In **Models**, choose a provider and model behind each Claude option. The same underlying model is shown once when several Claude slots use it. **Test** makes a small inference request. Exact provider/model IDs remain available under **Show technical IDs**.
 5. Finish current work in Claude and quit Claude. Choose **Launch Claude**. The app saves the mappings, prepares the selected providers and model metadata, starts a gateway with that prepared catalogue, verifies readiness, switches to its dedicated profile, and opens Claude. A missing key or unavailable model is identified by provider and exact route.
@@ -19,18 +19,33 @@ The main repository is `/Users/chrisizatt/Documents/Mistral Bridge`. Build there
 
 | Provider | Credential | Outbound interface | Catalogue evidence |
 | --- | --- | --- | --- |
-| Mistral | Vibe sign-in or Mistral API key | Mistral Chat Completions | Authenticated `/v1/models`; canonical aliases grouped; archived/retired IDs omitted |
+| Mistral | Vibe saved API key or another Mistral API key | Mistral Chat Completions | Authenticated `/v1/models`; canonical aliases grouped; archived/retired IDs omitted |
 | Kimi Code | Subscription API key from Kimi Code console | Native Anthropic-compatible Messages | Documented models; membership controls availability/context |
 | MiMo Token Plan | Token Plan API key for CN, Singapore, or Amsterdam | Native Anthropic-compatible Messages | Documented Token Plan models |
 | Ollama | Existing local daemon/login | Native Anthropic-compatible Messages | `/api/tags` plus `/api/show`; no downloads performed |
 | DeepSeek | DeepSeek API key | Native Anthropic-compatible Messages | Saved-key discovery and a live `deepseek-flash` tool cycle verified |
 | Cerebras | Cerebras API key | Chat Completions with authenticated reasoning replay | Saved-key discovery and a live `gpt-oss-120b` tool/reasoning cycle verified |
+| Muse (Meta Model API) | A Meta Model API key | Native Anthropic-compatible Messages | Authenticated `/v1/models`; exact default-model limits enriched from Meta’s cookbook |
 
-No CLI OAuth tokens are extracted to impersonate model API credentials. Grok Build and Muse Code subscriptions expose stateful ACP/MSP agent sessions; hosting those agents is a separate feature from changing the model behind Claude's agent. See `NATIVE-AGENTS.md` for the researched paths, source links, and implementation boundary. Separate xAI and Meta Model API credentials would support future API adapters, with their own API billing.
+No CLI OAuth tokens are extracted to impersonate model API credentials. Grok Build and Muse Code subscriptions expose stateful ACP/MSP agent sessions; hosting those agents is a separate feature from changing the model behind Claude's agent. See `NATIVE-AGENTS.md` for the researched paths, source links, and implementation boundary. The Muse card implements the Meta Model API-key route with its own API billing. A separate xAI API-key adapter remains a possible addition.
+
+The **Vibe saved API key** option resolves the credentials configured for Vibe and uses Mistral's standard API. Browser sign-in provisions an API key; the bridge does not implement a separate OAuth session. Mistral documents included usage shared across Studio, the API, and Vibe Code. Billing follows the resolved key's workspace/organization policy, which this app does not query or verify. An environment or `.env` key can take precedence over the key saved during browser sign-in. See [Mistral API keys and profiles](https://docs.mistral.ai/vibe/code/cli/api-keys-profiles).
+
+**Connect Muse with a Meta Model API key**
+
+1. Select **Muse** in Providers and use **Account setup** to open Meta's Model API console if you need a key.
+2. Paste the Model API key into the secure field and choose **Save key**. The app stores it under `MODEL_API_KEY` in its own macOS Keychain namespace and fetches the account's model list automatically.
+3. Choose the returned Muse model in a Claude slot under **Models**, then launch Claude. Muse supplies model responses while Claude owns the tool loop; this connection does not start a Muse Code agent.
+
+The native Messages endpoint is `https://api.meta.ai/v1/messages`; discovery uses `https://api.meta.ai/v1/models`. Both use the selected Model API credential. The environment option reads `MODEL_API_KEY`. It does not read `META_API_KEY` or copy the Muse CLI's login/credentials.
+
+Usage follows Meta Model API billing, including any applicable preview allowance. This is distinct from the automatically connected Muse Code subscription credential, which Meta scopes to Muse Code. Do not infer the billing product from a key's shape. See the [Meta Model API cookbook](https://github.com/meta-models/meta-model-cookbook) and `NATIVE-AGENTS.md`.
+
+Only account-listed IDs are advertised. For the exact `muse-spark-1.3` ID, Meta's cookbook reports a 1,048,576-token context and 131,072-token maximum output; more specific account metadata takes precedence when returned. Other IDs retain their own metadata and are not silently treated as aliases of Spark 1.3.
 
 **Names, branding, context, and model controls**
 
-The display-name parser recognizes provider spelling, versions, sizes, release dates, and qualifiers such as Cloud and Preview. Provider metadata and explicit display overrides take precedence. Examples: `model-name-v1-2504` becomes `Model Name V1 · Apr 2025`; `gpt-oss:120b-cloud` becomes `GPT OSS · 120B Cloud`. Routing always uses the original ID.
+The display-name parser recognizes provider spelling, versions, sizes, release dates, and qualifiers such as Cloud and Preview. Mistral aliases use the versioned model identifier reported in provider metadata when available: Medium’s current billing-model ID identifies 3.5, while the fixed Small/Large release IDs retain their Small 4/Large 3 product names. Raw repeated API names no longer override those labels. This changes display names only; moving routing aliases remain unchanged. Provider metadata and explicit display overrides take precedence. Examples: `model-name-v1-2504` becomes `Model Name V1 · Apr 2025`; `gpt-oss:120b-cloud` becomes `GPT OSS · 120B Cloud`. Routing always uses the original ID.
 
 The appearance layer reuses TaskWraith's provider presentation schema: `displayProvider`, `hueKey`, `accent`, `shortCode`, `modelLabels`, and optional bundled `logo` assets. It is keyed by immutable runtime provider identity. Provider names, accents, initials, and model labels can be edited in **Appearance**. An Ollama-hosted upstream brand can have its own logo and accent while the route still identifies Ollama as the account/provider. Logos and palette values were copied from the read-only AGBench source; that checkout was not changed.
 
