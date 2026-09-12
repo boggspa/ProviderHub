@@ -400,7 +400,9 @@ def validate_connection(provider_id: str, connection: dict | None) -> dict:
 
 def _auth_headers(provider_id: str, api_key: str | None, *, content_type: bool) -> dict:
     descriptor = _provider(provider_id)
-    headers = {"Accept": "application/json"}
+    # Identify the actual integration on metadata and inference requests.
+    # Cerebras rejects urllib's default Python user-agent at its edge.
+    headers = {"Accept": "application/json", "User-Agent": GATEWAY_USER_AGENT}
     if content_type:
         headers["Content-Type"] = "application/json"
     if provider_id == "ollama":
@@ -415,9 +417,6 @@ def _auth_headers(provider_id: str, api_key: str | None, *, content_type: bool) 
     headers[auth["name"]] = auth["prefix"] + key
     if descriptor["protocol"] == "anthropic":
         headers["anthropic-version"] = "2023-06-01"
-    if provider_id == "kimi":
-        # Kimi explicitly requires integrations to keep their real identity.
-        headers["User-Agent"] = GATEWAY_USER_AGENT
     return headers
 
 
@@ -577,7 +576,7 @@ def _cerebras_public_plan() -> dict:
     return {
         "method": "GET",
         "url": _CEREBRAS_PUBLIC_MODELS_URL,
-        "headers": {"Accept": "application/json"},
+        "headers": {"Accept": "application/json", "User-Agent": GATEWAY_USER_AGENT},
         "provider_name": PROVIDERS["cerebras"]["name"],
     }
 

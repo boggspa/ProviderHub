@@ -401,6 +401,11 @@ class DiscoveryTests(unittest.TestCase):
 
         result = discover("cerebras", {}, "secret", transport=transport)
         self.assertEqual(len(plans), 2)
+        # Cerebras blocks urllib's default identity, including on public metadata.
+        for plan in plans:
+            self.assertEqual(plan["headers"]["User-Agent"], "ProviderHub/0.3")
+        inference = prepare_request("cerebras", {}, "secret", text_prompt(), "account-model", {})
+        self.assertEqual(inference["headers"]["User-Agent"], "ProviderHub/0.3")
         by_id = {model["id"]: model for model in result["models"]}
         self.assertEqual(set(by_id), {"account-model", "account-rich"})
         self.assertEqual(by_id["account-model"]["display_name"], "Account Model")
