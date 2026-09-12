@@ -25,7 +25,7 @@ MODEL_VARIANT_FIELDS = (
     "max_input", "max_output", "advertised_context", "advertised_max_output",
     "tools", "vision", "reasoning", "effort_modes", "fast_mode", "speed_tier",
     "streaming", "tool_choice", "parallel_tool_calls", "service_tiers",
-    "reasoning_history", "complete_tool_cycles", "capabilities",
+    "reasoning_history", "complete_tool_cycles", "capabilities", "billing_model_name",
 )
 
 
@@ -275,9 +275,17 @@ def project_catalogue(provider_id: str, inventory: dict, settings: dict, observa
         override_label = labels.get(preferred) or labels.get(route)
         advertised = item.get("display_name")
         canonical = item.get("canonical_id") or preferred
-        # Already-human provider labels (including short names such as K3)
-        # should not be reformatted or gain duplicate release suffixes.
-        friendly = advertised if advertised and advertised not in {item["id"], canonical} else friendly_model_name(canonical, advertised)
+        # A moving Mistral alias can still advertise a resolved, versioned
+        # billing-model identifier. Use it for presentation, never for routing.
+        label_identifier = canonical
+        billing_model = item.get("billing_model_name")
+        if (provider_id == "mistral" and isinstance(billing_model, str)
+                and MODEL_ID.fullmatch(billing_model)
+                and re.search(r"(?:^|[-_.])\d", billing_model)):
+            label_identifier = billing_model
+        # Repeated raw IDs are not human labels and must not suppress known
+        # product names such as Mistral Small 4 or Large 3.
+        friendly = advertised if advertised and advertised not in {item["id"], canonical, label_identifier} else friendly_model_name(label_identifier)
         presentation = resolve_presentation(
             provider_id, preferred, overrides, override_label or friendly)
         item.update(id=route, model_id=preferred, provider_id=provider_id,

@@ -784,6 +784,7 @@ def _coalesce_mistral_models(models: list[dict]) -> list[dict]:
             model.get("vision"),
             model.get("reasoning"),
             tuple(model.get("effort_modes") or []),
+            model.get("billing_model_name"),
         )
         groups.setdefault(key, []).append(model)
 
@@ -864,7 +865,8 @@ def _models_from_api(provider_id: str, raw: dict, evidence: str, *, enriched=Non
                 source="provider_api",
                 evidence=evidence,
                 deprecation=card.get("deprecation"),
-                billing_model_name=card.get("billing_model_name"),
+                billing_model_name=(card.get("billing_model_name")
+                                    if isinstance(card.get("billing_model_name"), str) else None),
             ))
         elif provider_id == "deepseek":
             metadata = _DEEPSEEK_MODEL_METADATA.get(identifier, {})

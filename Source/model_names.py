@@ -68,7 +68,7 @@ def friendly_model_name(identifier: str, advertised_name: str | None = None) -> 
     The caller can supply a verified display name from provider/Vibe metadata.
     """
     original = identifier.strip()
-    if original in PINNED_LABELS and not advertised_name:
+    if original in PINNED_LABELS and (not advertised_name or advertised_name.strip() == original):
         return PINNED_LABELS[original]
     route = original
     if "/" in route:
