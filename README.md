@@ -1,4 +1,4 @@
-**Provider Hub Preview 0.3.0**
+**Provider Hub Preview 0.3.1**
 
 A native macOS menu bar app that connects Claude Desktop to model APIs from Mistral, Kimi Code, Xiaomi MiMo Token Plan, Ollama, DeepSeek, and Cerebras. Configure accounts, pick readable model names, and launch Claude through its native third-party profile system.
 
@@ -7,10 +7,10 @@ This repository contains the multi-provider extension to Mistral Bridge, merged 
 **Start using the preview**
 
 1. Open **Provider Hub Preview.app**. It requires an Apple Silicon Mac, macOS 14 or newer, and Python 3.11 or newer. The existing Mistral Vibe installation can supply Python; Vibe's agent does not need to keep running.
-2. Select a provider in **Providers**. Mistral can use Vibe's saved credentials. Enter other provider API keys with **Save key** to store them in the preview's macOS Keychain namespace. Ollama connects to the existing local daemon. MiMo's account region selects its official Token Plan endpoint.
-3. Use **Refresh catalogue**. This fetches model metadata, not a chat completion. Kimi and MiMo use a documented catalogue because an account-scoped list endpoint has not been established. Their presence in the picker does not prove that the current account can use them.
+2. Select a provider in **Providers**. Mistral can use Vibe's saved credentials. **Save key** stores an API key in the preview's macOS Keychain namespace and immediately fetches that provider's models. Ollama connects to the existing local daemon. MiMo's account region selects its official Token Plan endpoint.
+3. Catalogues refresh in the background when the app opens. **Refresh all** and the provider card's **Refresh catalogue** remain available for retrying. Refreshes fetch metadata without generating a chat completion. Each provider reports its own errors; an unrelated provider's failed refresh does not discard other catalogues. Kimi and MiMo use documented catalogues because an account-scoped list endpoint has not been established.
 4. In **Models**, choose a provider and model behind each Claude option. The same underlying model is shown once when several Claude slots use it. **Test** makes a small inference request. Exact provider/model IDs remain available under **Show technical IDs**.
-5. Finish current work in Claude and quit Claude. Choose **Launch Claude**. The app saves the mappings, starts the gateway, verifies readiness, switches to its dedicated profile, and opens the installed Claude app.
+5. Finish current work in Claude and quit Claude. Choose **Launch Claude**. The app saves the mappings, prepares the selected providers and model metadata, starts a gateway with that prepared catalogue, verifies readiness, switches to its dedicated profile, and opens Claude. A missing key or unavailable model is identified by provider and exact route.
 6. Quitting Claude restores the prior profile selection and normally stops the gateway. The menu bar app remains available.
 
 The main repository is `/Users/chrisizatt/Documents/Mistral Bridge`. Build there to create `Provider Hub Preview.app` alongside the original Mistral app. The development worktree remains at `/Users/chrisizatt/Documents/Mistral Bridge-worktrees/provider-hub` on `feature/provider-hub`. The original Mistral baseline was committed in three slices before development began. The provider extension was subsequently split into provider adapters/reasoning replay, branding/model names, app/gateway integration, and documentation before its fast-forward merge. The original two feature commits remain available on `archive/provider-hub-before-split`.
@@ -23,8 +23,8 @@ The main repository is `/Users/chrisizatt/Documents/Mistral Bridge`. Build there
 | Kimi Code | Subscription API key from Kimi Code console | Native Anthropic-compatible Messages | Documented models; membership controls availability/context |
 | MiMo Token Plan | Token Plan API key for CN, Singapore, or Amsterdam | Native Anthropic-compatible Messages | Documented Token Plan models |
 | Ollama | Existing local daemon/login | Native Anthropic-compatible Messages | `/api/tags` plus `/api/show`; no downloads performed |
-| DeepSeek | DeepSeek API key | Native Anthropic-compatible Messages | Authenticated model list plus documented capabilities |
-| Cerebras | Cerebras API key | Chat Completions with authenticated reasoning replay | Authenticated list enriched with public model metadata |
+| DeepSeek | DeepSeek API key | Native Anthropic-compatible Messages | Saved-key discovery and a live `deepseek-flash` tool cycle verified |
+| Cerebras | Cerebras API key | Chat Completions with authenticated reasoning replay | Saved-key discovery and a live `gpt-oss-120b` tool/reasoning cycle verified |
 
 No CLI OAuth tokens are extracted to impersonate model API credentials. Grok Build and Muse Code subscriptions expose stateful ACP/MSP agent sessions; hosting those agents is a separate feature from changing the model behind Claude's agent. See `NATIVE-AGENTS.md` for the researched paths, source links, and implementation boundary. Separate xAI and Meta Model API credentials would support future API adapters, with their own API billing.
 
@@ -39,6 +39,10 @@ Context is read-only. Exact integer values come from provider metadata or exact 
 Effort is translated only through established provider controls, using Claude's own request fields. Mistral retains Vibe's coarse Low → standard, Medium and above → reasoning behavior. Effort values are never manufactured as extra models. Fast requests require a documented same-model capability and never silently change the selected model. Kimi's high-speed model has a distinct ID/context and remains a distinct catalogue entry.
 
 A listed model is labelled as advertised or documented until an actual inference succeeds. Historical errors distinguish quota/rate limiting from model rejection. Refreshing the catalogue does not run an inference sweep.
+
+Claude Desktop itself expands a model's advertised 1M capability into standard and `[1m]` picker rows. This is not a duplicate in the adapter catalogue. Newly exported profiles prefer the 1M row where available, but Claude preserves saved selections and exposes both rows. Its gateway schema has no fixed-only 1M option, and it discards most exact numeric context metadata. A 200k session meter can therefore remain and may mean earlier compaction. The generic Kimi `k3` route also has plan-dependent context; its catalogue does not assert a universal 1M entitlement.
+
+Cerebras' account model API currently returns IDs without numeric limits. Public model metadata is used where present and can differ from account-console limits. For the inspected account, `gemma-4-31b` has no public limit record, while GPT OSS and Qwen have public values. These are not substituted with hard-coded screenshot values. Account-specific limit discovery remains a qualification item.
 
 **Claude Auto mode**
 
@@ -64,6 +68,8 @@ Preview state lives under `~/Library/Application Support/Provider Hub Preview/`.
 - `activity.jsonl`: event, real provider/model, HTTP status, and usage metadata. No prompts, tool arguments, response text, or authorization headers.
 - `last-request-shape.json`: field/role/content-type names only.
 - `profile-transaction.json`: temporary restoration journal, removed after successful recovery.
+
+Launch preparation uses same-connection metadata for 24 hours. Missing/stale selected routes trigger a refresh. A transient discovery failure can use a valid exact-route cache up to 7 days old, with a warning; authentication failures, changed credentials, missing routes, or older caches block with a specific explanation. Refresh batches have a 58-second deadline. Before switching profiles, activation checks that the running gateway loaded the prepared selected-route metadata.
 
 The gateway binds to literal loopback, authenticates desktop requests, rejects browser-origin requests, and uses the selected provider's credentials for outbound inference. Hosted endpoints are constrained to official HTTPS URLs; Ollama accepts literal loopback HTTP. Native Messages requests preserve protocol version/beta headers, tools, thinking, and IDs without forwarding the local gateway token.
 

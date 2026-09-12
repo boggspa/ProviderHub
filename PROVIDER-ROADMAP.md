@@ -8,7 +8,7 @@ Grok Build's browser-authenticated subscription path is ACP (`grok agent stdio`)
 
 Claude Auto works through the normal gateway mapping, but the current client exposes no supported independent classifier model selector or reliable classifier request marker. Preserve the existing opt-in and native permission handling. Do not route by prompt heuristics or claim that enabling the selector qualifies an arbitrary model as a reviewer.
 
-Remaining qualification work is account-specific: live Kimi/MiMo/DeepSeek/Cerebras access, every selected model's tool behavior, advanced native reasoning compatibility, Claude's provider-specific UI affordances, and any future delegated ACP/MSP integrations. Those capabilities must be reported from evidence as they are tested; catalogue presence alone is not a passing test.
+Remaining qualification work is account-specific: broader live Kimi/MiMo/DeepSeek/Cerebras qualification, every selected model's tool behavior, advanced native reasoning compatibility, Claude's provider-specific UI affordances, and any future delegated ACP/MSP integrations. Those capabilities must be reported from evidence as they are tested; catalogue presence alone is not a passing test.
 
 **Proposed native-agent slices: Muse first**
 
@@ -45,3 +45,11 @@ Using either subscription as a transparent replacement for every model request
 inside Claude's own agent loop remains unproven. The native-agent slices above
 can be pursued through the published session protocols without extracting
 browser credentials or disguising completed agent activity as model tool calls.
+
+
+The 0.3.1 follow-up adds automatic catalogue refresh and launch preparation,
+Cerebras client-identity compatibility, and direct DeepSeek/Cerebras tool-cycle
+qualification. Remaining context work includes account-specific Cerebras limits,
+Kimi K3 plan entitlement, and Claude's native standard/1M variant and compaction
+behavior. The gateway cannot publish a fixed-only 1M choice through the inspected
+Desktop schema; its supported default preference is now used.
