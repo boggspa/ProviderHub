@@ -53,3 +53,11 @@ qualification. Remaining context work includes account-specific Cerebras limits,
 Kimi K3 plan entitlement, and Claude's native standard/1M variant and compaction
 behavior. The gateway cannot publish a fixed-only 1M choice through the inspected
 Desktop schema; its supported default preference is now used.
+
+
+Muse credential clarification: its subscription does have an automatically
+connected onboarding API key. Meta scopes that key to Muse Code, while additional
+or manually supplied keys use PAYG. Keep **Muse Code subscription (login/MSP)**
+and **Meta Model API PAYG (API key/raw inference)** as explicit access products.
+Native subscription launch must detect API-key overrides so an inherited key
+cannot silently change billing. See `NATIVE-AGENTS.md` for the source references.

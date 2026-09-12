@@ -115,12 +115,28 @@ The SDK is explicitly a developer preview and pre-1.0. Its schema fingerprint,
 supported methods, and host version must therefore be checked at connection
 time rather than assumed from the installed command name.
 
-Meta's subscription page currently describes a flat monthly rate for **Muse
-Code** instead of per-token use, while the Model API quickstart separately
-requires a Model API account and API key. The public subscription body was
-login-gated during this review. The available evidence supports two product
-paths; it does not establish that their credentials or billing are
-interchangeable. See [Muse Code subscriptions](https://dev.meta.ai/docs/muse-code/subscriptions/).
+Muse Code subscriptions do issue an API key: Meta describes a special key
+automatically connected during CLI onboarding. The subscription documentation
+scopes that credential to Muse Code; additional API keys created under the same
+account use pay-as-you-go billing. Key existence therefore does not establish a
+supported third-party subscription endpoint. See
+[Muse Code subscriptions](https://dev.meta.ai/docs/muse-code/subscriptions/).
+
+The authentication documentation and installed Muse CLI distinguish account
+login from manually supplied keys. `META_API_KEY` and manually stored API keys
+take precedence over account login and use the API-key billing lane. A native
+subscription adapter must verify the effective authentication source instead of
+accidentally injecting an inherited PAYG key. See
+[Muse authentication and billing](https://dev.meta.ai/docs/muse-code/auth/).
+These documentation pages require login in their ordinary web view.
+
+A future UI should make the products explicit: **Muse Code subscription** uses
+the supported Muse login/MSP path; **Meta Model API PAYG** uses a user-created
+API key and raw inference adapter. The automatically connected subscription key
+is not a supported general-purpose BYOK option unless Meta publishes an
+external-client contract for it. This corrects the earlier uncertainty about
+whether the subscription has a key, while retaining the documented client and
+billing distinction.
 
 ### TaskWraith evidence to reuse
 
@@ -149,9 +165,9 @@ activity remain delegated-agent results, never pending Claude tool calls.
 
 - No inspected public source proves that a Muse Code subscription credential
   can authenticate `https://api.meta.ai/v1` outside the Muse host.
-- The public subscription document was login-gated, so exact plan quotas and
-  the treatment of separate API keys must be checked in the user's account UI
-  before presenting billing claims.
+- Exact subscription quotas still require the selected account's current plan.
+  Additional/manual API keys are documented as PAYG; do not infer subscription
+  coverage from key format or account ownership.
 - The MSP SDK is a developer preview. Pin a supported version/fingerprint and
   surface protocol mismatches instead of guessing compatibility.
 - TaskWraith's credential projection into an isolated home is useful protocol
