@@ -1,6 +1,6 @@
-**Provider Hub Preview 0.3.2**
+**Provider Hub Preview 0.3.3**
 
-A native macOS menu bar app that connects Claude Desktop to model APIs from Mistral, Kimi Code, Xiaomi MiMo Token Plan, Ollama, DeepSeek, Cerebras, and Muse through the Meta Model API. Configure accounts, pick readable model names, and launch Claude through its native third-party profile system.
+A native macOS menu bar app that connects Claude Desktop to model APIs from Mistral, Kimi Code, Xiaomi MiMo Token Plan, Ollama, DeepSeek, Cerebras, Muse through the Meta Model API, and Grok through the xAI API. Configure accounts, pick readable model names, and launch Claude through its native third-party profile system.
 
 This repository contains the multi-provider extension to Mistral Bridge, merged into `main`. The app remains labelled Preview while the remaining provider accounts are qualified. The stable Mistral app and the preview have separate bundle IDs, settings directories, Keychain namespaces, gateway ports, and Claude profile IDs. The preview does not replace the stable app.
 
@@ -26,8 +26,9 @@ The main repository is `/Users/chrisizatt/Documents/Mistral Bridge`. Build there
 | DeepSeek | DeepSeek API key | Native Anthropic-compatible Messages | Saved-key discovery and a live `deepseek-flash` tool cycle verified |
 | Cerebras | Cerebras API key | Chat Completions with authenticated reasoning replay | Saved-key discovery and a live `gpt-oss-120b` tool/reasoning cycle verified |
 | Muse (Meta Model API) | A Meta Model API key | Native Anthropic-compatible Messages | Authenticated `/v1/models`; exact default-model limits enriched from Meta’s cookbook |
+| Grok (xAI API) | An xAI API key for PAYG access | Chat Completions translated to Messages | Authenticated `/v1/language-models`, enriched by `/v1/models`; exact Grok 4.6 fallback metadata |
 
-No CLI OAuth tokens are extracted to impersonate model API credentials. Grok Build and Muse Code subscriptions expose stateful ACP/MSP agent sessions; hosting those agents is a separate feature from changing the model behind Claude's agent. See `NATIVE-AGENTS.md` for the researched paths, source links, and implementation boundary. The Muse card implements the Meta Model API-key route with its own API billing. A separate xAI API-key adapter remains a possible addition.
+No CLI OAuth tokens are extracted to impersonate model API credentials. Grok Build and Muse Code subscriptions expose stateful ACP/MSP agent sessions; hosting those agents is a separate feature from changing the model behind Claude's agent. See `NATIVE-AGENTS.md` for the researched paths, source links, and implementation boundary. The Muse and Grok cards implement their providers' API-key routes with API billing.
 
 The **Vibe saved API key** option resolves the credentials configured for Vibe and uses Mistral's standard API. Browser sign-in provisions an API key; the bridge does not implement a separate OAuth session. Mistral documents included usage shared across Studio, the API, and Vibe Code. Billing follows the resolved key's workspace/organization policy, which this app does not query or verify. An environment or `.env` key can take precedence over the key saved during browser sign-in. See [Mistral API keys and profiles](https://docs.mistral.ai/vibe/code/cli/api-keys-profiles).
 
@@ -42,6 +43,20 @@ The native Messages endpoint is `https://api.meta.ai/v1/messages`; discovery use
 Usage follows Meta Model API billing, including any applicable preview allowance. This is distinct from the automatically connected Muse Code subscription credential, which Meta scopes to Muse Code. Do not infer the billing product from a key's shape. See the [Meta Model API cookbook](https://github.com/meta-models/meta-model-cookbook) and `NATIVE-AGENTS.md`.
 
 Only account-listed IDs are advertised. For the exact `muse-spark-1.3` ID, Meta's cookbook reports a 1,048,576-token context and 131,072-token maximum output; more specific account metadata takes precedence when returned. Other IDs retain their own metadata and are not silently treated as aliases of Spark 1.3.
+
+**Connect Grok with an xAI API key**
+
+1. Select **Grok** in Providers, open **Account setup**, and use an xAI API key.
+2. Save the key in the secure field. It uses the app's own `XAI_API_KEY` Keychain entry; Environment mode reads `XAI_API_KEY` from the launch environment.
+3. Choose an account-listed Grok model under Models, then launch Claude. This route uses pay-as-you-go API billing and does not import Grok Build login credentials.
+
+The adapter uses `https://api.x.ai/v1/chat/completions`; xAI has deprecated its Anthropic endpoint. Discovery uses the account's language-model list to define membership and adds exact context metadata from the same account's general model list. Only the exact `grok-4.6` ID receives the documented 500,000-token fallback; unknown limits remain unknown. Catalogue presence does not prove inference access.
+
+Claude's Effort control maps to documented Grok levels: Minimal → Low; Max/Ultra → XHigh on Grok 4.6, or High on Grok 4.5. Reasoning cannot be disabled on those models. Unknown models need advertised effort metadata before non-default effort is accepted. Claude Fast requests xAI Priority processing, which carries premium token pricing. Activity metadata records the actual `service_tier` when the provider returns it; a Priority request is not a guarantee of Priority service. The initial release is mock-tested, not live-qualified against an xAI account.
+
+Sources: [Grok 4.6](https://docs.x.ai/developers/grok-4-6), [reasoning controls](https://docs.x.ai/developers/model-capabilities/text/reasoning), [Priority processing](https://docs.x.ai/developers/advanced-api-usage/priority-processing), [model discovery](https://docs.x.ai/developers/rest-api-reference/inference/models).
+
+The next harness investigation is in `HARNESS-OPTIONS.md`. Codex/ChatGPT Desktop support is researched but not included in this build; the gateway currently accepts Anthropic Messages only.
 
 **Names, branding, context, and model controls**
 

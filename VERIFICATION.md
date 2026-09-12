@@ -143,3 +143,25 @@ The dashboard was filtered to all keys and models; the evidence is the matching
 test totals and newly reported spend, not a provider-issued per-request invoice.
 No additional inference was run to investigate billing. This result does not
 qualify Muse Code's separate subscription login/MSP path.
+
+
+**0.3.3 Grok PAYG API — deterministic qualification**
+
+Grok is registered with an independent `XAI_API_KEY` credential entry and the
+official xAI Chat Completions endpoint. No Grok CLI credentials were accessed,
+and no paid xAI inference was run. Model availability remains account-specific.
+
+Twelve new tests cover official endpoint/auth boundaries, account language-model
+membership, context enrichment, exact-ID fallback limits, empty/malformed lists,
+branding projection, effort normalization, explicit unsupported controls,
+Priority requests, image/tool history, cache routing, full HTTP JSON and SSE
+tool cycles, interleaved parallel arguments, final usage-only stream chunks,
+actual tier reporting, HTTP 429 handling, and credential redaction.
+
+All **145 tests pass** with ResourceWarnings treated as errors. The native Swift
+build and ad-hoc signature verification pass. Fast requests are tested against
+a mock returning the default tier, and the activity record correctly records
+default. No assumption about charged Priority use is derived from the request.
+
+Codex/ChatGPT Desktop and Ollama were inspected read-only. No OpenAI config,
+authentication, sessions, or running tasks were changed for the harness research.

@@ -102,6 +102,10 @@ struct ProviderPage: View {
                         Text("Use a key created for the Meta Model API. Usage follows Meta’s API billing; this connection does not use your Muse Code subscription login.")
                             .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                     }
+                    if provider.id == "grok" {
+                        Text("Use an xAI API key for pay-as-you-go access. Claude’s Fast toggle requests xAI Priority processing at a premium token price. Your Grok Build subscription login is separate.")
+                            .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    }
                     HStack {
                         Text(state?.credential_source ?? "Checking setup…").font(.system(size: 11)).foregroundStyle(.secondary)
                         Spacer()
@@ -202,6 +206,7 @@ struct ProviderPage: View {
         case "deepseek": return "DeepSeek API key"
         case "cerebras": return "Cerebras API key"
         case "muse": return "Meta Model API key · API billing"
+        case "grok": return "xAI API key · Pay as you go"
         default: return "Provider model API"
         }
     }
