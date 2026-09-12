@@ -134,8 +134,12 @@ input tokens, 1,421 output tokens, and 0 cache-read input tokens. These are summ
 request totals, including context resent during the tool loop.
 
 This confirms live authentication, inference, and multi-turn tool operation for
-Spark 1.3 in this account. It does not identify the charged usage pool. The
-user's Meta screenshots immediately afterward showed unchanged subscription
-percentages and zero PAYG request/token/spend counters. Billing attribution
-remains **unconfirmed** pending provider-side usage records. No additional
-inference was run while collecting this diagnostic receipt.
+Spark 1.3 in this account. The user's immediate screenshots initially showed
+unchanged subscription percentages and zero PAYG counters. A later screenshot
+at 20:48 BST reports **156.3k input tokens, 1.4k output tokens and GBP 0.14 under
+Pay as you go**. Those rounded token counts match the gateway receipt, confirming
+PAYG attribution for this test with the newly created Provider Hub API key.
+The dashboard was filtered to all keys and models; the evidence is the matching
+test totals and newly reported spend, not a provider-issued per-request invoice.
+No additional inference was run to investigate billing. This result does not
+qualify Muse Code's separate subscription login/MSP path.
