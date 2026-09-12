@@ -2,32 +2,49 @@
 
 Research date: 12 September 2026. The TaskWraith source observations below
 refer to the read-only AGBench checkout at
-`b6eba91e9216eefdd7a75572585e79b48ed4e1b0`. No live provider run was made and
-no provider credential was read.
+`b6eba91e9216eefdd7a75572585e79b48ed4e1b0`. That research did not run an
+ACP/MSP agent, read a provider credential, or live-test xAI. The separate 0.4.0
+Codex qualification used an existing Ollama daemon and is recorded in
+`HARNESS-OPTIONS.md`. The 13 September implementation follow-up added Codex
+model-API access for the other six provider connections; it did not add an
+ACP/MSP native-agent host.
 
 ## Product boundary
 
 There are two distinct integrations:
 
-1. A **model API provider** accepts model requests owned by this gateway. The
-   gateway translates Claude's Messages request, streams the response, and
-   leaves tool execution to Claude Desktop.
+1. A **model API provider** accepts inference requests owned by this gateway.
+   Claude uses Messages across all eight connections. Codex uses Responses
+   across all eight: native forwarding for Grok and Ollama, and a local
+   Responses-to-Messages bridge for Mistral, Kimi, MiMo, DeepSeek, Cerebras,
+   and Muse. The selected desktop harness retains its own tool loop.
 2. A **native agent provider** owns a stateful coding-agent session. It may
    inspect files, request permission, execute tools, and return a final answer.
    ACP and MSP expose that session; they do not turn it into a raw completion
    endpoint.
 
-The current API providers are Mistral, Kimi, MiMo, Ollama, DeepSeek, Cerebras,
-and Muse through the Meta Model API. Muse's ordinary API-key route is implemented
-in 0.3.2; a separate xAI API-key adapter remains a possible addition. Reusing a
-flat-rate coding-agent subscription is a separate native-agent feature.
+The Codex Messages bridge remains a model-API integration. Its encrypted
+reasoning envelope preserves opaque provider state across a full-history tool
+turn. `cryptography` 50.0.0 authenticates the envelope with the separate local
+`responses-encryption-key`, scoped to the model and account connection. Only
+that persistent key is stored by Provider Hub; the bridge does not host a
+provider agent, resume an ACP/MSP session, or add a prompt/session store.
+Reasoning history cannot cross to a different provider, model, or account, so
+that change requires a new Codex task.
+
+The current API connections are Mistral, Kimi, MiMo, Ollama, DeepSeek,
+Cerebras, Muse through the Meta Model API, and Grok through xAI. Muse's ordinary
+API-key route was implemented in 0.3.2, Grok's xAI API-key route in 0.3.3, and
+native Grok/Ollama plus translated access to the other six connections for
+Codex in 0.4.0. Reusing a flat-rate coding-agent subscription remains a
+separate native-agent feature.
 
 | Product and credential | Genuine model API? | Subscription-preserving integration | Current conclusion |
 | --- | --- | --- | --- |
 | Grok Build browser login / SuperGrok allowance | A separate xAI model API exists, but the cached Build login is not documented as a public API credential. | `grok agent stdio` over ACP | Native agent only unless the user separately configures an xAI API key. |
-| xAI API key | Yes: Responses and Chat Completions, including `grok-4.6` and `grok-build-0.1`. | Not needed | Eligible for a future model-API adapter, with API billing and exact model capability checks. |
+| xAI API key | Yes: Responses and Chat Completions, including `grok-4.6` and `grok-build-0.1`. | Not needed | Implemented for PAYG model inference: Chat Completions serves Claude, and native Responses serves Codex in 0.4.0. |
 | Muse Code login / flat-rate Muse Code plan | A separate Meta Model API exists, but no public source inspected establishes that the Muse Code login is a reusable Model API key. | `muse serve` over MSP | Native agent only unless the user separately configures a Model API key. |
-| Meta Model API key | Yes: OpenAI-compatible API at `https://api.meta.ai/v1`, including `muse-spark-1.3`. | Not needed | Implemented as Muse (Meta Model API) in 0.3.2, with API entitlement and billing kept distinct. |
+| Meta Model API key | Yes: OpenAI-compatible API at `https://api.meta.ai/v1`, including `muse-spark-1.3`. | Not needed | Implemented as Muse (Meta Model API) in 0.3.2, with Messages serving Claude directly and Codex through the 0.4.0 Responses bridge. |
 
 ## Why the Vibe connection uses a saved API key
 
@@ -40,7 +57,7 @@ source modules are `setup/auth/http_browser_sign_in_gateway.py`,
 Mistral's [API-key and profile documentation](https://docs.mistral.ai/vibe/code/cli/api-keys-profiles)
 explicitly shares included monthly usage across Studio, its API, and Vibe Code.
 Its [key-scope documentation](https://docs.mistral.ai/admin/identity-access/api-keys#api-key-scope)
-associates API usage with the key's workspace. The bridge therefore keeps the
+associates API usage with the key's workspace. Provider Hub therefore keeps the
 server-side billing identity of whichever configured key it resolves; it does
 not prove or select a subscription tier itself.
 
@@ -70,7 +87,9 @@ the [CLI reference](https://docs.x.ai/build/cli/reference).
 xAI also exposes genuine model APIs. Its current Build overview shows
 `grok-4.6` on `POST https://api.x.ai/v1/responses`, and the model catalogue
 lists `grok-build-0.1` as a token-billed API model. That establishes a direct
-model-API adapter for an xAI API key. It does not establish that an app may
+model-API contract for an xAI API key. Provider Hub uses Chat Completions for
+Claude and native Responses for Codex; both require a separately supplied xAI
+API key and API billing. This does not establish that an app may
 extract or replay the browser session token as an API key. xAI's account FAQ
 also says the Grok account is shared while Grok and xAI API billing are
 separate. See [Grok 4.6 on the API](https://docs.x.ai/build/overview#use-grok-46-on-the-api),
@@ -95,16 +114,17 @@ translator:
   runs. Persistent per-seat processes remain disabled there because their
   durable ownership and close receipts are not yet proven.
 
-A Bridge implementation should therefore expose Grok as a delegated native
-agent session. The host owns the child process, binds the working directory,
-streams assistant and progress events, forwards each supported permission
-request to the user, and closes or cancels the ACP session explicitly. It may
-return the agent's final text and a typed activity summary to the outer Claude
-conversation.
+A future Provider Hub subscription integration should therefore expose Grok as
+a delegated native-agent session. The host owns the child process, binds the
+working directory, streams assistant and progress events, forwards each
+supported permission request to the user, and closes or cancels the ACP session
+explicitly. It may return the agent's final text and a typed activity summary
+to an outer desktop conversation.
 
 Already-executed Grok tool activity must stay an executed activity event. It
-must not be converted to a Claude `tool_use` block, because Claude Desktop would
-then believe the call still needed execution and could run it a second time.
+must not be converted to a pending outer-harness tool call, because the desktop
+would then believe the call still needed execution and could run it a second
+time.
 
 ### Unknown or unsupported
 
@@ -114,7 +134,7 @@ then believe the call still needed execution and could run it a second time.
   does not make it an xAI API key or prove API billing equivalence.
 - ACP session persistence beyond the documented start/prompt flow needs a
   version-pinned qualification before the menu app promises resume.
-- A direct xAI API adapter must use API credentials supplied for that purpose;
+- The direct xAI API connection must use credentials supplied for that purpose;
   it must not search Grok's profile for secrets.
 
 ## Muse Code
@@ -158,11 +178,12 @@ These documentation pages require login in their ordinary web view.
 
 The products remain explicit: **Muse Code subscription** uses the supported
 Muse login/MSP path as proposed follow-up work; **Muse (Meta Model API)** is the
-implemented user-created API-key connection for raw inference in 0.3.2. The automatically connected subscription key
-is not a supported general-purpose BYOK option unless Meta publishes an
-external-client contract for it. This corrects the earlier uncertainty about
-whether the subscription has a key, while retaining the documented client and
-billing distinction.
+implemented user-created API-key connection for raw inference in 0.3.2 and is
+available to both desktop harnesses in 0.4.0. The automatically connected
+subscription key is not a supported general-purpose BYOK option unless Meta
+publishes an external-client contract for it. This corrects the earlier
+uncertainty about whether the subscription has a key, while retaining the
+documented client and billing distinction.
 
 ### TaskWraith evidence to reuse
 
@@ -338,8 +359,8 @@ Provider Hub should therefore:
 Keep the native-agent layer beside, not inside, the model gateway:
 
 ```text
-Claude Desktop -> selected model API provider -> model response/tool_use
-              \-> explicit native-agent tool -> ACP/MSP session -> executed activity/result
+Desktop model harness -> selected model API provider -> model response/tool call
+                     \-> explicit native-agent tool -> ACP/MSP session -> executed activity/result
 ```
 
 Each native adapter should own process discovery, supported login handoff,
@@ -353,9 +374,9 @@ or with a separately supplied API key for the model-API route.
 ## Follow-up commit boundaries
 
 `PROVIDER-ROADMAP.md` now records a Muse-first implementation sequence with
-separate connection, lifecycle, approvals/UI, Claude-delegation, and Grok-ACP
+separate connection, lifecycle, approvals/UI, desktop delegation, and Grok-ACP
 slices. Those native adapters are proposed follow-up work, not part of the
-current model gateway or its 102-test qualification.
+current model gateway or the 0.4.0 all-provider Codex Responses harness.
 
 The official Muse quickstart explicitly supports normal configured Muse login
 and `muse serve`. It documents SDK-tier-unavailable host exit code 5 and states

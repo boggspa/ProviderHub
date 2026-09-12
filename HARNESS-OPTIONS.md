@@ -1,106 +1,229 @@
-**Provider Hub: Codex / ChatGPT Desktop harness options — 12 September 2026**
+**Provider Hub: Codex / ChatGPT Desktop harness — 13 September 2026**
 
-Grok PAYG is implemented in 0.3.3. The additional harness described here is
-research and an implementation proposal; no Codex/ChatGPT launch control or
-Responses endpoint is shipped in this build.
+Provider Hub Preview 0.4.0 adds Codex / ChatGPT Desktop as a second launched
+harness beside Claude Desktop. Every configured provider connection is now
+available to Codex. Grok and Ollama retain native Responses forwarding;
+Mistral, Kimi, MiMo, DeepSeek, Cerebras, and Muse use a local
+Responses-to-Messages translation over their existing provider adapters. This
+document records the shipped design and the evidence gathered so far, including
+the checks that remain user-operated.
 
-**What is actually installed**
+**Installed app and configuration contract**
 
 The local desktop bundle is `/Applications/ChatGPT.app`, version
 `26.908.40834`, with display name ChatGPT and bundle identifier
-`com.openai.codex`. This naming matters: it would be wrong to decide that the
-installed ChatGPT-branded app cannot use the Codex provider mechanism merely
-because older documentation calls it Codex App.
+`com.openai.codex`. The bundle is ChatGPT-branded while its local task harness,
+configuration, and process identity remain Codex. Provider Hub therefore uses
+**Codex / ChatGPT Desktop** in user-facing labels.
 
 Installed Ollama `0.33.3` advertises `ollama launch chatgpt` and accepts
-`codex-app`, `codex-desktop`, and `codex-gui` as aliases. The distinct `codex`
-integration launches the CLI. Its public desktop guide still uses
-`ollama launch codex-app` and documents a restore command.
+`codex-app`, `codex-desktop`, and `codex-gui` as aliases. Its distinct `codex`
+integration launches the CLI. The public desktop guide still uses
+`ollama launch codex-app` and documents a restore command. This confirmed that
+the installed desktop accepts a custom Responses provider and model catalogue;
+the app-server qualification below additionally proved that model IDs do not
+need GPT-shaped aliases.
 
 Sources: [Ollama desktop guide](https://docs.ollama.com/integrations/codex-app),
-[matching Ollama 0.33.3 implementation](https://github.com/ollama/ollama/blob/v0.33.3/cmd/launch/codex_app.go).
-The commands inspected locally were version/help commands only; no launcher was
-run and no OpenAI config or credential file was read or changed.
+[matching Ollama 0.33.3 implementation](https://github.com/ollama/ollama/blob/v0.33.3/cmd/launch/codex_app.go),
+[OpenAI custom providers and profiles](https://learn.chatgpt.com/docs/config-file/config-advanced),
+and [OpenAI configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference).
 
-**How Ollama configures it**
+The initial installed-app investigation used version/help commands only. It did
+not run Ollama's launcher or read or change the user's OpenAI configuration or
+credentials. Later Provider Hub qualification used disposable configuration;
+the user's normal Codex GUI/configuration still has not been switched.
 
-The matching launcher source writes a dedicated provider stanza plus selected
-root fields in `~/.codex/config.toml`: `model`, `model_provider`, and
-`model_catalog_json`. It generates a separate catalogue file and uses
-`wire_api = "responses"`. It saves restore state and backups and restarts the
-desktop when required. It is a managed configuration switch, not proof of an
-independent concurrently running desktop instance.
-
-OpenAI's current configuration docs support custom providers, a custom JSON
-model catalogue, bearer-token helpers, and named CLI profile files. The CLI
-profile format changed: a selected `name.config.toml` file overlays the base;
-the old `[profiles.name]` format and root `profile` selector are no longer the
-current mechanism. The inspected desktop launcher therefore edits selected
-root values instead of assuming CLI profiles select the desktop configuration.
-
-Sources: [OpenAI custom providers and profiles](https://learn.chatgpt.com/docs/config-file/config-advanced),
-[configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference).
-
-**Recommended implementation**
-
-Reuse Provider Hub's accounts, branding and model catalogue, then add a second
-client protocol alongside the existing Claude Messages interface:
+**Implemented protocol boundary**
 
 ```text
-Claude Desktop          -> /v1/messages  -> Provider Hub -> model API
-Codex / ChatGPT Desktop -> /v1/responses -> Provider Hub -> model API
+Claude Desktop -> /v1/messages -> Provider Hub -> all eight provider connections
+
+Codex / ChatGPT Desktop -> /v1/responses -> Provider Hub -+-> native Responses -> Grok or Ollama
+                                                           \-> local /v1/messages -> other six connections
 ```
 
-Keep these layers separate:
+The native Responses path does not translate through the existing Messages or
+Chat Completions adapters. It validates the Codex request, replaces the
+provider-qualified catalogue slug with the provider's exact model ID, relays
+the native request, and restores the qualified slug on returned response
+objects. Streaming and non-streaming responses preserve function calls and
+outputs, full-history items, opaque provider reasoning items, terminal status,
+final usage, provider errors, and client/gateway cancellation. The local
+`client_metadata` field is consumed at the hub boundary and is not sent to the
+provider.
 
-1. **Responses protocol.** Translate messages, function-call items and outputs,
-   streaming deltas, usage, terminal signals, cancellation and errors. Preserve
-   call IDs across turns. Qualify image inputs, reasoning items and special
-   tools separately. A successful text response alone is not sufficient.
-2. **Model catalogue.** Publish provider-qualified IDs with friendly names and
-   each model's exact known context, supported effort levels and speed tiers.
-   Ollama's catalogue schema has per-model `context_window`,
-   `max_context_window` and `supported_reasoning_levels`, unlike Claude's slot
-   mapping convention. Do not invent context values for unknown models. Verify
-   the installed desktop's display and compaction behaviour before promising
-   an exact meter for every provider.
-3. **Launch and restoration.** Use an owned provider/catalogue and an atomic
-   recovery journal. Record the previous values; restore only values still
-   owned by the hub so external user edits survive. Leave auth, sessions,
-   projects, skills and unrelated provider settings alone. A separate Codex
-   home is an option to investigate, not a proven complete GUI isolation
-   mechanism.
-4. **Authentication.** Codex authenticates to the loopback hub using a separate
-   local token. The provider API keys remain in Provider Hub's Keychain. A
-   command-backed bearer helper is documented and avoids relying on Finder to
-   inherit a terminal environment; its desktop startup behaviour needs a test.
-5. **Qualification.** Start with a disposable Codex CLI task to capture the
-   real Responses request shape, then test the desktop read/edit/read cycle,
-   continuation, compaction, cancellation and restore. Do not switch an active
-   task's provider during the investigation.
+The translated path converts Responses input and function history to the
+existing local Messages contract, then converts JSON or streaming Messages
+results back into Responses events and terminal objects. The loopback hop uses
+the hub's local bearer credential. The inner Messages request owns the existing
+provider concurrency slot and activity record, so a translated turn is bounded
+and counted once. Closing the outer Responses request propagates cancellation
+through the local Messages request to the provider connection.
 
-There are two sensible transport slices. A first slice could qualify direct
-Responses forwarding for a provider that already exposes that protocol, such
-as xAI or Ollama. A broader slice could translate Responses to the existing
-Messages/Chat Completions backends. Shared schemas do not guarantee full
-compatibility; free-form tools, hosted tools and reasoning state still need
-explicit checks. Any `previous_response_id` support must have session storage
-with defined resume behaviour, or the adapter must require full history and
-reject unsupported continuations clearly.
+Only function tools and function namespaces are enabled for this route.
+Provider Hub deterministically flattens a namespaced Codex function into a
+provider-safe name and reverses that mapping on returned calls. A collision is
+rejected. Hosted tools, including `web_search`, are disabled in the generated
+profile. The dedicated free-form `apply_patch` catalogue metadata is `null`
+because that wire format has not been qualified; the installed Codex engine's
+function and shell path can still inspect and edit files.
 
-The installed app-server schema was generated into a scratch directory without
-starting a task. It contains `model`, `modelProvider`, and `config` fields in
-thread start/resume requests. This is useful evidence for a custom client, but
-does not by itself establish a supported menu-bar control for the existing
-desktop's active session.
+Provider-specific continuation rules remain explicit:
 
-This proposal targets the installed app's Codex task harness. It does not claim
-to replace inference in every ChatGPT cloud chat, voice mode or other product
-surface. Those would need their own documented integration contracts.
+- Ollama and all six translated providers require full input history and
+  `store:false`. Provider Hub rejects `previous_response_id` and storage for
+  these routes. It does not advertise unproven Ollama effort or service-tier
+  controls.
+- Grok also defaults to `store:false`. If a client explicitly sends
+  `store:true`, Provider Hub can accept a later `previous_response_id` only
+  after that ID was returned for the same provider model, connection, and
+  credential scope. The local record contains ID/ownership/time metadata, not
+  prompts or responses, and is capped at 10,000 IDs.
+- Grok exposes only documented effort levels for the selected model. The
+  additional speed choice is labelled **Fast · xAI Priority**, including its
+  premium-rate meaning. Ollama receives no guessed effort or Fast controls.
 
-**Current decision**
+Native xAI is the only route that supports response-ID continuation. Changing
+provider, model, or account on a full-history route requires a new task when the
+history contains provider reasoning state.
 
-Codex/ChatGPT Desktop is a plausible next harness, and Ollama demonstrates the
-desktop configuration route. Build a Responses adapter and catalogue projection
-as their own tested slices, then add a launcher with restoration. Claude remains
-the only launched harness in 0.3.3.
+Messages providers can return opaque `thinking` or `redacted_thinking` blocks
+that must survive a function-tool round trip. Provider Hub carries them in the
+Responses `encrypted_content` field as authenticated Fernet envelopes. The
+separate persistent `responses-encryption-key` is consumed by `cryptography`
+50.0.0; only the key is stored in Provider Hub state, not prompts, response
+content, reasoning, or session history. Each envelope is scoped to the exact
+model and account connection and fails closed if edited or replayed across a
+different scope. Cerebras mock fixtures cover both JSON and streaming signed
+thinking replay through this envelope.
+
+**Model catalogue**
+
+The generated catalogue uses exact provider-qualified slugs, for example
+`grok/grok-4.6`, `mistral/mistral-vibe-cli-latest`, and
+`ollama/small-model:latest`, with friendly provider-aware labels. The upstream
+request uses the provider's exact model ID, while the Codex-facing response
+retains the catalogue slug. No OpenAI model aliases are introduced.
+
+Every model in the configured account catalogues appears unless the provider
+explicitly marks it as incompatible with coding tools. This is not a curated
+or elected checklist, and it is not limited to the selected default. While the
+Provider Hub configuration is active, the temporary catalogue replaces the
+ordinary picker list rather than merging Hub and OpenAI models.
+
+For a known numeric context, `context_window` and `max_context_window` contain
+the full value, `effective_context_window_percent` is 100, and automatic
+compaction is set to 85 percent. When the provider does not establish a numeric
+limit, the context values and automatic-compaction threshold are `null` rather
+than an invented 200,000 tokens; the picker tells the user to compact manually
+when needed. Each provider publishes only its known effort levels. Grok also
+has an explicitly labelled Priority service tier; Ollama entries do not claim
+effort or speed controls its metadata does not establish.
+
+The installed app-server loaded real non-GPT IDs `grok/grok-4.6` and
+`ollama/small-model:latest`, returned their intended friendly labels, and
+exposed the expected context, effort, and Priority metadata. This directly
+answers the compatibility question: provider-qualified, non-GPT model slugs are
+accepted by the installed Codex harness. A separate installed-engine check
+loaded a model with `context_window:null` and reported
+`model_context_window:null`; it did not substitute a 200,000-token default.
+
+**Launch, ownership, and restoration**
+
+`Source/CodexHarness.swift` adds a **Codex** page beside **Claude** and owns the
+desktop launch/recovery flow. It prepares the selected route and generated
+catalogue, then launches the installed app bundle's
+`Contents/Resources/codex` runtime in `app-server` mode with a disposable Codex
+home. Its `model/list` result must contain the expected provider-qualified IDs,
+friendly names, effort levels, and service tiers. This validation submits no
+turn or inference request and does not edit the user's Codex configuration.
+Provider Hub writes a prepared runtime signature only after the installed
+runtime accepts the catalogue.
+
+The launcher then starts and verifies the shared gateway before asking whether
+to restart an already-running Codex / ChatGPT Desktop. Activation rechecks the
+installed-runtime signature and gateway catalogue digest before configuration
+switching. An incompatible catalogue, including one that silently falls back
+to OpenAI defaults, fails before any user configuration is edited. A cancelled
+restart leaves the desktop configuration unchanged; the gateway can stop when
+no other owned harness or active request is using it.
+
+Activation edits the user's selected Codex `config.toml` and owns only the
+selected model, catalogue, context, reasoning, verbosity, service-tier, and web
+search root keys plus a `provider_hub` provider stanza. Vendored `tomlkit`
+0.13.3 preserves TOML structure and unrelated content. Provider Hub writes an
+atomic verified backup, generated catalogue, and recovery journal before
+switching. Restore returns owned settings to their prior values and preserves
+later unrelated edits or external provider/model changes. It refuses to
+overwrite a pre-existing external `provider_hub` stanza.
+
+The custom provider uses `wire_api = "responses"` and a command-backed bearer
+helper for the loopback gateway. Provider API keys stay in Provider Hub's
+existing Keychain entries. Codex conversation, authentication, project, and
+skill files are not read or modified by the launcher.
+
+Claude and Codex share one prepared gateway. It remains running while either
+owned desktop harness is open and is eligible to stop only after both have
+closed and active requests are finished. Each harness has its own restoration
+journal. Codex launch manages the installed app through a restart; it does not
+claim a separately isolated simultaneous GUI instance.
+
+**Qualification evidence and limits**
+
+The installed Codex CLI completed a disposable read/edit/read cycle against a
+mocked native Responses provider. That path preserved the exact
+500,000-token `grok/grok-4.6` context and completed a simulated context-pressure
+compaction turn through ordinary Responses calls. A namespaced function-call
+round trip reached the expected local dispatch path; its harmless invalid-agent
+wait created no agent.
+
+All six translated provider paths pass both JSON and streaming mock
+function-tool cycles through the real local Messages adapter. Those fixtures
+cover Mistral, Kimi, MiMo, DeepSeek, Muse, and Cerebras, including the
+authenticated encrypted reasoning round trip required by Cerebras. They prove
+the translation and local lifecycle behavior; they do not constitute live
+account qualification for every model in those catalogues.
+
+A live installed Codex engine then ran through Provider Hub, the existing
+Ollama daemon, and `deepseek-v4-flash:cloud`. It completed the disposable
+read/edit/read cycle with three HTTP 200 Responses requests, reported 16,486
+input tokens and 135 output tokens, showed the advertised 1,048,576-token
+context, and finished in 5.3 seconds. This qualifies that exact Ollama route,
+daemon, and account state. It does not qualify every Ollama model.
+
+No xAI key was configured, so Grok has protocol, catalogue, and mocked endpoint
+coverage but no live account qualification. The user's normal Codex GUI and
+configuration were not switched during development. A full GUI launch,
+restart, visual picker check, quit, and restore against the user's actual setup
+remain a final user-operated check; no such GUI result is claimed here. This
+harness also does not replace inference in ChatGPT cloud chat, voice, or other
+product surfaces that have no custom-provider contract.
+
+The installed Codex engine also completed a live translated read/edit/read
+cycle with `cerebras/gpt-oss-120b` at 00:18 BST on 13 September. All three
+provider requests returned HTTP 200, with 13,250 input tokens and 262 output
+tokens reported across the complete cycle. The engine reported the exact
+131,072-token context throughout and finished in 2.0 seconds. This qualifies
+the Responses-to-Messages path, Cerebras reasoning replay, and that specific
+account/model; other Cerebras models still require their own qualification.
+
+**Shareable bundle and signing status**
+
+The shareable app can embed a clean relocatable Python runtime so its Messages
+translation and Fernet dependency do not rely on the recipient's development
+environment. The prepared runtime is ARM64 CPython 3.13.13, downloaded with
+`uv` in an isolated work directory and packaged with `cryptography` 50.0.0. It
+does not copy Vibe or another user installation's `site-packages`. The app's
+Python lookup prefers the bundled runtime. A lightweight source build can omit
+it; setting `PROVIDER_HUB_PYTHON_RUNTIME` when running `Source/build.sh` embeds
+the supplied clean runtime.
+
+`Source/package_macos.py` accepts a Developer ID Application identity, signs
+embedded native components and the app, verifies the signature, and creates a
+zip archive. It can optionally submit that archive using a user-provided
+`notarytool` Keychain profile. Apple accepted the final 0.4.0 build 9 submission
+`c792bff2-9c05-4441-a5be-9b682183353a`. Its ticket is stapled, strict signature
+verification passes, and Gatekeeper identifies it as `Notarized Developer ID`.
+The recipient zip is recreated after stapling. A later source rebuild requires
+its own signing and notarization.

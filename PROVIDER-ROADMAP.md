@@ -1,76 +1,158 @@
-**Provider Hub integration status — 12 September 2026**
+**Provider Hub integration status — 13 September 2026**
 
-The preview implements eight model API connections behind one native menu bar app: Mistral, Kimi Code subscription API keys, Xiaomi MiMo Token Plan, the existing Ollama daemon, DeepSeek API, Cerebras API, Muse through the Meta Model API, and Grok through the xAI PAYG API. Provider identity, credentials, metadata, and quota attribution remain separate from TaskWraith-derived display branding.
+Provider Hub Preview 0.4.0 implements eight model API connections behind one
+native menu bar app: Mistral, Kimi Code subscription API keys, Xiaomi MiMo
+Token Plan, the existing Ollama daemon, DeepSeek API, Cerebras API, Muse through
+the Meta Model API, and Grok through the xAI PAYG API. Provider identity,
+credentials, model metadata, and quota attribution remain separate from
+TaskWraith-derived display branding.
 
-The current implementation includes model discovery/provenance, exact context where known, readable names, alias grouping, Claude slot mappings, native and translated Messages streaming/tool history, per-provider account settings, effort/Fast compatibility handling, profile launch/recovery, and metadata-only activity logs. See `README.md` for setup and `VERIFICATION.md` for actual evidence.
+The app now launches two desktop harnesses with separate model selection and
+restoration state:
 
-Grok Build's browser-authenticated subscription path is ACP (`grok agent stdio`). Muse Code's subscription path is MSP (`muse serve`). Neither is established as a reusable raw model API token. TaskWraith hosts their agent sessions with lifecycle, permission, and cancellation management. A future delegated-agent tool can reuse that architecture, but must not re-present already-executed native tools as pending Claude tool calls. The Meta Model API-key route is implemented as Muse in 0.3.2; Grok PAYG API access is implemented in 0.3.3. The detailed first-party research and TaskWraith file references are in `NATIVE-AGENTS.md`.
+| Harness | Local protocol | Provider connections in 0.4.0 | Tool owner |
+| --- | --- | --- | --- |
+| Claude Desktop | Anthropic Messages at `/v1/messages` | All eight | Claude executes returned tool calls |
+| Codex / ChatGPT Desktop | Responses at `/v1/responses` | All eight: native Grok/Ollama; local Messages translation for Mistral, Kimi, MiMo, DeepSeek, Cerebras, and Muse | Codex executes returned function/shell calls |
 
-The next harness candidate is the installed Codex/ChatGPT Desktop app. Ollama's
-current launcher configures a Responses provider and a custom model catalogue,
-with backup/restoration. `HARNESS-OPTIONS.md` records the exact local versions,
-source evidence, and proposed protocol/catalogue/launcher slices. The current
-gateway does not yet expose `/v1/responses` or launch this harness.
+The current implementation includes model discovery and provenance, exact
+context where known, readable names, alias grouping, Claude slot mappings,
+native and translated Messages streaming/tool history, native Responses
+streaming/function history, Responses-to-Messages translation, authenticated
+encrypted reasoning replay, per-provider account settings, provider-qualified
+Codex catalogue IDs, documented effort/Fast controls, profile and configuration
+launch/recovery, installed-runtime catalogue validation, cancellation, and
+metadata-only activity logs. See `README.md` for setup, `HARNESS-OPTIONS.md` for
+the Codex implementation and qualification, and `VERIFICATION.md` for the
+broader evidence matrix.
 
-Claude Auto works through the normal gateway mapping, but the current client exposes no supported independent classifier model selector or reliable classifier request marker. Preserve the existing opt-in and native permission handling. Do not route by prompt heuristics or claim that enabling the selector qualifies an arbitrary model as a reviewer.
+Grok and Ollama expose native Responses endpoints, so their protocol objects and
+opaque reasoning pass through without a Messages translation. Mistral, Kimi,
+MiMo, DeepSeek, Cerebras, and Muse now translate Codex Responses through the
+authenticated local Messages endpoint and their existing provider adapters.
+The bridge requires full history and `store:false`; native xAI remains the only
+route with scoped `previous_response_id` continuation. The inner Messages hop
+owns the existing provider concurrency slot and activity record, avoiding
+double accounting at the outer Responses layer.
 
-Remaining qualification work is account-specific: broader live Kimi/MiMo/DeepSeek/Cerebras qualification, every selected model's tool behavior, advanced native reasoning compatibility, Claude's provider-specific UI affordances, and any future delegated ACP/MSP integrations. Those capabilities must be reported from evidence as they are tested; catalogue presence alone is not a passing test.
+Opaque provider thinking crosses the translated boundary in authenticated
+encrypted Fernet envelopes. A separate persistent `responses-encryption-key`
+is used through `cryptography` 50.0.0; no prompt or session store is added.
+Envelope scope binds the model and account connection, and cross-provider or
+cross-account reasoning history requires a new task. Mock JSON and streaming
+function-tool cycles pass for all six translated providers, including
+Cerebras's signed thinking replay.
+
+The custom Codex catalogue includes every compatible model in the configured
+account catalogues rather than only the selected default or a curated/elected
+list. Models explicitly marked as tool-incompatible are omitted. Known numeric
+contexts remain 100 percent with an 85 percent automatic-compaction threshold;
+unknown contexts use `null` with no threshold. The installed engine accepted
+that null contract and reported `model_context_window:null` rather than
+guessing 200,000 tokens. The temporary Provider Hub catalogue replaces the
+ordinary picker while active; it does not merge an OpenAI list with Hub models.
+
+Each provider retains only its known effort controls. Grok also has an
+explicitly labelled xAI Priority tier, while Ollama controls are not invented.
+Installed app-server and CLI tests accepted real provider-qualified, non-GPT
+slugs. Launch preparation requires the installed app-server to accept the
+expected model IDs, names, effort levels, and service tiers in a disposable
+home before any user configuration switch. A live Codex engine completed
+read/edit/read through Provider Hub and `ollama/deepseek-v4-flash:cloud`; no
+xAI key was configured, so Grok is not live account-qualified. The user's
+normal Codex GUI/configuration was not switched, leaving the full GUI
+restart/restore cycle as a user-operated final check.
+
+Claude Auto mode still works through the ordinary Messages mapping. The
+inspected Claude client exposes no supported independent classifier selector or
+reliable classifier request marker. Preserve the existing opt-in and native
+permission handling. Do not route by prompt heuristics or claim that enabling
+Auto qualifies an arbitrary model as a reviewer.
+
+Remaining model-route qualification is account-specific: broader live
+Kimi/MiMo/DeepSeek/Cerebras coverage, every selected model's tool behavior,
+advanced native reasoning compatibility, Claude's provider-specific UI
+affordances, additional live Codex provider/model coverage, live xAI Responses, the Codex GUI
+launch/restore path, and any future delegated ACP/MSP integrations. Catalogue
+presence and mock protocol coverage are not live account tests.
+
+**Shareable build status**
+
+The prepared shareable bundle includes a clean ARM64 CPython 3.13.13 runtime
+downloaded with `uv` in an isolated work directory and the pinned
+`cryptography` 50.0.0 dependency. Python lookup prefers the bundle, and no Vibe
+or other user `site-packages` are copied. Lightweight source builds can omit the
+runtime; `PROVIDER_HUB_PYTHON_RUNTIME` supplies a clean relocatable runtime to
+`Source/build.sh` when an embedded build is wanted.
+
+`Source/package_macos.py` signs the app and embedded native components using a
+supplied Developer ID Application identity and can optionally submit the zip
+with a user-provided `notarytool` Keychain profile. The final 0.4.0 build 9 is
+Developer ID signed and Apple-notarized. Its ticket is stapled, and Gatekeeper
+accepts the app as `Notarized Developer ID`. This qualification applies to the
+packaged artifact; a future build needs a new submission.
 
 **Proposed native-agent slices: Muse first**
 
-These are implementation boundaries for follow-up work; native subscription
-adapters are not included in the current model gateway. The
-supported experience is a Muse or Grok agent hosted by Provider Hub, optionally
-called as a delegated tool from Claude. The outer Claude conversation still
-uses one of the configured model APIs.
+Grok Build's browser-authenticated subscription path is ACP
+(`grok agent stdio`). Muse Code's subscription path is MSP (`muse serve`).
+Neither login is established as a reusable raw model API token. TaskWraith
+hosts these stateful agents with lifecycle, permission, and cancellation
+management. A future delegated-agent tool can reuse that architecture, but it
+must not re-present native tools that already executed as pending desktop tool
+calls. The intended experience is a Muse or Grok agent hosted by Provider Hub,
+optionally invoked as an explicit delegated tool from a desktop harness; the
+outer conversation still uses one of the configured model API routes.
 
 | Slice | User-visible result | Evidence required before completion |
 | --- | --- | --- |
 | 1. Muse connection and model discovery | Detect the installed Muse CLI, use its normal sign-in, and show the host's advertised models/capabilities. | Complete MSP initialization and model listing without a model turn; verify host shutdown and unavailable-SDK diagnostics. |
 | 2. Muse session lifecycle | Start a task in a selected working directory, stream its progress/result, cancel, and resume sessions owned by the hub. | A disposable read-only task, cancellation/process-close checks, reconnect/resume, and retry tests proving a lost reply does not submit a second turn. |
 | 3. Muse approvals and native task UI | Show permission requests and agent questions in the app with explicit allow/deny/cancel controls and the existing Muse branding. | Disposable read/edit/read, denied write, user-question response, cancellation during an approval, and host-exit handling. |
-| 4. Claude delegation | Claude can invoke an explicit Muse task tool and receive its result and execution summary. | A complete Claude-to-Muse task, continuation/cancellation, clear provider attribution, and no replay of already-executed Muse tools as pending Claude tool calls. |
+| 4. Desktop delegation | A desktop model can invoke an explicit Muse task tool and receive its result and execution summary. | A complete delegated Muse task, continuation/cancellation, clear provider attribution, and no replay of already-executed Muse tools as pending model tool calls. |
 | 5. Grok ACP adapter | Add Grok's existing-login agent sessions to the same native task UI and delegation layer. | ACP initialize/authenticate/session/prompt/update/permission/cancel lifecycle, normal local login, and the same fixture and failure cases as Muse. |
 
 Muse's [official SDK quickstart](https://meta-models.github.io/muse-code-sdk/guides/quickstart/)
-explicitly uses a configured Muse login and `muse serve`; it demonstrates
-streaming, permission decisions, cancellation, and reloading a session in a new
-process. It also documents a host exit when that build's experimental SDK tier
-is unavailable. The first slice must detect that condition and report it.
+uses a configured Muse login and `muse serve`; it demonstrates streaming,
+permission decisions, cancellation, and reloading a session in a new process.
+It also documents a host exit when that build's experimental SDK tier is
+unavailable. The first slice must detect that condition and report it.
 Fingerprint differences should be surfaced and assessed against required
-protocol capabilities; the SDK documents them as warnings, not an automatic
-reason to reject every newer host.
+protocol capabilities; the SDK documents them as warnings rather than an
+automatic reason to reject every newer host.
 
 Grok's [official ACP example](https://docs.x.ai/build/cli/headless-scripting#acp)
 uses `grok agent stdio` and the CLI's existing local authentication. This is a
 credible subscription-preserving integration path. Exact entitlement still
-needs qualification with the selected account; no API-billing equivalence is
+needs qualification with the selected account; API-billing equivalence is not
 assumed.
 
-Using either subscription as a transparent replacement for every model request
-inside Claude's own agent loop remains unproven. The native-agent slices above
-can be pursued through the published session protocols without extracting
-browser credentials or disguising completed agent activity as model tool calls.
+Using either subscription as a transparent replacement for every request in a
+desktop model's own agent loop remains unproven. The published session
+protocols support an explicit native-agent boundary without extracting browser
+credentials or disguising completed agent activity as model tool calls.
 
+**Release history and retained boundaries**
 
-The 0.3.1 follow-up adds automatic catalogue refresh and launch preparation,
+Version 0.3.1 added automatic catalogue refresh and launch preparation,
 Cerebras client-identity compatibility, and direct DeepSeek/Cerebras tool-cycle
-qualification. Remaining context work includes account-specific Cerebras limits,
-Kimi K3 plan entitlement, and Claude's native standard/1M variant and compaction
-behavior. The gateway cannot publish a fixed-only 1M choice through the inspected
-Desktop schema; its supported default preference is now used.
+qualification. Remaining context work includes account-specific Cerebras
+limits, Kimi K3 plan entitlement, and Claude's standard/1M variant and
+compaction behavior. The inspected Claude Desktop schema cannot publish a
+fixed-only 1M choice, so Provider Hub uses its supported default preference.
 
+Version 0.3.2 added **Muse (Meta Model API)** as a normal provider-key
+connection with Keychain storage, authenticated model discovery, and native
+Anthropic Messages through `api.meta.ai`. A Muse Code subscription does have an
+automatically connected onboarding key, but Meta scopes that key to Muse Code;
+additional or manually supplied Model API keys use PAYG. Keep **Muse Code
+subscription (login/MSP)** and **Meta Model API PAYG (API key/raw inference)**
+as explicit access products. Native subscription launch must detect API-key
+overrides so an inherited key cannot silently change billing.
 
-Muse credential clarification: its subscription does have an automatically
-connected onboarding API key. Meta scopes that key to Muse Code, while additional
-or manually supplied keys use PAYG. Keep **Muse Code subscription (login/MSP)**
-and **Meta Model API PAYG (API key/raw inference)** as explicit access products.
-Native subscription launch must detect API-key overrides so an inherited key
-cannot silently change billing. See `NATIVE-AGENTS.md` for the source references.
-
-
-Version 0.3.2 adds **Muse (Meta Model API)** as a normal provider-key connection:
-Keychain storage, authenticated model discovery, and native Anthropic Messages
-through `api.meta.ai`. The native Muse Code subscription/MSP slices above remain
-separate follow-up work. A configured Meta Model API key is needed for live
-account qualification; offline protocol tests do not prove that entitlement.
+Version 0.3.3 added the Grok xAI API-key connection for PAYG inference through
+Claude's Messages harness. Version 0.4.0 adds native Grok and Ollama Responses,
+the six-provider Responses-to-Messages bridge, encrypted provider-reasoning
+continuity, the full provider-qualified Codex catalogue, and the reversible
+Codex / ChatGPT Desktop launcher. ACP/MSP subscription-agent hosting remains
+future work.

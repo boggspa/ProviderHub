@@ -165,3 +165,100 @@ default. No assumption about charged Priority use is derived from the request.
 
 Codex/ChatGPT Desktop and Ollama were inspected read-only. No OpenAI config,
 authentication, sessions, or running tasks were changed for the harness research.
+
+
+**0.4.0 Codex harness and all-provider Responses — 13 September 2026**
+
+The combined suite passes **181/181 tests**, including a complete run under
+the clean CPython 3.13.13 runtime embedded in the distribution app, with
+ResourceWarnings treated as errors. The native Swift build and development
+signature verification also pass.
+
+The new tests cover the Responses endpoint, native Grok/Ollama forwarding,
+namespaced function tools, streaming and JSON completion/error handling,
+cancellation, request capacity, provider/account ownership of response IDs,
+catalogue capabilities, and reversible TOML configuration. Restoration tests
+exercise byte-exact unchanged restores, unrelated later edits, external provider
+switches, provider-entry collisions, selection changes, and ambiguous external
+model edits that must preserve the recovery journal.
+
+All six translated providers—Mistral, Kimi, MiMo, DeepSeek, Muse, and
+Cerebras—pass both JSON and streaming function-tool cycles through the existing
+Messages adapters. Reasoning envelopes survive restart with the same local key;
+tampered envelopes and cross-account/model replay fail explicitly. Provider
+reasoning is carried as authenticated encrypted Responses history. No prompt
+or reasoning transcript is stored in Provider Hub's response-ID journal.
+Usage conversion includes input cache reads/writes so Codex receives the whole
+input-token count.
+
+The installed Codex app-server accepted the generated **74-model catalogue**
+from seven configured accounts, including provider-qualified IDs, friendly
+names, reasoning levels, and service-tier controls. No OpenAI model aliases were
+required. The launcher repeats this installed-runtime compatibility check before
+switching configuration and refuses a silent fallback to the built-in catalogue.
+The provider list is account-dependent; the missing eighth account is Grok.
+The UI review caught Meta's image-generation and transcription models in the
+general model list. Discovery now excludes those exact non-chat IDs, explicit
+non-text output models, and models marked deprecated/archived; text models
+with vision input remain eligible.
+
+Installed-engine probes in disposable Codex homes verified:
+
+- A native Responses read/edit/read cycle using function/shell tools.
+- The exact 500,000-token context from a mock model, plus local compaction under
+  simulated context pressure through ordinary Responses requests.
+- A harmless namespaced function dispatch, without creating another agent.
+- An unreported context limit represented as `null`; Codex reported an unknown
+  context instead of an invented 200,000-token limit.
+- A translated Cerebras tool cycle with thinking preserved and authenticated
+  across the Responses → Messages → Chat Completions round trip.
+
+**Live installed-engine qualification**
+
+| Route | Successful provider requests | Summed input / output tokens | Reported context | Result |
+| --- | --- | --- | --- | --- |
+| `ollama/deepseek-v4-flash:cloud` | 3 × HTTP 200 | 16,486 / 135 | 1,048,576 | Read/edit/read verified, 5.3 seconds |
+| `cerebras/gpt-oss-120b` | 3 × HTTP 200 | 13,250 / 262 | 131,072 | Read/edit/read verified, 2.0 seconds |
+
+The Ollama test ran on 12 September; the Cerebras test ran at 00:18 BST on
+13 September. Each used a disposable workspace and the already configured
+provider account. Counts are summed request usage, including history resent
+during the tool loop. These results qualify those routes only. Other providers
+have deterministic Codex bridge coverage; no new paid Mistral inference was
+run, and no xAI key was configured for live Grok testing.
+
+The active Codex GUI has not been restarted or switched to Provider Hub while
+this development task runs in it. Installed-engine behaviour is verified, but
+the final real GUI picker, context meter, restart, quit, and restoration cycle
+remain a user-operated check. Claude's native third-party profile support is
+independent of this Codex configuration switch.
+
+**Distribution runtime**
+
+The Apple Silicon distribution embeds a fresh relocatable CPython 3.13.13
+runtime, `cryptography` 50.0.0, `cffi` 2.1.1, and `pycparser` 3.0. It includes
+their upstream licence files and the vendored TOMLKit 0.13.3 MIT notice.
+It does not include Vibe's Python installation, provider keys, app settings,
+Claude or Codex sessions, or user account data. Python lookup prefers the
+bundled interpreter and ignores ambient PYTHONHOME/PYTHONPATH.
+
+The final 0.4.0 build 9 was signed with Developer ID, including all 12 embedded
+native components. Apple accepted submission
+`c792bff2-9c05-4441-a5be-9b682183353a`, created at
+2026-09-12T23:39:28.286Z (13 September locally). Stapling and ticket validation
+pass, `codesign --verify --deep --strict` passes, and Gatekeeper reports
+`accepted` with `source=Notarized Developer ID`. The distribution zip is created
+after stapling. The signed runtime passes SSL certificate loading and a Fernet
+encryption/decryption round trip. A source rebuild does not inherit this
+artifact's notarization.
+
+The installed app's UI now shows all seven configured provider groups in the
+Codex default-model menu. Muse shows Spark models only; its image-generation
+and transcription entries are absent. The Codex sidebar label fits, and the
+page states that the default sets the starting model while Codex receives the
+whole compatible catalogue. No default was selected on the user's behalf.
+During the update, idle Claude was closed and the app visibly confirmed that
+its previous profile had been restored. Claude then reopened through the final
+signed hub with the saved session list and provider profile visible. No new
+inference was requested during that UI check. The active Codex app remained
+running.
