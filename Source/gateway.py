@@ -131,7 +131,7 @@ class Runtime:
                     "catalogue_fingerprint": self.catalogue_fingerprint,
                     "providers": {key: dict(value) for key, value in self.provider_counts.items()}}
 
-    def record(self, kind, model="", code=None, usage=None, model_unavailable=False):
+    def record(self, kind, model="", code=None, usage=None, model_unavailable=False, service_tier=None):
         # Deliberately excludes prompts, tool arguments, response text, headers,
         # credentials, and raw upstream error bodies.
         event = {"time": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "event": kind}
@@ -142,6 +142,8 @@ class Runtime:
             event["status"] = code
         if usage:
             event["usage"] = usage
+        if service_tier in {"default", "priority"}:
+            event["service_tier"] = service_tier
         if model_unavailable:
             event["model_unavailable"] = True
         with self.lock:
@@ -301,6 +303,7 @@ class Handler(BaseHTTPRequestHandler):
         monitor = None
         ping = None
         usage = {}
+        service_tier = None
         try:
             with self.runtime.lock:
                 self.runtime.active += 1
@@ -358,6 +361,8 @@ class Handler(BaseHTTPRequestHandler):
                 if len(raw) > MAX_BODY:
                     raise BridgeError("The provider response exceeded the response limit.")
                 decoded = json.loads(raw)
+                if plan["provider_id"] == "grok" and decoded.get("service_tier") in {"default", "priority"}:
+                    service_tier = decoded["service_tier"]
                 result = translate_response(decoded, payload["model"], names) if plan["protocol"] == "chat_completions" else decoded
                 if result.get("type") != "message" or not isinstance(result.get("content"), list):
                     raise BridgeError("The provider returned an invalid Messages response.")
@@ -428,6 +433,8 @@ class Handler(BaseHTTPRequestHandler):
                             break
                         if data:
                             chunk = json.loads(data)
+                            if plan["provider_id"] == "grok" and chunk.get("service_tier") in {"default", "priority"}:
+                                service_tier = chunk["service_tier"]
                             if chunk.get("error") or chunk.get("type") == "error":
                                 raise BridgeError("The provider reported an error during generation.")
                             if translator:
@@ -461,7 +468,7 @@ class Handler(BaseHTTPRequestHandler):
                     self.wfile.write(b"0\r\n\r\n")
                     self.wfile.flush()
                 self.close_connection = True
-            self.runtime.record("completed", plan["route"], 200, usage)
+            self.runtime.record("completed", plan["route"], 200, usage, service_tier=service_tier)
         except (BrokenPipeError, ConnectionResetError):
             self.runtime.record("cancelled", plan["route"])
         except Exception as exc:

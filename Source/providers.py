@@ -178,6 +178,26 @@ PROVIDERS = {
             "reasoning_history": "native",
         },
     },
+    "grok": {
+        "id": "grok",
+        "name": "Grok (xAI API)",
+        "protocol": "chat_completions",
+        "default_base_url": "https://api.x.ai/v1",
+        "default_region": "global",
+        "regions": {"global": "https://api.x.ai/v1"},
+        "auth_header": {"name": "Authorization", "prefix": "Bearer "},
+        "credential_account": "XAI_API_KEY",
+        "credential_env": "XAI_API_KEY",
+        "setup_url": "https://console.x.ai/",
+        "capabilities": {
+            "streaming": True,
+            "tools": True,
+            "thinking": True,
+            "vision": "model_dependent",
+            "model_discovery": "api",
+            "reasoning_history": "not_required",
+        },
+    },
 }
 
 
@@ -190,6 +210,7 @@ _OFFICIAL_PATHS = {
     "deepseek": {"", "/anthropic", "/anthropic/v1/messages"},
     "cerebras": {"", "/v1", "/v1/models", "/v1/chat/completions"},
     "muse": {"", "/v1", "/v1/models", "/v1/messages"},
+    "grok": {"", "/v1", "/v1/models", "/v1/language-models", "/v1/chat/completions"},
 }
 
 _OLLAMA_PATHS = {"", "/v1", "/v1/messages", "/api/tags"}
@@ -291,6 +312,23 @@ _DEEPSEEK_MODEL_METADATA = {
 }
 
 _MUSE_COOKBOOK = "https://github.com/meta-models/meta-model-cookbook"
+_GROK_MODEL_DOCS = "https://docs.x.ai/developers/grok-4-6"
+_GROK_REASONING_DOCS = "https://docs.x.ai/developers/model-capabilities/text/reasoning"
+# Only enrich exact, account-listed IDs. A moving alias or a future model is
+# not evidence for a particular version, context limit, or reasoning control.
+_GROK_MODEL_METADATA = {
+    "grok-4.6": {
+        "context": 500000, "tools": True, "vision": True, "reasoning": True,
+        "effort_modes": ["low", "medium", "high", "xhigh"],
+        "metadata_evidence": _GROK_MODEL_DOCS,
+    },
+    "grok-4.5": {
+        "reasoning": True, "effort_modes": ["low", "medium", "high"],
+        "metadata_evidence": _GROK_REASONING_DOCS,
+    },
+}
+
+
 _MUSE_MODEL_METADATA = {
     "muse-spark-1.3": {
         "display_name": "Muse Spark 1.3",
@@ -586,6 +624,8 @@ def _discovery_plan(provider_id: str, connection: dict, api_key: str | None) -> 
         url = base + "/models"
     elif provider_id == "muse":
         url = base + "/v1/models"
+    elif provider_id == "grok":
+        url = base + "/language-models"
     elif provider_id == "deepseek":
         url = "https://api.deepseek.com/models"
     elif provider_id == "ollama":
@@ -818,6 +858,48 @@ def _cerebras_entry(card: dict, public_card: dict | None, evidence: str) -> dict
     )
 
 
+def _grok_entry(card: dict, supplement: dict, evidence: str) -> dict:
+    identifier = card["id"]
+    metadata = _GROK_MODEL_METADATA.get(identifier, {})
+    # The language list defines membership; /models only adds metadata for the
+    # same ID. It must never introduce image/video models into this picker.
+    merged = {**supplement, **card}
+    capabilities = merged.get("capabilities")
+    capabilities = capabilities if isinstance(capabilities, dict) else {}
+
+    def capability(name):
+        reported = _boolean(capabilities.get(name))
+        return reported if reported is not None else _boolean(metadata.get(name))
+
+    context = _first_positive(card.get("context_length"), card.get("max_context_length"),
+                              supplement.get("context_length"), supplement.get("max_context_length"))
+    inputs = card.get("input_modalities")
+    vision = ("image" in inputs) if isinstance(inputs, list) else capability("vision")
+    efforts = capabilities.get("effort_modes", card.get("effort_modes"))
+    if not isinstance(efforts, list) or not all(isinstance(value, str) for value in efforts):
+        efforts = metadata.get("effort_modes", [])
+    reasoning = capability("reasoning")
+    if reasoning is None and efforts:
+        reasoning = True
+    return _catalogue_entry(
+        identifier,
+        context=context or metadata.get("context"),
+        aliases=card.get("aliases") if isinstance(card.get("aliases"), list) else [],
+        tools=capability("tools"), vision=vision, reasoning=reasoning,
+        effort_modes=efforts,
+        # xAI documents Priority on both text inference endpoints. Actual
+        # service tier is returned by the API; requesting it is not a grant.
+        fast_mode=True,
+        source="provider_api", evidence=evidence,
+        metadata_evidence=metadata.get("metadata_evidence"),
+        context_kind=("provider_reported" if context else
+                      "verified_documentation" if metadata.get("context") else "unknown"),
+        max_output=_first_positive(merged.get("max_output_tokens"), merged.get("max_completion_tokens")),
+        streaming=True,
+        reasoning_history="not_required",
+    )
+
+
 def _muse_entry(card: dict, evidence: str) -> dict:
     identifier = card["id"]
     metadata = _MUSE_MODEL_METADATA.get(identifier, {})
@@ -1010,6 +1092,14 @@ def _models_from_api(provider_id: str, raw: dict, evidence: str, *, enriched=Non
         elif provider_id == "cerebras":
             public_card = (enriched or {}).get(identifier)
             models.append(_cerebras_entry(card, public_card, evidence))
+        elif provider_id == "grok":
+            capabilities = card.get("capabilities") if isinstance(card.get("capabilities"), dict) else {}
+            output = card.get("output_modalities")
+            if (card.get("deprecated") is True or card.get("archived") is True
+                    or capabilities.get("chat_completions") is False
+                    or (isinstance(output, list) and "text" not in output)):
+                continue
+            models.append(_grok_entry(card, (enriched or {}).get(identifier, {}), evidence))
         elif provider_id == "muse":
             capabilities = card.get("capabilities") if isinstance(card.get("capabilities"), dict) else {}
             if any(capabilities.get(field) is False for field in (
@@ -1058,6 +1148,19 @@ def discover(provider_id: str, connection: dict | None, api_key: str | None, *, 
         )
     else:
         enriched = None
+        if provider_id == "grok":
+            if not isinstance(raw.get("models"), list):
+                raise ProviderError("Grok language-model discovery response has no model list.")
+            raw = {"data": raw["models"]}
+            detail_plan = {**plan, "url": normalized["base_url"] + "/models"}
+            try:
+                details = fetch(copy.deepcopy(detail_plan))
+                if not isinstance(details, dict) or not isinstance(details.get("data"), list):
+                    raise ProviderError("Grok context metadata response has no model list.")
+                enriched = {card["id"]: card for card in details["data"]
+                            if isinstance(card, dict) and isinstance(card.get("id"), str)}
+            except ProviderError:
+                warnings.append("Grok context metadata was unavailable; exact known-model documentation is used where available.")
         if provider_id == "cerebras":
             public_plan = _cerebras_public_plan()
             try:
@@ -1093,6 +1196,10 @@ def discover(provider_id: str, connection: dict | None, api_key: str | None, *, 
             warnings.append(
                 "At least one Meta Model API model did not report an exact context limit; it remains provider-managed."
             )
+    if provider_id == "grok":
+        warnings.append("Grok uses xAI API billing. Fast requests Priority processing at a premium token price; the actual tier is recorded when returned.")
+        if any(model.get("context") is None for model in models):
+            warnings.append("At least one Grok model has no exact reported context limit; it remains provider-managed.")
     if provider_id == "mistral":
         removed = sorted({
             alias for model in models for alias in model.get("ambiguous_aliases_removed", [])
@@ -1505,7 +1612,7 @@ def _chat_content_part(provider_id: str, block: dict, model_spec: dict):
             raise ProviderError("Images must be base64 data or HTTPS URLs.")
         return {
             "type": "image_url",
-            "image_url": {"url": url} if provider_id == "cerebras" else url,
+            "image_url": {"url": url} if provider_id in {"cerebras", "grok"} else url,
         }
     if kind == "document":
         source = block.get("source") if isinstance(block.get("source"), dict) else {}
@@ -1538,6 +1645,29 @@ def _compact_chat_content(parts: list[dict]):
 
 
 def _chat_effort(provider_id: str, payload: dict, model_spec: dict):
+    if provider_id == "grok":
+        thinking = payload.get("thinking") or {}
+        output = payload.get("output_config") or {}
+        if not isinstance(thinking, dict) or not isinstance(output, dict):
+            raise ProviderError("Thinking and output_config must be objects.")
+        if thinking.get("type") not in (None, "enabled", "disabled", "adaptive"):
+            raise ProviderError("Unsupported Grok thinking mode.")
+        requested = output.get("effort")
+        if requested is not None and not isinstance(requested, str):
+            raise ProviderError("Grok reasoning effort must be a string.")
+        if thinking.get("type") == "disabled" or requested == "none":
+            if model_spec.get("reasoning") is not False:
+                raise ProviderError("Reasoning cannot be disabled on this Grok model. Select a non-reasoning model if available.")
+            return None
+        if requested is None:
+            return None
+        supported = model_spec.get("effort_modes") or []
+        target = {"minimal": "low", "max": "xhigh", "ultra": "xhigh"}.get(requested, requested)
+        if target == "xhigh" and "xhigh" not in supported and "high" in supported:
+            target = "high"
+        if target not in supported:
+            raise ProviderError(f"Grok effort {requested!r} is not advertised for this model. Use its default reasoning setting.")
+        return target
     if not model_spec.get("reasoning"):
         return None
     thinking = payload.get("thinking") or {}
@@ -1781,6 +1911,18 @@ def _translate_chat_payload(
             body["service_tier"] = service_tier
         elif service_tier not in (None, ""):
             raise ProviderError("Requested Cerebras service tier is unavailable on the shared endpoint.")
+    elif provider_id == "grok":
+        if model_spec.get("reasoning") is True and payload.get("stop_sequences"):
+            raise ProviderError("Grok reasoning models do not support stop sequences.")
+        tier = payload.get("service_tier")
+        if payload.get("speed") == "fast" or tier in {"fast", "priority"}:
+            body["service_tier"] = "priority"
+        elif tier in (None, "", "auto", "default", "standard"):
+            body["service_tier"] = "default"
+        else:
+            raise ProviderError("Grok supports only default or priority processing.")
+        if body["stream"]:
+            body["stream_options"] = {"include_usage": True}
     return body, name_map
 
 
@@ -1834,6 +1976,20 @@ def prepare_request(
         reasoning_by_message=normalized_reasoning,
     )
     reasoning_replay = _requires_cerebras_replay(provider_id, model_spec)
+    controls = {}
+    if provider_id == "grok":
+        # Stable, opaque routing hint, built locally instead of forwarding any
+        # client's identity header. No credentials or prompt text leave in it.
+        headers["x-grok-conv-id"] = hashlib.sha256(json.dumps({
+            "model": upstream_model,
+            "system": anthropic_payload.get("system"),
+            "first_message": anthropic_payload["messages"][0],
+        }, sort_keys=True).encode()).hexdigest()
+        requested = (anthropic_payload.get("output_config") or {}).get("effort")
+        actual = body.get("reasoning_effort")
+        if requested is not None and requested != actual:
+            controls["reasoning_effort"] = f"{requested}_normalized_to_{actual}"
+        controls["requested_service_tier"] = body["service_tier"]
     return {
         "url": base + "/chat/completions",
         "headers": headers,
@@ -1844,5 +2000,6 @@ def prepare_request(
             "complete_tool_cycles": True,
             "reasoning_history": "gateway_signed_replay" if reasoning_replay else "not_required_or_unknown",
             "verified_reasoning_messages": len(normalized_reasoning),
+            **controls,
         },
     }
