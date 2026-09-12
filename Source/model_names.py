@@ -12,6 +12,7 @@ BRANDS = {
     "grok": "Grok", "llama": "Llama", "gpt": "GPT", "oss": "OSS",
     "api": "API", "cli": "CLI", "tts": "TTS", "ocr": "OCR", "vl": "VL",
     "fp8": "FP8", "fp16": "FP16", "bf16": "BF16", "mamba": "Mamba",
+    "mlx": "MLX", "lfm": "LFM", "minimax": "MiniMax", "minicpm": "MiniCPM", "xs": "XS",
 }
 
 # Versioned IDs with known product names. Keep moving "latest" aliases out of
@@ -52,6 +53,8 @@ def word_label(word: str) -> str:
         return "V" + word[1:]
     if re.fullmatch(r"q\d+", lower):
         return word.upper()
+    if re.fullmatch(r"[rkm]\d+(?:\.\d+)*", lower):
+        return word[0].upper() + word[1:]
     if re.fullmatch(r"[a-zA-Z]+\d+(?:\.\d+)*", word):
         match = re.fullmatch(r"([a-zA-Z]+)(.+)", word)
         return BRANDS.get(match[1].lower(), match[1].capitalize()) + " " + match[2]
