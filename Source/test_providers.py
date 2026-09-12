@@ -27,7 +27,7 @@ class RegistryTests(unittest.TestCase):
     def test_registry_is_plain_json_data_with_expected_contract(self):
         self.assertEqual(
             set(PROVIDERS),
-            {"mistral", "kimi", "mimo", "ollama", "deepseek", "cerebras"},
+            {"mistral", "kimi", "mimo", "ollama", "deepseek", "cerebras", "muse"},
         )
         json.loads(json.dumps(PROVIDERS))
         for provider_id, descriptor in PROVIDERS.items():

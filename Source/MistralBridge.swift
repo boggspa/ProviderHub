@@ -675,7 +675,7 @@ struct BridgeWindow: View {
                 Spacer()
                 VStack(alignment: .leading, spacing: 9) {
                     StatusPill(text: model.running ? "Gateway ready" : model.gatewayState, good: model.running)
-                    Text("0.3.1 · PROVIDER HUB").font(.system(size: 9, weight: .medium)).tracking(1).foregroundStyle(.tertiary)
+                    Text("\(hubVersion) · PROVIDER HUB").font(.system(size: 9, weight: .medium)).tracking(1).foregroundStyle(.tertiary)
                 }
             }.padding(20).frame(width: 200).background(Color.black.opacity(0.15))
             Rectangle().fill(Color.white.opacity(0.07)).frame(width: 1)

@@ -156,6 +156,28 @@ PROVIDERS = {
             "reasoning_history": "gateway_signed_replay",
         },
     },
+    # Ordinary Meta Model API/PAYG access. Muse Code login and its onboarding
+    # key belong to the separate Muse session host and are never read here.
+    "muse": {
+        "id": "muse",
+        "name": "Muse (Meta Model API)",
+        "protocol": "anthropic",
+        "default_base_url": "https://api.meta.ai",
+        "default_region": "global",
+        "regions": {"global": "https://api.meta.ai"},
+        "auth_header": {"name": "Authorization", "prefix": "Bearer "},
+        "credential_account": "MODEL_API_KEY",
+        "credential_env": "MODEL_API_KEY",
+        "setup_url": "https://dev.meta.ai/",
+        "capabilities": {
+            "streaming": True,
+            "tools": True,
+            "thinking": True,
+            "vision": True,
+            "model_discovery": "api",
+            "reasoning_history": "native",
+        },
+    },
 }
 
 
@@ -167,6 +189,7 @@ _OFFICIAL_PATHS = {
     "mimo": {"", "/anthropic", "/anthropic/v1/messages"},
     "deepseek": {"", "/anthropic", "/anthropic/v1/messages"},
     "cerebras": {"", "/v1", "/v1/models", "/v1/chat/completions"},
+    "muse": {"", "/v1", "/v1/models", "/v1/messages"},
 }
 
 _OLLAMA_PATHS = {"", "/v1", "/v1/messages", "/api/tags"}
@@ -264,6 +287,26 @@ _DEEPSEEK_MODEL_METADATA = {
         "vision": False,
         "reasoning": True,
         "effort_modes": ["none", "low", "high", "max"],
+    },
+}
+
+_MUSE_COOKBOOK = "https://github.com/meta-models/meta-model-cookbook"
+_MUSE_MODEL_METADATA = {
+    "muse-spark-1.3": {
+        "display_name": "Muse Spark 1.3",
+        "context": 1048576,
+        "max_output": 131072,
+        "tools": True,
+        "vision": True,
+        "reasoning": True,
+        "streaming": True,
+        "adaptive_thinking": True,
+        "effort_modes": ["minimal", "low", "medium", "high"],
+        "fast_mode": False,
+        "parallel_tool_calls": True,
+        "tool_choice_modes": ["auto"],
+        "reasoning_history": "native",
+        "metadata_evidence": _MUSE_COOKBOOK,
     },
 }
 
@@ -541,6 +584,8 @@ def _discovery_plan(provider_id: str, connection: dict, api_key: str | None) -> 
     base = connection["base_url"]
     if provider_id in {"mistral", "cerebras"}:
         url = base + "/models"
+    elif provider_id == "muse":
+        url = base + "/v1/models"
     elif provider_id == "deepseek":
         url = "https://api.deepseek.com/models"
     elif provider_id == "ollama":
@@ -773,6 +818,85 @@ def _cerebras_entry(card: dict, public_card: dict | None, evidence: str) -> dict
     )
 
 
+def _muse_entry(card: dict, evidence: str) -> dict:
+    identifier = card["id"]
+    metadata = _MUSE_MODEL_METADATA.get(identifier, {})
+    limits = card.get("limits") if isinstance(card.get("limits"), dict) else {}
+    reported_context = _first_positive(
+        limits.get("max_context_length"),
+        card.get("max_context_length"),
+        card.get("context_length"),
+        card.get("max_context_window"),
+    )
+    reported_output = _first_positive(
+        limits.get("max_completion_tokens"),
+        card.get("max_completion_tokens"),
+        card.get("max_output_length"),
+        card.get("max_output_tokens"),
+    )
+    capabilities = card.get("capabilities") if isinstance(card.get("capabilities"), dict) else {}
+
+    def capability(*names):
+        for name in names:
+            value = _boolean(capabilities.get(name))
+            if value is not None:
+                return value
+        for name in names:
+            value = _boolean(metadata.get(name))
+            if value is not None:
+                return value
+        return None
+
+    effort_modes = None
+    for field in ("effort_modes", "supported_efforts", "reasoning_efforts"):
+        value = card.get(field)
+        if isinstance(value, list) and all(isinstance(mode, str) for mode in value):
+            effort_modes = list(value)
+            break
+    if effort_modes is None:
+        effort_modes = list(metadata.get("effort_modes", []))
+    display_name = card.get("display_name") or card.get("name") or metadata.get("display_name")
+    if not isinstance(display_name, str) or not display_name:
+        display_name = identifier
+    aliases = card.get("aliases") if isinstance(card.get("aliases"), list) else []
+    context = reported_context or _positive_integer(metadata.get("context"))
+    max_output = reported_output or _positive_integer(metadata.get("max_output"))
+    reasoning = capability("reasoning", "thinking")
+    tools = capability("tools", "function_calling", "tool_use")
+    return _catalogue_entry(
+        identifier,
+        canonical_id=identifier,
+        display_name=display_name,
+        context=context,
+        aliases=aliases,
+        tools=tools,
+        vision=capability("vision"),
+        reasoning=reasoning,
+        effort_modes=effort_modes,
+        fast_mode=False,
+        source="provider_api",
+        evidence=evidence,
+        metadata_evidence=metadata.get("metadata_evidence"),
+        max_output=max_output,
+        context_kind=("provider_reported" if reported_context is not None else
+                      "verified_documentation" if context is not None else "unknown"),
+        streaming=capability("streaming"),
+        parallel_tool_calls=capability("parallel_tool_calls"),
+        tool_choice_modes=(card.get("tool_choice_modes")
+                           if isinstance(card.get("tool_choice_modes"), list)
+                           else list(metadata.get("tool_choice_modes", []))),
+        reasoning_history=("native" if reasoning is True else
+                           "not_required" if reasoning is False else "unknown"),
+        complete_tool_cycles=(True if tools is True else None),
+        adaptive_thinking=(_boolean(card.get("adaptive_thinking"))
+                           if _boolean(card.get("adaptive_thinking")) is not None
+                           else _boolean(metadata.get("adaptive_thinking"))),
+        preview=_boolean(card.get("preview")),
+        deprecated=_boolean(card.get("deprecated")),
+        description=card.get("description") if isinstance(card.get("description"), str) else None,
+    )
+
+
 def _coalesce_mistral_models(models: list[dict]) -> list[dict]:
     """Group equivalent cards and remove aliases with ambiguous specifications."""
     groups = {}
@@ -886,6 +1010,13 @@ def _models_from_api(provider_id: str, raw: dict, evidence: str, *, enriched=Non
         elif provider_id == "cerebras":
             public_card = (enriched or {}).get(identifier)
             models.append(_cerebras_entry(card, public_card, evidence))
+        elif provider_id == "muse":
+            capabilities = card.get("capabilities") if isinstance(card.get("capabilities"), dict) else {}
+            if any(capabilities.get(field) is False for field in (
+                "completion_chat", "chat_completion", "chat_completions", "messages",
+            )):
+                continue
+            models.append(_muse_entry(card, evidence))
     if provider_id == "mistral":
         return _coalesce_mistral_models(models)
     return sorted(models, key=lambda model: (model["display_name"].casefold(), model["id"]))
@@ -953,6 +1084,15 @@ def discover(provider_id: str, connection: dict | None, api_key: str | None, *, 
         warnings.append(
             "Reasoning tool cycles require gateway-signed assistant reasoning replay through the Cerebras adapter."
         )
+    if provider_id == "muse":
+        if any(model.get("metadata_evidence") for model in models):
+            warnings.append(
+                "Exact Muse Spark 1.3 limits and capabilities were enriched from Meta's first-party Model API cookbook."
+            )
+        if any(model.get("context") is None for model in models):
+            warnings.append(
+                "At least one Meta Model API model did not report an exact context limit; it remains provider-managed."
+            )
     if provider_id == "mistral":
         removed = sorted({
             alias for model in models for alias in model.get("ambiguous_aliases_removed", [])
@@ -1071,7 +1211,7 @@ def _normalize_native_controls(
 
     requested = _output_effort(body)
     thinking_type = _thinking_type(body)
-    if thinking_type == "adaptive":
+    if thinking_type == "adaptive" and provider_id != "muse":
         if model_spec.get("reasoning") is not True:
             raise ProviderError(
                 f"The {descriptor['name']} model does not advertise thinking support.")
@@ -1086,6 +1226,35 @@ def _normalize_native_controls(
     if (model_spec.get("reasoning") is False
             and requested not in (None, "none")):
         raise ProviderError("The selected model is documented as not supporting reasoning effort.")
+
+    if provider_id == "muse":
+        if thinking_type == "disabled" or requested == "none":
+            raise ProviderError(
+                "Muse Spark reasoning cannot be disabled reliably on the public Meta Model API.")
+        if thinking_type not in (None, "adaptive", "enabled"):
+            raise ProviderError("Muse supports adaptive or enabled thinking for this route.")
+        if requested is not None:
+            aliases = {
+                "minimal": "minimal", "low": "low", "medium": "medium", "high": "high",
+                "xhigh": "high", "max": "high", "ultra": "high",
+            }
+            normalized = aliases.get(requested)
+            supported = set(model_spec.get("effort_modes") or [])
+            # Missing per-model metadata is not evidence of incompatibility.
+            # Forward a documented Meta API effort for the provider to validate;
+            # constrain it locally only when an explicit supported set exists.
+            if normalized is None or (supported and normalized not in supported):
+                raise ProviderError(f"Muse model does not support reasoning effort {requested!r}.")
+            _write_output_effort(body, normalized)
+            if normalized != requested:
+                compatibility["reasoning_effort"] = f"{requested}_normalized_to_{normalized}"
+        choice = body.get("tool_choice")
+        if choice is not None:
+            if not isinstance(choice, dict):
+                raise ProviderError("tool_choice must be an object.")
+            if choice.get("type") not in (None, "auto"):
+                raise ProviderError("Muse supports only automatic tool choice.")
+        return compatibility
 
     if provider_id == "kimi":
         supported = set(model_spec.get("effort_modes") or [])

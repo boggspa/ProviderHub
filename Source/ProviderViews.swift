@@ -74,13 +74,13 @@ struct ProviderPage: View {
                         Text("Uses the models already available in your Ollama daemon. Local and cloud-tagged models keep their actual Ollama IDs.").font(.caption).foregroundStyle(.secondary)
                     } else {
                         Picker("Credential source", selection: connectionField(\.credential_mode)) {
-                            if provider.id == "mistral" { Text("Vibe sign-in").tag("vibe") }
+                            if provider.id == "mistral" { Text("Vibe saved API key").tag("vibe") }
                             Text("macOS Keychain").tag("keychain")
                             Text("Environment").tag("environment")
                         }.pickerStyle(.segmented)
                         if connection.credential_mode == "keychain" {
                             HStack {
-                                SecureField("Provider API key", text: $model.secretDraft).textFieldStyle(.roundedBorder)
+                                SecureField(provider.id == "muse" ? "Meta Model API key" : "Provider API key", text: $model.secretDraft).textFieldStyle(.roundedBorder)
                                 Button("Save key") { Task { await model.saveKey() } }.disabled(model.busy || model.secretDraft.isEmpty)
                             }
                             Text("Stored in this preview’s macOS Keychain entry. Keys stay out of settings and logs.").font(.caption).foregroundStyle(.secondary)
@@ -93,6 +93,14 @@ struct ProviderPage: View {
                         } else {
                             Text("Reads " + (provider.credential_env ?? "the provider key") + " from the app’s launch environment. Finder launches may not inherit shell variables.").font(.caption).foregroundStyle(.secondary)
                         }
+                    }
+                    if provider.id == "mistral" {
+                        Text("Billing follows the Mistral workspace and usage policy attached to this key. The bridge does not select or verify a subscription tier.")
+                            .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    }
+                    if provider.id == "muse" {
+                        Text("Use a key created for the Meta Model API. Usage follows Meta’s API billing; this connection does not use your Muse Code subscription login.")
+                            .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                     }
                     HStack {
                         Text(state?.credential_source ?? "Checking setup…").font(.system(size: 11)).foregroundStyle(.secondary)
@@ -187,12 +195,13 @@ struct ProviderPage: View {
     }
     func accountDescription(_ id: String) -> String {
         switch id {
-        case "mistral": return "Vibe credentials or a Mistral API key"
+        case "mistral": return "Vibe’s configured API key or another Mistral key"
         case "kimi": return "Kimi Code subscription API key"
         case "mimo": return "MiMo Token Plan key for your account region"
         case "ollama": return "Your existing Ollama installation"
         case "deepseek": return "DeepSeek API key"
         case "cerebras": return "Cerebras API key"
+        case "muse": return "Meta Model API key · API billing"
         default: return "Provider model API"
         }
     }
