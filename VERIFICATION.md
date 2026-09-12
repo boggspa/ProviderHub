@@ -122,3 +122,20 @@ No private plan lookup, credential change, or paid inference was performed for
 this clarification.
 
 The combined 0.3.2 suite passed **133/133 tests** with ResourceWarnings treated as errors. The native Swift build and ad-hoc signature verification passed.
+
+
+**User-run live Muse qualification — 12 September, 20:22–20:23 BST**
+
+The user configured the dedicated Provider Hub key and ran a Claude Desktop
+repository-inspection conversation on `muse-spark-1.3`. Private gateway activity
+confirms four HTTP 200 completions between 20:22:55 and 20:23:11 BST, with native
+tool results carried across the turns. Provider-reported totals were 156,290
+input tokens, 1,421 output tokens, and 0 cache-read input tokens. These are summed
+request totals, including context resent during the tool loop.
+
+This confirms live authentication, inference, and multi-turn tool operation for
+Spark 1.3 in this account. It does not identify the charged usage pool. The
+user's Meta screenshots immediately afterward showed unchanged subscription
+percentages and zero PAYG request/token/spend counters. Billing attribution
+remains **unconfirmed** pending provider-side usage records. No additional
+inference was run while collecting this diagnostic receipt.
