@@ -1,7 +1,7 @@
 import AppKit
 import SwiftUI
 
-let hubVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.3.3"
+let hubVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.4.0"
 let hubName = Bundle.main.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String ?? "Provider Hub Preview"
 let hubProfileID = Bundle.main.object(forInfoDictionaryKey: "BridgeProfileID") as? String ?? "14c58c94-d7e8-4a15-96b8-81668956e474"
 let hubKeychainService = Bundle.main.object(forInfoDictionaryKey: "BridgeKeychainService") as? String ?? "com.mistralbridge.providerhub"
@@ -70,6 +70,7 @@ struct RouteSettings: Codable, Equatable {
     var branding_overrides: [String: BrandOverride] = [:]
     var auto_stop = true
     var auto_mode = false
+    var codex_model: String?
 }
 struct ModelEntry: Decodable, Identifiable {
     var id: String

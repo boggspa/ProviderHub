@@ -8,13 +8,23 @@ mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources/worker" "$BUILD_
 xcrun swiftc -swift-version 5 -parse-as-library -O -target arm64-apple-macosx14.0 \
   -module-cache-path "$BUILD_DIR/ModuleCache" \
   -framework AppKit -framework SwiftUI -framework Security \
-  "$SOURCE_DIR/HubModels.swift" "$SOURCE_DIR/ProviderViews.swift" "$SOURCE_DIR/MistralBridge.swift" \
+  "$SOURCE_DIR/HubModels.swift" "$SOURCE_DIR/ProviderViews.swift" "$SOURCE_DIR/CodexHarness.swift" "$SOURCE_DIR/MistralBridge.swift" \
   -o "$APP_DIR/Contents/MacOS/MistralBridge"
-for module in bridge_core protocol gateway model_names catalogue hub_config providers branding cerebras_replay catalogue_lifecycle; do
+for module in bridge_core protocol gateway model_names catalogue hub_config providers branding cerebras_replay catalogue_lifecycle responses_native responses_tools responses_bridge codex_catalogue codex_profile codex_token codex_runtime; do
   cp "$SOURCE_DIR/$module.py" "$APP_DIR/Contents/Resources/worker/"
 done
 cp "$SOURCE_DIR/provider_branding.json" "$APP_DIR/Contents/Resources/worker/"
 cp -R "$SOURCE_DIR/provider-logos" "$APP_DIR/Contents/Resources/worker/"
+cp -R "$SOURCE_DIR/vendor" "$APP_DIR/Contents/Resources/worker/"
+if [ -n "${PROVIDER_HUB_PYTHON_RUNTIME:-}" ]; then
+  if [ ! -x "$PROVIDER_HUB_PYTHON_RUNTIME/bin/python3" ]; then
+    printf 'The supplied Python runtime is missing bin/python3.\n' >&2
+    exit 1
+  fi
+  # This is generated app content; no user state is stored in the bundle.
+  rm -rf "$APP_DIR/Contents/Resources/python"
+  ditto "$PROVIDER_HUB_PYTHON_RUNTIME" "$APP_DIR/Contents/Resources/python"
+fi
 cat > "$APP_DIR/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -24,8 +34,8 @@ cat > "$APP_DIR/Contents/Info.plist" <<'PLIST'
   <key>CFBundleIdentifier</key><string>com.mistralbridge.providerhub</string>
   <key>CFBundleExecutable</key><string>MistralBridge</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>0.3.3</string>
-  <key>CFBundleVersion</key><string>7</string>
+  <key>CFBundleShortVersionString</key><string>0.4.0</string>
+  <key>CFBundleVersion</key><string>9</string>
   <key>BridgeStateName</key><string>Provider Hub Preview</string>
   <key>BridgeProfileID</key><string>14c58c94-d7e8-4a15-96b8-81668956e474</string>
   <key>BridgeDefaultPort</key><integer>11438</integer>

@@ -17,10 +17,10 @@ struct ActivityEntry: Identifiable {
 }
 
 enum Page: String, CaseIterable, Identifiable {
-    case connection = "Providers", models = "Models", claude = "Claude", activity = "Activity"
+    case connection = "Providers", models = "Models", claude = "Claude", codex = "Codex / ChatGPT", activity = "Activity"
     var id: String { rawValue }
     var icon: String {
-        switch self { case .connection: return "point.3.connected.trianglepath.dotted"; case .models: return "square.stack.3d.up"; case .claude: return "macwindow"; case .activity: return "waveform.path" }
+        switch self { case .connection: return "point.3.connected.trianglepath.dotted"; case .models: return "square.stack.3d.up"; case .claude: return "macwindow"; case .codex: return "terminal"; case .activity: return "waveform.path" }
     }
 }
 
@@ -36,7 +36,7 @@ final class BridgeModel: ObservableObject {
     @Published var savedSettings = RouteSettings()
     @Published var busy = false
     @Published var gatewayState = "Stopped"
-    @Published var credentialSource = "Checking Vibe…"
+    @Published var credentialSource = "Checking provider setup…"
     @Published var credentialFound = false
     @Published var vibeAlias = ""
     @Published var vibeModel = "mistral-vibe-cli-latest"
@@ -52,6 +52,13 @@ final class BridgeModel: ObservableObject {
     @Published var claudeRunning = false
     @Published var profileActive = false
     @Published var recoveryNeeded = false
+    @Published var codexModels: [CodexModelOption] = []
+    @Published var codexAppPath: String?
+    @Published var codexRunning = false
+    @Published var codexProfileActive = false
+    @Published var codexRecoveryNeeded = false
+    var observedOwnedCodex = false
+    var codexLaunchTime = Date.distantPast
     @Published var activeRequests = 0
     @Published var completed = 0
     @Published var failures = 0
@@ -128,6 +135,7 @@ final class BridgeModel: ObservableObject {
     }
 
     func readCatalogue(_ object: [String: Any], modelsKey: String) {
+        readCodexState(object)
         func decode<T: Decodable>(_ type: T.Type, _ raw: Any?) -> T? {
             guard let raw, let data = try? JSONSerialization.data(withJSONObject: raw) else { return nil }
             return try? JSONDecoder().decode(type, from: data)
@@ -155,6 +163,9 @@ final class BridgeModel: ObservableObject {
         }
         env["PYTHONDONTWRITEBYTECODE"] = "1"
         env["PYTHONUNBUFFERED"] = "1"
+        env["PYTHONNOUSERSITE"] = "1"
+        env.removeValue(forKey: "PYTHONHOME")
+        env.removeValue(forKey: "PYTHONPATH")
         return env
     }
 
@@ -164,6 +175,8 @@ final class BridgeModel: ObservableObject {
     }
 
     static func findPython() -> String? {
+        if let bundled = Bundle.main.resourceURL?.appendingPathComponent("python/bin/python3").path,
+           FileManager.default.isExecutableFile(atPath: bundled) { return bundled }
         if let vibe = findVibe(), let first = try? String(contentsOfFile: vibe, encoding: .utf8).components(separatedBy: .newlines).first,
            first.hasPrefix("#!/"), !first.contains("/usr/bin/env") {
             let candidate = String(first.dropFirst(2)).trimmingCharacters(in: .whitespaces)
@@ -187,7 +200,7 @@ final class BridgeModel: ObservableObject {
                     try process.run()
                     if let input { try stdin.fileHandleForWriting.write(contentsOf: input) }
                     try stdin.fileHandleForWriting.close()
-                    let timeout: Double = ["refresh-all", "prepare-launch", "discover", "activate"].contains(command) ? 120 : 45
+                    let timeout: Double = ["refresh-all", "prepare-launch", "discover", "activate", "codex-prepare", "codex-activate"].contains(command) ? 120 : 45
                     DispatchQueue.global().asyncAfter(deadline: .now() + timeout) {
                         if process.isRunning { process.terminate() }
                     }
@@ -205,7 +218,7 @@ final class BridgeModel: ObservableObject {
     }
 
     func command(_ name: String, provider: String? = nil, input: Data? = nil) async throws -> [String: Any] {
-        guard let python else { throw WorkerError(message: "Install Mistral Vibe or Python 3.11 or newer, then click Reconnect.") }
+        guard let python else { throw WorkerError(message: "Provider Hub needs Python 3.11 or newer. Install a supported Python runtime, then click Reconnect.") }
         let data = try await Self.execute(python: python, helper: helper.path, environment: workerEnvironment, command: name, provider: provider, input: input)
         return (try JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
     }
@@ -237,6 +250,13 @@ final class BridgeModel: ObservableObject {
                 vibeConfigured = vibe["configured_models"] as? [String] ?? []
             }
             readCatalogue(info, modelsKey: "catalog")
+            if recover && codexRecoveryNeeded && !codexRunning {
+                _ = try await command("codex-restore")
+                codexRecoveryNeeded = false; codexProfileActive = false
+            } else if recover && codexRecoveryNeeded && codexProfileActive && codexRunning {
+                try await startGateway()
+                observedOwnedCodex = true
+            }
             if recover && recoveryNeeded && !claudeRunning {
                 _ = try await command("restore")
                 recoveryNeeded = false; profileActive = false
@@ -244,7 +264,7 @@ final class BridgeModel: ObservableObject {
             } else if recover && recoveryNeeded && profileActive && claudeRunning {
                 try await startGateway()
                 hasObservedOwnedClaude = true
-                tell("Reconnected the gateway for the existing hub’s Claude session.")
+                tell("Reconnected the gateway for Claude’s existing Provider Hub session.")
             } else if !recover { tell("Provider settings reloaded. Updating model catalogues…") }
             beginCatalogueRefresh()
         } catch { tell(error.localizedDescription, error: true) }
@@ -302,7 +322,7 @@ final class BridgeModel: ObservableObject {
             let result = try await command("discover", provider: providerID)
             readCatalogue(result, modelsKey: "models")
             providerRefreshIssues.removeValue(forKey: providerID)
-            tell("Models refreshed. Your next Claude launch will load this catalogue automatically.")
+            tell("Models refreshed. The latest catalogue is ready for your next desktop launch.")
         } catch {
             providerRefreshIssues[providerID] = error.localizedDescription
             tell(error.localizedDescription, error: true)
@@ -312,9 +332,10 @@ final class BridgeModel: ObservableObject {
     func save() async throws {
         await waitForCatalogueRefresh()
         updateClaudeRunning()
+        updateCodexRunning()
         if running { try await checkIdleGateway() }
-        if activeRequests > 0 || (claudeRunning && profileActive) {
-            throw WorkerError(message: "Quit the hub’s Claude session before changing its active configuration.")
+        if activeRequests > 0 || anyOwnedHarnessRunning {
+            throw WorkerError(message: "Quit the desktop sessions using this gateway before changing its active configuration.")
         }
         if gatewayProcess?.isRunning == true { await stopGateway() }
         let candidate = settings
@@ -338,14 +359,14 @@ final class BridgeModel: ObservableObject {
     func saveFromUI() async {
         guard !busy else { return }
         busy = true; defer { busy = false }
-        do { try await save(); tell("Settings saved. Your next Claude launch will use these mappings.") }
+        do { try await save(); tell("Settings saved. They will be used for your next desktop session.") }
         catch { tell(error.localizedDescription, error: true) }
     }
 
     func startGateway() async throws {
         if running { return }
         guard gatewayProcess == nil else { throw WorkerError(message: "The gateway is still starting or stopping.") }
-        guard let python else { throw WorkerError(message: "Python 3.11 or newer was not found. Install Vibe or a supported Python runtime.") }
+        guard let python else { throw WorkerError(message: "Provider Hub needs Python 3.11 or newer. Install a supported Python runtime, then reconnect.") }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: python)
         process.arguments = [helper.path, "serve", "--parent-pipe"]
@@ -415,10 +436,10 @@ final class BridgeModel: ObservableObject {
         busy = true; defer { busy = false }
         do {
             if running {
-                if (claudeRunning && profileActive) || activeRequests > 0 { throw WorkerError(message: "Close the hub’s Claude session before stopping its gateway.") }
+                if anyOwnedHarnessRunning || activeRequests > 0 { throw WorkerError(message: "Close the desktop sessions using this gateway before stopping it.") }
                 await stopGateway()
                 tell("Gateway stopped. Your model mappings are saved for the next launch.")
-            } else { try await save(); try await startGateway(); tell("Gateway ready. You can test a model or launch Claude.") }
+            } else { try await save(); try await startGateway(); tell("Gateway ready. You can test a model or launch a desktop session.") }
         } catch { tell(error.localizedDescription, error: true) }
     }
 
@@ -439,7 +460,8 @@ final class BridgeModel: ObservableObject {
             await waitForCatalogueRefresh()
             if changed { try await save() }
             updateClaudeRunning()
-            if running && !(claudeRunning && profileActive) {
+            updateCodexRunning()
+            if running && !anyOwnedHarnessRunning {
                 try await checkIdleGateway()
                 await stopGateway()
             }
@@ -480,7 +502,9 @@ final class BridgeModel: ObservableObject {
         do {
             if recoveryNeeded { _ = try await command("restore"); recoveryNeeded = false }
             tell("Preparing the selected models for Claude…")
-            try await save()
+            updateCodexRunning()
+            if changed || !anyOwnedHarnessRunning { try await save() }
+            else { await waitForCatalogueRefresh() }
             let prepared = try await command("prepare-launch")
             readCatalogue(prepared, modelsKey: "models")
             applyCatalogueDiagnostics(prepared)
@@ -517,7 +541,7 @@ final class BridgeModel: ObservableObject {
         do {
             let result = try await command("restore")
             recoveryNeeded = false; profileActive = false; hasObservedOwnedClaude = false
-            await stopGateway()
+            if !anyOwnedHarnessRunning { await stopGateway() }
             let kept = result["preserved_external_changes"] as? Int ?? 0
             tell(kept > 0 ? "Disconnected. Changes made by another app were preserved." : "Restored Claude’s previous configuration. Your conversations remain saved.")
         } catch { tell(error.localizedDescription, error: true) }
@@ -530,6 +554,7 @@ final class BridgeModel: ObservableObject {
     func poll() async {
         guard !shuttingDown else { return }
         updateClaudeRunning()
+        updateCodexRunning()
         let metaPath = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library/Application Support/Claude-3p/configLibrary/_meta.json")
         if let data = try? Data(contentsOf: metaPath), let meta = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
             profileActive = meta["appliedId"] as? String == hubProfileID
@@ -541,11 +566,12 @@ final class BridgeModel: ObservableObject {
             do {
                 _ = try await command("restore")
                 recoveryNeeded = false; profileActive = false; hasObservedOwnedClaude = false
-                if savedSettings.auto_stop { await stopGateway() }
+                if savedSettings.auto_stop && !anyOwnedHarnessRunning && activeRequests == 0 { await stopGateway() }
                 tell("Claude closed. Its previous configuration has been restored.")
             } catch { tell(error.localizedDescription, error: true) }
             finishingSession = false
         }
+        await pollCodexRecovery()
         if running && !checkingStatus { await refreshStatus() }
         loadActivity()
     }
@@ -584,7 +610,7 @@ final class BridgeModel: ObservableObject {
         do {
             updateClaudeRunning()
             if running { try await checkIdleGateway() }
-            guard activeRequests == 0 && !(claudeRunning && profileActive) else { throw WorkerError(message: "Quit this hub’s Claude session before changing its key.") }
+            guard activeRequests == 0 && !anyOwnedHarnessRunning else { throw WorkerError(message: "Quit the desktop sessions using this gateway before changing its key.") }
             var proposed = settings
             proposed.providers[providerID]?.credential_mode = "keychain"
             proposed.providers[providerID]?.credential_revision += 1
@@ -665,7 +691,7 @@ struct BridgeWindow: View {
                 VStack(spacing: 5) {
                     ForEach(Page.allCases) { page in
                         Button { model.page = page } label: {
-                            HStack(spacing: 11) { Image(systemName: page.icon).frame(width: 18); Text(page.rawValue).lineLimit(1); Spacer() }
+                            HStack(spacing: 11) { Image(systemName: page.icon).frame(width: 18); Text(page == .codex ? "Codex" : page.rawValue).lineLimit(1); Spacer() }
                                 .font(.system(size: 13, weight: model.page == page ? .semibold : .regular))
                                 .padding(.horizontal, 12).padding(.vertical, 10)
                                 .background(model.page == page ? Color.white.opacity(0.09) : .clear, in: RoundedRectangle(cornerRadius: 8))
@@ -687,6 +713,7 @@ struct BridgeWindow: View {
                         case .connection: ProviderPage(model: model)
                         case .models: modelsPage
                         case .claude: claudePage
+                        case .codex: CodexPage(model: model)
                         case .activity: activityPage
                         }
                     }.padding(30).disabled(model.busy)
@@ -716,9 +743,10 @@ struct BridgeWindow: View {
 
     var subtitle: String {
         switch model.page {
-        case .connection: return "Your model accounts, together in Claude Desktop."
+        case .connection: return "Connect model providers for your desktop apps."
         case .models: return "Choose the provider and model behind each Claude option."
         case .claude: return "Launch Claude with your provider configuration."
+        case .codex: return "Choose a provider model for Codex / ChatGPT Desktop."
         case .activity: return "Requests through your local gateway."
         }
     }
@@ -809,7 +837,7 @@ struct BridgeWindow: View {
                 }
             }
             Panel {
-                Toggle(isOn: $model.settings.auto_stop) { VStack(alignment: .leading, spacing: 5) { Text("Stop gateway when Claude quits").font(.system(size: 13, weight: .medium)); Text("The menu bar app stays available for your next session.").font(.caption).foregroundStyle(.secondary) } }.toggleStyle(.switch)
+                Toggle(isOn: $model.settings.auto_stop) { VStack(alignment: .leading, spacing: 5) { Text("Stop gateway after the desktop sessions close").font(.system(size: 13, weight: .medium)); Text("The menu bar app stays available for your next session.").font(.caption).foregroundStyle(.secondary) } }.toggleStyle(.switch)
                 Divider()
                 Toggle(isOn: $model.settings.auto_mode) { VStack(alignment: .leading, spacing: 5) { Text("Enable Claude Auto mode").font(.system(size: 13, weight: .medium)); Text("Use Claude’s approval classifier through the configured gateway. Claude chooses its reviewer model internally.").font(.caption).foregroundStyle(.secondary) } }.toggleStyle(.switch)
                 Text("Claude adds a standard and a 1M choice for models that support long context. New selections prefer 1M; existing session choices are preserved.").font(.caption).foregroundStyle(.secondary).lineSpacing(3)
@@ -829,7 +857,7 @@ struct BridgeWindow: View {
             Panel {
                 HStack { Text("Recent requests").font(.headline); Spacer(); Text("Content stays out of logs").font(.caption).foregroundStyle(.secondary) }
                 if model.activity.isEmpty {
-                    VStack(spacing: 12) { Image(systemName: "waveform.path").font(.system(size: 35, weight: .light)).foregroundStyle(.tertiary); Text("Ready for your first request").font(.system(size: 14, weight: .medium)); Text("Test a model or launch Claude to see activity here.").font(.caption).foregroundStyle(.secondary) }.frame(maxWidth: .infinity).padding(.vertical, 44)
+                    VStack(spacing: 12) { Image(systemName: "waveform.path").font(.system(size: 35, weight: .light)).foregroundStyle(.tertiary); Text("Ready for your first request").font(.system(size: 14, weight: .medium)); Text("Test a model or launch a desktop session to see activity here.").font(.caption).foregroundStyle(.secondary) }.frame(maxWidth: .infinity).padding(.vertical, 44)
                 } else {
                     ForEach(model.activity) { entry in
                         HStack(spacing: 10) {
@@ -890,6 +918,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
 
     @objc func showWindow() { window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true) }
     @objc func launchClaude() { Task { await model.launchClaude(); if model.noticeIsError { showWindow() } } }
+    @objc func launchCodex() { Task { await model.launchCodex(); if model.noticeIsError { showWindow() } } }
     @objc func toggleGateway() { Task { await model.toggleGateway() } }
     @objc func openVibe() { model.openVibe() }
     @objc func quit() { NSApp.terminate(nil) }
@@ -900,6 +929,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         let title = NSMenuItem(title: "\(hubName) · \(model.gatewayState)", action: nil, keyEquivalent: ""); title.isEnabled = false; menu.addItem(title)
         menu.addItem(.separator())
         add(menu, "Launch Claude…", #selector(launchClaude), "l")
+        add(menu, "Launch Codex / ChatGPT…", #selector(launchCodex), "")
         add(menu, "Models & Settings…", #selector(showWindow), ",")
         add(menu, "Open Mistral Vibe", #selector(openVibe), "")
         menu.addItem(.separator())
@@ -918,11 +948,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         if readyToQuit { return .terminateNow }
         model.updateClaudeRunning()
-        if model.claudeRunning && model.profileActive {
+        model.updateCodexRunning()
+        if model.anyOwnedHarnessRunning {
             let alert = NSAlert()
-            alert.messageText = "Claude is using " + hubName
-            alert.informativeText = "Quit Claude first so your previous configuration can be restored and active work can finish."
-            alert.addButton(withTitle: "Keep Bridge Open")
+            alert.messageText = "A desktop session is using " + hubName
+            alert.informativeText = "Quit the desktop sessions using this gateway so their previous configuration can be restored and active work can finish."
+            alert.addButton(withTitle: "Keep Provider Hub Open")
             alert.runModal()
             return .terminateCancel
         }
@@ -931,6 +962,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         }
         model.shuttingDown = true
         Task {
+            if model.codexRecoveryNeeded && !model.codexRunning {
+                do { _ = try await model.command("codex-restore"); model.codexRecoveryNeeded = false }
+                catch { model.shuttingDown = false; model.tell(error.localizedDescription, error: true); showWindow(); NSApp.reply(toApplicationShouldTerminate: false); return }
+            }
             if model.recoveryNeeded && !model.claudeRunning {
                 do { _ = try await model.command("restore"); model.recoveryNeeded = false }
                 catch { model.shuttingDown = false; model.tell(error.localizedDescription, error: true); showWindow(); NSApp.reply(toApplicationShouldTerminate: false); return }

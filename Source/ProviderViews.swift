@@ -83,7 +83,7 @@ struct ProviderPage: View {
                                 SecureField(provider.id == "muse" ? "Meta Model API key" : "Provider API key", text: $model.secretDraft).textFieldStyle(.roundedBorder)
                                 Button("Save key") { Task { await model.saveKey() } }.disabled(model.busy || model.secretDraft.isEmpty)
                             }
-                            Text("Stored in this preview’s macOS Keychain entry. Keys stay out of settings and logs.").font(.caption).foregroundStyle(.secondary)
+                            Text("Stored in Provider Hub’s macOS Keychain entry. Keys stay out of settings and logs.").font(.caption).foregroundStyle(.secondary)
                         } else if connection.credential_mode == "vibe" {
                             HStack {
                                 Text(model.vibeAlias.isEmpty ? "Start Vibe and sign in, then reconnect." : "Vibe model: " + model.vibeAlias).font(.caption).foregroundStyle(.secondary)
@@ -95,7 +95,7 @@ struct ProviderPage: View {
                         }
                     }
                     if provider.id == "mistral" {
-                        Text("Billing follows the Mistral workspace and usage policy attached to this key. The bridge does not select or verify a subscription tier.")
+                        Text("Billing follows the Mistral workspace and usage policy attached to this key. Provider Hub does not select or verify a subscription tier.")
                             .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                     }
                     if provider.id == "muse" {
@@ -154,7 +154,7 @@ struct ProviderPage: View {
                 }
                 DisclosureGroup("Appearance", isExpanded: $expandedBranding) {
                     VStack(alignment: .leading, spacing: 12) {
-                        Text("Personalize names and accents using TaskWraith’s presentation schema. The account and model route stay visible in technical IDs.").font(.caption).foregroundStyle(.secondary)
+                        Text("Personalize provider names and accents. The account and model route stay visible in technical IDs.").font(.caption).foregroundStyle(.secondary)
                         HStack {
                             TextField("Provider name", text: brandingField(\.displayProvider, fallback: provider.presentation.displayProvider))
                             TextField("#RRGGBB", text: brandingField(\.accent, fallback: provider.presentation.accent)).frame(width: 95)
