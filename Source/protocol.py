@@ -91,15 +91,23 @@ def model_catalog(settings: dict):
         spec = settings.get("_model_specs", {}).get(identifier)
         if not spec:
             continue
-        key = (spec["canonical_id"], spec["context"])
+        key = (spec.get("provider_id", "mistral"), spec["id"])
         if key in seen:
             continue
         seen.add(key)
-        rows.append({"id": slot, "type": "model", "display_name": spec["display_name"],
-                     "description": f"{spec['context']:,} token context · {status_label(spec)}",
-                     "created_at": "2026-09-12T00:00:00Z", "max_tokens": spec["context"],
-                     "max_input_tokens": spec["context"], "supports_1m": spec["context"] >= 1000000,
-                     "anthropic_family_tier": family, "is_family_default": default})
+        context = spec.get("context")
+        context_text = f"{context:,} token context" if type(context) is int else "Provider-managed context"
+        provider = spec.get("presentation", {}).get("displayProvider")
+        title = spec["display_name"]
+        if provider and provider.casefold() not in title.casefold():
+            title += " · " + provider
+        row = {"id": slot, "type": "model", "display_name": title,
+               "description": f"{spec.get('provider_id', 'mistral')} account · {context_text} · {status_label(spec)}",
+               "created_at": "2026-09-12T00:00:00Z",
+               "anthropic_family_tier": family, "is_family_default": default}
+        if type(context) is int:
+            row.update(max_tokens=context, max_input_tokens=context, supports_1m=context >= 1000000)
+        rows.append(row)
     return {"data": rows, "first_id": rows[0]["id"] if rows else None,
             "last_id": rows[-1]["id"] if rows else None, "has_more": False}
 

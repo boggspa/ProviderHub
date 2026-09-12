@@ -17,11 +17,15 @@ import tempfile
 import tomllib
 import urllib.error
 import urllib.request
+import uuid
 
 from model_names import friendly_model_name, label_catalog
 from catalogue import build_catalogue, read_observations, route_specs
+from hub_config import (connection_signature, defaults as hub_defaults, normalize as normalize_hub_settings,
+                        project_catalogue, provider_presentations, qualify, split_route)
+from providers import PROVIDERS, discover
 
-PROFILE_ID = "8a93d471-d0f9-428c-b203-48fce46277bc"
+PROFILE_ID = str(uuid.UUID(os.environ.get("MISTRAL_BRIDGE_PROFILE_ID", "8a93d471-d0f9-428c-b203-48fce46277bc")))
 SLOTS = [
     ("claude-fable-5", "Fable 5", "fable", True),
     ("claude-opus-5", "Opus 5", "opus", True),
@@ -37,6 +41,14 @@ class BridgeError(Exception):
 
 def state_root() -> Path:
     return Path(os.environ.get("MISTRAL_BRIDGE_STATE_DIR", str(Path.home() / "Library/Application Support/Mistral Bridge")))
+
+
+def keychain_service() -> str:
+    return os.environ.get("MISTRAL_BRIDGE_KEYCHAIN_SERVICE", "com.mistralbridge.local")
+
+
+def app_display_name() -> str:
+    return os.environ.get("MISTRAL_BRIDGE_DISPLAY_NAME", "Mistral Bridge")
 
 
 def private_directory(path: Path) -> None:
@@ -135,12 +147,7 @@ def keychain_read(service: str, account: str) -> str | None:
     return result.stdout.decode().strip() if result.returncode == 0 else None
 
 
-def credentials(settings: dict) -> tuple[str, str]:
-    if settings.get("credential_mode", "vibe") == "separate":
-        key = keychain_read("com.mistralbridge.local", "MISTRAL_API_KEY")
-        if key:
-            return key, "Bridge Keychain"
-        raise BridgeError("Save a Mistral API key in Connection settings, or select Vibe credentials.")
+def vibe_credentials() -> tuple[str, str]:
     info = vibe_settings()
     name = info["key_name"]
     if os.environ.get(name):
@@ -167,37 +174,44 @@ def credentials(settings: dict) -> tuple[str, str]:
     raise BridgeError("No Vibe credential was found. Sign in through Vibe, then click Reconnect.")
 
 
+def credentials(settings: dict, provider_id="mistral") -> tuple[str, str]:
+    if provider_id not in PROVIDERS:
+        raise BridgeError("Unknown inference provider.")
+    provider = PROVIDERS[provider_id]
+    connection = settings["providers"][provider_id]
+    mode = connection["credential_mode"]
+    if provider_id == "ollama":
+        return "", "Local Ollama daemon"
+    if provider_id == "mistral" and mode == "vibe":
+        return vibe_credentials()
+    if mode == "environment":
+        name = provider.get("credential_env")
+        if name and os.environ.get(name):
+            return os.environ[name], name
+        raise BridgeError(f"{name or 'The provider credential'} is not set in this app's environment.")
+    key = keychain_read(keychain_service(), provider["credential_account"])
+    if key:
+        return key, "macOS Keychain"
+    raise BridgeError(f"Add the {provider['name']} API key in Providers to use this connection.")
+
+
 def default_settings() -> dict:
     try:
         model = vibe_settings()["active_model"]
     except BridgeError:
         model = "mistral-vibe-cli-latest"
-    return {"port": 11436, "credential_mode": "vibe",
-            "mappings": {slot[0]: model for slot in SLOTS}, "auto_stop": True, "auto_mode": False}
+    return hub_defaults(SLOTS, model, int(os.environ.get("MISTRAL_BRIDGE_DEFAULT_PORT", "11436")))
 
 
 def validate_settings(value: dict) -> dict:
-    result = default_settings()
-    for key in result:
-        if key in value:
-            result[key] = value[key]
-    if type(result["port"]) is not int or not 1024 <= result["port"] <= 65535:
-        raise BridgeError("Choose a port between 1024 and 65535.")
-    if result["credential_mode"] not in {"vibe", "separate"}:
-        raise BridgeError("Choose Vibe credentials or a separate API key.")
-    mappings = result["mappings"]
-    if not isinstance(mappings, dict):
-        raise BridgeError("Invalid model mappings.")
-    import re
-    for slot, _, _, _ in SLOTS:
-        model = mappings.get(slot, "").strip()
-        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:/-]{0,199}", model):
-            raise BridgeError("Enter a valid Mistral API model ID for every slot.")
-        mappings[slot] = model
-    result["mappings"] = {s[0]: mappings[s[0]] for s in SLOTS}
-    result["auto_stop"] = bool(result["auto_stop"])
-    result["auto_mode"] = bool(result["auto_mode"])
-    return result
+    try:
+        model = vibe_settings()["active_model"]
+    except BridgeError:
+        model = "mistral-vibe-cli-latest"
+    try:
+        return normalize_hub_settings(value, SLOTS, model, int(os.environ.get("MISTRAL_BRIDGE_DEFAULT_PORT", "11436")))
+    except ValueError as exc:
+        raise BridgeError(str(exc)) from exc
 
 
 def load_settings(root: Path | None = None) -> dict:
@@ -205,19 +219,31 @@ def load_settings(root: Path | None = None) -> dict:
     return validate_settings(read_json(root / "settings.json", default_settings()))
 
 
-def gateway_token(root: Path) -> str:
+def private_token(root: Path, name: str) -> str:
+    if name not in {"gateway-token", "reasoning-signing-key"}:
+        raise BridgeError("Unknown private token purpose.")
     private_directory(root)
-    path = root / "gateway-token"
+    path = root / name
     if path.is_symlink():
-        raise BridgeError("Gateway token path must not be a symbolic link.")
+        raise BridgeError("Private token path must not be a symbolic link.")
     try:
-        return path.read_text().strip()
+        value = path.read_text().strip()
+        if len(value) < 32:
+            raise BridgeError("A private gateway token is invalid; restore it before continuing.")
+        return value
     except FileNotFoundError:
         token = secrets.token_urlsafe(36)
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            return private_token(root, name)
         with os.fdopen(fd, "w") as stream:
             stream.write(token)
         return token
+
+
+def gateway_token(root: Path) -> str:
+    return private_token(root, "gateway-token")
 
 
 def ssl_context():
@@ -242,18 +268,42 @@ def catalog(key: str) -> dict:
 
 def cached_catalogue(settings, root=None):
     root = root or state_root()
-    cached = read_json(root / "catalog.json")
-    if cached.get("schema_version") != 2:
-        return {"models": [], "needs_refresh": True}
-    if cached.get("raw"):
-        try:
-            vibe = vibe_settings()
-        except BridgeError:
-            vibe = {}
-        result = build_catalogue(cached["raw"], settings, vibe, read_observations(root))
-        result["fetched_at"] = cached.get("fetched_at")
-        return result
-    return cached
+    observations = read_observations(root)
+    # Old events were bare Mistral IDs. Keep them historical, without assigning
+    # them to a different provider that happens to use the same model string.
+    observations = {qualify(*split_route(identifier)): value for identifier, value in observations.items()}
+    models, summaries = [], {}
+    for provider_id in PROVIDERS:
+        path = root / "catalogues" / (provider_id + ".json")
+        inventory = read_json(path)
+        imported_legacy = False
+        if not inventory and provider_id == "mistral" and settings["providers"][provider_id]["credential_mode"] == "vibe" and settings["providers"][provider_id].get("credential_revision", 0) == 0:
+            legacy = read_json(root / "catalog.json")
+            if legacy.get("schema_version") == 2:
+                if legacy.get("raw"):
+                    try:
+                        vibe = vibe_settings()
+                    except BridgeError:
+                        vibe = {}
+                    bare_settings = {"mappings": {slot: split_route(route)[1] for slot, route in settings["mappings"].items() if split_route(route)[0] == "mistral"}}
+                    inventory = build_catalogue(legacy["raw"], bare_settings, vibe)
+                else:
+                    inventory = legacy
+                inventory["source"] = "imported-provider-metadata"
+                imported_legacy = True
+        expected = connection_signature(provider_id, settings["providers"][provider_id])
+        if inventory and not imported_legacy and inventory.get("connection_signature") != expected:
+            summaries[provider_id] = {"needs_refresh": True, "warnings": ["Connection changed; refresh this provider's catalogue."]}
+            continue
+        if not inventory:
+            summaries[provider_id] = {"needs_refresh": True}
+            continue
+        projected = project_catalogue(provider_id, inventory, settings, observations)
+        models.extend(projected)
+        summaries[provider_id] = {"model_count": len(projected), "source": inventory.get("source", "provider"),
+                                  "fetched_at": inventory.get("fetched_at"), "warnings": inventory.get("warnings", [])}
+    return {"schema_version": 3, "models": models, "providers": summaries,
+            "model_count": len(models), "needs_refresh": not bool(models)}
 
 
 def attach_model_specs(settings, root=None):
@@ -299,7 +349,7 @@ class ClaudeProfile:
             "inferenceProvider": "gateway", "inferenceCredentialKind": "static",
             "inferenceGatewayBaseUrl": f"http://127.0.0.1:{settings['port']}",
             "inferenceGatewayApiKey": token, "inferenceGatewayAuthScheme": "bearer",
-            "deploymentDisplayName": "Mistral Bridge", "chatTabEnabled": True,
+            "deploymentDisplayName": app_display_name(), "chatTabEnabled": True,
             "modelDiscoveryEnabled": True, "disableDeploymentModeChooser": True,
             "disableEssentialTelemetry": True, "disableNonessentialTelemetry": True,
             "autoModeEnabled": settings.get("auto_mode", False),
@@ -317,7 +367,7 @@ class ClaudeProfile:
         profile = self.prepare(settings, token)
         meta = read_json(self.meta)
         entries = [e for e in meta.get("entries", []) if not isinstance(e, dict) or e.get("id") != PROFILE_ID]
-        entries.append({"id": PROFILE_ID, "name": "Mistral Bridge"})
+        entries.append({"id": PROFILE_ID, "name": app_display_name()})
         targets = [(self.profile, profile), (self.meta, {"appliedId": PROFILE_ID, "entries": entries, "hybridPointer": None}),
                    (self.third_party, {"deploymentMode": "3p"}), (self.normal, {"deploymentMode": "3p"})]
         operations = []
@@ -393,13 +443,56 @@ def inspect_state(root: Path) -> dict:
         result["vibe"] = vibe_settings()
     except BridgeError as exc:
         result["vibe_error"] = str(exc)
-    try:
-        _, source = credentials(settings)
-        result.update(credential_found=True, credential_source=source)
-    except (BridgeError, subprocess.TimeoutExpired) as exc:
-        result.update(credential_found=False, credential_source="Not connected", credential_error=str(exc))
+    states = {}
+    for provider_id in PROVIDERS:
+        try:
+            _, source = credentials(settings, provider_id)
+            states[provider_id] = {"credential_found": True, "credential_source": source}
+        except (BridgeError, subprocess.TimeoutExpired) as exc:
+            states[provider_id] = {"credential_found": False, "credential_source": "Setup needed", "credential_error": str(exc)}
+    result.update(states["mistral"])
+    result["provider_states"] = states
+    result["provider_definitions"] = provider_presentations(settings)
+    result["profile_id"] = PROFILE_ID
     cached = cached_catalogue(settings, root)
     result["catalog"] = cached.get("models", [])
     result["catalog_summary"] = {k: v for k, v in cached.items() if k not in {"models", "raw"}}
     result["friendly_names"] = model_labels(settings, result["catalog"], result.get("vibe", {}))
     return result
+
+
+def discover_provider(settings, provider_id, root=None):
+    root = root or state_root()
+    if provider_id not in PROVIDERS:
+        raise BridgeError("Unknown inference provider.")
+    try:
+        key, source = credentials(settings, provider_id)
+    except BridgeError:
+        if PROVIDERS[provider_id].get("capabilities", {}).get("model_discovery") != "documentation":
+            raise
+        key, source = "", "Public provider documentation; credential not configured"
+    try:
+        inventory = discover(provider_id, settings["providers"][provider_id], key)
+    except ValueError as exc:
+        raise BridgeError(str(exc).replace(key, "[redacted]") if key else str(exc)) from exc
+    inventory["connection_signature"] = connection_signature(provider_id, settings["providers"][provider_id])
+    inventory["fetched_at"] = time_now_iso()
+    atomic_json(root / "catalogues" / (provider_id + ".json"), inventory)
+    return source
+
+
+def bootstrap_metadata(root: Path):
+    """Seed a preview with non-secret Mistral catalogue data only."""
+    source = os.environ.get("MISTRAL_BRIDGE_SEED_CATALOG")
+    target = root / "catalog.json"
+    if not source or target.exists():
+        return
+    seed = read_json(Path(source))
+    if seed.get("schema_version") == 2 and isinstance(seed.get("raw"), dict):
+        private_directory(root)
+        atomic_json(target, seed)
+
+
+def time_now_iso():
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).isoformat()

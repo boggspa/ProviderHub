@@ -3,31 +3,10 @@ import SwiftUI
 import Security
 
 private let bridgeOrange = Color(red: 1.0, green: 0.43, blue: 0.18)
-private let slots: [(id: String, label: String)] = [
+let slots: [(id: String, label: String)] = [
     ("claude-fable-5", "Fable 5"), ("claude-opus-5", "Opus 5"),
     ("claude-sonnet-5", "Sonnet 5"), ("claude-haiku-4-5", "Haiku 4.5"), ("claude-sonnet-4-6", "Sonnet 4.6")
 ]
-
-struct RouteSettings: Codable, Equatable {
-    var port = 11436
-    var credential_mode = "vibe"
-    var mappings = Dictionary(uniqueKeysWithValues: slots.map { ($0.id, "mistral-vibe-cli-latest") })
-    var auto_stop = true
-    var auto_mode = false
-}
-
-struct ModelEntry: Decodable, Identifiable {
-    var id: String
-    var canonical_id: String?
-    var display_name: String?
-    var context: Int?
-    var tools: Bool?
-    var vision: Bool?
-    var reasoning: Bool?
-    var aliases: [String]?
-    var inference_status: String?
-    var last_success: String?
-}
 
 struct ActivityEntry: Identifiable {
     let id = UUID()
@@ -38,7 +17,7 @@ struct ActivityEntry: Identifiable {
 }
 
 enum Page: String, CaseIterable, Identifiable {
-    case connection = "Connection", models = "Models", claude = "Claude", activity = "Activity"
+    case connection = "Providers", models = "Models", claude = "Claude", activity = "Activity"
     var id: String { rawValue }
     var icon: String {
         switch self { case .connection: return "point.3.connected.trianglepath.dotted"; case .models: return "square.stack.3d.up"; case .claude: return "macwindow"; case .activity: return "waveform.path" }
@@ -78,6 +57,10 @@ final class BridgeModel: ObservableObject {
     @Published var notice = ""
     @Published var noticeIsError = false
     @Published var secretDraft = ""
+    @Published var selectedProvider = "mistral"
+    @Published var providerDefinitions: [ProviderDefinition] = []
+    @Published var providerStates: [String: ProviderState] = [:]
+    @Published var providerSummaries: [String: ProviderSummary] = [:]
     @Published var showRoutingIDs = false
     @Published var runtimeFound = true
     var gatewayProcess: Process?
@@ -94,7 +77,8 @@ final class BridgeModel: ObservableObject {
     var shuttingDown = false
 
     init() {
-        root = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library/Application Support/Mistral Bridge", isDirectory: true)
+        let stateName = Bundle.main.object(forInfoDictionaryKey: "BridgeStateName") as? String ?? hubName
+        root = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library/Application Support/" + stateName, isDirectory: true)
         helper = Bundle.main.resourceURL!.appendingPathComponent("worker/gateway.py")
         python = Self.findPython()
         runtimeFound = python != nil
@@ -109,37 +93,65 @@ final class BridgeModel: ObservableObject {
     var routeOptions: [String] {
         let known = Set(availableModels.flatMap { ($0.aliases ?? []) + [$0.id] })
         let extra = Set(settings.mappings.values.filter { !known.contains($0) })
-        return availableModels.map(\.id) + extra.sorted()
+        return Array(Set(availableModels.map(\.id))).sorted { modelLabel($0) < modelLabel($1) } + extra.sorted()
     }
     var endpoint: String { "http://127.0.0.1:\(savedSettings.port)" }
 
-    func modelLabel(_ identifier: String) -> String { friendlyNames[identifier] ?? identifier }
+    func modelLabel(_ identifier: String) -> String {
+        let entry = modelEntry(identifier)
+        let name = friendlyNames[identifier] ?? entry?.display_name ?? identifier
+        guard let provider = entry?.provider_id, let definition = providerDefinitions.first(where: { $0.id == provider }) else { return name }
+        let brand = entry?.presentation?.displayProvider ?? definition.presentation.displayProvider
+        let account = definition.presentation.displayProvider
+        return name + " · " + (brand == account ? account : brand + " via " + account)
+    }
 
     func modelEntry(_ identifier: String) -> ModelEntry? {
         availableModels.first { $0.id == identifier || ($0.aliases ?? []).contains(identifier) }
     }
 
     func modelFacts(_ identifier: String) -> String {
-        guard let entry = modelEntry(identifier), let context = entry.context else { return "Metadata missing · refresh models" }
+        guard let entry = modelEntry(identifier) else { return "Metadata missing · refresh this provider" }
         let state: String
         switch entry.inference_status {
         case "responded": state = "Previously responded"
         case "quota_limited": state = "Quota or rate limited"
         case "unavailable": state = "Rejected by provider"
-        default: state = "Advertised · not tested"
+        default: state = entry.discovery_source?.contains("documentation") == true ? "Documented · not tested" : "Advertised · not tested"
         }
-        return "\(context.formatted()) tokens · \(state)"
+        let context = entry.context.map { "\($0.formatted()) tokens" } ?? "Provider-managed context"
+        return "\(context) · \(state)"
     }
 
     func readCatalogue(_ object: [String: Any], modelsKey: String) {
-        if let raw = object[modelsKey], let data = try? JSONSerialization.data(withJSONObject: raw) {
-            availableModels = (try? JSONDecoder().decode([ModelEntry].self, from: data)) ?? []
+        func decode<T: Decodable>(_ type: T.Type, _ raw: Any?) -> T? {
+            guard let raw, let data = try? JSONSerialization.data(withJSONObject: raw) else { return nil }
+            return try? JSONDecoder().decode(type, from: data)
         }
+        if let models = decode([ModelEntry].self, object[modelsKey]) { availableModels = models }
+        if let definitions = decode([ProviderDefinition].self, object["provider_definitions"]) { providerDefinitions = definitions }
+        if let states = decode([String: ProviderState].self, object["provider_states"]) { providerStates = states }
         friendlyNames = object["friendly_names"] as? [String: String] ?? friendlyNames
         if let summary = object["catalog_summary"] as? [String: Any] {
-            if summary["needs_refresh"] as? Bool == true { catalogueSummary = "Refresh models to load provider limits and aliases." }
-            else { catalogueSummary = "\(availableModels.count) models · \(summary["aliases_grouped"] as? Int ?? 0) aliases grouped · \(summary["retired_ids"] as? Int ?? 0) marked retired" }
+            providerSummaries = decode([String: ProviderSummary].self, summary["providers"]) ?? [:]
         }
+        let count = Set(availableModels.compactMap(\.provider_id)).count
+        catalogueSummary = "\(availableModels.count) models across \(count) providers · aliases grouped by model and context"
+    }
+
+    var workerEnvironment: [String: String] {
+        var env = ProcessInfo.processInfo.environment
+        env["MISTRAL_BRIDGE_STATE_DIR"] = root.path
+        env["MISTRAL_BRIDGE_PROFILE_ID"] = hubProfileID
+        env["MISTRAL_BRIDGE_KEYCHAIN_SERVICE"] = hubKeychainService
+        env["MISTRAL_BRIDGE_DISPLAY_NAME"] = hubName
+        env["MISTRAL_BRIDGE_DEFAULT_PORT"] = String(hubDefaultPort)
+        if Bundle.main.object(forInfoDictionaryKey: "BridgeSeedMistralMetadata") as? Bool == true {
+            env["MISTRAL_BRIDGE_SEED_CATALOG"] = NSHomeDirectory() + "/Library/Application Support/Mistral Bridge/catalog.json"
+        }
+        env["PYTHONDONTWRITEBYTECODE"] = "1"
+        env["PYTHONUNBUFFERED"] = "1"
+        return env
     }
 
     static func findVibe() -> String? {
@@ -153,21 +165,18 @@ final class BridgeModel: ObservableObject {
             let candidate = String(first.dropFirst(2)).trimmingCharacters(in: .whitespaces)
             if candidate.contains("python"), FileManager.default.isExecutableFile(atPath: candidate) { return candidate }
         }
-        let candidates = [NSHomeDirectory() + "/.local/share/uv/tools/mistral-vibe/bin/python3", "/opt/homebrew/bin/python3.13", "/opt/homebrew/bin/python3.12"]
+        let candidates = [NSHomeDirectory() + "/.local/share/uv/tools/mistral-vibe/bin/python3", "/opt/homebrew/bin/python3.13", "/opt/homebrew/bin/python3.12", "/opt/homebrew/bin/python3.11", "/usr/local/bin/python3.13", "/usr/local/bin/python3.12", "/usr/local/bin/python3.11"]
         return candidates.first { FileManager.default.isExecutableFile(atPath: $0) }
     }
 
-    nonisolated static func execute(python: String, helper: String, root: String, command: String, input: Data?) async throws -> Data {
+    nonisolated static func execute(python: String, helper: String, environment: [String: String], command: String, provider: String?, input: Data?) async throws -> Data {
         try await withCheckedThrowingContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
                 let process = Process()
                 process.executableURL = URL(fileURLWithPath: python)
                 process.arguments = [helper, command]
-                var env = ProcessInfo.processInfo.environment
-                env["MISTRAL_BRIDGE_STATE_DIR"] = root
-                env["PYTHONDONTWRITEBYTECODE"] = "1"
-                env["PYTHONUNBUFFERED"] = "1"
-                process.environment = env
+                if let provider { process.arguments! += ["--provider", provider] }
+                process.environment = environment
                 let output = Pipe(), errors = Pipe(), stdin = Pipe()
                 process.standardOutput = output; process.standardError = errors; process.standardInput = stdin
                 do {
@@ -183,16 +192,16 @@ final class BridgeModel: ObservableObject {
                     if let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any], object["ok"] as? Bool == false {
                         throw WorkerError(message: object["error"] as? String ?? "The operation failed.")
                     }
-                    guard process.terminationStatus == 0 else { throw WorkerError(message: "The Vibe runtime could not complete this operation. Reconnect and try again.") }
+                    guard process.terminationStatus == 0 else { throw WorkerError(message: "The gateway helper could not complete this operation. Reconnect and try again.") }
                     continuation.resume(returning: data)
                 } catch { continuation.resume(throwing: error) }
             }
         }
     }
 
-    func command(_ name: String, input: Data? = nil) async throws -> [String: Any] {
-        guard let python else { throw WorkerError(message: "Install or update Mistral Vibe, then click Reconnect.") }
-        let data = try await Self.execute(python: python, helper: helper.path, root: root.path, command: name, input: input)
+    func command(_ name: String, provider: String? = nil, input: Data? = nil) async throws -> [String: Any] {
+        guard let python else { throw WorkerError(message: "Install Mistral Vibe or Python 3.11 or newer, then click Reconnect.") }
+        let data = try await Self.execute(python: python, helper: helper.path, environment: workerEnvironment, command: name, provider: provider, input: input)
         return (try JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
     }
 
@@ -229,10 +238,8 @@ final class BridgeModel: ObservableObject {
             } else if recover && recoveryNeeded && profileActive && claudeRunning {
                 try await startGateway()
                 hasObservedOwnedClaude = true
-                tell("Reconnected the gateway for the existing Mistral Claude session.")
-            } else if !credentialFound {
-                tell(info["credential_error"] as? String ?? "Sign in through Vibe, then reconnect.", error: true)
-            } else if !recover { tell("Connected to \(credentialSource). Vibe’s current model is \(vibeAlias).") }
+                tell("Reconnected the gateway for the existing hub’s Claude session.")
+            } else if !recover { tell("Provider settings reloaded. Refresh a catalogue to check available models.") }
         } catch { tell(error.localizedDescription, error: true) }
         loadActivity()
     }
@@ -241,21 +248,36 @@ final class BridgeModel: ObservableObject {
         guard !busy else { return }
         busy = true; defer { busy = false }
         do {
-            let result = try await command("discover")
+            if changed { try await save() }
+            let result = try await command("discover", provider: selectedProvider)
             readCatalogue(result, modelsKey: "models")
-            tell("\(catalogueSummary). Limits come from Mistral. Advertised models are not marked tested until a request succeeds.")
+            tell("Catalogue refreshed. This checks model metadata; use Test on a mapping to make an inference request.")
         } catch { tell(error.localizedDescription, error: true) }
     }
 
     func save() async throws {
-        if gatewayProcess?.isRunning == true && (activeRequests > 0 || (claudeRunning && profileActive)) {
-            throw WorkerError(message: "Quit the Mistral Claude session before changing its active configuration.")
+        updateClaudeRunning()
+        if running { try await checkIdleGateway() }
+        if activeRequests > 0 || (claudeRunning && profileActive) {
+            throw WorkerError(message: "Quit the hub’s Claude session before changing its active configuration.")
         }
         if gatewayProcess?.isRunning == true { await stopGateway() }
-        let data = try JSONEncoder().encode(settings)
+        let candidate = settings
+        let data = try JSONEncoder().encode(candidate)
         let result = try await command("save", input: data)
         readCatalogue(result, modelsKey: "models")
+        if let raw = result["settings"], let bytes = try? JSONSerialization.data(withJSONObject: raw), let normalized = try? JSONDecoder().decode(RouteSettings.self, from: bytes) { settings = normalized }
         savedSettings = settings
+    }
+
+    func checkIdleGateway() async throws {
+        let request = try authorizedRequest(path: "/_bridge/status")
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard (response as? HTTPURLResponse)?.statusCode == 200,
+              let status = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let count = status["active"] as? Int else { throw WorkerError(message: "Could not verify that the gateway is idle.") }
+        activeRequests = count
+        if count > 0 { throw WorkerError(message: "Wait for active model requests to finish before changing this connection.") }
     }
 
     func saveFromUI() async {
@@ -268,15 +290,11 @@ final class BridgeModel: ObservableObject {
     func startGateway() async throws {
         if running { return }
         guard gatewayProcess == nil else { throw WorkerError(message: "The gateway is still starting or stopping.") }
-        guard let python else { throw WorkerError(message: "Mistral Vibe’s Python runtime was not found.") }
+        guard let python else { throw WorkerError(message: "Python 3.11 or newer was not found. Install Vibe or a supported Python runtime.") }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: python)
         process.arguments = [helper.path, "serve", "--parent-pipe"]
-        var env = ProcessInfo.processInfo.environment
-        env["MISTRAL_BRIDGE_STATE_DIR"] = root.path
-        env["PYTHONDONTWRITEBYTECODE"] = "1"
-        env["PYTHONUNBUFFERED"] = "1"
-        process.environment = env
+        process.environment = workerEnvironment
         let stdout = Pipe(), stderr = Pipe(), stdin = Pipe()
         process.standardOutput = stdout; process.standardError = stderr; process.standardInput = stdin
         parentPipe = stdin; processBuffer = Data(); gatewayState = "Starting"
@@ -305,7 +323,7 @@ final class BridgeModel: ObservableObject {
         }
         if !running {
             if process.isRunning { process.terminate() }
-            throw WorkerError(message: noticeIsError ? notice : "The gateway could not start. Reconnect to Vibe and check the port.")
+            throw WorkerError(message: noticeIsError ? notice : "The gateway could not start. Check the runtime and gateway port.")
         }
     }
 
@@ -316,7 +334,7 @@ final class BridgeModel: ObservableObject {
             processBuffer.removeSubrange(0..<range.upperBound)
             guard let json = try? JSONSerialization.jsonObject(with: line) as? [String: Any] else { continue }
             if json["ready"] as? Bool == true {
-                gatewayState = "Ready"; credentialFound = true
+                gatewayState = "Ready"
                 credentialSource = json["credential_source"] as? String ?? credentialSource
             } else if let error = json["error"] as? String {
                 gatewayState = "Error"; tell(error, error: true)
@@ -342,7 +360,7 @@ final class BridgeModel: ObservableObject {
         busy = true; defer { busy = false }
         do {
             if running {
-                if (claudeRunning && profileActive) || activeRequests > 0 { throw WorkerError(message: "Close the Mistral Claude session before stopping its gateway.") }
+                if (claudeRunning && profileActive) || activeRequests > 0 { throw WorkerError(message: "Close the hub’s Claude session before stopping its gateway.") }
                 await stopGateway()
                 tell("Gateway stopped. Your model mappings are saved for the next launch.")
             } else { try await save(); try await startGateway(); tell("Gateway ready. You can test a model or launch Claude.") }
@@ -365,10 +383,14 @@ final class BridgeModel: ObservableObject {
         do {
             if changed { try await save() }
             try await startGateway()
-            let request = try authorizedRequest(path: "/v1/messages", method: "POST", body: [
-                "model": slot, "max_tokens": 96, "thinking": ["type": "disabled"],
-                "messages": [["role": "user", "content": "Reply with exactly: Mistral Bridge is connected."]]
-            ])
+            var body: [String: Any] = [
+                "model": slot, "max_tokens": 512,
+                "messages": [["role": "user", "content": "Reply with exactly: Provider Hub is connected."]]
+            ]
+            let entry = modelEntry(savedSettings.mappings[slot] ?? slot)
+            if entry?.reasoning == false || entry?.effort_modes?.contains("none") == true { body["thinking"] = ["type": "disabled"] }
+            else if entry?.effort_modes?.contains("low") == true { body["output_config"] = ["effort": "low"] }
+            let request = try authorizedRequest(path: "/v1/messages", method: "POST", body: body)
             let (data, response) = try await URLSession.shared.data(for: request)
             let object = (try? JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
             if (response as? HTTPURLResponse)?.statusCode != 200 {
@@ -411,7 +433,7 @@ final class BridgeModel: ObservableObject {
                 }
             }
             lastLaunchTime = Date(); hasObservedOwnedClaude = false
-            tell("Claude is opening with your Mistral profile. Its previous configuration will be restored after Claude quits.")
+            tell("Claude is opening with your provider profile. Its previous configuration will be restored after Claude quits.")
         } catch {
             updateClaudeRunning()
             if !claudeRunning && recoveryNeeded {
@@ -443,7 +465,7 @@ final class BridgeModel: ObservableObject {
         updateClaudeRunning()
         let metaPath = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library/Application Support/Claude-3p/configLibrary/_meta.json")
         if let data = try? Data(contentsOf: metaPath), let meta = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-            profileActive = meta["appliedId"] as? String == "8a93d471-d0f9-428c-b203-48fce46277bc"
+            profileActive = meta["appliedId"] as? String == hubProfileID
         }
         if profileActive && claudeRunning { hasObservedOwnedClaude = true }
         let launchFailed = profileActive && !claudeRunning && !hasObservedOwnedClaude && Date().timeIntervalSince(lastLaunchTime) > 20
@@ -486,20 +508,42 @@ final class BridgeModel: ObservableObject {
     }
 
     func saveKey() async {
+        guard !busy, let provider = providerDefinitions.first(where: { $0.id == selectedProvider }), let account = provider.credential_account else { return }
+        let providerID = provider.id
         let key = secretDraft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !key.isEmpty else { tell("Enter your Mistral API key first.", error: true); return }
-        let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: "com.mistralbridge.local", kSecAttrAccount as String: "MISTRAL_API_KEY"]
-        let attributes: [String: Any] = [kSecValueData as String: Data(key.utf8)]
-        var status = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
-        if status == errSecItemNotFound {
-            var entry = query; entry.merge(attributes) { _, new in new }
-            entry[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-            status = SecItemAdd(entry as CFDictionary, nil)
-        }
-        guard status == errSecSuccess else { tell("Keychain could not save the key (\(status)).", error: true); return }
-        secretDraft = ""; settings.credential_mode = "separate"
-        await saveFromUI()
-        await reconnect()
+        guard !key.isEmpty else { tell("Enter the provider API key first.", error: true); return }
+        busy = true; defer { busy = false }
+        do {
+            updateClaudeRunning()
+            if running { try await checkIdleGateway() }
+            guard activeRequests == 0 && !(claudeRunning && profileActive) else { throw WorkerError(message: "Quit this hub’s Claude session before changing its key.") }
+            var proposed = settings
+            proposed.providers[providerID]?.credential_mode = "keychain"
+            proposed.providers[providerID]?.credential_revision += 1
+            _ = try await command("validate", input: JSONEncoder().encode(proposed))
+            if gatewayProcess?.isRunning == true { await stopGateway() }
+            // Invalidate account-scoped metadata before replacing the credential.
+            // Even a subsequent settings-write failure cannot reuse the old account's list.
+            let cache = root.appendingPathComponent("catalogues/" + providerID + ".json")
+            if FileManager.default.fileExists(atPath: cache.path) { try FileManager.default.removeItem(at: cache) }
+            if providerID == "mistral" {
+                let legacy = root.appendingPathComponent("catalog.json")
+                if FileManager.default.fileExists(atPath: legacy.path) { try FileManager.default.removeItem(at: legacy) }
+            }
+            let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: hubKeychainService, kSecAttrAccount as String: account]
+            let attributes: [String: Any] = [kSecValueData as String: Data(key.utf8)]
+            var status = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
+            if status == errSecItemNotFound {
+                var entry = query; entry.merge(attributes) { _, new in new }
+                entry[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+                status = SecItemAdd(entry as CFDictionary, nil)
+            }
+            guard status == errSecSuccess else { throw WorkerError(message: "Keychain could not save the key (\(status)).") }
+            secretDraft = ""; settings = proposed
+            try await save()
+            if let info = try? await command("inspect") { readCatalogue(info, modelsKey: "catalog") }
+            tell("Key saved in macOS Keychain. Refresh this provider’s catalogue before choosing its models.")
+        } catch { tell(error.localizedDescription, error: true) }
     }
 
     func openVibe() {
@@ -539,7 +583,7 @@ struct BridgeWindow: View {
             VStack(alignment: .leading, spacing: 28) {
                 HStack(spacing: 10) {
                     Image(systemName: "point.3.connected.trianglepath.dotted").font(.system(size: 27, weight: .semibold)).foregroundStyle(bridgeOrange)
-                    VStack(alignment: .leading, spacing: 2) { Text("Mistral").font(.system(size: 18, weight: .semibold)); Text("BRIDGE").font(.system(size: 10, weight: .semibold)).tracking(2).foregroundStyle(.secondary) }
+                    VStack(alignment: .leading, spacing: 2) { Text("Provider").font(.system(size: 18, weight: .semibold)); Text("HUB PREVIEW").font(.system(size: 10, weight: .semibold)).tracking(2).foregroundStyle(.secondary) }
                 }.padding(.top, 12)
                 VStack(spacing: 5) {
                     ForEach(Page.allCases) { page in
@@ -554,7 +598,7 @@ struct BridgeWindow: View {
                 Spacer()
                 VStack(alignment: .leading, spacing: 9) {
                     StatusPill(text: model.running ? "Gateway ready" : model.gatewayState, good: model.running)
-                    Text("0.2.0 · LOCAL PROTOTYPE").font(.system(size: 9, weight: .medium)).tracking(1).foregroundStyle(.tertiary)
+                    Text("0.3.0 · WORKTREE PREVIEW").font(.system(size: 9, weight: .medium)).tracking(1).foregroundStyle(.tertiary)
                 }
             }.padding(20).frame(width: 200).background(Color.black.opacity(0.15))
             Rectangle().fill(Color.white.opacity(0.07)).frame(width: 1)
@@ -563,12 +607,12 @@ struct BridgeWindow: View {
                     VStack(alignment: .leading, spacing: 22) {
                         header
                         switch model.page {
-                        case .connection: connectionPage
+                        case .connection: ProviderPage(model: model)
                         case .models: modelsPage
                         case .claude: claudePage
                         case .activity: activityPage
                         }
-                    }.padding(30)
+                    }.padding(30).disabled(model.busy)
                 }
                 if !model.notice.isEmpty {
                     HStack(alignment: .top, spacing: 10) {
@@ -595,53 +639,10 @@ struct BridgeWindow: View {
 
     var subtitle: String {
         switch model.page {
-        case .connection: return "Bring your Mistral access into Claude Desktop."
-        case .models: return "Choose the Mistral model behind each Claude option."
-        case .claude: return "Launch Claude with your Mistral configuration."
+        case .connection: return "Your model accounts, together in Claude Desktop."
+        case .models: return "Choose the provider and model behind each Claude option."
+        case .claude: return "Launch Claude with your provider configuration."
         case .activity: return "Requests through your local gateway."
-        }
-    }
-
-    var connectionPage: some View {
-        VStack(spacing: 18) {
-            Panel {
-                HStack(alignment: .top) {
-                    Image(systemName: "key.horizontal").font(.system(size: 22)).foregroundStyle(bridgeOrange)
-                    VStack(alignment: .leading, spacing: 6) { Text("Mistral account").font(.headline); Text(model.credentialFound ? "Connected through \(model.credentialSource)" : "Start Vibe and sign in to your Mistral account.").foregroundStyle(.secondary).font(.system(size: 12)) }
-                    Spacer()
-                    StatusPill(text: model.credentialFound ? "Connected" : "Setup needed", good: model.credentialFound)
-                }
-                Picker("Credentials", selection: $model.settings.credential_mode) {
-                    Text("Use Vibe sign-in").tag("vibe"); Text("Separate API key").tag("separate")
-                }.pickerStyle(.segmented)
-                if model.settings.credential_mode == "separate" {
-                    HStack { SecureField("Mistral API key", text: $model.secretDraft).textFieldStyle(.roundedBorder); Button("Save in Keychain") { Task { await model.saveKey() } }.disabled(model.busy || model.secretDraft.isEmpty) }
-                    Text("Saved in macOS Keychain. The key stays out of configuration files and logs.").font(.caption).foregroundStyle(.secondary)
-                } else {
-                    HStack {
-                        VStack(alignment: .leading, spacing: 4) { Text("Vibe’s selected model").font(.caption).foregroundStyle(.secondary); Text(model.vibeAlias.isEmpty ? "Waiting for Vibe" : model.vibeAlias).font(.system(size: 13, weight: .medium)) }
-                        Spacer()
-                        Button("Open Vibe") { model.openVibe() }
-                        Button("Reconnect") { Task { await model.reconnect() } }.disabled(model.busy)
-                    }
-                }
-            }
-            Panel {
-                HStack {
-                    VStack(alignment: .leading, spacing: 6) { Text("Local gateway").font(.headline); Text(model.endpoint).font(.system(size: 12, design: .monospaced)).foregroundStyle(.secondary).textSelection(.enabled) }
-                    Spacer()
-                    Button(model.running ? "Stop gateway" : "Start gateway") { Task { await model.toggleGateway() } }.disabled(model.busy).controlSize(.large)
-                }
-                Divider()
-                HStack { Text("Port").font(.system(size: 13)); Spacer(); TextField("11436", value: $model.settings.port, format: .number.grouping(.never)).textFieldStyle(.roundedBorder).frame(width: 90) }
-                Text("The bridge runs on this Mac. Mistral performs inference in the cloud.").font(.caption).foregroundStyle(.secondary)
-            }
-            HStack {
-                Button("Test connection") { Task { await model.testRoute() } }.disabled(model.busy || !model.runtimeFound).controlSize(.large)
-                Spacer()
-                Button("Save settings") { Task { await model.saveFromUI() } }.disabled(model.busy || !model.changed)
-                Button("Choose models →") { model.page = .models }.buttonStyle(.borderedProminent).controlSize(.large)
-            }
         }
     }
 
@@ -651,7 +652,7 @@ struct BridgeWindow: View {
                 HStack {
                     VStack(alignment: .leading, spacing: 5) { Text("Model mappings").font(.headline); Text("Choose a model by name. Show technical IDs to enter a custom route.").font(.caption).foregroundStyle(.secondary) }
                     Spacer()
-                    Button("Refresh models") { Task { await model.discover() } }.disabled(model.busy)
+                    Button("Provider catalogues") { model.page = .connection }.disabled(model.busy)
                 }
                 Text(model.catalogueSummary).font(.system(size: 11)).foregroundStyle(.secondary)
                 ForEach(slots, id: \.id) { slot in
@@ -660,8 +661,12 @@ struct BridgeWindow: View {
                         Image(systemName: "arrow.right").foregroundStyle(.tertiary)
                         VStack(alignment: .leading, spacing: 6) {
                             Menu {
-                                ForEach(model.routeOptions, id: \.self) { identifier in
-                                    Button("\(model.modelLabel(identifier)) — \(model.modelFacts(identifier))") { model.settings.mappings[slot.id] = identifier }.help(identifier)
+                                ForEach(model.providerDefinitions) { provider in
+                                    Menu(provider.presentation.displayProvider) {
+                                        ForEach(model.routeOptions.filter { $0.hasPrefix(provider.id + "/") }, id: \.self) { identifier in
+                                            Button("\(model.modelLabel(identifier)) — \(model.modelFacts(identifier))") { model.settings.mappings[slot.id] = identifier }.help(identifier)
+                                        }
+                                    }
                                 }
                                 Divider()
                                 Button("Enter a custom model ID…") { model.showRoutingIDs = true }
@@ -673,7 +678,7 @@ struct BridgeWindow: View {
                                 .help("API ID: \(model.settings.mappings[slot.id] ?? "")")
                             Text(model.modelFacts(model.settings.mappings[slot.id] ?? "")).font(.system(size: 9)).foregroundStyle(.secondary)
                             if model.showRoutingIDs {
-                                TextField("Exact Mistral API model ID", text: Binding(get: { model.settings.mappings[slot.id] ?? "" }, set: { model.settings.mappings[slot.id] = $0 }))
+                                TextField("provider/exact-model-id", text: Binding(get: { model.settings.mappings[slot.id] ?? "" }, set: { model.settings.mappings[slot.id] = $0 }))
                                     .textFieldStyle(.roundedBorder).font(.system(size: 10, design: .monospaced))
                             }
                         }.frame(maxWidth: .infinity)
@@ -684,18 +689,18 @@ struct BridgeWindow: View {
                 HStack {
                     Toggle("Show technical IDs", isOn: $model.showRoutingIDs).toggleStyle(.checkbox).font(.caption)
                     Spacer()
-                    Button("Use Vibe for all") { for slot in slots { model.settings.mappings[slot.id] = model.vibeModel } }
+                    Button("Use Vibe for all") { for slot in slots { model.settings.mappings[slot.id] = "mistral/" + model.vibeModel } }
                 }
             }
             Panel {
                 Text("Model controls").font(.headline)
-                HStack { Text("Context").font(.system(size: 13, weight: .medium)); Spacer(); Text("Reported by Mistral for each model").font(.caption).foregroundStyle(.secondary) }
+                HStack { Text("Context").font(.system(size: 13, weight: .medium)); Spacer(); Text("Reported per model; never an editable guess").font(.caption).foregroundStyle(.secondary) }
                 Divider()
                 HStack { Text("Effort").font(.system(size: 13, weight: .medium)); Spacer(); Text("Use Claude’s Effort control").font(.caption).foregroundStyle(.secondary) }
-                Text("For reasoning models, this follows Vibe’s current Mistral mapping: Low uses standard mode; Medium and above enable reasoning. Models without reasoning omit that parameter.").font(.caption).foregroundStyle(.secondary).lineSpacing(3)
+                Text("Effort follows the selected provider’s supported controls. Mistral uses standard mode at Low and reasoning at Medium or above; native Messages providers receive their supported reasoning settings.").font(.caption).foregroundStyle(.secondary).lineSpacing(3)
                 Divider()
-                HStack { Text("Fast").font(.system(size: 13, weight: .medium)); Spacer(); Text("No same-model fast mode connected").font(.caption).foregroundStyle(.secondary) }
-                Text("Vibe’s fast alias is Mistral Small. It appears once as that model, rather than a speed variant of Medium.").font(.caption).foregroundStyle(.secondary)
+                HStack { Text("Fast").font(.system(size: 13, weight: .medium)); Spacer(); Text("Only when supported by the provider").font(.caption).foregroundStyle(.secondary) }
+                Text("A speed toggle never silently swaps models. Distinct models or context variants keep separate catalogue entries. Unsupported Fast requests return a clear compatibility message.").font(.caption).foregroundStyle(.secondary)
             }
             HStack { Spacer(); Button("Save mappings") { Task { await model.saveFromUI() } }.disabled(model.busy || !model.changed).controlSize(.large); Button("Launch Claude") { Task { await model.launchClaude() } }.buttonStyle(.borderedProminent).controlSize(.large).disabled(model.busy || !model.claudeInstalled) }
         }
@@ -706,10 +711,10 @@ struct BridgeWindow: View {
             Panel {
                 HStack(spacing: 18) {
                     Image(systemName: "macwindow").font(.system(size: 38, weight: .light)).foregroundStyle(bridgeOrange).frame(width: 60, height: 60)
-                    VStack(alignment: .leading, spacing: 6) { Text("Claude, powered by Mistral").font(.system(size: 19, weight: .semibold)); Text("Your usual Claude interface with the models you choose.").font(.system(size: 12)).foregroundStyle(.secondary) }
+                    VStack(alignment: .leading, spacing: 6) { Text("Claude, with your models").font(.system(size: 19, weight: .semibold)); Text("Your usual Claude interface with the models you choose.").font(.system(size: 12)).foregroundStyle(.secondary) }
                 }
                 Divider()
-                infoRow("Mistral profile", model.profileActive ? "Active" : "Ready to launch", "person.crop.rectangle")
+                infoRow("Provider profile", model.profileActive ? "Active" : "Ready to launch", "person.crop.rectangle")
                 infoRow("Conversations", "Saved by Claude’s third-party mode", "bubble.left.and.bubble.right")
                 infoRow("Previous setup", "Restored after this Claude session closes", "arrow.uturn.backward")
                 if model.claudeRunning && !model.profileActive {
@@ -724,7 +729,7 @@ struct BridgeWindow: View {
             Panel {
                 Toggle(isOn: $model.settings.auto_stop) { VStack(alignment: .leading, spacing: 5) { Text("Stop gateway when Claude quits").font(.system(size: 13, weight: .medium)); Text("The menu bar app stays available for your next session.").font(.caption).foregroundStyle(.secondary) } }.toggleStyle(.switch)
                 Divider()
-                Toggle(isOn: $model.settings.auto_mode) { VStack(alignment: .leading, spacing: 5) { Text("Enable Claude Auto mode").font(.system(size: 13, weight: .medium)); Text("Let Claude decide when to ask before making changes.").font(.caption).foregroundStyle(.secondary) } }.toggleStyle(.switch)
+                Toggle(isOn: $model.settings.auto_mode) { VStack(alignment: .leading, spacing: 5) { Text("Enable Claude Auto mode").font(.system(size: 13, weight: .medium)); Text("Use Claude’s approval classifier through the configured gateway. Claude chooses its reviewer model internally.").font(.caption).foregroundStyle(.secondary) } }.toggleStyle(.switch)
                 Text("This uses Claude’s native third-party profile system, like Ollama. It switches the installed app’s profile; it does not create a simultaneous second Claude app. Existing Ollama and Claude conversations are retained.").font(.caption).foregroundStyle(.secondary).lineSpacing(3)
             }
             HStack { Spacer(); Button("Save preferences") { Task { await model.saveFromUI() } }.disabled(model.busy || !model.changed) }
@@ -752,7 +757,7 @@ struct BridgeWindow: View {
                     }
                 }
             }
-            HStack { Text("Counters cover this gateway run. Mistral provides the usage totals.").font(.caption).foregroundStyle(.secondary); Spacer(); Button("Open data folder") { NSWorkspace.shared.open(model.root) } }
+            HStack { Text("Counters cover this gateway run. Usage is reported by each provider.").font(.caption).foregroundStyle(.secondary); Spacer(); Button("Open data folder") { NSWorkspace.shared.open(model.root) } }
         }
     }
 
@@ -774,8 +779,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         NSApp.appearance = NSAppearance(named: .darkAqua)
         let mainMenu = NSMenu()
         let appItem = NSMenuItem()
-        let appMenu = NSMenu(title: "Mistral Bridge")
-        let quitItem = NSMenuItem(title: "Quit Mistral Bridge", action: #selector(quit), keyEquivalent: "q")
+        let appMenu = NSMenu(title: hubName)
+        let quitItem = NSMenuItem(title: "Quit " + hubName, action: #selector(quit), keyEquivalent: "q")
         quitItem.target = self
         appMenu.addItem(quitItem); appItem.submenu = appMenu; mainMenu.addItem(appItem)
         let editItem = NSMenuItem()
@@ -786,12 +791,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         editItem.submenu = editMenu; mainMenu.addItem(editItem); NSApp.mainMenu = mainMenu
         model = BridgeModel()
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-        statusItem.button?.image = NSImage(systemSymbolName: "point.3.connected.trianglepath.dotted", accessibilityDescription: "Mistral Bridge")
+        statusItem.button?.image = NSImage(systemSymbolName: "point.3.connected.trianglepath.dotted", accessibilityDescription: hubName)
         statusItem.button?.image?.isTemplate = true
-        statusItem.button?.toolTip = "Mistral Bridge"
+        statusItem.button?.toolTip = hubName
         let menu = NSMenu(); menu.delegate = self; statusItem.menu = menu
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 940, height: 740), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
-        window.title = "Mistral Bridge"
+        window.title = hubName
         window.titlebarAppearsTransparent = true
         window.isReleasedWhenClosed = false
         window.delegate = self
@@ -809,7 +814,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
 
     func menuWillOpen(_ menu: NSMenu) {
         menu.removeAllItems()
-        let title = NSMenuItem(title: "Mistral Bridge · \(model.gatewayState)", action: nil, keyEquivalent: ""); title.isEnabled = false; menu.addItem(title)
+        let title = NSMenuItem(title: "\(hubName) · \(model.gatewayState)", action: nil, keyEquivalent: ""); title.isEnabled = false; menu.addItem(title)
         menu.addItem(.separator())
         add(menu, "Launch Claude…", #selector(launchClaude), "l")
         add(menu, "Models & Settings…", #selector(showWindow), ",")
@@ -818,7 +823,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         add(menu, model.running ? "Stop Gateway" : "Start Gateway", #selector(toggleGateway), "")
         if model.recoveryNeeded { add(menu, "Restore Previous Claude Setup", #selector(restore), "") }
         menu.addItem(.separator())
-        add(menu, "Quit Mistral Bridge", #selector(quit), "q")
+        add(menu, "Quit " + hubName, #selector(quit), "q")
     }
 
     func add(_ menu: NSMenu, _ title: String, _ action: Selector, _ key: String) {
@@ -832,7 +837,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         model.updateClaudeRunning()
         if model.claudeRunning && model.profileActive {
             let alert = NSAlert()
-            alert.messageText = "Claude is using Mistral Bridge"
+            alert.messageText = "Claude is using " + hubName
             alert.informativeText = "Quit Claude first so your previous configuration can be restored and active work can finish."
             alert.addButton(withTitle: "Keep Bridge Open")
             alert.runModal()

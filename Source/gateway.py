@@ -7,6 +7,7 @@ import fcntl
 import hashlib
 import hmac
 import http.client
+import ipaddress
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
@@ -21,9 +22,12 @@ import time
 import urllib.parse
 import urllib.request
 
-from bridge_core import (BridgeError, ClaudeProfile, atomic_json, attach_model_specs, cached_catalogue, catalog, credentials, gateway_token,
-                         inspect_state, load_settings, model_labels, private_directory, read_json, ssl_context, state_root, validate_settings)
+from bridge_core import (BridgeError, ClaudeProfile, atomic_json, attach_model_specs, bootstrap_metadata, cached_catalogue, credentials, discover_provider, gateway_token,
+                         inspect_state, load_settings, model_labels, private_directory, private_token, read_json, ssl_context, state_root, validate_settings)
 from catalogue import build_catalogue, read_observations
+from hub_config import connection_signature, provider_presentations, qualify, split_route
+from providers import PROVIDERS, prepare_request, ProviderError
+from cerebras_replay import CerebrasReplayError, CerebrasStreamAdapter, sign_thinking, validate_messages
 from protocol import (StreamTranslator, estimated_tokens, model_catalog, resolve_model,
                       translate_request, translate_response)
 
@@ -31,12 +35,16 @@ MAX_BODY = 32 * 1024 * 1024
 
 
 class Runtime:
-    def __init__(self, root: Path, upstream_url="https://api.mistral.ai/v1", key=None):
+    def __init__(self, root: Path, upstream_url=None, key=None, request_planner=None):
         self.root = root
         self.settings, self.catalogue = attach_model_specs(load_settings(root), root)
         self.token = gateway_token(root)
-        self.key, self.source = (key, "test") if key is not None else credentials(self.settings)
+        self.replay_key = private_token(root, "reasoning-signing-key")
+        self.key = key
+        self.source = "Provider-specific credentials"
         self.upstream_url = upstream_url
+        self.request_planner = request_planner
+        self.credential_cache = {}
         self.lock = threading.Lock()
         self.semaphore = threading.BoundedSemaphore(8)
         self.active = 0
@@ -49,13 +57,69 @@ class Runtime:
         self.started = time.time()
         self.stopping = threading.Event()
         self.connections = set()
+        self.provider_counts = {provider_id: {"completed": 0, "failed": 0, "input_tokens": 0, "output_tokens": 0} for provider_id in PROVIDERS}
+
+    def resolve_route(self, requested):
+        if not isinstance(requested, str):
+            raise BridgeError("Choose a model route.")
+        try:
+            route = resolve_model(requested, self.settings["mappings"])
+        except BridgeError:
+            route = qualify(*split_route(requested.removesuffix("[1m]")))
+        if route not in self.settings["_model_specs"]:
+            raise BridgeError("This route is not in the current provider catalogue. Refresh its models first.")
+        return route
+
+    def plan(self, payload):
+        route = self.resolve_route(payload.get("model"))
+        provider_id, upstream_model = split_route(route)
+        spec = self.settings["_model_specs"][route]
+        context = spec.get("context")
+        estimate = estimated_tokens(payload)
+        if type(context) is int and estimate >= context:
+            raise BridgeError(f"This conversation is above the provider's reported {context:,}-token context limit.")
+        if payload.get("model", "").endswith("[1m]") and (type(context) is not int or context < 1000000):
+            raise BridgeError("A 1M context window has not been established for this route.")
+        if self.key is not None:
+            key = self.key
+        else:
+            with self.lock:
+                cached = self.credential_cache.get(provider_id)
+            if cached is None:
+                cached = credentials(self.settings, provider_id)
+                with self.lock:
+                    self.credential_cache[provider_id] = cached
+            key, _ = cached
+        scope = connection_signature(provider_id, self.settings["providers"][provider_id])
+        # Bind replay to the actual credential as well as the configured revision.
+        # This covers Vibe/environment credential rotation between gateway runs.
+        scope += ":" + hmac.new(self.replay_key.encode(), key.encode(), hashlib.sha256).hexdigest()
+        replay_required = provider_id == "cerebras" and spec.get("reasoning_history") in {"adapter_required", "gateway_signed_replay", "gateway_signed_replay_required"}
+        try:
+            replay = validate_messages(payload.get("messages"), upstream_model, scope, self.replay_key,
+                                       require_tool_reasoning=replay_required) if provider_id == "cerebras" else None
+            options = {"reasoning_by_message": replay} if provider_id == "cerebras" else {}
+            plan = (self.request_planner or prepare_request)(provider_id, self.settings["providers"][provider_id], key, payload, upstream_model, spec, **options)
+        except (ProviderError, CerebrasReplayError) as exc:
+            raise BridgeError(str(exc).replace(key, "[redacted]") if key else str(exc)) from exc
+        plan.update(route=route, provider_id=provider_id, provider_name=PROVIDERS[provider_id]["name"],
+                    private_key=key, upstream_model=upstream_model, replay_scope=scope, replay_required=replay_required)
+        if type(context) is int:
+            plan["body"]["max_tokens"] = min(plan["body"].get("max_tokens", 4096), max(1, context - estimate))
+        # The only override is an explicit in-process test-harness argument,
+        # never a client request field or persisted provider setting.
+        if self.upstream_url is not None:
+            endpoint = "/v1/messages" if plan["protocol"] == "anthropic" else "/chat/completions"
+            plan["url"] = self.upstream_url.rstrip("/") + endpoint
+        return plan
 
     def status(self):
         with self.lock:
             return {"running": True, "active": self.active, "completed": self.completed, "failed": self.failed,
                     "input_tokens": self.input_tokens, "output_tokens": self.output_tokens,
                     "last_error": self.last_error, "last_model": self.last_model,
-                    "credential_source": self.source, "uptime_seconds": int(time.time() - self.started), "pid": os.getpid()}
+                    "credential_source": self.source, "uptime_seconds": int(time.time() - self.started), "pid": os.getpid(),
+                    "providers": {key: dict(value) for key, value in self.provider_counts.items()}}
 
     def record(self, kind, model="", code=None, usage=None, model_unavailable=False):
         # Deliberately excludes prompts, tool arguments, response text, headers,
@@ -63,6 +127,7 @@ class Runtime:
         event = {"time": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "event": kind}
         if model:
             event["model"] = model
+            event["provider_id"] = split_route(model)[0]
         if code is not None:
             event["status"] = code
         if usage:
@@ -79,6 +144,14 @@ class Runtime:
                 self.failed += 1
                 self.last_error = f"Request failed (HTTP {code}). See the message in Claude."
             self.last_model = model or self.last_model
+            if model:
+                counters = self.provider_counts[split_route(model)[0]]
+                if kind == "completed":
+                    counters["completed"] += 1
+                    counters["input_tokens"] += (usage or {}).get("input_tokens", 0)
+                    counters["output_tokens"] += (usage or {}).get("output_tokens", 0)
+                elif kind == "error":
+                    counters["failed"] += 1
             path = self.root / "activity.jsonl"
             if path.exists() and path.stat().st_size > 512000:
                 path.replace(self.root / "activity.previous.jsonl")
@@ -86,16 +159,15 @@ class Runtime:
             with os.fdopen(fd, "a") as stream:
                 stream.write(json.dumps(event) + "\n")
 
-    def upstream(self):
-        parsed = urllib.parse.urlsplit(self.upstream_url)
+    def upstream(self, url):
+        parsed = urllib.parse.urlsplit(url)
         if parsed.scheme == "https":
             connection = http.client.HTTPSConnection(parsed.hostname, parsed.port or 443, timeout=180, context=ssl_context())
-        elif parsed.hostname == "127.0.0.1":
-            # Only the in-process test harness supplies a local HTTP upstream.
-            connection = http.client.HTTPConnection(parsed.hostname, parsed.port, timeout=10)
+        elif parsed.scheme == "http" and ipaddress.ip_address(parsed.hostname).is_loopback:
+            connection = http.client.HTTPConnection(parsed.hostname, parsed.port, timeout=10 if self.upstream_url else 180)
         else:
-            raise BridgeError("Mistral connections require HTTPS.")
-        return connection, parsed.path.rstrip("/") + "/chat/completions"
+            raise BridgeError("Hosted provider connections require HTTPS.")
+        return connection, parsed.path + ("?" + parsed.query if parsed.query else "")
 
 
 def error_type(status):
@@ -105,7 +177,7 @@ def error_type(status):
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "MistralBridge/0.2.0"
+    server_version = "ProviderHub/0.3.0"
 
     @property
     def runtime(self):
@@ -153,7 +225,7 @@ class Handler(BaseHTTPRequestHandler):
         if not self.allowed(health=path == "/_bridge/health"):
             return
         if path == "/_bridge/health":
-            self.json_response(200, {"service": "mistral-bridge", "version": "0.2.0"})
+            self.json_response(200, {"service": "mistral-bridge", "version": "0.3.0"})
         elif path == "/_bridge/status":
             self.json_response(200, self.runtime.status())
         elif path == "/v1/models":
@@ -191,10 +263,18 @@ class Handler(BaseHTTPRequestHandler):
                                          for t in payload.get("tools", []) if isinstance(t, dict)})})
             settings = self.runtime.settings
             if path == "/v1/messages/count_tokens":
-                resolve_model(payload.get("model", ""), settings["mappings"])
+                self.runtime.resolve_route(payload.get("model", ""))
                 self.json_response(200, {"input_tokens": estimated_tokens(payload)}, {"X-Mistral-Bridge-Token-Count": "estimate"})
                 return
-            upstream, names = translate_request(payload, settings)
+            plan = self.runtime.plan(payload)
+            upstream, names = plan["body"], plan.get("tool_name_map", {})
+            if plan["protocol"] == "anthropic":
+                # Protocol capability negotiation belongs to the Messages request.
+                # Never copy local authentication or arbitrary client headers.
+                for name in ("anthropic-version", "anthropic-beta"):
+                    value = self.headers.get(name)
+                    if value and len(value) <= 4096 and "\r" not in value and "\n" not in value:
+                        plan["headers"][name] = value
         except (ValueError, TypeError, KeyError, AttributeError, BridgeError) as exc:
             self.error(400, str(exc))
             return
@@ -214,7 +294,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             with self.runtime.lock:
                 self.runtime.active += 1
-            connection, endpoint = self.runtime.upstream()
+            connection, endpoint = self.runtime.upstream(plan["url"])
             with self.runtime.lock:
                 self.runtime.connections.add(connection)
 
@@ -242,9 +322,8 @@ class Handler(BaseHTTPRequestHandler):
             monitor = threading.Thread(target=cancel_monitor, daemon=True)
             monitor.start()
             encoded = json.dumps(upstream, ensure_ascii=False).encode()
-            connection.request("POST", endpoint, encoded, {"Authorization": "Bearer " + self.runtime.key,
-                               "Content-Type": "application/json", "Accept": "text/event-stream" if upstream["stream"] else "application/json",
-                               "User-Agent": "MistralBridge/0.2.0"})
+            headers = {**plan["headers"], "Accept": "text/event-stream" if upstream.get("stream") else "application/json"}
+            connection.request("POST", endpoint, encoded, headers)
             response = connection.getresponse()
             upstream_socket = connection.sock or getattr(getattr(response.fp, "raw", None), "_sock", None)
             if response.status != 200:
@@ -255,21 +334,40 @@ class Handler(BaseHTTPRequestHandler):
                     detail = error.get("message", data.get("detail", "")) if isinstance(error, dict) else str(error)
                 except (ValueError, AttributeError):
                     detail = ""
-                detail = str(detail).replace(self.runtime.key, "[redacted]")[:700]
-                message = f"Mistral returned HTTP {response.status}" + (": " + detail if detail else ".")
+                detail = str(detail)
+                if plan["private_key"]:
+                    detail = detail.replace(plan["private_key"], "[redacted]")
+                detail = detail[:700]
+                message = f"{plan['provider_name']} returned HTTP {response.status}" + (": " + detail if detail else ".")
                 unavailable = response.status in {400, 404, 410} and any(term in detail.lower() for term in ("invalid model", "model not found", "model has been deprecated", "model is no longer"))
-                self.runtime.record("error", upstream["model"], response.status, model_unavailable=unavailable)
-                self.error(response.status if response.status in {400, 401, 403, 404, 413, 429, 500, 502, 503, 504} else 502, message)
+                self.runtime.record("error", plan["route"], response.status, model_unavailable=unavailable)
+                self.error(response.status if response.status in {400, 401, 402, 403, 404, 413, 429, 500, 502, 503, 504} else 502, message)
                 return
-            if not upstream["stream"]:
+            if not upstream.get("stream"):
                 raw = response.read(MAX_BODY + 1)
                 if len(raw) > MAX_BODY:
-                    raise BridgeError("Mistral's response exceeded the response limit.")
-                result = translate_response(json.loads(raw), payload["model"], names)
-                usage = result["usage"]
+                    raise BridgeError("The provider response exceeded the response limit.")
+                decoded = json.loads(raw)
+                result = translate_response(decoded, payload["model"], names) if plan["protocol"] == "chat_completions" else decoded
+                if result.get("type") != "message" or not isinstance(result.get("content"), list):
+                    raise BridgeError("The provider returned an invalid Messages response.")
+                if plan["protocol"] == "anthropic":
+                    result["model"] = payload["model"]
+                if plan["provider_id"] == "cerebras":
+                    reasoning = decoded.get("choices", [{}])[0].get("message", {}).get("reasoning")
+                    if plan["replay_required"] and any(block.get("type") == "tool_use" for block in result["content"]) and not reasoning:
+                        raise BridgeError("Cerebras returned tool calls without the reasoning required to continue this model.")
+                    thinking = sign_thinking(reasoning, result["content"], plan["upstream_model"], plan["replay_scope"], self.runtime.replay_key)
+                    if thinking is not None:
+                        result["content"].insert(0, thinking)
+                usage = result.get("usage", {})
                 self.json_response(200, result)
             else:
-                translator = StreamTranslator(payload["model"], names)
+                if plan["provider_id"] == "cerebras":
+                    translator = CerebrasStreamAdapter(payload["model"], names, plan["upstream_model"], plan["replay_scope"], self.runtime.replay_key,
+                                                       require_tool_reasoning=plan["replay_required"])
+                else:
+                    translator = StreamTranslator(payload["model"], names) if plan["protocol"] == "chat_completions" else None
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream")
                 self.send_header("Cache-Control", "no-cache")
@@ -298,8 +396,9 @@ class Handler(BaseHTTPRequestHandler):
 
                 ping = threading.Thread(target=ping_loop, daemon=True)
                 ping.start()
-                for event in translator.start():
-                    emit(event)
+                if translator:
+                    for event in translator.start():
+                        emit(event)
                 event_lines = []
                 event_size = 0
                 done = False
@@ -309,43 +408,58 @@ class Handler(BaseHTTPRequestHandler):
                         break
                     event_size += len(line)
                     if event_size > MAX_BODY:
-                        raise BridgeError("Mistral sent an oversized stream event.")
+                        raise BridgeError("The provider sent an oversized stream event.")
                     if line in (b"\n", b"\r\n"):
                         data = b"\n".join(event_lines)
                         event_lines.clear()
                         event_size = 0
                         if data == b"[DONE]":
-                            done = True
+                            done = translator is not None
                             break
                         if data:
                             chunk = json.loads(data)
-                            if chunk.get("error"):
-                                raise BridgeError("Mistral reported an error during generation.")
-                            for event in translator.feed(chunk):
-                                emit(event)
+                            if chunk.get("error") or chunk.get("type") == "error":
+                                raise BridgeError("The provider reported an error during generation.")
+                            if translator:
+                                for event in translator.feed(chunk):
+                                    emit(event)
+                            else:
+                                kind = chunk.get("type")
+                                if kind not in {"message_start", "content_block_start", "content_block_delta", "content_block_stop", "message_delta", "message_stop", "ping"}:
+                                    raise BridgeError("The provider sent an unsupported Messages event.")
+                                if kind == "message_start":
+                                    chunk["message"]["model"] = payload["model"]
+                                    usage.update(chunk.get("message", {}).get("usage", {}))
+                                elif kind == "message_delta":
+                                    usage.update(chunk.get("usage", {}))
+                                emit(chunk)
+                                if kind == "message_stop":
+                                    done = True
+                                    break
                     elif line.startswith(b"data:"):
                         event_lines.append(line[5:].strip())
                 if disconnected.is_set():
                     raise BrokenPipeError()
                 if not done:
-                    raise BridgeError("Mistral's stream ended unexpectedly. Please retry.")
-                for event in translator.end():
-                    emit(event)
-                usage = translator.usage
+                    raise BridgeError("The provider stream ended unexpectedly. Please retry.")
+                if translator:
+                    for event in translator.end():
+                        emit(event)
+                    usage = translator.usage
                 closed.set()
                 with write_lock:
                     self.wfile.write(b"0\r\n\r\n")
                     self.wfile.flush()
                 self.close_connection = True
-            self.runtime.record("completed", upstream["model"], 200, usage)
+            self.runtime.record("completed", plan["route"], 200, usage)
         except (BrokenPipeError, ConnectionResetError):
-            self.runtime.record("cancelled", upstream["model"])
+            self.runtime.record("cancelled", plan["route"])
         except Exception as exc:
             if disconnected.is_set():
-                self.runtime.record("cancelled", upstream["model"])
+                self.runtime.record("cancelled", plan["route"])
             else:
-                message = str(exc) if isinstance(exc, BridgeError) else "The Mistral connection failed. Check your connection and try again."
-                self.runtime.record("error", upstream["model"], 502)
+                message = str(exc) if isinstance(exc, (BridgeError, CerebrasReplayError)) else "The provider connection failed. Check your connection and try again."
+                self.runtime.record("error", plan["route"], 502)
                 try:
                     if streaming:
                         emit({"type": "error", "error": {"type": "api_error", "message": message}})
@@ -388,12 +502,12 @@ def serve(root, parent_pipe=False):
     try:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError as exc:
-        raise BridgeError("Mistral Bridge is already running.") from exc
+        raise BridgeError("This provider gateway is already running.") from exc
     runtime = Runtime(root)
     try:
         server = Server(runtime)
     except OSError as exc:
-        raise BridgeError(f"Port {runtime.settings['port']} is in use. Choose another port in Connection settings.") from exc
+        raise BridgeError(f"Port {runtime.settings['port']} is in use. Choose another port in Providers settings.") from exc
 
     def stop(*_):
         runtime.stopping.set()
@@ -424,34 +538,40 @@ def serve(root, parent_pipe=False):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=["inspect", "save", "discover", "activate", "restore", "serve"])
+    parser.add_argument("command", choices=["inspect", "validate", "save", "discover", "activate", "restore", "serve"])
+    parser.add_argument("--provider", choices=list(PROVIDERS), default="mistral")
     parser.add_argument("--parent-pipe", action="store_true")
     args = parser.parse_args()
     root = state_root()
+    bootstrap_metadata(root)
     if args.command == "serve":
         serve(root, args.parent_pipe)
         return
     if args.command == "inspect":
         result = inspect_state(root)
-    elif args.command == "save":
+    elif args.command in {"validate", "save"}:
         settings = validate_settings(json.load(sys.stdin))
-        private_directory(root)
-        atomic_json(root / "settings.json", settings)
+        if args.command == "save":
+            private_directory(root)
+            atomic_json(root / "settings.json", settings)
         inventory = cached_catalogue(settings, root)
-        result = {"saved": True, "settings": settings, "friendly_names": model_labels(settings, inventory.get("models", [])), "models": inventory.get("models", [])}
+        result = {"saved": args.command == "save", "settings": settings,
+                  "friendly_names": model_labels(settings, inventory.get("models", [])), "models": inventory.get("models", []),
+                  "catalog_summary": {k: v for k, v in inventory.items() if k != "models"},
+                  "provider_definitions": provider_presentations(settings)}
     elif args.command == "discover":
         settings = load_settings(root)
-        key, source = credentials(settings)
-        from bridge_core import vibe_settings
-        inventory = build_catalogue(catalog(key), settings, vibe_settings(), read_observations(root))
-        atomic_json(root / "catalog.json", inventory)
+        source = discover_provider(settings, args.provider, root)
+        inventory = cached_catalogue(settings, root)
         result = {"models": inventory["models"], "credential_source": source, "friendly_names": model_labels(settings, inventory["models"]),
                   "catalog_summary": {k: v for k, v in inventory.items() if k not in {"models", "raw"}}}
     elif args.command == "activate":
         settings = load_settings(root)
         enriched, _ = attach_model_specs(settings, root)
         if any(identifier not in enriched["_model_specs"] for identifier in settings["mappings"].values()):
-            raise BridgeError("Refresh models before launching Claude so every mapped model has a provider-reported context limit.")
+            raise BridgeError("Refresh provider models before launching Claude so every selected route has catalogue metadata.")
+        for provider_id in {split_route(route)[0] for route in settings["mappings"].values()}:
+            credentials(settings, provider_id)
         token = gateway_token(root)
         # Authenticate the readiness probe so an unrelated process on this port
         # cannot be mistaken for this app's gateway.
@@ -472,6 +592,6 @@ if __name__ == "__main__":
     try:
         main()
     except (BridgeError, OSError, ValueError, subprocess.TimeoutExpired) as exc:
-        message = str(exc) if isinstance(exc, BridgeError) else "The operation could not finish. Check the local runtime and configuration."
+        message = str(exc) if isinstance(exc, (BridgeError, CerebrasReplayError)) else "The operation could not finish. Check the local runtime and configuration."
         print(json.dumps({"ok": False, "error": message}), flush=True)
         sys.exit(1)

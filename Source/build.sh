@@ -2,25 +2,35 @@
 set -euo pipefail
 SOURCE_DIR="$(cd "$(dirname "$0")" && pwd)"
 PACKAGE_DIR="$(dirname "$SOURCE_DIR")"
-APP_DIR="$PACKAGE_DIR/Mistral Bridge.app"
+APP_DIR="$PACKAGE_DIR/Provider Hub Preview.app"
 BUILD_DIR="${MISTRAL_BRIDGE_BUILD_DIR:-$SOURCE_DIR/.build}"
 mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources/worker" "$BUILD_DIR"
 xcrun swiftc -swift-version 5 -parse-as-library -O -target arm64-apple-macosx14.0 \
   -module-cache-path "$BUILD_DIR/ModuleCache" \
   -framework AppKit -framework SwiftUI -framework Security \
-  "$SOURCE_DIR/MistralBridge.swift" -o "$APP_DIR/Contents/MacOS/MistralBridge"
-cp "$SOURCE_DIR/bridge_core.py" "$SOURCE_DIR/protocol.py" "$SOURCE_DIR/gateway.py" "$SOURCE_DIR/model_names.py" "$SOURCE_DIR/catalogue.py" "$APP_DIR/Contents/Resources/worker/"
+  "$SOURCE_DIR/HubModels.swift" "$SOURCE_DIR/ProviderViews.swift" "$SOURCE_DIR/MistralBridge.swift" \
+  -o "$APP_DIR/Contents/MacOS/MistralBridge"
+for module in bridge_core protocol gateway model_names catalogue hub_config providers branding cerebras_replay; do
+  cp "$SOURCE_DIR/$module.py" "$APP_DIR/Contents/Resources/worker/"
+done
+cp "$SOURCE_DIR/provider_branding.json" "$APP_DIR/Contents/Resources/worker/"
+cp -R "$SOURCE_DIR/provider-logos" "$APP_DIR/Contents/Resources/worker/"
 cat > "$APP_DIR/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
-  <key>CFBundleName</key><string>Mistral Bridge</string>
-  <key>CFBundleDisplayName</key><string>Mistral Bridge</string>
-  <key>CFBundleIdentifier</key><string>com.mistralbridge.local</string>
+  <key>CFBundleName</key><string>Provider Hub Preview</string>
+  <key>CFBundleDisplayName</key><string>Provider Hub Preview</string>
+  <key>CFBundleIdentifier</key><string>com.mistralbridge.providerhub</string>
   <key>CFBundleExecutable</key><string>MistralBridge</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>0.2.0</string>
-  <key>CFBundleVersion</key><string>3</string>
+  <key>CFBundleShortVersionString</key><string>0.3.0</string>
+  <key>CFBundleVersion</key><string>4</string>
+  <key>BridgeStateName</key><string>Provider Hub Preview</string>
+  <key>BridgeProfileID</key><string>14c58c94-d7e8-4a15-96b8-81668956e474</string>
+  <key>BridgeDefaultPort</key><integer>11438</integer>
+  <key>BridgeKeychainService</key><string>com.mistralbridge.providerhub</string>
+  <key>BridgeSeedMistralMetadata</key><true/>
   <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>LSMinimumSystemVersion</key><string>14.0</string>
   <key>LSUIElement</key><true/>
