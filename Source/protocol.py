@@ -1,4 +1,4 @@
-"""Anthropic Messages ↔ Mistral Chat Completions, including streaming tools.
+"""Messages/Chat Completions response translation and legacy Mistral request helpers.
 
 The desktop remains the tool executor. This module never executes tool calls.
 Unsupported content/tools fail explicitly instead of silently disappearing.
@@ -81,7 +81,7 @@ def resolve_model(requested: str, mappings: dict) -> str:
     # Only explicitly configured upstream IDs are callable through this gateway.
     if requested in mappings.values():
         return requested
-    raise BridgeError(f"Model {requested!r} is not mapped. Choose it in Mistral Bridge first.")
+    raise BridgeError(f"Model {requested!r} is not mapped. Choose it in Provider Hub first.")
 
 
 def model_catalog(settings: dict):
@@ -150,7 +150,7 @@ def translate_request(payload: dict, settings: dict):
     upstream = resolve_model(requested, settings["mappings"])
     spec = settings.get("_model_specs", {}).get(upstream)
     if not spec or type(spec.get("context")) is not int:
-        raise BridgeError("Model limits are not in the current catalogue. Refresh models in Mistral Bridge first.")
+        raise BridgeError("Model limits are not in the current catalogue. Refresh models in Provider Hub first.")
     if requested.endswith("[1m]") and spec["context"] < 1000000:
         raise BridgeError("The selected model does not have a 1M context window.")
     if payload.get("speed") == "fast" or payload.get("service_tier") in {"fast", "priority"}:
@@ -279,7 +279,7 @@ def visible_text(content) -> str:
         return content
     if isinstance(content, list):
         return "".join(p.get("text", "") for p in content if p.get("type") == "text")
-    raise BridgeError("Mistral returned an unsupported content format.")
+    raise BridgeError("The provider returned an unsupported content format.")
 
 
 def usage_counts(usage):
@@ -311,7 +311,7 @@ def translate_response(response, requested, names):
                 "content": content, "stop_reason": stop_reason(choice.get("finish_reason"), bool(msg.get("tool_calls"))),
                 "stop_sequence": None, "usage": usage_counts(response.get("usage", {}))}
     except (KeyError, IndexError, TypeError, ValueError) as exc:
-        raise BridgeError("Mistral returned a malformed response or invalid tool arguments.") from exc
+        raise BridgeError("The provider returned a malformed response or invalid tool arguments.") from exc
 
 
 class StreamTranslator:
@@ -375,16 +375,16 @@ class StreamTranslator:
 
     def end(self):
         if self.finish is None:
-            raise BridgeError("Mistral closed the stream before a completion signal.")
+            raise BridgeError("The provider closed the stream before a completion signal.")
         for tool in self.tools.values():
             if tool["index"] is None:
-                raise BridgeError("Mistral returned an incomplete tool call.")
+                raise BridgeError("The provider returned an incomplete tool call.")
             try:
                 value = json.loads(tool["arguments"] or "{}")
                 if not isinstance(value, dict):
                     raise ValueError()
             except ValueError as exc:
-                raise BridgeError("Mistral returned invalid tool arguments.") from exc
+                raise BridgeError("The provider returned invalid tool arguments.") from exc
         result = [{"type": "content_block_stop", "index": i} for i in sorted(self.open_indices)]
         result.append({"type": "message_delta", "delta": {"stop_reason": stop_reason(self.finish, bool(self.tools)), "stop_sequence": None}, "usage": self.usage})
         result.append({"type": "message_stop"})

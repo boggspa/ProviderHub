@@ -142,9 +142,9 @@ def _route_description(provider: dict) -> str:
     routes = provider.get("routes", [])
     slots = provider.get("slots", [])
     route_word = "route" if len(routes) == 1 else "routes"
-    slot_word = "slot" if len(slots) == 1 else "slots"
+    slot_word = "selection" if len(slots) == 1 else "selections"
     return (f"selected {route_word} {', '.join(routes)} "
-            f"(Claude {slot_word} {', '.join(slots)})")
+            f"({slot_word} {', '.join(slots)})")
 
 
 def _cache_state(settings: dict, root: Path, provider_id: str, current: datetime) -> dict:
@@ -531,7 +531,7 @@ def prepare_launch(
                 "route_not_advertised", missing_provider,
                 f"{provider['provider_name']} catalogue does not contain selected "
                 f"{'route' if len(missing) == 1 else 'routes'} {', '.join(missing)} "
-                f"(Claude {'slot' if len(missing_provider['slots']) == 1 else 'slots'} "
+                f"({'selection' if len(missing_provider['slots']) == 1 else 'selections'} "
                 f"{', '.join(missing_provider['slots'])}). Choose an exact model ID "
                 "advertised for this account.",
             )
@@ -690,4 +690,4 @@ def runtime_fingerprint_error(
     routes = sorted(set(settings["mappings"].values()))
     return ("The running gateway loaded an older catalogue snapshot for selected "
             f"routes {', '.join(routes)}. Restart the gateway after preparing these "
-            "routes, then launch Claude again.")
+            "routes, then launch the desktop app again.")

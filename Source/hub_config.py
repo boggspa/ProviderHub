@@ -96,7 +96,7 @@ def defaults(slots, vibe_model: str, port: int = 11436) -> dict:
     return {"schema_version": 3, "port": port,
             "mappings": {slot[0]: qualify("mistral", vibe_model) for slot in slots},
             "providers": connections, "branding_overrides": {},
-            "auto_stop": True, "auto_mode": False}
+            "auto_stop": True, "auto_mode": False, "codex_model": None}
 
 
 def normalize(value: dict, slots, vibe_model: str, port: int = 11436) -> dict:
@@ -145,6 +145,8 @@ def normalize(value: dict, slots, vibe_model: str, port: int = 11436) -> dict:
             requested.get("credential_revision", baseline["credential_revision"]))
         result["providers"][provider_id] = connection
     result["branding_overrides"] = validate_overrides(value.get("branding_overrides", {}))
+    if value.get("codex_model") is not None:
+        result["codex_model"] = qualify(*split_route(value["codex_model"]))
     for key, fallback in (("auto_stop", True), ("auto_mode", False)):
         requested = value.get(key, fallback)
         if type(requested) is not bool:

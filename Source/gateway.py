@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Menu app's private worker. Uses the existing Vibe Python runtime only."""
+"""Provider Hub's private worker for Python 3.11 or newer."""
 from __future__ import annotations
 
 import argparse
@@ -34,6 +34,10 @@ from providers import PROVIDERS, prepare_request, ProviderError
 from cerebras_replay import CerebrasReplayError, CerebrasStreamAdapter, sign_thinking, validate_messages
 from protocol import (StreamTranslator, estimated_tokens, model_catalog, resolve_model,
                       translate_request, translate_response)
+from responses_native import ResponseOwnership, handle_responses, NATIVE_PROVIDERS
+from codex_catalogue import catalogue_digest, choices as codex_choices, launch_settings as codex_launch_settings
+from codex_profile import CodexProfile
+from codex_runtime import qualify_runtime, runtime_signature
 
 MAX_BODY = 32 * 1024 * 1024
 
@@ -49,6 +53,8 @@ class Runtime:
             self.settings, root, model_specs=self.settings["_model_specs"])
         self.token = gateway_token(root)
         self.replay_key = private_token(root, "reasoning-signing-key")
+        self.response_ownership = ResponseOwnership(root)
+        self.codex_catalogue_digest = catalogue_digest(self.settings, self.catalogue)
         self.key = key
         self.source = "Provider-specific credentials"
         self.upstream_url = upstream_url
@@ -79,6 +85,17 @@ class Runtime:
             raise BridgeError("This route is not in the current provider catalogue. Refresh its models first.")
         return route
 
+    def provider_key(self, provider_id):
+        if self.key is not None:
+            return self.key
+        with self.lock:
+            cached = self.credential_cache.get(provider_id)
+        if cached is None:
+            cached = credentials(self.settings, provider_id)
+            with self.lock:
+                self.credential_cache[provider_id] = cached
+        return cached[0]
+
     def plan(self, payload):
         route = self.resolve_route(payload.get("model"))
         provider_id, upstream_model = split_route(route)
@@ -89,16 +106,7 @@ class Runtime:
             raise BridgeError(f"This conversation is above the provider's reported {context:,}-token context limit.")
         if payload.get("model", "").endswith("[1m]") and (type(context) is not int or context < 1000000):
             raise BridgeError("A 1M context window has not been established for this route.")
-        if self.key is not None:
-            key = self.key
-        else:
-            with self.lock:
-                cached = self.credential_cache.get(provider_id)
-            if cached is None:
-                cached = credentials(self.settings, provider_id)
-                with self.lock:
-                    self.credential_cache[provider_id] = cached
-            key, _ = cached
+        key = self.provider_key(provider_id)
         scope = connection_signature(provider_id, self.settings["providers"][provider_id])
         # Bind replay to the actual credential as well as the configured revision.
         # This covers Vibe/environment credential rotation between gateway runs.
@@ -129,6 +137,7 @@ class Runtime:
                     "last_error": self.last_error, "last_model": self.last_model,
                     "credential_source": self.source, "uptime_seconds": int(time.time() - self.started), "pid": os.getpid(),
                     "catalogue_fingerprint": self.catalogue_fingerprint,
+                    "codex_catalogue_digest": self.codex_catalogue_digest,
                     "providers": {key: dict(value) for key, value in self.provider_counts.items()}}
 
     def record(self, kind, model="", code=None, usage=None, model_unavailable=False, service_tier=None):
@@ -154,7 +163,7 @@ class Runtime:
                 self.last_error = ""
             elif kind == "error":
                 self.failed += 1
-                self.last_error = f"Request failed (HTTP {code}). See the message in Claude."
+                self.last_error = f"Request failed (HTTP {code}). See the message in the desktop client."
             self.last_model = model or self.last_model
             if model:
                 counters = self.provider_counts[split_route(model)[0]]
@@ -189,7 +198,7 @@ def error_type(status):
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "ProviderHub/0.3.2"
+    server_version = "ProviderHub/0.4.0"
 
     @property
     def runtime(self):
@@ -237,11 +246,13 @@ class Handler(BaseHTTPRequestHandler):
         if not self.allowed(health=path == "/_bridge/health"):
             return
         if path == "/_bridge/health":
-            self.json_response(200, {"service": "mistral-bridge", "version": "0.3.2"})
+            self.json_response(200, {"service": "mistral-bridge", "product": "Provider Hub", "version": "0.4.0"})
         elif path == "/_bridge/status":
             self.json_response(200, self.runtime.status())
         elif path == "/v1/models":
             self.json_response(200, model_catalog(self.runtime.settings))
+        elif path == "/_bridge/codex/models":
+            self.json_response(200, {"models": codex_choices(self.runtime.settings, self.runtime.catalogue)})
         else:
             self.error(404, "Unknown gateway endpoint.")
 
@@ -249,6 +260,8 @@ class Handler(BaseHTTPRequestHandler):
         if not self.allowed():
             return
         path = urllib.parse.urlsplit(self.path).path
+        if path == "/v1/responses":
+            return handle_responses(self)
         if path not in {"/v1/messages", "/v1/messages/count_tokens"}:
             self.error(404, "Unknown gateway endpoint.")
             return
@@ -561,13 +574,14 @@ def catalogue_command_result(settings, root, lifecycle):
         "catalog_summary": {key: value for key, value in inventory.items()
                             if key not in {"models", "raw"}},
         "provider_definitions": provider_presentations(settings),
+        "codex_models": codex_choices(settings, inventory),
         "catalogue_lifecycle": lifecycle,
     }
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=["inspect", "validate", "save", "discover", "refresh-all", "prepare-launch", "activate", "restore", "serve"])
+    parser.add_argument("command", choices=["inspect", "validate", "save", "discover", "refresh-all", "prepare-launch", "activate", "restore", "serve", "codex-status", "codex-prepare", "codex-activate", "codex-restore"])
     parser.add_argument("--provider", choices=list(PROVIDERS), default="mistral")
     parser.add_argument("--parent-pipe", action="store_true")
     args = parser.parse_args()
@@ -578,6 +592,44 @@ def main():
         return
     if args.command == "inspect":
         result = inspect_state(root)
+        settings = load_settings(root)
+        result.update(CodexProfile(root).status())
+        result["codex_models"] = codex_choices(settings, cached_catalogue(settings, root))
+    elif args.command == "codex-status":
+        settings = load_settings(root)
+        result = {**CodexProfile(root).status(), "codex_models": codex_choices(settings, cached_catalogue(settings, root))}
+    elif args.command == "codex-prepare":
+        settings = load_settings(root)
+        refresh_all(settings, root)
+        lifecycle = require_prepared(prepare_launch(codex_launch_settings(settings), root))
+        inventory = cached_catalogue(settings, root)
+        available = codex_choices(settings, inventory)
+        if settings.get("codex_model") not in {model["id"] for model in available}:
+            raise BridgeError("The selected model is not available in the Codex catalogue. Refresh its provider metadata or choose another listed model.")
+        qualification = qualify_runtime(settings, inventory)
+        prepared = {"catalogue_digest": catalogue_digest(settings, inventory), "model": settings["codex_model"],
+                    "runtime_signature": qualification["runtime_signature"]}
+        atomic_json(root / "codex-prepared.json", prepared)
+        result = {**catalogue_command_result(settings, root, lifecycle), **prepared}
+    elif args.command == "codex-activate":
+        settings = load_settings(root)
+        require_prepared(validate_prepared_launch(codex_launch_settings(settings), root))
+        inventory = cached_catalogue(settings, root)
+        expected = catalogue_digest(settings, inventory)
+        prepared = read_json(root / "codex-prepared.json")
+        if prepared != {"catalogue_digest": expected, "model": settings["codex_model"], "runtime_signature": runtime_signature()}:
+            raise BridgeError("Prepare the Codex model catalogue again before switching.")
+        request = urllib.request.Request(f"http://127.0.0.1:{settings['port']}/_bridge/status", headers={"Authorization": "Bearer " + gateway_token(root)})
+        try:
+            with urllib.request.urlopen(request, timeout=3) as response:
+                status = json.load(response)
+            if not status.get("running") or status.get("codex_catalogue_digest") != expected:
+                raise ValueError()
+        except Exception as exc:
+            raise BridgeError("Start the gateway with the prepared Codex catalogue before switching.") from exc
+        result = CodexProfile(root).activate(settings, inventory)
+    elif args.command == "codex-restore":
+        result = CodexProfile(root).restore()
     elif args.command in {"validate", "save"}:
         settings = validate_settings(json.load(sys.stdin))
         if args.command == "save":
@@ -587,12 +639,13 @@ def main():
         result = {"saved": args.command == "save", "settings": settings,
                   "friendly_names": model_labels(settings, inventory.get("models", [])), "models": inventory.get("models", []),
                   "catalog_summary": {k: v for k, v in inventory.items() if k != "models"},
-                  "provider_definitions": provider_presentations(settings)}
+                  "provider_definitions": provider_presentations(settings), "codex_models": codex_choices(settings, inventory)}
     elif args.command == "discover":
         settings = load_settings(root)
         source = discover_provider(settings, args.provider, root)
         inventory = cached_catalogue(settings, root)
         result = {"models": inventory["models"], "credential_source": source, "friendly_names": model_labels(settings, inventory["models"]),
+                  "codex_models": codex_choices(settings, inventory),
                   "catalog_summary": {k: v for k, v in inventory.items() if k not in {"models", "raw"}}}
     elif args.command in {"refresh-all", "prepare-launch"}:
         settings = load_settings(root)

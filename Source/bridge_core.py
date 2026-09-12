@@ -1,7 +1,7 @@
-"""Mistral Bridge: local configuration, credentials, and Claude profile transactions.
+"""Provider Hub: shared configuration, credentials, and Claude profile transactions.
 
 No transcript files are read or modified. Credentials never appear in JSON output.
-Requires Python 3.11+, supplied by the user's existing Vibe installation.
+Requires Python 3.11+. An existing Vibe installation is one supported runtime source.
 """
 from __future__ import annotations
 
@@ -220,7 +220,7 @@ def load_settings(root: Path | None = None) -> dict:
 
 
 def private_token(root: Path, name: str) -> str:
-    if name not in {"gateway-token", "reasoning-signing-key"}:
+    if name not in {"gateway-token", "reasoning-signing-key", "responses-encryption-key"}:
         raise BridgeError("Unknown private token purpose.")
     private_directory(root)
     path = root / name

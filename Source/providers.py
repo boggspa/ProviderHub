@@ -27,7 +27,7 @@ class ProviderError(ValueError):
     """A provider configuration, catalogue, or request cannot be used safely."""
 
 
-GATEWAY_USER_AGENT = "ProviderHub/0.3"
+GATEWAY_USER_AGENT = "ProviderHub/0.4"
 
 
 PROVIDERS = {
@@ -347,6 +347,12 @@ _MUSE_MODEL_METADATA = {
         "metadata_evidence": _MUSE_COOKBOOK,
     },
 }
+
+# Meta's general /v1/models list also returns these exact image-generation and
+# transcription IDs without capability fields. They have separate endpoints,
+# not the Messages/tool contract used by either coding harness. See the
+# first-party cookbook's 05_muse_image and 06_muse_voice sections.
+_MUSE_NON_CHAT_MODELS = {"muse-image-1.0", "muse-voice-transcribe-1.0"}
 
 # The list API does not return capability or context metadata.  Only exact IDs
 # covered by current Cerebras documentation receive these additions.  Every
@@ -1102,6 +1108,11 @@ def _models_from_api(provider_id: str, raw: dict, evidence: str, *, enriched=Non
             models.append(_grok_entry(card, (enriched or {}).get(identifier, {}), evidence))
         elif provider_id == "muse":
             capabilities = card.get("capabilities") if isinstance(card.get("capabilities"), dict) else {}
+            output = card.get("output_modalities")
+            if (identifier in _MUSE_NON_CHAT_MODELS
+                    or card.get("deprecated") is True or card.get("archived") is True
+                    or (isinstance(output, list) and "text" not in output)):
+                continue
             if any(capabilities.get(field) is False for field in (
                 "completion_chat", "chat_completion", "chat_completions", "messages",
             )):

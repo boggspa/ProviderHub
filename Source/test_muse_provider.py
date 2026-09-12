@@ -108,6 +108,20 @@ class MuseRegistryTests(unittest.TestCase):
 
 
 class MuseDiscoveryTests(unittest.TestCase):
+    def test_general_model_list_excludes_non_chat_and_retired_models(self):
+        result = discover("muse", {}, "key", transport=lambda _plan: {
+            "data": [
+                {"id": "muse-image-1.0"},
+                {"id": "muse-voice-transcribe-1.0"},
+                {"id": "future-image", "output_modalities": ["image"]},
+                {"id": "retired-spark", "deprecated": True},
+                {"id": "archived-spark", "archived": True},
+                {"id": "muse-spark-1.3"},
+                {"id": "future-chat", "input_modalities": ["text", "image"], "output_modalities": ["text"]},
+            ],
+        })
+        self.assertEqual({model["id"] for model in result["models"]}, {"muse-spark-1.3", "future-chat"})
+
     def test_authenticated_model_list_and_exact_documentation_enrichment(self):
         plans = []
 
