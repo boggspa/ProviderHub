@@ -127,6 +127,59 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(result["content"][0]["input"], {"path": "a"})
         self.assertEqual(result["usage"], {"input_tokens": 10, "output_tokens": 3})
 
+    def test_nonstream_predicted_tool_calls_recovered(self):
+        content = 'Bash{"command": "ls", "description": "list"}Bash{"command": "pwd", "description": "where"}'
+        response = {"choices": [{"message": {"content": content}, "finish_reason": "stop"}]}
+        result = translate_response(response, "claude-fable-5", {"Bash": "Bash"})
+        self.assertEqual([b["type"] for b in result["content"]], ["tool_use", "tool_use"])
+        self.assertEqual(result["content"][0]["input"], {"command": "ls", "description": "list"})
+        self.assertEqual(result["content"][1]["input"], {"command": "pwd", "description": "where"})
+        self.assertNotEqual(result["content"][0]["id"], result["content"][1]["id"])
+        self.assertEqual(result["stop_reason"], "tool_use")
+
+    def test_predicted_calls_unmap_names_and_keep_surrounding_prose(self):
+        content = 'I will read it. Read{"path": "a.txt"} Then fn_one {"x": 1} done.'
+        response = {"choices": [{"message": {"content": content}, "finish_reason": "stop"}]}
+        result = translate_response(response, "claude-fable-5", {"Read": "Read", "fn_one": "fn.one"})
+        blocks = result["content"]
+        self.assertEqual([b["type"] for b in blocks], ["text", "tool_use", "text", "tool_use", "text"])
+        self.assertEqual(blocks[0]["text"], "I will read it. ")
+        self.assertEqual(blocks[1]["name"], "Read")
+        self.assertEqual(blocks[1]["input"], {"path": "a.txt"})
+        self.assertEqual(blocks[2]["text"], " Then ")
+        self.assertEqual(blocks[3]["name"], "fn.one")
+        self.assertEqual(blocks[4]["text"], " done.")
+        self.assertEqual(result["stop_reason"], "tool_use")
+
+    def test_predicted_calls_stay_text_when_unconfident(self):
+        cases = [
+            ('Bash{"command": "ls"}', {"Read": "Read"}),            # unknown tool name
+            ('Bash{"command": }', {"Bash": "Bash"}),                # malformed JSON
+            ("Bash{1}", {"Bash": "Bash"}),                          # JSON is not an object
+            ('Bash{"command": "ls"}', {}),                          # no tools advertised
+        ]
+        for content, names in cases:
+            response = {"choices": [{"message": {"content": content}, "finish_reason": "stop"}]}
+            result = translate_response(response, "claude-fable-5", names)
+            self.assertEqual(result["content"], [{"type": "text", "text": content}], content)
+            self.assertEqual(result["stop_reason"], "end_turn")
+
+    def test_recovered_tool_call_round_trips_through_request_translation(self):
+        response = {"choices": [{"message": {"content": 'Read{"path": "a.txt"}'}, "finish_reason": "stop"}]}
+        result = translate_response(response, "claude-fable-5", {"Read": "Read"})
+        call = result["content"][0]
+        self.assertEqual(call["type"], "tool_use")
+        body = prompt(messages=[
+            {"role": "user", "content": "Read a.txt"},
+            {"role": "assistant", "content": [call]},
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": call["id"], "content": "alpha"}]}])
+        upstream, _ = translate_request(body, config())
+        assistant, tool_message = upstream["messages"][1], upstream["messages"][2]
+        self.assertEqual(assistant["tool_calls"][0]["function"]["name"], "Read")
+        self.assertEqual(json.loads(assistant["tool_calls"][0]["function"]["arguments"]), {"path": "a.txt"})
+        self.assertEqual(assistant["tool_calls"][0]["id"], tool_message["tool_call_id"])
+        self.assertEqual(len(tool_message["tool_call_id"]), 9)
+
     def test_stream_text_and_interleaved_partial_arguments(self):
         translator = StreamTranslator("claude-fable-5", {"fn_one": "fn.one", "fn_two": "fn.two"})
         events = translator.start()

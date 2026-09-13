@@ -293,14 +293,102 @@ def stop_reason(reason, has_tools=False):
     return "tool_use" if reason == "tool_calls" or has_tools else "end_turn"
 
 
+# Mistral sometimes answers tool turns by typing the invocation as plain text
+# (for example Bash{"command": ...}) instead of using the structured
+# tool_calls channel. Recovery converts those predicted calls, but only when
+# the shape is unambiguous, so prose about tool calls is never converted.
+_IDENTIFIER_RUN = re.compile(r"[A-Za-z_][A-Za-z0-9_-]*")
+# Give up holding an unbalanced candidate tail beyond this size so runaway
+# near-JSON prose cannot buffer the whole stream. Genuine arguments from Edit
+# and similar tools stay well under this.
+_MAX_TOOL_CALL_HOLD = 65536
+
+
+def _balanced_object_end(text: str, start: int):
+    """Index just past the JSON object opening at `start`, string-aware."""
+    depth, in_string, escaped = 0, False, False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+    return None
+
+
+def segment_predicted_calls(text: str, names: dict) -> list:
+    """Split assistant text into ("text", str) and ("tool", name, arguments) segments.
+
+    A tool segment is `Name{...}` (whitespace allowed before the brace) where
+    Name is a tool advertised for this request and {...} parses to a JSON
+    object. Anything else stays text.
+    """
+    segments, pos, cursor = [], 0, 0
+    while cursor < len(text):
+        match = _IDENTIFIER_RUN.search(text, cursor)
+        if not match:
+            break
+        name = match.group(0)
+        brace = match.end()
+        while brace < len(text) and text[brace] in " \t":
+            brace += 1
+        end = None
+        if name in names and brace < len(text) and text[brace] == "{":
+            end = _balanced_object_end(text, brace)
+        if end is not None:
+            try:
+                value = json.loads(text[brace:end])
+            except ValueError:
+                value = None
+            if isinstance(value, dict):
+                if match.start() > pos:
+                    segments.append(("text", text[pos:match.start()]))
+                segments.append(("tool", name, text[brace:end]))
+                pos = cursor = end
+                continue
+        cursor = match.end()
+    if pos < len(text):
+        segments.append(("text", text[pos:]))
+    return segments
+
+
+def _synthetic_tool_id(occurrence: int, name: str, arguments: str) -> str:
+    # Deterministic so tests reproduce, and unique per occurrence so identical
+    # repeated calls stay distinguishable. The desktop echoes this ID in its
+    # tool_result and the next request re-hashes it for the provider, so the
+    # recovered call becomes a structured call in provider history.
+    digest = hashlib.sha256(f"{occurrence}:{name}:{arguments}".encode()).hexdigest()
+    return "toolu_" + digest[:22]
+
+
 def translate_response(response, requested, names):
     try:
         choice = response["choices"][0]
         msg = choice["message"]
         content = []
+        converted = 0
         text = visible_text(msg.get("content"))
         if text:
-            content.append({"type": "text", "text": text})
+            for segment in segment_predicted_calls(text, names):
+                if segment[0] == "text":
+                    content.append({"type": "text", "text": segment[1]})
+                else:
+                    _, name, arguments = segment
+                    content.append({"type": "tool_use", "id": _synthetic_tool_id(converted, name, arguments),
+                                    "name": names.get(name, name), "input": json.loads(arguments)})
+                    converted += 1
         for tool in msg.get("tool_calls") or []:
             fn = tool["function"]
             args = fn.get("arguments", "{}")
@@ -308,7 +396,8 @@ def translate_response(response, requested, names):
                             "name": names.get(fn["name"], fn["name"]),
                             "input": json.loads(args) if isinstance(args, str) else args})
         return {"id": "msg_" + secrets.token_hex(12), "type": "message", "role": "assistant", "model": requested,
-                "content": content, "stop_reason": stop_reason(choice.get("finish_reason"), bool(msg.get("tool_calls"))),
+                "content": content,
+                "stop_reason": stop_reason(choice.get("finish_reason"), bool(msg.get("tool_calls")) or converted > 0),
                 "stop_sequence": None, "usage": usage_counts(response.get("usage", {}))}
     except (KeyError, IndexError, TypeError, ValueError) as exc:
         raise BridgeError("The provider returned a malformed response or invalid tool arguments.") from exc
