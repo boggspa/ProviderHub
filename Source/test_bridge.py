@@ -14,8 +14,8 @@ from unittest.mock import patch
 from bridge_core import (BridgeError, ClaudeProfile, PROFILE_ID, atomic_json, default_settings,
                          read_json, validate_settings)
 from gateway import Runtime, Server
-from protocol import (StreamTranslator, function_name, model_catalog, tool_id, translate_request,
-                      translate_response)
+from protocol import (StreamTranslator, estimated_tokens, function_name, model_catalog,
+                      rewrite_context_reminders, tool_id, translate_request, translate_response)
 from catalogue import build_catalogue, read_observations, route_specs
 
 
@@ -119,6 +119,59 @@ class ProtocolTests(unittest.TestCase):
         settings = config(); settings.pop("_model_specs")
         self.assertEqual(model_catalog(settings)["data"], [])
         with self.assertRaises(BridgeError): translate_request(prompt(), settings)
+
+    def test_desktop_context_reminders_rewrite_to_remaining_catalogue_context(self):
+        reminder = "<total_tokens>15000000 tokens left</total_tokens>"
+        window_line = "<ctx_window>Infinite tokens left, 12/15000000 used</ctx_window>"
+        payload = prompt(
+            system=reminder,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "hello\n" + window_line},
+                    {"type": "tool_result", "tool_use_id": "toolu_1", "content": reminder},
+                ],
+            }],
+        )
+        original = copy.deepcopy(payload)
+        estimate = estimated_tokens(payload)
+        remaining = 240000 - estimate
+        rewritten = rewrite_context_reminders(payload, 240000, estimate)
+        self.assertEqual(payload, original)
+        self.assertIsNot(rewritten, payload)
+        self.assertEqual(rewritten["system"], f"<total_tokens>{remaining} tokens left</total_tokens>")
+        self.assertEqual(
+            rewritten["messages"][0]["content"][0]["text"],
+            f"hello\n<ctx_window>{remaining} tokens left, {estimate}/240000 used</ctx_window>",
+        )
+        self.assertEqual(
+            rewritten["messages"][0]["content"][1]["content"],
+            f"<total_tokens>{remaining} tokens left</total_tokens>",
+        )
+        body = prompt(system=reminder, messages=[{"role": "user", "content": "hello\n" + reminder}])
+        remaining = 240000 - estimated_tokens(body)
+        result, _ = translate_request(body, config())
+        texts = [message["content"] for message in result["messages"] if isinstance(message["content"], str)]
+        self.assertEqual(texts[0], f"<total_tokens>{remaining} tokens left</total_tokens>")
+        self.assertEqual(texts[1], f"hello\n<total_tokens>{remaining} tokens left</total_tokens>")
+        self.assertNotIn("15000000", json.dumps(result))
+
+    def test_desktop_context_reminders_stay_put_without_catalogue_or_in_fences(self):
+        fenced = "```\n<total_tokens>15000000 tokens left</total_tokens>\n```"
+        payload = prompt(messages=[{"role": "user", "content": fenced}])
+        self.assertIs(rewrite_context_reminders(payload, 240000, 10), payload)
+        self.assertEqual(payload["messages"][0]["content"], fenced)
+        tagged = prompt(messages=[{"role": "user", "content": "<total_tokens>15000000 tokens left</total_tokens>"}])
+        self.assertIs(rewrite_context_reminders(tagged, None, 10), tagged)
+        self.assertIs(rewrite_context_reminders(tagged, "262144", 10), tagged)
+        prose = prompt(messages=[{"role": "user", "content": "see <total_tokens>15000000 tokens left</total_tokens> please"}])
+        self.assertIs(rewrite_context_reminders(prose, 240000, 10), prose)
+        indented = {"messages": [{"role": "user", "content": "   <total_tokens>15000000 tokens left</total_tokens>\r\nkeep"}]}
+        rewritten = rewrite_context_reminders(indented, 1000, 10)
+        self.assertEqual(
+            rewritten["messages"][0]["content"],
+            "   <total_tokens>990 tokens left</total_tokens>\r\nkeep",
+        )
 
     def test_nonstream_response_tools_and_usage(self):
         response = {"choices": [{"message": {"content": "", "tool_calls": [{"id": "123456789", "function": {"name": "Read", "arguments": '{"path":"a"}'}}]}, "finish_reason": "tool_calls"}], "usage": {"prompt_tokens": 10, "completion_tokens": 3}}
@@ -443,6 +496,17 @@ class GatewayTests(unittest.TestCase):
         log = (self.root / "activity.jsonl").read_text()
         for secret in ("TEST-SECRET-NEVER-LOG", "hello", "Connected"):
             self.assertNotIn(secret, log)
+
+    def test_desktop_token_reminders_are_rewritten_before_upstream(self):
+        reminder = "<total_tokens>15000000 tokens left</total_tokens>"
+        body = prompt(system=reminder, messages=[{"role": "user", "content": "hello"}])
+        remaining = 240000 - estimated_tokens(body)
+        status, data, _ = self.request("POST", "/v1/messages", body)
+        self.assertEqual(status, 200)
+        combined = json.dumps(MockMistral.requests[0])
+        self.assertNotIn("15000000", combined)
+        self.assertIn(f"<total_tokens>{remaining} tokens left</total_tokens>", combined)
+        self.assertEqual(self.runtime.plan(body)["compatibility"]["context_reminders"], "catalogue_remaining")
 
     def test_stream_is_valid_anthropic_sse(self):
         status, data, headers = self.request("POST", "/v1/messages", prompt(stream=True))

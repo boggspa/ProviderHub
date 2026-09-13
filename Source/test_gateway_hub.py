@@ -21,6 +21,7 @@ from bridge_core import SLOTS, atomic_json, default_settings
 from cerebras_replay import validate_messages
 from gateway import Runtime, Server
 from hub_config import connection_signature
+from protocol import estimated_tokens
 
 
 LOCAL_REQUEST_TEXT = "LOCAL-REQUEST-TEXT-MUST-NOT-BE-LOGGED"
@@ -500,6 +501,27 @@ class GatewayHubHTTPTests(unittest.TestCase):
         log = (self.root / "activity.jsonl").read_text()
         self.assertNotIn(LOCAL_REQUEST_TEXT, log)
         self.assertNotIn(PROVIDER_KEY, log)
+
+    def test_desktop_context_reminders_are_rewritten_on_native_routes(self):
+        self.start_gateway("deepseek", "deepseek-flash", {
+            "effort_modes": ["none", "low", "high", "max"],
+            "reasoning_history": "native",
+        })
+        reminder = "<total_tokens>15000000 tokens left</total_tokens>"
+        payload = {
+            "model": "claude-fable-5",
+            "max_tokens": 256,
+            "system": reminder,
+            "messages": [{"role": "user", "content": LOCAL_REQUEST_TEXT + "\n" + reminder}],
+        }
+        remaining = 131072 - estimated_tokens(payload)
+        status, raw, _ = self.request(payload)
+        self.assertEqual(status, 200, raw)
+        combined = json.dumps(MockProvider.requests[0])
+        self.assertNotIn("15000000", combined)
+        self.assertIn(f"<total_tokens>{remaining} tokens left</total_tokens>", combined)
+        self.assertIn(LOCAL_REQUEST_TEXT, combined)
+        self.assertEqual(self.runtime.plan(payload)["compatibility"]["context_reminders"], "catalogue_remaining")
 
     def test_native_sse_preserves_thinking_and_completes_tool_cycle(self):
         self.start_gateway("deepseek", "deepseek-flash", {

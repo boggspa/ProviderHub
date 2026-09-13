@@ -5,6 +5,7 @@ Unsupported content/tools fail explicitly instead of silently disappearing.
 """
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import math
@@ -145,6 +146,153 @@ def estimated_tokens(payload: dict) -> int:
     return max(1, math.ceil(len(json.dumps(subset, ensure_ascii=False).encode()) / 3) + images * 4096)
 
 
+# Claude Desktop / managed Claude Code injects standalone
+# <total_tokens> / <ctx_window> reminder lines. Default padded-countdown
+# mode is a 15,000,000-token task budget that re-anchors on every user
+# turn, so the figure is not the selected provider's context window.
+# When the catalogue has a known integer context, rewrite matching
+# standalone lines to remaining provider context. Unknown-context routes
+# and fenced code are left unchanged. The desktop's own session meter is
+# separate and is not modified here.
+_CONTEXT_REMINDER_TAGS = ("<total_tokens>", "<ctx_window>")
+_FENCE_LINE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
+_CONTEXT_REMINDER_LINE = re.compile(
+    r"^( {0,3})<(total_tokens|ctx_window)>"
+    r"(?:-?\d{1,12}|Infinite) tokens left"
+    r"(, \d{1,12}/\d{1,12} used)?"
+    r"</\2>"
+    r"([ \t]*)$"
+)
+_MAX_REMINDER_DIGITS = 12
+
+
+def _contains_context_reminder(value) -> bool:
+    if isinstance(value, str):
+        return any(tag in value for tag in _CONTEXT_REMINDER_TAGS)
+    if isinstance(value, list):
+        return any(_contains_context_reminder(item) for item in value)
+    if isinstance(value, dict):
+        return any(
+            _contains_context_reminder(item)
+            for key, item in value.items()
+            if key != "data"
+        )
+    return False
+
+
+def _rewrite_reminder_text(text: str, remaining: int, used: int, window: int) -> tuple[str, bool]:
+    if not isinstance(text, str) or not _contains_context_reminder(text):
+        return text, False
+    lines = text.split("\n")
+    fence = None
+    changed = False
+    rewritten = []
+    for line in lines:
+        raw = line[:-1] if line.endswith("\r") else line
+        marker = _FENCE_LINE.match(raw)
+        if marker:
+            token = marker.group(1)
+            if fence is None:
+                fence = token
+            elif token[0] == fence[0] and len(token) >= len(fence):
+                fence = None
+            rewritten.append(line)
+            continue
+        match = None if fence is not None else _CONTEXT_REMINDER_LINE.match(raw)
+        if match is None:
+            rewritten.append(line)
+            continue
+        indent, tag, used_suffix, trailing = match.group(1), match.group(2), match.group(3), match.group(4)
+        body = f"{remaining} tokens left"
+        if used_suffix:
+            body += f", {used}/{window} used"
+        replacement = f"{indent}<{tag}>{body}</{tag}>{trailing}"
+        if line.endswith("\r"):
+            replacement += "\r"
+        if replacement != line:
+            changed = True
+        rewritten.append(replacement)
+    return "\n".join(rewritten) if changed else text, changed
+
+
+def _rewrite_reminder_block(block: dict, remaining: int, used: int, window: int) -> bool:
+    kind = block.get("type")
+    if kind == "text" and isinstance(block.get("text"), str):
+        rewritten, changed = _rewrite_reminder_text(block["text"], remaining, used, window)
+        if changed:
+            block["text"] = rewritten
+        return changed
+    if kind == "tool_result" and "content" in block:
+        content = block["content"]
+        if isinstance(content, str):
+            rewritten, changed = _rewrite_reminder_text(content, remaining, used, window)
+            if changed:
+                block["content"] = rewritten
+            return changed
+        return _rewrite_reminder_content(content, remaining, used, window)
+    return False
+
+
+def _rewrite_reminder_content(value, remaining: int, used: int, window: int) -> bool:
+    if not isinstance(value, list):
+        return False
+    changed = False
+    for index, item in enumerate(value):
+        if isinstance(item, str):
+            rewritten, item_changed = _rewrite_reminder_text(item, remaining, used, window)
+            if item_changed:
+                value[index] = rewritten
+                changed = True
+        elif isinstance(item, dict) and _rewrite_reminder_block(item, remaining, used, window):
+            changed = True
+    return changed
+
+
+def rewrite_context_reminders(payload: dict, context, used):
+    """Rewrite Claude Desktop token-reminder lines to remaining catalogue context.
+
+    No-op when the catalogue has no known integer context, the payload has no
+    matching standalone reminder lines, or the replacement would not fit the
+    Desktop tag grammar. Matching lines inside fenced code are left intact.
+    """
+    if not isinstance(payload, dict):
+        return payload
+    if type(context) is not int or context <= 0:
+        return payload
+    if type(used) is not int or used < 0:
+        return payload
+    remaining = max(0, context - used)
+    limit = 10 ** _MAX_REMINDER_DIGITS
+    if remaining >= limit or used >= limit or context >= limit:
+        return payload
+    if not _contains_context_reminder(payload.get("system")) and not _contains_context_reminder(payload.get("messages")):
+        return payload
+    result = copy.deepcopy(payload)
+    changed = False
+    system = result.get("system")
+    if isinstance(system, str):
+        rewritten, system_changed = _rewrite_reminder_text(system, remaining, used, context)
+        if system_changed:
+            result["system"] = rewritten
+            changed = True
+    elif isinstance(system, list) and _rewrite_reminder_content(system, remaining, used, context):
+        changed = True
+    messages = result.get("messages")
+    if isinstance(messages, list):
+        for message in messages:
+            if not isinstance(message, dict):
+                continue
+            content = message.get("content")
+            if isinstance(content, str):
+                rewritten, item_changed = _rewrite_reminder_text(content, remaining, used, context)
+                if item_changed:
+                    message["content"] = rewritten
+                    changed = True
+            elif isinstance(content, list) and _rewrite_reminder_content(content, remaining, used, context):
+                changed = True
+    return result if changed else payload
+
+
 def translate_request(payload: dict, settings: dict):
     requested = payload.get("model", "")
     upstream = resolve_model(requested, settings["mappings"])
@@ -163,6 +311,7 @@ def translate_request(payload: dict, settings: dict):
     estimate = estimated_tokens(payload)
     if estimate >= spec["context"]:
         raise BridgeError(f"This conversation is above the model's reported {spec['context']:,}-token context limit. Compact it or start a new session.")
+    payload = rewrite_context_reminders(payload, spec["context"], estimate)
     messages = []
     if payload.get("system"):
         system = [content_part(p) for p in blocks(payload["system"])]
