@@ -13,6 +13,10 @@ from urllib.parse import quote
 BASE_URL = "https://openrouter.ai/api"
 MODELS_URL = BASE_URL + "/v1/models"
 DOCS = "https://openrouter.ai/docs/guides/routing/provider-selection"
+# OpenRouter identifies calling apps via HTTP-Referer and X-Title. Free-tier
+# models gated to "agentic harnesses" 403 without them.
+APP_TITLE = "Mistral Bridge"
+APP_URL = "https://github.com/chrisizatt/mistral-bridge"
 DESCRIPTOR = {
     "id": "openrouter", "name": "OpenRouter", "protocol": "anthropic",
     "default_base_url": BASE_URL, "default_region": "global", "regions": {"global": BASE_URL},
@@ -46,6 +50,10 @@ TAG = re.compile(r"[a-z0-9][a-z0-9._/-]{0,159}\Z", re.I)
 class OpenRouterError(ValueError):
     pass
 
+
+def app_headers() -> dict:
+    """OpenRouter app-identification headers required by free-tier agentic models."""
+    return {"HTTP-Referer": APP_URL, "X-Title": APP_TITLE}
 
 def integer(value):
     return value if type(value) is int and value > 0 else None
@@ -152,7 +160,8 @@ def _entries(card, details):
 def discover(connection, api_key, *, transport):
     if not isinstance(api_key, str) or not api_key.strip() or any(c in api_key for c in "\r\n"):
         raise OpenRouterError("Add an OpenRouter API key to load this catalogue.")
-    headers = {"Authorization": "Bearer " + api_key.strip(), "Accept": "application/json", "User-Agent": "ProviderHub/0.5"}
+    headers = {"Authorization": "Bearer " + api_key.strip(), "Accept": "application/json",
+                "User-Agent": "ProviderHub/0.5", **app_headers()}
     def fetch(url):
         return transport({"url": url, "headers": headers, "method": "GET", "provider_name": "OpenRouter"})
     raw = fetch(MODELS_URL)

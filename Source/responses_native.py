@@ -15,7 +15,7 @@ from hub_config import connection_signature, qualify, split_route
 from providers import PROVIDERS, ProviderError, _auth_headers, _chat_effort, validate_connection
 from responses_tools import flatten_tools, input_names, output_names, register
 from responses_bridge import ENVELOPE_PREFIX, MessagesResponsesAdapter, ReasoningEnvelope, to_messages
-from openrouter_provider import OpenRouterError, finalize as openrouter_finalize
+from openrouter_provider import OpenRouterError, finalize as openrouter_finalize, app_headers as openrouter_app_headers
 from effort_map import cap_high_end, map_effort, ollama_effort_aliases
 
 
@@ -109,6 +109,8 @@ def prepare_native(runtime, payload):
         route, connection_signature(provider_id, runtime.settings["providers"][provider_id]), key,
     ]).encode(), hashlib.sha256).hexdigest()
     headers = _auth_headers(provider_id, key, content_type=True)
+    if provider_id == "openrouter":
+        headers.update(openrouter_app_headers())
     if provider_id not in NATIVE_PROVIDERS:
         envelope = ReasoningEnvelope(runtime.root)
         translated = to_messages(body, route, spec, envelope, scope)
