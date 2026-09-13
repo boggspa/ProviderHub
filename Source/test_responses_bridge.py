@@ -13,7 +13,7 @@ from providers import ProviderError, prepare_request
 
 
 MODELS = {
-    "mistral": ("mistral-medium-latest", ["none", "high"]),
+    "mistral": ("mistral-medium-latest", ["none", "low", "medium", "high", "max"]),
     "kimi": ("kimi-for-coding", ["low", "high", "max"]),
     "mimo": ("mimo-v2.5-pro", ["none", "high"]),
     "deepseek": ("deepseek-flash", ["none", "low", "high", "max"]),

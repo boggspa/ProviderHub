@@ -201,7 +201,7 @@ class DiscoveryTests(unittest.TestCase):
         self.assertEqual(model["canonical_id"], "model")
         self.assertEqual(model["aliases"], ["model-v1", "model-latest"])
         self.assertEqual(model["context"], 262144)
-        self.assertEqual(model["effort_modes"], ["none", "high"])
+        self.assertEqual(model["effort_modes"], ["none", "low", "medium", "high", "max"])
 
     def test_mistral_equivalent_cards_group_and_conflicting_aliases_are_order_independent(self):
         def card(identifier, canonical, context, aliases):
@@ -611,7 +611,7 @@ class NativePlanTests(unittest.TestCase):
         }
         for requested, expected in (
             ("none", "none"), ("minimal", "low"), ("low", "low"),
-            ("medium", "high"), ("xhigh", "high"), ("max", "max"),
+            ("medium", "high"), ("xhigh", "high"), ("max", "max"), ("ultra", "max"),
         ):
             body = prepare_request(
                 "deepseek", {}, "key", text_prompt(output_config={"effort": requested}),
@@ -621,11 +621,6 @@ class NativePlanTests(unittest.TestCase):
                 self.assertEqual(body["output_config"]["effort"], expected)
                 self.assertEqual(
                     body["thinking"]["type"], "disabled" if expected == "none" else "enabled")
-        with self.assertRaises(ProviderError):
-            prepare_request(
-                "deepseek", {}, "key", text_prompt(output_config={"effort": "ultra"}),
-                "deepseek-flash", spec,
-            )
         with self.assertRaisesRegex(ProviderError, "conflicting"):
             prepare_request(
                 "deepseek", {}, "key",
@@ -737,7 +732,7 @@ class ChatPlanTests(unittest.TestCase):
         self.assertEqual(plan["url"], "https://api.mistral.ai/v1/chat/completions")
         self.assertEqual(plan["headers"]["Authorization"], "Bearer mistral-key")
         self.assertEqual(plan["body"]["model"], "mistral-model")
-        self.assertEqual(plan["body"]["reasoning_effort"], "none")
+        self.assertEqual(plan["body"]["reasoning_effort"], "low")
         self.assertIn("prompt_cache_key", plan["body"])
         assistant = next(message for message in plan["body"]["messages"] if message["role"] == "assistant")
         mapped_id = assistant["tool_calls"][0]["id"]

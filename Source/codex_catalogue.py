@@ -33,8 +33,6 @@ _EFFORT_DESCRIPTIONS = {
 
 
 def _reasoning_levels(provider_id, entry):
-    if provider_id == "ollama":
-        return []
     levels = []
     seen = set()
     for effort in entry.get("effort_modes") or []:

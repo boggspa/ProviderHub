@@ -16,6 +16,7 @@ from providers import PROVIDERS, ProviderError, _auth_headers, _chat_effort, val
 from responses_tools import flatten_tools, input_names, output_names, register
 from responses_bridge import ENVELOPE_PREFIX, MessagesResponsesAdapter, ReasoningEnvelope, to_messages
 from openrouter_provider import OpenRouterError, finalize as openrouter_finalize
+from effort_map import map_effort, ollama_effort_aliases
 
 
 NATIVE_PROVIDERS = frozenset({"grok", "ollama", "openrouter"})
@@ -132,6 +133,17 @@ def prepare_native(runtime, payload):
         tier = body.pop("service_tier", None)
         if tier not in (None, "auto", "default", "standard"):
             raise BridgeError("Ollama does not advertise a Responses Fast service tier.")
+        reasoning = body.get("reasoning")
+        if isinstance(reasoning, dict) and reasoning.get("effort") is not None:
+            requested_effort = reasoning.get("effort")
+            if not isinstance(requested_effort, str):
+                raise BridgeError("reasoning.effort must be text.")
+            supported = spec.get("effort_modes") or []
+            mapped = map_effort(requested_effort, supported, ollama_effort_aliases(model_id))
+            if mapped is None and supported:
+                raise BridgeError(f"Ollama model does not support reasoning effort {requested_effort!r}.")
+            if mapped is not None:
+                reasoning["effort"] = mapped
         url = connection["base_url"] + "/v1/responses"
     else:
         reasoning = body.get("reasoning")

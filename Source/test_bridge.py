@@ -119,7 +119,7 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(result["reasoning_effort"], "none")
 
     def test_effort_comes_from_claude_and_never_changes_the_model(self):
-        for native, expected in [("low", "none"), ("medium", "high"), ("high", "high"), ("xhigh", "high"), ("max", "high")]:
+        for native, expected in [("low", "low"), ("medium", "medium"), ("high", "high"), ("xhigh", "max"), ("max", "max")]:
             result, _ = translate_request(prompt(output_config={"effort": native}), config())
             self.assertEqual(result["reasoning_effort"], expected)
             self.assertEqual(result["model"], "test-model")

@@ -139,8 +139,8 @@ when needed. Each provider publishes only its known effort levels. Muse Spark 1.
 publishes Meta's current first-party ranks including distinct `xhigh` and `max`,
 without inventing Fast. Grok also
 has an explicitly labelled Priority service tier when that model advertises
-same-model Fast; Ollama entries do not claim effort or speed controls its
-metadata does not establish. ChatGPT's compact Power slider is not given fake
+same-model Fast. Thinking-capable Ollama models publish their think ranks;
+speed/Fast is still omitted unless a same-model Fast control exists. ChatGPT's compact Power slider is not given fake
 GPT-only ranks. After a custom catalogue model is selected, that control and
 the advanced Effort menu use `supported_reasoning_levels`; Fast uses the
 model's `service_tiers` when a same-model Fast control exists.

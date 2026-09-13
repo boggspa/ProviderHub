@@ -15,6 +15,7 @@ import secrets
 from bridge_core import BridgeError, SLOTS
 from model_names import friendly_model_name
 from catalogue import status_label
+from effort_map import MISTRAL_EFFORT_ALIASES, MISTRAL_REASONING_EFFORTS, map_effort
 
 
 def tool_id(value: str) -> str:
@@ -171,13 +172,13 @@ def model_effort(payload: dict, spec: dict):
     if (payload.get("thinking") or {}).get("type") == "disabled":
         return "none"
     requested = (payload.get("output_config") or {}).get("effort")
-    # Match Vibe's native Mistral backend: it currently uses none/high,
-    # with Low mapped to none and Medium/High/Max mapped to high.
-    if requested in {"none", "minimal", "low"}:
-        return "none"
-    if requested in {None, "medium", "high", "xhigh", "max"}:
-        return "high"
-    raise BridgeError("Unsupported effort value. Use Claude's standard effort control.")
+    supported = list(spec.get("effort_modes") or []) or list(MISTRAL_REASONING_EFFORTS)
+    if requested is None:
+        return "high" if "high" in supported else (supported[-1] if supported else None)
+    normalized = map_effort(requested, supported, MISTRAL_EFFORT_ALIASES)
+    if normalized is None:
+        raise BridgeError("Unsupported effort value. Use Claude's standard effort control.")
+    return normalized
 
 
 def estimated_tokens(payload: dict) -> int:

@@ -206,6 +206,7 @@ PROVIDERS = {
 from qwen_provider import DESCRIPTOR as QWEN_DESCRIPTOR, OFFICIAL_PATHS as QWEN_PATHS, QwenError, catalogue as qwen_catalogue, normalize_controls as qwen_controls
 from openrouter_provider import DESCRIPTOR as OPENROUTER_DESCRIPTOR, OFFICIAL_PATHS as OPENROUTER_PATHS, OpenRouterError, discover as openrouter_discover, finalize as openrouter_finalize, normalize_messages as openrouter_controls
 from gemini_provider import DESCRIPTOR as GEMINI_DESCRIPTOR, OFFICIAL_PATHS as GEMINI_PATHS, GeminiError, discover as gemini_discover, prepare_request as gemini_prepare_request, validate_connection as gemini_validate_connection
+from effort_map import DEEPSEEK_EFFORT_ALIASES, MISTRAL_EFFORT_ALIASES, MISTRAL_REASONING_EFFORTS, map_effort, ollama_effort_aliases, ollama_effort_modes
 
 PROVIDERS[QWEN_DESCRIPTOR["id"]] = QWEN_DESCRIPTOR
 PROVIDERS[OPENROUTER_DESCRIPTOR["id"]] = OPENROUTER_DESCRIPTOR
@@ -796,7 +797,7 @@ def _ollama_models(raw: dict, connection: dict, api_key: str | None, fetch) -> t
             tools=("tools" in capabilities) if capabilities is not None else None,
             vision=("vision" in capabilities) if capabilities is not None else None,
             reasoning=("thinking" in capabilities) if capabilities is not None else None,
-            effort_modes=[],
+            effort_modes=ollama_effort_modes(identifier, ("thinking" in capabilities) if capabilities is not None else None),
             fast_mode=False,
             source="ollama_daemon",
             evidence=show_plan["url"],
@@ -1111,7 +1112,7 @@ def _models_from_api(provider_id: str, raw: dict, evidence: str, *, enriched=Non
                 tools=capabilities.get("function_calling") if type(capabilities.get("function_calling")) is bool else None,
                 vision=capabilities.get("vision") if type(capabilities.get("vision")) is bool else None,
                 reasoning=capabilities.get("reasoning") if type(capabilities.get("reasoning")) is bool else None,
-                effort_modes=["none", "high"] if capabilities.get("reasoning") is True else [],
+                effort_modes=list(MISTRAL_REASONING_EFFORTS) if capabilities.get("reasoning") is True else [],
                 fast_mode=False,
                 source="provider_api",
                 evidence=evidence,
@@ -1490,13 +1491,8 @@ def _normalize_native_controls(
 
     if provider_id == "deepseek":
         if requested is not None:
-            aliases = {
-                "none": "none", "minimal": "low", "low": "low",
-                "medium": "high", "high": "high", "xhigh": "high", "max": "max",
-            }
-            normalized = aliases.get(requested)
-            supported = set(model_spec.get("effort_modes") or [])
-            if normalized is None or normalized not in supported:
+            normalized = map_effort(requested, model_spec.get("effort_modes") or [], DEEPSEEK_EFFORT_ALIASES)
+            if normalized is None:
                 raise ProviderError(
                     f"DeepSeek model does not support reasoning effort {requested!r}.")
             _write_thinking_type(
@@ -1510,19 +1506,32 @@ def _normalize_native_controls(
         if thinking_type == "enabled" and model_spec.get("reasoning") is not True:
             raise ProviderError("The Ollama model does not advertise thinking support.")
         if requested is not None:
-            if requested == "none":
-                target = "disabled"
+            supported = list(model_spec.get("effort_modes") or [])
+            if supported:
+                normalized = map_effort(requested, supported, ollama_effort_aliases(upstream_model))
+                if normalized is None:
+                    raise ProviderError(
+                        f"Ollama model does not support reasoning effort {requested!r}.")
+                if normalized == "none":
+                    _write_thinking_type(body, "disabled", descriptor["name"])
+                    _write_output_effort(body, None)
+                else:
+                    if model_spec.get("reasoning") is not True:
+                        raise ProviderError("The Ollama model does not advertise thinking support.")
+                    _write_thinking_type(body, "enabled", descriptor["name"])
+                    _write_output_effort(body, normalized)
+                    if normalized != requested:
+                        compatibility["reasoning_effort"] = f"{requested}_normalized_to_{normalized}"
+            elif requested == "none":
+                _write_thinking_type(body, "disabled", descriptor["name"])
+                _write_output_effort(body, None)
             elif requested in {"minimal", "low", "medium", "high", "xhigh", "max", "ultra"}:
                 if model_spec.get("reasoning") is not True:
                     raise ProviderError("The Ollama model does not advertise thinking support.")
-                target = "enabled"
+                _write_thinking_type(body, "enabled", descriptor["name"])
+                _write_output_effort(body, None)
             else:
                 raise ProviderError(f"Ollama does not support reasoning effort {requested!r}.")
-            _write_thinking_type(body, target, descriptor["name"])
-            # Ollama documents the Anthropic thinking switch, but its daemon
-            # does not advertise distinct effort levels. Preserve any other
-            # output_config fields while translating effort to that switch.
-            _write_output_effort(body, None)
         return compatibility
     return compatibility
 
@@ -1774,11 +1783,15 @@ def _chat_effort(provider_id: str, payload: dict, model_spec: dict):
     disabled = thinking.get("type") == "disabled"
     requested = output_config.get("effort")
     if provider_id == "mistral":
-        if disabled or requested in {"none", "minimal", "low"}:
-            return "none"
-        if requested in {None, "medium", "high", "xhigh", "max"}:
-            return "high"
-        raise ProviderError("Unsupported Mistral reasoning effort.")
+        supported = list(model_spec.get("effort_modes") or []) or list(MISTRAL_REASONING_EFFORTS)
+        if disabled:
+            requested = "none"
+        if requested is None:
+            return "high" if "high" in supported else (supported[-1] if supported else None)
+        normalized = map_effort(requested, supported, MISTRAL_EFFORT_ALIASES)
+        if normalized is None:
+            raise ProviderError("Unsupported Mistral reasoning effort.")
+        return normalized
     if provider_id == "cerebras":
         supported = model_spec.get("effort_modes") or []
         if disabled:

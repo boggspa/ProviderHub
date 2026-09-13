@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 
 from model_names import friendly_model_name
+from effort_map import MISTRAL_REASONING_EFFORTS
 
 
 def now_iso():
@@ -90,9 +91,7 @@ def build_catalogue(raw, settings, vibe=None, observations=None):
             "id": selected, "canonical_id": canonical, "display_name": label,
             "context": context, "aliases": sorted(ids), "tools": tools,
             "vision": vision, "reasoning": reasoning,
-            # These are the actual levels used by the installed Vibe Mistral
-            # backend. Do not invent separate models for UI effort positions.
-            "effort_modes": ["none", "high"] if reasoning else [],
+            "effort_modes": list(MISTRAL_REASONING_EFFORTS) if reasoning else [],
             "fast_mode": False,
             "inference_status": observation.get("status", "advertised"),
             "last_success": observation.get("last_success"),

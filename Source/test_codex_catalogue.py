@@ -205,7 +205,10 @@ class EffortAndFastProjectionTests(unittest.TestCase):
             ["minimal", "low", "medium", "high", "xhigh", "max"],
         )
         self.assertEqual(rows["muse/muse-spark-1.3"]["service_tiers"][0]["id"], "fast")
-        self.assertEqual(rows["ollama/thinker:latest"]["supported_reasoning_levels"], [])
+        self.assertEqual(
+            [entry["effort"] for entry in rows["ollama/thinker:latest"]["supported_reasoning_levels"]],
+            ["none", "high"],
+        )
         self.assertEqual(rows["ollama/thinker:latest"]["service_tiers"], [])
 
     def test_models_without_high_default_to_their_top_advertised_rank(self):
