@@ -359,9 +359,9 @@ still treats `xhigh` as `high` and never mentions `max`; Hub follows the current
 
 **Signed distribution**
 
-Apple accepted **0.5.0 build 12** submission
-`428429c2-e200-4cdd-b871-71b4837077de`, created at
-`2026-09-13T13:18:07.679Z`. It is signed with Developer ID Application
+Apple accepted **0.5.0 build 13** submission
+`67958106-b904-473c-b5cb-be84743be4ae`, created at
+`2026-09-13T17:00:25.830Z`. It is signed with Developer ID Application
 `Christopher Izatt (8CZML8FK2D)` (certificate SHA-1
 `A5D4019DBFEDE7727487D49BD08257C46A72E7E0`). All twelve embedded native
 components and the app use hardened runtime. The notarization ticket was
@@ -375,10 +375,14 @@ files. The Swift `omitSystem`/`omitTools` bindings required explicit `self`
 captures so `Source/build.sh` compiles with Swift 5.
 
 The notarized build was copied to `/Applications/Provider Hub Preview.app` and
-launched from that path. Gatekeeper accepted the installed copy as
+launched twice from that path. Gatekeeper accepted the installed copy as
 `Notarized Developer ID`. The process is `MistralBridge` from the Applications
-bundle, version 0.5.0 build 12. Claude Desktop and Codex were not restarted as
+bundle, version 0.5.0 build 13. Claude Desktop and Codex were not restarted as
 part of this packaging pass.
+
+The earlier 0.5.0 build 12 submission `428429c2-e200-4cdd-b871-71b4837077de`
+(`2026-09-13T13:18:07.679Z`) remains accepted; a later source rebuild does not
+inherit that ticket.
 
 The earlier 0.5.0 build 11 submission `76a51b1d-8569-4bf4-b64d-0233fb931319`
 (`2026-09-13T03:05:34.268Z`) remains accepted; a later source rebuild does not

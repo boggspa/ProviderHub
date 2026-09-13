@@ -260,7 +260,7 @@ the supplied clean runtime.
 `Source/package_macos.py` accepts a Developer ID Application identity, signs
 embedded native components and the app, verifies the signature, and creates a
 zip archive. It can optionally submit that archive using a user-provided
-`notarytool` Keychain profile. The final 0.5.0 build 12 submission is recorded
+`notarytool` Keychain profile. The final 0.5.0 build 13 submission is recorded
 in `VERIFICATION.md`. Its ticket is stapled, strict signature
 verification passes, and Gatekeeper identifies it as `Notarized Developer ID`.
 The recipient zip is recreated after stapling. A later source rebuild requires
