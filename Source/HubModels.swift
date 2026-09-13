@@ -120,3 +120,51 @@ struct ProviderMark: View {
         }.frame(width: size, height: size).accessibilityLabel(presentation.displayProvider)
     }
 }
+
+// MARK: - Devin agent-session models
+
+struct DevinSessionSummary: Decodable, Identifiable, Equatable {
+    var id: String
+    var org_id: String?
+    var task: String?
+    var mode: String?
+    var state: String?
+    var created_at: String?
+    var updated_at: String?
+    var completed_at: String?
+    var error: String?
+    var tags: [String]?
+    var metadata: [String: String]?
+
+    var displayTitle: String { task ?? id }
+    var isActive: Bool { state == "pending" || state == "running" }
+}
+
+struct DevinModeOption: Decodable, Identifiable, Equatable {
+    var id: String
+    var display_name: String?
+    var description: String?
+    var capabilities: [String: Bool]?
+
+    var title: String { display_name ?? id }
+}
+
+struct DevinOrganizationOption: Decodable, Identifiable, Equatable {
+    var id: String
+    var name: String?
+    var slug: String?
+
+    var title: String { name ?? slug ?? id }
+}
+
+struct DevinCatalogue: Decodable {
+    var provider_id: String?
+    var modes: [DevinModeOption]
+    var warnings: [String]?
+    var documentation: String?
+}
+
+struct DevinSessionListResponse: Decodable {
+    var data: [DevinSessionSummary]
+    var cursor: String?
+}

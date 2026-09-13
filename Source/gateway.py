@@ -31,6 +31,14 @@ from catalogue_lifecycle import (CataloguePreparationError, catalogue_fingerprin
 from catalogue import build_catalogue, read_observations
 from hub_config import connection_signature, provider_presentations, qualify, split_route
 from providers import PROVIDERS, prepare_request, ProviderError
+from devin_agent import (DESCRIPTOR as DEVIN_DESCRIPTOR, DevinAgentError,
+                         create_session as devin_create_session,
+                         list_sessions as devin_list_sessions,
+                         get_session as devin_get_session,
+                         archive_session as devin_archive_session,
+                         cancel_session as devin_cancel_session,
+                         submit_task as devin_submit_task,
+                         catalogue as devin_catalogue)
 from cerebras_replay import CerebrasReplayError, CerebrasStreamAdapter, sign_thinking, validate_messages
 from gemini_provider import GeminiError, GeminiStreamAdapter, translate_response as translate_gemini_response, _estimated_input_tokens as estimated_gemini_tokens
 from protocol import (StreamTranslator, apply_mapping_options, compact_conversation, estimated_tokens, mapping_options_for, validate_mistral_roles,
@@ -250,6 +258,159 @@ class Handler(BaseHTTPRequestHandler):
     def error(self, status, message):
         self.json_response(status, {"type": "error", "error": {"type": error_type(status), "message": message}})
 
+    # ------------------------------------------------------------------
+    # Devin agent-session endpoints. Devin is a session-based agent
+    # (protocol "agent_session"), not a chat-completions provider, so these
+    # routes sit beside the LLM routes instead of flowing through plan().
+    # ------------------------------------------------------------------
+    def _devin_key(self):
+        # A test-harness key override wins, exactly like Runtime.provider_key().
+        if self.runtime.key is not None:
+            return self.runtime.key
+        key, _source = credentials(self.runtime.settings, "devin")
+        return key
+
+    def _devin_org_id(self):
+        connection = self.runtime.settings.get("providers", {}).get("devin", {})
+        org_id = connection.get("org_id")
+        if not org_id:
+            raise DevinAgentError("Devin requires an organization ID. Set one in the provider connection.")
+        return org_id
+
+    def _devin_transport(self):
+        # Reuse the gateway's own HTTPS outbound path so Devin session calls
+        # share the same TLS context and local-only policy as model requests.
+        # A test-harness upstream_url override rewrites the target exactly as
+        # plan() does, without touching the real api.devin.ai default.
+        override = self.runtime.upstream_url
+        def transport(plan):
+            method = plan.get("method", "GET")
+            body = plan.get("body")
+            encoded = json.dumps(body, ensure_ascii=False).encode() if body is not None else None
+            url = plan["url"]
+            if override is not None:
+                base = override.rstrip("/")
+                parsed_plan = urllib.parse.urlsplit(url)
+                url = base + parsed_plan.path + ("?" + parsed_plan.query if parsed_plan.query else "")
+            parsed = urllib.parse.urlsplit(url)
+            if parsed.scheme == "https":
+                connection = http.client.HTTPSConnection(parsed.hostname, parsed.port or 443, timeout=180, context=ssl_context())
+            elif parsed.scheme == "http" and ipaddress.ip_address(parsed.hostname).is_loopback:
+                connection = http.client.HTTPConnection(parsed.hostname, parsed.port, timeout=10)
+            else:
+                raise DevinAgentError("Devin requests require HTTPS on the official endpoint.")
+            endpoint = parsed.path + ("?" + parsed.query if parsed.query else "")
+            try:
+                connection.request(method, endpoint, encoded, plan.get("headers", {}))
+                response = connection.getresponse()
+                raw = response.read(MAX_BODY + 1)
+                if len(raw) > MAX_BODY:
+                    raise DevinAgentError("Devin response exceeded the response limit.")
+                if response.status >= 400:
+                    raise DevinAgentError(f"Devin returned HTTP {response.status}: {raw[:200].decode('utf-8', 'replace')}")
+                if not raw:
+                    return {}
+                return json.loads(raw)
+            finally:
+                connection.close()
+        return transport
+
+    def _read_json_body(self):
+        if self.headers.get("Transfer-Encoding"):
+            self.error(400, "Use a Content-Length request body.")
+            return None
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            if not 0 < length <= MAX_BODY:
+                self.error(413, "Request body is empty or above 32 MB.")
+                return None
+            body = self.rfile.read(length)
+            if len(body) != length:
+                self.error(400, "The request body was interrupted.")
+                return None
+            payload = json.loads(body)
+            if not isinstance(payload, dict):
+                self.error(400, "The request must be a JSON object.")
+                return None
+            return payload
+        except (ValueError, TypeError) as exc:
+            self.error(400, str(exc))
+            return None
+
+    def _handle_list_agent_sessions(self):
+        try:
+            key = self._devin_key()
+            org_id = self._devin_org_id()
+            sessions, cursor = devin_list_sessions(key, org_id, transport=self._devin_transport())
+        except DevinAgentError as exc:
+            self.error(400, str(exc))
+            return
+        self.json_response(200, {"data": [session.to_dict() for session in sessions], "cursor": cursor})
+
+    def _handle_get_agent_session(self, path):
+        session_id = path[len("/v1/agents/sessions/"):].strip("/")
+        if not session_id or "/" in session_id:
+            self.error(404, "Unknown agent endpoint.")
+            return
+        try:
+            key = self._devin_key()
+            org_id = self._devin_org_id()
+            session = devin_get_session(key, org_id, session_id, transport=self._devin_transport())
+        except DevinAgentError as exc:
+            self.error(400, str(exc))
+            return
+        self.json_response(200, session.to_dict())
+
+    def _handle_create_agent_session(self):
+        payload = self._read_json_body()
+        if payload is None:
+            return
+        try:
+            key = self._devin_key()
+            org_id = self._devin_org_id()
+            task = payload.get("task")
+            mode = payload.get("mode", "normal")
+            tags = payload.get("tags")
+            metadata = payload.get("metadata")
+            session = devin_create_session(key, org_id, task, mode=mode, tags=tags, metadata=metadata,
+                                           transport=self._devin_transport())
+        except (DevinAgentError, TypeError) as exc:
+            self.error(400, str(exc))
+            return
+        self.json_response(200, session.to_dict())
+
+    def _handle_agent_session_action(self, path):
+        remainder = path[len("/v1/agents/sessions/"):].strip("/")
+        parts = remainder.split("/") if remainder else []
+        if not parts:
+            self.error(404, "Unknown agent endpoint.")
+            return
+        session_id = parts[0]
+        action = parts[1] if len(parts) > 1 else ""
+        payload = {}
+        content_length = self.headers.get("Content-Length")
+        if self.command == "POST" and content_length and int(content_length) > 0:
+            payload = self._read_json_body() or {}
+        try:
+            key = self._devin_key()
+            org_id = self._devin_org_id()
+            if action == "cancel" or action == "archive":
+                session = (devin_cancel_session(key, org_id, session_id, transport=self._devin_transport())
+                           if action == "cancel"
+                           else devin_archive_session(key, org_id, session_id, transport=self._devin_transport()))
+            elif action == "messages" or action == "tasks":
+                message = (payload or {}).get("content") or (payload or {}).get("message")
+                result = devin_submit_task(key, org_id, session_id, message, transport=self._devin_transport())
+                self.json_response(200, result if isinstance(result, dict) else {"data": result})
+                return
+            else:
+                self.error(404, "Unknown agent endpoint.")
+                return
+        except DevinAgentError as exc:
+            self.error(400, str(exc))
+            return
+        self.json_response(200, session.to_dict())
+
     def allowed(self, *, health=False):
         host = self.headers.get("Host", "").split(":")[0]
         if host not in {"127.0.0.1", "localhost"} or self.headers.get("Origin"):
@@ -276,6 +437,13 @@ class Handler(BaseHTTPRequestHandler):
             self.json_response(200, model_catalog(self.runtime.settings))
         elif path == "/_bridge/codex/models":
             self.json_response(200, {"models": codex_choices(self.runtime.settings, self.runtime.catalogue)})
+        elif path == "/v1/agents/sessions":
+            return self._handle_list_agent_sessions()
+        elif path.startswith("/v1/agents/sessions/"):
+            return self._handle_get_agent_session(path)
+        elif path == "/v1/agents/catalogue":
+            modes, warnings, docs = devin_catalogue()
+            self.json_response(200, {"provider_id": "devin", "modes": modes, "warnings": warnings, "documentation": docs})
         else:
             self.error(404, "Unknown gateway endpoint.")
 
@@ -285,6 +453,10 @@ class Handler(BaseHTTPRequestHandler):
         path = urllib.parse.urlsplit(self.path).path
         if path == "/v1/responses":
             return handle_responses(self)
+        if path == "/v1/agents/sessions":
+            return self._handle_create_agent_session()
+        if path.startswith("/v1/agents/sessions/"):
+            return self._handle_agent_session_action(path)
         if path not in {"/v1/messages", "/v1/messages/count_tokens"}:
             self.error(404, "Unknown gateway endpoint.")
             return

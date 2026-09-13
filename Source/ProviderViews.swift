@@ -80,7 +80,7 @@ struct ProviderPage: View {
                         }.pickerStyle(.segmented)
                         if connection.credential_mode == "keychain" {
                             HStack {
-                                SecureField(provider.id == "muse" ? "Meta Model API key" : "Provider API key", text: $model.secretDraft).textFieldStyle(.roundedBorder)
+                                SecureField(provider.id == "muse" ? "Meta Model API key" : (provider.id == "devin" ? "Devin API key (cog_ / pat_ / apk_)" : "Provider API key"), text: $model.secretDraft).textFieldStyle(.roundedBorder)
                                 Button("Save key") { Task { await model.saveKey() } }.disabled(model.busy || model.secretDraft.isEmpty)
                             }
                             Text("Stored in Provider Hub’s macOS Keychain entry. Keys stay out of settings and logs.").font(.caption).foregroundStyle(.secondary)
@@ -118,6 +118,10 @@ struct ProviderPage: View {
                         Text("Use a Gemini API key from Google AI Studio. Model access and usage follow its billing project. This connection uses the public API, independently of Gemini CLI or Google app subscriptions.")
                             .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                         Text("Gemini replies currently appear after generation finishes, so the information needed to continue the conversation can be retained. The connection stays active while it waits.")
+                            .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    }
+                    if provider.id == "devin" {
+                        Text("Devin is a session-based AI agent, not a chat model. Use a Devin API key (cog_, pat_, or apk_ prefix). Sessions run in modes: normal, fast, lite, ultra, fusion.")
                             .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                     }
                     HStack {
@@ -224,6 +228,7 @@ struct ProviderPage: View {
         case "qwen-token-plan": return "Token Plan subscription API key"
         case "openrouter": return "OpenRouter API key · Curated models"
         case "gemini": return "Google AI Studio API key"
+        case "devin": return "Devin API key · Session-based agents"
         default: return "Provider model API"
         }
     }

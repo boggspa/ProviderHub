@@ -17,10 +17,10 @@ struct ActivityEntry: Identifiable {
 }
 
 enum Page: String, CaseIterable, Identifiable {
-    case connection = "Providers", models = "Models", claude = "Claude", codex = "Codex / ChatGPT", activity = "Activity"
+    case connection = "Providers", models = "Models", agents = "Agents", claude = "Claude", codex = "Codex / ChatGPT", activity = "Activity"
     var id: String { rawValue }
     var icon: String {
-        switch self { case .connection: return "point.3.connected.trianglepath.dotted"; case .models: return "square.stack.3d.up"; case .claude: return "macwindow"; case .codex: return "terminal"; case .activity: return "waveform.path" }
+        switch self { case .connection: return "point.3.connected.trianglepath.dotted"; case .models: return "square.stack.3d.up"; case .agents: return "sparkles.rectangle.stack"; case .claude: return "macwindow"; case .codex: return "terminal"; case .activity: return "waveform.path" }
     }
 }
 
@@ -74,6 +74,15 @@ final class BridgeModel: ObservableObject {
     @Published var providerSummaries: [String: ProviderSummary] = [:]
     @Published var showRoutingIDs = false
     @Published var runtimeFound = true
+    @Published var devinSessions: [DevinSessionSummary] = []
+    @Published var devinModes: [DevinModeOption] = []
+    @Published var devinOrganizations: [DevinOrganizationOption] = []
+    @Published var devinOrgId = ""
+    @Published var devinSessionTask = ""
+    @Published var devinSessionMode = "normal"
+    @Published var devinLoading = false
+    @Published var devinError = ""
+    @Published var devinNotice = ""
     var gatewayProcess: Process?
     var parentPipe: Pipe?
     var processBuffer = Data()
@@ -722,6 +731,89 @@ final class BridgeModel: ObservableObject {
         if entries.count != activity.count || entries.first?.time != activity.first?.time || entries.first?.event != activity.first?.event { activity = entries }
     }
 
+    // MARK: - Devin agent sessions
+
+    func devinRequest(path: String, method: String = "GET", body: [String: Any]? = nil) throws -> URLRequest {
+        try authorizedRequest(path: path, method: method, body: body)
+    }
+
+    func devinAgentCall<T: Decodable>(_ type: T.Type, path: String, method: String = "GET", body: [String: Any]? = nil) async throws -> T {
+        let request = try devinRequest(path: path, method: method, body: body)
+        let (data, response) = try await URLSession.shared.data(for: request)
+        if let http = response as? HTTPURLResponse, http.statusCode >= 300 {
+            let object = (try? JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
+            let message = (object["error"] as? [String: Any])?["message"] as? String ?? "Devin request failed (HTTP \(http.statusCode))."
+            throw WorkerError(message: message)
+        }
+        return try JSONDecoder().decode(type, from: data)
+    }
+
+    func devinFetchCatalogue() async {
+        do {
+            let catalogue: DevinCatalogue = try await devinAgentCall(DevinCatalogue.self, path: "/v1/agents/catalogue")
+            devinModes = catalogue.modes
+            devinNotice = catalogue.warnings?.first ?? ""
+        } catch {
+            devinError = error.localizedDescription
+            // Fall back to the static five modes when the gateway is offline.
+            if devinModes.isEmpty {
+                devinModes = [DevinModeOption(id: "normal"), DevinModeOption(id: "fast"), DevinModeOption(id: "lite"), DevinModeOption(id: "ultra"), DevinModeOption(id: "fusion")]
+            }
+        }
+    }
+
+    func devinLoadSessions() async {
+        devinLoading = true; defer { devinLoading = false }
+        do {
+            let list: DevinSessionListResponse = try await devinAgentCall(DevinSessionListResponse.self, path: "/v1/agents/sessions")
+            devinSessions = list.data.sorted { ($0.created_at ?? "") > ($1.created_at ?? "") }
+            devinError = ""
+        } catch {
+            devinError = error.localizedDescription
+        }
+    }
+
+    func devinCreateSession() async {
+        guard !devinSessionTask.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            devinError = "Enter a task description first."
+            return
+        }
+        devinLoading = true; defer { devinLoading = false }
+        do {
+            var body: [String: Any] = ["task": devinSessionTask, "mode": devinSessionMode]
+            if !devinOrgId.isEmpty { body["org_id"] = devinOrgId }
+            let created: DevinSessionSummary = try await devinAgentCall(DevinSessionSummary.self, path: "/v1/agents/sessions", method: "POST", body: body)
+            devinSessionTask = ""
+            devinError = ""
+            devinNotice = "Session \(created.id) started in \(created.mode ?? devinSessionMode) mode."
+            await devinLoadSessions()
+        } catch {
+            devinError = error.localizedDescription
+        }
+    }
+
+    func devinCancel(_ session: DevinSessionSummary) async {
+        do {
+            let request = try devinRequest(path: "/v1/agents/sessions/\(session.id)/cancel", method: "POST")
+            _ = try await URLSession.shared.data(for: request)
+            devinNotice = "Session \(session.id) cancelled."
+            await devinLoadSessions()
+        } catch {
+            devinError = error.localizedDescription
+        }
+    }
+
+    func devinArchive(_ session: DevinSessionSummary) async {
+        do {
+            let request = try devinRequest(path: "/v1/agents/sessions/\(session.id)/archive", method: "POST")
+            _ = try await URLSession.shared.data(for: request)
+            devinNotice = "Session \(session.id) archived."
+            await devinLoadSessions()
+        } catch {
+            devinError = error.localizedDescription
+        }
+    }
+
     func saveKey() async {
         guard !busy, let provider = providerDefinitions.first(where: { $0.id == selectedProvider }), let account = provider.credential_account else { return }
         let providerID = provider.id
@@ -834,6 +926,7 @@ struct BridgeWindow: View {
                         switch model.page {
                         case .connection: ProviderPage(model: model)
                         case .models: modelsPage
+                        case .agents: DevinAgentsPage(model: model)
                         case .claude: claudePage
                         case .codex: CodexPage(model: model)
                         case .activity: activityPage
@@ -867,6 +960,7 @@ struct BridgeWindow: View {
         switch model.page {
         case .connection: return "Connect model providers for your desktop apps."
         case .models: return "Choose the provider and model behind each Claude option."
+        case .agents: return "Create and monitor Devin agent sessions."
         case .claude: return "Launch Claude with your provider configuration."
         case .codex: return "Choose a provider model for Codex / ChatGPT Desktop."
         case .activity: return "Requests through your local gateway."

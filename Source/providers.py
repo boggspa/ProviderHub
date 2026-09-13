@@ -205,7 +205,7 @@ PROVIDERS = {
 # Canonical paths accepted from settings.  A user may paste a provider base URL
 # or its documented request endpoint; both normalize to the same safe base.
 from qwen_provider import DESCRIPTOR as QWEN_DESCRIPTOR, OFFICIAL_PATHS as QWEN_PATHS, QwenError, catalogue as qwen_catalogue, normalize_controls as qwen_controls
-from openrouter_provider import DESCRIPTOR as OPENROUTER_DESCRIPTOR, OFFICIAL_PATHS as OPENROUTER_PATHS, OpenRouterError, discover as openrouter_discover, finalize as openrouter_finalize, normalize_messages as openrouter_controls
+from openrouter_provider import DESCRIPTOR as OPENROUTER_DESCRIPTOR, OFFICIAL_PATHS as OPENROUTER_PATHS, OpenRouterError, discover as openrouter_discover, finalize as openrouter_finalize, normalize_messages as openrouter_controls, app_headers as openrouter_app_headers
 from gemini_provider import DESCRIPTOR as GEMINI_DESCRIPTOR, OFFICIAL_PATHS as GEMINI_PATHS, GeminiError, discover as gemini_discover, prepare_request as gemini_prepare_request, validate_connection as gemini_validate_connection
 from devin_agent import DESCRIPTOR as DEVIN_DESCRIPTOR, OFFICIAL_PATHS as DEVIN_PATHS, DevinAgentError, catalogue as devin_catalogue, validate_connection as devin_validate_connection
 from effort_map import CEREBRAS_EFFORT_ALIASES, DEEPSEEK_EFFORT_ALIASES, MISTRAL_EFFORT_ALIASES, MISTRAL_REASONING_EFFORTS, cap_high_end, map_effort, ollama_effort_aliases, ollama_effort_modes
@@ -519,7 +519,19 @@ def validate_connection(provider_id: str, connection: dict | None) -> dict:
         derived_region, normalized_base = _official_base(provider_id, value)
     if requested_region is not None and requested_region != derived_region:
         raise ProviderError("Provider region does not match its base URL.")
-    return {"region": derived_region, "base_url": normalized_base}
+    result = {"region": derived_region, "base_url": normalized_base}
+    if provider_id == "devin":
+        # Devin is session-based and needs an org id on the connection to
+        # address /v3/organizations/{org_id}/sessions. It is a non-secret
+        # routing field, validated by devin_agent.validate_connection.
+        try:
+            normalized_devin = devin_validate_connection(connection)
+        except DevinAgentError as exc:
+            raise ProviderError(str(exc)) from exc
+        org_id = normalized_devin.get("org_id")
+        if org_id is not None:
+            result["org_id"] = org_id
+    return result
 
 
 def _auth_headers(provider_id: str, api_key: str | None, *, content_type: bool) -> dict:
@@ -541,6 +553,10 @@ def _auth_headers(provider_id: str, api_key: str | None, *, content_type: bool) 
     headers[auth["name"]] = auth["prefix"] + key
     if descriptor["protocol"] == "anthropic":
         headers["anthropic-version"] = "2023-06-01"
+    if provider_id == "openrouter":
+        # Free-tier OpenRouter models gated to "agentic harnesses" 403
+        # without HTTP-Referer and X-Title identifying the calling app.
+        headers.update(openrouter_app_headers())
     return headers
 
 
@@ -660,6 +676,25 @@ def _static_catalogue(provider_id: str) -> tuple[list[dict], list[str], str] | N
         return models, [
             "Token Plan availability is documented, not inference-tested by discovery.",
         ], _MIMO_DOCS
+    if provider_id == "devin":
+        # Devin is a single session-based agent exposed as capability modes,
+        # not a multi-model catalogue. Each mode is a routable "agent model"
+        # entry so the existing model-catalogue projection can carry it.
+        modes, warnings, docs = devin_catalogue()
+        models = [
+            _catalogue_entry(
+                mode["id"],
+                display_name=mode.get("display_name", mode["id"]),
+                tools=mode.get("capabilities", {}).get("tools"),
+                vision=mode.get("capabilities", {}).get("vision"),
+                reasoning=mode.get("capabilities", {}).get("thinking"),
+                source="provider_documentation",
+                evidence=mode.get("evidence", docs),
+                description=mode.get("description"),
+            )
+            for mode in modes
+        ]
+        return models, warnings, docs
     return None
 
 

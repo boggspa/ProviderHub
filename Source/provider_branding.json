@@ -177,6 +177,11 @@
       "logo": {
         "light": "provider-logos/provider-logo-gemini.png"
       }
+    },
+    "devin": {
+      "displayProvider": "Devin",
+      "hueKey": "ensemble",
+      "shortCode": "DEV"
     }
   },
   "modelLabels": {
