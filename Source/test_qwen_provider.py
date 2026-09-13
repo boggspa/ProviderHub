@@ -62,7 +62,7 @@ class QwenProviderTests(unittest.TestCase):
         current = next(model for model in models if model["slug"] == "qwen-token-plan/qwen3.8-max")
         self.assertEqual(current["context_window"], 1000000)
         self.assertEqual(current["default_reasoning_level"], "xhigh")
-        self.assertEqual([entry["effort"] for entry in current["supported_reasoning_levels"]], ["none", "low", "medium", "xhigh"])
+        self.assertEqual([entry["effort"] for entry in current["supported_reasoning_levels"]], ["none", "low", "medium", "xhigh", "ultra"])
 
     def test_effort_translation_and_thinking_disable(self):
         for requested, expected in (("low", "low"), ("medium", "medium"), ("high", "xhigh"), ("max", "xhigh")):

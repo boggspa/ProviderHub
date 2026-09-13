@@ -145,6 +145,29 @@ GPT-only ranks. After a custom catalogue model is selected, that control and
 the advanced Effort menu use `supported_reasoning_levels`; Fast uses the
 model's `service_tiers` when a same-model Fast control exists.
 
+An **Ultra** slider position is synthesized for every reasoning-capable model
+as an alias for that model's top advertised rank, so the slider is available
+even when a provider does not name an ultra level natively. The gateway maps
+ultra onto the provider's highest advertised reasoning rank at request time;
+above-range ranks that a model does not support natively (xhigh, max, ultra)
+are capped to its top advertised rank with a `normalized_to_` compatibility
+note rather than rejected. Below-range requests still fail closed.
+
+For reasoning-capable models, the catalogue also advertises
+`multi_agent_version: "v2"` and `multi_agent_reasoning_effort: "xhigh"`. On
+activation, Provider Hub writes `default_subagent_model` and
+`default_subagent_reasoning_effort` to point the Codex multi-agent runtime at
+the selected hub catalogue route, and enables `features.multi_agent_v2` in
+the Codex `config.toml`. This lets the Ultra slider position opt into
+autonomous sub-agent orchestration using the configured provider connection.
+The `multi_agent_mode` hint is left at its default so selecting Ultra enables
+the capability without forcing proactive delegation. Non-reasoning routes
+receive no subagent keys or feature flag. `model_reasoning_effort` is cleared
+on activation so the catalogue's `default_reasoning_level` governs the
+starting slider position; the user's prior value is saved in the journal and
+restored on quit. The installed app-server verified that `multiAgentVersion`
+is echoed back by the runtime in `model/list`.
+
 The installed app-server loaded real non-GPT IDs `grok/grok-4.6` and
 `ollama/small-model:latest`, returned their intended friendly labels, and
 exposed the expected context, effort, and Priority metadata. This directly

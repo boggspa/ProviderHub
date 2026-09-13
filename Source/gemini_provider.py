@@ -22,6 +22,8 @@ import re
 import secrets
 import urllib.parse
 
+from effort_map import cap_high_end
+
 
 class GeminiError(ValueError):
     """A Gemini catalogue, request, response, or replay envelope is invalid."""
@@ -560,7 +562,10 @@ def _normalize_effort(payload: dict, model_spec: dict, upstream_model: str) -> t
     if normalized not in supported:
         if normalized == "none":
             raise GeminiError("Thinking cannot be disabled on this Gemini model.")
-        raise GeminiError(f"Gemini model does not support reasoning effort {requested!r}.")
+        capped = cap_high_end(normalized, supported)
+        if capped is None:
+            raise GeminiError(f"Gemini model does not support reasoning effort {requested!r}.")
+        normalized = capped
     controls = {}
     if normalized != requested:
         controls["reasoning_effort"] = f"{requested}_normalized_to_{normalized}"

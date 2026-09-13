@@ -1,6 +1,10 @@
 """Map desktop effort sliders onto provider-native reasoning ranks."""
 from __future__ import annotations
 
+# Canonical desktop-to-provider rank order, low to high. Shared by the Claude
+# effort control and the Codex effort slider; provider aliases map onto it.
+EFFORT_ORDER = ("none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra")
+
 # Vibe CLI thinking levels: Off, Low, Medium, High, Max. No xhigh or ultra.
 MISTRAL_REASONING_EFFORTS = ["none", "low", "medium", "high", "max"]
 MISTRAL_EFFORT_ALIASES = {
@@ -40,6 +44,19 @@ OLLAMA_EFFORT_ALIASES = {
 }
 
 
+# Cerebras reasoning ladders top out at xhigh or high depending on the model.
+# Aliases stay exact; above-range requests cap to the advertised top rank.
+CEREBRAS_EFFORT_ALIASES = {
+    "minimal": "low",
+    "low": "low",
+    "medium": "medium",
+    "high": "high",
+    "xhigh": "xhigh",
+    "max": "max",
+    "ultra": "ultra",
+}
+
+
 def map_effort(requested: str | None, supported, aliases: dict[str, str]) -> str | None:
     if requested is None:
         return None
@@ -48,6 +65,28 @@ def map_effort(requested: str | None, supported, aliases: dict[str, str]) -> str
     if normalized is None or normalized not in allowed:
         return None
     return normalized
+
+
+def cap_high_end(normalized: str | None, supported) -> str | None:
+    """Cap an above-range native rank to the top advertised rank.
+
+    Only requests at or above the model's own top rank are capped, so an
+    explicit rank the model could have served differently (or a request to
+    disable reasoning) still fails closed in the caller. Unknown ranks and
+    models with no known ranks also return None.
+    """
+    if normalized is None or normalized not in EFFORT_ORDER:
+        return None
+    allowed = set(supported or [])
+    if normalized in allowed:
+        return normalized
+    known = [rank for rank in allowed if rank in EFFORT_ORDER]
+    if not known:
+        return None
+    top = max(known, key=EFFORT_ORDER.index)
+    if EFFORT_ORDER.index(normalized) >= EFFORT_ORDER.index(top):
+        return top
+    return None
 
 
 def ollama_effort_modes(identifier: str, reasoning: bool | None) -> list[str]:

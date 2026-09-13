@@ -110,6 +110,15 @@ def qualify_runtime(settings, inventory, *, binary=None, timeout=25):
                             or efforts != [entry["effort"] for entry in model["supported_reasoning_levels"]]
                             or tiers != [entry["id"] for entry in model["service_tiers"]]):
                         raise BridgeError("Codex did not accept the model names or controls in this catalogue. Its current configuration has not been switched.")
+                    # When we advertise multi-agent v2, verify the runtime
+                    # echoes it back. A null advertisement need not match.
+                    expected_ma = model.get("multi_agent_version")
+                    if expected_ma is not None:
+                        actual_ma = row.get("multiAgentVersion")
+                        if actual_ma != expected_ma:
+                            raise BridgeError(
+                                "Codex did not accept the multi-agent capability for this catalogue. "
+                                "Its current configuration has not been switched.")
                 return {"accepted": True, "model_count": len(rows), "runtime_signature": signature}
             except (OSError, ValueError, TypeError) as exc:
                 raise BridgeError("The installed Codex runtime could not validate this catalogue. Its current configuration has not been switched.") from exc

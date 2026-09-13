@@ -32,9 +32,11 @@ class CodexRuntimeQualificationTests(unittest.TestCase):
                     if request['method'] == 'model/list':
                         rows = [{'model':m['slug'], 'displayName':m['display_name'], 'hidden':False,
                                  'supportedReasoningEfforts':[{'reasoningEffort':v['effort']} for v in m['supported_reasoning_levels']],
-                                 'serviceTiers':m['service_tiers']} for m in models]
+                                 'serviceTiers':m['service_tiers'],
+                                 'multiAgentVersion':m.get('multi_agent_version')} for m in models]
                         if mode == 'fallback': rows = [{'model':'gpt-fallback'}]
                         if mode == 'wrong-controls': rows[0]['supportedReasoningEfforts'] = []
+                        if mode == 'wrong-multi-agent': rows[0]['multiAgentVersion'] = 'v1'
                         result = {'data':rows, 'nextCursor':None}
                     print(json.dumps({'id':request['id'],'result':result}), flush=True)
             ''').replace("MODE_VALUE", repr(mode))
@@ -59,6 +61,10 @@ class CodexRuntimeQualificationTests(unittest.TestCase):
     def test_silently_ignored_effort_controls_are_rejected(self):
         with self.assertRaises(BridgeError):
             self.run_fixture("wrong-controls")
+
+    def test_mismatched_multi_agent_version_is_rejected(self):
+        with self.assertRaises(BridgeError):
+            self.run_fixture("wrong-multi-agent")
 
 
 if __name__ == "__main__":

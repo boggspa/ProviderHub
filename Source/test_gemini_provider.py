@@ -347,6 +347,14 @@ class RequestAndReplayTests(unittest.TestCase):
                 model_spec(effort_modes=[], reasoning=None), SCOPE, REPLAY_KEY,
             )
 
+    def test_ultra_effort_caps_to_highest_gemini_rank(self):
+        plan = prepare_request(
+            {}, KEY, request_payload(output_config={"effort": "ultra"}),
+            MODEL, model_spec(), SCOPE, REPLAY_KEY,
+        )
+        self.assertEqual(plan["body"]["reasoning_effort"], "high")
+        self.assertEqual(plan["compatibility"]["reasoning_effort"], "ultra_normalized_to_high")
+
     def test_separate_input_and_output_limits_are_not_combined(self):
         payload = {
             "model": REQUESTED,

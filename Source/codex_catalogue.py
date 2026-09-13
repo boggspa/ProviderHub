@@ -75,9 +75,12 @@ def _default_reasoning_level(provider_id, entry, efforts):
         return entry["default_effort"]
     if provider_id == "gemini":
         return None
-    if "high" in efforts:
+    # The synthesized ultra level aliases the model's top advertised rank; it
+    # should not become the default. Pick the highest non-ultra advertised rank.
+    advertised = [e for e in efforts if e != "ultra"]
+    if "high" in advertised:
         return "high"
-    return efforts[-1] if efforts else None
+    return advertised[-1] if advertised else None
 
 
 def _service_tiers(provider_id, entry):
@@ -192,6 +195,9 @@ def project_codex(settings, inventory):
             # the installed Codex engine supports for reasoning-capable models.
             # ultra/v2 let the desktop slider opt into autonomous sub-agent
             # orchestration; the gateway still maps ultra onto the provider's
+            # highest advertised reasoning rank at request time.
+            "multi_agent_version": "v2" if (entry.get("reasoning") is True and efforts) else None,
+            "multi_agent_reasoning_effort": "xhigh" if (entry.get("reasoning") is True and efforts) else None,
         })
     models.sort(key=lambda model: (model["display_name"].casefold(), model["slug"]))
     selected = settings.get("codex_model")

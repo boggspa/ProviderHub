@@ -28,6 +28,7 @@ MODEL_VARIANT_FIELDS = (
     "reasoning_history", "complete_tool_cycles", "capabilities", "billing_model_name",
     "upstream_model_id", "routing_endpoints", "routing_ignore", "routing_all_tags", "effort_control", "reasoning_mandatory",
     "version", "base_model_id", "provider_effort_modes",
+    "multi_agent_version", "multi_agent_reasoning_effort",
 )
 
 
@@ -58,6 +59,13 @@ def _credential_revision(value) -> int:
 def qualify(provider_id: str, model_id: str) -> str:
     if provider_id not in PROVIDERS:
         raise ValueError("Unknown inference provider.")
+    # For agent_session protocol (like Devin), model_id is actually a session_id or mode
+    provider_protocol = PROVIDERS[provider_id].get("protocol", "chat_completions")
+    if provider_protocol == "agent_session":
+        # For agents, we use provider/mode or provider/session_id format
+        if not isinstance(model_id, str) or not model_id.strip():
+            raise ValueError("Enter a valid agent mode or session ID.")
+        return provider_id + "/" + model_id
     if not isinstance(model_id, str) or not MODEL_ID.fullmatch(model_id):
         raise ValueError("Enter an exact model ID without whitespace.")
     return provider_id + "/" + model_id
@@ -69,8 +77,16 @@ def split_route(value: str) -> tuple[str, str]:
     value = value.strip()
     first, separator, remainder = value.partition("/")
     if separator and first in PROVIDERS:
-        qualify(first, remainder)
-        return first, remainder
+        # Check if this is an agent provider
+        provider_protocol = PROVIDERS[first].get("protocol", "chat_completions")
+        if provider_protocol == "agent_session":
+            # For agents, remainder can be mode, session_id, or task
+            if not remainder or not remainder.strip():
+                raise ValueError("Agent route must include a mode, session ID, or task.")
+            return first, remainder
+        else:
+            qualify(first, remainder)
+            return first, remainder
     # The v0.2 settings format contained bare Mistral model IDs.
     qualify("mistral", value)
     return "mistral", value

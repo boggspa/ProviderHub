@@ -2,9 +2,12 @@
 import unittest
 
 from effort_map import (
+    CEREBRAS_EFFORT_ALIASES,
     DEEPSEEK_EFFORT_ALIASES,
+    EFFORT_ORDER,
     MISTRAL_EFFORT_ALIASES,
     MISTRAL_REASONING_EFFORTS,
+    cap_high_end,
     map_effort,
     ollama_effort_modes,
 )
@@ -120,6 +123,36 @@ class EffortTransportTests(unittest.TestCase):
         )["models"]}
         self.assertEqual(by_id["deepseek-v4-pro:cloud"]["effort_modes"], ["none", "low", "high", "max"])
         self.assertEqual(by_id["plain"]["effort_modes"], [])
+
+
+class CapHighEndTests(unittest.TestCase):
+    def test_caps_above_top_to_highest_advertised(self):
+        self.assertEqual(cap_high_end("ultra", ["low", "medium", "high"]), "high")
+        self.assertEqual(cap_high_end("xhigh", ["low", "medium", "high"]), "high")
+        self.assertEqual(cap_high_end("max", ["low", "medium", "high"]), "high")
+
+    def test_keeps_exact_match(self):
+        self.assertEqual(cap_high_end("high", ["low", "medium", "high"]), "high")
+        self.assertEqual(cap_high_end("xhigh", ["low", "high", "xhigh"]), "xhigh")
+        self.assertEqual(cap_high_end("max", ["none", "low", "high", "max"]), "max")
+
+    def test_caps_to_top_when_above_top(self):
+        self.assertEqual(cap_high_end("max", ["low", "high", "xhigh"]), "xhigh")
+        self.assertEqual(cap_high_end("ultra", ["low", "high", "xhigh"]), "xhigh")
+
+    def test_returns_none_for_below_top_mismatch(self):
+        self.assertIsNone(cap_high_end("low", ["medium", "high"]))
+        self.assertIsNone(cap_high_end("medium", ["high", "xhigh"]))
+
+    def test_returns_none_for_empty_or_unknown(self):
+        self.assertIsNone(cap_high_end("high", []))
+        self.assertIsNone(cap_high_end(None, ["low", "high"]))
+        self.assertIsNone(cap_high_end("bogus", ["low", "high"]))
+
+    def test_cerebras_narrow_model_caps_ultra_to_high(self):
+        for requested in ("xhigh", "max", "ultra"):
+            normalized = CEREBRAS_EFFORT_ALIASES.get(requested, requested)
+            self.assertEqual(cap_high_end(normalized, ["low", "medium", "high"]), "high")
 
 
 if __name__ == "__main__":

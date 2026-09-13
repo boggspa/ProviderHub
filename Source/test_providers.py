@@ -27,7 +27,7 @@ class RegistryTests(unittest.TestCase):
     def test_registry_is_plain_json_data_with_expected_contract(self):
         self.assertEqual(
             set(PROVIDERS),
-            {"mistral", "kimi", "mimo", "ollama", "deepseek", "cerebras", "muse", "grok", "qwen-token-plan", "openrouter", "gemini"},
+            {"mistral", "kimi", "mimo", "ollama", "deepseek", "cerebras", "muse", "grok", "qwen-token-plan", "openrouter", "gemini", "devin"},
         )
         json.loads(json.dumps(PROVIDERS))
         for provider_id, descriptor in PROVIDERS.items():
@@ -800,13 +800,31 @@ class ChatPlanTests(unittest.TestCase):
                 },
             )
 
-    def test_cerebras_reasoning_and_service_tiers_do_not_use_mistral_mapping(self):
-        spec = {"reasoning": True, "effort_modes": ["low", "medium", "high"]}
+    def test_cerebras_high_end_effort_caps_to_top_advertised_rank(self):
+        narrow = {"reasoning": True, "effort_modes": ["low", "medium", "high"]}
+        for requested, expected in (("xhigh", "high"), ("max", "high"), ("ultra", "high"),
+                                    ("minimal", "low"), ("medium", "medium")):
+            plan = prepare_request(
+                "cerebras", {}, "key", text_prompt(output_config={"effort": requested}),
+                "gpt-oss-120b", narrow,
+            )
+            with self.subTest(requested=requested):
+                self.assertEqual(plan["body"]["reasoning_effort"], expected)
+        wide = {"reasoning": True, "effort_modes": ["low", "medium", "high", "xhigh"]}
+        plan = prepare_request(
+            "cerebras", {}, "key", text_prompt(output_config={"effort": "ultra"}),
+            "cerebras-model", wide,
+        )
+        self.assertEqual(plan["body"]["reasoning_effort"], "xhigh")
+        self.assertEqual(plan["compatibility"]["reasoning_effort"], "ultra_normalized_to_xhigh")
         with self.assertRaises(ProviderError):
             prepare_request(
-                "cerebras", {}, "key", text_prompt(output_config={"effort": "xhigh"}),
-                "gpt-oss-120b", spec,
+                "cerebras", {}, "key", text_prompt(output_config={"effort": "bogus"}),
+                "gpt-oss-120b", narrow,
             )
+
+    def test_cerebras_reasoning_and_service_tiers_do_not_use_mistral_mapping(self):
+        spec = {"reasoning": True, "effort_modes": ["low", "medium", "high"]}
         with self.assertRaises(ProviderError):
             prepare_request(
                 "cerebras", {}, "key", text_prompt(thinking={"type": "disabled"}),

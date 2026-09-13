@@ -15,7 +15,7 @@ def fixture():
     settings["codex_model"] = "grok/grok-4.6"
     inventory = {"models": [{
         "id": "grok/grok-4.6", "display_name": "Grok 4.6", "provider_id": "grok",
-        "context": 500000, "tools": True, "vision": True,
+        "context": 500000, "tools": True, "vision": True, "reasoning": True,
         "effort_modes": ["low", "medium", "high", "xhigh"],
         "fast_mode": True,
         "presentation": {"displayProvider": "Grok"},
@@ -113,6 +113,13 @@ command = "existing-command"
         self.assertEqual(doc["model_provider"], "provider_hub")
         self.assertNotIn("model_context_window", doc)
         self.assertNotIn("model_reasoning_effort", doc)
+        # Multi-agent keys are owned: the selected model advertises v2, so the
+        # subagent defaults and features.multi_agent_v2 are written on activation
+        # and restored to their prior state on restore.
+        self.assertEqual(doc["default_subagent_model"], "grok/grok-4.6")
+        self.assertEqual(doc["default_subagent_reasoning_effort"], "xhigh")
+        self.assertIn("multi_agent_v2", doc["features"])
+        self.assertTrue(doc["features"]["multi_agent_v2"])
         self.assertIn('# Preserve my settings and formatting.', updated)
         self.assertIn('model = "this-is-not-a-setting"', updated)
         auth = doc["model_providers"]["provider_hub"]["auth"]
@@ -148,6 +155,18 @@ command = "existing-command"
         self.edit(lambda doc: doc.update({"model": "ollama/small-model:latest"}))
         self.manager.restore()
         self.assertEqual(parse(self.manager.config.read_text())["model"], "my-usual-model")
+
+    def test_non_reasoning_model_writes_no_subagent_keys(self):
+        self.settings["codex_model"] = "ollama/small-model:latest"
+        self.activate()
+        doc = parse(self.manager.config.read_text())
+        self.assertNotIn("default_subagent_model", doc)
+        self.assertNotIn("default_subagent_reasoning_effort", doc)
+        # features.multi_agent_v2 is not written for a non-reasoning route.
+        if "features" in doc:
+            self.assertNotIn("multi_agent_v2", doc["features"])
+        self.manager.restore()
+        self.assertEqual(self.manager.config.read_text(), self.original)
 
     def test_unknown_selection_under_hub_is_not_silently_retargeted(self):
         self.activate()

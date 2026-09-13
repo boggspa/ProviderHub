@@ -22,7 +22,7 @@ def settings(**updates):
     return value
 
 
-def model(route, *, name=None, context=131072, tools=True, **extra):
+def model(route, *, name=None, context=131072, tools=True, reasoning=True, **extra):
     provider_id, model_id = route.split("/", 1)
     value = {
         "id": route,
@@ -32,6 +32,7 @@ def model(route, *, name=None, context=131072, tools=True, **extra):
         "context": context,
         "tools": tools,
         "vision": False,
+        "reasoning": reasoning,
         "effort_modes": ["none", "high"],
     }
     value.update(extra)
@@ -158,17 +159,38 @@ class EffortAndFastProjectionTests(unittest.TestCase):
         )
         self.assertEqual(
             [entry["effort"] for entry in rows["mistral/codestral"]["supported_reasoning_levels"]],
-            ["none", "high"],
+            ["none", "high", "ultra"],
         )
         self.assertEqual(rows["mistral/codestral"]["default_reasoning_level"], "high")
         self.assertEqual(
             [entry["effort"] for entry in rows["kimi/k3"]["supported_reasoning_levels"]],
-            ["low", "high", "max"],
+            ["low", "high", "max", "ultra"],
         )
         self.assertEqual(rows["qwen-token-plan/qwen3.8-max"]["default_reasoning_level"], "xhigh")
         self.assertEqual(rows["gemini/gemini-3.8-flash"]["default_reasoning_level"], "medium")
         self.assertEqual(rows["cerebras/gpt-oss-120b"]["service_tiers"], [])
+        # Multi-agent v2 is advertised for every reasoning-capable model with a ladder.
+        for slug in rows:
+            with self.subTest(slug=slug):
+                self.assertEqual(rows[slug]["multi_agent_version"], "v2")
+                self.assertEqual(rows[slug]["multi_agent_reasoning_effort"], "xhigh")
         self.assertEqual(len(rows), 5)
+
+    def test_non_reasoning_model_publishes_no_ultra_or_multi_agent(self):
+        rows = self.projected(model(
+            "mistral/plain-model", reasoning=False, effort_modes=[],
+        ))
+        row = rows["mistral/plain-model"]
+        self.assertEqual(row["supported_reasoning_levels"], [])
+        self.assertIsNone(row["multi_agent_version"])
+        self.assertIsNone(row["multi_agent_reasoning_effort"])
+
+    def test_ultra_is_not_duplicated_when_model_advertises_it(self):
+        rows = self.projected(model(
+            "mistral/ultra-native", effort_modes=["none", "low", "ultra"],
+        ))
+        efforts = [e["effort"] for e in rows["mistral/ultra-native"]["supported_reasoning_levels"]]
+        self.assertEqual(efforts.count("ultra"), 1)
 
     def test_chatgpt_invalid_effort_names_are_dropped(self):
         rows = self.projected(model(
@@ -177,7 +199,7 @@ class EffortAndFastProjectionTests(unittest.TestCase):
         ))
         self.assertEqual(
             [entry["effort"] for entry in rows["mistral/a-model"]["supported_reasoning_levels"]],
-            ["none", "high"],
+            ["none", "high", "ultra"],
         )
 
     def test_fast_is_advertised_only_for_same_model_fast_controls(self):
@@ -196,18 +218,18 @@ class EffortAndFastProjectionTests(unittest.TestCase):
         self.assertIn("Priority", grok["description"])
         self.assertEqual(
             [entry["effort"] for entry in grok["supported_reasoning_levels"]],
-            ["low", "medium", "high", "xhigh"],
+            ["low", "medium", "high", "xhigh", "ultra"],
         )
         self.assertEqual(rows["grok/unknown"]["service_tiers"], [])
         self.assertNotIn("Fast", rows["grok/unknown"]["description"])
         self.assertEqual(
             [entry["effort"] for entry in rows["muse/muse-spark-1.3"]["supported_reasoning_levels"]],
-            ["minimal", "low", "medium", "high", "xhigh", "max"],
+            ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"],
         )
         self.assertEqual(rows["muse/muse-spark-1.3"]["service_tiers"][0]["id"], "fast")
         self.assertEqual(
             [entry["effort"] for entry in rows["ollama/thinker:latest"]["supported_reasoning_levels"]],
-            ["none", "high"],
+            ["none", "high", "ultra"],
         )
         self.assertEqual(rows["ollama/thinker:latest"]["service_tiers"], [])
 
@@ -240,7 +262,7 @@ class EffortAndFastProjectionTests(unittest.TestCase):
         row = rows["muse/muse-spark-1.3"]
         self.assertEqual(
             [entry["effort"] for entry in row["supported_reasoning_levels"]],
-            ["minimal", "low", "medium", "high", "xhigh", "max"],
+            ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"],
         )
         self.assertEqual(row["default_reasoning_level"], "high")
         self.assertEqual(row["service_tiers"], [])
