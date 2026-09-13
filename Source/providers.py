@@ -1583,7 +1583,21 @@ def _estimated_input_tokens(payload: dict) -> int:
     return max(1, math.ceil(size / 3) + images * 4096)
 
 
-def _apply_native_model_limits(body: dict, model_spec: dict) -> None:
+def _image_input_rejected(provider_id: str | None, model_spec: dict) -> bool:
+    # Catalogue vision is picker metadata. Ollama's Anthropic and Responses
+    # endpoints accept or reject images themselves, so a stale or incomplete
+    # /api/show False must not block a vision-capable model or a tool turn
+    # that happens to include an image.
+    if provider_id == "ollama":
+        return False
+    return model_spec.get("vision") is False
+
+
+def _image_capability_error() -> ProviderError:
+    return ProviderError("The selected model does not advertise image input.")
+
+
+def _apply_native_model_limits(body: dict, model_spec: dict, provider_id: str | None = None) -> None:
     max_tokens = body.get("max_tokens", 4096)
     if type(max_tokens) is not int or max_tokens <= 0:
         raise ProviderError("max_tokens must be a positive integer.")
@@ -1597,8 +1611,8 @@ def _apply_native_model_limits(body: dict, model_spec: dict) -> None:
             raise ProviderError(f"Request exceeds the model's reported {context}-token context limit.")
         max_tokens = min(max_tokens, context - estimate)
     body["max_tokens"] = max_tokens
-    if model_spec.get("vision") is False and _contains_content_type(body.get("messages"), {"image"}):
-        raise ProviderError("The selected model is documented as text-only.")
+    if _image_input_rejected(provider_id, model_spec) and _contains_content_type(body.get("messages"), {"image"}):
+        raise _image_capability_error()
     if model_spec.get("tools") is False:
         if body.get("tools") or _contains_content_type(body.get("messages"), {"tool_use", "tool_result"}):
             raise ProviderError("The selected model does not support tool use.")
@@ -1644,8 +1658,8 @@ def _chat_content_part(provider_id: str, block: dict, model_spec: dict):
             raise ProviderError("Message text must be a string.")
         return {"type": "text", "text": text}
     if kind == "image":
-        if model_spec.get("vision") is False:
-            raise ProviderError("The selected model is documented as text-only.")
+        if _image_input_rejected(provider_id, model_spec):
+            raise _image_capability_error()
         source = block.get("source") if isinstance(block.get("source"), dict) else {}
         if source.get("type") == "base64":
             media = source.get("media_type", "")
@@ -2012,7 +2026,7 @@ def prepare_request(
     if descriptor["protocol"] == "anthropic":
         body, normalized_system_roles, control_compatibility = _normalize_native_payload(
             provider_id, anthropic_payload, upstream_model, model_spec)
-        _apply_native_model_limits(body, model_spec)
+        _apply_native_model_limits(body, model_spec, provider_id)
         if provider_id == "openrouter":
             try:
                 openrouter_finalize(body, model_spec, api_key)

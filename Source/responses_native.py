@@ -93,9 +93,11 @@ def prepare_native(runtime, payload):
             if not isinstance(item, dict) or item.get("type", "message") not in {"message", "function_call", "function_call_output", "reasoning"}:
                 raise BridgeError("Unsupported Responses history item. Use the function-tool catalogue.")
             content = item.get("content")
-            if isinstance(content, list) and spec.get("vision") is False:
+            # Ollama's Responses endpoint accepts or rejects images itself.
+            # Catalogue vision is picker metadata, not a request interceptor.
+            if isinstance(content, list) and provider_id != "ollama" and spec.get("vision") is False:
                 if any(isinstance(part, dict) and part.get("type") == "input_image" for part in content):
-                    raise BridgeError("The selected model is documented as text-only.")
+                    raise BridgeError("The selected model does not advertise image input.")
     input_names(body["input"], tool_map)
     choice = body.get("tool_choice")
     if isinstance(choice, dict) and choice.get("type") == "function":

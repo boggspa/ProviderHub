@@ -35,6 +35,8 @@ class CodexCatalogueTests(unittest.TestCase):
         self.assertEqual(models["grok/grok-4.6"]["service_tiers"][0]["id"], "priority")
         self.assertEqual(models["grok/grok-4.6"]["effective_context_window_percent"], 100)
         self.assertEqual(models["ollama/small-model:latest"]["supported_reasoning_levels"], [])
+        self.assertEqual(models["grok/grok-4.6"]["input_modalities"], ["text", "image"])
+        self.assertEqual(models["ollama/small-model:latest"]["input_modalities"], ["text"])
         self.assertTrue(all(model["apply_patch_tool_type"] is None for model in models.values()))
 
     def test_all_provider_catalogues_preserve_unknown_context_without_fabrication(self):

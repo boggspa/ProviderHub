@@ -164,6 +164,34 @@ class NativeResponsesTests(unittest.TestCase):
         for changes in ({"store": True}, {"previous_response_id": "resp-first"}, {"service_tier": "fast"}):
             self.assertEqual(self.request(self.body(**changes))[0], 400)
 
+    def test_ollama_forwards_images_even_when_catalogue_omits_vision(self):
+        self.provider = "ollama"
+        self.route = self.start_gateway("ollama", "sample:cloud", {
+            "context": 500000, "vision": False, "tools": True,
+            "effort_modes": ["low", "medium", "high", "xhigh"],
+        })
+        image = {"type": "input_image", "image_url": "data:image/png;base64,AAAA"}
+        status, raw = self.request(self.body(input=[{
+            "role": "user",
+            "content": [{"type": "input_text", "text": "describe"}, image],
+        }]))
+        self.assertEqual(status, 200, raw)
+        self.assertEqual(MockProvider.requests[0]["input"][0]["content"][1], image)
+
+    def test_non_ollama_native_route_still_rejects_unadvertised_images(self):
+        self.start("grok")
+        self.runtime.settings["_model_specs"][self.route]["vision"] = False
+        status, raw = self.request(self.body(input=[{
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": "describe"},
+                {"type": "input_image", "image_url": "data:image/png;base64,AAAA"},
+            ],
+        }]))
+        self.assertEqual(status, 400, raw)
+        self.assertIn(b"does not advertise image input", raw)
+        self.assertEqual(len(MockProvider.requests), 0)
+
     def test_unsupported_tools_fields_and_providers_are_explicit(self):
         self.start()
         for changes in ({"tools": [{"type": "custom", "name": "apply_patch"}]}, {"background": True},

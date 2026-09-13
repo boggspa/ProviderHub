@@ -308,6 +308,7 @@ class DiscoveryTests(unittest.TestCase):
             if plan["url"].endswith("/api/tags"):
                 return {"models": [
                     {"name": "vision-model", "model": "vision-model", "details": {"family": "tag-family"}},
+                    {"name": "coder-model:cloud", "model": "coder-model:cloud"},
                     {"name": "embed-model", "model": "embed-model"},
                 ]}
             if plan["body"]["model"] == "vision-model":
@@ -320,25 +321,35 @@ class DiscoveryTests(unittest.TestCase):
                         "clip.context_length": 2048,
                     },
                 }
+            if plan["body"]["model"] == "coder-model:cloud":
+                return {
+                    "capabilities": ["completion", "tools", "thinking"],
+                    "model_info": {"general.architecture": "coder", "coder.context_length": 1048576},
+                }
             return {
                 "capabilities": ["embedding"],
                 "model_info": {"general.architecture": "embed", "embed.context_length": 8192},
             }
 
         result = discover("ollama", {}, None, transport=transport)
-        self.assertEqual([plan["method"] for plan in plans], ["GET", "POST", "POST"])
+        self.assertEqual([plan["method"] for plan in plans], ["GET", "POST", "POST", "POST"])
         self.assertEqual(plans[1]["url"], "http://127.0.0.1:11434/api/show")
         self.assertEqual(plans[1]["body"], {"model": "vision-model"})
         self.assertEqual(plans[1]["headers"]["Content-Type"], "application/json")
-        self.assertEqual(len(result["models"]), 1)
-        model = result["models"][0]
-        self.assertEqual(model["id"], "vision-model")
+        by_id = {model["id"]: model for model in result["models"]}
+        self.assertEqual(set(by_id), {"vision-model", "coder-model:cloud"})
+        model = by_id["vision-model"]
         self.assertEqual(model["context"], 131072)
         self.assertEqual(model["context_kind"], "model_declared_maximum")
         self.assertTrue(model["tools"])
         self.assertTrue(model["vision"])
         self.assertTrue(model["reasoning"])
         self.assertEqual(model["details"]["family"], "show-family")
+        coder = by_id["coder-model:cloud"]
+        self.assertTrue(coder["tools"])
+        self.assertFalse(coder["vision"])
+        self.assertTrue(coder["reasoning"])
+        self.assertEqual(coder["context"], 1048576)
         self.assertTrue(any("embed-model" in warning and "omitted" in warning for warning in result["warnings"]))
 
     def test_cerebras_discovery_marks_reasoning_replay_gap_per_exact_model(self):
@@ -830,8 +841,29 @@ class ChatPlanTests(unittest.TestCase):
         }]}])
         with self.assertRaises(ProviderError):
             prepare_request("cerebras", {}, "key", remote, "model", {"vision": True})
-        with self.assertRaises(ProviderError):
+        with self.assertRaisesRegex(ProviderError, "does not advertise image input"):
             prepare_request("cerebras", {}, "key", payload, "model", {"vision": False})
+        with self.assertRaisesRegex(ProviderError, "does not advertise image input"):
+            prepare_request("kimi", {}, "key", payload, "kimi-k2.5", {"vision": False, "tools": True})
+
+    def test_ollama_forwards_images_and_tools_without_a_text_only_gate(self):
+        image = {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AAAA"}}
+        payload = text_prompt(
+            messages=[{"role": "user", "content": [{"type": "text", "text": "describe"}, image]}],
+            tools=[{"name": "read_file", "description": "Read", "input_schema": {"type": "object"}}],
+        )
+        plan = prepare_request(
+            "ollama", {}, None, payload, "gemma4:cloud",
+            {"vision": False, "tools": True},
+        )
+        self.assertEqual(plan["protocol"], "anthropic")
+        self.assertEqual(plan["body"]["messages"][0]["content"][1], image)
+        self.assertEqual(plan["body"]["tools"][0]["name"], "read_file")
+        with self.assertRaisesRegex(ProviderError, "does not support tool use"):
+            prepare_request(
+                "ollama", {}, None, payload, "gemma4:cloud",
+                {"vision": False, "tools": False},
+            )
 
     def test_chat_plan_does_not_mutate_input_and_rejects_hosted_tools(self):
         payload = self.tool_prompt()
