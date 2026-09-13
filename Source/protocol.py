@@ -15,7 +15,8 @@ import secrets
 from bridge_core import BridgeError, SLOTS
 from model_names import friendly_model_name
 from catalogue import status_label
-from effort_map import MISTRAL_EFFORT_ALIASES, MISTRAL_REASONING_EFFORTS, map_effort
+from effort_map import MISTRAL_EFFORT_ALIASES, MISTRAL_REASONING_EFFORTS, cap_high_end, map_effort
+from chat_tool_order import repair_openai_tool_order
 
 
 def tool_id(value: str) -> str:
@@ -176,6 +177,8 @@ def model_effort(payload: dict, spec: dict):
     if requested is None:
         return "high" if "high" in supported else (supported[-1] if supported else None)
     normalized = map_effort(requested, supported, MISTRAL_EFFORT_ALIASES)
+    if normalized is None:
+        normalized = cap_high_end(MISTRAL_EFFORT_ALIASES.get(requested), supported)
     if normalized is None:
         raise BridgeError("Unsupported effort value. Use Claude's standard effort control.")
     return normalized
@@ -471,6 +474,8 @@ def translate_request(payload: dict, settings: dict):
         result["reasoning_effort"] = effort
     # Stable cache hint; Mistral decides whether cached prefixes can be reused.
     result["prompt_cache_key"] = hashlib.sha256(json.dumps({"system": payload.get("system"), "tools": payload.get("tools")}, sort_keys=True).encode()).hexdigest()
+    result["messages"] = repair_openai_tool_order(result["messages"])
+
     return result, names
 
 

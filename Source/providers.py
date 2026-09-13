@@ -27,6 +27,7 @@ class ProviderError(ValueError):
     """A provider configuration, catalogue, or request cannot be used safely."""
 
 
+from chat_tool_order import repair_openai_tool_order
 GATEWAY_USER_AGENT = "ProviderHub/0.5"
 
 
@@ -206,11 +207,13 @@ PROVIDERS = {
 from qwen_provider import DESCRIPTOR as QWEN_DESCRIPTOR, OFFICIAL_PATHS as QWEN_PATHS, QwenError, catalogue as qwen_catalogue, normalize_controls as qwen_controls
 from openrouter_provider import DESCRIPTOR as OPENROUTER_DESCRIPTOR, OFFICIAL_PATHS as OPENROUTER_PATHS, OpenRouterError, discover as openrouter_discover, finalize as openrouter_finalize, normalize_messages as openrouter_controls
 from gemini_provider import DESCRIPTOR as GEMINI_DESCRIPTOR, OFFICIAL_PATHS as GEMINI_PATHS, GeminiError, discover as gemini_discover, prepare_request as gemini_prepare_request, validate_connection as gemini_validate_connection
-from effort_map import DEEPSEEK_EFFORT_ALIASES, MISTRAL_EFFORT_ALIASES, MISTRAL_REASONING_EFFORTS, map_effort, ollama_effort_aliases, ollama_effort_modes
+from devin_agent import DESCRIPTOR as DEVIN_DESCRIPTOR, OFFICIAL_PATHS as DEVIN_PATHS, DevinAgentError, catalogue as devin_catalogue, validate_connection as devin_validate_connection
+from effort_map import CEREBRAS_EFFORT_ALIASES, DEEPSEEK_EFFORT_ALIASES, MISTRAL_EFFORT_ALIASES, MISTRAL_REASONING_EFFORTS, cap_high_end, map_effort, ollama_effort_aliases, ollama_effort_modes
 
 PROVIDERS[QWEN_DESCRIPTOR["id"]] = QWEN_DESCRIPTOR
 PROVIDERS[OPENROUTER_DESCRIPTOR["id"]] = OPENROUTER_DESCRIPTOR
 PROVIDERS[GEMINI_DESCRIPTOR["id"]] = GEMINI_DESCRIPTOR
+PROVIDERS[DEVIN_DESCRIPTOR["id"]] = DEVIN_DESCRIPTOR
 
 _OFFICIAL_PATHS = {
     "mistral": {"", "/v1", "/v1/models", "/v1/chat/completions"},
@@ -223,6 +226,7 @@ _OFFICIAL_PATHS = {
     "qwen-token-plan": QWEN_PATHS,
     "openrouter": OPENROUTER_PATHS,
     "gemini": GEMINI_PATHS,
+    "devin": DEVIN_PATHS,
 }
 
 _OLLAMA_PATHS = {"", "/v1", "/v1/messages", "/api/tags"}
@@ -1463,11 +1467,15 @@ def _normalize_native_controls(
             _write_thinking_type(body, "disabled", descriptor["name"])
         elif requested is not None:
             normalized = aliases.get(requested)
+            if normalized is not None and normalized not in supported:
+                normalized = cap_high_end(normalized, supported)
             if normalized is None or normalized not in supported:
                 raise ProviderError(
                     f"Kimi model does not support reasoning effort {requested!r}.")
             _write_thinking_type(body, "enabled", descriptor["name"])
             _write_output_effort(body, normalized)
+            if normalized != requested:
+                compatibility["reasoning_effort"] = f"{requested}_normalized_to_{normalized}"
         if thinking_type == "disabled" and upstream_model != "kimi-for-coding":
             raise ProviderError(
                 "Disabling thinking is not an exact-model control for this Kimi route.")
@@ -1491,13 +1499,18 @@ def _normalize_native_controls(
 
     if provider_id == "deepseek":
         if requested is not None:
-            normalized = map_effort(requested, model_spec.get("effort_modes") or [], DEEPSEEK_EFFORT_ALIASES)
+            supported = model_spec.get("effort_modes") or []
+            normalized = map_effort(requested, supported, DEEPSEEK_EFFORT_ALIASES)
+            if normalized is None:
+                normalized = cap_high_end(DEEPSEEK_EFFORT_ALIASES.get(requested), supported)
             if normalized is None:
                 raise ProviderError(
                     f"DeepSeek model does not support reasoning effort {requested!r}.")
             _write_thinking_type(
                 body, "disabled" if normalized == "none" else "enabled", descriptor["name"])
             _write_output_effort(body, normalized)
+            if normalized != requested:
+                compatibility["reasoning_effort"] = f"{requested}_normalized_to_{normalized}"
         return compatibility
 
     if provider_id == "ollama":
@@ -1508,7 +1521,10 @@ def _normalize_native_controls(
         if requested is not None:
             supported = list(model_spec.get("effort_modes") or [])
             if supported:
-                normalized = map_effort(requested, supported, ollama_effort_aliases(upstream_model))
+                aliases = ollama_effort_aliases(upstream_model)
+                normalized = map_effort(requested, supported, aliases)
+                if normalized is None:
+                    normalized = cap_high_end(aliases.get(requested), supported)
                 if normalized is None:
                     raise ProviderError(
                         f"Ollama model does not support reasoning effort {requested!r}.")
@@ -1769,9 +1785,9 @@ def _chat_effort(provider_id: str, payload: dict, model_spec: dict):
             return None
         supported = model_spec.get("effort_modes") or []
         target = {"minimal": "low", "max": "xhigh", "ultra": "xhigh"}.get(requested, requested)
-        if target == "xhigh" and "xhigh" not in supported and "high" in supported:
-            target = "high"
         if target not in supported:
+            target = cap_high_end(target, supported)
+        if target is None or target not in supported:
             raise ProviderError(f"Grok effort {requested!r} is not advertised for this model. Use its default reasoning setting.")
         return target
     if not model_spec.get("reasoning"):
@@ -1790,6 +1806,8 @@ def _chat_effort(provider_id: str, payload: dict, model_spec: dict):
             return "high" if "high" in supported else (supported[-1] if supported else None)
         normalized = map_effort(requested, supported, MISTRAL_EFFORT_ALIASES)
         if normalized is None:
+            normalized = cap_high_end(MISTRAL_EFFORT_ALIASES.get(requested), supported)
+        if normalized is None:
             raise ProviderError("Unsupported Mistral reasoning effort.")
         return normalized
     if provider_id == "cerebras":
@@ -1798,11 +1816,14 @@ def _chat_effort(provider_id: str, payload: dict, model_spec: dict):
             requested = "none"
         if requested is None:
             return None
-        if requested not in supported:
+        normalized = CEREBRAS_EFFORT_ALIASES.get(requested, requested)
+        if normalized not in supported:
+            normalized = cap_high_end(normalized, supported)
+        if normalized is None or normalized not in supported:
             if not supported:
                 raise ProviderError("Cerebras reasoning effort controls are not known for this model.")
             raise ProviderError(f"Cerebras model does not support reasoning effort {requested!r}.")
-        return requested
+        return normalized
     return None
 
 
@@ -2033,6 +2054,7 @@ def _translate_chat_payload(
             raise ProviderError("Grok supports only default or priority processing.")
         if body["stream"]:
             body["stream_options"] = {"include_usage": True}
+    body["messages"] = repair_openai_tool_order(body["messages"])
     return body, name_map
 
 
@@ -2102,6 +2124,10 @@ def prepare_request(
     )
     reasoning_replay = _requires_cerebras_replay(provider_id, model_spec)
     controls = {}
+    requested = (anthropic_payload.get("output_config") or {}).get("effort")
+    actual = body.get("reasoning_effort")
+    if requested is not None and actual is not None and requested != actual:
+        controls["reasoning_effort"] = f"{requested}_normalized_to_{actual}"
     if provider_id == "grok":
         # Stable, opaque routing hint, built locally instead of forwarding any
         # client's identity header. No credentials or prompt text leave in it.
@@ -2110,10 +2136,6 @@ def prepare_request(
             "system": anthropic_payload.get("system"),
             "first_message": anthropic_payload["messages"][0],
         }, sort_keys=True).encode()).hexdigest()
-        requested = (anthropic_payload.get("output_config") or {}).get("effort")
-        actual = body.get("reasoning_effort")
-        if requested is not None and requested != actual:
-            controls["reasoning_effort"] = f"{requested}_normalized_to_{actual}"
         controls["requested_service_tier"] = body["service_tier"]
     return {
         "url": base + "/chat/completions",

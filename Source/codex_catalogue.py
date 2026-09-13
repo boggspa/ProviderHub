@@ -30,6 +30,11 @@ _EFFORT_DESCRIPTIONS = {
     "max": "Maximum reasoning",
     "ultra": "Ultra reasoning",
 }
+# Ranks below ultra that may head a model's advertised ladder, low to high.
+# Used to synthesize an ultra slider position as an alias for a model's own
+# top advertised rank, so the slider is available even when a provider does
+# not name an ultra level natively.
+_HIGH_END_RANKS = ("minimal", "low", "medium", "high", "xhigh", "max")
 
 
 def _reasoning_levels(provider_id, entry):
@@ -44,6 +49,25 @@ def _reasoning_levels(provider_id, entry):
             "description": _EFFORT_DESCRIPTIONS.get(effort, effort.title() + " reasoning"),
         })
     return levels
+
+
+def _ultra_level(entry, levels):
+    """Synthesize an ultra slider position aliasing the model's top rank.
+
+    Only added when the model advertises a reasoning ladder and does not
+    already name ultra itself. The alias keeps the slider available across
+    providers that cap at max/xhigh/high; the gateway maps ultra onto the
+    provider's highest advertised rank at request time.
+    """
+    if "ultra" in {row["effort"] for row in levels}:
+        return None
+    advertised = [rank for rank in entry.get("effort_modes") or [] if rank in _HIGH_END_RANKS]
+    if not advertised:
+        return None
+    top = max(advertised, key=_HIGH_END_RANKS.index)
+    if top == "max":
+        return {"effort": "ultra", "description": _EFFORT_DESCRIPTIONS["ultra"]}
+    return {"effort": "ultra", "description": "Ultra reasoning · maps to " + top}
 
 
 def _default_reasoning_level(provider_id, entry, efforts):
@@ -125,6 +149,9 @@ def project_codex(settings, inventory):
         label = name + (" · Ollama" if provider_id == "ollama" else " · OpenRouter" if provider_id == "openrouter"
                         else ("" if name.casefold().startswith(provider.casefold()) else " · " + provider))
         levels = _reasoning_levels(provider_id, entry)
+        ultra = _ultra_level(entry, levels)
+        if ultra is not None:
+            levels = list(levels) + [ultra]
         efforts = [row["effort"] for row in levels]
         service_tiers = _service_tiers(provider_id, entry)
         models.append({
@@ -161,6 +188,10 @@ def project_codex(settings, inventory):
             "experimental_supported_tools": [],
             "input_modalities": ["text", "image"] if entry.get("vision") is True else ["text"],
             "supports_search_tool": False,
+            # Multi-agent capability: advertise the native multi_agent runtime
+            # the installed Codex engine supports for reasoning-capable models.
+            # ultra/v2 let the desktop slider opt into autonomous sub-agent
+            # orchestration; the gateway still maps ultra onto the provider's
         })
     models.sort(key=lambda model: (model["display_name"].casefold(), model["slug"]))
     selected = settings.get("codex_model")

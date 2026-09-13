@@ -53,6 +53,20 @@ def read_observations(root: Path):
     return result
 
 
+def _extract_effort_modes(card: dict) -> list[str]:
+    """Extract effort_modes from a raw provider card, falling back to reasoning capability."""
+    # Try explicit effort_modes first
+    for field in ("effort_modes", "supported_efforts", "reasoning_efforts"):
+        value = card.get(field)
+        if isinstance(value, list) and all(isinstance(mode, str) for mode in value):
+            return list(value)
+    # Fall back to reasoning capability
+    caps = card.get("capabilities") or {}
+    if caps.get("reasoning") is True:
+        return list(MISTRAL_REASONING_EFFORTS)
+    return []
+
+
 def build_catalogue(raw, settings, vibe=None, observations=None):
     vibe = vibe or {}
     observations = observations or {}
@@ -70,13 +84,17 @@ def build_catalogue(raw, settings, vibe=None, observations=None):
         if type(context) is not int or context <= 0:
             continue
         canonical = card.get("name") or card["id"]
+        # Include effort_modes in grouping key to preserve provider-specific modes
+        effort_modes = _extract_effort_modes(card)
         # Actual context/capability variants stay separate, even when their
         # canonical family name happens to be the same.
-        group_key = (canonical, context, bool(caps.get("reasoning")), bool(caps.get("vision")), bool(caps.get("function_calling")))
+        group_key = (canonical, context, bool(caps.get("reasoning")), bool(caps.get("vision")), 
+                    bool(caps.get("function_calling")), tuple(sorted(effort_modes)))
         groups.setdefault(group_key, []).append(card)
     models = []
     configured = list(settings["mappings"].values())
-    for (canonical, context, reasoning, vision, tools), cards in groups.items():
+    for (canonical, context, reasoning, vision, tools, effort_tuple), cards in groups.items():
+        effort_modes = list(effort_tuple) if effort_tuple else []
         ids = [card["id"] for card in cards]
         candidates = ([vibe.get("active_model")] + configured +
                       [identifier for identifier in ids if observations.get(identifier, {}).get("status") == "responded"] +
@@ -91,7 +109,7 @@ def build_catalogue(raw, settings, vibe=None, observations=None):
             "id": selected, "canonical_id": canonical, "display_name": label,
             "context": context, "aliases": sorted(ids), "tools": tools,
             "vision": vision, "reasoning": reasoning,
-            "effort_modes": list(MISTRAL_REASONING_EFFORTS) if reasoning else [],
+            "effort_modes": effort_modes,
             "fast_mode": False,
             "inference_status": observation.get("status", "advertised"),
             "last_success": observation.get("last_success"),

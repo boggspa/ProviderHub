@@ -101,7 +101,7 @@ class EffortTransportTests(unittest.TestCase):
         row = project_codex(settings, inventory)["models"][0]
         self.assertEqual(
             [entry["effort"] for entry in row["supported_reasoning_levels"]],
-            ["none", "low", "high", "max"],
+            ["none", "low", "high", "max", "ultra"],
         )
 
     def test_ollama_show_thinking_models_get_effort_modes(self):
