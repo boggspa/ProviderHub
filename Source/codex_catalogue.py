@@ -15,6 +15,74 @@ BASE_INSTRUCTIONS = (
     "State what you changed and what you verified."
 )
 
+# ChatGPT's compact Power control becomes this effort slider (and the advanced
+# Effort menu) once a custom catalogue model is selected. Only ranks the
+# installed app-server accepts are published; extra GPT-only Power bundles
+# and per-rank duplicate models are not invented here.
+_CHAT_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra")
+_EFFORT_DESCRIPTIONS = {
+    "none": "No extra reasoning",
+    "minimal": "Minimal reasoning",
+    "low": "Low reasoning",
+    "medium": "Medium reasoning",
+    "high": "High reasoning",
+    "xhigh": "Extra-high reasoning",
+    "max": "Maximum reasoning",
+    "ultra": "Ultra reasoning",
+}
+
+
+def _reasoning_levels(provider_id, entry):
+    if provider_id == "ollama":
+        return []
+    levels = []
+    seen = set()
+    for effort in entry.get("effort_modes") or []:
+        if effort not in _CHAT_EFFORTS or effort in seen:
+            continue
+        seen.add(effort)
+        levels.append({
+            "effort": effort,
+            "description": _EFFORT_DESCRIPTIONS.get(effort, effort.title() + " reasoning"),
+        })
+    return levels
+
+
+def _default_reasoning_level(provider_id, entry, efforts):
+    if entry.get("default_effort") in efforts:
+        return entry["default_effort"]
+    if provider_id == "gemini":
+        return None
+    if "high" in efforts:
+        return "high"
+    return efforts[-1] if efforts else None
+
+
+def _service_tiers(provider_id, entry):
+    # Fast is the ChatGPT Speed/Fast control, keyed off serviceTiers whose id
+    # or name maps to fast/priority. Advertise it only for a documented
+    # same-model Fast tier; never as extra catalogue rows.
+    if provider_id == "ollama" or entry.get("fast_mode") is not True:
+        return []
+    if provider_id == "grok":
+        return [{"id": "priority", "name": "Fast · xAI Priority",
+                 "description": "Higher scheduling priority at xAI's premium token rates."}]
+    return [{"id": "fast", "name": "Fast",
+             "description": "Same-model Fast processing advertised by this provider."}]
+
+
+def _codex_description(provider_id, provider, context, service_tiers):
+    if provider_id == "ollama":
+        text = provider + " via Ollama. Runtime context is managed by the daemon."
+    elif provider_id == "grok":
+        text = ("xAI API billing; Fast requests premium Priority processing."
+                if service_tiers else "xAI API billing.")
+    else:
+        text = PROVIDERS[provider_id]["name"] + " model connection."
+    if context is None:
+        text += " Exact context is not reported; compact manually when needed."
+    return text
+
 
 def project_codex(settings, inventory):
     models = []
@@ -58,19 +126,15 @@ def project_codex(settings, inventory):
         # Include the account/transport when Ollama presents an upstream brand.
         label = name + (" · Ollama" if provider_id == "ollama" else " · OpenRouter" if provider_id == "openrouter"
                         else ("" if name.casefold().startswith(provider.casefold()) else " · " + provider))
-        efforts = list(entry.get("effort_modes") or []) if provider_id != "ollama" else []
-        service_tiers = ([{"id": "priority", "name": "Fast · xAI Priority",
-                          "description": "Higher scheduling priority at xAI's premium token rates."}]
-                         if provider_id == "grok" else [])
+        levels = _reasoning_levels(provider_id, entry)
+        efforts = [row["effort"] for row in levels]
+        service_tiers = _service_tiers(provider_id, entry)
         models.append({
             "slug": route,
             "display_name": label,
-            "description": (provider + " via Ollama. Runtime context is managed by the daemon." if provider_id == "ollama" else
-                            "xAI API billing; Fast requests premium Priority processing." if provider_id == "grok" else
-                            PROVIDERS[provider_id]["name"] + " model connection.") + (" Exact context is not reported; compact manually when needed." if context is None else ""),
-            "default_reasoning_level": (entry["default_effort"] if entry.get("default_effort") in efforts
-                                        else "high" if provider_id != "gemini" and "high" in efforts else None),
-            "supported_reasoning_levels": [{"effort": effort, "description": effort.title() + " reasoning"} for effort in efforts],
+            "description": _codex_description(provider_id, provider, context, service_tiers),
+            "default_reasoning_level": _default_reasoning_level(provider_id, entry, efforts),
+            "supported_reasoning_levels": levels,
             "shell_type": "default",
             "visibility": "list",
             "supported_in_api": True,

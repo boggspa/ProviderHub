@@ -109,6 +109,21 @@ class ResponsesBridgeTests(unittest.TestCase):
             self.assertEqual(translated["messages"], [{"role": "user", "content": [{"type": "text", "text": "hello"}]}])
             self.assertEqual(translated["max_tokens"], 16384)
 
+    def test_chatgpt_effort_slider_and_fast_reach_translated_messages(self):
+        with tempfile.TemporaryDirectory() as directory:
+            envelope = ReasoningEnvelope(Path(directory))
+            body = {"input": "hello", "stream": False, "store": False, "tools": [],
+                    "reasoning": {"effort": "xhigh"}, "service_tier": "fast"}
+            translated = to_messages(
+                body, "kimi/k3", {"context": 131072, "max_output": 4096}, envelope, "scope")
+            self.assertEqual(translated["output_config"], {"effort": "xhigh"})
+            self.assertEqual(translated["service_tier"], "fast")
+            self.assertNotIn("thinking", translated)
+            body["reasoning"] = {"effort": "none"}
+            disabled = to_messages(
+                body, "kimi/k3", {"context": 131072, "max_output": 4096}, envelope, "scope")
+            self.assertEqual(disabled["thinking"], {"type": "disabled"})
+
     def test_anthropic_cache_usage_is_included_in_codex_context_accounting(self):
         self.assertEqual(response_usage({"input_tokens": 10, "cache_creation_input_tokens": 20,
                                          "cache_read_input_tokens": 30, "output_tokens": 4}),

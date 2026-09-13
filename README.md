@@ -72,6 +72,8 @@ Claude's Effort control maps to documented Grok levels: Minimal → Low; Max/Ult
 
 Sources: [Grok 4.6](https://docs.x.ai/developers/grok-4-6), [reasoning controls](https://docs.x.ai/developers/model-capabilities/text/reasoning), [Priority processing](https://docs.x.ai/developers/advanced-api-usage/priority-processing), [model discovery](https://docs.x.ai/developers/rest-api-reference/inference/models).
 
+Every other Codex catalogue row likewise publishes only that model's documented effort ranks. Fast appears only when the model has a same-model Fast control. ChatGPT's Power slider is not overridden with extra model rows; after a custom model is selected, the effort slider and advanced Effort menu use those ranks, and Fast maps to the advertised service tier.
+
 **Codex / ChatGPT Desktop**
 
 Provider Hub 0.5.0 exposes `/v1/responses` for every configured provider connection. Grok, Ollama and OpenRouter remain native: the hub relays their streaming and non-streaming Responses, function-call history and outputs, opaque provider reasoning items, terminal usage, provider errors, and cancellation. Mistral, Kimi, MiMo, DeepSeek, Cerebras, Muse, Qwen Token Plan and Gemini use the authenticated local Messages bridge described above, which converts JSON and streaming function calls, usage, errors, and cancellation back to Responses semantics. `client_metadata` is consumed as local client context and is never forwarded to a provider.

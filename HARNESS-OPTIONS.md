@@ -136,8 +136,12 @@ compaction is set to 85 percent. When the provider does not establish a numeric
 limit, the context values and automatic-compaction threshold are `null` rather
 than an invented 200,000 tokens; the picker tells the user to compact manually
 when needed. Each provider publishes only its known effort levels. Grok also
-has an explicitly labelled Priority service tier; Ollama entries do not claim
-effort or speed controls its metadata does not establish.
+has an explicitly labelled Priority service tier when that model advertises
+same-model Fast; Ollama entries do not claim effort or speed controls its
+metadata does not establish. ChatGPT's compact Power slider is not given fake
+GPT-only ranks. After a custom catalogue model is selected, that control and
+the advanced Effort menu use `supported_reasoning_levels`; Fast uses the
+model's `service_tiers` when a same-model Fast control exists.
 
 The installed app-server loaded real non-GPT IDs `grok/grok-4.6` and
 `ollama/small-model:latest`, returned their intended friendly labels, and

@@ -17,6 +17,7 @@ def fixture():
         "id": "grok/grok-4.6", "display_name": "Grok 4.6", "provider_id": "grok",
         "context": 500000, "tools": True, "vision": True,
         "effort_modes": ["low", "medium", "high", "xhigh"],
+        "fast_mode": True,
         "presentation": {"displayProvider": "Grok"},
     }, {"id": "ollama/small-model:latest", "display_name": "Small Model",
         "context": 131072, "tools": True, "vision": False, "provider_id": "ollama"}]}

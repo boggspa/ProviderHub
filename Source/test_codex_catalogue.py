@@ -139,5 +139,77 @@ class CuratedCatalogueProjectionTests(unittest.TestCase):
         self.assertNotEqual(narrowed, catalogue_digest(base, stock))
 
 
+class EffortAndFastProjectionTests(unittest.TestCase):
+    def projected(self, *models):
+        selected = settings(codex_model=models[0]["id"])
+        return {row["slug"]: row for row in project_codex(selected, inventory(*models))["models"]}
+
+    def test_each_provider_publishes_its_own_effort_ranks_not_duplicate_rows(self):
+        rows = self.projected(
+            model("mistral/codestral", effort_modes=["none", "high"]),
+            model("kimi/k3", name="K3", effort_modes=["low", "high", "max"]),
+            model("qwen-token-plan/qwen3.8-max", name="Qwen 3.8 Max",
+                  effort_modes=["none", "low", "medium", "xhigh"], default_effort="xhigh"),
+            model("gemini/gemini-3.8-flash", name="Gemini 3.8 Flash",
+                  effort_modes=["low", "medium", "high"], default_effort="medium"),
+            model("cerebras/gpt-oss-120b", name="GPT OSS 120B",
+                  effort_modes=["low", "medium", "high"]),
+        )
+        self.assertEqual(
+            [entry["effort"] for entry in rows["mistral/codestral"]["supported_reasoning_levels"]],
+            ["none", "high"],
+        )
+        self.assertEqual(rows["mistral/codestral"]["default_reasoning_level"], "high")
+        self.assertEqual(
+            [entry["effort"] for entry in rows["kimi/k3"]["supported_reasoning_levels"]],
+            ["low", "high", "max"],
+        )
+        self.assertEqual(rows["qwen-token-plan/qwen3.8-max"]["default_reasoning_level"], "xhigh")
+        self.assertEqual(rows["gemini/gemini-3.8-flash"]["default_reasoning_level"], "medium")
+        self.assertEqual(rows["cerebras/gpt-oss-120b"]["service_tiers"], [])
+        self.assertEqual(len(rows), 5)
+
+    def test_chatgpt_invalid_effort_names_are_dropped(self):
+        rows = self.projected(model(
+            "mistral/a-model",
+            effort_modes=["none", "persistent", "high", "foo", "high"],
+        ))
+        self.assertEqual(
+            [entry["effort"] for entry in rows["mistral/a-model"]["supported_reasoning_levels"]],
+            ["none", "high"],
+        )
+
+    def test_fast_is_advertised_only_for_same_model_fast_controls(self):
+        rows = self.projected(
+            model("grok/grok-4.6", name="Grok 4.6",
+                  effort_modes=["low", "medium", "high", "xhigh"], fast_mode=True,
+                  presentation={"displayProvider": "Grok"}),
+            model("grok/unknown", name="Unknown Grok", effort_modes=["low", "high"]),
+            model("muse/muse-spark-1.3", name="Muse Spark",
+                  effort_modes=["minimal", "low", "medium", "high"], fast_mode=True),
+            model("ollama/thinker:latest", name="Thinker", reasoning=True,
+                  effort_modes=["none", "high"], fast_mode=True),
+        )
+        grok = rows["grok/grok-4.6"]
+        self.assertEqual(grok["service_tiers"][0]["id"], "priority")
+        self.assertIn("Priority", grok["description"])
+        self.assertEqual(
+            [entry["effort"] for entry in grok["supported_reasoning_levels"]],
+            ["low", "medium", "high", "xhigh"],
+        )
+        self.assertEqual(rows["grok/unknown"]["service_tiers"], [])
+        self.assertNotIn("Fast", rows["grok/unknown"]["description"])
+        self.assertEqual(rows["muse/muse-spark-1.3"]["service_tiers"][0]["id"], "fast")
+        self.assertEqual(rows["ollama/thinker:latest"]["supported_reasoning_levels"], [])
+        self.assertEqual(rows["ollama/thinker:latest"]["service_tiers"], [])
+
+    def test_models_without_high_default_to_their_top_advertised_rank(self):
+        rows = self.projected(model(
+            "openrouter/z-ai/glm-5.2", name="GLM 5.2",
+            effort_modes=["none", "low", "medium", "xhigh"],
+        ))
+        self.assertEqual(rows["openrouter/z-ai/glm-5.2"]["default_reasoning_level"], "xhigh")
+
+
 if __name__ == "__main__":
     unittest.main()
