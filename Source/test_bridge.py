@@ -180,6 +180,62 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(assistant["tool_calls"][0]["id"], tool_message["tool_call_id"])
         self.assertEqual(len(tool_message["tool_call_id"]), 9)
 
+    def test_stream_predicted_tool_calls_recovered_across_chunks(self):
+        translator = StreamTranslator("claude-fable-5", {"Bash": "Bash", "Read": "Read"})
+        events = translator.start()
+        # The call is held while its name and braces are still incomplete.
+        self.assertEqual(translator.feed({"choices": [{"delta": {"content": "Rea"}}]}), [])
+        self.assertEqual(translator.feed({"choices": [{"delta": {"content": 'd{"pa'}}]}), [])
+        events += translator.feed({"choices": [{"delta": {"content": 'th": "a.txt"}'}}]})
+        events += translator.feed({"choices": [{"delta": {"content": ' and Bash{"command": "ls"} done'}}]})
+        events += translator.feed({"choices": [{"delta": {}, "finish_reason": "stop"}], "usage": {"prompt_tokens": 9, "completion_tokens": 7}})
+        events += translator.end()
+        starts = [e for e in events if e["type"] == "content_block_start"]
+        self.assertEqual([s["content_block"]["type"] for s in starts], ["tool_use", "text", "tool_use", "text"])
+        self.assertEqual(starts[0]["content_block"]["name"], "Read")
+        self.assertEqual(starts[2]["content_block"]["name"], "Bash")
+        fragments = [e["delta"]["partial_json"] for e in events
+                     if e["type"] == "content_block_delta" and e["index"] == starts[0]["index"]]
+        self.assertEqual(json.loads("".join(fragments)), {"path": "a.txt"})
+        text_deltas = [e["delta"]["text"] for e in events
+                       if e["type"] == "content_block_delta" and e["delta"]["type"] == "text_delta"]
+        self.assertEqual("".join(text_deltas), " and  done")
+        stops = sorted(e["index"] for e in events if e["type"] == "content_block_stop")
+        self.assertEqual(stops, [0, 1, 2, 3])
+        self.assertEqual(events[-2]["delta"]["stop_reason"], "tool_use")
+        self.assertEqual(events[-1]["type"], "message_stop")
+
+    def test_stream_prose_immediately_then_predicted_call(self):
+        translator = StreamTranslator("claude-fable-5", {"Bash": "Bash"})
+        events = translator.start()
+        events += translator.feed({"choices": [{"delta": {"content": 'Running Bash{"command": "ls"} now.'}}]})
+        events += translator.feed({"choices": [{"delta": {}, "finish_reason": "stop"}]})
+        events += translator.end()
+        starts = [e for e in events if e["type"] == "content_block_start"]
+        self.assertEqual([s["content_block"]["type"] for s in starts], ["text", "tool_use", "text"])
+        self.assertEqual(starts[1]["content_block"]["name"], "Bash")
+        self.assertEqual(events[-2]["delta"]["stop_reason"], "tool_use")
+
+    def test_stream_unbalanced_predicted_call_stays_text(self):
+        translator = StreamTranslator("claude-fable-5", {"Bash": "Bash"})
+        events = translator.start()
+        self.assertEqual(translator.feed({"choices": [{"delta": {"content": 'Bash{"command": "ls"'}}]}), [])
+        events += translator.feed({"choices": [{"delta": {}, "finish_reason": "stop"}]})
+        events += translator.end()
+        starts = [e for e in events if e["type"] == "content_block_start"]
+        self.assertEqual([s["content_block"]["type"] for s in starts], ["text"])
+        text_deltas = [e["delta"]["text"] for e in events if e["type"] == "content_block_delta"]
+        self.assertEqual("".join(text_deltas), 'Bash{"command": "ls"')
+        self.assertEqual(events[-2]["delta"]["stop_reason"], "end_turn")
+
+    def test_stream_hold_cap_flushes_near_json_as_text(self):
+        translator = StreamTranslator("claude-fable-5", {"Bash": "Bash"})
+        translator.start()
+        with patch("protocol._MAX_TOOL_CALL_HOLD", 8):
+            events = translator.feed({"choices": [{"delta": {"content": 'Bash{"abcdefghij'}}]})
+        self.assertEqual("".join(e["delta"]["text"] for e in events if e["type"] == "content_block_delta"),
+                         'Bash{"abcdefghij')
+
     def test_stream_text_and_interleaved_partial_arguments(self):
         translator = StreamTranslator("claude-fable-5", {"fn_one": "fn.one", "fn_two": "fn.two"})
         events = translator.start()

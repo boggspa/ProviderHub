@@ -410,8 +410,14 @@ class StreamTranslator:
         self.identifier = "msg_" + secrets.token_hex(12)
         self.next_index = 0
         self.text_index = None
+        self.text_open = False
         self.open_indices = set()
         self.tools = {}
+        # Content text is buffered so predicted tool calls typed as plain text
+        # can be converted before their deltas reach the desktop. Only the
+        # undecided tail that could still become a candidate is held back.
+        self.buffer = ""
+        self.converted = []
         self.usage = {"input_tokens": 0, "output_tokens": 0}
         self.finish = None
 
@@ -431,12 +437,8 @@ class StreamTranslator:
             delta = choice.get("delta") or {}
             text = visible_text(delta.get("content"))
             if text:
-                if self.text_index is None:
-                    self.text_index = self.next_index
-                    self.next_index += 1
-                    self.open_indices.add(self.text_index)
-                    events.append({"type": "content_block_start", "index": self.text_index, "content_block": {"type": "text", "text": ""}})
-                events.append({"type": "content_block_delta", "index": self.text_index, "delta": {"type": "text_delta", "text": text}})
+                self.buffer += text
+                self._flush_buffer(events)
             for tool in delta.get("tool_calls") or []:
                 key = tool.get("index", 0)
                 state = self.tools.setdefault(key, {"id": None, "name": None, "arguments": "", "buffer": "", "index": None})
@@ -462,9 +464,82 @@ class StreamTranslator:
                     state["buffer"] = ""
         return events
 
+    def _emit_text(self, events, text):
+        if not self.text_open:
+            self.text_index = self.next_index
+            self.next_index += 1
+            self.open_indices.add(self.text_index)
+            events.append({"type": "content_block_start", "index": self.text_index,
+                           "content_block": {"type": "text", "text": ""}})
+            self.text_open = True
+        events.append({"type": "content_block_delta", "index": self.text_index,
+                       "delta": {"type": "text_delta", "text": text}})
+
+    def _close_text(self, events):
+        if self.text_open:
+            events.append({"type": "content_block_stop", "index": self.text_index})
+            self.open_indices.discard(self.text_index)
+            self.text_open = False
+
+    def _decided_prefix(self):
+        """Length of the buffer prefix whose interpretation cannot change.
+
+        Complete predicted calls and text before them are decided. A suffix
+        that could still become a candidate — a known tool name (or a prefix
+        of one) at the buffer end, or an unbalanced '{' — is held back for
+        more deltas.
+        """
+        if not self.names:
+            return len(self.buffer)
+        limit = len(self.buffer)
+        cursor = 0
+        while cursor < limit:
+            match = _IDENTIFIER_RUN.search(self.buffer, cursor)
+            if not match:
+                break
+            name = match.group(0)
+            brace = match.end()
+            while brace < limit and self.buffer[brace] in " \t":
+                brace += 1
+            if name in self.names and brace < limit and self.buffer[brace] == "{":
+                end = _balanced_object_end(self.buffer, brace)
+                if end is None:
+                    if limit - match.start() > _MAX_TOOL_CALL_HOLD:
+                        return limit  # stop holding a runaway near-JSON tail
+                    return match.start()
+                cursor = end  # balanced: appends cannot change this slice
+            elif brace >= limit and (name in self.names or any(n.startswith(name) for n in self.names)):
+                return match.start()  # appending may complete the name and '{'
+            else:
+                cursor = match.end()  # followed by ordinary text: never a call
+        return limit
+
+    def _flush_buffer(self, events, *, final=False):
+        decided = len(self.buffer) if final else self._decided_prefix()
+        if not decided:
+            return
+        head, self.buffer = self.buffer[:decided], self.buffer[decided:]
+        for segment in segment_predicted_calls(head, self.names):
+            if segment[0] == "text":
+                self._emit_text(events, segment[1])
+                continue
+            _, name, arguments = segment
+            self._close_text(events)
+            index = self.next_index
+            self.next_index += 1
+            events.append({"type": "content_block_start", "index": index, "content_block": {
+                "type": "tool_use", "id": _synthetic_tool_id(len(self.converted), name, arguments),
+                "name": self.names.get(name, name), "input": {}}})
+            events.append({"type": "content_block_delta", "index": index, "delta": {
+                "type": "input_json_delta", "partial_json": arguments}})
+            events.append({"type": "content_block_stop", "index": index})
+            self.converted.append((name, arguments))
+
     def end(self):
         if self.finish is None:
             raise BridgeError("The provider closed the stream before a completion signal.")
+        events = []
+        self._flush_buffer(events, final=True)
         for tool in self.tools.values():
             if tool["index"] is None:
                 raise BridgeError("The provider returned an incomplete tool call.")
@@ -475,6 +550,6 @@ class StreamTranslator:
             except ValueError as exc:
                 raise BridgeError("The provider returned invalid tool arguments.") from exc
         result = [{"type": "content_block_stop", "index": i} for i in sorted(self.open_indices)]
-        result.append({"type": "message_delta", "delta": {"stop_reason": stop_reason(self.finish, bool(self.tools)), "stop_sequence": None}, "usage": self.usage})
+        result.append({"type": "message_delta", "delta": {"stop_reason": stop_reason(self.finish, bool(self.tools) or bool(self.converted)), "stop_sequence": None}, "usage": self.usage})
         result.append({"type": "message_stop"})
-        return result
+        return events + result
