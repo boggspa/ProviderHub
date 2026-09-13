@@ -8,9 +8,9 @@ mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources/worker" "$BUILD_
 xcrun swiftc -swift-version 5 -parse-as-library -O -target arm64-apple-macosx14.0 \
   -module-cache-path "$BUILD_DIR/ModuleCache" \
   -framework AppKit -framework SwiftUI -framework Security \
-  "$SOURCE_DIR/HubModels.swift" "$SOURCE_DIR/ProviderViews.swift" "$SOURCE_DIR/CodexHarness.swift" "$SOURCE_DIR/MistralBridge.swift" \
+  "$SOURCE_DIR/HubModels.swift" "$SOURCE_DIR/ProviderViews.swift" "$SOURCE_DIR/DevinAgentsView.swift" "$SOURCE_DIR/CodexHarness.swift" "$SOURCE_DIR/MistralBridge.swift" \
   -o "$APP_DIR/Contents/MacOS/MistralBridge"
-for module in bridge_core protocol gateway model_names catalogue hub_config providers qwen_provider openrouter_provider gemini_provider branding cerebras_replay catalogue_lifecycle responses_native responses_tools responses_bridge codex_catalogue codex_profile codex_token codex_runtime; do
+for module in bridge_core protocol gateway model_names catalogue hub_config providers devin_agent qwen_provider openrouter_provider gemini_provider branding cerebras_replay catalogue_lifecycle responses_native responses_tools responses_bridge codex_catalogue codex_profile codex_token codex_runtime effort_map chat_tool_order; do
   cp "$SOURCE_DIR/$module.py" "$APP_DIR/Contents/Resources/worker/"
 done
 cp "$SOURCE_DIR/provider_branding.json" "$APP_DIR/Contents/Resources/worker/"
@@ -34,8 +34,8 @@ cat > "$APP_DIR/Contents/Info.plist" <<'PLIST'
   <key>CFBundleIdentifier</key><string>com.mistralbridge.providerhub</string>
   <key>CFBundleExecutable</key><string>MistralBridge</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>0.5.0</string>
-  <key>CFBundleVersion</key><string>13</string>
+  <key>CFBundleShortVersionString</key><string>0.5.1</string>
+  <key>CFBundleVersion</key><string>14</string>
   <key>BridgeStateName</key><string>Provider Hub Preview</string>
   <key>BridgeProfileID</key><string>14c58c94-d7e8-4a15-96b8-81668956e474</string>
   <key>BridgeDefaultPort</key><integer>11438</integer>
