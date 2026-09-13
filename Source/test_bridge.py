@@ -14,8 +14,9 @@ from unittest.mock import patch
 from bridge_core import (BridgeError, ClaudeProfile, PROFILE_ID, atomic_json, default_settings,
                          read_json, validate_settings)
 from gateway import Runtime, Server
-from protocol import (StreamTranslator, estimated_tokens, function_name, model_catalog,
-                      rewrite_context_reminders, tool_id, translate_request, translate_response)
+from protocol import (StreamTranslator, apply_mapping_options, estimated_tokens, function_name,
+                      mapping_options_for, model_catalog, rewrite_context_reminders, tool_id,
+                      translate_request, translate_response)
 from catalogue import build_catalogue, read_observations, route_specs
 
 
@@ -75,6 +76,31 @@ class ProtocolTests(unittest.TestCase):
         with self.assertRaises(BridgeError): translate_request(prompt(model="unmapped"), config())
         with self.assertRaises(BridgeError): translate_request(prompt(tools=[{"type": "web_search_20250305", "name": "web_search"}]), config())
         with self.assertRaises(BridgeError): translate_request(prompt(messages=[{"role": "user", "content": [{"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": "abc"}}]}]), config())
+
+    def test_mapping_options_omit_system_and_tools_without_mutating(self):
+        settings = config()
+        settings["mapping_options"] = {"claude-fable-5": {"omit_system": True, "omit_tools": True}}
+        tools = [{"name": "Read", "description": "read", "input_schema": {"type": "object"}}]
+        body = prompt(system="HARNESS", tools=tools, tool_choice={"type": "auto"})
+        original = copy.deepcopy(body)
+        stripped = apply_mapping_options(body, settings)
+        self.assertEqual(body, original)
+        self.assertIsNot(stripped, body)
+        self.assertNotIn("system", stripped)
+        self.assertNotIn("tools", stripped)
+        self.assertNotIn("tool_choice", stripped)
+        self.assertEqual(stripped["messages"], body["messages"])
+        self.assertTrue(mapping_options_for("claude-fable-5", settings)["omit_system"])
+        self.assertTrue(mapping_options_for("fable", settings)["omit_system"])
+        self.assertTrue(mapping_options_for("claude-fable-5[1m]", settings)["omit_tools"])
+        self.assertFalse(mapping_options_for("claude-haiku-4-5", settings)["omit_tools"])
+        untouched = apply_mapping_options(body, config())
+        self.assertIs(untouched, body)
+        settings["mappings"]["claude-haiku-4-5"] = "other-model"
+        settings["mapping_options"]["claude-haiku-4-5"] = {"omit_system": True, "omit_tools": False}
+        shared = apply_mapping_options(prompt(model="test-model", system="keep"), settings)
+        self.assertEqual(shared.get("system"), "keep")
+
 
     def test_context_limits_and_model_mappings(self):
         small = config(); small["_model_specs"]["test-model"]["context"] = 8000
@@ -534,6 +560,37 @@ class GatewayTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(headers["X-Mistral-Bridge-Token-Count"], "estimate")
         self.assertGreater(json.loads(data)["input_tokens"], 0)
+
+    def test_mapping_options_drop_harness_before_context_preflight(self):
+        specs = self.runtime.settings["_model_specs"]
+        self.assertTrue(specs)
+        for spec in specs.values():
+            spec["context"] = 2048
+        tools = [{"name": "Read", "description": "T" * 4000,
+                  "input_schema": {"type": "object", "properties": {"path": {"type": "string"}}}}]
+        body = prompt(system="S" * 4000, tools=tools, tool_choice={"type": "auto"})
+        self.assertGreaterEqual(estimated_tokens(body), 2048)
+        status, data, _ = self.request("POST", "/v1/messages", body)
+        self.assertEqual(status, 400)
+        self.assertIn("2,048-token context limit", json.loads(data)["error"]["message"])
+        count_status, count_data, _ = self.request("POST", "/v1/messages/count_tokens", body)
+        self.assertEqual(count_status, 200)
+        self.assertGreaterEqual(json.loads(count_data)["input_tokens"], 2048)
+        self.runtime.settings["mapping_options"] = {
+            "claude-fable-5": {"omit_system": True, "omit_tools": True},
+        }
+        status, data, _ = self.request("POST", "/v1/messages", body)
+        self.assertEqual(status, 200, data)
+        upstream = MockMistral.requests[-1]
+        self.assertNotIn("tools", upstream)
+        self.assertFalse(any(message.get("role") == "system" for message in upstream["messages"]))
+        plan = self.runtime.plan(body)
+        self.assertEqual(plan["compatibility"]["omitted_mapping_fields"], ["system", "tools"])
+        self.assertNotIn("context_reminders", plan.get("compatibility", {}))
+        count_status, count_data, _ = self.request("POST", "/v1/messages/count_tokens", body)
+        self.assertEqual(count_status, 200)
+        self.assertLess(json.loads(count_data)["input_tokens"], 2048)
+
 
     def test_client_cancellation_clears_active_request(self):
         MockMistral.mode = "slow"

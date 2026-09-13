@@ -76,6 +76,38 @@ class SettingsMigrationTests(unittest.TestCase):
         self.assertFalse(normalize({"auto_mode": False}, SLOTS, "mistral-test")["auto_mode"])
         self.assertTrue(normalize({"auto_mode": True}, SLOTS, "mistral-test")["auto_mode"])
 
+    def test_mapping_options_default_off_and_persist_only_true_omits(self):
+        empty = normalize({}, SLOTS, "mistral-test")
+        self.assertEqual(empty["mapping_options"], {})
+        self.assertEqual(
+            normalize({"mapping_options": {}}, SLOTS, "mistral-test")["mapping_options"], {})
+        both = normalize({
+            "mapping_options": {
+                "claude-fable-5": {"omit_system": True, "omit_tools": True},
+                "claude-opus-5": {"omit_system": False, "omit_tools": False},
+            },
+        }, SLOTS, "mistral-test")
+        self.assertEqual(both["mapping_options"], {
+            "claude-fable-5": {"omit_system": True, "omit_tools": True},
+        })
+        system_only = normalize({
+            "mapping_options": {"claude-opus-5": {"omit_system": True}},
+        }, SLOTS, "mistral-test")
+        self.assertEqual(system_only["mapping_options"], {
+            "claude-opus-5": {"omit_system": True, "omit_tools": False},
+        })
+        ignored = normalize({
+            "mapping_options": {"claude-retired": {"omit_tools": True}},
+        }, SLOTS, "mistral-test")
+        self.assertEqual(ignored["mapping_options"], {})
+        for value in (True, [], {"claude-fable-5": True},
+                      {"claude-fable-5": {"omit_system": 1}},
+                      {"claude-fable-5": {"omit_tools": "true"}},
+                      {"claude-fable-5": {"drop": True}}):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                normalize({"mapping_options": value}, SLOTS, "mistral-test")
+
+
     def test_legacy_credential_mode_is_validated_before_migration(self):
         vibe = normalize({"credential_mode": "vibe"}, SLOTS, "mistral-test")
         separate = normalize({"credential_mode": "separate"}, SLOTS, "mistral-test")

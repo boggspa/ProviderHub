@@ -523,6 +523,34 @@ class GatewayHubHTTPTests(unittest.TestCase):
         self.assertIn(LOCAL_REQUEST_TEXT, combined)
         self.assertEqual(self.runtime.plan(payload)["compatibility"]["context_reminders"], "catalogue_remaining")
 
+    def test_mapping_options_omit_native_system_and_tools_before_context_check(self):
+        self.start_gateway("deepseek", "deepseek-flash", {
+            "effort_modes": ["none", "low", "high", "max"],
+            "reasoning_history": "native",
+            "context": 2048,
+        })
+        tools = [tool_definition()]
+        tools[0]["description"] = "T" * 4000
+        payload = {
+            "model": "claude-fable-5",
+            "max_tokens": 256,
+            "system": "S" * 4000,
+            "messages": [{"role": "user", "content": LOCAL_REQUEST_TEXT}],
+            "tools": tools,
+        }
+        status, raw, _ = self.request(payload)
+        self.assertEqual(status, 400, raw)
+        self.runtime.settings["mapping_options"] = {
+            "claude-fable-5": {"omit_system": True, "omit_tools": True},
+        }
+        status, raw, _ = self.request(payload)
+        self.assertEqual(status, 200, raw)
+        upstream = MockProvider.requests[-1]
+        self.assertNotIn("tools", upstream)
+        self.assertNotIn("system", upstream)
+        self.assertIn(LOCAL_REQUEST_TEXT, json.dumps(upstream))
+
+
     def test_native_sse_preserves_thinking_and_completes_tool_cycle(self):
         self.start_gateway("deepseek", "deepseek-flash", {
             "effort_modes": ["none", "low", "high", "max"],

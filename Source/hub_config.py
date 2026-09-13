@@ -87,6 +87,30 @@ def connection_signature(provider_id: str, connection: dict) -> str:
     return hashlib.sha256(value).hexdigest()[:20]
 
 
+def _normalize_mapping_options(value, slots) -> dict:
+    if value in (None, {}):
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError("Mapping options must be an object.")
+    known = {slot[0] for slot in slots}
+    result = {}
+    for slot, options in value.items():
+        if slot not in known:
+            continue
+        if not isinstance(options, dict):
+            raise ValueError("Each mapping option must be an object.")
+        unknown = set(options) - {"omit_system", "omit_tools"}
+        if unknown:
+            raise ValueError("Unknown mapping option field.")
+        omit_system = options.get("omit_system", False)
+        omit_tools = options.get("omit_tools", False)
+        if type(omit_system) is not bool or type(omit_tools) is not bool:
+            raise ValueError("omit_system and omit_tools must be true or false.")
+        if omit_system or omit_tools:
+            result[slot] = {"omit_system": omit_system, "omit_tools": omit_tools}
+    return result
+
+
 def defaults(slots, vibe_model: str, port: int = 11436) -> dict:
     connections = provider_defaults()
     for provider_id, connection in connections.items():
@@ -97,6 +121,7 @@ def defaults(slots, vibe_model: str, port: int = 11436) -> dict:
         connection["credential_revision"] = 0
     return {"schema_version": 3, "port": port,
             "mappings": {slot[0]: qualify("mistral", vibe_model) for slot in slots},
+            "mapping_options": {},
             "providers": connections, "branding_overrides": {},
             "auto_stop": True, "auto_mode": False, "codex_model": None,
             "codex_catalogue": None}
@@ -125,6 +150,7 @@ def normalize(value: dict, slots, vibe_model: str, port: int = 11436) -> dict:
         if slot not in mappings:
             raise ValueError("Choose a model for every Claude slot.")
         result["mappings"][slot] = qualify(*split_route(mappings[slot]))
+    result["mapping_options"] = _normalize_mapping_options(value.get("mapping_options", {}), slots)
     configured = value.get("providers", {})
     if not isinstance(configured, dict):
         raise ValueError("Provider connections must be an object.")

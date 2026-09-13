@@ -102,6 +102,29 @@ final class BridgeModel: ObservableObject {
     var running: Bool { gatewayState == "Ready" }
     var changed: Bool { settings != savedSettings }
 
+    func omitSystem(for slot: String) -> Binding<Bool> {
+        Binding(
+            get: { settings.mapping_options[slot]?.omit_system ?? false },
+            set: { setMappingOmit(slot, omitSystem: $0) }
+        )
+    }
+    func omitTools(for slot: String) -> Binding<Bool> {
+        Binding(
+            get: { settings.mapping_options[slot]?.omit_tools ?? false },
+            set: { setMappingOmit(slot, omitTools: $0) }
+        )
+    }
+    private func setMappingOmit(_ slot: String, omitSystem: Bool? = nil, omitTools: Bool? = nil) {
+        var options = settings.mapping_options[slot] ?? MappingOptions()
+        if let omitSystem { options.omit_system = omitSystem }
+        if let omitTools { options.omit_tools = omitTools }
+        if options.omit_system || options.omit_tools {
+            settings.mapping_options[slot] = options
+        } else {
+            settings.mapping_options.removeValue(forKey: slot)
+        }
+    }
+
     enum ChangeKind {
         /// Nothing to write.
         case unchanged
@@ -109,7 +132,7 @@ final class BridgeModel: ObservableObject {
         case prefs
         /// Only the Codex catalogue or default differs.
         case codexOnly
-        /// Claude-side routing (mappings, providers, port, branding) differs.
+        /// Claude-side routing (mappings, mapping_options, providers, port, branding) differs.
         case claudeRouting
         /// Both harnesses' selections or shared provider settings differ.
         case mixed
@@ -890,10 +913,16 @@ struct BridgeWindow: View {
                                 TextField("provider/exact-model-id", text: Binding(get: { model.settings.mappings[slot.id] ?? "" }, set: { model.settings.mappings[slot.id] = $0 }))
                                     .textFieldStyle(.roundedBorder).font(.system(size: 10, design: .monospaced))
                             }
+                            HStack(spacing: 14) {
+                                Toggle("Omit system", isOn: model.omitSystem(for: slot.id)).toggleStyle(.checkbox)
+                                Toggle("Omit tools", isOn: model.omitTools(for: slot.id)).toggleStyle(.checkbox)
+                            }.font(.caption).foregroundStyle(.secondary)
                         }.frame(maxWidth: .infinity)
                         Button("Test") { Task { await model.testRoute(slot.id) } }.disabled(model.busy)
                     }
                 }
+                Text("At your own risk. Claude still sends system and tools; checked boxes drop those fields here before the model. This is a first-turn smoke test for small contexts, not a coding-agent mode — tool loops and Claude Code will break.")
+                    .font(.caption).foregroundStyle(.secondary).lineSpacing(3)
                 Divider()
                 HStack {
                     Toggle("Show technical IDs", isOn: $model.showRoutingIDs).toggleStyle(.checkbox).font(.caption)

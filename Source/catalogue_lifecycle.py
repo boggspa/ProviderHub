@@ -335,6 +335,9 @@ def catalogue_fingerprint(
                 None if spec is None else
                 {key: spec.get(key) for key in _PLANNING_FIELDS if key in spec}
             )
+    options = settings.get("mapping_options") or {}
+    if options:
+        material["mapping_options"] = options
     encoded = json.dumps(
         material, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
     ).encode()

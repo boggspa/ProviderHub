@@ -62,10 +62,15 @@ struct ProviderSummary: Decodable {
     var warnings: [String]?
     var fetched_at: String?
 }
+struct MappingOptions: Codable, Equatable {
+    var omit_system = false
+    var omit_tools = false
+}
 struct RouteSettings: Codable, Equatable {
     var schema_version = 3
     var port = hubDefaultPort
     var mappings = Dictionary(uniqueKeysWithValues: slots.map { ($0.id, "mistral/mistral-vibe-cli-latest") })
+    var mapping_options: [String: MappingOptions] = [:]
     var providers: [String: ProviderConnection] = [:]
     var branding_overrides: [String: BrandOverride] = [:]
     var auto_stop = true

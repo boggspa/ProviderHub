@@ -39,7 +39,7 @@ integration. Grok here also uses its pay-as-you-go API.
 
 ## Claude Desktop
 
-1. Open **Models** and select the provider model behind each Claude model slot.
+1. Open **Models** and select the provider model behind each Claude model slot. Optional **Omit system** / **Omit tools** checkboxes drop those Claude-sent fields at this gateway (own risk; tool loops break).
 2. Open **Claude** and choose **Launch Claude**.
 3. If Claude is already open, the app asks before restarting it.
 

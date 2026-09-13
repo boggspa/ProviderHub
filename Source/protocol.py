@@ -71,18 +71,70 @@ def compact_content(parts):
     return list(parts)
 
 
+SLOT_ALIASES = {
+    "fable": "claude-fable-5",
+    "opus": "claude-opus-5",
+    "sonnet": "claude-sonnet-5",
+    "haiku": "claude-haiku-4-5",
+}
+
 def resolve_model(requested: str, mappings: dict) -> str:
     if requested.endswith("[1m]"):
         requested = requested[:-4]
     if requested in mappings:
         return mappings[requested]
-    aliases = {"fable": "claude-fable-5", "opus": "claude-opus-5", "sonnet": "claude-sonnet-5", "haiku": "claude-haiku-4-5"}
-    if requested in aliases:
-        return mappings[aliases[requested]]
+    if requested in SLOT_ALIASES:
+        return mappings[SLOT_ALIASES[requested]]
     # Only explicitly configured upstream IDs are callable through this gateway.
     if requested in mappings.values():
         return requested
     raise BridgeError(f"Model {requested!r} is not mapped. Choose it in Provider Hub first.")
+
+
+def resolve_mapping_slot(requested, mappings: dict) -> str | None:
+    if not isinstance(requested, str) or not isinstance(mappings, dict):
+        return None
+    if requested.endswith("[1m]"):
+        requested = requested[:-4]
+    if requested in mappings:
+        return requested
+    if requested in SLOT_ALIASES:
+        slot = SLOT_ALIASES[requested]
+        return slot if slot in mappings else None
+    matches = [slot for slot, route in mappings.items() if route == requested]
+    if len(matches) == 1:
+        return matches[0]
+    return None
+
+
+def mapping_options_for(requested, settings: dict) -> dict:
+    options = {"omit_system": False, "omit_tools": False}
+    if not isinstance(settings, dict):
+        return options
+    slot = resolve_mapping_slot(requested, settings.get("mappings") or {})
+    if slot is None:
+        return options
+    configured = (settings.get("mapping_options") or {}).get(slot) or {}
+    if configured.get("omit_system") is True:
+        options["omit_system"] = True
+    if configured.get("omit_tools") is True:
+        options["omit_tools"] = True
+    return options
+
+
+def apply_mapping_options(payload: dict, settings: dict) -> dict:
+    if not isinstance(payload, dict):
+        return payload
+    options = mapping_options_for(payload.get("model"), settings)
+    if not options["omit_system"] and not options["omit_tools"]:
+        return payload
+    result = dict(payload)
+    if options["omit_system"]:
+        result.pop("system", None)
+    if options["omit_tools"]:
+        result.pop("tools", None)
+        result.pop("tool_choice", None)
+    return result
 
 
 def model_catalog(settings: dict):

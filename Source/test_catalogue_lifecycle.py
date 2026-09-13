@@ -358,6 +358,18 @@ class CatalogueLifecycleTests(unittest.TestCase):
             atomic_json(root / "catalogues/deepseek.json", selected)
             self.assertNotEqual(first, catalogue_fingerprint(settings, root, now=NOW))
 
+    def test_runtime_fingerprint_includes_mapping_options_only_when_set(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            settings = settings_for()
+            write_catalogue(root, settings, "deepseek", [model("deepseek-chat", context=8192)])
+            first = catalogue_fingerprint(settings, root, now=NOW)
+            settings["mapping_options"] = {}
+            self.assertEqual(first, catalogue_fingerprint(settings, root, now=NOW))
+            settings["mapping_options"] = {"claude-fable-5": {"omit_system": True, "omit_tools": False}}
+            self.assertNotEqual(first, catalogue_fingerprint(settings, root, now=NOW))
+
+
     def test_runtime_startup_snapshot_requires_restart_after_planning_change(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
