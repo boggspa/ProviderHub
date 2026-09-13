@@ -105,12 +105,30 @@ The generated catalogue uses exact provider-qualified slugs, for example
 request uses the provider's exact model ID, while the Codex-facing response
 retains the catalogue slug. No OpenAI model aliases are introduced.
 
-Every compatible model published by the configured account catalogues appears.
-OpenRouter publishes a curated shortlist with separate context choices; there
-is no additional user inclusion checklist. The selected default sets the
-starting model. While the
-Provider Hub configuration is active, the temporary catalogue replaces the
-ordinary picker list rather than merging Hub and OpenAI models.
+By default, every compatible model published by the configured account
+catalogues appears. OpenRouter publishes a curated shortlist with separate
+context choices. The selected default sets the starting model.
+
+**Codex catalogue curation**
+
+Provider Hub 0.5.0 adds an optional Codex catalogue selection on the Codex page.
+Switch the **Catalogue** mode from **All compatible models** (the default)
+to **Custom selection** and choose which of your configured provider models
+should appear in the Codex picker. The curated list:
+
+- Contains only the exact provider-qualified routes you select
+- Excludes models without coding-tool support (they are listed under
+  exclusions with an honest reason)
+- Shows friendly labels and known context limits in the setup card
+- Maintains the same default-model picker and starting behaviour
+- Can be saved while Claude is live on the gateway; launching Codex
+  briefly restarts the gateway so both desktop harnesses share the new
+  snapshot, and the live app reconnects automatically
+
+Missing curated routes (e.g., after a provider refresh that removes a model)
+are reported on the Codex page and block `codex-prepare` until you refresh
+or remove them. While the Provider Hub configuration is active, the catalogue
+replaces the ordinary picker list rather than merging with OpenAI models.
 
 For a known numeric context, `context_window` and `max_context_window` contain
 the full value, `effective_context_window_percent` is 100, and automatic
@@ -148,6 +166,20 @@ switching. An incompatible catalogue, including one that silently falls back
 to OpenAI defaults, fails before any user configuration is edited. A cancelled
 restart leaves the desktop configuration unchanged; the gateway can stop when
 no other owned harness or active request is using it.
+
+**Simultaneous use**
+
+Claude and Codex can now both run on the same gateway. While one desktop
+harness is live, you can still change the *other* harness's selection:
+
+- Changing the Codex catalogue or default while Claude is live: Save writes
+the new selection without stopping the gateway. When you launch Codex, the
+app briefly restarts the gateway so both harnesses share the new snapshot;
+Claude reconnects automatically.
+- Changing Claude mappings while Codex is live: Save writes the new mappings,
+and launching Claude briefly restarts the gateway; Codex reconnects.
+- Changing shared provider settings (keys, regions, port, branding) while
+*either* harness is live still requires quitting both desktop apps first.
 
 Activation edits the user's selected Codex `config.toml` and owns only the
 selected model, catalogue, context, reasoning, verbosity, service-tier, and web

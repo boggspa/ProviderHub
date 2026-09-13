@@ -101,6 +101,34 @@ final class BridgeModel: ObservableObject {
 
     var running: Bool { gatewayState == "Ready" }
     var changed: Bool { settings != savedSettings }
+
+    enum ChangeKind {
+        /// Nothing to write.
+        case unchanged
+        /// Only Swift-side preferences (auto stop/mode) differ; no gateway material.
+        case prefs
+        /// Only the Codex catalogue or default differs.
+        case codexOnly
+        /// Claude-side routing (mappings, providers, port, branding) differs.
+        case claudeRouting
+        /// Both harnesses' selections or shared provider settings differ.
+        case mixed
+    }
+
+    var changeKind: ChangeKind {
+        if settings == savedSettings { return .unchanged }
+        var mine = settings
+        mine.codex_model = savedSettings.codex_model
+        mine.codex_catalogue = savedSettings.codex_catalogue
+        if mine == savedSettings { return .codexOnly }
+        var prefsOnly = mine
+        prefsOnly.auto_stop = savedSettings.auto_stop
+        prefsOnly.auto_mode = savedSettings.auto_mode
+        if prefsOnly == savedSettings { return .prefs }
+        let codexChanged = settings.codex_model != savedSettings.codex_model
+            || settings.codex_catalogue != savedSettings.codex_catalogue
+        return codexChanged ? .mixed : .claudeRouting
+    }
     var routeOptions: [String] {
         let known = Set(availableModels.flatMap { ($0.aliases ?? []) + [$0.id] })
         let extra = Set(settings.mappings.values.filter { !known.contains($0) })
@@ -333,17 +361,87 @@ final class BridgeModel: ObservableObject {
         await waitForCatalogueRefresh()
         updateClaudeRunning()
         updateCodexRunning()
-        if running { try await checkIdleGateway() }
-        if activeRequests > 0 || anyOwnedHarnessRunning {
-            throw WorkerError(message: "Quit the desktop sessions using this gateway before changing its active configuration.")
+        let kind = changeKind
+        if kind == .unchanged { return }
+        let claudeLive = claudeRunning && profileActive
+        let codexLive = codexRunning && codexRecoveryNeeded
+        if activeRequests > 0 || claudeLive || codexLive {
+            // While one desktop session is live, only changes scoped to the
+            // idle harness's selection are writable; the launch flow offers a
+            // gateway restart when the new selection needs a fresh snapshot.
+            switch kind {
+            case .prefs:
+                try await writeSettings()
+                return
+            case .codexOnly:
+                guard !codexLive else {
+                    throw WorkerError(message: "Quit Codex / ChatGPT before changing its model catalogue or default.")
+                }
+            case .claudeRouting:
+                guard !claudeLive else {
+                    throw WorkerError(message: "Quit Claude before changing its provider settings.")
+                }
+            case .mixed:
+                throw WorkerError(message: "Quit the desktop sessions using this gateway before changing provider settings.")
+            case .unchanged:
+                return
+            }
+            try await saveScoped()
+            return
         }
+        if running { try await checkIdleGateway() }
         if gatewayProcess?.isRunning == true { await stopGateway() }
-        let candidate = settings
-        let data = try JSONEncoder().encode(candidate)
+        try await writeSettings()
+    }
+
+    func saveScoped() async throws {
+        // Persist a change scoped to the idle harness without disturbing the
+        // gateway owned by the live one.
+        if running { try await checkIdleGateway() }
+        try await writeSettings()
+    }
+
+    private func writeSettings() async throws {
+        let data = try JSONEncoder().encode(settings)
         let result = try await command("save", input: data)
         readCatalogue(result, modelsKey: "models")
         if let raw = result["settings"], let bytes = try? JSONSerialization.data(withJSONObject: raw), let normalized = try? JSONDecoder().decode(RouteSettings.self, from: bytes) { settings = normalized }
         savedSettings = settings
+    }
+
+    func gatewayMatches(fingerprint: String?, digest: String?) async throws -> Bool? {
+        var request = try authorizedRequest(path: "/_bridge/status")
+        request.timeoutInterval = 10
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard (response as? HTTPURLResponse)?.statusCode == 200,
+              let status = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+        activeRequests = status["active"] as? Int ?? activeRequests
+        let fingerprintMatches = fingerprint.map { status["catalogue_fingerprint"] as? String == $0 } ?? true
+        let digestMatches = digest.map { status["codex_catalogue_digest"] as? String == $0 } ?? true
+        return fingerprintMatches && digestMatches
+    }
+
+    func ensureGatewaySnapshot(fingerprint: String?, digest: String?, otherHarness: String) async throws {
+        guard running, fingerprint != nil || digest != nil else { return }
+        if try await gatewayMatches(fingerprint: fingerprint, digest: digest) == true { return }
+        if activeRequests > 0 {
+            throw WorkerError(message: "Wait for the active model requests to finish, then launch again so the gateway can load your latest selection.")
+        }
+        let alert = NSAlert()
+        alert.messageText = "Restart the gateway for this launch?"
+        alert.informativeText = anyOwnedHarnessRunning
+            ? "The gateway is running with an earlier model selection, and \(otherHarness) is connected to it. Restarting briefly interrupts \(otherHarness), which reconnects automatically."
+            : "The gateway is running with an earlier model selection. Restarting it loads your latest selection."
+        alert.addButton(withTitle: "Cancel")
+        alert.addButton(withTitle: "Restart Gateway")
+        guard alert.runModal() == .alertSecondButtonReturn else {
+            throw WorkerError(message: "Launch cancelled. The gateway keeps its earlier selection until it is restarted.")
+        }
+        await stopGateway()
+        try await startGateway()
+        if try await gatewayMatches(fingerprint: fingerprint, digest: digest) != true {
+            throw WorkerError(message: "The restarted gateway did not load the prepared selection. Reconnect and try again.")
+        }
     }
 
     func checkIdleGateway() async throws {
@@ -511,6 +609,7 @@ final class BridgeModel: ObservableObject {
             // save() stops an idle gateway before preparation. The new worker
             // must snapshot the prepared catalogue, not the old startup cache.
             try await startGateway()
+            try await ensureGatewaySnapshot(fingerprint: prepared["catalogue_fingerprint"] as? String, digest: nil, otherHarness: "Codex / ChatGPT")
             _ = try await command("activate")
             profileActive = true; recoveryNeeded = true
             let configuration = NSWorkspace.OpenConfiguration()
@@ -829,6 +928,10 @@ struct BridgeWindow: View {
                 infoRow("Previous setup", "Restored after this Claude session closes", "arrow.uturn.backward")
                 if model.claudeRunning && !model.profileActive {
                     Text("Claude is already open with another profile. Finish your current work and quit Claude before switching.").font(.system(size: 12)).foregroundStyle(.orange).padding(12).frame(maxWidth: .infinity, alignment: .leading).background(Color.orange.opacity(0.07), in: RoundedRectangle(cornerRadius: 8))
+                }
+                if model.codexRunning && model.codexRecoveryNeeded {
+                    Text("Codex / ChatGPT is live on this gateway. Launching Claude shares it; changing Claude’s mappings first briefly restarts the gateway, and Codex reconnects automatically.")
+                        .font(.system(size: 12)).foregroundStyle(.secondary)
                 }
                 HStack {
                     Button(model.profileActive && model.claudeRunning ? "Show Claude" : "Launch Claude") { Task { await model.launchClaude() } }.buttonStyle(.borderedProminent).controlSize(.large).disabled(model.busy || !model.claudeInstalled)

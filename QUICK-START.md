@@ -55,18 +55,31 @@ in their respective profiles.
 ## Codex / ChatGPT Desktop
 
 1. Open **Codex** in Provider Hub.
-2. Select a **Default model** from the provider-grouped menu.
-3. Choose **Launch Codex / ChatGPT**, then confirm the restart when ready.
+2. By default **All compatible models** from every configured provider appear
+   in the Codex picker. Switch to **Custom selection** to curate which models
+   are published.
+3. Select a **Default model** from the provider-grouped menu.
+4. Choose **Launch Codex / ChatGPT**, then confirm the restart when ready.
 
-The default sets the starting model. Codex's own picker receives every
-compatible model from your configured catalogues, not only the default. OpenRouter supplies a curated shortlist with distinct context choices. There
-is no separate model-inclusion checklist in this release.
+The default sets the starting model. Codex's picker receives the models you
+selected: either all compatible models, or your curated list. OpenRouter supplies
+a curated shortlist with distinct context choices.
+
+If you switch to **Custom selection**, only the routes you add are offered in
+Codex. Missing curated routes (e.g., after a provider refresh) are shown on the
+page and must be refreshed or removed before launching.
 
 Provider Hub uses the same installed desktop app. Its catalogue temporarily
 replaces the normal model catalogue. This is not a second simultaneous app or
 a new login. Existing tasks, credentials, projects, and unrelated settings are
 retained. Quit the desktop app to restore its previous model configuration.
 The **Restore previous setup** button is available for recovery after it closes.
+
+Claude and Codex can run on the same gateway. While one desktop harness is
+live, you can change the other's model selection and save; launching briefly
+restarts the gateway so both share the new snapshot, and the running app
+reconnects automatically. Shared provider settings (keys, regions, port) still
+require quitting both desktop apps.
 
 This integration applies to the Codex coding workspace. It does not reroute
 ordinary ChatGPT cloud chats, voice, or every other product feature. File

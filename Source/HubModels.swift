@@ -71,6 +71,7 @@ struct RouteSettings: Codable, Equatable {
     var auto_stop = true
     var auto_mode = false
     var codex_model: String?
+    var codex_catalogue: [String]?
 }
 struct ModelEntry: Decodable, Identifiable {
     var id: String

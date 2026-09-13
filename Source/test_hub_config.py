@@ -29,6 +29,45 @@ class SettingsMigrationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "newer version"):
             normalize({"schema_version": 4}, SLOTS, "mistral-test")
 
+    def test_codex_catalogue_is_optional_deduped_and_binds_the_default(self):
+        base = defaults(SLOTS, "mistral-test")
+        self.assertIsNone(base["codex_catalogue"])
+        self.assertIsNone(normalize({}, SLOTS, "mistral-test")["codex_catalogue"])
+
+        value = {
+            "codex_model": "mistral/mistral-small-4",
+            "codex_catalogue": [
+                "mistral/mistral-small-4",
+                "mistral/mistral-small-4",
+                "ollama/deepseek-v4-flash:cloud",
+            ],
+        }
+        normalized = normalize(value, SLOTS, "mistral-test")
+        self.assertEqual(
+            normalized["codex_catalogue"],
+            ["mistral/mistral-small-4", "ollama/deepseek-v4-flash:cloud"],
+        )
+        self.assertEqual(normalized["codex_model"], "mistral/mistral-small-4")
+
+        for catalogue in ([], "mistral/mistral-small-4", [None], ["mistral/"]):
+            with self.subTest(catalogue=catalogue), self.assertRaises(ValueError):
+                normalize({"codex_catalogue": catalogue}, SLOTS, "mistral-test")
+
+        outside_default = {
+            "codex_model": "mistral/other-model",
+            "codex_catalogue": ["mistral/mistral-small-4"],
+        }
+        with self.assertRaisesRegex(ValueError, "from the catalogue"):
+            normalize(outside_default, SLOTS, "mistral-test")
+
+        # A catalogue selection without a default remains valid; the default
+        # picker in the app only requires the default once one is chosen.
+        without_default = normalize(
+            {"codex_catalogue": ["mistral/mistral-small-4"]}, SLOTS, "mistral-test")
+        self.assertIsNone(without_default["codex_model"])
+        self.assertEqual(
+            without_default["codex_catalogue"], ["mistral/mistral-small-4"])
+
     def test_auto_flags_require_json_booleans(self):
         for key in ("auto_mode", "auto_stop"):
             for value in ("false", "true", 0, 1, None, [], {}):

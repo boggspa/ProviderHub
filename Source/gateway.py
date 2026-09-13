@@ -589,6 +589,7 @@ def catalogue_command_result(settings, root, lifecycle):
         "provider_definitions": provider_presentations(settings),
         "codex_models": codex_choices(settings, inventory),
         "catalogue_lifecycle": lifecycle,
+        "catalogue_fingerprint": lifecycle.get("catalogue_fingerprint"),
     }
 
 
@@ -613,11 +614,20 @@ def main():
         result = {**CodexProfile(root).status(), "codex_models": codex_choices(settings, cached_catalogue(settings, root))}
     elif args.command == "codex-prepare":
         settings = load_settings(root)
-        refresh_all(settings, root)
+        # Freshness-scoped preparation only: an unconditional refresh-all here
+        # would drift the catalogue digest away from a gateway already running
+        # for the other desktop harness.
         lifecycle = require_prepared(prepare_launch(codex_launch_settings(settings), root))
         inventory = cached_catalogue(settings, root)
         available = codex_choices(settings, inventory)
-        if settings.get("codex_model") not in {model["id"] for model in available}:
+        available_ids = {model["id"] for model in available}
+        missing = [route for route in settings.get("codex_catalogue") or []
+                   if route not in available_ids]
+        if missing:
+            raise BridgeError("The Codex catalogue selection is not fully advertised: "
+                              + ", ".join(missing)
+                              + ". Refresh those providers or remove the routes from the Codex catalogue.")
+        if settings.get("codex_model") not in available_ids:
             raise BridgeError("The selected model is not available in the Codex catalogue. Refresh its provider metadata or choose another listed model.")
         qualification = qualify_runtime(settings, inventory)
         prepared = {"catalogue_digest": catalogue_digest(settings, inventory), "model": settings["codex_model"],

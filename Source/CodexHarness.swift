@@ -44,21 +44,13 @@ extension BridgeModel {
             }
             tell("Preparing the Codex / ChatGPT model catalogue…")
             await waitForCatalogueRefresh()
-            if anyOwnedHarnessRunning {
-                var withoutSelection = settings
-                withoutSelection.codex_model = savedSettings.codex_model
-                guard withoutSelection == savedSettings else {
-                    throw WorkerError(message: "Close the desktop sessions using this gateway before changing provider settings.")
-                }
-                if changed {
-                    let result = try await command("save", input: JSONEncoder().encode(settings))
-                    readCatalogue(result, modelsKey: "models")
-                    savedSettings = settings
-                }
-            } else { try await save() }
+            // While Claude is live on this gateway, save() admits only changes
+            // scoped to Codex and refuses shared or Claude-side edits.
+            if changed || !anyOwnedHarnessRunning { try await save() }
             let prepared = try await command("codex-prepare")
             readCatalogue(prepared, modelsKey: "models")
             try await startGateway()
+            try await ensureGatewaySnapshot(fingerprint: nil, digest: prepared["catalogue_digest"] as? String, otherHarness: "Claude")
             updateCodexRunning()
             if codexRunning {
                 let alert = NSAlert()
@@ -129,18 +121,83 @@ extension BridgeModel {
 
 struct CodexPage: View {
     @ObservedObject var model: BridgeModel
-    var selected: CodexModelOption? { model.codexModels.first { $0.id == model.settings.codex_model } }
+    var curatedRoutes: [String] { model.settings.codex_catalogue ?? [] }
+    var isCustom: Bool { model.settings.codex_catalogue != nil }
+    var advertised: Set<String> { Set(model.availableModels.map(\.id)) }
+    var missingSelections: [String] { curatedRoutes.filter { !advertised.contains($0) } }
+
+    // The default picker follows the unsaved selection so newly added models
+    // are pickable before the catalogue is saved.
+    var defaultOptions: [CodexModelOption] {
+        guard let curated = model.settings.codex_catalogue else { return model.codexModels }
+        return curated.map { route in
+            model.codexModels.first { $0.id == route }
+                ?? CodexModelOption(id: route, name: model.modelLabel(route),
+                                    context: model.modelEntry(route)?.context,
+                                    description: model.modelFacts(route))
+        }
+    }
+
+    var selected: CodexModelOption? { defaultOptions.first { $0.id == model.settings.codex_model } }
+
+    var catalogueMode: Binding<String> {
+        Binding(
+            get: { isCustom ? "custom" : "all" },
+            set: { value in
+                if value == "custom" {
+                    var seed: [String] = []
+                    if let route = model.settings.codex_model { seed.append(route) }
+                    if seed.isEmpty, let first = model.codexModels.first { seed = [first.id] }
+                    model.settings.codex_catalogue = seed.isEmpty ? nil : seed
+                } else {
+                    model.settings.codex_catalogue = nil
+                }
+            }
+        )
+    }
+
+    func removeRoute(_ route: String) {
+        guard var list = model.settings.codex_catalogue, list.count > 1 else { return }
+        list.removeAll { $0 == route }
+        model.settings.codex_catalogue = list
+        if model.settings.codex_model == route { model.settings.codex_model = list.first }
+    }
+
+    func clearCatalogue() {
+        guard let keep = curatedRoutes.contains(model.settings.codex_model ?? "") ? model.settings.codex_model : curatedRoutes.first else { return }
+        model.settings.codex_catalogue = [keep]
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
             Panel {
                 Text("Codex / ChatGPT Desktop").font(.title2.bold())
                 Text("Choose a provider model directly. Your Claude mappings stay independent.").foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack {
+                        Text("Catalogue").font(.system(size: 13, weight: .medium))
+                        Spacer()
+                        Picker("Catalogue", selection: catalogueMode) {
+                            Text("All compatible models").tag("all")
+                            Text("Custom selection").tag("custom")
+                        }.pickerStyle(.segmented).fixedSize()
+                    }
+                    if isCustom {
+                        customCatalogue
+                    } else {
+                        Text("Codex’s picker lists every compatible model from your configured accounts; catalogues refresh in the background.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    if !missingSelections.isEmpty {
+                        Text("\(missingSelections.count) selected \(missingSelections.count == 1 ? "model is" : "models are") not currently advertised: \(missingSelections.map { model.modelLabel($0) }.joined(separator: ", ")). Refresh their providers or remove \(missingSelections.count == 1 ? "it" : "them") from the catalogue.")
+                            .font(.caption).foregroundStyle(.orange)
+                    }
+                }
                 HStack {
                     Text("Default model").font(.system(size: 13, weight: .medium))
                     Menu {
                         ForEach(model.providerDefinitions) { provider in
-                            let options = model.codexModels.filter { $0.id.hasPrefix(provider.id + "/") }
+                            let options = defaultOptions.filter { $0.id.hasPrefix(provider.id + "/") }
                             if !options.isEmpty {
                                 Menu(provider.presentation.displayProvider) {
                                     ForEach(options) { option in
@@ -157,7 +214,7 @@ struct CodexPage: View {
                 if let selected {
                     Text("\(selected.context.map { $0.formatted() + " tokens" } ?? "Provider-managed context") · \(selected.description)").font(.caption).foregroundStyle(.secondary)
                 }
-                Text("Codex’s picker will show every compatible model from your configured accounts. This selection sets the starting model.")
+                Text("The default sets the starting model; the rest of the catalogue stays available in Codex’s picker.")
                     .font(.caption).foregroundStyle(.secondary)
                 Text("Context limits follow each model’s metadata; unreported limits remain unknown.")
                     .font(.caption).foregroundStyle(.secondary)
@@ -169,6 +226,13 @@ struct CodexPage: View {
                         .disabled(model.busy || model.codexAppPath == nil || model.settings.codex_model == nil)
                     Button("Restore previous setup") { Task { await model.restoreCodex() } }
                         .disabled(model.busy || !model.codexRecoveryNeeded || model.codexRunning)
+                    Spacer()
+                    Button("Save catalogue") { Task { await model.saveFromUI() } }
+                        .disabled(model.busy || !model.changed)
+                }
+                if model.claudeRunning && model.profileActive {
+                    Text("Claude is live on this gateway. Launching Codex shares it; changing the catalogue or default first briefly restarts the gateway, and Claude reconnects automatically.")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
                 if model.codexRunning && !model.codexProfileActive {
                     Text("The desktop app is open. Launching here will ask before restarting it.")
@@ -190,5 +254,53 @@ struct CodexPage: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
         }
+    }
+
+    var customCatalogue: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("\(curatedRoutes.count) model\(curatedRoutes.count == 1 ? "" : "s") will appear in Codex’s picker.")
+                .font(.caption).foregroundStyle(.secondary)
+            ForEach(curatedRoutes, id: \.self) { route in
+                HStack(spacing: 10) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(model.modelLabel(route)).font(.system(size: 12, weight: .medium)).lineLimit(1)
+                        Text(model.modelFacts(route)).font(.system(size: 9)).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button { removeRoute(route) } label: { Image(systemName: "minus.circle").foregroundStyle(.secondary) }
+                        .buttonStyle(.plain)
+                        .disabled(curatedRoutes.count <= 1 || model.busy)
+                        .help(curatedRoutes.count <= 1 ? "Keep at least one model in the catalogue" : "Remove from the Codex catalogue")
+                }
+                .padding(.horizontal, 10).padding(.vertical, 7)
+                .background(Color.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 7))
+            }
+            HStack(spacing: 12) {
+                addMenu
+                Button("Add all") { model.settings.codex_catalogue = model.availableModels.filter { $0.tools ?? true }.map(\.id) }
+                    .disabled(model.busy || model.availableModels.isEmpty)
+                Button("Clear") { clearCatalogue() }
+                    .disabled(model.busy || curatedRoutes.count <= 1)
+            }
+        }
+    }
+
+    var addMenu: some View {
+        Menu {
+            ForEach(model.providerDefinitions) { provider in
+                let options = model.availableModels.filter {
+                    $0.provider_id == provider.id && ($0.tools ?? true) && !curatedRoutes.contains($0.id)
+                }
+                if !options.isEmpty {
+                    Menu(provider.presentation.displayProvider) {
+                        ForEach(options) { entry in
+                            Button(model.modelLabel(entry.id)) { model.settings.codex_catalogue?.append(entry.id) }
+                                .help(entry.id)
+                        }
+                    }
+                }
+            }
+        } label: { Label("Add model…", systemImage: "plus") }
+            .disabled(model.busy)
     }
 }

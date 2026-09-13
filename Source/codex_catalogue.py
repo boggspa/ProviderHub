@@ -20,7 +20,26 @@ def project_codex(settings, inventory):
     models = []
     excluded = []
     seen = set()
-    for entry in inventory.get("models", []):
+    entries = inventory.get("models", [])
+    curated = settings.get("codex_catalogue")
+    if curated is not None:
+        by_route = {entry["id"]: entry for entry in entries}
+        picked = set()
+        selected = []
+        for route in curated:
+            if route in picked:
+                continue
+            picked.add(route)
+            entry = by_route.get(route)
+            if entry is None:
+                excluded.append({"id": route, "reason": "Selected for Codex but not advertised by the current provider catalogues. Refresh its provider or remove it from the Codex catalogue."})
+                continue
+            if entry.get("tools") is False:
+                excluded.append({"id": route, "reason": "The model does not support coding tools."})
+                continue
+            selected.append(entry)
+        entries = selected
+    for entry in entries:
         route = entry["id"]
         provider_id, _ = split_route(route)
         if provider_id not in PROVIDERS:
@@ -115,4 +134,9 @@ def launch_settings(settings):
         raise ValueError("Choose a Codex model first.")
     if split_route(route)[0] not in PROVIDERS:
         raise ValueError("Choose a configured provider model for Codex.")
-    return {**settings, "mappings": {"Codex": route}}
+    mappings = {"Codex": route}
+    # Launch preparation must freshness-check every provider that feeds the
+    # prepared catalogue, not only the default model's provider.
+    for index, catalogue_route in enumerate(settings.get("codex_catalogue") or []):
+        mappings[f"codex-catalog-{index}"] = catalogue_route
+    return {**settings, "mappings": mappings}

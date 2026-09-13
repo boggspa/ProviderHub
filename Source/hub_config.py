@@ -98,7 +98,8 @@ def defaults(slots, vibe_model: str, port: int = 11436) -> dict:
     return {"schema_version": 3, "port": port,
             "mappings": {slot[0]: qualify("mistral", vibe_model) for slot in slots},
             "providers": connections, "branding_overrides": {},
-            "auto_stop": True, "auto_mode": False, "codex_model": None}
+            "auto_stop": True, "auto_mode": False, "codex_model": None,
+            "codex_catalogue": None}
 
 
 def normalize(value: dict, slots, vibe_model: str, port: int = 11436) -> dict:
@@ -149,6 +150,18 @@ def normalize(value: dict, slots, vibe_model: str, port: int = 11436) -> dict:
     result["branding_overrides"] = validate_overrides(value.get("branding_overrides", {}))
     if value.get("codex_model") is not None:
         result["codex_model"] = qualify(*split_route(value["codex_model"]))
+    catalogue = value.get("codex_catalogue")
+    if catalogue is not None:
+        if not isinstance(catalogue, list) or not catalogue:
+            raise ValueError("The Codex catalogue selection must be a non-empty list of model routes.")
+        selected = []
+        for route in catalogue:
+            qualified = qualify(*split_route(route))
+            if qualified not in selected:
+                selected.append(qualified)
+        result["codex_catalogue"] = selected
+        if result["codex_model"] is not None and result["codex_model"] not in selected:
+            raise ValueError("Choose the Codex default model from the catalogue selection.")
     for key, fallback in (("auto_stop", True), ("auto_mode", False)):
         requested = value.get(key, fallback)
         if type(requested) is not bool:
