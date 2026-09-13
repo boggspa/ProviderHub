@@ -30,7 +30,8 @@
     "tencent": "#4E73CA",
     "inception": "#7C5BE9",
     "nexagi": "#747A42",
-    "sakana": "#EA0C2D"
+    "sakana": "#EA0C2D",
+    "gemini": "#346EEC"
   },
   "accentAliases": {
     "mimo": "xiaomi",
@@ -168,6 +169,14 @@
       "displayProvider": "Sakana",
       "hueKey": "sakana",
       "shortCode": "SAK"
+    },
+    "gemini": {
+      "displayProvider": "Gemini",
+      "hueKey": "gemini",
+      "shortCode": "GEM",
+      "logo": {
+        "light": "provider-logos/provider-logo-gemini.png"
+      }
     }
   },
   "modelLabels": {

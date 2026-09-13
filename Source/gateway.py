@@ -32,6 +32,7 @@ from catalogue import build_catalogue, read_observations
 from hub_config import connection_signature, provider_presentations, qualify, split_route
 from providers import PROVIDERS, prepare_request, ProviderError
 from cerebras_replay import CerebrasReplayError, CerebrasStreamAdapter, sign_thinking, validate_messages
+from gemini_provider import GeminiError, GeminiStreamAdapter, translate_response as translate_gemini_response, _estimated_input_tokens as estimated_gemini_tokens
 from protocol import (StreamTranslator, estimated_tokens, model_catalog, resolve_model,
                       translate_request, translate_response)
 from responses_native import ResponseOwnership, handle_responses, NATIVE_PROVIDERS
@@ -101,7 +102,7 @@ class Runtime:
         provider_id, upstream_model = split_route(route)
         spec = self.settings["_model_specs"][route]
         context = spec.get("context")
-        estimate = estimated_tokens(payload)
+        estimate = estimated_gemini_tokens(payload) if provider_id == "gemini" else estimated_tokens(payload)
         if type(context) is int and estimate >= context:
             raise BridgeError(f"This conversation is above the provider's reported {context:,}-token context limit.")
         if payload.get("model", "").endswith("[1m]") and (type(context) is not int or context < 1000000):
@@ -116,12 +117,15 @@ class Runtime:
             replay = validate_messages(payload.get("messages"), upstream_model, scope, self.replay_key,
                                        require_tool_reasoning=replay_required) if provider_id == "cerebras" else None
             options = {"reasoning_by_message": replay} if provider_id == "cerebras" else {}
+            if provider_id == "gemini":
+                options.update(replay_scope=scope, replay_key=self.replay_key)
             plan = (self.request_planner or prepare_request)(provider_id, self.settings["providers"][provider_id], key, payload, upstream_model, spec, **options)
         except (ProviderError, CerebrasReplayError) as exc:
             raise BridgeError(str(exc).replace(key, "[redacted]") if key else str(exc)) from exc
         plan.update(route=route, provider_id=provider_id, provider_name=PROVIDERS[provider_id]["name"],
-                    private_key=key, upstream_model=upstream_model, replay_scope=scope, replay_required=replay_required)
-        if type(context) is int:
+                    private_key=key, upstream_model=upstream_model, replay_scope=scope, replay_required=replay_required,
+                    model_spec=spec)
+        if type(context) is int and provider_id != "gemini":
             plan["body"]["max_tokens"] = min(plan["body"].get("max_tokens", 4096), max(1, context - estimate))
         # The only override is an explicit in-process test-harness argument,
         # never a client request field or persisted provider setting.
@@ -376,7 +380,11 @@ class Handler(BaseHTTPRequestHandler):
                 decoded = json.loads(raw)
                 if plan["provider_id"] == "grok" and decoded.get("service_tier") in {"default", "priority"}:
                     service_tier = decoded["service_tier"]
-                result = translate_response(decoded, payload["model"], names) if plan["protocol"] == "chat_completions" else decoded
+                if plan["provider_id"] == "gemini":
+                    result = translate_gemini_response(decoded, payload["model"], names, plan["upstream_model"],
+                                                       plan["replay_scope"], self.runtime.replay_key, model_spec=plan["model_spec"])
+                else:
+                    result = translate_response(decoded, payload["model"], names) if plan["protocol"] == "chat_completions" else decoded
                 if result.get("type") != "message" or not isinstance(result.get("content"), list):
                     raise BridgeError("The provider returned an invalid Messages response.")
                 if plan["protocol"] == "anthropic":
@@ -391,7 +399,10 @@ class Handler(BaseHTTPRequestHandler):
                 usage = result.get("usage", {})
                 self.json_response(200, result)
             else:
-                if plan["provider_id"] == "cerebras":
+                if plan["provider_id"] == "gemini":
+                    translator = GeminiStreamAdapter(payload["model"], names, plan["upstream_model"], plan["replay_scope"],
+                                                     self.runtime.replay_key, model_spec=plan["model_spec"])
+                elif plan["provider_id"] == "cerebras":
                     translator = CerebrasStreamAdapter(payload["model"], names, plan["upstream_model"], plan["replay_scope"], self.runtime.replay_key,
                                                        require_tool_reasoning=plan["replay_required"])
                 else:
@@ -488,7 +499,9 @@ class Handler(BaseHTTPRequestHandler):
             if disconnected.is_set():
                 self.runtime.record("cancelled", plan["route"])
             else:
-                message = str(exc) if isinstance(exc, (BridgeError, CerebrasReplayError)) else "The provider connection failed. Check your connection and try again."
+                message = str(exc) if isinstance(exc, (BridgeError, CerebrasReplayError, GeminiError)) else "The provider connection failed. Check your connection and try again."
+                if plan["private_key"]:
+                    message = message.replace(plan["private_key"], "[redacted]")
                 self.runtime.record("error", plan["route"], 502)
                 try:
                     if streaming:

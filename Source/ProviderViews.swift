@@ -114,6 +114,10 @@ struct ProviderPage: View {
                         Text("A curated selection based on TaskWraith’s Pi catalogue. Models and controls refresh from OpenRouter; distinct context choices use matching provider endpoints. Usage follows your OpenRouter account.")
                             .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                     }
+                    if provider.id == "gemini" {
+                        Text("Use a Gemini API key from Google AI Studio. Model access and usage follow its billing project. This connection uses the public API, independently of Gemini CLI or Google app subscriptions.")
+                            .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    }
                     HStack {
                         Text(state?.credential_source ?? "Checking setup…").font(.system(size: 11)).foregroundStyle(.secondary)
                         Spacer()
@@ -217,6 +221,7 @@ struct ProviderPage: View {
         case "grok": return "xAI API key · Pay as you go"
         case "qwen-token-plan": return "Token Plan subscription API key"
         case "openrouter": return "OpenRouter API key · Curated models"
+        case "gemini": return "Google AI Studio API key"
         default: return "Provider model API"
         }
     }

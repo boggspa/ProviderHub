@@ -86,3 +86,52 @@ Sources:
 - https://openrouter.ai/docs/guides/features/router-metadata
 - TaskWraith `src/host-shared/pi/PiOpenRouterModelRegistration.ts`,
   `src/shared/taskWraithProviderPresentation.ts`, and renderer `styles/theme.css`.
+
+## Gemini API
+
+The `gemini` connection uses `GEMINI_API_KEY` and Google's official
+OpenAI-compatible Chat Completions endpoint. No CLI login, OAuth, Antigravity
+credential, or agent runtime is involved. Google receives an explicit Provider
+Hub partner-client header. Both metadata and inference use that project's API
+key, with credentials kept out of URLs and logs.
+
+Discovery follows the Models API's pagination and intersects account-listed
+generateContent models with Google's documented function-calling roster.
+An exact known model ID remains usable when optional `baseModelId` is absent
+or only names a family; broad prefix inference is not used. Input and output
+limits remain separate. The Codex context field uses the reported input limit,
+and the gateway does not subtract input usage from Google's independent output
+allowance. API version, base-model identity and effort metadata participate in
+alias grouping and gateway fingerprints.
+
+Google's positional `extra_content.google.thought_signature` fields survive
+complete tool and text continuations. The adapter carries them in an
+authenticated `redacted_thinking` block bound to the exact model, credential
+scope and visible assistant content. Codex carries that block through the
+existing encrypted Responses envelope. Missing 2.5 signatures remain absent;
+Gemini 3 tool calls without their required signature fail explicitly. No
+fabricated bypass signature is used.
+
+Gemini streams buffer visible content until the final signature arrives, while
+the gateway keeps the client connection alive. This preserves reasoning-first
+ordering and signatures that arrive on a final empty-text chunk. Actual tool
+calls take precedence over the observed compatibility API's `stop` finish label.
+Thought-token usage is included in the output count.
+
+The Sol Max agent's 19 focused tests are joined by six complete gateway tests:
+Claude JSON/SSE tool and text continuations, Codex JSON/SSE namespaced tool
+cycles, missing-signature/quota errors, independent output limits, and distinct
+model snapshots, and opaque signature bytes excluded from text-token estimates.
+TaskWraith's Gemini API implementation and tests corroborate
+the positional signature and unsigned-2.5 rules. No live Gemini key or inference
+was used during implementation; account qualification follows key entry.
+
+Sources:
+
+- https://ai.google.dev/gemini-api/docs/openai
+- https://ai.google.dev/gemini-api/docs/generate-content/thought-signatures
+- https://ai.google.dev/api/models
+- https://ai.google.dev/gemini-api/docs/thinking
+- https://ai.google.dev/gemini-api/docs/function-calling
+- https://ai.google.dev/gemini-api/docs/partner-integration
+- TaskWraith `src/main/GeminiApiProvider.ts` and `GeminiApiProvider.test.ts`.

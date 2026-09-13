@@ -205,9 +205,11 @@ PROVIDERS = {
 # or its documented request endpoint; both normalize to the same safe base.
 from qwen_provider import DESCRIPTOR as QWEN_DESCRIPTOR, OFFICIAL_PATHS as QWEN_PATHS, QwenError, catalogue as qwen_catalogue, normalize_controls as qwen_controls
 from openrouter_provider import DESCRIPTOR as OPENROUTER_DESCRIPTOR, OFFICIAL_PATHS as OPENROUTER_PATHS, OpenRouterError, discover as openrouter_discover, finalize as openrouter_finalize, normalize_messages as openrouter_controls
+from gemini_provider import DESCRIPTOR as GEMINI_DESCRIPTOR, OFFICIAL_PATHS as GEMINI_PATHS, GeminiError, discover as gemini_discover, prepare_request as gemini_prepare_request, validate_connection as gemini_validate_connection
 
 PROVIDERS[QWEN_DESCRIPTOR["id"]] = QWEN_DESCRIPTOR
 PROVIDERS[OPENROUTER_DESCRIPTOR["id"]] = OPENROUTER_DESCRIPTOR
+PROVIDERS[GEMINI_DESCRIPTOR["id"]] = GEMINI_DESCRIPTOR
 
 _OFFICIAL_PATHS = {
     "mistral": {"", "/v1", "/v1/models", "/v1/chat/completions"},
@@ -219,6 +221,7 @@ _OFFICIAL_PATHS = {
     "grok": {"", "/v1", "/v1/models", "/v1/language-models", "/v1/chat/completions"},
     "qwen-token-plan": QWEN_PATHS,
     "openrouter": OPENROUTER_PATHS,
+    "gemini": GEMINI_PATHS,
 }
 
 _OLLAMA_PATHS = {"", "/v1", "/v1/messages", "/api/tags"}
@@ -465,6 +468,11 @@ def validate_connection(provider_id: str, connection: dict | None) -> dict:
     this returned dictionary.
     """
     descriptor = _provider(provider_id)
+    if provider_id == "gemini":
+        try:
+            return gemini_validate_connection(connection)
+        except GeminiError as exc:
+            raise ProviderError(str(exc)) from exc
     if connection is None:
         connection = {}
     if not isinstance(connection, dict):
@@ -1144,6 +1152,11 @@ def discover(provider_id: str, connection: dict | None, api_key: str | None, *, 
     """
     _provider(provider_id)
     normalized = validate_connection(provider_id, connection)
+    if provider_id == "gemini":
+        try:
+            return gemini_discover(normalized, api_key, transport=transport or _fetch_json)
+        except GeminiError as exc:
+            raise ProviderError(str(exc)) from exc
     if provider_id == "openrouter":
         try:
             return openrouter_discover(normalized, api_key, transport=transport or _fetch_json)
@@ -1973,6 +1986,8 @@ def prepare_request(
     model_spec: dict | None,
     *,
     reasoning_by_message=None,
+    replay_scope=None,
+    replay_key=None,
 ) -> dict:
     """Build a plain outbound request plan for the streaming gateway.
 
@@ -1984,6 +1999,14 @@ def prepare_request(
     normalized = validate_connection(provider_id, connection)
     upstream_model = _valid_model_id(upstream_model)
     model_spec = copy.deepcopy(model_spec) if isinstance(model_spec, dict) else {}
+    if provider_id == "gemini":
+        if not isinstance(replay_scope, str) or not replay_scope or not replay_key:
+            raise ProviderError("Gemini requests require the gateway's authenticated reasoning scope.")
+        try:
+            return gemini_prepare_request(normalized, api_key, anthropic_payload, upstream_model, model_spec,
+                                          replay_scope, replay_key, translate_chat=_translate_chat_payload)
+        except GeminiError as exc:
+            raise ProviderError(str(exc)) from exc
     headers = _auth_headers(provider_id, api_key, content_type=True)
     base = normalized["base_url"]
     if descriptor["protocol"] == "anthropic":
