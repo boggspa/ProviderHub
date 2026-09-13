@@ -1,0 +1,732 @@
+#!/usr/bin/env bash
+# Mistral Bridge concurrent-work backstop.
+#
+# Several agents from different providers may share this one checkout. AGENTS.md
+# states the rules; this hook is the part that binds an agent which never read
+# them, because every provider shells out to git.
+#
+# It is deliberately narrow. A hook that cries wolf gets disabled, and a
+# disabled hook protects nothing — so exactly one condition BLOCKs and
+# everything else advises. That one is: staging a path another live session
+# has claimed (section 1). Everything else is advisory.
+#
+# This hook was ported from the TaskWraith repo and pruned: the public-remote
+# force-add block and the large-monolith whole-file-staging advisory were
+# dropped because this repo has no remote and no ≥5000-line files.
+#
+# Enable:  bash scripts/hooks_install.sh
+# Override once: TW_ALLOW_CLAIMED=1 git commit ...
+
+set -uo pipefail
+
+root="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
+cd "$root" || exit 0
+
+# NUL delimiters preserve every valid Git path byte (including newlines and
+# tabs). Disabling rename detection makes a rename appear as its source
+# deletion plus destination addition, so neither endpoint can bypass a claim.
+staged_paths=()
+while IFS= read -r -d '' staged_path; do
+  staged_paths[${#staged_paths[@]}]="$staged_path"
+done < <(git diff --cached -z --name-only --no-renames --diff-filter=ACDMRT)
+[ "${#staged_paths[@]}" -eq 0 ] && exit 0
+
+warn=0
+block=0
+derived_runtime_recovery_block=0
+claim_block=0
+
+# ── epoch helper: GNU and BSD date disagree; unparseable means "do not block".
+to_epoch() {
+  local iso="$1"
+  [ -z "$iso" ] && { printf ''; return 0; }
+  # Python's datetime.isoformat() emits +00:00 rather than Z for UTC.
+  # Normalize only an explicit zero offset; the same lease ceiling still applies.
+  case "$iso" in
+    *+00:00) iso="${iso%+00:00}Z" ;;
+    *+0000) iso="${iso%+0000}Z" ;;
+  esac
+  date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$iso" +%s 2>/dev/null && return 0
+  date -u -d "$iso" +%s 2>/dev/null && return 0
+  # Runtime markers use JavaScript ISO timestamps, which include fractional
+  # seconds. BSD date cannot parse that form with %S, so remove only a trailing
+  # fractional component before retrying the strict UTC grammar.
+  iso="$(printf '%s' "$iso" | sed -E 's/\.[0-9]+Z$/Z/')"
+  date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$iso" +%s 2>/dev/null && return 0
+  date -u -d "$iso" +%s 2>/dev/null && return 0
+  echo ""
+}
+
+marker_scalar() {
+  local marker="$1" key="$2"
+  awk -v key="$key" '
+    $0 == "---" {
+      if (!frontmatter) {
+        frontmatter = 1
+        next
+      }
+      exit
+    }
+    frontmatter && index($0, key ":") == 1 {
+      value = substr($0, length(key) + 2)
+      sub(/^[[:space:]]+/, "", value)
+      sub(/[[:space:]]+$/, "", value)
+      first = substr(value, 1, 1)
+      last = substr(value, length(value), 1)
+      if (length(value) >= 2 &&
+          ((first == "\"" && last == "\"") || (first == "\047" && last == "\047"))) {
+        value = substr(value, 2, length(value) - 2)
+      }
+      print value
+      exit
+    }
+  ' "$marker"
+}
+
+# ── lease ceiling ───────────────────────────────────────────────────────────
+# A lease may not exceed 20 minutes and must be renewed by hand. Nothing
+# bounded it before: `expires: 2099-…` held a path for 73 years, and an
+# owner-id claim from a seat has no pid to decay it, so the lease was its ONLY
+# decay signal and that signal was unbounded.
+#
+# CLAMPED, never voided — an over-long lease still protects for its first 20
+# minutes. Punishing a typo with total loss of protection is the opposite of
+# what a ceiling is for. Anchored to `started`, because anchoring to "now"
+# would push the expiry forward on every evaluation and never expire at all.
+MAX_LEASE_SECONDS=1200
+
+report_lease_capped() {
+  printf '  note: %s expired at its 20m ceiling, not its stated expires:.\n' "$1"
+  printf '        Leases cap at 20m and are renewed by hand — re-stamp started:\n'
+  printf '        and expires: if that work is still live.\n'
+  warn=1
+}
+
+# Echoes the effective expiry epoch, or "" when a lease exceeds the ceiling and
+# no readable `started` exists to bound it against.
+capped_expiry() {
+  local exp_epoch="$1" started_epoch="$2"
+  local cap
+  if [ -z "$started_epoch" ]; then
+    [ "$((exp_epoch - now))" -gt "$MAX_LEASE_SECONDS" ] && return 0
+    printf '%s' "$exp_epoch"
+    return 0
+  fi
+  cap=$((started_epoch + MAX_LEASE_SECONDS))
+  if [ "$exp_epoch" -gt "$cap" ]; then printf '%s' "$cap"; else printf '%s' "$exp_epoch"; fi
+}
+
+# ── ownership helper: this hook is a transient child of git, so $$ never
+# equals the long-lived session pid recorded in a marker. "Our own claim"
+# means the marker's pid is an ANCESTOR of this process — the session host
+# that raised the claim is the one committing through us right now. No
+# ancestor match ⇒ foreign (fail safe: a genuinely-yours claim raised from a
+# different terminal blocks like anyone else's; TW_ALLOW_CLAIMED covers it).
+is_own_claim() {
+  local claim_pid="$1" cur=$$ depth=0
+  [ -n "$claim_pid" ] || return 1
+  [ "$claim_pid" = "$cur" ] && return 0
+  [ -n "${PPID:-}" ] && [ "$claim_pid" = "$PPID" ] && return 0
+  while [ -n "$cur" ] && [ "$cur" -gt 1 ] 2>/dev/null && [ "$depth" -lt 25 ]; do
+    [ "$cur" = "$claim_pid" ] && return 0
+    cur="$(ps -o ppid= -p "$cur" 2>/dev/null | tr -d '[:space:]')"
+    depth=$((depth + 1))
+  done
+  return 1
+}
+
+# A marker is "derived" (runtime-projected, not adoptable, owner-id-only
+# ownership) if it declares `derived: true` OR its filename matches a
+# runtime/contribution projection pattern.
+is_derived_marker() {
+  [ "$(marker_scalar "$1" derived)" = "true" ] && return 0
+  is_runtime_marker_filename "$1"
+}
+
+derived_lock_owner_id() {
+  marker_scalar "$1" lockOwnerId
+}
+
+# Full runtime markers (taskwraith-runtime-*) project workspace-wide and
+# tree/digest claims and carry a pid. Contribution markers
+# (taskwraith-contribution-*) are a lighter projection: they carry
+# lockOwnerId + expires + paths but no pid and no birthReceiptHash. Both
+# classes use owner-id-only ownership (no pid ancestry) and are NOT adoptable.
+is_own_marker_claim() {
+  local marker="$1" claim_pid="$2" lock_owner_id
+  if is_derived_marker "$marker"; then
+    lock_owner_id="$(derived_lock_owner_id "$marker")"
+    [ -n "$lock_owner_id" ] &&
+      [ -n "${TASKWRAITH_LOCK_OWNER_ID:-}" ] &&
+      [ "${TASKWRAITH_LOCK_OWNER_ID}" = "$lock_owner_id" ]
+    return
+  fi
+  is_own_claim "$claim_pid"
+}
+
+# Manual ownership accepts EITHER identity, because not every agent can produce
+# both. An external or interactive agent normally has no owner id and uses its
+# stable session-host PID. A TaskWraith seat normally uses the narrower opaque
+# TASKWRAITH_LOCK_OWNER_ID.
+#
+# An absent or empty env var must NEVER match, or every process outside
+# TaskWraith would inherit every seat's bypass at once.
+is_own_manual_claim() {
+  local claim_pid="$1" claim_owner="$2"
+  if [ -n "$claim_owner" ] &&
+    [ -n "${TASKWRAITH_LOCK_OWNER_ID:-}" ] &&
+    [ "${TASKWRAITH_LOCK_OWNER_ID}" = "$claim_owner" ]; then
+    return 0
+  fi
+  is_own_claim "$claim_pid"
+}
+
+is_runtime_marker_filename() {
+  case "$1" in
+    .WORK-IN-PROGRESS-taskwraith-runtime-*.md) return 0 ;;
+    .WORK-IN-PROGRESS-taskwraith-contribution-*.md) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Contribution markers are a lighter runtime projection: they carry
+# lockOwnerId + expires + paths, but no pid and no birthReceiptHash.
+# They are NOT adoptable — reconcile through TaskWraith.
+is_contribution_marker_filename() {
+  case "$1" in
+    .WORK-IN-PROGRESS-taskwraith-contribution-*.md) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+marker_list() {
+  local marker="$1" key="$2"
+  awk -v heading="$key" '
+    $0 == "---" {
+      if (!frontmatter) {
+        frontmatter = 1
+        next
+      }
+      exit
+    }
+    frontmatter && $0 ~ ("^" heading ":[[:space:]]*$") { inlist = 1; next }
+    frontmatter && inlist && /^[[:space:]]*-[[:space:]]+/ {
+      sub(/^[[:space:]]*-[[:space:]]+/, "")
+      sub(/[[:space:]]+$/, "")
+      gsub(/^["'"'"']|["'"'"']$/, "")
+      if (length($0)) print
+      next
+    }
+    inlist { inlist = 0 }
+  ' "$marker"
+}
+
+sha256_cache_values=()
+sha256_cache_digests=()
+sha256_result=""
+
+sha256_value() {
+  local value="$1" digest="" candidate="" index
+  for ((index = 0; index < ${#sha256_cache_values[@]}; index++)); do
+    if [ "${sha256_cache_values[$index]}" = "$value" ]; then
+      sha256_result="${sha256_cache_digests[$index]}"
+      return
+    fi
+  done
+  if command -v sha256sum >/dev/null 2>&1; then
+    if candidate="$(printf '%s' "$value" | sha256sum | awk '{ print $1 }')" &&
+      [[ "$candidate" =~ ^[0-9a-f]{64}$ ]]; then
+      digest="$candidate"
+    fi
+  fi
+  if [ -z "$digest" ] && command -v shasum >/dev/null 2>&1; then
+    if candidate="$(printf '%s' "$value" | shasum -a 256 | awk '{ print $1 }')" &&
+      [[ "$candidate" =~ ^[0-9a-f]{64}$ ]]; then
+      digest="$candidate"
+    fi
+  fi
+  if [ -z "$digest" ] && command -v openssl >/dev/null 2>&1; then
+    if candidate="$(printf '%s' "$value" | openssl dgst -sha256 | sed -E 's/^.*= //')" &&
+      [[ "$candidate" =~ ^[0-9a-f]{64}$ ]]; then
+      digest="$candidate"
+    fi
+  fi
+  index="${#sha256_cache_values[@]}"
+  sha256_cache_values[$index]="$value"
+  sha256_cache_digests[$index]="$digest"
+  sha256_result="$digest"
+}
+
+digest_list_contains() {
+  local digests="$1" expected="$2" digest
+  [ -n "$expected" ] || return 1
+  while IFS= read -r digest; do
+    [ "$digest" = "$expected" ] && return 0
+  done <<< "$digests"
+  return 1
+}
+
+digest_list_is_valid() {
+  local digests="$1" digest
+  while IFS= read -r digest; do
+    [ -z "$digest" ] && continue
+    [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || return 1
+  done <<< "$digests"
+  return 0
+}
+
+marker_list_count() {
+  local values="$1" value count=0
+  while IFS= read -r value; do
+    [ -z "$value" ] && continue
+    count=$((count + 1))
+  done <<< "$values"
+  printf '%s' "$count"
+}
+
+tree_digests_cover_path() {
+  local digests="$1" candidate="$2" digest
+  sha256_value "."
+  digest="$sha256_result"
+  digest_list_contains "$digests" "$digest" && return 0
+  while [ -n "$candidate" ]; do
+    sha256_value "$candidate"
+    digest="$sha256_result"
+    digest_list_contains "$digests" "$digest" && return 0
+    case "$candidate" in
+      */*) candidate="${candidate%/*}" ;;
+      *) break ;;
+    esac
+  done
+  return 1
+}
+
+report_live_overlap() {
+  local path="$1" marker="$2" claim_pid="$3" claim_agent="$4" scope="${5:-}"
+  if [ -z "${TW_ALLOW_CLAIMED:-}" ]; then
+    printf '\n  BLOCKED  %s is claimed by a live session (pid %s, %s)\n' \
+      "$path" "$claim_pid" "${claim_agent:-unknown agent}"
+    printf '           claim: %s%s\n' "$marker" "$scope"
+    block=1
+    claim_block=1
+  else
+    printf '  override: committing %s despite live claim in %s%s\n' \
+      "$path" "$marker" "$scope"
+    warn=1
+  fi
+}
+
+now="$(date -u +%s)"
+
+# ── 1. BLOCK: staging a path claimed by another LIVE session ────────────────
+# Manual markers are promises and remain live only while their owner exists
+# and their renewable lease has not expired. Runtime-derived markers are
+# different: durable lock state owns their cleanup, so an expired projection
+# from a still-live runtime fails closed until the runtime removes it or its
+# pid is dead. This prevents a marker-write outage from making a durable lease
+# invisible.
+#
+# Contribution markers are a lighter projection: they carry lockOwnerId +
+# expires + paths but no pid. They flow through the manual path for blocking
+# (exact paths: matching, expires-based liveness) but are NOT adoptable.
+shopt -s nullglob
+for marker in .WORK-IN-PROGRESS-taskwraith-runtime-*.md .WORK-IN-PROGRESS-taskwraith-contribution-*.md SHIP-HOLD-*.md SESSION-IN-PROGRESS-*.md; do
+  [ -f "$marker" ] || continue
+  derived_marker=0
+  is_runtime_marker_filename "$marker" && derived_marker=1
+  m_pid="$(marker_scalar "$marker" pid)"
+  [[ "$m_pid" =~ ^[0-9]+$ ]] || m_pid=""
+  m_exp="$(marker_scalar "$marker" expires)"
+  m_agent="$(marker_scalar "$marker" agent)"
+  m_owner="$(marker_scalar "$marker" lockOwnerId)"
+
+  if [ "$derived_marker" -eq 1 ]; then
+    m_lock_owner_id="$(derived_lock_owner_id "$marker")"
+    m_birth_receipt_hash="$(marker_scalar "$marker" birthReceiptHash)"
+    if is_contribution_marker_filename "$marker"; then
+      # Contribution markers carry only lockOwnerId + expires + paths — no
+      # pid, no birthReceiptHash. Valid if they have a readable owner id.
+      if [ -z "$m_lock_owner_id" ]; then
+        report_live_overlap "${staged_paths[0]}" "$marker" "unknown" "$m_agent" \
+          ' (invalid contribution projection — no lockOwnerId)'
+        continue
+      fi
+    else
+      # Full runtime markers require pid + lockOwnerId + birthReceiptHash.
+      if [ -z "$m_pid" ] ||
+        [ -z "$m_lock_owner_id" ] ||
+        ! [[ "$m_birth_receipt_hash" =~ ^[0-9a-f]{64}$ ]]; then
+        report_live_overlap "${staged_paths[0]}" "$marker" "${m_pid:-unknown}" "$m_agent" \
+          ' (invalid runtime owner projection)'
+        continue
+      fi
+    fi
+  fi
+
+  # Manual claims use the pid-ancestry rule, or an exact per-seat owner id.
+  # Contribution markers use owner-id only (no pid ancestry).
+  if [ "$derived_marker" -eq 1 ]; then
+    is_own_marker_claim "$marker" "$m_pid" && continue
+  else
+    is_own_manual_claim "$m_pid" "$m_owner" && continue
+  fi
+  # A manual marker with neither identity predates the format; advise, never
+  # block. Derived markers were validated above and never take this path.
+  if [ -z "$m_pid" ] && [ -z "$m_owner" ]; then
+    printf '  note: %s has no pid or lockOwnerId — treating as advisory.\n' "$marker"
+    warn=1
+    continue
+  fi
+  if [ "$derived_marker" -eq 0 ]; then
+    # A dead manual owner is stale; an elapsed OR unreadable promise is decayed.
+    if [ -n "$m_pid" ]; then
+      kill -0 "$m_pid" 2>/dev/null || continue
+    fi
+    exp_epoch=""
+    [ -n "$m_exp" ] && exp_epoch="$(to_epoch "$m_exp")"
+    if [ -z "$exp_epoch" ]; then
+      printf '  note: %s has no readable expires — treating as decayed.\n' "$marker"
+      printf '        Give it a lease or delete it (AGENTS.md: Marker format).\n'
+      warn=1
+      continue
+    fi
+    eff_epoch="$(capped_expiry "$exp_epoch" "$(to_epoch "$(marker_scalar "$marker" started)")")"
+    if [ -z "$eff_epoch" ]; then
+      printf '  note: %s claims more than 20m with no readable started:,\n' "$marker"
+      printf '        so its lease cannot be bounded — treating as decayed.\n'
+      warn=1
+      continue
+    fi
+    if [ "$now" -gt "$eff_epoch" ]; then
+      [ "$now" -le "$exp_epoch" ] && report_lease_capped "$marker"
+      continue
+    fi
+  elif is_contribution_marker_filename "$marker"; then
+    # Contribution markers have no pid; liveness is expires-based only.
+    exp_epoch=""
+    [ -n "$m_exp" ] && exp_epoch="$(to_epoch "$m_exp")"
+    if [ -z "$exp_epoch" ]; then
+      printf '  note: %s has no readable expires — treating as decayed.\n' "$marker"
+      warn=1
+      continue
+    fi
+    eff_epoch="$(capped_expiry "$exp_epoch" "$(to_epoch "$(marker_scalar "$marker" started)")")"
+    if [ -z "$eff_epoch" ]; then
+      warn=1
+      continue
+    fi
+    if [ "$now" -gt "$eff_epoch" ]; then
+      [ "$now" -le "$exp_epoch" ] && report_lease_capped "$marker"
+      continue
+    fi
+  elif ! kill -0 "$m_pid" 2>/dev/null; then
+    # Durable authority—not the projected leader PID—owns derived cleanup.
+    # A launching process can outlive main, and a child can leave descendants.
+    # Keep foreign commits blocked until TaskWraith reconciles/removes the
+    # marker; the exact inherited opaque owner id remains the only normal bypass.
+    derived_runtime_recovery_block=1
+  fi
+
+  # Claim is live. Manual markers and contribution markers use exact-path
+  # matching against `paths:`. Full runtime markers additionally project
+  # workspace-wide and tree claims via digests.
+  claimed="$(marker_list "$marker" paths)"
+  if ! is_derived_marker "$marker"; then
+    [ -z "$claimed" ] && continue
+    while IFS= read -r path; do
+      [ -z "$path" ] && continue
+      for staged_path in "${staged_paths[@]}"; do
+        [ "$staged_path" = "$path" ] &&
+          report_live_overlap "$path" "$marker" "$m_pid" "$m_agent"
+      done
+    done <<< "$claimed"
+    continue
+  fi
+
+  # Contribution markers also use exact-path matching (no digest/tree projection).
+  if is_contribution_marker_filename "$marker"; then
+    [ -z "$claimed" ] && continue
+    while IFS= read -r path; do
+      [ -z "$path" ] && continue
+      for staged_path in "${staged_paths[@]}"; do
+        [ "$staged_path" = "$path" ] &&
+          report_live_overlap "$path" "$marker" "${m_pid:-no-pid}" "$m_agent"
+      done
+    done <<< "$claimed"
+    continue
+  fi
+
+  # Full runtime marker: workspace-wide, tree, and digest projection.
+  workspace_wide=0
+  [ "$(marker_scalar "$marker" workspaceWide)" = "true" ] && workspace_wide=1
+  if [ "$workspace_wide" -eq 1 ]; then
+    first_staged="${staged_paths[0]}"
+    [ -n "$first_staged" ] &&
+      report_live_overlap "$first_staged" "$marker" "$m_pid" "$m_agent" \
+        ' (workspace-wide runtime lock)'
+    continue
+  fi
+
+  path_digests="$(marker_list "$marker" pathDigests)"
+  tree_digests="$(marker_list "$marker" treeDigests)"
+  trees="$(marker_list "$marker" trees)"
+
+  # Exact path digests are mandatory whenever a derived marker projects human
+  # paths. Missing, malformed, or count-mismatched digest metadata means the
+  # projection cannot be checked byte-for-byte, so fail closed.
+  projection_valid=1
+  [ "$(marker_list_count "$claimed")" = "$(marker_list_count "$path_digests")" ] ||
+    projection_valid=0
+  [ "$(marker_list_count "$trees")" = "$(marker_list_count "$tree_digests")" ] ||
+    projection_valid=0
+  digest_list_is_valid "$path_digests" || projection_valid=0
+  digest_list_is_valid "$tree_digests" || projection_valid=0
+  if [ "$projection_valid" -eq 0 ]; then
+    report_live_overlap "${staged_paths[0]}" "$marker" "$m_pid" "$m_agent" \
+      ' (invalid runtime path-digest projection)'
+    continue
+  fi
+
+  if [ -n "$path_digests$tree_digests" ]; then
+    sha256_value taskwraith
+    if [ -z "$sha256_result" ]; then
+      report_live_overlap "${staged_paths[0]}" "$marker" "$m_pid" "$m_agent" \
+        ' (SHA-256 unavailable for runtime lock projection)'
+      continue
+    fi
+  fi
+
+  for staged_path in "${staged_paths[@]}"; do
+    if [ -n "$path_digests" ]; then
+      sha256_value "$staged_path"
+      staged_digest="$sha256_result"
+      if digest_list_contains "$path_digests" "$staged_digest"; then
+        report_live_overlap "$staged_path" "$marker" "$m_pid" "$m_agent" \
+          ' (file/hunk runtime lock)'
+      fi
+    fi
+    if [ -n "$tree_digests" ] && tree_digests_cover_path "$tree_digests" "$staged_path"; then
+      report_live_overlap "$staged_path" "$marker" "$m_pid" "$m_agent" \
+        ' (runtime tree lock)'
+    fi
+  done
+done
+
+for marker in .WORK-IN-PROGRESS-*.md; do
+  [ -f "$marker" ] || continue
+  is_runtime_marker_filename "$marker" && continue
+  derived_marker=0
+  m_pid="$(marker_scalar "$marker" pid)"
+  [[ "$m_pid" =~ ^[0-9]+$ ]] || m_pid=""
+  m_exp="$(marker_scalar "$marker" expires)"
+  m_agent="$(marker_scalar "$marker" agent)"
+  m_owner="$(marker_scalar "$marker" lockOwnerId)"
+
+  # Human markers use pid ancestry, or an exact per-seat owner id when the
+  # author had no pid to give.
+  is_own_manual_claim "$m_pid" "$m_owner" && continue
+  if [ -z "$m_pid" ] && [ -z "$m_owner" ]; then
+    if ! grep -qx -- '---' "$marker" 2>/dev/null; then
+      printf '  note: %s has no --- frontmatter delimiters, so every\n' "$marker"
+      printf '        field parses empty and it claims NOTHING. Wrap the fields in a\n'
+      printf '        --- ... --- block (AGENTS.md: Marker format).\n'
+    elif grep -qE '^[[:space:]]*(pid|lockOwnerId):' "$marker" 2>/dev/null; then
+      printf '  note: %s has an identity line the frontmatter parser\n' "$marker"
+      printf '        cannot reach, so it claims NOTHING. Every field must sit inside\n'
+      printf '        the --- ... --- block (AGENTS.md: Marker format).\n'
+    else
+      printf '  note: %s has no pid or lockOwnerId — treating as advisory.\n' "$marker"
+    fi
+    warn=1
+    continue
+  fi
+  # Liveness. A pid is the stronger signal, so it rules when present. An
+  # owner-id-only claim has no process to probe, which leaves `expires` as its
+  # sole decay signal.
+  if [ -n "$m_pid" ]; then
+    kill -0 "$m_pid" 2>/dev/null || continue
+  fi
+  exp_epoch=""
+  [ -n "$m_exp" ] && exp_epoch="$(to_epoch "$m_exp")"
+  if [ -z "$exp_epoch" ]; then
+    printf '  note: %s has no readable expires — treating as decayed.\n' "$marker"
+    printf '        Give it a lease or delete it (AGENTS.md: Marker format).\n'
+    warn=1
+    continue
+  fi
+  eff_epoch="$(capped_expiry "$exp_epoch" "$(to_epoch "$(marker_scalar "$marker" started)")")"
+  if [ -z "$eff_epoch" ]; then
+    printf '  note: %s claims more than 20m with no readable started:,\n' "$marker"
+    printf '        so its lease cannot be bounded — treating as decayed.\n'
+    warn=1
+    continue
+  fi
+  if [ "$now" -gt "$eff_epoch" ]; then
+    [ "$now" -le "$exp_epoch" ] && report_lease_capped "$marker"
+    continue
+  fi
+  claimed="$(marker_list "$marker" paths)"
+  [ -z "$claimed" ] && continue
+  while IFS= read -r path; do
+    [ -z "$path" ] && continue
+    for staged_path in "${staged_paths[@]}"; do
+      [ "$staged_path" = "$path" ] &&
+        report_live_overlap "$path" "$marker" "$m_pid" "$m_agent"
+    done
+  done <<< "$claimed"
+done
+shopt -u nullglob
+
+# ── 3. ADVISE: breadth that looks like a bulk add ───────────────────────────
+count="${#staged_paths[@]}"
+if [ "${count:-0}" -ge 40 ]; then
+  printf '  note: %s files staged. `git add -A`/`.` sweeps other sessions in —\n' "$count"
+  printf '        confirm every path is yours (AGENTS.md: stage by explicit path).\n'
+  warn=1
+fi
+
+# ── 4. ADVISE: your claim is expiring, or you never raised one ──────────────
+# The second half is the mirror of the first, and it is the only thing in this
+# hook that speaks to a session holding NO claim. Section 1 needs someone
+# else's marker to say anything, and section 6 waits ORPHAN_WARN_MS — so a
+# session that edits a clean file and commits promptly without a marker used
+# to trigger nothing at all, on every commit, indefinitely.
+own_live_claim=0
+shopt -s nullglob
+for marker in SHIP-HOLD-*.md SESSION-IN-PROGRESS-*.md .WORK-IN-PROGRESS-*.md; do
+  [ -f "$marker" ] || continue
+  m_pid="$(marker_scalar "$marker" pid)"
+  [[ "$m_pid" =~ ^[0-9]+$ ]] || m_pid=""
+  m_owner="$(marker_scalar "$marker" lockOwnerId)"
+  if is_runtime_marker_filename "$marker"; then
+    # A durable runtime lock IS a live claim of yours — section 1 treats it as
+    # authoritative against everyone else. It simply is not yours to drop by
+    # hand, so it counts here without earning the personal nag.
+    is_own_marker_claim "$marker" "$m_pid" || continue
+    own_live_claim=1
+    continue
+  fi
+  is_own_manual_claim "$m_pid" "$m_owner" || continue
+  printf '  note: your claim %s is still up — drop it when this work is done.\n' "$marker"
+  m_exp="$(marker_scalar "$marker" expires)"
+  exp_epoch=""
+  [ -n "$m_exp" ] && exp_epoch="$(to_epoch "$m_exp")"
+  if [ -z "$exp_epoch" ]; then
+    printf '        It has no readable expires, so it can never decay — fix or drop it.\n'
+    warn=1
+  elif [ "$now" -le "$exp_epoch" ]; then
+    own_live_claim=1
+  fi
+done
+shopt -u nullglob
+
+if [ "$own_live_claim" -eq 0 ]; then
+  printf '  note: no live claim of yours covers this commit. Raise a marker before\n'
+  printf '        your next edit to a clean file (AGENTS.md: Before you write).\n'
+  if [ -z "${TASKWRAITH_LOCK_OWNER_ID:-}" ]; then
+    printf '        No usable TASKWRAITH_LOCK_OWNER_ID is present. That does not\n'
+    printf '        prevent an external/interactive agent from claiming work: use its\n'
+    printf '        stable agent/session host PID in `pid:`; this hook accepts it when\n'
+    printf '        it is an ancestor of git. Do not invent lockOwnerId or use a\n'
+    printf '        one-shot command PID; without a stable ancestor PID, coordinate.\n'
+  fi
+  warn=1
+fi
+
+# ── 5. ADVISE: a decayed claim is still standing ────────────────────────────
+# Manual markers become adoptable on expiry or owner death (AGENTS.md:
+# "Adopting a decayed claim"). Runtime-derived and contribution markers never
+# become adoptable merely because their projection expiry elapsed: durable
+# authority owns their cleanup.
+shopt -s nullglob
+for marker in .WORK-IN-PROGRESS-taskwraith-runtime-*.md .WORK-IN-PROGRESS-taskwraith-contribution-*.md SHIP-HOLD-*.md SESSION-IN-PROGRESS-*.md; do
+  [ -f "$marker" ] || continue
+  derived_marker=1
+  is_runtime_marker_filename "$marker" || derived_marker=0
+  m_pid="$(marker_scalar "$marker" pid)"
+  [[ "$m_pid" =~ ^[0-9]+$ ]] || m_pid=""
+  m_exp="$(marker_scalar "$marker" expires)"
+  is_own_marker_claim "$marker" "$m_pid" && continue
+  decayed=0
+  if [ -n "$m_pid" ] && ! kill -0 "$m_pid" 2>/dev/null; then
+    decayed=1
+  fi
+  if [ "$derived_marker" -eq 0 ] && [ "$decayed" -eq 0 ] && [ -n "$m_exp" ]; then
+    exp_epoch="$(to_epoch "$m_exp")"
+    if [ -n "$exp_epoch" ] && [ "$now" -gt "$exp_epoch" ]; then
+      decayed=1
+    fi
+  fi
+  if [ "$decayed" -eq 1 ]; then
+    if is_runtime_marker_filename "$marker"; then
+      printf '  note: %s has a dead runtime owner — reconcile it through TaskWraith\n' "$marker"
+      printf '        lock recovery before removing its derived projection.\n'
+    else
+      printf '  note: %s may be decayed (expired or owner dead). Confirm with\n' "$marker"
+      printf '        `python3 scripts/work_guard.py status` before adopting — a passed\n'
+      printf '        expires is NOT decay while the claim'\''s own files are still being written\n'
+      printf '        (AGENTS.md: Adopting a decayed claim).\n'
+    fi
+    warn=1
+  fi
+done
+for marker in .WORK-IN-PROGRESS-*.md; do
+  [ -f "$marker" ] || continue
+  is_runtime_marker_filename "$marker" && continue
+  derived_marker=0
+  m_pid="$(marker_scalar "$marker" pid)"
+  [[ "$m_pid" =~ ^[0-9]+$ ]] || m_pid=""
+  m_exp="$(marker_scalar "$marker" expires)"
+  m_owner="$(marker_scalar "$marker" lockOwnerId)"
+  is_own_manual_claim "$m_pid" "$m_owner" && continue
+  decayed=0
+  if [ -n "$m_pid" ] && ! kill -0 "$m_pid" 2>/dev/null; then
+    decayed=1
+  fi
+  if [ "$decayed" -eq 0 ] && [ -n "$m_exp" ]; then
+    exp_epoch="$(to_epoch "$m_exp")"
+    if [ -n "$exp_epoch" ] && [ "$now" -gt "$exp_epoch" ]; then
+      decayed=1
+    fi
+  fi
+  if [ "$decayed" -eq 1 ]; then
+    printf '  note: %s may be decayed (expired or owner dead). Confirm with\n' "$marker"
+    printf '        `python3 scripts/work_guard.py status` before adopting — a passed\n'
+    printf '        expires is NOT decay while the claim'\''s own files are still being written\n'
+    printf '        (AGENTS.md: Adopting a decayed claim).\n'
+    warn=1
+  fi
+done
+shopt -u nullglob
+
+# ── 6. ADVISE: dirty work that no live claim covers ─────────────────────────
+# Every section above fires at COMMIT time — which is exactly the moment the
+# real failures have already happened. work_guard answers the one question
+# none of the sections above can — "is there dirty work nobody has promised
+# to finish?" — and its timer runs between commits, where the hook cannot
+# reach. Advisory and fail-open: no python3 or no script means no notice,
+# never a blocked commit.
+if command -v python3 >/dev/null 2>&1 && [ -f scripts/work_guard.py ]; then
+  guard_note="$(python3 scripts/work_guard.py status --hook 2>/dev/null || true)"
+  if [ -n "$guard_note" ]; then
+    printf '%s\n' "$guard_note"
+    warn=1
+  fi
+fi
+
+if [ "$block" -eq 1 ]; then
+  if [ "$derived_runtime_recovery_block" -eq 1 ]; then
+    printf '\n  A runtime-derived workspace lock needs TaskWraith recovery reconciliation.\n'
+    printf '  Restart TaskWraith and inspect the lock owner before forcing any override.\n'
+    printf '  Re-run with TW_ALLOW_CLAIMED=1 only after you prove the durable claim is wrong.\n\n'
+  elif [ "$claim_block" -eq 1 ]; then
+    printf '\n  Another session is editing that file right now. Coordinate, pick different\n'
+    printf '  work, or re-run with TW_ALLOW_CLAIMED=1 if you know the claim is wrong.\n\n'
+  else
+    printf '\n'
+  fi
+  exit 1
+fi
+
+[ "$warn" -eq 1 ] && printf '\n'
+exit 0
