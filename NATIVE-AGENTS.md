@@ -14,10 +14,11 @@ ACP/MSP native-agent host.
 There are two distinct integrations:
 
 1. A **model API provider** accepts inference requests owned by this gateway.
-   Claude uses Messages across all eight connections. Codex uses Responses
-   across all eight: native forwarding for Grok and Ollama, and a local
+   Claude uses Messages across all eleven connections. Codex uses Responses
+   across all eleven: native forwarding for Grok, Ollama and OpenRouter, and a local
    Responses-to-Messages bridge for Mistral, Kimi, MiMo, DeepSeek, Cerebras,
-   and Muse. The selected desktop harness retains its own tool loop.
+   Muse, Qwen Token Plan and Gemini. The selected desktop harness retains its
+   own tool loop.
 2. A **native agent provider** owns a stateful coding-agent session. It may
    inspect files, request permission, execute tools, and return a final answer.
    ACP and MSP expose that session; they do not turn it into a raw completion
@@ -384,3 +385,6 @@ that a differing schema fingerprint is a warning. An adapter should therefore
 check the required host capabilities, report version/fingerprint differences,
 and verify compatibility rather than treating every fingerprint difference as
 an automatic failure. See the [SDK quickstart](https://meta-models.github.io/muse-code-sdk/guides/quickstart/).
+
+
+Provider Hub 0.5.0 also adds Qwen Token Plan and Gemini API as model-API connections and OpenRouter with native Messages/Responses. These do not introduce CLI delegation or alter the native-agent boundary above.

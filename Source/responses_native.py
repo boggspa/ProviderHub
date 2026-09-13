@@ -126,7 +126,7 @@ def prepare_native(runtime, payload):
         if body.get("previous_response_id") or body.get("store"):
             raise BridgeError("Ollama Responses is stateless. Send the full input history with store:false.")
         # The daemon owns its cloud login. Never send the local gateway token.
-        headers = {"Content-Type": "application/json", "Authorization": "Bearer ollama", "User-Agent": "ProviderHub/0.4"}
+        headers = {"Content-Type": "application/json", "Authorization": "Bearer ollama", "User-Agent": "ProviderHub/0.5"}
         tier = body.pop("service_tier", None)
         if tier not in (None, "auto", "default", "standard"):
             raise BridgeError("Ollama does not advertise a Responses Fast service tier.")

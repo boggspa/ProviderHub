@@ -35,7 +35,7 @@ THINKING_DOCS = "https://ai.google.dev/gemini-api/docs/thinking"
 FUNCTION_CALLING_DOCS = "https://ai.google.dev/gemini-api/docs/function-calling"
 THOUGHT_SIGNATURE_DOCS = "https://ai.google.dev/gemini-api/docs/generate-content/thought-signatures"
 OPENAI_DOCS = "https://ai.google.dev/gemini-api/docs/openai"
-CLIENT_HEADER = "provider-hub-oai/0.4.0"
+CLIENT_HEADER = "provider-hub-oai/0.5.0"
 ENVELOPE_PREFIX = "ph_gemini_v1."
 
 
@@ -108,6 +108,16 @@ _UNDERLYING_EFFORTS = {
     "gemini-2.5-flash-lite": ("none", "low", "medium", "high"),
 }
 
+# Defaults explicitly listed in Google's thinking and Gemini 3 guides. Leave
+# unnamed defaults absent so the compatibility API keeps Google's own budget.
+_MODEL_DEFAULT_EFFORTS = {
+    "gemini-3.8-flash": "medium", "gemini-3.7-flash": "medium",
+    "gemini-3.6-flash": "medium", "gemini-3.5-flash": "medium",
+    "gemini-3.5-flash-lite": "minimal", "gemini-3.1-flash-lite": "minimal",
+    "gemini-3.1-pro-preview": "high", "gemini-3-flash-preview": "high",
+    "gemini-2.5-flash-lite": "none",
+}
+
 
 def _positive_integer(value):
     return value if type(value) is int and value > 0 else None
@@ -167,7 +177,7 @@ def validate_connection(connection: dict | None) -> dict:
 def _metadata_headers(api_key: str) -> dict:
     return {
         "Accept": "application/json",
-        "User-Agent": "ProviderHub/0.4",
+        "User-Agent": "ProviderHub/0.5",
         "x-goog-api-client": CLIENT_HEADER,
         "x-goog-api-key": api_key,
     }
@@ -178,7 +188,7 @@ def _inference_headers(api_key: str) -> dict:
         "Accept": "application/json",
         "Authorization": "Bearer " + api_key,
         "Content-Type": "application/json",
-        "User-Agent": "ProviderHub/0.4",
+        "User-Agent": "ProviderHub/0.5",
         "x-goog-api-client": CLIENT_HEADER,
     }
 
@@ -254,6 +264,7 @@ def _catalogue_entry(card: dict) -> dict | None:
         "vision": True,
         "reasoning": thinking,
         "effort_modes": effort_modes,
+        "default_effort": _MODEL_DEFAULT_EFFORTS.get(capability_model) if thinking is True else None,
         "provider_effort_modes": list(_UNDERLYING_EFFORTS[capability_model]) if thinking is True else [],
         "fast_mode": False,
         "inference_status": "advertised",

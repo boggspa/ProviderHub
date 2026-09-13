@@ -1,19 +1,19 @@
 **Provider Hub integration status — 13 September 2026**
 
-Provider Hub Preview 0.4.0 implements eight model API connections behind one
+Provider Hub Preview 0.5.0 implements eleven model API connections behind one
 native menu bar app: Mistral, Kimi Code subscription API keys, Xiaomi MiMo
 Token Plan, the existing Ollama daemon, DeepSeek API, Cerebras API, Muse through
-the Meta Model API, and Grok through the xAI PAYG API. Provider identity,
+the Meta Model API, Grok through the xAI PAYG API, Qwen Token Plan, curated OpenRouter, and Gemini API. Provider identity,
 credentials, model metadata, and quota attribution remain separate from
 TaskWraith-derived display branding.
 
 The app now launches two desktop harnesses with separate model selection and
 restoration state:
 
-| Harness | Local protocol | Provider connections in 0.4.0 | Tool owner |
+| Harness | Local protocol | Provider connections in 0.5.0 | Tool owner |
 | --- | --- | --- | --- |
-| Claude Desktop | Anthropic Messages at `/v1/messages` | All eight | Claude executes returned tool calls |
-| Codex / ChatGPT Desktop | Responses at `/v1/responses` | All eight: native Grok/Ollama; local Messages translation for Mistral, Kimi, MiMo, DeepSeek, Cerebras, and Muse | Codex executes returned function/shell calls |
+| Claude Desktop | Anthropic Messages at `/v1/messages` | All eleven | Claude executes returned tool calls |
+| Codex / ChatGPT Desktop | Responses at `/v1/responses` | All eleven: native Grok/Ollama/OpenRouter; local Messages translation for the other eight connections | Codex executes returned function/shell calls |
 
 The current implementation includes model discovery and provenance, exact
 context where known, readable names, alias grouping, Claude slot mappings,
@@ -26,9 +26,9 @@ metadata-only activity logs. See `README.md` for setup, `HARNESS-OPTIONS.md` for
 the Codex implementation and qualification, and `VERIFICATION.md` for the
 broader evidence matrix.
 
-Grok and Ollama expose native Responses endpoints, so their protocol objects and
+Grok, Ollama and OpenRouter expose native Responses endpoints, so their protocol objects and
 opaque reasoning pass through without a Messages translation. Mistral, Kimi,
-MiMo, DeepSeek, Cerebras, and Muse now translate Codex Responses through the
+MiMo, DeepSeek, Cerebras, Muse, Qwen Token Plan and Gemini translate Codex Responses through the
 authenticated local Messages endpoint and their existing provider adapters.
 The bridge requires full history and `store:false`; native xAI remains the only
 route with scoped `previous_response_id` continuation. The inner Messages hop
@@ -40,12 +40,14 @@ encrypted Fernet envelopes. A separate persistent `responses-encryption-key`
 is used through `cryptography` 50.0.0; no prompt or session store is added.
 Envelope scope binds the model and account connection, and cross-provider or
 cross-account reasoning history requires a new task. Mock JSON and streaming
-function-tool cycles pass for all six translated providers, including
+function-tool cycles pass for all eight translated providers, including
 Cerebras's signed thinking replay.
 
-The custom Codex catalogue includes every compatible model in the configured
-account catalogues rather than only the selected default or a curated/elected
-list. Models explicitly marked as tool-incompatible are omitted. Known numeric
+The custom Codex catalogue includes every compatible model published by the
+configured account catalogues. OpenRouter publishes a curated shortlist with
+separate context choices; there is no additional user inclusion checklist.
+The selected default sets the starting model. Models explicitly marked as
+tool-incompatible are omitted. Known numeric
 contexts remain 100 percent with an 85 percent automatic-compaction threshold;
 unknown contexts use `null` with no threshold. The installed engine accepted
 that null contract and reported `model_context_window:null` rather than
@@ -87,7 +89,7 @@ runtime; `PROVIDER_HUB_PYTHON_RUNTIME` supplies a clean relocatable runtime to
 
 `Source/package_macos.py` signs the app and embedded native components using a
 supplied Developer ID Application identity and can optionally submit the zip
-with a user-provided `notarytool` Keychain profile. The final 0.4.0 build 9 is
+with a user-provided `notarytool` Keychain profile. The final 0.5.0 build 11 is
 Developer ID signed and Apple-notarized. Its ticket is stapled, and Gatekeeper
 accepts the app as `Notarized Developer ID`. This qualification applies to the
 packaged artifact; a future build needs a new submission.
@@ -156,3 +158,8 @@ the six-provider Responses-to-Messages bridge, encrypted provider-reasoning
 continuity, the full provider-qualified Codex catalogue, and the reversible
 Codex / ChatGPT Desktop launcher. ACP/MSP subscription-agent hosting remains
 future work.
+
+
+**0.5.0 implemented additions**
+
+Qwen Token Plan, curated OpenRouter and Gemini API are implemented in separate commits. See `PROVIDER-ADDITIONS.md` for endpoint isolation, context provenance, OpenRouter route binding and Gemini signature handling. Further additions should preserve the same per-provider qualification boundary.

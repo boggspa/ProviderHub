@@ -1,9 +1,8 @@
 **Provider Hub: Codex / ChatGPT Desktop harness — 13 September 2026**
 
-Provider Hub Preview 0.4.0 adds Codex / ChatGPT Desktop as a second launched
-harness beside Claude Desktop. Every configured provider connection is now
-available to Codex. Grok and Ollama retain native Responses forwarding;
-Mistral, Kimi, MiMo, DeepSeek, Cerebras, and Muse use a local
+Provider Hub Preview 0.5.0 extends the second desktop harness introduced in 0.4.0 with Qwen Token Plan, curated OpenRouter and Gemini API. Every configured provider connection is now
+available to Codex. Grok, Ollama and OpenRouter retain native Responses forwarding;
+Mistral, Kimi, MiMo, DeepSeek, Cerebras, Muse, Qwen Token Plan and Gemini use a local
 Responses-to-Messages translation over their existing provider adapters. This
 document records the shipped design and the evidence gathered so far, including
 the checks that remain user-operated.
@@ -37,10 +36,10 @@ the user's normal Codex GUI/configuration still has not been switched.
 **Implemented protocol boundary**
 
 ```text
-Claude Desktop -> /v1/messages -> Provider Hub -> all eight provider connections
+Claude Desktop -> /v1/messages -> Provider Hub -> all eleven provider connections
 
-Codex / ChatGPT Desktop -> /v1/responses -> Provider Hub -+-> native Responses -> Grok or Ollama
-                                                           \-> local /v1/messages -> other six connections
+Codex / ChatGPT Desktop -> /v1/responses -> Provider Hub -+-> native Responses -> Grok, Ollama or OpenRouter
+                                                           \-> local /v1/messages -> other eight connections
 ```
 
 The native Responses path does not translate through the existing Messages or
@@ -71,7 +70,7 @@ function and shell path can still inspect and edit files.
 
 Provider-specific continuation rules remain explicit:
 
-- Ollama and all six translated providers require full input history and
+- Ollama, OpenRouter and all eight translated providers require full input history and
   `store:false`. Provider Hub rejects `previous_response_id` and storage for
   these routes. It does not advertise unproven Ollama effort or service-tier
   controls.
@@ -106,9 +105,10 @@ The generated catalogue uses exact provider-qualified slugs, for example
 request uses the provider's exact model ID, while the Codex-facing response
 retains the catalogue slug. No OpenAI model aliases are introduced.
 
-Every model in the configured account catalogues appears unless the provider
-explicitly marks it as incompatible with coding tools. This is not a curated
-or elected checklist, and it is not limited to the selected default. While the
+Every compatible model published by the configured account catalogues appears.
+OpenRouter publishes a curated shortlist with separate context choices; there
+is no additional user inclusion checklist. The selected default sets the
+starting model. While the
 Provider Hub configuration is active, the temporary catalogue replaces the
 ordinary picker list rather than merging Hub and OpenAI models.
 
@@ -178,7 +178,7 @@ compaction turn through ordinary Responses calls. A namespaced function-call
 round trip reached the expected local dispatch path; its harmless invalid-agent
 wait created no agent.
 
-All six translated provider paths pass both JSON and streaming mock
+The six translated provider paths introduced in 0.4.0 pass both JSON and streaming mock
 function-tool cycles through the real local Messages adapter. Those fixtures
 cover Mistral, Kimi, MiMo, DeepSeek, Muse, and Cerebras, including the
 authenticated encrypted reasoning round trip required by Cerebras. They prove
@@ -222,8 +222,13 @@ the supplied clean runtime.
 `Source/package_macos.py` accepts a Developer ID Application identity, signs
 embedded native components and the app, verifies the signature, and creates a
 zip archive. It can optionally submit that archive using a user-provided
-`notarytool` Keychain profile. Apple accepted the final 0.4.0 build 9 submission
-`c792bff2-9c05-4441-a5be-9b682183353a`. Its ticket is stapled, strict signature
+`notarytool` Keychain profile. The final 0.5.0 build 11 submission is recorded
+in `VERIFICATION.md`. Its ticket is stapled, strict signature
 verification passes, and Gatekeeper identifies it as `Notarized Developer ID`.
 The recipient zip is recreated after stapling. A later source rebuild requires
 its own signing and notarization.
+
+
+**0.5.0 provider expansion**
+
+Qwen Token Plan, OpenRouter and Gemini API are available to both harnesses. OpenRouter uses native Responses and publishes context-specific routes; Qwen and Gemini use the existing local Messages bridge. Provider-specific contract and qualification details are in `PROVIDER-ADDITIONS.md`.

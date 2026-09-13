@@ -118,10 +118,13 @@ ordering and signatures that arrive on a final empty-text chunk. Actual tool
 calls take precedence over the observed compatibility API's `stop` finish label.
 Thought-token usage is included in the output count.
 
-The Sol Max agent's 19 focused tests are joined by six complete gateway tests:
+The Sol Max agent's 19 focused tests are joined by seven gateway and catalogue tests:
 Claude JSON/SSE tool and text continuations, Codex JSON/SSE namespaced tool
 cycles, missing-signature/quota errors, independent output limits, and distinct
-model snapshots, and opaque signature bytes excluded from text-token estimates.
+model snapshots, opaque signature bytes excluded from text-token estimates,
+and model-specific default effort. Google's documented medium, minimal and
+off defaults are retained; models with an unnamed default keep a null Codex
+default so the provider can choose its budget.
 TaskWraith's Gemini API implementation and tests corroborate
 the positional signature and unsigned-2.5 rules. No live Gemini key or inference
 was used during implementation; account qualification follows key entry.
@@ -132,6 +135,7 @@ Sources:
 - https://ai.google.dev/gemini-api/docs/generate-content/thought-signatures
 - https://ai.google.dev/api/models
 - https://ai.google.dev/gemini-api/docs/thinking
+- https://ai.google.dev/gemini-api/docs/generate-content/gemini-3
 - https://ai.google.dev/gemini-api/docs/function-calling
 - https://ai.google.dev/gemini-api/docs/partner-integration
 - TaskWraith `src/main/GeminiApiProvider.ts` and `GeminiApiProvider.test.ts`.

@@ -27,7 +27,7 @@ class ProviderError(ValueError):
     """A provider configuration, catalogue, or request cannot be used safely."""
 
 
-GATEWAY_USER_AGENT = "ProviderHub/0.4"
+GATEWAY_USER_AGENT = "ProviderHub/0.5"
 
 
 PROVIDERS = {

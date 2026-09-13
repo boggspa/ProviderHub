@@ -6,7 +6,8 @@ import unittest
 from unittest.mock import patch
 
 import test_gateway_hub as fixtures
-from gemini_provider import ENVELOPE_PREFIX, seal_replay
+from gemini_provider import ENVELOPE_PREFIX, seal_replay, discover as discover_gemini
+from codex_catalogue import project_codex
 from hub_config import defaults, project_catalogue
 from bridge_core import SLOTS
 
@@ -161,6 +162,23 @@ class GeminiGatewayTests(unittest.TestCase):
         self.assertEqual(status, 200, raw)
         assistant = next(row for row in fixtures.MockProvider.requests[0]["messages"] if row["role"] == "assistant")
         self.assertEqual(assistant["extra_content"]["google"]["thought_signature"], "A" * 20000)
+
+    def test_documented_gemini_default_effort_reaches_codex(self):
+        expected = {
+            "gemini-3.8-flash": "medium", "gemini-3.7-flash": "medium",
+            "gemini-3.6-flash": "medium", "gemini-3.5-flash": "medium",
+            "gemini-3.5-flash-lite": "minimal", "gemini-3.1-flash-lite": "minimal",
+            "gemini-3.1-pro-preview": "high", "gemini-3-flash-preview": "high",
+            "gemini-2.5-flash-lite": "none", "gemini-2.5-pro": None,
+            "gemini-2.5-flash": None,
+        }
+        inventory = discover_gemini({}, "key", transport=lambda _: {"models": [{
+            "name": "models/" + model, "supportedGenerationMethods": ["generateContent"],
+            "inputTokenLimit": 1048576, "outputTokenLimit": 65536, "thinking": True,
+        } for model in expected]})
+        settings = defaults(SLOTS, "unused")
+        models = project_codex(settings, {"models": project_catalogue("gemini", inventory, settings)})["models"]
+        self.assertEqual({row["slug"].removeprefix("gemini/"): row["default_reasoning_level"] for row in models}, expected)
 
 
 if __name__ == "__main__":

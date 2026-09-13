@@ -1,4 +1,4 @@
-# Provider Hub Preview 0.4.0
+# Provider Hub Preview 0.5.0
 
 Use your model accounts inside Claude Desktop or the Codex coding workspace
 in Codex / ChatGPT Desktop.
@@ -22,7 +22,7 @@ settings, or conversations from its developer.
 
 - **Mistral:** use the API key already saved by Vibe, or enter your Mistral API
   key directly. Starting Vibe is optional when using an API key directly.
-- **Kimi, MiMo, DeepSeek, Cerebras, Muse, or Grok:** configure the corresponding
+- **Kimi, MiMo, DeepSeek, Cerebras, Muse, Grok, Qwen Token Plan, OpenRouter, or Gemini:** configure the corresponding
   account/key in its card.
 - **Ollama:** run your existing Ollama app or daemon. It manages its own models,
   downloads, and cloud sign-in.
@@ -59,7 +59,7 @@ in their respective profiles.
 3. Choose **Launch Codex / ChatGPT**, then confirm the restart when ready.
 
 The default sets the starting model. Codex's own picker receives every
-compatible model from your configured catalogues, not only the default. There
+compatible model from your configured catalogues, not only the default. OpenRouter supplies a curated shortlist with distinct context choices. There
 is no separate model-inclusion checklist in this release.
 
 Provider Hub uses the same installed desktop app. Its catalogue temporarily
@@ -76,15 +76,23 @@ provider-specific reasoning history.
 
 ## What has been checked
 
-The 0.4.0 release passes 181 automated tests under the bundled runtime. The
+The 0.5.0 release passes 226 automated tests under the bundled runtime. The
 installed Codex engine completed live read/edit/read cycles using Ollama's
 DeepSeek V4 Flash cloud route and Cerebras GPT OSS 120B. Their reported context
 limits were preserved. Other provider translations have deterministic protocol
 tests; not every advertised model has been live-tested.
 
+Live 0.5.0 Messages and streaming Responses read/edit/read cycles also passed
+for OpenRouter North Mini Code Free and Gemini 3.8 Flash. Qwen Token Plan
+returned its exhausted weekly quota response, so its live tool cycle remains
+for verification after quota returns.
+
 The active development Codex app was not restarted during those checks. A full
 GUI launch/picker/context-meter/quit/restore cycle remains a final user check.
 The preview label reflects these remaining account and desktop qualifications.
+
+Gemini replies currently appear after generation finishes so its continuation
+signatures can be preserved. The connection stays active while it waits.
 
 If something fails, **Activity** shows request status and usage without logging
 prompts or keys. A provider can reject a model because of account access,

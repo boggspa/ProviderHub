@@ -262,3 +262,105 @@ its previous profile had been restored. Claude then reopened through the final
 signed hub with the saved session list and provider profile visible. No new
 inference was requested during that UI check. The active Codex app remained
 running.
+
+
+**0.5.0 Qwen Token Plan, OpenRouter and Gemini API — 13 September 2026**
+
+The new provider work was committed in slices: Qwen (`c9df461`), OpenRouter
+(`6869b61`), and Gemini (`ca0ae18`). The combined suite passes **226/226 tests**
+under the bundled CPython 3.13.13 runtime with ResourceWarnings treated as
+errors. The native Swift build passes. `PROVIDER-ADDITIONS.md` records each
+contract, metadata source, implementation detail and qualification boundary.
+
+Qwen uses only the dedicated Token Plan endpoint. Five exact context/output
+limits are imported from TaskWraith/Pi's matching Token Plan catalogue with
+source version and hash recorded. No number is guessed for the newer Qwen 3.8
+Flash entry. OpenRouter's current metadata defines the curated membership,
+context variants, routing endpoints and reasoning controls. Gemini uses the
+official Models API and OpenAI-compatible Chat Completions, preserving exact
+input/output limits and positional opaque thought signatures. Different Gemini
+snapshot versions cannot collapse into aliases, and encrypted signature bytes
+do not count as ordinary text in the gateway's input estimate.
+
+The user authorized reuse of Qwen, OpenRouter and Gemini keys already saved by
+TaskWraith. The selected three keys were copied into Provider Hub's own Keychain
+entries. Their values were not printed or placed in source/build artifacts.
+TaskWraith's source and encrypted credential files were not modified. Account
+discovery returned six documented Qwen entries, eleven Gemini entries, and
+between fifteen and seventeen OpenRouter context choices as endpoint status
+changed. The installed Codex parser accepted the seventeen-choice OpenRouter
+catalogue. The installed app also displayed all three new provider groups in
+its Codex selector, without selecting a default or changing Codex configuration.
+
+**Live gateway qualification**
+
+Every successful cycle below used only a disposable `fixture.txt`, initially
+`colour=blue`, and the supplied read/write tools. The model read the file,
+changed it to green, read it back, and completed its final reply. No user
+repository or private document was included in these requests.
+
+| Route | Client interface | Provider requests | Summed input / output tokens | Result |
+| --- | --- | --- | --- | --- |
+| `openrouter/cohere/north-mini-code:free` | Messages JSON | 4 × HTTP 200 | 490 / 30 | Complete read/edit/read cycle |
+| `openrouter/cohere/north-mini-code:free` | Streaming Responses | 4 × HTTP 200 | 490 / 30 | Complete read/edit/read cycle |
+| `gemini/gemini-3.8-flash` | Messages JSON | 4 × HTTP 200 | 882 / 64 | Complete read/edit/read cycle |
+| `gemini/gemini-3.8-flash` | Streaming Responses, paced retry | 4 × HTTP 200 | 882 / 64 | Complete read/edit/read cycle |
+| `qwen-token-plan/qwen3.8-max` | Messages JSON | HTTP 429 | No usage reported | Weekly Token Plan quota exhausted |
+| `qwen-token-plan/qwen3.8-max` | Streaming Responses | HTTP 429 | No usage reported | Same subscription quota response |
+
+Gemini's initial Responses cycle completed the file operations but encountered
+HTTP 429 before its final reply. That attempt remains recorded as incomplete.
+A later retry with fifteen seconds between turns completed. Qwen's response
+named the Token Plan weekly quota and a reset at **16 September, 02:03 UTC**.
+No alternate billing endpoint was attempted. The user will verify its live
+tool cycle when quota returns.
+
+These live tests qualify the gateway protocols and the listed accounts/models.
+They do not qualify every model in any provider catalogue or replace the
+remaining actual Codex GUI restart/picker/context-meter/quit/restore check.
+
+**Release review**
+
+The final Sol Max review found that incomplete Gemini defaults fell back to
+High in the Codex catalogue. Build 11 adds every established model default,
+including Medium for 3.5 Flash, Minimal for 3.1 Flash-Lite and thinking off for
+2.5 Flash-Lite. Gemini 2.5 Pro and Flash keep a null default because Google
+documents dynamic thinking without a fixed default level. The expanded
+regression covers all eleven currently listed Gemini models. The combined
+226-test suite passed again in 39.365 seconds after that correction.
+
+The installed `codex-cli 0.154.0-alpha.6.2` completed four entirely local mock
+turns in disposable Codex homes. A Gemini 2.5 Pro-shaped row with a null default
+sent `reasoning: {}` with no effort. Exact None, Minimal and Medium defaults
+sent those exact effort values. The app-server's model list renders a null
+default as the string `none` in its required suggestion field, even when None
+is not a supported option; that display projection did not add an outbound
+effort. Actual GUI presentation of this case remains part of the GUI check.
+
+The installed app-server also accepted the complete build-11 catalogue: 108
+choices across ten configured providers, including six Qwen, seventeen
+OpenRouter context choices and eleven Gemini models. This was a model-list
+check in a disposable Codex home, with no provider inference or change to the
+user's normal Codex configuration. A final check using the installed app's
+freshly refreshed cache accepted 107 choices, with sixteen OpenRouter routes
+after another endpoint-status change; all eleven Gemini defaults were present.
+
+**Signed distribution**
+
+Apple accepted the final **0.5.0 build 11** submission
+`76a51b1d-8569-4bf4-b64d-0233fb931319`, created at
+`2026-09-13T03:05:34.268Z`. All twelve embedded native components and the app
+are Developer ID signed with hardened runtime. The notarization ticket was
+stapled successfully. The recipient archive was created after stapling and
+extracted into a fresh directory. Strict deep signature verification, ticket
+validation and Gatekeeper assessment all passed; Gatekeeper reported
+`Notarized Developer ID`. The extracted ARM64 CPython 3.13.13 runtime loaded
+its SSL trust store and passed an encryption/decryption check with
+`cryptography` 50.0.0. All sixty packaged worker files match their source files.
+
+The notarized build was installed in the main Documents checkout. The UI showed
+all eleven provider cards, with the user's ten configured connections retained.
+Claude was closed while idle; Provider Hub visibly confirmed restoration of
+its previous configuration. After the update, Claude reopened with the saved
+Provider Hub profile, model mappings and existing task list intact. The active
+Codex desktop host was not restarted or reconfigured.

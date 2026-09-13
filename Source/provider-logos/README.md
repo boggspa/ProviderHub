@@ -1,4 +1,4 @@
-These nine PNG assets are copied unchanged from TaskWraith's
+These PNG assets are copied unchanged from TaskWraith's
 `src/renderer/src/assets/provider-logos` in the user's AGBench checkout.
 The source checkout was read-only. The display palette and logo variant/scale
 contract are recorded in `../provider_branding.json`.

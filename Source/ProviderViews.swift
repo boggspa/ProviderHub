@@ -117,6 +117,8 @@ struct ProviderPage: View {
                     if provider.id == "gemini" {
                         Text("Use a Gemini API key from Google AI Studio. Model access and usage follow its billing project. This connection uses the public API, independently of Gemini CLI or Google app subscriptions.")
                             .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                        Text("Gemini replies currently appear after generation finishes, so the information needed to continue the conversation can be retained. The connection stays active while it waits.")
+                            .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                     }
                     HStack {
                         Text(state?.credential_source ?? "Checking setup…").font(.system(size: 11)).foregroundStyle(.secondary)

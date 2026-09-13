@@ -403,9 +403,9 @@ class DiscoveryTests(unittest.TestCase):
         self.assertEqual(len(plans), 2)
         # Cerebras blocks urllib's default identity, including on public metadata.
         for plan in plans:
-            self.assertEqual(plan["headers"]["User-Agent"], "ProviderHub/0.4")
+            self.assertEqual(plan["headers"]["User-Agent"], "ProviderHub/0.5")
         inference = prepare_request("cerebras", {}, "secret", text_prompt(), "account-model", {})
-        self.assertEqual(inference["headers"]["User-Agent"], "ProviderHub/0.4")
+        self.assertEqual(inference["headers"]["User-Agent"], "ProviderHub/0.5")
         by_id = {model["id"]: model for model in result["models"]}
         self.assertEqual(set(by_id), {"account-model", "account-rich"})
         self.assertEqual(by_id["account-model"]["display_name"], "Account Model")
@@ -449,7 +449,7 @@ class NativePlanTests(unittest.TestCase):
                 self.assertTrue(plan["compatibility"]["complete_tool_cycles"])
         self.assertEqual(
             prepare_request("kimi", {}, "key", text_prompt(), "k3-256k", {})["headers"]["User-Agent"],
-            "ProviderHub/0.4",
+            "ProviderHub/0.5",
         )
 
     def test_native_plan_preserves_thinking_tools_and_tool_ids(self):
