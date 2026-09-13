@@ -760,3 +760,78 @@ class StreamTranslator:
         result.append({"type": "message_delta", "delta": {"stop_reason": stop_reason(self.finish, bool(self.tools) or bool(self.converted)), "stop_sequence": None}, "usage": self.usage})
         result.append({"type": "message_stop"})
         return events + result
+
+
+def compact_conversation(payload: dict, max_tokens: int) -> dict:
+    """Compact conversation history to fit within max_tokens budget.
+    
+    Strategy: Remove oldest messages first, preserving system prompt and most recent context.
+    Returns a new payload with compacted messages.
+    """
+    import copy
+    result = copy.deepcopy(payload)
+    
+    messages = result.get("messages", [])
+    if not messages:
+        return result
+    
+    # Always preserve system message if present
+    system_message = None
+    non_system_messages = []
+    
+    for msg in messages:
+        if msg.get("role") == "system":
+            system_message = msg
+        else:
+            non_system_messages.append(msg)
+    
+    if not non_system_messages:
+        return result
+    
+    # Build compacted message list starting from most recent
+    compacted = []
+    if system_message:
+        compacted.append(system_message)
+    
+    # Add messages from newest to oldest until we fit
+    for msg in reversed(non_system_messages):
+        test_payload = {"messages": compacted + [msg], "system": result.get("system")}
+        test_estimate = estimated_tokens(test_payload)
+        
+        if test_estimate <= max_tokens:
+            compacted.append(msg)
+        else:
+            # This message would exceed the limit, skip it
+            continue
+    
+    # Reverse back to chronological order (system, then oldest to newest of kept messages)
+    result["messages"] = compacted
+    return result
+
+
+def validate_mistral_roles(payload: dict) -> None:
+    """Validate message roles for Mistral API compatibility.
+    
+    Mistral requires the last message to be from user, tool, or assistant with prefix=True.
+    Raises BridgeError if validation fails.
+    """
+    messages = payload.get("messages", [])
+    if not messages:
+        return
+    
+    last_message = messages[-1]
+    role = last_message.get("role")
+    
+    # Mistral accepts: user, tool, or assistant with prefix=True
+    if role == "assistant":
+        # Check if prefix flag is present and True
+        if not last_message.get("prefix", False):
+            raise BridgeError(
+                "Mistral API requires the last assistant message to have prefix=True. "
+                "Start a new conversation or ensure proper message ordering."
+            )
+    elif role not in {"user", "tool"}:
+        raise BridgeError(
+            f"Mistral API requires the last message role to be 'user', 'tool', or 'assistant' with prefix=True, "
+            f"but got '{role}'. Start a new conversation."
+        )

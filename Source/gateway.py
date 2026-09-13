@@ -33,7 +33,7 @@ from hub_config import connection_signature, provider_presentations, qualify, sp
 from providers import PROVIDERS, prepare_request, ProviderError
 from cerebras_replay import CerebrasReplayError, CerebrasStreamAdapter, sign_thinking, validate_messages
 from gemini_provider import GeminiError, GeminiStreamAdapter, translate_response as translate_gemini_response, _estimated_input_tokens as estimated_gemini_tokens
-from protocol import (StreamTranslator, apply_mapping_options, estimated_tokens, mapping_options_for,
+from protocol import (StreamTranslator, apply_mapping_options, compact_conversation, estimated_tokens, mapping_options_for, validate_mistral_roles,
                       model_catalog, resolve_model, rewrite_context_reminders, translate_request, translate_response)
 from responses_native import ResponseOwnership, handle_responses, NATIVE_PROVIDERS
 from codex_catalogue import catalogue_digest, choices as codex_choices, launch_settings as codex_launch_settings
@@ -107,8 +107,17 @@ class Runtime:
         estimate = estimated_gemini_tokens(payload) if provider_id == "gemini" else estimated_tokens(payload)
         if type(context) is int and estimate >= context:
             raise BridgeError(f"This conversation is above the provider's reported {context:,}-token context limit.")
+        # Auto-compact at 85% of context limit for providers that support it
+        if type(context) is int and estimate >= context * 0.85 and context > 10000:
+            compacted_payload = compact_conversation(payload, int(context * 0.85))
+            # Re-estimate after compaction
+            estimate = estimated_gemini_tokens(compacted_payload) if provider_id == "gemini" else estimated_tokens(compacted_payload)
+            payload = compacted_payload
         if payload.get("model", "").endswith("[1m]") and (type(context) is not int or context < 1000000):
             raise BridgeError("A 1M context window has not been established for this route.")
+        # Validate Mistral-specific role requirements
+        if provider_id == "mistral":
+            validate_mistral_roles(payload)
         rewritten = rewrite_context_reminders(payload, context, estimate)
         reminders_rewritten = rewritten is not payload
         payload = rewritten
