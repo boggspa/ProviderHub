@@ -37,7 +37,7 @@ THINKING_DOCS = "https://ai.google.dev/gemini-api/docs/thinking"
 FUNCTION_CALLING_DOCS = "https://ai.google.dev/gemini-api/docs/function-calling"
 THOUGHT_SIGNATURE_DOCS = "https://ai.google.dev/gemini-api/docs/generate-content/thought-signatures"
 OPENAI_DOCS = "https://ai.google.dev/gemini-api/docs/openai"
-CLIENT_HEADER = "provider-hub-oai/0.5.0"
+CLIENT_HEADER = "provider-hub-oai/0.5.3"
 ENVELOPE_PREFIX = "ph_gemini_v1."
 
 

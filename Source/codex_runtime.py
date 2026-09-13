@@ -81,7 +81,7 @@ def qualify_runtime(settings, inventory, *, binary=None, timeout=25):
                         return value.get("result", {})
                 raise BridgeError("The installed Codex runtime could not verify the provider catalogue. Its current configuration has not been switched.")
             try:
-                send({"id": 1, "method": "initialize", "params": {"clientInfo": {"name": "provider-hub-catalogue-check", "version": "0.5.0"},
+                send({"id": 1, "method": "initialize", "params": {"clientInfo": {"name": "provider-hub-catalogue-check", "version": "0.5.3"},
                                                                  "capabilities": {"experimentalApi": True}}})
                 receive(1)
                 send({"method": "initialized", "params": {}})

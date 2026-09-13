@@ -229,7 +229,7 @@ def error_type(status):
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "ProviderHub/0.5.0"
+    server_version = "ProviderHub/0.5.3"
 
     @property
     def runtime(self):
@@ -430,7 +430,7 @@ class Handler(BaseHTTPRequestHandler):
         if not self.allowed(health=path == "/_bridge/health"):
             return
         if path == "/_bridge/health":
-            self.json_response(200, {"service": "mistral-bridge", "product": "Provider Hub", "version": "0.5.0"})
+            self.json_response(200, {"service": "mistral-bridge", "product": "Provider Hub", "version": "0.5.3"})
         elif path == "/_bridge/status":
             self.json_response(200, self.runtime.status())
         elif path == "/v1/models":
