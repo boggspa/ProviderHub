@@ -378,16 +378,28 @@ _CEREBRAS_PUBLIC_DOCS = "https://inference-docs.cerebras.ai/api-reference/models
 _CEREBRAS_PUBLIC_MODELS_URL = "https://api.cerebras.ai/public/v1/models"
 _CEREBRAS_MODEL_METADATA = {
     "gpt-oss-120b": {
-        "context": 131072,
-        "max_output": 40960,
+        "context": 131000,
+        "max_output": 40000,
         "tools": True,
         "vision": False,
         "reasoning": True,
         "effort_modes": ["low", "medium", "high"],
         "evidence": _CEREBRAS_PUBLIC_DOCS,
     },
-    "gemma-4-31b": {"reasoning": True, "effort_modes": ["none", "low", "medium", "high"]},
-    "qwen-3.8-27b": {"reasoning": True, "effort_modes": ["none", "low", "medium", "high"]},
+    "gemma-4-31b": {
+        "context": 131072,
+        "max_output": 40000,
+        "vision": True,
+        "reasoning": True,
+        "effort_modes": ["none", "low", "medium", "high"],
+    },
+    "qwen-3.8-27b": {
+        "context": 131072,
+        "max_output": 40960,
+        "vision": True,
+        "reasoning": True,
+        "effort_modes": ["none", "low", "medium", "high"],
+    },
     "kimi-k2.7-code": {"reasoning": True, "effort_modes": []},
     "zai-glm-4.7": {"reasoning": True, "effort_modes": ["none"]},
 }
@@ -809,6 +821,8 @@ def _cerebras_entry(card: dict, public_card: dict | None, evidence: str) -> dict
         card.get("max_context_length"),
         card.get("context_length"),
         card.get("max_context_window"),
+    )
+    public_context = _first_positive(
         public_limits.get("max_context_length"),
         public_card.get("max_context_length"),
         public_card.get("context_length"),
@@ -819,13 +833,15 @@ def _cerebras_entry(card: dict, public_card: dict | None, evidence: str) -> dict
         card.get("max_completion_tokens"),
         card.get("max_output_length"),
         card.get("max_output_tokens"),
+    )
+    public_output = _first_positive(
         public_limits.get("max_completion_tokens"),
         public_card.get("max_completion_tokens"),
         public_card.get("max_output_length"),
         public_card.get("max_output_tokens"),
     )
-    context = reported_context or _positive_integer(metadata.get("context"))
-    max_output = reported_output or _positive_integer(metadata.get("max_output"))
+    context = reported_context or _positive_integer(metadata.get("context")) or public_context
+    max_output = reported_output or _positive_integer(metadata.get("max_output")) or public_output
     account_capabilities = card.get("capabilities") if isinstance(card.get("capabilities"), dict) else {}
     public_capabilities = public_card.get("capabilities") if isinstance(public_card.get("capabilities"), dict) else {}
     tools = _boolean(account_capabilities.get("tools"))
@@ -839,9 +855,9 @@ def _cerebras_entry(card: dict, public_card: dict | None, evidence: str) -> dict
         tools = _boolean(metadata.get("tools"))
     vision = _boolean(account_capabilities.get("vision"))
     if vision is None:
-        vision = _boolean(public_capabilities.get("vision"))
-    if vision is None:
         vision = _boolean(metadata.get("vision"))
+    if vision is None:
+        vision = _boolean(public_capabilities.get("vision"))
     reasoning = _boolean(account_capabilities.get("reasoning"))
     if reasoning is None:
         reasoning = _boolean(public_capabilities.get("reasoning"))
@@ -867,7 +883,8 @@ def _cerebras_entry(card: dict, public_card: dict | None, evidence: str) -> dict
         evidence=source_evidence,
         max_output=max_output,
         context_kind=("provider_reported" if reported_context is not None else
-                      "verified_documentation" if context is not None else "unknown"),
+                      "verified_documentation" if _positive_integer(metadata.get("context")) is not None else
+                      "provider_reported" if public_context is not None else "unknown"),
         reasoning_history=("gateway_signed_replay" if reasoning is True else
                            "not_required" if reasoning is False else "unknown"),
         complete_tool_cycles=(True if reasoning is not None else None),

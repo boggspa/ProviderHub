@@ -102,7 +102,7 @@ A listed model is labelled as advertised or documented until an actual inference
 
 Claude Desktop itself expands a model's advertised 1M capability into standard and `[1m]` picker rows. This is not a duplicate in the adapter catalogue. Newly exported profiles prefer the 1M row where available, but Claude preserves saved selections and exposes both rows. Its gateway schema has no fixed-only 1M option, and it discards most exact numeric context metadata. A 200k session meter can therefore remain and may mean earlier compaction. The generic Kimi `k3` route also has plan-dependent context; its catalogue does not assert a universal 1M entitlement.
 
-Cerebras' account model API currently returns IDs without numeric limits. Public model metadata is used where present and can differ from account-console limits. For the inspected account, `gemma-4-31b` has no public limit record, while GPT OSS and Qwen have public values. These are not substituted with hard-coded screenshot values. Account-specific limit discovery remains a qualification item.
+Cerebras' account model API currently returns IDs without numeric limits. When an account field is present it still wins. Otherwise the org Limits-page values are used for the exact listed IDs: `gpt-oss-120b` 131,000 context / 40,000 max output, `gemma-4-31b` 131,072 / 40,000 with image input, and `qwen-3.8-27b` 131,072 / 40,960 with image input. Those beat the public catalogue's stale 65,536-token figures. Unknown IDs still fall back to public metadata.
 
 **Claude Auto mode**
 

@@ -364,8 +364,8 @@ class DiscoveryTests(unittest.TestCase):
         )
         by_id = {model["id"]: model for model in result["models"]}
         self.assertEqual(by_id["gpt-oss-120b"]["effort_modes"], ["low", "medium", "high"])
-        self.assertEqual(by_id["gpt-oss-120b"]["context"], 131072)
-        self.assertEqual(by_id["gpt-oss-120b"]["max_output"], 40960)
+        self.assertEqual(by_id["gpt-oss-120b"]["context"], 131000)
+        self.assertEqual(by_id["gpt-oss-120b"]["max_output"], 40000)
         self.assertEqual(by_id["gpt-oss-120b"]["context_kind"], "verified_documentation")
         self.assertEqual(by_id["gpt-oss-120b"]["reasoning_history"], "gateway_signed_replay")
         self.assertTrue(by_id["gpt-oss-120b"]["complete_tool_cycles"])
