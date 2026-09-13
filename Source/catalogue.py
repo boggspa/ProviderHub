@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 
 from model_names import friendly_model_name
-from effort_map import MISTRAL_REASONING_EFFORTS
+from effort_map import mistral_effort_modes
 
 
 def now_iso():
@@ -63,7 +63,7 @@ def _extract_effort_modes(card: dict) -> list[str]:
     # Fall back to reasoning capability
     caps = card.get("capabilities") or {}
     if caps.get("reasoning") is True:
-        return list(MISTRAL_REASONING_EFFORTS)
+        return mistral_effort_modes(card.get("id") or card.get("name") or "", True)
     return []
 
 

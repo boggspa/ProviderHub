@@ -6,9 +6,11 @@ from effort_map import (
     DEEPSEEK_EFFORT_ALIASES,
     EFFORT_ORDER,
     MISTRAL_EFFORT_ALIASES,
+    MISTRAL_NARROW_EFFORTS,
     MISTRAL_REASONING_EFFORTS,
     cap_high_end,
     map_effort,
+    mistral_effort_modes,
     ollama_effort_modes,
 )
 from providers import discover, prepare_request
@@ -54,6 +56,28 @@ class EffortMapUnitTests(unittest.TestCase):
             ["none", "low", "medium", "high", "max"],
         )
         self.assertEqual(ollama_effort_modes("plain:latest", False), [])
+
+    def test_mistral_effort_ladders_are_model_specific(self):
+        # Full Off | Low | Medium | High | Max ladder: GLM 5.2 (Mistral hosted),
+        # Mistral Medium 3.5, Mistral Small 4.
+        for identifier in ("glm-5-2", "mistral-medium-latest", "mistral-medium-3-5",
+                           "mistral-small-2603", "mistral-small-4"):
+            with self.subTest(identifier=identifier):
+                self.assertEqual(
+                    mistral_effort_modes(identifier, True),
+                    list(MISTRAL_REASONING_EFFORTS),
+                )
+        # Off | High principle: every other Mistral reasoning model.
+        for identifier in ("mistral-large-2512", "mistral-large-3", "codestral-2508",
+                           "codestral-latest", "labs-leanstral-1-5-1", "ministral-14b-2512"):
+            with self.subTest(identifier=identifier):
+                self.assertEqual(
+                    mistral_effort_modes(identifier, True),
+                    list(MISTRAL_NARROW_EFFORTS),
+                )
+        # Non-reasoning models advertise no ladder at all.
+        self.assertEqual(mistral_effort_modes("mistral-large-2512", False), [])
+        self.assertEqual(mistral_effort_modes("mistral-large-2512", None), [])
 
 
 class EffortTransportTests(unittest.TestCase):

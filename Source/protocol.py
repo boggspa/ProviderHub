@@ -15,7 +15,7 @@ import secrets
 from bridge_core import BridgeError, SLOTS
 from model_names import friendly_model_name
 from catalogue import status_label
-from effort_map import MISTRAL_EFFORT_ALIASES, MISTRAL_REASONING_EFFORTS, cap_high_end, map_effort
+from effort_map import MISTRAL_EFFORT_ALIASES, MISTRAL_REASONING_EFFORTS, cap_high_end, map_effort, mistral_effort_modes
 from chat_tool_order import repair_openai_tool_order
 
 
@@ -173,7 +173,7 @@ def model_effort(payload: dict, spec: dict):
     if (payload.get("thinking") or {}).get("type") == "disabled":
         return "none"
     requested = (payload.get("output_config") or {}).get("effort")
-    supported = list(spec.get("effort_modes") or []) or list(MISTRAL_REASONING_EFFORTS)
+    supported = list(spec.get("effort_modes") or []) or mistral_effort_modes(spec.get("id") or "", spec.get("reasoning"))
     if requested is None:
         return "high" if "high" in supported else (supported[-1] if supported else None)
     normalized = map_effort(requested, supported, MISTRAL_EFFORT_ALIASES)

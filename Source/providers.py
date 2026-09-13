@@ -208,7 +208,7 @@ from qwen_provider import DESCRIPTOR as QWEN_DESCRIPTOR, OFFICIAL_PATHS as QWEN_
 from openrouter_provider import DESCRIPTOR as OPENROUTER_DESCRIPTOR, OFFICIAL_PATHS as OPENROUTER_PATHS, OpenRouterError, discover as openrouter_discover, finalize as openrouter_finalize, normalize_messages as openrouter_controls, app_headers as openrouter_app_headers
 from gemini_provider import DESCRIPTOR as GEMINI_DESCRIPTOR, OFFICIAL_PATHS as GEMINI_PATHS, GeminiError, discover as gemini_discover, prepare_request as gemini_prepare_request, validate_connection as gemini_validate_connection
 from devin_agent import DESCRIPTOR as DEVIN_DESCRIPTOR, OFFICIAL_PATHS as DEVIN_PATHS, DevinAgentError, catalogue as devin_catalogue, validate_connection as devin_validate_connection
-from effort_map import CEREBRAS_EFFORT_ALIASES, DEEPSEEK_EFFORT_ALIASES, MISTRAL_EFFORT_ALIASES, MISTRAL_REASONING_EFFORTS, cap_high_end, map_effort, ollama_effort_aliases, ollama_effort_modes
+from effort_map import CEREBRAS_EFFORT_ALIASES, DEEPSEEK_EFFORT_ALIASES, MISTRAL_EFFORT_ALIASES, MISTRAL_REASONING_EFFORTS, cap_high_end, map_effort, mistral_effort_modes, ollama_effort_aliases, ollama_effort_modes
 
 PROVIDERS[QWEN_DESCRIPTOR["id"]] = QWEN_DESCRIPTOR
 PROVIDERS[OPENROUTER_DESCRIPTOR["id"]] = OPENROUTER_DESCRIPTOR
@@ -1151,7 +1151,7 @@ def _models_from_api(provider_id: str, raw: dict, evidence: str, *, enriched=Non
                 tools=capabilities.get("function_calling") if type(capabilities.get("function_calling")) is bool else None,
                 vision=capabilities.get("vision") if type(capabilities.get("vision")) is bool else None,
                 reasoning=capabilities.get("reasoning") if type(capabilities.get("reasoning")) is bool else None,
-                effort_modes=list(MISTRAL_REASONING_EFFORTS) if capabilities.get("reasoning") is True else [],
+                effort_modes=mistral_effort_modes(identifier, capabilities.get("reasoning")),
                 fast_mode=False,
                 source="provider_api",
                 evidence=evidence,
@@ -1801,7 +1801,7 @@ def _compact_chat_content(parts: list[dict]):
     return list(parts)
 
 
-def _chat_effort(provider_id: str, payload: dict, model_spec: dict):
+def _chat_effort(provider_id: str, payload: dict, model_spec: dict, upstream_model: str | None = None):
     if provider_id == "grok":
         thinking = payload.get("thinking") or {}
         output = payload.get("output_config") or {}
@@ -1834,7 +1834,7 @@ def _chat_effort(provider_id: str, payload: dict, model_spec: dict):
     disabled = thinking.get("type") == "disabled"
     requested = output_config.get("effort")
     if provider_id == "mistral":
-        supported = list(model_spec.get("effort_modes") or []) or list(MISTRAL_REASONING_EFFORTS)
+        supported = list(model_spec.get("effort_modes") or []) or mistral_effort_modes(upstream_model or "", model_spec.get("reasoning"))
         if disabled:
             requested = "none"
         if requested is None:
@@ -1921,7 +1921,10 @@ def _translate_chat_payload(
         role = message.get("role")
         if role in {"system", "developer"}:
             blocks = _content_blocks(message.get("content", ""), system=True)
-            output_role = "developer" if provider_id == "cerebras" and role == "developer" else "system"
+            # Cerebras chat templates reject the developer role: Qwen 3.8 27B
+            # fails with "Unexpected message role" while GPT-OSS tolerated it.
+            # The system role is universally supported, so map both here.
+            output_role = "system"
             messages.append({"role": output_role, "content": "\n".join(block.get("text", "") for block in blocks)})
             continue
         if role not in {"user", "assistant"}:
@@ -2059,7 +2062,7 @@ def _translate_chat_payload(
             body[key] = payload[key]
     if payload.get("stop_sequences"):
         body["stop"] = copy.deepcopy(payload["stop_sequences"])
-    effort = _chat_effort(provider_id, payload, model_spec)
+    effort = _chat_effort(provider_id, payload, model_spec, upstream_model)
     if effort is not None:
         body["reasoning_effort"] = effort
     if provider_id == "mistral":

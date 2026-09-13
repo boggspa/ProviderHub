@@ -173,9 +173,9 @@ class DiscoveryTests(unittest.TestCase):
                 "object": "list",
                 "data": [
                     {
-                        "id": "model-v1",
-                        "name": "model",
-                        "aliases": ["model-latest"],
+                        "id": "mistral-medium-latest",
+                        "name": "mistral-medium",
+                        "aliases": ["mistral-medium-3-5"],
                         "max_context_length": 262144,
                         "capabilities": {
                             "completion_chat": True,
@@ -197,11 +197,39 @@ class DiscoveryTests(unittest.TestCase):
         self.assertNotIn("secret", json.dumps(result))
         self.assertEqual(len(result["models"]), 1)
         model = result["models"][0]
-        self.assertEqual(model["id"], "model-v1")
-        self.assertEqual(model["canonical_id"], "model")
-        self.assertEqual(model["aliases"], ["model-v1", "model-latest"])
+        self.assertEqual(model["id"], "mistral-medium-latest")
+        self.assertEqual(model["canonical_id"], "mistral-medium")
+        self.assertEqual(model["aliases"], ["mistral-medium-latest", "mistral-medium-3-5"])
         self.assertEqual(model["context"], 262144)
+        # Mistral Medium 3.5 exposes the full Off | Low | Medium | High | Max ladder.
         self.assertEqual(model["effort_modes"], ["none", "low", "medium", "high", "max"])
+
+    def test_mistral_discovery_narrow_ladder_for_other_reasoning_models(self):
+        def transport(plan):
+            return {
+                "object": "list",
+                "data": [
+                    {
+                        "id": "mistral-large-2512",
+                        "name": "mistral-large",
+                        "max_context_length": 262144,
+                        "capabilities": {"completion_chat": True, "reasoning": True},
+                    },
+                    {
+                        "id": "codestral-2508",
+                        "name": "codestral",
+                        "max_context_length": 262144,
+                        "capabilities": {"completion_chat": True, "reasoning": True},
+                    },
+                ],
+            }
+
+        by_id = {model["id"]: model for model in discover(
+            "mistral", {}, "secret", transport=transport,
+        )["models"]}
+        # Mistral Large 3 and Codestral follow the Off | High principle.
+        self.assertEqual(by_id["mistral-large-2512"]["effort_modes"], ["none", "high"])
+        self.assertEqual(by_id["codestral-2508"]["effort_modes"], ["none", "high"])
 
     def test_mistral_equivalent_cards_group_and_conflicting_aliases_are_order_independent(self):
         def card(identifier, canonical, context, aliases):
@@ -726,12 +754,12 @@ class ChatPlanTests(unittest.TestCase):
             {},
             "mistral-key",
             payload,
-            "mistral-model",
+            "mistral-medium-latest",
             {"context": 262144, "reasoning": True, "vision": True},
         )
         self.assertEqual(plan["url"], "https://api.mistral.ai/v1/chat/completions")
         self.assertEqual(plan["headers"]["Authorization"], "Bearer mistral-key")
-        self.assertEqual(plan["body"]["model"], "mistral-model")
+        self.assertEqual(plan["body"]["model"], "mistral-medium-latest")
         self.assertEqual(plan["body"]["reasoning_effort"], "low")
         self.assertIn("prompt_cache_key", plan["body"])
         assistant = next(message for message in plan["body"]["messages"] if message["role"] == "assistant")
@@ -822,6 +850,23 @@ class ChatPlanTests(unittest.TestCase):
                 "cerebras", {}, "key", text_prompt(output_config={"effort": "bogus"}),
                 "gpt-oss-120b", narrow,
             )
+
+    def test_cerebras_developer_instructions_map_to_system_role(self):
+        # Qwen 3.8 27B rejects the developer role with "Unexpected message
+        # role" while GPT-OSS tolerated it. Both must receive the system role.
+        payload = text_prompt(messages=[
+            {"role": "developer", "content": [{"type": "text", "text": "Developer rule"}]},
+            {"role": "user", "content": "hello"},
+        ])
+        for model in ("qwen-3.8-27b", "gpt-oss-120b"):
+            with self.subTest(model=model):
+                plan = prepare_request(
+                    "cerebras", {}, "key", payload, model,
+                    {"reasoning": True, "effort_modes": ["none", "low", "medium", "high"]},
+                )
+                roles = [message["role"] for message in plan["body"]["messages"]]
+                self.assertEqual(roles, ["system", "user"])
+                self.assertEqual(plan["body"]["messages"][0]["content"], "Developer rule")
 
     def test_cerebras_reasoning_and_service_tiers_do_not_use_mistral_mapping(self):
         spec = {"reasoning": True, "effort_modes": ["low", "medium", "high"]}

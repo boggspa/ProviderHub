@@ -25,7 +25,8 @@ def config():
     value["port"] = 11436
     value["mappings"] = {k: "test-model" for k in value["mappings"]}
     value["_model_specs"] = {"test-model": {"id": "test-model", "canonical_id": "test-model", "display_name": "Test Model",
-        "context": 240000, "aliases": ["test-model"], "reasoning": True, "vision": True, "tools": True, "inference_status": "advertised"}}
+        "context": 240000, "aliases": ["test-model"], "reasoning": True, "vision": True, "tools": True, "inference_status": "advertised",
+        "effort_modes": ["none", "low", "medium", "high", "max"]}}
     return value
 
 

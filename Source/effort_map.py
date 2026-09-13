@@ -18,6 +18,23 @@ MISTRAL_EFFORT_ALIASES = {
     "ultra": "max",
 }
 
+# Mistral reasoning ladders are model-specific, not a single shared ladder.
+# GLM 5.2 (Mistral hosted), Mistral Medium 3.5 and Mistral Small 4 expose the
+# full Off | Low | Medium | High | Max ladder; every other Mistral reasoning
+# model (Mistral Large 3, Codestral, Leanstral, ...) follows the Off | High
+# principle. An earlier spike tested only two API models and wrongly assumed
+# every Mistral model accepted only Off | High.
+MISTRAL_NARROW_EFFORTS = ["none", "high"]
+
+
+def mistral_effort_modes(identifier: str, reasoning: bool | None) -> list[str]:
+    if reasoning is not True:
+        return []
+    name = identifier.rsplit("/", 1)[-1].casefold()
+    if "glm" in name or "mistral-medium" in name or "mistral-small" in name:
+        return list(MISTRAL_REASONING_EFFORTS)
+    return list(MISTRAL_NARROW_EFFORTS)
+
 # DeepSeek thinking-mode docs: Claude/ChatGPT ranks onto none/low/high/max.
 DEEPSEEK_EFFORT_ALIASES = {
     "none": "none",
