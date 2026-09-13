@@ -27,6 +27,11 @@
     "qwen": "alibaba"
   },
   "providers": {
+    "qwen-token-plan": {
+      "displayProvider": "Qwen Token Plan",
+      "hueKey": "qwen",
+      "shortCode": "QWN"
+    },
     "mistral": {
       "displayProvider": "Mistral",
       "hueKey": "mistral",

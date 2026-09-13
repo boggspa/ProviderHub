@@ -48,7 +48,8 @@ def project_codex(settings, inventory):
             "description": (provider + " via Ollama. Runtime context is managed by the daemon." if provider_id == "ollama" else
                             "xAI API billing; Fast requests premium Priority processing." if provider_id == "grok" else
                             PROVIDERS[provider_id]["name"] + " model connection.") + (" Exact context is not reported; compact manually when needed." if context is None else ""),
-            "default_reasoning_level": "high" if "high" in efforts else None,
+            "default_reasoning_level": (entry["default_effort"] if entry.get("default_effort") in efforts
+                                        else "high" if "high" in efforts else None),
             "supported_reasoning_levels": [{"effort": effort, "description": effort.title() + " reasoning"} for effort in efforts],
             "shell_type": "default",
             "visibility": "list",

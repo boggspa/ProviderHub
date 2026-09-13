@@ -106,6 +106,10 @@ struct ProviderPage: View {
                         Text("Use an xAI API key for pay-as-you-go access. Claude’s Fast toggle requests xAI Priority processing at a premium token price. Your Grok Build subscription login is separate.")
                             .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                     }
+                    if provider.id == "qwen-token-plan" {
+                        Text("Use your Token Plan subscription key for Singapore. This connection keeps Token Plan separate from Coding Plan and pay-as-you-go access.")
+                            .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    }
                     HStack {
                         Text(state?.credential_source ?? "Checking setup…").font(.system(size: 11)).foregroundStyle(.secondary)
                         Spacer()
@@ -207,6 +211,7 @@ struct ProviderPage: View {
         case "cerebras": return "Cerebras API key"
         case "muse": return "Meta Model API key · API billing"
         case "grok": return "xAI API key · Pay as you go"
+        case "qwen-token-plan": return "Token Plan subscription API key"
         default: return "Provider model API"
         }
     }

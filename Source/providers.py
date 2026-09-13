@@ -203,6 +203,10 @@ PROVIDERS = {
 
 # Canonical paths accepted from settings.  A user may paste a provider base URL
 # or its documented request endpoint; both normalize to the same safe base.
+from qwen_provider import DESCRIPTOR as QWEN_DESCRIPTOR, OFFICIAL_PATHS as QWEN_PATHS, QwenError, catalogue as qwen_catalogue, normalize_controls as qwen_controls
+
+PROVIDERS[QWEN_DESCRIPTOR["id"]] = QWEN_DESCRIPTOR
+
 _OFFICIAL_PATHS = {
     "mistral": {"", "/v1", "/v1/models", "/v1/chat/completions"},
     "kimi": {"", "/coding", "/coding/v1/messages", "/coding/v1/chat/completions"},
@@ -211,6 +215,7 @@ _OFFICIAL_PATHS = {
     "cerebras": {"", "/v1", "/v1/models", "/v1/chat/completions"},
     "muse": {"", "/v1", "/v1/models", "/v1/messages"},
     "grok": {"", "/v1", "/v1/models", "/v1/language-models", "/v1/chat/completions"},
+    "qwen-token-plan": QWEN_PATHS,
 }
 
 _OLLAMA_PATHS = {"", "/v1", "/v1/messages", "/api/tags"}
@@ -593,6 +598,8 @@ def _catalogue_entry(
 
 
 def _static_catalogue(provider_id: str) -> tuple[list[dict], list[str], str] | None:
+    if provider_id == "qwen-token-plan":
+        return qwen_catalogue()
     if provider_id == "kimi":
         models = [
             _catalogue_entry(
@@ -1344,6 +1351,12 @@ def _normalize_native_controls(
     if (model_spec.get("reasoning") is False
             and requested not in (None, "none")):
         raise ProviderError("The selected model is documented as not supporting reasoning effort.")
+
+    if provider_id == "qwen-token-plan":
+        try:
+            return {**compatibility, **qwen_controls(body, upstream_model, model_spec)}
+        except QwenError as exc:
+            raise ProviderError(str(exc)) from exc
 
     if provider_id == "muse":
         if thinking_type == "disabled" or requested == "none":

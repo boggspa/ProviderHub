@@ -23,7 +23,7 @@ MAX_CREDENTIAL_REVISION = 9_007_199_254_740_991
 MODEL_VARIANT_FIELDS = (
     "context", "context_options", "context_kind", "runtime_context",
     "max_input", "max_output", "advertised_context", "advertised_max_output",
-    "tools", "vision", "reasoning", "effort_modes", "fast_mode", "speed_tier",
+    "tools", "vision", "reasoning", "effort_modes", "default_effort", "fast_mode", "speed_tier",
     "streaming", "tool_choice", "parallel_tool_calls", "service_tiers",
     "reasoning_history", "complete_tool_cycles", "capabilities", "billing_model_name",
 )
