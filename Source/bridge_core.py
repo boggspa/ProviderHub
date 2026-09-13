@@ -328,8 +328,19 @@ def model_labels(settings: dict, entries=(), vibe=None):
 
 
 def claude_running() -> bool:
-    result = subprocess.run(["/bin/ps", "-axo", "comm="], capture_output=True, timeout=5, text=True)
-    return any(line.strip().endswith("/Claude.app/Contents/MacOS/Claude") for line in result.stdout.splitlines())
+    try:
+        result = subprocess.run(["pgrep", "-f", "/Claude.app/Contents/MacOS/Claude"], capture_output=True, timeout=5)
+        if result.returncode == 0:
+            return True
+        elif result.returncode == 1:
+            return False
+    except OSError:
+        pass
+    try:
+        result = subprocess.run(["/bin/ps", "-axo", "comm="], capture_output=True, timeout=5, text=True)
+        return any(line.strip().endswith("/Claude.app/Contents/MacOS/Claude") for line in result.stdout.splitlines())
+    except OSError:
+        return False
 
 
 class ClaudeProfile:
