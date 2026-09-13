@@ -67,6 +67,13 @@ class EffortMapUnitTests(unittest.TestCase):
                     mistral_effort_modes(identifier, True),
                     list(MISTRAL_REASONING_EFFORTS),
                 )
+        # Also match spaced model names (e.g., from Vibe/Codex UI display names).
+        for identifier in ("Mistral Medium 3.5", "Mistral Small 4", "GLM 5.2"):
+            with self.subTest(identifier=identifier):
+                self.assertEqual(
+                    mistral_effort_modes(identifier, True),
+                    list(MISTRAL_REASONING_EFFORTS),
+                )
         # Off | High principle: every other Mistral reasoning model.
         for identifier in ("mistral-large-2512", "mistral-large-3", "codestral-2508",
                            "codestral-latest", "labs-leanstral-1-5-1", "ministral-14b-2512"):
@@ -75,6 +82,11 @@ class EffortMapUnitTests(unittest.TestCase):
                     mistral_effort_modes(identifier, True),
                     list(MISTRAL_NARROW_EFFORTS),
                 )
+        # Spaced narrow models also match correctly.
+        self.assertEqual(
+            mistral_effort_modes("Mistral Large 3", True),
+            list(MISTRAL_NARROW_EFFORTS),
+        )
         # Non-reasoning models advertise no ladder at all.
         self.assertEqual(mistral_effort_modes("mistral-large-2512", False), [])
         self.assertEqual(mistral_effort_modes("mistral-large-2512", None), [])

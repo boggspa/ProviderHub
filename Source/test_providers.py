@@ -868,6 +868,31 @@ class ChatPlanTests(unittest.TestCase):
                 self.assertEqual(roles, ["system", "user"])
                 self.assertEqual(plan["body"]["messages"][0]["content"], "Developer rule")
 
+    def test_cerebras_qwen_system_message_consolidation(self):
+        # Qwen 3.8 27B's chat template requires exactly one system message
+        # at messages[0]. If both payload["system"] and a source system message
+        # are present, they must be consolidated into a single system message.
+        payload = text_prompt(
+            system="Top-level system prompt",
+            messages=[
+                {"role": "system", "content": "Source system message"},
+                {"role": "user", "content": "hello"},
+            ],
+        )
+        plan = prepare_request(
+            "cerebras", {}, "key", payload, "qwen-3.8-27b",
+            {"reasoning": True, "effort_modes": ["none", "high"]},
+        )
+        messages = plan["body"]["messages"]
+        # Must have exactly one system message at the beginning
+        self.assertEqual(messages[0]["role"], "system")
+        # The content should be consolidated (both parts joined with \n\n)
+        self.assertIn("Top-level system prompt", messages[0]["content"])
+        self.assertIn("Source system message", messages[0]["content"])
+        # Second message must be user, not another system message
+        self.assertEqual(messages[1]["role"], "user")
+        self.assertEqual(messages[1]["content"], "hello")
+
     def test_cerebras_reasoning_and_service_tiers_do_not_use_mistral_mapping(self):
         spec = {"reasoning": True, "effort_modes": ["low", "medium", "high"]}
         with self.assertRaises(ProviderError):

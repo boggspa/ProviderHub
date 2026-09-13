@@ -31,7 +31,9 @@ def mistral_effort_modes(identifier: str, reasoning: bool | None) -> list[str]:
     if reasoning is not True:
         return []
     name = identifier.rsplit("/", 1)[-1].casefold()
-    if "glm" in name or "mistral-medium" in name or "mistral-small" in name:
+    # Match both hyphenated and spaced model names (e.g., "mistral-medium-3-5" or "Mistral Medium 3.5")
+    normalized = name.replace(" ", "-")
+    if "glm" in normalized or "mistral-medium" in normalized or "mistral-small" in normalized:
         return list(MISTRAL_REASONING_EFFORTS)
     return list(MISTRAL_NARROW_EFFORTS)
 

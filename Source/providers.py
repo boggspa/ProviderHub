@@ -1910,9 +1910,16 @@ def _translate_chat_payload(
         max_tokens = min(max_tokens, context - estimate)
 
     messages = []
+    # For Cerebras: Qwen 3.8 27B's chat template requires exactly one system
+    # message at the beginning. Collect system parts to consolidate.
+    system_parts = []
     if payload.get("system") not in (None, ""):
         blocks = _content_blocks(payload["system"], system=True)
-        messages.append({"role": "system", "content": "\n".join(block.get("text", "") for block in blocks)})
+        content = "\n".join(block.get("text", "") for block in blocks)
+        if provider_id == "cerebras":
+            system_parts.append(content)
+        else:
+            messages.append({"role": "system", "content": content})
     name_map = {}
     id_map = {}
     for source_index, message in enumerate(source_messages):
@@ -1924,8 +1931,12 @@ def _translate_chat_payload(
             # Cerebras chat templates reject the developer role: Qwen 3.8 27B
             # fails with "Unexpected message role" while GPT-OSS tolerated it.
             # The system role is universally supported, so map both here.
+            content = "\n".join(block.get("text", "") for block in blocks)
+            if provider_id == "cerebras":
+                system_parts.append(content)
+                continue
             output_role = "system"
-            messages.append({"role": output_role, "content": "\n".join(block.get("text", "") for block in blocks)})
+            messages.append({"role": output_role, "content": content})
             continue
         if role not in {"user", "assistant"}:
             raise ProviderError(f"Unsupported message role: {str(role)[:30]}.")
@@ -2009,6 +2020,11 @@ def _translate_chat_payload(
         if (replay_required and role == "assistant" and message_has_tools
                 and source_index not in used_reasoning):
             raise ProviderError("Cerebras tool history is missing verified reasoning.")
+
+    # For Cerebras: insert the consolidated system message at the beginning.
+    # Qwen 3.8 27B's chat template requires exactly one system message at messages[0].
+    if provider_id == "cerebras" and system_parts:
+        messages.insert(0, {"role": "system", "content": "\n\n".join(system_parts)})
 
     if set(verified_reasoning) != used_reasoning:
         raise ProviderError("Verified reasoning refers to a message that was not replayed.")
