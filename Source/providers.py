@@ -323,6 +323,10 @@ _DEEPSEEK_MODEL_METADATA = {
 }
 
 _MUSE_COOKBOOK = "https://github.com/meta-models/meta-model-cookbook"
+_MUSE_REASONING_DOCS = "https://dev.meta.ai/docs/reasoning.md"
+# First-party Spark 1.3 ranks from the current reasoning page. `none` is omitted
+# because Meta documents HTTP 400 when reasoning is turned off on Spark.
+_MUSE_EFFORT_RANKS = ["minimal", "low", "medium", "high", "xhigh", "max"]
 _GROK_MODEL_DOCS = "https://docs.x.ai/developers/grok-4-6"
 _GROK_REASONING_DOCS = "https://docs.x.ai/developers/model-capabilities/text/reasoning"
 # Only enrich exact, account-listed IDs. A moving alias or a future model is
@@ -350,12 +354,12 @@ _MUSE_MODEL_METADATA = {
         "reasoning": True,
         "streaming": True,
         "adaptive_thinking": True,
-        "effort_modes": ["minimal", "low", "medium", "high"],
+        "effort_modes": list(_MUSE_EFFORT_RANKS),
         "fast_mode": False,
         "parallel_tool_calls": True,
         "tool_choice_modes": ["auto"],
         "reasoning_history": "native",
-        "metadata_evidence": _MUSE_COOKBOOK,
+        "metadata_evidence": _MUSE_REASONING_DOCS,
     },
 }
 
@@ -1229,7 +1233,9 @@ def discover(provider_id: str, connection: dict | None, api_key: str | None, *, 
     if provider_id == "muse":
         if any(model.get("metadata_evidence") for model in models):
             warnings.append(
-                "Exact Muse Spark 1.3 limits and capabilities were enriched from Meta's first-party Model API cookbook."
+                "Exact Muse Spark 1.3 context and output limits were enriched from Meta's Model API cookbook "
+                f"({_MUSE_COOKBOOK}); effort ranks follow Meta's current first-party reasoning documentation "
+                f"({_MUSE_REASONING_DOCS}) unless the account list supplies effort_modes."
             )
         if any(model.get("context") is None for model in models):
             warnings.append(
@@ -1325,6 +1331,19 @@ def _thinking_type(body: dict) -> str | None:
     return value
 
 
+def _muse_effort(requested: str, supported: set[str]) -> str:
+    if requested == "ultra":
+        ranked = [rank for rank in _MUSE_EFFORT_RANKS if not supported or rank in supported]
+        if not ranked:
+            raise ProviderError(f"Muse model does not support reasoning effort {requested!r}.")
+        return ranked[-1]
+    if requested in _MUSE_EFFORT_RANKS:
+        if supported and requested not in supported:
+            raise ProviderError(f"Muse model does not support reasoning effort {requested!r}.")
+        return requested
+    raise ProviderError(f"Muse model does not support reasoning effort {requested!r}.")
+
+
 def _write_thinking_type(body: dict, value: str, provider_name: str) -> None:
     thinking = body.get("thinking")
     if thinking is None:
@@ -1392,17 +1411,13 @@ def _normalize_native_controls(
         if thinking_type not in (None, "adaptive", "enabled"):
             raise ProviderError("Muse supports adaptive or enabled thinking for this route.")
         if requested is not None:
-            aliases = {
-                "minimal": "minimal", "low": "low", "medium": "medium", "high": "high",
-                "xhigh": "high", "max": "high", "ultra": "high",
-            }
-            normalized = aliases.get(requested)
             supported = set(model_spec.get("effort_modes") or [])
             # Missing per-model metadata is not evidence of incompatibility.
             # Forward a documented Meta API effort for the provider to validate;
             # constrain it locally only when an explicit supported set exists.
-            if normalized is None or (supported and normalized not in supported):
-                raise ProviderError(f"Muse model does not support reasoning effort {requested!r}.")
+            # Do not collapse Standard-tier xhigh/max to high, and do not send
+            # max on a narrower account-listed set.
+            normalized = _muse_effort(requested, supported)
             _write_output_effort(body, normalized)
             if normalized != requested:
                 compatibility["reasoning_effort"] = f"{requested}_normalized_to_{normalized}"

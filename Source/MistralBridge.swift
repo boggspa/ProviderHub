@@ -104,14 +104,14 @@ final class BridgeModel: ObservableObject {
 
     func omitSystem(for slot: String) -> Binding<Bool> {
         Binding(
-            get: { settings.mapping_options[slot]?.omit_system ?? false },
-            set: { setMappingOmit(slot, omitSystem: $0) }
+            get: { self.settings.mapping_options[slot]?.omit_system ?? false },
+            set: { self.setMappingOmit(slot, omitSystem: $0) }
         )
     }
     func omitTools(for slot: String) -> Binding<Bool> {
         Binding(
-            get: { settings.mapping_options[slot]?.omit_tools ?? false },
-            set: { setMappingOmit(slot, omitTools: $0) }
+            get: { self.settings.mapping_options[slot]?.omit_tools ?? false },
+            set: { self.setMappingOmit(slot, omitTools: $0) }
         )
     }
     private func setMappingOmit(_ slot: String, omitSystem: Bool? = nil, omitTools: Bool? = nil) {

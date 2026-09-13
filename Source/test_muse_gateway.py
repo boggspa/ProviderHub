@@ -20,7 +20,7 @@ class MuseGatewayTests(unittest.TestCase):
     def exercise_tool_cycle(self, stream):
         route = self.start_gateway("muse", "muse-spark-1.3", {
             "context": 1048576, "max_output": 131072,
-            "effort_modes": ["minimal", "low", "medium", "high"],
+            "effort_modes": ["minimal", "low", "medium", "high", "xhigh", "max"],
             "reasoning_history": "native",
         })
         requested = "claude-fable-5[1m]"
@@ -65,7 +65,7 @@ class MuseGatewayTests(unittest.TestCase):
         self.assertEqual(len(MockProvider.requests), 2)
         for request in MockProvider.requests:
             self.assertEqual(request["model"], "muse-spark-1.3")
-            self.assertEqual(request["output_config"]["effort"], "high")
+            self.assertEqual(request["output_config"]["effort"], "max")
             self.assertEqual(request["thinking"], {"type": "adaptive", "display": "omitted"})
         self.assertEqual(MockProvider.requests[1]["messages"][1]["content"], content)
         self.assert_upstream_secret_boundary("muse")
@@ -79,6 +79,36 @@ class MuseGatewayTests(unittest.TestCase):
 
     def test_stream_tool_cycle_preserves_native_reasoning(self):
         self.exercise_tool_cycle(True)
+
+    def test_gateway_forwards_xhigh_on_spark_13(self):
+        self.start_gateway("muse", "muse-spark-1.3", {
+            "context": 1048576, "max_output": 131072,
+            "effort_modes": ["minimal", "low", "medium", "high", "xhigh", "max"],
+            "reasoning_history": "native",
+        })
+        status, raw, _ = self.request({
+            "model": "claude-fable-5[1m]", "max_tokens": 32, "stream": False,
+            "messages": [{"role": "user", "content": LOCAL_REQUEST_TEXT}],
+            "thinking": {"type": "adaptive", "display": "omitted"},
+            "output_config": {"effort": "xhigh"},
+        })
+        self.assertEqual(status, 200, raw)
+        self.assertEqual(MockProvider.requests[0]["output_config"]["effort"], "xhigh")
+
+    def test_gateway_rejects_max_when_account_omits_it(self):
+        self.start_gateway("muse", "muse-spark-1.3-contributor", {
+            "context": 524288, "max_output": 65536,
+            "effort_modes": ["low", "high"],
+            "reasoning_history": "native",
+        })
+        status, raw, _ = self.request({
+            "model": "claude-fable-5", "max_tokens": 32, "stream": False,
+            "messages": [{"role": "user", "content": LOCAL_REQUEST_TEXT}],
+            "thinking": {"type": "adaptive", "display": "omitted"},
+            "output_config": {"effort": "max"},
+        })
+        self.assertEqual(status, 400, raw)
+        self.assertIn(b"does not support", raw)
 
 
 if __name__ == "__main__":

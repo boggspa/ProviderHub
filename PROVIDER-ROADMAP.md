@@ -89,7 +89,7 @@ runtime; `PROVIDER_HUB_PYTHON_RUNTIME` supplies a clean relocatable runtime to
 
 `Source/package_macos.py` signs the app and embedded native components using a
 supplied Developer ID Application identity and can optionally submit the zip
-with a user-provided `notarytool` Keychain profile. The final 0.5.0 build 11 is
+with a user-provided `notarytool` Keychain profile. The final 0.5.0 build 12 is
 Developer ID signed and Apple-notarized. Its ticket is stapled, and Gatekeeper
 accepts the app as `Notarized Developer ID`. This qualification applies to the
 packaged artifact; a future build needs a new submission.

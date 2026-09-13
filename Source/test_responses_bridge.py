@@ -9,6 +9,7 @@ import unittest
 import test_gateway_hub as fixtures
 from responses_bridge import ReasoningEnvelope, response_usage, to_messages
 from bridge_core import BridgeError
+from providers import ProviderError, prepare_request
 
 
 MODELS = {
@@ -16,7 +17,7 @@ MODELS = {
     "kimi": ("kimi-for-coding", ["low", "high", "max"]),
     "mimo": ("mimo-v2.5-pro", ["none", "high"]),
     "deepseek": ("deepseek-flash", ["none", "low", "high", "max"]),
-    "muse": ("muse-spark-1.3", ["minimal", "low", "medium", "high"]),
+    "muse": ("muse-spark-1.3", ["minimal", "low", "medium", "high", "xhigh", "max"]),
     "cerebras": ("gpt-oss-120b", ["low", "medium", "high"]),
 }
 
@@ -123,6 +124,34 @@ class ResponsesBridgeTests(unittest.TestCase):
             disabled = to_messages(
                 body, "kimi/k3", {"context": 131072, "max_output": 4096}, envelope, "scope")
             self.assertEqual(disabled["thinking"], {"type": "disabled"})
+
+    def test_muse_slider_xhigh_and_max_reach_native_messages(self):
+        spec = {
+            "id": "muse-spark-1.3", "context": 1048576, "max_output": 131072,
+            "reasoning": True, "effort_modes": MODELS["muse"][1], "fast_mode": False,
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            envelope = ReasoningEnvelope(Path(directory))
+            for requested in ("xhigh", "max"):
+                with self.subTest(requested=requested):
+                    translated = to_messages(
+                        {"input": "hello", "stream": False, "store": False, "tools": [],
+                         "reasoning": {"effort": requested}},
+                        "muse/muse-spark-1.3", spec, envelope, "scope",
+                    )
+                    self.assertEqual(translated["output_config"]["effort"], requested)
+                    plan = prepare_request(
+                        "muse", {}, "key", translated, "muse-spark-1.3", spec,
+                    )
+                    self.assertEqual(plan["body"]["output_config"]["effort"], requested)
+            omitted = {**spec, "effort_modes": ["minimal", "low", "medium", "high"]}
+            translated = to_messages(
+                {"input": "hello", "stream": False, "store": False, "tools": [],
+                 "reasoning": {"effort": "max"}},
+                "muse/muse-spark-1.3", omitted, envelope, "scope",
+            )
+            with self.assertRaisesRegex(ProviderError, "does not support"):
+                prepare_request("muse", {}, "key", translated, "muse-spark-1.3", omitted)
 
     def test_anthropic_cache_usage_is_included_in_codex_context_accounting(self):
         self.assertEqual(response_usage({"input_tokens": 10, "cache_creation_input_tokens": 20,

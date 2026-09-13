@@ -10,6 +10,7 @@ from codex_catalogue import (
     project_codex,
 )
 from hub_config import defaults
+from providers import discover
 
 
 SLOTS = [("claude-fable-5", "Fable 5", "fable", True)]
@@ -186,7 +187,7 @@ class EffortAndFastProjectionTests(unittest.TestCase):
                   presentation={"displayProvider": "Grok"}),
             model("grok/unknown", name="Unknown Grok", effort_modes=["low", "high"]),
             model("muse/muse-spark-1.3", name="Muse Spark",
-                  effort_modes=["minimal", "low", "medium", "high"], fast_mode=True),
+                  effort_modes=["minimal", "low", "medium", "high", "xhigh", "max"], fast_mode=True),
             model("ollama/thinker:latest", name="Thinker", reasoning=True,
                   effort_modes=["none", "high"], fast_mode=True),
         )
@@ -199,6 +200,10 @@ class EffortAndFastProjectionTests(unittest.TestCase):
         )
         self.assertEqual(rows["grok/unknown"]["service_tiers"], [])
         self.assertNotIn("Fast", rows["grok/unknown"]["description"])
+        self.assertEqual(
+            [entry["effort"] for entry in rows["muse/muse-spark-1.3"]["supported_reasoning_levels"]],
+            ["minimal", "low", "medium", "high", "xhigh", "max"],
+        )
         self.assertEqual(rows["muse/muse-spark-1.3"]["service_tiers"][0]["id"], "fast")
         self.assertEqual(rows["ollama/thinker:latest"]["supported_reasoning_levels"], [])
         self.assertEqual(rows["ollama/thinker:latest"]["service_tiers"], [])
@@ -209,6 +214,33 @@ class EffortAndFastProjectionTests(unittest.TestCase):
             effort_modes=["none", "low", "medium", "xhigh"],
         ))
         self.assertEqual(rows["openrouter/z-ai/glm-5.2"]["default_reasoning_level"], "xhigh")
+
+    def test_spark_13_catalogue_publishes_first_party_ranks_without_inventing_fast(self):
+        discovered = discover("muse", {}, "key", transport=lambda _plan: {
+            "data": [{"id": "muse-spark-1.3"}],
+        })["models"][0]
+        self.assertEqual(
+            discovered["effort_modes"],
+            ["minimal", "low", "medium", "high", "xhigh", "max"],
+        )
+        self.assertFalse(discovered["fast_mode"])
+        self.assertNotIn("none", discovered["effort_modes"])
+        rows = self.projected(model(
+            "muse/muse-spark-1.3",
+            name=discovered["display_name"],
+            context=discovered["context"],
+            effort_modes=discovered["effort_modes"],
+            fast_mode=discovered["fast_mode"],
+            reasoning=discovered["reasoning"],
+            tools=discovered["tools"],
+        ))
+        row = rows["muse/muse-spark-1.3"]
+        self.assertEqual(
+            [entry["effort"] for entry in row["supported_reasoning_levels"]],
+            ["minimal", "low", "medium", "high", "xhigh", "max"],
+        )
+        self.assertEqual(row["default_reasoning_level"], "high")
+        self.assertEqual(row["service_tiers"], [])
 
 
 if __name__ == "__main__":

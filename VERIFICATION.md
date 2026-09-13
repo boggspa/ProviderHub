@@ -102,8 +102,8 @@ unknown.
 
 Ten provider tests and two complete HTTP JSON/SSE tool-cycle tests cover the
 new route, including bearer authentication, local-token separation, exact model
-IDs, native thinking/signatures, adaptive thinking, and Claude Max mapping to
-Meta High. Forced tool choices, unsupported reasoning disable, and Fast fail
+IDs, native thinking/signatures, adaptive thinking, and the original cookbook-era
+Claude Max mapping to Meta High. Forced tool choices, unsupported reasoning disable, and Fast fail
 with explicit compatibility messages. No Meta Model API key was read and no
 paid Meta inference was run during implementation; account qualification follows
 user key entry in the app.
@@ -345,22 +345,41 @@ user's normal Codex configuration. A final check using the installed app's
 freshly refreshed cache accepted 107 choices, with sixteen OpenRouter routes
 after another endpoint-status change; all eleven Gemini defaults were present.
 
+**Muse Spark 1.3 effort ranks**
+
+Spark 1.3 advertised ranks are Meta's current first-party values `minimal`,
+`low`, `medium`, `high`, `xhigh`, and `max`. Claude Desktop Effort `xhigh` and
+Max are forwarded as those Meta values when advertised; Ultra uses the highest
+advertised Meta rank. Codex/ChatGPT catalogue rows publish the same ranks as
+`supported_reasoning_levels`. A live `/v1/models` `effort_modes` list still
+wins, so Contributor-tier or other narrower sets are not given Standard-tier
+`max`. Muse Fast is not invented. `none` remains unsupported. Meta's cookbook
+still treats `xhigh` as `high` and never mentions `max`; Hub follows the current
+[reasoning](https://dev.meta.ai/docs/reasoning.md) page plus live list fields.
+
 **Signed distribution**
 
-Apple accepted the final **0.5.0 build 11** submission
-`76a51b1d-8569-4bf4-b64d-0233fb931319`, created at
-`2026-09-13T03:05:34.268Z`. All twelve embedded native components and the app
-are Developer ID signed with hardened runtime. The notarization ticket was
+Apple accepted **0.5.0 build 12** submission
+`428429c2-e200-4cdd-b871-71b4837077de`, created at
+`2026-09-13T13:18:07.679Z`. It is signed with Developer ID Application
+`Christopher Izatt (8CZML8FK2D)` (certificate SHA-1
+`A5D4019DBFEDE7727487D49BD08257C46A72E7E0`). All twelve embedded native
+components and the app use hardened runtime. The notarization ticket was
 stapled successfully. The recipient archive was created after stapling and
 extracted into a fresh directory. Strict deep signature verification, ticket
 validation and Gatekeeper assessment all passed; Gatekeeper reported
 `Notarized Developer ID`. The extracted ARM64 CPython 3.13.13 runtime loaded
 its SSL trust store and passed an encryption/decryption check with
-`cryptography` 50.0.0. All sixty packaged worker files match their source files.
+`cryptography` 50.0.0. All seventy-two packaged worker files match their source
+files. The Swift `omitSystem`/`omitTools` bindings required explicit `self`
+captures so `Source/build.sh` compiles with Swift 5.
 
-The notarized build was installed in the main Documents checkout. The UI showed
-all eleven provider cards, with the user's ten configured connections retained.
-Claude was closed while idle; Provider Hub visibly confirmed restoration of
-its previous configuration. After the update, Claude reopened with the saved
-Provider Hub profile, model mappings and existing task list intact. The active
-Codex desktop host was not restarted or reconfigured.
+The notarized build was copied to `/Applications/Provider Hub Preview.app` and
+launched from that path. Gatekeeper accepted the installed copy as
+`Notarized Developer ID`. The process is `MistralBridge` from the Applications
+bundle, version 0.5.0 build 12. Claude Desktop and Codex were not restarted as
+part of this packaging pass.
+
+The earlier 0.5.0 build 11 submission `76a51b1d-8569-4bf4-b64d-0233fb931319`
+(`2026-09-13T03:05:34.268Z`) remains accepted; a later source rebuild does not
+inherit that ticket.

@@ -29,7 +29,7 @@ def default_spec():
         "reasoning": True,
         "streaming": True,
         "adaptive_thinking": True,
-        "effort_modes": ["minimal", "low", "medium", "high"],
+        "effort_modes": ["minimal", "low", "medium", "high", "xhigh", "max"],
         "fast_mode": False,
         "parallel_tool_calls": True,
         "tool_choice_modes": ["auto"],
@@ -174,14 +174,14 @@ class MuseDiscoveryTests(unittest.TestCase):
         self.assertEqual(standard["context"], 1048576)
         self.assertEqual(standard["max_output"], 131072)
         self.assertEqual(standard["context_kind"], "verified_documentation")
-        self.assertEqual(standard["effort_modes"], ["minimal", "low", "medium", "high"])
+        self.assertEqual(standard["effort_modes"], ["minimal", "low", "medium", "high", "xhigh", "max"])
         self.assertTrue(standard["tools"])
         self.assertTrue(standard["vision"])
         self.assertTrue(standard["reasoning"])
         self.assertTrue(standard["adaptive_thinking"])
         self.assertTrue(standard["parallel_tool_calls"])
         self.assertFalse(standard["fast_mode"])
-        self.assertIn("meta-model-cookbook", standard["metadata_evidence"])
+        self.assertIn("reasoning.md", standard["metadata_evidence"])
 
         contributor = by_id["muse-spark-1.3-contributor"]
         self.assertEqual(contributor["canonical_id"], "muse-spark-1.3-contributor")
@@ -258,37 +258,62 @@ class MusePlanningTests(unittest.TestCase):
         self.assertNotIn("authorization", plan["body"])
         self.assertNotIn("adaptive_thinking", plan["compatibility"])
 
-    def test_claude_maximum_efforts_map_to_meta_high_and_report_the_mapping(self):
-        for requested in ("xhigh", "max", "ultra"):
+    def test_claude_and_codex_ranks_forward_current_meta_values(self):
+        for requested, expected, note in (
+            ("minimal", "minimal", None),
+            ("low", "low", None),
+            ("medium", "medium", None),
+            ("high", "high", None),
+            ("xhigh", "xhigh", None),
+            ("max", "max", None),
+            ("ultra", "max", "ultra_normalized_to_max"),
+        ):
             with self.subTest(requested=requested):
-                payload = claude_payload(output_config={"effort": requested})
                 plan = prepare_request(
-                    "muse", {}, "key", payload, "muse-spark-1.3", default_spec(),
+                    "muse", {}, "key",
+                    claude_payload(output_config={"effort": requested}),
+                    "muse-spark-1.3", default_spec(),
                 )
-                self.assertEqual(plan["body"]["output_config"]["effort"], "high")
-                self.assertEqual(
-                    plan["compatibility"]["reasoning_effort"],
-                    f"{requested}_normalized_to_high",
-                )
-        direct = prepare_request(
-            "muse", {}, "key", claude_payload(output_config={"effort": "minimal"}),
-            "muse-spark-1.3", default_spec(),
-        )
-        self.assertEqual(direct["body"]["output_config"]["effort"], "minimal")
-        self.assertNotIn("reasoning_effort", direct["compatibility"])
+                self.assertEqual(plan["body"]["output_config"]["effort"], expected)
+                if note is None:
+                    self.assertNotIn("reasoning_effort", plan["compatibility"])
+                else:
+                    self.assertEqual(plan["compatibility"]["reasoning_effort"], note)
 
-    def test_unknown_model_metadata_does_not_block_standard_api_effort(self):
+    def test_unknown_model_metadata_does_not_block_documented_api_effort(self):
         plan = prepare_request(
             "muse", {}, "key", claude_payload(), "future-muse-model",
             {"reasoning": None, "effort_modes": [], "context": None},
         )
         self.assertEqual(plan["body"]["output_config"]["effort"], "high")
         self.assertEqual(plan["body"]["model"], "future-muse-model")
+        for requested in ("xhigh", "max"):
+            with self.subTest(requested=requested):
+                forwarded = prepare_request(
+                    "muse", {}, "key", claude_payload(output_config={"effort": requested}),
+                    "future-muse-model", {"reasoning": None, "effort_modes": [], "context": None},
+                )
+                self.assertEqual(forwarded["body"]["output_config"]["effort"], requested)
         with self.assertRaisesRegex(ProviderError, "does not support"):
             prepare_request(
                 "muse", {}, "key", claude_payload(), "limited-muse-model",
                 {"reasoning": True, "effort_modes": ["low"]},
             )
+
+    def test_account_listed_modes_constrain_or_reject_standard_tier_max(self):
+        contributor = {"reasoning": True, "effort_modes": ["low", "high"]}
+        for requested in ("xhigh", "max"):
+            with self.subTest(requested=requested), self.assertRaisesRegex(ProviderError, "does not support"):
+                prepare_request(
+                    "muse", {}, "key", claude_payload(output_config={"effort": requested}),
+                    "muse-spark-1.3-contributor", contributor,
+                )
+        ultra = prepare_request(
+            "muse", {}, "key", claude_payload(output_config={"effort": "ultra"}),
+            "muse-spark-1.3-contributor", contributor,
+        )
+        self.assertEqual(ultra["body"]["output_config"]["effort"], "high")
+        self.assertEqual(ultra["compatibility"]["reasoning_effort"], "ultra_normalized_to_high")
 
     def test_unreliable_reasoning_disable_and_forced_tool_choice_fail_clearly(self):
         with self.assertRaisesRegex(ProviderError, "cannot be disabled reliably"):
