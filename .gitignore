@@ -5,3 +5,9 @@ Source/.build/
 __pycache__/
 *.pyc
 work/
+
+# Concurrent-work markers and sidecar state (AGENTS.md)
+.WORK-IN-PROGRESS-*.md
+SHIP-HOLD-*.md
+SESSION-IN-PROGRESS-*.md
+.work-guard/
