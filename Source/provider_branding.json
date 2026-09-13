@@ -20,7 +20,17 @@
     "muse": "#1671EA",
     "meta": "#1671EA",
     "alibaba": "#8C52EF",
-    "zai": "#177DAA"
+    "zai": "#177DAA",
+    "openrouter": "#E02948",
+    "poolside": "#0C8194",
+    "nvidia": "#538200",
+    "cohere": "#5E7C6F",
+    "minimax": "#C044A4",
+    "thinkingmachines": "#C24E68",
+    "tencent": "#4E73CA",
+    "inception": "#7C5BE9",
+    "nexagi": "#747A42",
+    "sakana": "#EA0C2D"
   },
   "accentAliases": {
     "mimo": "xiaomi",
@@ -108,6 +118,56 @@
       "displayProvider": "Z.ai",
       "hueKey": "zai",
       "shortCode": "ZAI"
+    },
+    "openrouter": {
+      "displayProvider": "OpenRouter",
+      "hueKey": "openrouter",
+      "shortCode": "ORT"
+    },
+    "poolside": {
+      "displayProvider": "Poolside",
+      "hueKey": "poolside",
+      "shortCode": "POL"
+    },
+    "nvidia": {
+      "displayProvider": "NVIDIA",
+      "hueKey": "nvidia",
+      "shortCode": "NV"
+    },
+    "cohere": {
+      "displayProvider": "Cohere",
+      "hueKey": "cohere",
+      "shortCode": "COH"
+    },
+    "minimax": {
+      "displayProvider": "MiniMax",
+      "hueKey": "minimax",
+      "shortCode": "MMX"
+    },
+    "thinkingmachines": {
+      "displayProvider": "Thinking Machines",
+      "hueKey": "thinkingmachines",
+      "shortCode": "TM"
+    },
+    "tencent": {
+      "displayProvider": "Tencent",
+      "hueKey": "tencent",
+      "shortCode": "TEN"
+    },
+    "inception": {
+      "displayProvider": "Inception",
+      "hueKey": "inception",
+      "shortCode": "INC"
+    },
+    "nexagi": {
+      "displayProvider": "Nex AGI",
+      "hueKey": "nexagi",
+      "shortCode": "NEX"
+    },
+    "sakana": {
+      "displayProvider": "Sakana",
+      "hueKey": "sakana",
+      "shortCode": "SAK"
     }
   },
   "modelLabels": {
@@ -125,7 +185,11 @@
       "id": "alibaba",
       "providerLabel": "Alibaba",
       "providerClass": "alibaba",
-      "needles": ["qwen3", "qwen 3", "qwen"],
+      "needles": [
+        "qwen3",
+        "qwen 3",
+        "qwen"
+      ],
       "fallbackModelLabel": "Qwen"
     },
     {
@@ -133,7 +197,11 @@
       "id": "deepseek",
       "providerLabel": "DeepSeek",
       "providerClass": "deepseek",
-      "needles": ["deepseek-r1", "deepseek r1", "deepseek"],
+      "needles": [
+        "deepseek-r1",
+        "deepseek r1",
+        "deepseek"
+      ],
       "fallbackModelLabel": "DeepSeek model"
     },
     {
@@ -141,7 +209,9 @@
       "id": "kimi",
       "providerLabel": "Kimi",
       "providerClass": "kimi",
-      "needles": ["kimi-"],
+      "needles": [
+        "kimi-"
+      ],
       "fallbackModelLabel": "Kimi model"
     },
     {
@@ -149,7 +219,14 @@
       "id": "meta",
       "providerLabel": "Meta",
       "providerClass": "meta",
-      "needles": ["muse-glimmer", "muse glimmer", "llama3.1", "llama 3.1", "llama3.2", "llama 3.2"],
+      "needles": [
+        "muse-glimmer",
+        "muse glimmer",
+        "llama3.1",
+        "llama 3.1",
+        "llama3.2",
+        "llama 3.2"
+      ],
       "fallbackModelLabel": "Llama model"
     },
     {
@@ -157,7 +234,12 @@
       "id": "mistral",
       "providerLabel": "Mistral",
       "providerClass": "mistral",
-      "needles": ["devstral", "ministral", "magistral", "mistral"],
+      "needles": [
+        "devstral",
+        "ministral",
+        "magistral",
+        "mistral"
+      ],
       "fallbackModelLabel": "Mistral model"
     },
     {
@@ -165,8 +247,111 @@
       "id": "zai",
       "providerLabel": "Z.ai",
       "providerClass": "zai",
-      "needles": ["glm-", "glm "],
+      "needles": [
+        "glm-",
+        "glm "
+      ],
       "fallbackModelLabel": "GLM model"
+    },
+    {
+      "runtimeProvider": "openrouter",
+      "id": "zai",
+      "providerLabel": "Z.ai",
+      "providerClass": "zai",
+      "needles": [
+        "z-ai/"
+      ],
+      "fallbackModelLabel": "Z.ai model"
+    },
+    {
+      "runtimeProvider": "openrouter",
+      "id": "poolside",
+      "providerLabel": "Poolside",
+      "providerClass": "poolside",
+      "needles": [
+        "poolside/"
+      ],
+      "fallbackModelLabel": "Poolside model"
+    },
+    {
+      "runtimeProvider": "openrouter",
+      "id": "nvidia",
+      "providerLabel": "NVIDIA",
+      "providerClass": "nvidia",
+      "needles": [
+        "nvidia/"
+      ],
+      "fallbackModelLabel": "NVIDIA model"
+    },
+    {
+      "runtimeProvider": "openrouter",
+      "id": "cohere",
+      "providerLabel": "Cohere",
+      "providerClass": "cohere",
+      "needles": [
+        "cohere/"
+      ],
+      "fallbackModelLabel": "Cohere model"
+    },
+    {
+      "runtimeProvider": "openrouter",
+      "id": "minimax",
+      "providerLabel": "MiniMax",
+      "providerClass": "minimax",
+      "needles": [
+        "minimax/"
+      ],
+      "fallbackModelLabel": "MiniMax model"
+    },
+    {
+      "runtimeProvider": "openrouter",
+      "id": "thinkingmachines",
+      "providerLabel": "Thinking Machines",
+      "providerClass": "thinkingmachines",
+      "needles": [
+        "thinkingmachines/"
+      ],
+      "fallbackModelLabel": "Thinking Machines model"
+    },
+    {
+      "runtimeProvider": "openrouter",
+      "id": "tencent",
+      "providerLabel": "Tencent",
+      "providerClass": "tencent",
+      "needles": [
+        "tencent/"
+      ],
+      "fallbackModelLabel": "Tencent model"
+    },
+    {
+      "runtimeProvider": "openrouter",
+      "id": "inception",
+      "providerLabel": "Inception",
+      "providerClass": "inception",
+      "needles": [
+        "inception/"
+      ],
+      "fallbackModelLabel": "Inception model"
+    },
+    {
+      "runtimeProvider": "openrouter",
+      "id": "nexagi",
+      "providerLabel": "Nex AGI",
+      "providerClass": "nexagi",
+      "needles": [
+        "nex-agi/"
+      ],
+      "fallbackModelLabel": "Nex AGI model"
+    },
+    {
+      "runtimeProvider": "openrouter",
+      "id": "sakana",
+      "providerLabel": "Sakana",
+      "providerClass": "sakana",
+      "needles": [
+        "sakana/"
+      ],
+      "fallbackModelLabel": "Sakana model"
     }
   ]
 }

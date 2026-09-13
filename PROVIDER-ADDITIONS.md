@@ -41,3 +41,48 @@ Sources:
 - https://www.alibabacloud.com/help/en/model-studio/anthropic-api-messages
 - TaskWraith `src/host-shared/pi/PiModels.ts` and Pi AI 0.84.2's
   `dist/providers/data/qwen-token-plan.json`, inspected 2026-09-13.
+
+## Curated OpenRouter
+
+The `openrouter` connection uses its own `OPENROUTER_API_KEY`, native Messages
+for Claude, and native Responses for Codex. The source shortlist is TaskWraith's
+14 Pi OpenRouter registrations. Each refresh intersects that shortlist with the
+current Models API, then fetches endpoint metadata concurrently. Limits and
+effort sets come from the current API, not the shortlist's older snapshot.
+
+Different endpoint context limits become distinct model choices. The highest
+context retains the ordinary model route; other choices have local
+`/context-N` route suffixes. All send the original upstream model ID. Explicit
+endpoint allow/ignore lists prevent a selected context from silently moving to
+a smaller endpoint, including variants matched by a base provider slug.
+Reasoning/forced-tool/sampling/structured-output controls further restrict the
+eligible hosts. Routine token and default parallel controls are forwarded to
+OpenRouter's native adapter without a blanket `require_parameters` check that
+would incorrectly exclude currently advertised Fugu and Inkling endpoints.
+Unknown endpoint limits remain unknown. No same-model Fast tier is advertised.
+
+An opaque session grouping hash keeps routing sticky across equivalent string
+and full-history requests. It contains no prompt text and does not enable
+server-stored continuations. Responses uses full history with `store:false`.
+Both gateway fingerprints include endpoint and control metadata so refreshing
+that metadata cannot activate a stale routing snapshot.
+
+The public metadata check on 2026-09-13 returned 12 curated model IDs and 17
+context variants. MiniMax M3 Free and Mercury 2.5 Preview were absent from that
+public list. The installed Codex model-list parser accepted all 17 choices.
+This was metadata-only, without a key or inference. The baseline plus Qwen and
+OpenRouter suite passes 200 tests with ResourceWarnings treated as errors;
+OpenRouter's tests cover native Claude/Codex JSON and SSE tool continuations,
+opaque reasoning, endpoint binding, state fingerprints and control edge cases.
+
+OpenRouter and upstream-brand accents reuse TaskWraith's presentation palette.
+The account identity remains OpenRouter regardless of the displayed model brand.
+
+Sources:
+
+- https://openrouter.ai/api/v1/models
+- https://openrouter.ai/docs/guides/routing/provider-selection
+- https://openrouter.ai/docs/api/api-reference/anthropic-messages/create-messages?explorer=true
+- https://openrouter.ai/docs/guides/features/router-metadata
+- TaskWraith `src/host-shared/pi/PiOpenRouterModelRegistration.ts`,
+  `src/shared/taskWraithProviderPresentation.ts`, and renderer `styles/theme.css`.

@@ -36,6 +36,8 @@ _PLANNING_FIELDS = (
     "effort_modes", "fast_mode", "speed_tier", "streaming",
     "tool_choice", "parallel_tool_calls", "service_tiers",
     "reasoning_history", "complete_tool_cycles", "capabilities",
+    "default_effort", "upstream_model_id", "routing_endpoints", "routing_ignore",
+    "routing_all_tags", "effort_control", "reasoning_mandatory",
 )
 
 

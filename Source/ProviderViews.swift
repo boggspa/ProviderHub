@@ -110,6 +110,10 @@ struct ProviderPage: View {
                         Text("Use your Token Plan subscription key for Singapore. This connection keeps Token Plan separate from Coding Plan and pay-as-you-go access.")
                             .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                     }
+                    if provider.id == "openrouter" {
+                        Text("A curated selection based on TaskWraith’s Pi catalogue. Models and controls refresh from OpenRouter; distinct context choices use matching provider endpoints. Usage follows your OpenRouter account.")
+                            .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    }
                     HStack {
                         Text(state?.credential_source ?? "Checking setup…").font(.system(size: 11)).foregroundStyle(.secondary)
                         Spacer()
@@ -212,6 +216,7 @@ struct ProviderPage: View {
         case "muse": return "Meta Model API key · API billing"
         case "grok": return "xAI API key · Pay as you go"
         case "qwen-token-plan": return "Token Plan subscription API key"
+        case "openrouter": return "OpenRouter API key · Curated models"
         default: return "Provider model API"
         }
     }

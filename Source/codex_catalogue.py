@@ -4,7 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 
-from hub_config import connection_signature, split_route
+from hub_config import MODEL_VARIANT_FIELDS, connection_signature, split_route
 from providers import PROVIDERS
 
 
@@ -37,7 +37,8 @@ def project_codex(settings, inventory):
         provider = entry.get("presentation", {}).get("displayProvider") or provider_id.title()
         name = entry.get("display_name") or route
         # Include the account/transport when Ollama presents an upstream brand.
-        label = name + (" · Ollama" if provider_id == "ollama" else ("" if name.casefold().startswith(provider.casefold()) else " · " + provider))
+        label = name + (" · Ollama" if provider_id == "ollama" else " · OpenRouter" if provider_id == "openrouter"
+                        else ("" if name.casefold().startswith(provider.casefold()) else " · " + provider))
         efforts = list(entry.get("effort_modes") or []) if provider_id != "ollama" else []
         service_tiers = ([{"id": "priority", "name": "Fast · xAI Priority",
                           "description": "Higher scheduling priority at xAI's premium token rates."}]
@@ -74,7 +75,7 @@ def project_codex(settings, inventory):
             "supports_image_detail_original": False,
             "context_window": context,
             "max_context_window": context,
-            "auto_compact_token_limit": int(context * .85) if context is not None else None,
+            "auto_compact_token_limit": int(min(context, entry.get("max_input") or context) * .85) if context is not None else None,
             "effective_context_window_percent": 100,
             "experimental_supported_tools": [],
             "input_modalities": ["text", "image"] if entry.get("vision") is True else ["text"],
@@ -93,7 +94,10 @@ def catalogue_digest(settings, inventory):
     # desktop harnesses can share an existing snapshot when only it changes.
     for model in projected["models"]:
         model.pop("priority", None)
-    material = {"catalogue": projected, "accounts": {
+    material = {"catalogue": projected, "planning": {
+        entry["id"]: {key: entry.get(key) for key in MODEL_VARIANT_FIELDS}
+        for entry in inventory.get("models", [])
+    }, "accounts": {
         provider: connection_signature(provider, settings["providers"][provider])
         for provider in sorted(PROVIDERS)
     }}

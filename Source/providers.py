@@ -204,8 +204,10 @@ PROVIDERS = {
 # Canonical paths accepted from settings.  A user may paste a provider base URL
 # or its documented request endpoint; both normalize to the same safe base.
 from qwen_provider import DESCRIPTOR as QWEN_DESCRIPTOR, OFFICIAL_PATHS as QWEN_PATHS, QwenError, catalogue as qwen_catalogue, normalize_controls as qwen_controls
+from openrouter_provider import DESCRIPTOR as OPENROUTER_DESCRIPTOR, OFFICIAL_PATHS as OPENROUTER_PATHS, OpenRouterError, discover as openrouter_discover, finalize as openrouter_finalize, normalize_messages as openrouter_controls
 
 PROVIDERS[QWEN_DESCRIPTOR["id"]] = QWEN_DESCRIPTOR
+PROVIDERS[OPENROUTER_DESCRIPTOR["id"]] = OPENROUTER_DESCRIPTOR
 
 _OFFICIAL_PATHS = {
     "mistral": {"", "/v1", "/v1/models", "/v1/chat/completions"},
@@ -216,6 +218,7 @@ _OFFICIAL_PATHS = {
     "muse": {"", "/v1", "/v1/models", "/v1/messages"},
     "grok": {"", "/v1", "/v1/models", "/v1/language-models", "/v1/chat/completions"},
     "qwen-token-plan": QWEN_PATHS,
+    "openrouter": OPENROUTER_PATHS,
 }
 
 _OLLAMA_PATHS = {"", "/v1", "/v1/messages", "/api/tags"}
@@ -1141,6 +1144,11 @@ def discover(provider_id: str, connection: dict | None, api_key: str | None, *, 
     """
     _provider(provider_id)
     normalized = validate_connection(provider_id, connection)
+    if provider_id == "openrouter":
+        try:
+            return openrouter_discover(normalized, api_key, transport=transport or _fetch_json)
+        except OpenRouterError as exc:
+            raise ProviderError(str(exc)) from exc
     static = _static_catalogue(provider_id)
     if static is not None:
         models, warnings, evidence = static
@@ -1356,6 +1364,12 @@ def _normalize_native_controls(
         try:
             return {**compatibility, **qwen_controls(body, upstream_model, model_spec)}
         except QwenError as exc:
+            raise ProviderError(str(exc)) from exc
+
+    if provider_id == "openrouter":
+        try:
+            return {**compatibility, **openrouter_controls(body, upstream_model, model_spec)}
+        except OpenRouterError as exc:
             raise ProviderError(str(exc)) from exc
 
     if provider_id == "muse":
@@ -1976,6 +1990,11 @@ def prepare_request(
         body, normalized_system_roles, control_compatibility = _normalize_native_payload(
             provider_id, anthropic_payload, upstream_model, model_spec)
         _apply_native_model_limits(body, model_spec)
+        if provider_id == "openrouter":
+            try:
+                openrouter_finalize(body, model_spec, api_key)
+            except OpenRouterError as exc:
+                raise ProviderError(str(exc)) from exc
         return {
             "url": base + "/v1/messages",
             "headers": headers,

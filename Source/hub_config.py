@@ -26,6 +26,7 @@ MODEL_VARIANT_FIELDS = (
     "tools", "vision", "reasoning", "effort_modes", "default_effort", "fast_mode", "speed_tier",
     "streaming", "tool_choice", "parallel_tool_calls", "service_tiers",
     "reasoning_history", "complete_tool_cycles", "capabilities", "billing_model_name",
+    "upstream_model_id", "routing_endpoints", "routing_ignore", "routing_all_tags", "effort_control", "reasoning_mandatory",
 )
 
 

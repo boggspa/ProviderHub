@@ -15,9 +15,10 @@ from hub_config import connection_signature, qualify, split_route
 from providers import PROVIDERS, ProviderError, _auth_headers, _chat_effort, validate_connection
 from responses_tools import flatten_tools, input_names, output_names, register
 from responses_bridge import ENVELOPE_PREFIX, MessagesResponsesAdapter, ReasoningEnvelope, to_messages
+from openrouter_provider import OpenRouterError, finalize as openrouter_finalize
 
 
-NATIVE_PROVIDERS = frozenset({"grok", "ollama"})
+NATIVE_PROVIDERS = frozenset({"grok", "ollama", "openrouter"})
 MAX_BODY = 32 * 1024 * 1024
 REQUEST_FIELDS = frozenset({
     "model", "input", "instructions", "tools", "tool_choice", "parallel_tool_calls",
@@ -115,7 +116,13 @@ def prepare_native(runtime, payload):
                 "adapter": MessagesResponsesAdapter(requested, envelope, scope)}
     if isinstance(body["input"], list) and any(isinstance(item, dict) and str(item.get("encrypted_content", "")).startswith(ENVELOPE_PREFIX) for item in body["input"]):
         raise BridgeError("This reasoning history belongs to a different provider connection. Start a new task when changing providers.")
-    if provider_id == "ollama":
+    if provider_id == "openrouter":
+        try:
+            openrouter_finalize(body, spec, key, responses=True)
+        except OpenRouterError as exc:
+            raise BridgeError(str(exc)) from exc
+        url = connection["base_url"] + "/v1/responses"
+    elif provider_id == "ollama":
         if body.get("previous_response_id") or body.get("store"):
             raise BridgeError("Ollama Responses is stateless. Send the full input history with store:false.")
         # The daemon owns its cloud login. Never send the local gateway token.
