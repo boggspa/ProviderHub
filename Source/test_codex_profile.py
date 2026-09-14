@@ -4,6 +4,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
+from branding import resolve_presentation
 from bridge_core import BridgeError, SLOTS
 from codex_catalogue import catalogue_digest, project_codex
 from codex_profile import CodexProfile, parse, tomlkit
@@ -214,6 +215,49 @@ command = "existing-command"
         self.manager.config.write_text(self.original)
         self.manager.restore()
         self.assertEqual(self.manager.config.read_text(), self.original)
+
+    def test_activate_writes_provider_accent_to_both_chrome_themes(self):
+        expected = resolve_presentation("grok", "grok-4.6")["accent"]
+        result = self.activate()
+        self.assertEqual(result["codex_accent"], expected)
+        doc = parse(self.manager.config.read_text())
+        for mode in ("appearanceLightChromeTheme", "appearanceDarkChromeTheme"):
+            with self.subTest(mode=mode):
+                self.assertEqual(doc["desktop"][mode]["accent"], expected)
+                self.assertEqual(doc["desktop"][mode]["accentSource"], "custom")
+
+    def test_restore_removes_hub_accent_when_previously_absent(self):
+        self.activate()
+        self.assertIn("desktop", parse(self.manager.config.read_text()))
+        self.manager.restore()
+        self.assertEqual(self.manager.config.read_text(), self.original)
+
+    def test_restore_returns_previous_custom_accent(self):
+        self.manager.config.write_text(
+            self.original + '\n[desktop.appearanceDarkChromeTheme]\naccent = "#123456"\n')
+        original = self.manager.config.read_text()
+        self.activate()
+        doc = parse(self.manager.config.read_text())
+        self.assertEqual(doc["desktop"]["appearanceDarkChromeTheme"]["accent"],
+                         resolve_presentation("grok", "grok-4.6")["accent"])
+        self.assertEqual(doc["desktop"]["appearanceDarkChromeTheme"]["accentSource"], "custom")
+        self.manager.restore()
+        self.assertEqual(self.manager.config.read_text(), original)
+
+    def test_in_session_theme_change_is_preserved_on_restore(self):
+        self.activate()
+        self.edit(lambda doc: doc["desktop"]["appearanceDarkChromeTheme"].update({"accent": "#ABCDEF"}))
+        result = self.manager.restore()
+        doc = parse(self.manager.config.read_text())
+        self.assertEqual(doc["desktop"]["appearanceDarkChromeTheme"]["accent"], "#ABCDEF")
+        self.assertGreater(result["preserved_external_changes"], 0)
+
+    def test_user_branding_override_drives_desktop_accent(self):
+        self.settings["branding_overrides"] = {"grok": {"accent": "#112233"}}
+        self.activate()
+        doc = parse(self.manager.config.read_text())
+        self.assertEqual(doc["desktop"]["appearanceDarkChromeTheme"]["accent"], "#112233")
+        self.assertEqual(doc["desktop"]["appearanceDarkChromeTheme"]["accentSource"], "custom")
 
 
 if __name__ == "__main__":
