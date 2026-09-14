@@ -6,26 +6,32 @@ from __future__ import annotations
 EFFORT_ORDER = ("none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra")
 
 # Vibe CLI thinking levels: Off, Low, Medium, High, Max. No xhigh or ultra.
+# These are UI-level distinctions. On the wire, the Mistral API only accepts
+# "none" and "high" for reasoning_effort — the Vibe CLI itself collapses all
+# five thinking levels into those two values (see _THINKING_TO_REASONING_EFFORT
+# in vibe/core/llm/backend/mistral.py).  The full list is kept here for the
+# catalogue projection / UI picker; the alias table below controls the wire.
 MISTRAL_REASONING_EFFORTS = ["none", "low", "medium", "high", "max"]
 MISTRAL_EFFORT_ALIASES = {
     "none": "none",
-    "minimal": "low",
-    "low": "low",
-    "medium": "medium",
+    "minimal": "none",
+    "low": "none",
+    "medium": "high",
     "high": "high",
-    "xhigh": "max",
-    "max": "max",
-    "ultra": "max",
+    "xhigh": "high",
+    "max": "high",
+    "ultra": "high",
 }
 
-# Mistral reasoning ladders are model-specific, not a single shared ladder.
-# GLM 5.2 (Mistral hosted), Mistral Medium 3.5 and Mistral Small 4 expose the
-# full Off | Low | Medium | High | Max ladder — the Vibe CLI /thinking picker
-# lists exactly Off, Low, Medium, High, Max for Mistral Medium 3.5, with no
-# xhigh. Every other Mistral reasoning model (Mistral Large 3, Codestral,
-# Leanstral, ...) follows the Off | High principle. An earlier spike tested
-# only two API models and wrongly assumed every Mistral model accepted only
-# Off | High.
+# Mistral's API reasoning_effort field only accepts "none" and "high" on the
+# wire — confirmed by the Vibe CLI SDK's _THINKING_TO_REASONING_EFFORT mapping
+# which collapses all five UI thinking levels (Off/Low/Medium/High/Max) into
+# those two values.  The Vibe CLI UI presents five picker positions as a UX
+# abstraction, but the HTTP endpoint rejects anything other than none/high.
+#
+# The MISTRAL_EFFORT_ALIASES table above handles this collapse.  The ladder
+# lists below are kept for the catalogue projection (UI picker) only; they do
+# not widen what the wire accepts.
 MISTRAL_NARROW_EFFORTS = ["none", "high"]
 
 

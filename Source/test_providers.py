@@ -760,7 +760,10 @@ class ChatPlanTests(unittest.TestCase):
         self.assertEqual(plan["url"], "https://api.mistral.ai/v1/chat/completions")
         self.assertEqual(plan["headers"]["Authorization"], "Bearer mistral-key")
         self.assertEqual(plan["body"]["model"], "mistral-medium-latest")
-        self.assertEqual(plan["body"]["reasoning_effort"], "low")
+        # "low" effort collapses to "none" on the wire, matching the Vibe CLI's
+        # _THINKING_TO_REASONING_EFFORT mapping — the Mistral API only accepts
+        # "none" and "high" for reasoning_effort.
+        self.assertEqual(plan["body"]["reasoning_effort"], "none")
         self.assertIn("prompt_cache_key", plan["body"])
         assistant = next(message for message in plan["body"]["messages"] if message["role"] == "assistant")
         mapped_id = assistant["tool_calls"][0]["id"]

@@ -891,17 +891,29 @@ def compact_conversation(payload: dict, max_tokens: int, estimate=None) -> dict:
 
 def validate_mistral_roles(payload: dict) -> None:
     """Validate message roles for Mistral API compatibility.
-    
+
     Mistral requires the last message to be from user, tool, or assistant with prefix=True.
-    Raises BridgeError if validation fails.
+    System and developer messages at the tail are skipped because
+    ``_translate_chat_payload`` reorders them to the front before the wire
+    request is built.  Raises BridgeError if validation fails.
     """
     messages = payload.get("messages", [])
     if not messages:
         return
-    
-    last_message = messages[-1]
+
+    # Walk backwards past any trailing system/developer messages — translation
+    # will move them to the front, so they cannot be the wire's last message.
+    last_message = None
+    for msg in reversed(messages):
+        if isinstance(msg, dict) and msg.get("role") in {"system", "developer"}:
+            continue
+        last_message = msg
+        break
+    if last_message is None:
+        # All messages are system/developer; translation will handle it.
+        return
     role = last_message.get("role")
-    
+
     # Mistral accepts: user, tool, or assistant with prefix=True
     if role == "assistant":
         # Check if prefix flag is present and True

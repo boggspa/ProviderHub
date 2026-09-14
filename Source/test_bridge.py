@@ -202,7 +202,11 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(result["reasoning_effort"], "none")
 
     def test_effort_comes_from_claude_and_never_changes_the_model(self):
-        for native, expected in [("low", "low"), ("medium", "medium"), ("high", "high"), ("xhigh", "max"), ("max", "max")]:
+        # Bare model IDs route through Mistral by default (v0.2 compat).
+        # The Vibe CLI collapses all thinking levels to "none"/"high" on the
+        # wire — the alias table mirrors that collapse so the API never sees
+        # a value it rejects.
+        for native, expected in [("low", "none"), ("medium", "high"), ("high", "high"), ("xhigh", "high"), ("max", "high")]:
             result, _ = translate_request(prompt(output_config={"effort": native}), config())
             self.assertEqual(result["reasoning_effort"], expected)
             self.assertEqual(result["model"], "test-model")
