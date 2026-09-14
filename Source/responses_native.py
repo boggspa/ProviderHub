@@ -5,6 +5,7 @@ import copy
 import hashlib
 import hmac
 import json
+import re
 import select
 import socket
 import threading
@@ -67,6 +68,27 @@ _MAX_WIRE_DEPTH = 5
 # end-of-message frame. Like the routing headers it is harness framing, not
 # task content, and weaker models echo it back into history verbatim.
 _WIRE_FOOTER = "[END_OF_MESSAGE]"
+
+# Our own agent_message attribution. A previous turn's normalized output
+# re-enters history once the model echoes it, possibly with a drifted agent
+# name (different sibling, case/whitespace drift), so attribution must be
+# stripped by shape rather than guarded by exact match.
+_SUBAGENT_PREFIX_RE = re.compile(r"\[subagent_[^\[\]]+\]\s*:\s*", re.IGNORECASE)
+
+
+def _strip_subagent_prefixes(text):
+    """Strip stacked `[subagent_*]:` prefixes so attribution is idempotent.
+
+    Removes every leading subagent prefix before the caller adds the
+    current one, so echoed attributions collapse to a single prefix
+    instead of compounding across turns.
+    """
+    cleaned = text.strip()
+    while True:
+        match = _SUBAGENT_PREFIX_RE.match(cleaned)
+        if not match:
+            return cleaned
+        cleaned = cleaned[match.end():]
 
 
 def _strip_task_header(text):
@@ -244,8 +266,8 @@ def _normalize_multi_agent_items(input_list):
     
     Maps:
     - multi_agent_call / subagent_call -> user message (extracted task instruction)
-    - multi_agent_call_output / subagent_call_output -> message (synthetic subagent result description)
-    - agent_message -> message (with agent prefix)
+    - multi_agent_call_output / subagent_call_output -> user message (synthetic subagent result description)
+    - agent_message -> user message (with agent prefix)
     
     All multi-agent items become standard message items with role and string content,
     ensuring they pass the Responses whitelist validation while preserving subagent
@@ -292,26 +314,26 @@ def _normalize_multi_agent_items(input_list):
                 "role": "user",
                 "content": content,
             })
-        # agent_message -> message with agent prefix
+        # agent_message -> user message with agent prefix.
+        # Synthetic subagent speech is third-party content, not this turn's
+        # assistant output: a user role keeps it out of the Mistral prefill
+        # trap (see multi_agent_call above) so the model reads it as
+        # received history instead of continuing it as its own prefill.
         elif item_type == "agent_message":
-            role = item.get("role") or "assistant"
-            if role not in {"user", "assistant", "system", "developer"}:
-                role = "assistant"
             agent_name = item.get("agent") or item.get("sender") or "subagent"
             content = item.get("content") or ""
-            # Guard: only add prefix if content is a string and doesn't already have it
             if isinstance(content, str):
                 # Break the echo chamber: a previous turn's leaked envelope
                 # re-enters here as `subagent: [...]` prose once the model
                 # repeats it. Unwrap it instead of amplifying it.
                 content = _clean_wire_text(content) if content else ""
+                content = _strip_subagent_prefixes(content)
                 prefix = f"[subagent_{agent_name}]"
-                if not content.startswith(prefix):
-                    content = f"{prefix}: {content}" if content else prefix
+                content = f"{prefix}: {content}" if content else prefix
             elif isinstance(content, (dict, list)):
                 extracted = _extract_wire_value(content)
                 if extracted:
-                    content = f"[subagent_{agent_name}]: {extracted}"
+                    content = f"[subagent_{agent_name}]: {_strip_subagent_prefixes(extracted)}"
                 else:
                     # Stringify non-string content
                     content = f"{agent_name}: {json.dumps(content)}"
@@ -319,7 +341,7 @@ def _normalize_multi_agent_items(input_list):
                 content = f"{agent_name}: {str(content)}"
             normalized.append({
                 "type": "message",
-                "role": role,
+                "role": "user",
                 "content": content,
             })
         else:

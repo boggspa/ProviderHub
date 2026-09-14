@@ -284,7 +284,7 @@ class NativeResponsesTests(unittest.TestCase):
         
         # Fourth item: agent_message -> message with subagent_ prefix
         self.assertEqual(normalized[3]["type"], "message")
-        self.assertEqual(normalized[3]["role"], "assistant")
+        self.assertEqual(normalized[3]["role"], "user")
         self.assertIn("[subagent_researcher]", normalized[3]["content"])
         self.assertIn("Found some data", normalized[3]["content"])
         
@@ -346,7 +346,7 @@ class NativeResponsesTests(unittest.TestCase):
         self.assertIn("returned", normalized[1]["content"])
         
         self.assertEqual(normalized[2]["type"], "message")
-        self.assertEqual(normalized[2]["role"], "assistant")
+        self.assertEqual(normalized[2]["role"], "user")
         self.assertIn("[subagent_subagent]", normalized[2]["content"])
 
     def test_multi_agent_v2_passthrough_non_dict_items(self):
@@ -459,7 +459,7 @@ class NativeResponsesTests(unittest.TestCase):
         self.assertEqual(normalized[1]["role"], "user")
         self.assertEqual(normalized[2]["role"], "user")
         self.assertEqual(normalized[3]["role"], "user")
-        self.assertEqual(normalized[4]["role"], "assistant")
+        self.assertEqual(normalized[4]["role"], "user")
 
         # Check content contains expected identifiers
         self.assertIn("analyst", normalized[0]["content"])
@@ -512,7 +512,7 @@ class MultiAgentNormalizationTests(unittest.TestCase):
 
         # Fourth item: agent_message -> message with subagent_ prefix
         self.assertEqual(normalized[3]["type"], "message")
-        self.assertEqual(normalized[3]["role"], "assistant")
+        self.assertEqual(normalized[3]["role"], "user")
         self.assertIn("[subagent_researcher]", normalized[3]["content"])
         self.assertIn("Found some data", normalized[3]["content"])
 
@@ -574,7 +574,7 @@ class MultiAgentNormalizationTests(unittest.TestCase):
         self.assertIn("returned", normalized[1]["content"])
 
         self.assertEqual(normalized[2]["type"], "message")
-        self.assertEqual(normalized[2]["role"], "assistant")
+        self.assertEqual(normalized[2]["role"], "user")
         self.assertIn("[subagent_subagent]", normalized[2]["content"])
 
     def test_multi_agent_v2_passthrough_non_dict_items(self):
@@ -687,7 +687,7 @@ class MultiAgentNormalizationTests(unittest.TestCase):
         self.assertEqual(normalized[1]["role"], "user")
         self.assertEqual(normalized[2]["role"], "user")
         self.assertEqual(normalized[3]["role"], "user")
-        self.assertEqual(normalized[4]["role"], "assistant")
+        self.assertEqual(normalized[4]["role"], "user")
 
         # Check content contains expected identifiers
         self.assertIn("analyst", normalized[0]["content"])
@@ -816,7 +816,7 @@ class MultiAgentNormalizationTests(unittest.TestCase):
         ]
         normalized = _normalize_multi_agent_items(inputs)
 
-        self.assertEqual(normalized[0]["role"], "assistant")
+        self.assertEqual(normalized[0]["role"], "user")
         self.assertIn("Review the provider docs.", normalized[0]["content"])
         for token in ("input_text", "encrypted_content", "Message Type:", "subagent: ["):
             self.assertNotIn(token, normalized[0]["content"])
@@ -856,6 +856,45 @@ class MultiAgentNormalizationTests(unittest.TestCase):
         self.assertNotIn("[END_OF_MESSAGE]", normalized[0]["content"])
         self.assertIn("Return the list of files found.", normalized[1]["content"])
         self.assertNotIn("[END_OF_MESSAGE]", normalized[1]["content"])
+
+    def test_agent_message_maps_to_user_role(self):
+        """Synthetic subagent speech is received history, never a Mistral prefill."""
+        from responses_native import _normalize_multi_agent_items
+
+        inputs = [
+            {"type": "agent_message", "agent": "researcher", "role": "assistant",
+             "content": "Found some data"},
+            {"type": "agent_message", "agent": "writer", "content": "Draft done"},
+        ]
+        normalized = _normalize_multi_agent_items(inputs)
+
+        for item in normalized:
+            self.assertEqual(item["type"], "message")
+            self.assertEqual(item["role"], "user")
+        self.assertIn("[subagent_researcher]", normalized[0]["content"])
+        self.assertIn("[subagent_writer]", normalized[1]["content"])
+
+    def test_agent_message_prefix_is_idempotent(self):
+        """Echoed attributions collapse to a single prefix instead of stacking."""
+        from responses_native import _normalize_multi_agent_items
+
+        inputs = [
+            {"type": "agent_message", "agent": "subagent", "role": "assistant",
+             "content": "[subagent_subagent]: [subagent_subagent]: Analyze AGENTS.md"},
+            {"type": "agent_message", "agent": "subagent", "role": "assistant",
+             "content": "[subagent_subagent2]: Review the Source/ directory"},
+            {"type": "agent_message", "agent": "researcher", "role": "assistant",
+             "content": "  [Subagent_Researcher] :  Found some data"},
+        ]
+        normalized = _normalize_multi_agent_items(inputs)
+
+        self.assertEqual(
+            normalized[0]["content"], "[subagent_subagent]: Analyze AGENTS.md")
+        self.assertEqual(
+            normalized[1]["content"],
+            "[subagent_subagent]: Review the Source/ directory")
+        self.assertEqual(
+            normalized[2]["content"], "[subagent_researcher]: Found some data")
 
 
 if __name__ == "__main__":
