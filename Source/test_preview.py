@@ -1,6 +1,8 @@
 """Preview namespace and metadata regression checks; no real accounts used."""
+import ast
 import json
 from pathlib import Path
+import re
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -43,6 +45,37 @@ class PreviewTests(unittest.TestCase):
         self.assertEqual(entry["display_name"], "GPT OSS · 120B Cloud")
         kimi = project_catalogue("kimi", {"models": [{"id": "k3", "display_name": "K3"}]}, settings)[0]
         self.assertEqual(kimi["display_name"], "K3")
+
+    def test_worker_bundle_lists_every_local_import(self):
+        # The Preview app runs worker/gateway.py from its bundle, not from
+        # this checkout. A worker module forgotten in build.sh bricks the
+        # shipped gateway with ModuleNotFoundError, so the bundle list must
+        # cover the import closure of everything it ships.
+        source = Path(__file__).with_name("build.sh").read_text()
+        match = re.search(r"^for module in ([^;]+); do", source, re.MULTILINE)
+        self.assertIsNotNone(match, "build.sh worker module list not found")
+        listed = set(match.group(1).split())
+        self.assertIn("gateway", listed)
+        for module in sorted(listed):
+            self.assertTrue(
+                Path(__file__).with_name(module + ".py").is_file(),
+                f"build.sh lists {module} but Source/{module}.py is missing",
+            )
+        for module in sorted(listed):
+            tree = ast.parse(Path(__file__).with_name(module + ".py").read_text())
+            for node in ast.walk(tree):
+                names = []
+                if isinstance(node, ast.Import):
+                    names = [alias.name.split(".")[0] for alias in node.names]
+                elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                    names = [node.module.split(".")[0]]
+                for name in names:
+                    if Path(__file__).with_name(name + ".py").is_file():
+                        self.assertIn(
+                            name, listed,
+                            f"{module}.py imports sibling {name}, "
+                            f"which build.sh does not bundle",
+                        )
 
     def test_expired_mistral_ids_are_omitted_without_inference(self):
         cards = [{"id": name, "capabilities": {"completion_chat": True}, "max_context_length": 8192, **fields}
