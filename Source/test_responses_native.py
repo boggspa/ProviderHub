@@ -837,6 +837,26 @@ class MultiAgentNormalizationTests(unittest.TestCase):
         self.assertIn("Guide written.", normalized[1]["content"])
         self.assertIn("Working on it.", normalized[2]["content"])
 
+    def test_envelope_footer_is_stripped_not_forwarded(self):
+        """The trailing [END_OF_MESSAGE] frame is harness framing, not task content."""
+        from responses_native import _normalize_multi_agent_items
+
+        inputs = [
+            {"type": "multi_agent_call", "call_id": "call_1", "agent": "doc_explorer",
+             "arguments": [{"type": "input_text",
+                            "text": "Message Type: NEW_TASK\nTask name: /root/doc_explorer\nPayload:\n"},
+                           {"type": "encrypted_content",
+                            "encrypted_content": "Explore the repository.\n[END_OF_MESSAGE]"}]},
+            {"type": "agent_message", "agent": "doc_explorer", "role": "assistant",
+             "content": "Return the list of files found. [END_OF_MESSAGE]"},
+        ]
+        normalized = _normalize_multi_agent_items(inputs)
+
+        self.assertIn("Explore the repository.", normalized[0]["content"])
+        self.assertNotIn("[END_OF_MESSAGE]", normalized[0]["content"])
+        self.assertIn("Return the list of files found.", normalized[1]["content"])
+        self.assertNotIn("[END_OF_MESSAGE]", normalized[1]["content"])
+
 
 if __name__ == "__main__":
     unittest.main()

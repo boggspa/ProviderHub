@@ -63,10 +63,31 @@ _TASK_HEADER_PREFIXES = ("Message Type:", "Task name:", "Sender:", "Payload:")
 _SUBAGENT_ECHO_PREFIX = "subagent:"
 _MAX_WIRE_DEPTH = 5
 
+# Codex typed envelopes (NEW_TASK/MESSAGE/FINAL_ANSWER) also carry a trailing
+# end-of-message frame. Like the routing headers it is harness framing, not
+# task content, and weaker models echo it back into history verbatim.
+_WIRE_FOOTER = "[END_OF_MESSAGE]"
+
 
 def _strip_task_header(text):
-    """Strip Codex NEW_TASK routing header lines (may return ""; caller falls back)."""
-    kept = [line for line in text.splitlines() if not line.strip().startswith(_TASK_HEADER_PREFIXES)]
+    """Strip Codex envelope headers and the end-of-message frame.
+
+    Drops routing header lines plus a trailing [END_OF_MESSAGE] marker,
+    whether it stands on its own line or trails the final content line
+    (may return ""; caller falls back).
+    """
+    kept = []
+    for line in text.splitlines():
+        if line.strip().startswith(_TASK_HEADER_PREFIXES):
+            continue
+        stripped = line.strip()
+        if stripped == _WIRE_FOOTER:
+            continue
+        if stripped.endswith(_WIRE_FOOTER):
+            line = line[: line.rfind(_WIRE_FOOTER)].rstrip()
+            if not line.strip():
+                continue
+        kept.append(line)
     return "\n".join(kept).strip()
 
 
