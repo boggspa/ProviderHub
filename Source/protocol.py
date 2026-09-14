@@ -927,3 +927,44 @@ def validate_mistral_roles(payload: dict) -> None:
             f"Mistral API requires the last message role to be 'user', 'tool', or 'assistant' with prefix=True, "
             f"but got '{role}'. Start a new conversation."
         )
+
+
+def apply_mistral_prefix(payload: dict) -> dict:
+    """Mark a trailing bare assistant message as a Mistral prefill prefix.
+
+    Mistral only accepts a trailing assistant message with prefix=True;
+    anything else is a guaranteed HTTP 400. Synthetic history such as
+    subagent delegation events legitimately lands at the tail, so translate
+    it instead of failing. Assistant turns carrying tool calls are left
+    untouched so validation still rejects genuinely incomplete tool loops.
+    Mirrors the trailing system/developer skip in validate_mistral_roles.
+    Copy-on-write: the input payload is never mutated.
+    """
+    messages = payload.get("messages", [])
+    if not isinstance(messages, list) or not messages:
+        return payload
+    target_index = None
+    for index in range(len(messages) - 1, -1, -1):
+        msg = messages[index]
+        if isinstance(msg, dict) and msg.get("role") in {"system", "developer"}:
+            continue
+        target_index = index
+        break
+    if target_index is None:
+        return payload
+    last_message = messages[target_index]
+    if not isinstance(last_message, dict) or last_message.get("role") != "assistant":
+        return payload
+    if last_message.get("prefix", False):
+        return payload
+    if last_message.get("tool_calls"):
+        return payload
+    content = last_message.get("content", "")
+    blocks = content if isinstance(content, list) else []
+    if any(isinstance(block, dict) and block.get("type") == "tool_use" for block in blocks):
+        return payload
+    patched = dict(last_message)
+    patched["prefix"] = True
+    updated = list(messages)
+    updated[target_index] = patched
+    return {**payload, "messages": updated}

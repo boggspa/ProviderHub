@@ -974,5 +974,89 @@ class ChatPlanTests(unittest.TestCase):
         self.assertEqual(plan["body"]["max_tokens"], 2048)
 
 
+class MistralPrefixTests(unittest.TestCase):
+    def test_apply_prefix_marks_trailing_bare_assistant_and_validates(self):
+        from protocol import apply_mistral_prefix, validate_mistral_roles
+
+        payload = text_prompt(messages=[
+            {"role": "user", "content": "go"},
+            {"role": "assistant", "content": "[subagent_researcher (call_1) invoked with {}]"},
+        ])
+        original = copy.deepcopy(payload)
+        patched = apply_mistral_prefix(payload)
+        self.assertEqual(payload, original)
+        self.assertTrue(patched["messages"][-1]["prefix"])
+        validate_mistral_roles(patched)
+
+    def test_apply_prefix_skips_trailing_system_messages(self):
+        from protocol import apply_mistral_prefix, validate_mistral_roles
+
+        payload = text_prompt(messages=[
+            {"role": "assistant", "content": "tail"},
+            {"role": "system", "content": "interstitial"},
+        ])
+        patched = apply_mistral_prefix(payload)
+        self.assertTrue(patched["messages"][0]["prefix"])
+        self.assertNotIn("prefix", patched["messages"][1])
+        validate_mistral_roles(patched)
+
+    def test_apply_prefix_leaves_user_tool_and_tool_call_tails(self):
+        from bridge_core import BridgeError
+        from protocol import apply_mistral_prefix, validate_mistral_roles
+
+        for tail in (
+            [{"role": "user", "content": "hi"}],
+            [{"role": "assistant", "content": [
+                {"type": "text", "text": "calling"},
+                {"type": "tool_use", "id": "tu_1", "name": "read", "input": {}},
+            ]}],
+        ):
+            with self.subTest(tail=tail[0]["role"]):
+                payload = text_prompt(messages=tail)
+                self.assertEqual(apply_mistral_prefix(payload), payload)
+        pending_tool_call = text_prompt(messages=[
+            {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "tu_1", "name": "read", "input": {}},
+            ]},
+        ])
+        with self.assertRaises(BridgeError):
+            validate_mistral_roles(apply_mistral_prefix(pending_tool_call))
+
+    def test_mistral_wire_marks_trailing_assistant_as_prefix(self):
+        payload = text_prompt(messages=[
+            {"role": "user", "content": "go"},
+            {"role": "assistant", "content": "[subagent_coder (call_2) invoked with {}]"},
+        ])
+        plan = prepare_request("mistral", {}, "key", payload, "mistral-medium-latest", {})
+        self.assertTrue(plan["body"]["messages"][-1]["prefix"])
+
+    def test_mistral_wire_preserves_explicit_prefix_and_skips_tool_calls(self):
+        payload = text_prompt(messages=[
+            {"role": "user", "content": "go"},
+            {"role": "assistant", "content": "prefill", "prefix": True},
+        ])
+        plan = prepare_request("mistral", {}, "key", payload, "mistral-medium-latest", {})
+        self.assertTrue(plan["body"]["messages"][-1]["prefix"])
+        tool_tail = text_prompt(
+            messages=[
+                {"role": "user", "content": "read"},
+                {"role": "assistant", "content": [
+                    {"type": "tool_use", "id": "tu_1", "name": "read", "input": {}},
+                ]},
+            ],
+            tools=[{"name": "read", "description": "Read", "input_schema": {"type": "object"}}],
+        )
+        plan = prepare_request("mistral", {}, "key", tool_tail, "mistral-medium-latest", {})
+        self.assertNotIn("prefix", plan["body"]["messages"][-1])
+
+    def test_non_mistral_chat_wire_is_unchanged(self):
+        payload = text_prompt(messages=[
+            {"role": "user", "content": "go"},
+            {"role": "assistant", "content": "tail"},
+        ])
+        plan = prepare_request("grok", {}, "key", payload, "grok-4", {})
+        self.assertNotIn("prefix", plan["body"]["messages"][-1])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

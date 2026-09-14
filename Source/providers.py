@@ -1952,6 +1952,8 @@ def _translate_chat_payload(
                 item = {"role": role, "content": _compact_chat_content(pending)}
                 if calls:
                     item["tool_calls"] = list(calls)
+                if provider_id == "mistral" and message.get("prefix") is True:
+                    item["prefix"] = True
                 if trace is not None:
                     if role != "assistant" or trace_attached:
                         raise ProviderError("Verified reasoning does not identify one assistant message.")
@@ -2109,6 +2111,10 @@ def _translate_chat_payload(
         if body["stream"]:
             body["stream_options"] = {"include_usage": True}
     body["messages"] = repair_openai_tool_order(body["messages"])
+    if provider_id == "mistral" and body["messages"]:
+        last = body["messages"][-1]
+        if isinstance(last, dict) and last.get("role") == "assistant" and not last.get("tool_calls"):
+            last["prefix"] = True
     return body, name_map
 
 

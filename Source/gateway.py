@@ -41,7 +41,7 @@ from devin_agent import (DESCRIPTOR as DEVIN_DESCRIPTOR, DevinAgentError,
                          catalogue as devin_catalogue)
 from cerebras_replay import CerebrasReplayError, CerebrasStreamAdapter, sanitize_compacted_messages, sign_thinking, validate_messages
 from gemini_provider import GeminiError, GeminiStreamAdapter, translate_response as translate_gemini_response, _estimated_input_tokens as estimated_gemini_tokens
-from protocol import (StreamTranslator, apply_mapping_options, compact_conversation, compact_threshold, estimated_tokens, mapping_options_for, validate_mistral_roles,
+from protocol import (StreamTranslator, apply_mapping_options, apply_mistral_prefix, compact_conversation, compact_threshold, estimated_tokens, mapping_options_for, validate_mistral_roles,
                       model_catalog, resolve_model, rewrite_context_reminders, translate_request, translate_response)
 from responses_native import ResponseOwnership, handle_responses, NATIVE_PROVIDERS
 from codex_catalogue import catalogue_digest, choices as codex_choices, launch_settings as codex_launch_settings
@@ -142,8 +142,10 @@ class Runtime:
             raise BridgeError(f"This conversation is above the provider's reported {context:,}-token context limit.")
         if payload.get("model", "").endswith("[1m]") and (type(context) is not int or context < 1000000):
             raise BridgeError("A 1M context window has not been established for this route.")
-        # Validate Mistral-specific role requirements
+        # Translate a trailing bare assistant message to a Mistral prefill
+        # prefix first, then validate the remaining role requirements.
         if provider_id == "mistral":
+            payload = apply_mistral_prefix(payload)
             validate_mistral_roles(payload)
         rewritten = rewrite_context_reminders(payload, context, estimate)
         reminders_rewritten = rewritten is not payload
