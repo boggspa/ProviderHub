@@ -28,10 +28,12 @@ class EffortMapUnitTests(unittest.TestCase):
         self.assertEqual(MISTRAL_REASONING_EFFORTS, ["none", "low", "medium", "high", "max"])
         self.assertNotIn("xhigh", MISTRAL_REASONING_EFFORTS)
         self.assertNotIn("ultra", MISTRAL_REASONING_EFFORTS)
+        # The picker keeps all five ranks, but the wire collapses to the
+        # only two values the Mistral API accepts (anything else 400s).
         for requested, expected in (
-            ("none", "none"), ("minimal", "low"), ("low", "low"),
-            ("medium", "medium"), ("high", "high"),
-            ("xhigh", "max"), ("max", "max"), ("ultra", "max"),
+            ("none", "none"), ("minimal", "none"), ("low", "none"),
+            ("medium", "high"), ("high", "high"),
+            ("xhigh", "high"), ("max", "high"), ("ultra", "high"),
         ):
             self.assertEqual(map_effort(requested, MISTRAL_REASONING_EFFORTS, MISTRAL_EFFORT_ALIASES), expected)
 
@@ -126,9 +128,9 @@ class EffortMapUnitTests(unittest.TestCase):
 
 
 class EffortTransportTests(unittest.TestCase):
-    def test_mistral_forwards_vibe_ranks_instead_of_collapsing_to_none_high(self):
+    def test_mistral_collapses_vibe_ranks_to_wire_none_high(self):
         spec = {"reasoning": True, "effort_modes": list(MISTRAL_REASONING_EFFORTS)}
-        for requested, expected in (("low", "low"), ("medium", "medium"), ("max", "max"), ("xhigh", "max")):
+        for requested, expected in (("low", "none"), ("medium", "high"), ("max", "high"), ("xhigh", "high")):
             plan = prepare_request(
                 "mistral", {}, "key", text_prompt(output_config={"effort": requested}),
                 "mistral-medium-2508", spec,
@@ -153,7 +155,7 @@ class EffortTransportTests(unittest.TestCase):
         self.assertEqual(body["output_config"]["effort"], "high")
 
     def test_claude_translate_uses_vibe_ranks(self):
-        for requested, expected in (("low", "low"), ("medium", "medium"), ("xhigh", "max"), ("max", "max")):
+        for requested, expected in (("low", "none"), ("medium", "high"), ("xhigh", "high"), ("max", "high")):
             result, _ = translate_request(prompt(output_config={"effort": requested}), config())
             self.assertEqual(result["reasoning_effort"], expected)
             self.assertEqual(result["model"], "test-model")
