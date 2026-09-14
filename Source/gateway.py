@@ -116,16 +116,28 @@ class Runtime:
         estimate = estimate_fn(payload)
         # Compact before enforcing the hard window: Claude Desktop meters the
         # session at 200K/1M regardless of the selected route, so a small-window
-        # route would otherwise fail instead of trimming old turns first.
+        # route would otherwise fail instead of trimming old turns first. The
+        # threshold also reserves room for the requested output so input
+        # pressure cannot silently shrink the response below what the client
+        # asked for (effective request after the model's own output cap).
+        wanted_output = payload.get("max_tokens")
+        if type(wanted_output) is not int or wanted_output <= 0:
+            wanted_output = 4096
+        model_output_cap = spec.get("max_output")
+        if type(model_output_cap) is int and model_output_cap > 0:
+            wanted_output = min(wanted_output, model_output_cap)
         auto_compact = None
-        threshold = compact_threshold(context, options)
+        threshold = compact_threshold(context, options, reserve_output=wanted_output)
         if threshold is not None and estimate >= threshold:
             compacted_payload = compact_conversation(payload, threshold, estimate=estimate_fn)
             after = estimate_fn(compacted_payload)
             if after < estimate:
-                auto_compact = {"threshold": threshold, "estimated_before": estimate, "estimated_after": after}
+                auto_compact = {"threshold": threshold, "requested_output": wanted_output,
+                                "estimated_before": estimate, "estimated_after": after}
                 payload = compacted_payload
                 estimate = after
+                self.record("compacted", route, 200, {"estimated_before": auto_compact["estimated_before"],
+                                                      "estimated_after": after})
         if type(context) is int and estimate >= context:
             raise BridgeError(f"This conversation is above the provider's reported {context:,}-token context limit.")
         if payload.get("model", "").endswith("[1m]") and (type(context) is not int or context < 1000000):
@@ -178,7 +190,14 @@ class Runtime:
         if cerebras_repair is not None and cerebras_repair.get("repaired"):
             plan.setdefault("compatibility", {})["cerebras_history_repair"] = cerebras_repair
         if type(context) is int and provider_id != "gemini":
-            plan["body"]["max_tokens"] = min(plan["body"].get("max_tokens", 4096), max(1, context - estimate))
+            allowed_output = min(plan["body"].get("max_tokens", 4096), max(1, context - estimate))
+            plan["body"]["max_tokens"] = allowed_output
+            if allowed_output < wanted_output:
+                # Compaction could not free enough room (system/tools bound):
+                # record that the response was shrunk below the request so a
+                # later max_tokens truncation is not misread as a harness cap.
+                plan.setdefault("compatibility", {})["output_headroom_clamped"] = {
+                    "requested": wanted_output, "allowed": allowed_output}
         # The only override is an explicit in-process test-harness argument,
         # never a client request field or persisted provider setting.
         if self.upstream_url is not None:

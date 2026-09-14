@@ -113,8 +113,24 @@ def mapping_options_for(requested, settings: dict) -> dict:
     options = {"omit_system": False, "omit_tools": False, "compact_limit": None}
     if not isinstance(settings, dict):
         return options
-    slot = resolve_mapping_slot(requested, settings.get("mappings") or {})
+    mappings = settings.get("mappings") or {}
+    slot = resolve_mapping_slot(requested, mappings)
     if slot is None:
+        # A bare route shared by several slots is ambiguous for omit flags,
+        # which stay strict so ambiguity never drops harness fields. A
+        # compaction threshold can still apply safely: use the smallest one.
+        if isinstance(requested, str):
+            base = requested[:-4] if requested.endswith("[1m]") else requested
+            configured_all = settings.get("mapping_options") or {}
+            limits = []
+            for entry_slot, route in mappings.items():
+                entry = configured_all.get(entry_slot)
+                if route == base and isinstance(entry, dict):
+                    limit = entry.get("compact_limit")
+                    if type(limit) is int and limit > 0:
+                        limits.append(limit)
+            if limits:
+                options["compact_limit"] = min(limits)
         return options
     configured = (settings.get("mapping_options") or {}).get(slot) or {}
     if configured.get("omit_system") is True:
@@ -765,23 +781,33 @@ class StreamTranslator:
         return events + result
 
 
-def compact_threshold(context, options=None) -> int | None:
+def compact_threshold(context, options=None, *, reserve_output=None) -> int | None:
     """Return the estimated token count that triggers gateway-side compaction.
 
     An explicit per-slot ``compact_limit`` override always applies and clamps
     to the catalogue window, so small-window routes can compact earlier than
     Claude Desktop's own session meter would. Otherwise compaction starts at
-    85 percent of a known window larger than 10,000 tokens. Returns None when
-    no automatic compaction applies.
+    85 percent of a known window larger than 10,000 tokens. When
+    ``reserve_output`` names the requested output size, the threshold also
+    tightens to leave that much headroom, so input pressure cannot silently
+    shrink the response below what the client asked for. Absurd reservations
+    that would leave under 1,000 tokens are ignored. Returns None when no
+    automatic compaction applies.
     """
     if type(context) is not int or context <= 0:
         return None
     override = (options or {}).get("compact_limit")
     if type(override) is int and override > 0:
-        return min(override, context)
-    if context > 10000:
-        return int(context * 0.85)
-    return None
+        threshold = min(override, context)
+    elif context > 10000:
+        threshold = int(context * 0.85)
+    else:
+        return None
+    if type(reserve_output) is int and reserve_output > 0:
+        headroom = context - reserve_output
+        if headroom >= 1000:
+            threshold = min(threshold, headroom)
+    return threshold
 
 
 def compact_conversation(payload: dict, max_tokens: int, estimate=None) -> dict:

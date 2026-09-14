@@ -14,7 +14,7 @@ from unittest.mock import patch
 from bridge_core import (BridgeError, ClaudeProfile, PROFILE_ID, atomic_json, default_settings,
                          read_json, validate_settings)
 from gateway import Runtime, Server
-from protocol import (StreamTranslator, apply_mapping_options, compact_conversation, estimated_tokens, function_name,
+from protocol import (StreamTranslator, apply_mapping_options, compact_conversation, compact_threshold, estimated_tokens, function_name,
                       mapping_options_for, model_catalog, rewrite_context_reminders, tool_id,
                       translate_request, translate_response)
 from catalogue import build_catalogue, read_observations, route_specs
@@ -140,6 +140,32 @@ class ProtocolTests(unittest.TestCase):
         roles = [message["role"] for message in kept]
         for first, second in zip(roles, roles[1:]):
             self.assertNotEqual(first, second)
+
+    def test_compact_threshold_reserves_output_headroom(self):
+        self.assertEqual(compact_threshold(131072, {}, reserve_output=32000), 99072)
+        self.assertEqual(
+            compact_threshold(131072, {"compact_limit": 100000}, reserve_output=32000), 99072)
+        # A small request leaves the default threshold alone.
+        self.assertEqual(compact_threshold(131072, {}, reserve_output=64), int(131072 * 0.85))
+        # An absurd request cannot gut history below a usable floor.
+        self.assertEqual(compact_threshold(131072, {}, reserve_output=200000), int(131072 * 0.85))
+        self.assertIsNone(compact_threshold(None, {}, reserve_output=32000))
+        self.assertIsNone(compact_threshold(8000, {}, reserve_output=32000))
+
+    def test_mapping_options_compact_limit_falls_back_on_shared_route(self):
+        settings = config()
+        settings["mapping_options"] = {
+            "claude-fable-5": {"compact_limit": 100000},
+            "claude-opus-5": {"compact_limit": 80000},
+        }
+        # Every slot maps to test-model, so the bare route is ambiguous; the
+        # smallest threshold still applies.
+        self.assertEqual(mapping_options_for("test-model", settings)["compact_limit"], 80000)
+        self.assertEqual(mapping_options_for("claude-fable-5", settings)["compact_limit"], 100000)
+        # Omit flags stay strict: ambiguity never drops harness fields.
+        settings["mapping_options"]["claude-fable-5"]["omit_system"] = True
+        self.assertFalse(mapping_options_for("test-model", settings)["omit_system"])
+        self.assertTrue(mapping_options_for("claude-fable-5", settings)["omit_system"])
 
     def test_compact_conversation_drops_tool_results_for_dropped_calls(self):
         body = prompt(messages=[
@@ -537,6 +563,57 @@ class MockMistral(BaseHTTPRequestHandler):
         self.close_connection = True
 
 
+class CompactionPlanTests(unittest.TestCase):
+    """Server-less Runtime.plan coverage: no sockets, runs anywhere."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        atomic_json(self.root / "settings.json", config())
+        atomic_json(self.root / "catalog.json", {"schema_version": 2, "models": list(config()["_model_specs"].values())})
+        self.runtime = Runtime(self.root, "http://127.0.0.1:1/v1", key="TEST-SECRET-NEVER-LOG")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_plan_compaction_leaves_room_for_requested_output(self):
+        for spec in self.runtime.settings["_model_specs"].values():
+            spec["context"] = 131072
+        body = sized_conversation(60, 2600, max_tokens=32000)
+        body["messages"].append({"role": "user", "content": "continue"})
+        self.assertGreaterEqual(estimated_tokens(body), 99072)
+        plan = self.runtime.plan(body)
+        report = plan["compatibility"]["auto_compact"]
+        self.assertEqual(report["threshold"], 99072)
+        self.assertLessEqual(report["estimated_after"], 99072)
+        self.assertGreaterEqual(131072 - report["estimated_after"], 32000)
+        # Full requested output survives: no headroom clamp was needed.
+        self.assertEqual(plan["body"]["max_tokens"], 32000)
+        self.assertNotIn("output_headroom_clamped", plan.get("compatibility", {}))
+
+    def test_plan_records_output_headroom_clamp(self):
+        for spec in self.runtime.settings["_model_specs"].values():
+            spec["context"] = 8000
+        body = prompt(system="S" * 18000, max_tokens=2000)
+        estimate = estimated_tokens(body)
+        self.assertLess(estimate, 8000)
+        plan = self.runtime.plan(body)
+        note = plan["compatibility"]["output_headroom_clamped"]
+        self.assertEqual(note, {"requested": 2000, "allowed": 8000 - estimate})
+        self.assertEqual(plan["body"]["max_tokens"], 8000 - estimate)
+
+    def test_plan_records_compacted_activity_event(self):
+        for spec in self.runtime.settings["_model_specs"].values():
+            spec["context"] = 12000
+        body = sized_conversation(8, 2600)
+        body["messages"].append({"role": "user", "content": "continue"})
+        self.runtime.plan(body)
+        activity = (self.root / "activity.jsonl").read_text()
+        self.assertIn('"event": "compacted"', activity)
+        self.assertIn('"estimated_before"', activity)
+        self.assertIn('"estimated_after"', activity)
+
+
 class GatewayTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -677,6 +754,7 @@ class GatewayTests(unittest.TestCase):
         self.assertEqual(plan["compatibility"]["auto_compact"]["threshold"], 40000)
         # An override above the catalogue window clamps to the window instead
         # of disabling protection: an over-limit conversation still compacts.
+        # The 64 requested output tokens reserve headroom below the window.
         huge = sized_conversation(150, 2600)
         huge["messages"].append({"role": "user", "content": "continue"})
         self.assertGreaterEqual(estimated_tokens(huge), 240000)
@@ -684,7 +762,7 @@ class GatewayTests(unittest.TestCase):
             "claude-fable-5": {"compact_limit": 1000000},
         }
         clamped = self.runtime.plan(huge)
-        self.assertEqual(clamped["compatibility"]["auto_compact"]["threshold"], 240000)
+        self.assertEqual(clamped["compatibility"]["auto_compact"]["threshold"], 240000 - 64)
 
     def test_plan_rejects_conversation_that_cannot_compact(self):
         for spec in self.runtime.settings["_model_specs"].values():

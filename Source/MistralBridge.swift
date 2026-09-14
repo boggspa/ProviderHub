@@ -1118,7 +1118,7 @@ struct BridgeWindow: View {
                 } else {
                     ForEach(model.activity) { entry in
                         HStack(spacing: 10) {
-                            Image(systemName: entry.event == "completed" ? "checkmark.circle.fill" : entry.event == "cancelled" ? "stop.circle" : "exclamationmark.circle").foregroundStyle(entry.event == "completed" ? Color.green : .orange)
+                            Image(systemName: entry.event == "completed" ? "checkmark.circle.fill" : entry.event == "cancelled" ? "stop.circle" : entry.event == "compacted" ? "arrow.down.circle" : "exclamationmark.circle").foregroundStyle(entry.event == "completed" ? Color.green : entry.event == "compacted" ? Color.blue : .orange)
                             VStack(alignment: .leading, spacing: 4) { Text(model.modelLabel(entry.model)).font(.system(size: 12, weight: .medium)).help(entry.model); Text(entry.event.capitalized + (entry.status.map { " · HTTP \($0)" } ?? "")).font(.caption).foregroundStyle(.secondary) }
                             Spacer(); Text(String(entry.time.dropFirst(11).prefix(8))).font(.system(size: 10, design: .monospaced)).foregroundStyle(.tertiary)
                         }
