@@ -90,8 +90,14 @@ class GrokGatewayTests(unittest.TestCase):
     def test_provider_quota_error_preserves_status_and_redacts_key(self):
         self.start_gateway("grok", "grok-4.6", {"effort_modes": ["high"]})
         MockProvider.mode = "rate_limit"
-        status, raw, _ = self.request({"model": "claude-fable-5", "max_tokens": 50,
-                                       "messages": [{"role": "user", "content": "hello"}]})
+        # The gateway absorbs persistent pressure with backoff before
+        # surfacing 429; patch the delays so the round-trip fits the
+        # harness timeout. The asserted mapping is unchanged.
+        with patch("rate_limit.BACKOFF_BASE", 0.01), \
+                patch("rate_limit.BACKOFF_CAP", 0.05), \
+                patch("rate_limit.random.uniform", return_value=0):
+            status, raw, _ = self.request({"model": "claude-fable-5", "max_tokens": 50,
+                                           "messages": [{"role": "user", "content": "hello"}]})
         self.assertEqual(status, 429)
         self.assertNotIn(fixtures.PROVIDER_KEY, raw.decode())
 

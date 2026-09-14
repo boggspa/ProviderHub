@@ -691,7 +691,13 @@ class GatewayTests(unittest.TestCase):
 
     def test_rate_limit_and_token_estimate(self):
         MockMistral.mode = "rate_limit"
-        status, data, _ = self.request("POST", "/v1/messages", prompt())
+        # The gateway absorbs persistent pressure with backoff before
+        # surfacing 429; patch the delays so the round-trip fits the
+        # harness timeout. The asserted mapping is unchanged.
+        with patch("rate_limit.BACKOFF_BASE", 0.01), \
+                patch("rate_limit.BACKOFF_CAP", 0.05), \
+                patch("rate_limit.random.uniform", return_value=0):
+            status, data, _ = self.request("POST", "/v1/messages", prompt())
         self.assertEqual(status, 429)
         self.assertEqual(json.loads(data)["error"]["type"], "rate_limit_error")
         status, data, headers = self.request("POST", "/v1/messages/count_tokens", prompt())

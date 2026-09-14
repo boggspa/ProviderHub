@@ -134,7 +134,13 @@ class GeminiGatewayTests(unittest.TestCase):
         self.assertEqual(status, 502)
         self.assertIn(b"thought signature", raw)
         fixtures.MockProvider.mode = "rate_limit"
-        status, raw, _ = self.request(body)
+        # The gateway absorbs persistent pressure with backoff before
+        # surfacing 429; patch the delays so the round-trip fits the
+        # harness timeout. The asserted mapping is unchanged.
+        with patch("rate_limit.BACKOFF_BASE", 0.01), \
+                patch("rate_limit.BACKOFF_CAP", 0.05), \
+                patch("rate_limit.random.uniform", return_value=0):
+            status, raw, _ = self.request(body)
         self.assertEqual(status, 429)
         self.assertNotIn(fixtures.PROVIDER_KEY.encode(), raw)
         self.assertEqual(self.runtime.status()["completed"], 0)
