@@ -3,6 +3,7 @@ import copy
 import unittest
 
 from branding import BrandingError
+from effort_map import MISTRAL_NARROW_EFFORTS, MISTRAL_REASONING_EFFORTS
 from hub_config import (
     connection_signature,
     defaults,
@@ -327,6 +328,57 @@ class CataloguePresentationTests(unittest.TestCase):
         ]
         with self.assertRaisesRegex(ValueError, "conflicting specifications"):
             project_catalogue("mistral", {"models": rows}, settings)
+
+    def test_stale_snapshot_cannot_override_verified_mistral_ladders(self):
+        settings = self.settings("mistral/mistral-medium-2604")
+        rows = [
+            # Narrow-era bytes for full-ladder models: projection widens.
+            {"id": "mistral-medium-2604", "canonical_id": "mistral-medium",
+             "display_name": "Mistral Medium 3.5", "context": 262144,
+             "tools": True, "vision": True, "reasoning": True,
+             "effort_modes": ["none", "high"]},
+            {"id": "mistral-small-2603", "canonical_id": "mistral-small",
+             "display_name": "Mistral Small 4", "context": 262144,
+             "tools": True, "vision": True, "reasoning": True,
+             "effort_modes": ["none", "high"]},
+            {"id": "glm-5-2", "canonical_id": "glm-5-2",
+             "display_name": "GLM 5.2", "context": 262144,
+             "tools": True, "vision": True, "reasoning": True,
+             "effort_modes": ["none", "high"]},
+            # An opaque raw ID is rescued by its canonical and billing names.
+            {"id": "version-a", "canonical_id": "mistral-medium",
+             "display_name": "version-a",
+             "billing_model_name": "mistral-medium-3-5", "context": 262144,
+             "tools": True, "vision": True, "reasoning": True,
+             "effort_modes": []},
+            # Full-era bytes for narrow models: projection narrows back, so a
+            # stale snapshot cannot cause "reasoning_effort max" 400s.
+            {"id": "mistral-large-2512", "canonical_id": "mistral-large",
+             "display_name": "Mistral Large 3", "context": 262144,
+             "tools": True, "vision": True, "reasoning": True,
+             "effort_modes": ["none", "low", "medium", "high", "max"]},
+            {"id": "codestral-2508", "canonical_id": "codestral",
+             "display_name": "Codestral", "context": 262144,
+             "tools": True, "vision": False, "reasoning": True,
+             "effort_modes": ["none", "low", "medium", "high", "max"]},
+            # Non-reasoning models still advertise no ladder.
+            {"id": "mistral-small-2501", "canonical_id": "mistral-small",
+             "display_name": "Mistral Small", "context": 262144,
+             "tools": True, "vision": False, "reasoning": False,
+             "effort_modes": ["none", "high"]},
+        ]
+        by_id = {item["model_id"]: item["effort_modes"] for item in project_catalogue(
+            "mistral", {"source": "provider_api", "models": rows}, settings)}
+        full = list(MISTRAL_REASONING_EFFORTS)
+        narrow = list(MISTRAL_NARROW_EFFORTS)
+        for model_id in ("mistral-medium-2604", "mistral-small-2603", "glm-5-2",
+                         "version-a"):
+            with self.subTest(model_id=model_id):
+                self.assertEqual(by_id[model_id], full)
+        for model_id in ("mistral-large-2512", "codestral-2508"):
+            with self.subTest(model_id=model_id):
+                self.assertEqual(by_id[model_id], narrow)
+        self.assertEqual(by_id["mistral-small-2501"], [])
 
     def test_catalogue_cannot_claim_another_provider_identity(self):
         settings = self.settings("mistral/model-a")

@@ -11,6 +11,7 @@ from effort_map import (
     cap_high_end,
     map_effort,
     mistral_effort_modes,
+    mistral_ladder_for_model,
     ollama_effort_modes,
 )
 from providers import discover, prepare_request
@@ -18,7 +19,7 @@ from test_providers import text_prompt
 from protocol import translate_request
 from test_bridge import config, prompt
 from codex_catalogue import project_codex
-from hub_config import defaults
+from hub_config import defaults, project_catalogue
 from bridge_core import SLOTS
 
 
@@ -59,9 +60,14 @@ class EffortMapUnitTests(unittest.TestCase):
 
     def test_mistral_effort_ladders_are_model_specific(self):
         # Full Off | Low | Medium | High | Max ladder: GLM 5.2 (Mistral hosted),
-        # Mistral Medium 3.5, Mistral Small 4.
-        for identifier in ("glm-5-2", "mistral-medium-latest", "mistral-medium-3-5",
-                           "mistral-small-2603", "mistral-small-4"):
+        # Mistral Medium 3.5, Mistral Small 4. Includes the versioned API IDs
+        # from Mistral's model cards and qualified hub routes.
+        for identifier in ("glm-5-2", "zai-glm-5-2", "mistral-medium-latest",
+                           "mistral-medium-3", "mistral-medium-3-5",
+                           "mistral-medium-3-5-26-04", "mistral-medium-2604",
+                           "mistral-small-latest", "mistral-small-2603",
+                           "mistral-small-4", "mistral/mistral-medium-2604",
+                           "mistral/glm-5-2"):
             with self.subTest(identifier=identifier):
                 self.assertEqual(
                     mistral_effort_modes(identifier, True),
@@ -90,6 +96,33 @@ class EffortMapUnitTests(unittest.TestCase):
         # Non-reasoning models advertise no ladder at all.
         self.assertEqual(mistral_effort_modes("mistral-large-2512", False), [])
         self.assertEqual(mistral_effort_modes("mistral-large-2512", None), [])
+
+    def test_ladder_for_model_checks_every_catalogue_name(self):
+        # An opaque raw ID must not narrow a full ladder when the card's other
+        # names (canonical, billing, advertised) identify it, and nothing may
+        # widen a narrow model.
+        full = list(MISTRAL_REASONING_EFFORTS)
+        narrow = list(MISTRAL_NARROW_EFFORTS)
+        self.assertEqual(
+            mistral_ladder_for_model(
+                "version-a", True,
+                ("mistral-medium", "mistral-medium-3-5", "Mistral Medium 3.5")),
+            full)
+        self.assertEqual(
+            mistral_ladder_for_model("opaque-id", True, ("mistral-small-2603",)),
+            full)
+        self.assertEqual(
+            mistral_ladder_for_model("opaque-id", True, ("glm-5-2",)), full)
+        self.assertEqual(
+            mistral_ladder_for_model("mistral-medium-2604", True), full)
+        self.assertEqual(
+            mistral_ladder_for_model(
+                "mistral-large-2512", True, ("mistral-large",)), narrow)
+        self.assertEqual(mistral_ladder_for_model("opaque-id", True, ()), narrow)
+        self.assertEqual(
+            mistral_ladder_for_model("opaque-id", True, (None, "")), narrow)
+        self.assertEqual(mistral_ladder_for_model("mistral-medium-2604", False), [])
+        self.assertEqual(mistral_ladder_for_model("mistral-medium-2604", None), [])
 
 
 class EffortTransportTests(unittest.TestCase):
@@ -142,6 +175,29 @@ class EffortTransportTests(unittest.TestCase):
             [entry["effort"] for entry in row["supported_reasoning_levels"]],
             ["none", "low", "high", "max", "ultra"],
         )
+
+    def test_stale_narrow_snapshot_still_projects_full_medium_ladder(self):
+        settings = defaults(SLOTS, "mistral-medium-2604")
+        settings["codex_model"] = "mistral/mistral-medium-2604"
+        stale = {"models": [{
+            "id": "mistral-medium-2604", "canonical_id": "mistral-medium",
+            "display_name": "Mistral Medium 3.5",
+            "billing_model_name": "mistral-medium-3-5",
+            "aliases": ["mistral-medium-2604", "mistral-medium-latest"],
+            "context": 262144, "tools": True, "vision": True,
+            "reasoning": True,
+            # Narrow-era snapshot bytes: projection must re-derive the
+            # Vibe-verified ladder instead of trusting them.
+            "effort_modes": ["none", "high"],
+            "fast_mode": False,
+        }]}
+        inventory = {"models": project_catalogue("mistral", stale, settings)}
+        row = project_codex(settings, inventory)["models"][0]
+        self.assertEqual(
+            [entry["effort"] for entry in row["supported_reasoning_levels"]],
+            ["none", "low", "medium", "high", "max", "ultra"],
+        )
+        self.assertEqual(row["default_reasoning_level"], "high")
 
     def test_ollama_show_thinking_models_get_effort_modes(self):
         def transport(plan):

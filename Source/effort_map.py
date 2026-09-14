@@ -20,21 +20,55 @@ MISTRAL_EFFORT_ALIASES = {
 
 # Mistral reasoning ladders are model-specific, not a single shared ladder.
 # GLM 5.2 (Mistral hosted), Mistral Medium 3.5 and Mistral Small 4 expose the
-# full Off | Low | Medium | High | Max ladder; every other Mistral reasoning
-# model (Mistral Large 3, Codestral, Leanstral, ...) follows the Off | High
-# principle. An earlier spike tested only two API models and wrongly assumed
-# every Mistral model accepted only Off | High.
+# full Off | Low | Medium | High | Max ladder — the Vibe CLI /thinking picker
+# lists exactly Off, Low, Medium, High, Max for Mistral Medium 3.5, with no
+# xhigh. Every other Mistral reasoning model (Mistral Large 3, Codestral,
+# Leanstral, ...) follows the Off | High principle. An earlier spike tested
+# only two API models and wrongly assumed every Mistral model accepted only
+# Off | High.
 MISTRAL_NARROW_EFFORTS = ["none", "high"]
+
+
+def _mistral_full_ladder_name(name: str) -> bool:
+    """True when one model name identifies a full-ladder Mistral model.
+
+    Covers hyphenated API IDs (mistral-medium-2604, mistral-medium-3-5,
+    mistral-small-2603, mistral-medium-latest, glm-5-2, ...), spaced display
+    names (Mistral Medium 3.5), and the Mistral-hosted Z.ai GLM builds.
+    """
+    normalized = name.replace(" ", "-").replace("_", "-")
+    return ("glm" in normalized or "mistral-medium" in normalized
+            or "mistral-small" in normalized)
 
 
 def mistral_effort_modes(identifier: str, reasoning: bool | None) -> list[str]:
     if reasoning is not True:
         return []
     name = identifier.rsplit("/", 1)[-1].casefold()
-    # Match both hyphenated and spaced model names (e.g., "mistral-medium-3-5" or "Mistral Medium 3.5")
-    normalized = name.replace(" ", "-")
-    if "glm" in normalized or "mistral-medium" in normalized or "mistral-small" in normalized:
+    if _mistral_full_ladder_name(name):
         return list(MISTRAL_REASONING_EFFORTS)
+    return list(MISTRAL_NARROW_EFFORTS)
+
+
+def mistral_ladder_for_model(identifier: str, reasoning: bool | None,
+                             extra_names=()) -> list[str]:
+    """Authoritative ladder for one Mistral catalogue model.
+
+    Discovery snapshots are trusted verbatim downstream, so snapshot bytes
+    written before the per-model ladders would otherwise keep overriding the
+    corrected ladder. This re-derives the ladder from model identity across
+    every name the card carries (raw id, canonical id, billing id, advertised
+    name), so a stale snapshot can neither narrow a verified full ladder nor
+    widen a narrow one. Full wins when any name matches: every known
+    full-ladder name is unambiguous.
+    """
+    if reasoning is not True:
+        return []
+    for candidate in (identifier, *extra_names):
+        if not isinstance(candidate, str) or not candidate:
+            continue
+        if _mistral_full_ladder_name(candidate.rsplit("/", 1)[-1].casefold()):
+            return list(MISTRAL_REASONING_EFFORTS)
     return list(MISTRAL_NARROW_EFFORTS)
 
 # DeepSeek thinking-mode docs: Claude/ChatGPT ranks onto none/low/high/max.

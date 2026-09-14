@@ -12,6 +12,7 @@ import re
 
 from providers import PROVIDERS, provider_defaults, validate_connection
 from branding import resolve_presentation, validate_overrides
+from effort_map import mistral_ladder_for_model
 from model_names import PINNED_LABELS, friendly_model_name
 
 MODEL_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:/+\-]{0,299}\Z")
@@ -334,6 +335,16 @@ def project_catalogue(provider_id: str, inventory: dict, settings: dict, observa
                   if preferred in identifiers), group["entries"][0]),
         )
         item = copy.deepcopy(source)
+        if provider_id == "mistral":
+            # The cached discovery snapshot is trusted verbatim downstream
+            # (Hub UI, Codex projection, gateway request specs), so snapshot
+            # bytes from before the per-model ladders would otherwise keep
+            # overriding them without any refresh. Re-derive authoritatively
+            # from every name the card carries.
+            item["effort_modes"] = mistral_ladder_for_model(
+                preferred, item.get("reasoning"),
+                (item.get("canonical_id"), item.get("billing_model_name"),
+                 item.get("display_name")))
         route = qualify(provider_id, preferred)
         overrides = settings.get("branding_overrides", {})
         labels = overrides.get(provider_id, {}).get("modelLabels", {})
