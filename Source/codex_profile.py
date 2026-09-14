@@ -190,6 +190,12 @@ class CodexProfile:
             if multi_agent:
                 applied["default_subagent_model"] = selected
                 applied["default_subagent_reasoning_effort"] = selected_model.get("multi_agent_reasoning_effort")
+            # Inject the per-model auto-compact threshold so Claude Desktop
+            # compacts at the catalogue's 85%-of-context boundary instead of
+            # falling back to the provider-wide default (or the full window).
+            compact_limit = selected_model.get("auto_compact_token_limit")
+            if type(compact_limit) is int and compact_limit > 0:
+                applied["model_auto_compact_token_limit"] = compact_limit
             for key in ROOT_KEYS:
                 if key in applied:
                     document[key] = applied[key]
