@@ -149,12 +149,14 @@ class MockProvider(BaseHTTPRequestHandler):
             type(self).request_headers.append({key.lower(): value for key, value in self.headers.items()})
         return body
 
-    def send_json(self, status, value):
+    def send_json(self, status, value, headers=None):
         raw = json.dumps(value).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(raw)))
         self.send_header("Connection", "close")
+        for key, val in (headers or {}).items():
+            self.send_header(key, val)
         self.end_headers()
         self.wfile.write(raw)
         self.close_connection = True
@@ -182,6 +184,21 @@ class MockProvider(BaseHTTPRequestHandler):
             return
         if self.mode == "http_error":
             self.send_json(503, {"error": {"message": "mock overload"}})
+            return
+        if self.mode == "flaky_rate_limit":
+            # Fail twice with a provider Retry-After hint, then recover, so a
+            # single client request can prove the gateway absorbs transient
+            # pressure instead of forwarding it.
+            with type(self).lock:
+                seen = len(type(self).requests)
+            if seen <= 2:
+                self.send_json(429, {"error": {"message": "mock quota exhausted"}},
+                               headers={"Retry-After": "1"})
+                return
+            # Fall through to normal path routing below.
+        if self.mode == "exhausted_quota":
+            self.send_json(429, {"error": {"message": "mock monthly quota exhausted"}},
+                           headers={"Retry-After": "3600"})
             return
         if self.mode == "native_stream_error":
             self.send_sse([
@@ -599,23 +616,118 @@ class GatewayHubHTTPTests(unittest.TestCase):
             "max_tokens": 64,
             "messages": [{"role": "user", "content": "hello"}],
         }
-        for mode, expected_status, expected_type in (
-            ("rate_limit", 429, "rate_limit_error"),
-            ("http_error", 503, "overloaded_error"),
-        ):
-            with self.subTest(mode=mode):
-                MockProvider.mode = mode
-                status, raw, _ = self.request(payload)
-                self.assertEqual(status, expected_status)
-                result = json.loads(raw)
-                self.assertEqual(result["error"]["type"], expected_type)
-                self.assertNotIn(PROVIDER_KEY, raw.decode())
-                self.assertNotIn(self.runtime.token, raw.decode())
+        # Sustained pressure still reaches the client with the same mapping,
+        # but only after the gateway's own absorb-and-retry budget is spent.
+        # The delays are patched down; real backoff timing is unit-covered.
+        with patch("rate_limit.BACKOFF_BASE", 0.01), \
+                patch("rate_limit.BACKOFF_CAP", 0.05), \
+                patch("rate_limit.random.uniform", return_value=0):
+            for mode, expected_status, expected_type in (
+                ("rate_limit", 429, "rate_limit_error"),
+                ("http_error", 503, "overloaded_error"),
+            ):
+                with self.subTest(mode=mode):
+                    MockProvider.mode = mode
+                    status, raw, response_headers = self.request(payload)
+                    self.assertEqual(status, expected_status)
+                    result = json.loads(raw)
+                    self.assertEqual(result["error"]["type"], expected_type)
+                    self.assertNotIn(PROVIDER_KEY, raw.decode())
+                    self.assertNotIn(self.runtime.token, raw.decode())
+                    lowered = {key.lower(): value for key, value in response_headers.items()}
+                    self.assertGreaterEqual(int(lowered.get("retry-after", "0")), 1)
         status = self.runtime.status()
         self.assertEqual(status["failed"], 2)
         self.assertEqual(status["providers"]["deepseek"]["failed"], 2)
         log = (self.root / "activity.jsonl").read_text()
         self.assertNotIn(PROVIDER_KEY, log)
+
+    def test_transient_rate_limit_is_absorbed_with_backoff(self):
+        self.start_gateway("deepseek", "deepseek-flash", {"reasoning_history": "native"})
+        payload = {
+            "model": "claude-fable-5",
+            "max_tokens": 64,
+            "messages": [{"role": "user", "content": "hello"}],
+        }
+        MockProvider.mode = "flaky_rate_limit"
+        with patch("rate_limit.random.uniform", return_value=0):
+            status, raw, _ = self.request(payload, timeout=15)
+        self.assertEqual(status, 200, raw)
+        self.assertEqual(len(MockProvider.requests), 3)
+        self.assertEqual(self.runtime.status()["completed"], 1)
+        self.assertEqual(self.runtime.status()["failed"], 0)
+        log = (self.root / "activity.jsonl").read_text()
+        self.assertEqual(log.count('"event": "throttled"'), 2)
+        self.assertIn('"status": 429', log)
+
+    def test_long_retry_after_is_handed_back_not_absorbed(self):
+        self.start_gateway("deepseek", "deepseek-flash", {"reasoning_history": "native"})
+        payload = {
+            "model": "claude-fable-5",
+            "max_tokens": 64,
+            "messages": [{"role": "user", "content": "hello"}],
+        }
+        MockProvider.mode = "exhausted_quota"
+        status, raw, response_headers = self.request(payload)
+        self.assertEqual(status, 429, raw)
+        # One upstream hit only: an hour-long quota wait must not pin a
+        # worker slot, so the provider's own hint is passed straight back.
+        self.assertEqual(len(MockProvider.requests), 1)
+        lowered = {key.lower(): value for key, value in response_headers.items()}
+        self.assertEqual(lowered.get("retry-after"), "3600")
+
+    def test_ninth_request_queues_for_a_slot(self):
+        self.start_gateway("deepseek", "deepseek-flash", {"reasoning_history": "native"})
+        payload = {
+            "model": "claude-fable-5",
+            "max_tokens": 64,
+            "messages": [{"role": "user", "content": "hello"}],
+        }
+        for _ in range(8):
+            self.assertTrue(self.runtime.semaphore.acquire(blocking=False))
+        outcome = {}
+
+        def ninth():
+            try:
+                outcome["result"] = self.request(payload, timeout=10)
+            except Exception as exc:
+                outcome["error"] = exc
+
+        with patch("gateway.SLOT_WAIT_TIMEOUT", 5):
+            thread = threading.Thread(target=ninth)
+            thread.start()
+            time.sleep(0.5)
+            # Still queued: the old fail-fast 429 would have answered by now.
+            self.assertNotIn("result", outcome)
+            self.assertNotIn("error", outcome)
+            self.runtime.semaphore.release()
+            thread.join(timeout=10)
+            for _ in range(7):
+                self.runtime.semaphore.release()
+        self.assertNotIn("error", outcome)
+        status, raw, _ = outcome["result"]
+        self.assertEqual(status, 200, raw)
+
+    def test_slot_wait_expiry_returns_retry_after(self):
+        self.start_gateway("deepseek", "deepseek-flash", {"reasoning_history": "native"})
+        payload = {
+            "model": "claude-fable-5",
+            "max_tokens": 64,
+            "messages": [{"role": "user", "content": "hello"}],
+        }
+        for _ in range(8):
+            self.assertTrue(self.runtime.semaphore.acquire(blocking=False))
+        try:
+            with patch("gateway.SLOT_WAIT_TIMEOUT", 0.2):
+                status, raw, response_headers = self.request(payload)
+        finally:
+            for _ in range(8):
+                self.runtime.semaphore.release()
+        self.assertEqual(status, 429)
+        result = json.loads(raw)
+        self.assertEqual(result["error"]["type"], "rate_limit_error")
+        lowered = {key.lower(): value for key, value in response_headers.items()}
+        self.assertGreaterEqual(int(lowered.get("retry-after", "0")), 1)
 
     def test_native_stream_error_and_client_cancellation_do_not_record_success(self):
         self.start_gateway("deepseek", "deepseek-flash", {"reasoning_history": "native"})

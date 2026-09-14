@@ -31,6 +31,9 @@ from catalogue_lifecycle import (CataloguePreparationError, catalogue_fingerprin
 from catalogue import build_catalogue, read_observations
 from hub_config import connection_signature, provider_presentations, qualify, split_route
 from providers import PROVIDERS, prepare_request, ProviderError
+from rate_limit import (MAX_UPSTREAM_ATTEMPTS, RETRYABLE_STATUSES, SLOT_RETRY_AFTER, SLOT_WAIT_TIMEOUT,
+                        THROTTLE_CAP, ProviderThrottle, parse_retry_after, wait_for_slot)
+from spawn_depth import filter_spawn_tools
 from devin_agent import (DESCRIPTOR as DEVIN_DESCRIPTOR, DevinAgentError,
                          create_session as devin_create_session,
                          list_sessions as devin_list_sessions,
@@ -71,6 +74,7 @@ class Runtime:
         self.credential_cache = {}
         self.lock = threading.Lock()
         self.semaphore = threading.BoundedSemaphore(8)
+        self.throttle = ProviderThrottle()
         self.active = 0
         self.completed = 0
         self.failed = 0
@@ -273,6 +277,15 @@ def error_type(status):
             404: "not_found_error", 413: "request_too_large", 429: "rate_limit_error", 503: "overloaded_error"}.get(status, "api_error")
 
 
+def _client_gone(handler):
+    """True when the local client disconnected (socket peek only, like the monitors)."""
+    try:
+        ready, _, _ = select.select([handler.connection], [], [], 0)
+        return bool(ready and handler.connection.recv(1, socket.MSG_PEEK | socket.MSG_DONTWAIT) == b"")
+    except (OSError, ValueError):
+        return True
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version = "ProviderHub/0.5.3"
@@ -301,8 +314,9 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(encoded)
         self.close_connection = True
 
-    def error(self, status, message):
-        self.json_response(status, {"type": "error", "error": {"type": error_type(status), "message": message}})
+    def error(self, status, message, headers=None):
+        self.json_response(status, {"type": "error", "error": {"type": error_type(status), "message": message}},
+                           headers=headers)
 
     # ------------------------------------------------------------------
     # Devin agent-session endpoints. Devin is a session-based agent
@@ -498,6 +512,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         path = urllib.parse.urlsplit(self.path).path
         if path == "/v1/responses":
+            # Fail-open spawn-depth middleware: without the provider flag it
+            # hands the body through byte-identical for normal handling.
+            filter_spawn_tools(self)
             return handle_responses(self)
         if path == "/v1/agents/sessions":
             return self._handle_create_agent_session()
@@ -545,8 +562,16 @@ class Handler(BaseHTTPRequestHandler):
         except (ValueError, TypeError, KeyError, AttributeError, BridgeError) as exc:
             self.error(400, str(exc))
             return
-        if not self.runtime.semaphore.acquire(blocking=False):
-            self.error(429, "Eight requests are already active. Try again shortly.")
+        # Queue for a worker slot instead of failing fast: subagent bursts
+        # briefly exceed the worker count by design, and every instant 429
+        # burns one of the client's own retries toward terminalisation.
+        if not wait_for_slot(self.runtime.semaphore, cancel=lambda: _client_gone(self),
+                             timeout=SLOT_WAIT_TIMEOUT):
+            if _client_gone(self):
+                self.runtime.record("cancelled", plan["route"])
+                return
+            self.error(429, "Eight requests are already active. Try again shortly.",
+                       headers={"Retry-After": str(SLOT_RETRY_AFTER)})
             return
         connection = None
         response = None
@@ -562,9 +587,6 @@ class Handler(BaseHTTPRequestHandler):
         try:
             with self.runtime.lock:
                 self.runtime.active += 1
-            connection, endpoint = self.runtime.upstream(plan["url"])
-            with self.runtime.lock:
-                self.runtime.connections.add(connection)
 
             def cancel_monitor():
                 while not closed.wait(.25):
@@ -579,10 +601,13 @@ class Handler(BaseHTTPRequestHandler):
                             disconnected.set()
                     if disconnected.is_set():
                         try:
-                            sock = connection.sock or upstream_socket
+                            # Retry backoff leaves no live connection between attempts.
+                            live = connection if connection is not None else None
+                            sock = (live.sock if live is not None else None) or upstream_socket
                             if sock:
                                 sock.shutdown(socket.SHUT_RDWR)
-                            connection.close()
+                            if live is not None:
+                                live.close()
                         except OSError:
                             pass
                         return
@@ -591,10 +616,23 @@ class Handler(BaseHTTPRequestHandler):
             monitor.start()
             encoded = json.dumps(upstream, ensure_ascii=False).encode()
             headers = {**plan["headers"], "Accept": "text/event-stream" if upstream.get("stream") else "application/json"}
-            connection.request("POST", endpoint, encoded, headers)
-            response = connection.getresponse()
-            upstream_socket = connection.sock or getattr(getattr(response.fp, "raw", None), "_sock", None)
-            if response.status != 200:
+            attempts = 0
+            while True:
+                # Serialize on the shared provider gate: a sibling's 429 parks
+                # this route, so bursts pause here instead of firing requests
+                # a depleted quota is certain to reject.
+                if not self.runtime.throttle.wait(plan["provider_id"], cancel=lambda: _client_gone(self)):
+                    self.runtime.record("cancelled", plan["route"])
+                    return
+                connection, endpoint = self.runtime.upstream(plan["url"])
+                with self.runtime.lock:
+                    self.runtime.connections.add(connection)
+                connection.request("POST", endpoint, encoded, headers)
+                response = connection.getresponse()
+                upstream_socket = connection.sock or getattr(getattr(response.fp, "raw", None), "_sock", None)
+                if response.status == 200:
+                    self.runtime.throttle.note_success(plan["provider_id"])
+                    break
                 raw = response.read(65536)
                 try:
                     data = json.loads(raw)
@@ -606,10 +644,33 @@ class Handler(BaseHTTPRequestHandler):
                 if plan["private_key"]:
                     detail = detail.replace(plan["private_key"], "[redacted]")
                 detail = detail[:700]
+                retry_after = parse_retry_after(response.getheader("Retry-After")) if response.status in RETRYABLE_STATUSES else None
+                if (response.status in RETRYABLE_STATUSES
+                        and attempts + 1 < MAX_UPSTREAM_ATTEMPTS
+                        and (retry_after is None or retry_after <= THROTTLE_CAP)):
+                    # Transient provider pressure: absorb it in-bridge with
+                    # backoff instead of burning one of the client's retries.
+                    # Absorbed attempts are logged, never counted as failures.
+                    attempts += 1
+                    self.runtime.throttle.note_limit(plan["provider_id"], retry_after, attempts - 1)
+                    self.runtime.record("throttled", plan["route"], response.status)
+                    response.close()
+                    connection.close()
+                    with self.runtime.lock:
+                        self.runtime.connections.discard(connection)
+                    connection = None
+                    response = None
+                    upstream_socket = None
+                    continue
                 message = f"{plan['provider_name']} returned HTTP {response.status}" + (": " + detail if detail else ".")
                 unavailable = response.status in {400, 404, 410} and any(term in detail.lower() for term in ("invalid model", "model not found", "model has been deprecated", "model is no longer"))
                 self.runtime.record("error", plan["route"], response.status, model_unavailable=unavailable)
-                self.error(response.status if response.status in {400, 401, 402, 403, 404, 413, 429, 500, 502, 503, 504} else 502, message)
+                terminal_headers = None
+                if response.status in RETRYABLE_STATUSES:
+                    hint = retry_after if retry_after is not None else SLOT_RETRY_AFTER
+                    terminal_headers = {"Retry-After": str(max(1, int(hint)))}
+                self.error(response.status if response.status in {400, 401, 402, 403, 404, 413, 429, 500, 502, 503, 504} else 502, message,
+                           headers=terminal_headers)
                 return
             if not upstream.get("stream"):
                 raw = response.read(MAX_BODY + 1)
