@@ -180,7 +180,13 @@ def model_catalog(settings: dict):
                "created_at": "2026-09-12T00:00:00Z",
                "anthropic_family_tier": family, "is_family_default": default}
         if type(context) is int:
-            row.update(max_tokens=context, max_input_tokens=context, supports_1m=context >= 1000000)
+            # Use the per-model auto-compact threshold as max_input_tokens so
+            # Claude Desktop compacts at the hub's catalogue boundary (typically
+            # 85%% of context) instead of waiting for the full window.  The
+            # gateway's server-side compaction handles the remaining headroom.
+            compact_limit = spec.get("auto_compact_token_limit")
+            input_limit = compact_limit if type(compact_limit) is int and 0 < compact_limit < context else context
+            row.update(max_tokens=context, max_input_tokens=input_limit, supports_1m=context >= 1000000)
         rows.append(row)
     return {"data": rows, "first_id": rows[0]["id"] if rows else None,
             "last_id": rows[-1]["id"] if rows else None, "has_more": False}
