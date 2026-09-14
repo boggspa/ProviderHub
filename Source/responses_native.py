@@ -54,6 +54,80 @@ class ResponseOwnership:
             atomic_json(self.path, self.records)
 
 
+def _normalize_multi_agent_items(input_list):
+    """Normalize Codex multi_agent_v2 history items to standard message items at ingress.
+    
+    Maps:
+    - multi_agent_call / subagent_call -> message (synthetic subagent invocation description)
+    - multi_agent_call_output / subagent_call_output -> message (synthetic subagent result description)
+    - agent_message -> message (with agent prefix)
+    
+    All multi-agent items become standard message items with role and string content,
+    ensuring they pass the Responses whitelist validation while preserving subagent
+    context for the model. Subagent aliases use the subagent_* naming convention.
+    """
+    if not isinstance(input_list, list):
+        return input_list
+    
+    normalized = []
+    for index, item in enumerate(input_list):
+        if not isinstance(item, dict):
+            normalized.append(item)
+            continue
+        
+        item_type = item.get("type", "message")
+        
+        # multi_agent_call / subagent_call -> message describing the subagent delegation
+        if item_type in ("multi_agent_call", "subagent_call"):
+            agent_name = item.get("agent") or item.get("recipient") or "agent"
+            call_id = item.get("call_id") or item.get("id") or f"subagent_call_{index}"
+            args = item.get("arguments") or item.get("input") or {}
+            # Stringify arguments to ensure content is always a string
+            args_str = json.dumps(args) if isinstance(args, (dict, list)) else str(args)
+            content = f"[subagent_{agent_name} ({call_id}) invoked with {args_str}]"
+            normalized.append({
+                "type": "message",
+                "role": "assistant",
+                "content": content,
+            })
+        # multi_agent_call_output / subagent_call_output -> message describing the subagent result
+        elif item_type in ("multi_agent_call_output", "subagent_call_output"):
+            call_id = item.get("call_id") or item.get("id") or f"subagent_call_{index}"
+            output = item.get("output") or item.get("result") or ""
+            # Stringify output to ensure content is always a string
+            output_str = json.dumps(output) if isinstance(output, (dict, list)) else str(output)
+            content = f"[subagent_{call_id} returned: {output_str}]"
+            normalized.append({
+                "type": "message",
+                "role": "user",
+                "content": content,
+            })
+        # agent_message -> message with agent prefix
+        elif item_type == "agent_message":
+            role = item.get("role") or "assistant"
+            if role not in {"user", "assistant", "system", "developer"}:
+                role = "assistant"
+            agent_name = item.get("agent") or item.get("sender") or "subagent"
+            content = item.get("content") or ""
+            # Guard: only add prefix if content is a string and doesn't already have it
+            if isinstance(content, str):
+                prefix = f"[subagent_{agent_name}]"
+                if not content.startswith(prefix):
+                    content = f"{prefix}: {content}" if content else prefix
+            else:
+                # Stringify non-string content
+                content = f"{agent_name}: {json.dumps(content) if isinstance(content, (dict, list)) else str(content)}"
+            normalized.append({
+                "type": "message",
+                "role": role,
+                "content": content,
+            })
+        else:
+            normalized.append(item)
+    
+    return normalized
+
+
 def prepare_native(runtime, payload):
     if not isinstance(payload, dict):
         raise BridgeError("The Responses request must be an object.")
@@ -90,9 +164,11 @@ def prepare_native(runtime, payload):
     if tools and spec.get("tools") is False:
         raise BridgeError("The selected model does not support tool calls.")
     if isinstance(body["input"], list):
+        body["input"] = _normalize_multi_agent_items(body["input"])
         for item in body["input"]:
             if not isinstance(item, dict) or item.get("type", "message") not in {"message", "function_call", "function_call_output", "reasoning"}:
-                raise BridgeError("Unsupported Responses history item. Use the function-tool catalogue.")
+                offending_type = item.get("type", "unknown") if isinstance(item, dict) else type(item).__name__
+                raise BridgeError(f"Unsupported Responses history item '{offending_type}'. Use the function-tool catalogue.")
             content = item.get("content")
             # Ollama's Responses endpoint accepts or rejects images itself.
             # Catalogue vision is picker metadata, not a request interceptor.

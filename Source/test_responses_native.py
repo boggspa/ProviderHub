@@ -248,6 +248,479 @@ class NativeResponsesTests(unittest.TestCase):
         self.assertEqual(self.runtime.status()["active"], 0)
         self.assertIn('"event": "cancelled"', (self.root / "activity.jsonl").read_text())
 
+    def test_multi_agent_v2_items_are_normalized_to_message_items(self):
+        """Verify that Codex multi_agent_v2 history items are translated to standard message items at ingress."""
+        from responses_native import _normalize_multi_agent_items
+        
+        # Test multi_agent_call -> message with subagent_* alias
+        inputs = [
+            {"type": "message", "role": "user", "content": "Hello"},
+            {"type": "multi_agent_call", "call_id": "call_123", "agent": "researcher", "arguments": {"task": "research"}},
+            {"type": "multi_agent_call_output", "call_id": "call_123", "output": "Research complete"},
+            {"type": "agent_message", "agent": "researcher", "content": "Found some data", "role": "assistant"},
+            {"type": "function_call", "call_id": "fc_456", "name": "read_file", "arguments": '{}'},
+        ]
+        normalized = _normalize_multi_agent_items(inputs)
+        
+        self.assertEqual(len(normalized), 5)
+        
+        # First item: message passes through unchanged
+        self.assertEqual(normalized[0]["type"], "message")
+        self.assertEqual(normalized[0]["role"], "user")
+        self.assertEqual(normalized[0]["content"], "Hello")
+        
+        # Second item: multi_agent_call -> message with subagent_ alias
+        self.assertEqual(normalized[1]["type"], "message")
+        self.assertEqual(normalized[1]["role"], "assistant")
+        self.assertIn("subagent_researcher", normalized[1]["content"])
+        self.assertIn("invoked", normalized[1]["content"])
+        self.assertIn("research", normalized[1]["content"])
+        
+        # Third item: multi_agent_call_output -> message with subagent_ alias
+        self.assertEqual(normalized[2]["type"], "message")
+        self.assertEqual(normalized[2]["role"], "user")
+        self.assertIn("subagent_call_123", normalized[2]["content"])
+        self.assertIn("Research complete", normalized[2]["content"])
+        
+        # Fourth item: agent_message -> message with subagent_ prefix
+        self.assertEqual(normalized[3]["type"], "message")
+        self.assertEqual(normalized[3]["role"], "assistant")
+        self.assertIn("[subagent_researcher]", normalized[3]["content"])
+        self.assertIn("Found some data", normalized[3]["content"])
+        
+        # Fifth item: standard function_call passes through unchanged
+        self.assertEqual(normalized[4]["type"], "function_call")
+        self.assertEqual(normalized[4]["name"], "read_file")
+
+    def test_multi_agent_v2_normalization_preserves_call_id_in_content(self):
+        """Verify that subagent call/output pairs maintain call_id references in their message content."""
+        from responses_native import _normalize_multi_agent_items
+        
+        inputs = [
+            {"type": "multi_agent_call", "call_id": "sub_1", "agent": "analyst"},
+            {"type": "multi_agent_call_output", "call_id": "sub_1", "output": "Analysis done"},
+            {"type": "multi_agent_call", "id": "sub_2", "agent": "writer"},
+            {"type": "multi_agent_call_output", "call_id": "sub_2", "result": "Text generated"},
+        ]
+        normalized = _normalize_multi_agent_items(inputs)
+        
+        # Verify call_id is preserved in the message content
+        self.assertIn("sub_1", normalized[0]["content"])
+        self.assertIn("sub_1", normalized[1]["content"])
+        self.assertIn("sub_2", normalized[2]["content"])
+        self.assertIn("sub_2", normalized[3]["content"])
+        
+        # Verify all are message items
+        for item in normalized:
+            self.assertEqual(item["type"], "message")
+        
+        # Verify content format
+        self.assertIn("analyst", normalized[0]["content"])
+        self.assertIn("invoked", normalized[0]["content"])
+        self.assertIn("returned", normalized[1]["content"])
+        self.assertIn("Analysis done", normalized[1]["content"])
+
+    def test_multi_agent_v2_with_missing_fields_uses_defaults(self):
+        """Verify normalization handles multi-agent items with missing optional fields gracefully."""
+        from responses_native import _normalize_multi_agent_items
+        
+        # multi_agent_call with minimal fields
+        inputs = [
+            {"type": "multi_agent_call"},
+            {"type": "multi_agent_call_output"},
+            {"type": "agent_message"},
+        ]
+        normalized = _normalize_multi_agent_items(inputs)
+        
+        # All should be message items
+        self.assertEqual(normalized[0]["type"], "message")
+        self.assertEqual(normalized[0]["role"], "assistant")
+        self.assertIn("subagent_agent", normalized[0]["content"])
+        self.assertIn("invoked", normalized[0]["content"])
+        # Verify fallback call_id is in content
+        self.assertIn("subagent_call_0", normalized[0]["content"])
+        
+        self.assertEqual(normalized[1]["type"], "message")
+        self.assertEqual(normalized[1]["role"], "user")
+        self.assertIn("subagent_call_1", normalized[1]["content"])
+        self.assertIn("returned", normalized[1]["content"])
+        
+        self.assertEqual(normalized[2]["type"], "message")
+        self.assertEqual(normalized[2]["role"], "assistant")
+        self.assertIn("[subagent_subagent]", normalized[2]["content"])
+
+    def test_multi_agent_v2_passthrough_non_dict_items(self):
+        """Verify non-dict items (e.g., strings) pass through unchanged."""
+        from responses_native import _normalize_multi_agent_items
+        
+        inputs = ["string_item", {"type": "message", "role": "user", "content": "test"}]
+        normalized = _normalize_multi_agent_items(inputs)
+        
+        self.assertEqual(normalized[0], "string_item")
+        self.assertEqual(normalized[1]["type"], "message")
+
+    def test_multi_agent_v2_non_list_passthrough(self):
+        """Verify non-list input passes through unchanged."""
+        from responses_native import _normalize_multi_agent_items
+        
+        result = _normalize_multi_agent_items("not a list")
+        self.assertEqual(result, "not a list")
+
+    def test_multi_agent_v2_stringifies_non_string_payloads(self):
+        """Verify that dict/list content in multi-agent items is stringified."""
+        from responses_native import _normalize_multi_agent_items
+        
+        inputs = [
+            {"type": "multi_agent_call", "call_id": "call_1", "agent": "researcher", "arguments": {"complex": {"nested": "data"}}},
+            {"type": "multi_agent_call_output", "call_id": "call_2", "output": {"result": ["a", "b", "c"]}},
+            {"type": "agent_message", "agent": "writer", "content": {"text": "hello"}},
+        ]
+        normalized = _normalize_multi_agent_items(inputs)
+        
+        # All should be message items with string content
+        for item in normalized:
+            self.assertEqual(item["type"], "message")
+            self.assertIsInstance(item["content"], str)
+        
+        # Verify content contains stringified data
+        self.assertIn("complex", normalized[0]["content"])
+        self.assertIn("nested", normalized[0]["content"])
+        self.assertIn("result", normalized[1]["content"])
+        self.assertIn("text", normalized[2]["content"])
+
+    def test_multi_agent_v2_guards_list_content(self):
+        """Verify that list content in agent_message doesn't crash on .startswith."""
+        from responses_native import _normalize_multi_agent_items
+        
+        # agent_message with list content (which would crash .startswith)
+        inputs = [
+            {"type": "agent_message", "agent": "researcher", "content": ["item1", "item2"]},
+        ]
+        normalized = _normalize_multi_agent_items(inputs)
+        
+        self.assertEqual(len(normalized), 1)
+        self.assertEqual(normalized[0]["type"], "message")
+        self.assertIsInstance(normalized[0]["content"], str)
+        self.assertIn("researcher", normalized[0]["content"])
+
+    def test_subagent_call_aliases_are_normalized(self):
+        """Verify that subagent_call and subagent_call_output aliases are also normalized to message items."""
+        from responses_native import _normalize_multi_agent_items
+        
+        inputs = [
+            {"type": "message", "role": "user", "content": "Hello"},
+            {"type": "subagent_call", "call_id": "sub_1", "agent": "coder", "arguments": {"task": "write code"}},
+            {"type": "subagent_call_output", "call_id": "sub_1", "output": "Code written"},
+        ]
+        normalized = _normalize_multi_agent_items(inputs)
+        
+        self.assertEqual(len(normalized), 3)
+        
+        # First item: standard message passes through
+        self.assertEqual(normalized[0]["type"], "message")
+        self.assertEqual(normalized[0]["role"], "user")
+        self.assertEqual(normalized[0]["content"], "Hello")
+        
+        # Second item: subagent_call -> message
+        self.assertEqual(normalized[1]["type"], "message")
+        self.assertEqual(normalized[1]["role"], "assistant")
+        self.assertIn("subagent_coder", normalized[1]["content"])
+        self.assertIn("sub_1", normalized[1]["content"])
+        self.assertIn("invoked", normalized[1]["content"])
+        
+        # Third item: subagent_call_output -> message
+        self.assertEqual(normalized[2]["type"], "message")
+        self.assertEqual(normalized[2]["role"], "user")
+        self.assertIn("sub_1", normalized[2]["content"])
+        self.assertIn("returned", normalized[2]["content"])
+        self.assertIn("Code written", normalized[2]["content"])
+
+    def test_mixed_multi_agent_and_subagent_aliases(self):
+        """Verify mixed multi_agent_* and subagent_* items are all normalized together."""
+        from responses_native import _normalize_multi_agent_items
+
+        inputs = [
+            {"type": "multi_agent_call", "call_id": "ma_1", "agent": "analyst"},
+            {"type": "subagent_call", "call_id": "sa_1", "agent": "writer"},
+            {"type": "multi_agent_call_output", "call_id": "ma_1", "output": "Analysis"},
+            {"type": "subagent_call_output", "call_id": "sa_1", "output": "Text"},
+            {"type": "agent_message", "agent": "coordinator", "content": "Done"},
+        ]
+        normalized = _normalize_multi_agent_items(inputs)
+
+        self.assertEqual(len(normalized), 5)
+
+        # All should be message items
+        for item in normalized:
+            self.assertEqual(item["type"], "message")
+
+        # Check roles
+        self.assertEqual(normalized[0]["role"], "assistant")
+        self.assertEqual(normalized[1]["role"], "assistant")
+        self.assertEqual(normalized[2]["role"], "user")
+        self.assertEqual(normalized[3]["role"], "user")
+        self.assertEqual(normalized[4]["role"], "assistant")
+
+        # Check content contains expected identifiers
+        self.assertIn("analyst", normalized[0]["content"])
+        self.assertIn("writer", normalized[1]["content"])
+        self.assertIn("Analysis", normalized[2]["content"])
+        self.assertIn("Text", normalized[3]["content"])
+        self.assertIn("coordinator", normalized[4]["content"])
+
+
+class MultiAgentNormalizationTests(unittest.TestCase):
+    """Socket-free unit tests for _normalize_multi_agent_items function.
+    
+    These tests can run in restricted sandboxes since they only test the pure
+    normalization function and don't require network access or server setup.
+    """
+
+    def test_multi_agent_v2_items_are_normalized_to_message_items(self):
+        """Verify that Codex multi_agent_v2 history items are translated to standard message items at ingress."""
+        from responses_native import _normalize_multi_agent_items
+
+        # Test multi_agent_call -> message with subagent_* alias
+        inputs = [
+            {"type": "message", "role": "user", "content": "Hello"},
+            {"type": "multi_agent_call", "call_id": "call_123", "agent": "researcher", "arguments": {"task": "research"}},
+            {"type": "multi_agent_call_output", "call_id": "call_123", "output": "Research complete"},
+            {"type": "agent_message", "agent": "researcher", "content": "Found some data", "role": "assistant"},
+            {"type": "function_call", "call_id": "fc_456", "name": "read_file", "arguments": '{}'},
+        ]
+        normalized = _normalize_multi_agent_items(inputs)
+
+        self.assertEqual(len(normalized), 5)
+
+        # First item: message passes through unchanged
+        self.assertEqual(normalized[0]["type"], "message")
+        self.assertEqual(normalized[0]["role"], "user")
+        self.assertEqual(normalized[0]["content"], "Hello")
+
+        # Second item: multi_agent_call -> message with subagent_ alias
+        self.assertEqual(normalized[1]["type"], "message")
+        self.assertEqual(normalized[1]["role"], "assistant")
+        self.assertIn("subagent_researcher", normalized[1]["content"])
+        self.assertIn("invoked", normalized[1]["content"])
+        self.assertIn("research", normalized[1]["content"])
+
+        # Third item: multi_agent_call_output -> message with subagent_ alias
+        self.assertEqual(normalized[2]["type"], "message")
+        self.assertEqual(normalized[2]["role"], "user")
+        self.assertIn("subagent_call_123", normalized[2]["content"])
+        self.assertIn("Research complete", normalized[2]["content"])
+
+        # Fourth item: agent_message -> message with subagent_ prefix
+        self.assertEqual(normalized[3]["type"], "message")
+        self.assertEqual(normalized[3]["role"], "assistant")
+        self.assertIn("[subagent_researcher]", normalized[3]["content"])
+        self.assertIn("Found some data", normalized[3]["content"])
+
+        # Fifth item: standard function_call passes through unchanged
+        self.assertEqual(normalized[4]["type"], "function_call")
+        self.assertEqual(normalized[4]["name"], "read_file")
+
+    def test_multi_agent_v2_normalization_preserves_call_id_in_content(self):
+        """Verify that subagent call/output pairs maintain call_id references in their message content."""
+        from responses_native import _normalize_multi_agent_items
+
+        inputs = [
+            {"type": "multi_agent_call", "call_id": "sub_1", "agent": "analyst"},
+            {"type": "multi_agent_call_output", "call_id": "sub_1", "output": "Analysis done"},
+            {"type": "multi_agent_call", "id": "sub_2", "agent": "writer"},
+            {"type": "multi_agent_call_output", "call_id": "sub_2", "result": "Text generated"},
+        ]
+        normalized = _normalize_multi_agent_items(inputs)
+
+        # Verify call_id is preserved in the message content
+        self.assertIn("sub_1", normalized[0]["content"])
+        self.assertIn("sub_1", normalized[1]["content"])
+        self.assertIn("sub_2", normalized[2]["content"])
+        self.assertIn("sub_2", normalized[3]["content"])
+
+        # Verify all are message items
+        for item in normalized:
+            self.assertEqual(item["type"], "message")
+
+        # Verify content format
+        self.assertIn("analyst", normalized[0]["content"])
+        self.assertIn("invoked", normalized[0]["content"])
+        self.assertIn("returned", normalized[1]["content"])
+        self.assertIn("Analysis done", normalized[1]["content"])
+
+    def test_multi_agent_v2_with_missing_fields_uses_defaults(self):
+        """Verify normalization handles multi-agent items with missing optional fields gracefully."""
+        from responses_native import _normalize_multi_agent_items
+
+        # multi_agent_call with minimal fields
+        inputs = [
+            {"type": "multi_agent_call"},
+            {"type": "multi_agent_call_output"},
+            {"type": "agent_message"},
+        ]
+        normalized = _normalize_multi_agent_items(inputs)
+
+        # All should be message items
+        self.assertEqual(normalized[0]["type"], "message")
+        self.assertEqual(normalized[0]["role"], "assistant")
+        self.assertIn("subagent_agent", normalized[0]["content"])
+        self.assertIn("invoked", normalized[0]["content"])
+        # Verify fallback call_id is in content
+        self.assertIn("subagent_call_0", normalized[0]["content"])
+
+        self.assertEqual(normalized[1]["type"], "message")
+        self.assertEqual(normalized[1]["role"], "user")
+        self.assertIn("subagent_call_1", normalized[1]["content"])
+        self.assertIn("returned", normalized[1]["content"])
+
+        self.assertEqual(normalized[2]["type"], "message")
+        self.assertEqual(normalized[2]["role"], "assistant")
+        self.assertIn("[subagent_subagent]", normalized[2]["content"])
+
+    def test_multi_agent_v2_passthrough_non_dict_items(self):
+        """Verify non-dict items (e.g., strings) pass through unchanged."""
+        from responses_native import _normalize_multi_agent_items
+
+        inputs = ["string_item", {"type": "message", "role": "user", "content": "test"}]
+        normalized = _normalize_multi_agent_items(inputs)
+
+        self.assertEqual(normalized[0], "string_item")
+        self.assertEqual(normalized[1]["type"], "message")
+
+    def test_multi_agent_v2_non_list_passthrough(self):
+        """Verify non-list input passes through unchanged."""
+        from responses_native import _normalize_multi_agent_items
+
+        result = _normalize_multi_agent_items("not a list")
+        self.assertEqual(result, "not a list")
+
+    def test_multi_agent_v2_stringifies_non_string_payloads(self):
+        """Verify that dict/list content in multi-agent items is stringified."""
+        from responses_native import _normalize_multi_agent_items
+
+        inputs = [
+            {"type": "multi_agent_call", "call_id": "call_1", "agent": "researcher", "arguments": {"complex": {"nested": "data"}}},
+            {"type": "multi_agent_call_output", "call_id": "call_2", "output": {"result": ["a", "b", "c"]}},
+            {"type": "agent_message", "agent": "writer", "content": {"text": "hello"}},
+        ]
+        normalized = _normalize_multi_agent_items(inputs)
+
+        # All should be message items with string content
+        for item in normalized:
+            self.assertEqual(item["type"], "message")
+            self.assertIsInstance(item["content"], str)
+
+        # Verify content contains stringified data
+        self.assertIn("complex", normalized[0]["content"])
+        self.assertIn("nested", normalized[0]["content"])
+        self.assertIn("result", normalized[1]["content"])
+        self.assertIn("text", normalized[2]["content"])
+
+    def test_multi_agent_v2_guards_list_content(self):
+        """Verify that list content in agent_message doesn't crash on .startswith."""
+        from responses_native import _normalize_multi_agent_items
+
+        # agent_message with list content (which would crash .startswith)
+        inputs = [
+            {"type": "agent_message", "agent": "researcher", "content": ["item1", "item2"]},
+        ]
+        normalized = _normalize_multi_agent_items(inputs)
+
+        self.assertEqual(len(normalized), 1)
+        self.assertEqual(normalized[0]["type"], "message")
+        self.assertIsInstance(normalized[0]["content"], str)
+        self.assertIn("researcher", normalized[0]["content"])
+
+    def test_subagent_call_aliases_are_normalized(self):
+        """Verify that subagent_call and subagent_call_output aliases are also normalized to message items."""
+        from responses_native import _normalize_multi_agent_items
+
+        inputs = [
+            {"type": "message", "role": "user", "content": "Hello"},
+            {"type": "subagent_call", "call_id": "sub_1", "agent": "coder", "arguments": {"task": "write code"}},
+            {"type": "subagent_call_output", "call_id": "sub_1", "output": "Code written"},
+        ]
+        normalized = _normalize_multi_agent_items(inputs)
+
+        self.assertEqual(len(normalized), 3)
+
+        # First item: standard message passes through
+        self.assertEqual(normalized[0]["type"], "message")
+        self.assertEqual(normalized[0]["role"], "user")
+        self.assertEqual(normalized[0]["content"], "Hello")
+
+        # Second item: subagent_call -> message
+        self.assertEqual(normalized[1]["type"], "message")
+        self.assertEqual(normalized[1]["role"], "assistant")
+        self.assertIn("subagent_coder", normalized[1]["content"])
+        self.assertIn("sub_1", normalized[1]["content"])
+        self.assertIn("invoked", normalized[1]["content"])
+
+        # Third item: subagent_call_output -> message
+        self.assertEqual(normalized[2]["type"], "message")
+        self.assertEqual(normalized[2]["role"], "user")
+        self.assertIn("sub_1", normalized[2]["content"])
+        self.assertIn("returned", normalized[2]["content"])
+        self.assertIn("Code written", normalized[2]["content"])
+
+    def test_mixed_multi_agent_and_subagent_aliases(self):
+        """Verify mixed multi_agent_* and subagent_* items are all normalized together."""
+        from responses_native import _normalize_multi_agent_items
+
+        inputs = [
+            {"type": "multi_agent_call", "call_id": "ma_1", "agent": "analyst"},
+            {"type": "subagent_call", "call_id": "sa_1", "agent": "writer"},
+            {"type": "multi_agent_call_output", "call_id": "ma_1", "output": "Analysis"},
+            {"type": "subagent_call_output", "call_id": "sa_1", "output": "Text"},
+            {"type": "agent_message", "agent": "coordinator", "content": "Done"},
+        ]
+        normalized = _normalize_multi_agent_items(inputs)
+
+        self.assertEqual(len(normalized), 5)
+
+        # All should be message items
+        for item in normalized:
+            self.assertEqual(item["type"], "message")
+
+        # Check roles
+        self.assertEqual(normalized[0]["role"], "assistant")
+        self.assertEqual(normalized[1]["role"], "assistant")
+        self.assertEqual(normalized[2]["role"], "user")
+        self.assertEqual(normalized[3]["role"], "user")
+        self.assertEqual(normalized[4]["role"], "assistant")
+
+        # Check content contains expected identifiers
+        self.assertIn("analyst", normalized[0]["content"])
+        self.assertIn("writer", normalized[1]["content"])
+        self.assertIn("Analysis", normalized[2]["content"])
+        self.assertIn("Text", normalized[3]["content"])
+        self.assertIn("coordinator", normalized[4]["content"])
+
+    def test_non_dict_item_error_includes_type(self):
+        """Regression test for N1: non-dict items must raise BridgeError (not AttributeError) via prepare_native."""
+        from types import SimpleNamespace
+
+        from bridge_core import BridgeError
+        from hub_config import qualify
+        from responses_native import prepare_native
+
+        route = qualify("mistral", "mistral-medium-2508")
+        # Validation runs before any provider/network access, so a minimal
+        # stub runtime carrying only the model spec is sufficient.
+        runtime = SimpleNamespace(settings={"_model_specs": {route: {}}})
+
+        for bad_item, expected in (("string_item", "str"), (42, "int")):
+            with self.subTest(item=bad_item):
+                with self.assertRaises(BridgeError) as ctx:
+                    prepare_native(runtime, {"model": route, "input": [bad_item]})
+                self.assertIn("Unsupported Responses history item", str(ctx.exception))
+                self.assertIn("'%s'" % expected, str(ctx.exception))
+
+        # Dict path unchanged: unknown dict types still report their 'type' value.
+        with self.assertRaises(BridgeError) as ctx:
+            prepare_native(runtime, {"model": route, "input": [{"type": "weird_future"}]})
+        self.assertIn("'weird_future'", str(ctx.exception))
+
 
 if __name__ == "__main__":
     unittest.main()
