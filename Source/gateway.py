@@ -143,7 +143,8 @@ class Runtime:
                 self.record("compacted", route, 200, {"estimated_before": auto_compact["estimated_before"],
                                                       "estimated_after": after})
         if type(context) is int and estimate >= context:
-            raise BridgeError(f"This conversation is above the provider's reported {context:,}-token context limit.")
+            raise BridgeError(f"This conversation (~{estimate:,} tokens) is above the provider's reported "
+                              f"{context:,}-token context limit.")
         if payload.get("model", "").endswith("[1m]") and (type(context) is not int or context < 1000000):
             raise BridgeError("A 1M context window has not been established for this route.")
         # Translate a trailing bare assistant message to a Mistral prefill
@@ -275,6 +276,26 @@ class Runtime:
 def error_type(status):
     return {400: "invalid_request_error", 401: "authentication_error", 403: "permission_error",
             404: "not_found_error", 413: "request_too_large", 429: "rate_limit_error", 503: "overloaded_error"}.get(status, "api_error")
+
+
+def rejection_details(payload):
+    """Attributable (model, usage) for a planning rejection, else None.
+
+    Returns the requested route verbatim when it parses; an unparseable
+    route is kept in usage so the attempt is still diagnosable without
+    breaking provider attribution. Anything without a model string —
+    malformed bodies, missing fields — yields None: nothing to attribute.
+    """
+    if not isinstance(payload, dict):
+        return None
+    model = payload.get("model")
+    if not isinstance(model, str) or not model:
+        return None
+    try:
+        split_route(model)
+    except ValueError:
+        return "", {"requested": model[:120]}
+    return model, None
 
 
 def _client_gone(handler):
@@ -526,6 +547,7 @@ class Handler(BaseHTTPRequestHandler):
         if self.headers.get("Transfer-Encoding"):
             self.error(400, "Use a Content-Length request body.")
             return
+        payload = None
         try:
             length = int(self.headers.get("Content-Length", "0"))
             if not 0 < length <= MAX_BODY:
@@ -560,6 +582,14 @@ class Handler(BaseHTTPRequestHandler):
                     if value and len(value) <= 4096 and "\r" not in value and "\n" not in value:
                         plan["headers"][name] = value
         except (ValueError, TypeError, KeyError, AttributeError, BridgeError) as exc:
+            # Planning rejections (unknown route, context over window,
+            # capability mismatch) used to be silent: the desktop retried
+            # a deterministic 400 with nothing in activity.jsonl. "rejected"
+            # attributes without blaming the provider — no counters move.
+            details = rejection_details(payload)
+            if details is not None:
+                model, usage = details
+                self.runtime.record("rejected", model, 400, usage)
             self.error(400, str(exc))
             return
         # Queue for a worker slot instead of failing fast: subagent bursts

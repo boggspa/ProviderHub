@@ -10,6 +10,26 @@ from model_names import friendly_model_name
 from effort_map import mistral_effort_modes
 
 
+#: Estimated tokens of a fresh desktop session before any user history:
+#: system instructions plus tool schemas (MCP servers included). Models
+#: below this cannot serve even a first message once desktop overhead is
+#: counted, so catalogue projections flag them instead of letting every
+#: request fail at the gateway's context gate.
+DESKTOP_BASELINE_TOKENS = 65536
+
+
+def fits_desktop_baseline(context):
+    """True when a known context fits a fresh desktop session.
+
+    Returns None when the context is unknown rather than penalizing a
+    model the provider did not describe; those entries already carry an
+    unknown-context caveat in their projected descriptions.
+    """
+    if type(context) is not int or context <= 0:
+        return None
+    return context >= DESKTOP_BASELINE_TOKENS
+
+
 def now_iso():
     return datetime.now(timezone.utc).isoformat()
 

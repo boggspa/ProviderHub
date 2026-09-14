@@ -13,7 +13,7 @@ from unittest.mock import patch
 
 from bridge_core import (BridgeError, ClaudeProfile, PROFILE_ID, atomic_json, default_settings,
                          read_json, validate_settings)
-from gateway import Runtime, Server
+from gateway import Runtime, Server, rejection_details
 from protocol import (StreamTranslator, apply_mapping_options, compact_conversation, compact_threshold, estimated_tokens, function_name,
                       mapping_options_for, model_catalog, rewrite_context_reminders, tool_id,
                       translate_request, translate_response)
@@ -233,6 +233,21 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(model_catalog(settings)["data"], [])
         with self.assertRaises(BridgeError): translate_request(prompt(), settings)
 
+    def test_model_catalog_flags_desktop_baseline_fit(self):
+        settings = config()
+        self.assertTrue(model_catalog(settings)["data"][0]["fits_desktop_baseline"])
+        self.assertNotIn("below desktop baseline", model_catalog(settings)["data"][0]["description"])
+        settings["_model_specs"]["test-model"]["context"] = 32768
+        small = model_catalog(settings)["data"][0]
+        self.assertIs(small["fits_desktop_baseline"], False)
+        self.assertIn("below desktop baseline", small["description"])
+        settings["_model_specs"]["test-model"]["context"] = 65536
+        self.assertTrue(model_catalog(settings)["data"][0]["fits_desktop_baseline"])
+        settings["_model_specs"]["test-model"].pop("context")
+        unknown = model_catalog(settings)["data"][0]
+        self.assertIsNone(unknown["fits_desktop_baseline"])
+        self.assertNotIn("below desktop baseline", unknown["description"])
+
     def test_desktop_context_reminders_rewrite_to_remaining_catalogue_context(self):
         reminder = "<total_tokens>15000000 tokens left</total_tokens>"
         window_line = "<ctx_window>Infinite tokens left, 12/15000000 used</ctx_window>"
@@ -435,6 +450,49 @@ class ProtocolTests(unittest.TestCase):
         translator = StreamTranslator("x", {})
         translator.feed({"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "abc", "function": {"name": "Read", "arguments": "{"}}]}, "finish_reason": "tool_calls"}]})
         with self.assertRaises(BridgeError): translator.end()
+
+
+class RejectionDetailsTests(unittest.TestCase):
+    def test_routed_model_attributed_verbatim(self):
+        self.assertEqual(rejection_details({"model": "mistral/test-model"}), ("mistral/test-model", None))
+
+    def test_unparseable_route_kept_in_usage(self):
+        model, usage = rejection_details({"model": "no such model!"})
+        self.assertEqual(model, "")
+        self.assertEqual(usage, {"requested": "no such model!"})
+
+    def test_long_garbage_truncated(self):
+        _, usage = rejection_details({"model": "x" * 500})
+        self.assertEqual(usage, {"requested": "x" * 120})
+
+    def test_nothing_attributable_yields_none(self):
+        for payload in (None, [], "text", {}, {"model": None}, {"model": 42}, {"model": ""}, {"messages": []}):
+            with self.subTest(payload=payload):
+                self.assertIsNone(rejection_details(payload))
+
+
+class PlanRejectionTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        atomic_json(self.root / "settings.json", config())
+        atomic_json(self.root / "catalog.json", {"schema_version": 2, "models": list(config()["_model_specs"].values())})
+        self.runtime = Runtime(self.root)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_context_rejection_reports_estimate_and_limit(self):
+        body = prompt(system="S" * 800000, messages=[{"role": "user", "content": "hi"}])
+        with self.assertRaises(BridgeError) as raised:
+            self.runtime.plan(body)
+        self.assertIn("~", str(raised.exception))
+        self.assertIn("240,000-token context limit", str(raised.exception))
+
+    def test_unknown_route_rejection_names_catalogue_refresh(self):
+        with self.assertRaises(BridgeError) as raised:
+            self.runtime.plan(prompt(model="no/such-model"))
+        self.assertIn("not in the current provider catalogue", str(raised.exception))
 
 
 class ProfileTests(unittest.TestCase):
@@ -704,6 +762,30 @@ class GatewayTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(headers["X-Mistral-Bridge-Token-Count"], "estimate")
         self.assertGreater(json.loads(data)["input_tokens"], 0)
+
+    def test_unknown_route_rejection_is_logged_without_counting_failure(self):
+        status, data, _ = self.request("POST", "/v1/messages", prompt(model="no/such-model"))
+        self.assertEqual(status, 400)
+        self.assertIn("not in the current provider catalogue", data.decode())
+        events = [json.loads(line) for line in (self.root / "activity.jsonl").read_text().splitlines()]
+        rejected = [event for event in events if event.get("event") == "rejected"]
+        self.assertEqual(len(rejected), 1)
+        self.assertEqual(rejected[0]["model"], "no/such-model")
+        self.assertEqual(rejected[0]["status"], 400)
+        self.assertEqual(self.runtime.status()["failed"], 0)
+        self.assertEqual(self.runtime.status()["completed"], 0)
+
+    def test_context_rejection_is_logged_with_route(self):
+        body = prompt(system="S" * 800000, messages=[{"role": "user", "content": "hi"}])
+        status, data, _ = self.request("POST", "/v1/messages", body)
+        self.assertEqual(status, 400)
+        self.assertIn("above the provider's reported 240,000-token context limit", data.decode())
+        events = [json.loads(line) for line in (self.root / "activity.jsonl").read_text().splitlines()]
+        rejected = [event for event in events if event.get("event") == "rejected"]
+        self.assertEqual(len(rejected), 1)
+        self.assertEqual(rejected[0]["model"], "claude-fable-5")
+        self.assertEqual(rejected[0]["status"], 400)
+        self.assertEqual(self.runtime.status()["failed"], 0)
 
     def test_mapping_options_drop_harness_before_context_preflight(self):
         specs = self.runtime.settings["_model_specs"]

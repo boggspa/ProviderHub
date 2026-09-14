@@ -1700,7 +1700,8 @@ def _apply_native_model_limits(body: dict, model_spec: dict, provider_id: str | 
     if type(context) is int and context > 0:
         estimate = _estimated_input_tokens(body)
         if estimate >= context:
-            raise ProviderError(f"Request exceeds the model's reported {context}-token context limit.")
+            raise ProviderError(f"Request (~{estimate:,} tokens) exceeds the model's reported "
+                                f"{context:,}-token context limit.")
         max_tokens = min(max_tokens, context - estimate)
     body["max_tokens"] = max_tokens
     if _image_input_rejected(provider_id, model_spec) and _contains_content_type(body.get("messages"), {"image"}):
@@ -1906,7 +1907,8 @@ def _translate_chat_payload(
     if type(context) is int and context > 0:
         estimate = _estimated_input_tokens(payload)
         if estimate >= context:
-            raise ProviderError(f"Request exceeds the model's reported {context}-token context limit.")
+            raise ProviderError(f"Request (~{estimate:,} tokens) exceeds the model's reported "
+                                f"{context:,}-token context limit.")
         max_tokens = min(max_tokens, context - estimate)
 
     messages = []

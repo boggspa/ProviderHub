@@ -14,7 +14,7 @@ import secrets
 
 from bridge_core import BridgeError, SLOTS
 from model_names import friendly_model_name
-from catalogue import status_label
+from catalogue import fits_desktop_baseline, status_label
 from effort_map import MISTRAL_EFFORT_ALIASES, MISTRAL_REASONING_EFFORTS, cap_high_end, map_effort, mistral_effort_modes
 from chat_tool_order import repair_openai_tool_order
 
@@ -178,7 +178,10 @@ def model_catalog(settings: dict):
         row = {"id": slot, "type": "model", "display_name": title,
                "description": f"{spec.get('provider_id', 'mistral')} account · {context_text} · {status_label(spec)}",
                "created_at": "2026-09-12T00:00:00Z",
-               "anthropic_family_tier": family, "is_family_default": default}
+               "anthropic_family_tier": family, "is_family_default": default,
+               "fits_desktop_baseline": fits_desktop_baseline(context)}
+        if fits_desktop_baseline(context) is False:
+            row["description"] += " · below desktop baseline"
         if type(context) is int:
             # Use the per-model auto-compact threshold as max_input_tokens so
             # Claude Desktop compacts at the hub's catalogue boundary (typically

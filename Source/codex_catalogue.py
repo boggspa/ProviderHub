@@ -5,6 +5,7 @@ import hashlib
 import json
 
 from hub_config import MODEL_VARIANT_FIELDS, connection_signature, split_route
+from catalogue import fits_desktop_baseline
 from providers import PROVIDERS
 
 
@@ -106,6 +107,8 @@ def _codex_description(provider_id, provider, context, service_tiers):
         text = PROVIDERS[provider_id]["name"] + " model connection."
     if context is None:
         text += " Exact context is not reported; compact manually when needed."
+    elif fits_desktop_baseline(context) is False:
+        text += " Context is below the desktop baseline; long sessions may be rejected."
     return text
 
 
@@ -186,6 +189,7 @@ def project_codex(settings, inventory):
             "supports_image_detail_original": False,
             "context_window": context,
             "max_context_window": context,
+            "fits_desktop_baseline": fits_desktop_baseline(context),
             "auto_compact_token_limit": int(min(context, entry.get("max_input") or context) * .85) if context is not None else None,
             "effective_context_window_percent": 100,
             "experimental_supported_tools": [],
@@ -224,7 +228,9 @@ def catalogue_digest(settings, inventory):
 
 def choices(settings, inventory):
     return [{"id": model["slug"], "name": model["display_name"], "context": model["context_window"],
-             "description": model["description"]} for model in project_codex(settings, inventory)["models"]]
+             "description": model["description"],
+             "fits_desktop_baseline": model["fits_desktop_baseline"]}
+            for model in project_codex(settings, inventory)["models"]]
 
 
 def launch_settings(settings):

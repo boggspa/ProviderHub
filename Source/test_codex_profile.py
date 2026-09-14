@@ -55,6 +55,22 @@ class CodexCatalogueTests(unittest.TestCase):
         self.assertIsNone(unknown["context_window"])
         self.assertIsNone(unknown["auto_compact_token_limit"])
 
+    def test_projection_flags_desktop_baseline_fit(self):
+        settings, inventory = fixture()
+        inventory["models"] += [
+            {"id": "ollama/tiny:latest", "display_name": "Tiny", "context": 32768,
+             "tools": True, "provider_id": "ollama"},
+            {"id": "ollama/mystery:latest", "display_name": "Mystery",
+             "tools": True, "provider_id": "ollama"},
+        ]
+        models = {model["slug"]: model for model in project_codex(settings, inventory)["models"]}
+        self.assertTrue(models["grok/grok-4.6"]["fits_desktop_baseline"])
+        self.assertNotIn("below the desktop baseline", models["grok/grok-4.6"]["description"])
+        self.assertIs(models["ollama/tiny:latest"]["fits_desktop_baseline"], False)
+        self.assertIn("below the desktop baseline", models["ollama/tiny:latest"]["description"])
+        self.assertIsNone(models["ollama/mystery:latest"]["fits_desktop_baseline"])
+        self.assertNotIn("below the desktop baseline", models["ollama/mystery:latest"]["description"])
+
     def test_fingerprint_covers_metadata_and_credentials_without_secrets(self):
         settings, inventory = fixture()
         first = catalogue_digest(settings, inventory)
