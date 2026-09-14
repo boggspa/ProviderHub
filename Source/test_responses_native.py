@@ -271,9 +271,9 @@ class NativeResponsesTests(unittest.TestCase):
         
         # Second item: multi_agent_call -> message with subagent_ alias
         self.assertEqual(normalized[1]["type"], "message")
-        self.assertEqual(normalized[1]["role"], "assistant")
+        self.assertEqual(normalized[1]["role"], "user")
         self.assertIn("subagent_researcher", normalized[1]["content"])
-        self.assertIn("invoked", normalized[1]["content"])
+        self.assertIn("[Task from parent agent", normalized[1]["content"])
         self.assertIn("research", normalized[1]["content"])
         
         # Third item: multi_agent_call_output -> message with subagent_ alias
@@ -316,7 +316,7 @@ class NativeResponsesTests(unittest.TestCase):
         
         # Verify content format
         self.assertIn("analyst", normalized[0]["content"])
-        self.assertIn("invoked", normalized[0]["content"])
+        self.assertIn("[Task from parent agent", normalized[0]["content"])
         self.assertIn("returned", normalized[1]["content"])
         self.assertIn("Analysis done", normalized[1]["content"])
 
@@ -334,11 +334,11 @@ class NativeResponsesTests(unittest.TestCase):
         
         # All should be message items
         self.assertEqual(normalized[0]["type"], "message")
-        self.assertEqual(normalized[0]["role"], "assistant")
+        self.assertEqual(normalized[0]["role"], "user")
         self.assertIn("subagent_agent", normalized[0]["content"])
-        self.assertIn("invoked", normalized[0]["content"])
+        self.assertIn("[Task from parent agent", normalized[0]["content"])
         # Verify fallback call_id is in content
-        self.assertIn("subagent_call_0", normalized[0]["content"])
+        self.assertIn("subagent_agent ()", normalized[0]["content"])
         
         self.assertEqual(normalized[1]["type"], "message")
         self.assertEqual(normalized[1]["role"], "user")
@@ -423,10 +423,10 @@ class NativeResponsesTests(unittest.TestCase):
         
         # Second item: subagent_call -> message
         self.assertEqual(normalized[1]["type"], "message")
-        self.assertEqual(normalized[1]["role"], "assistant")
+        self.assertEqual(normalized[1]["role"], "user")
         self.assertIn("subagent_coder", normalized[1]["content"])
         self.assertIn("sub_1", normalized[1]["content"])
-        self.assertIn("invoked", normalized[1]["content"])
+        self.assertIn("[Task from parent agent", normalized[1]["content"])
         
         # Third item: subagent_call_output -> message
         self.assertEqual(normalized[2]["type"], "message")
@@ -455,8 +455,8 @@ class NativeResponsesTests(unittest.TestCase):
             self.assertEqual(item["type"], "message")
 
         # Check roles
-        self.assertEqual(normalized[0]["role"], "assistant")
-        self.assertEqual(normalized[1]["role"], "assistant")
+        self.assertEqual(normalized[0]["role"], "user")
+        self.assertEqual(normalized[1]["role"], "user")
         self.assertEqual(normalized[2]["role"], "user")
         self.assertEqual(normalized[3]["role"], "user")
         self.assertEqual(normalized[4]["role"], "assistant")
@@ -499,9 +499,9 @@ class MultiAgentNormalizationTests(unittest.TestCase):
 
         # Second item: multi_agent_call -> message with subagent_ alias
         self.assertEqual(normalized[1]["type"], "message")
-        self.assertEqual(normalized[1]["role"], "assistant")
+        self.assertEqual(normalized[1]["role"], "user")
         self.assertIn("subagent_researcher", normalized[1]["content"])
-        self.assertIn("invoked", normalized[1]["content"])
+        self.assertIn("[Task from parent agent", normalized[1]["content"])
         self.assertIn("research", normalized[1]["content"])
 
         # Third item: multi_agent_call_output -> message with subagent_ alias
@@ -544,7 +544,7 @@ class MultiAgentNormalizationTests(unittest.TestCase):
 
         # Verify content format
         self.assertIn("analyst", normalized[0]["content"])
-        self.assertIn("invoked", normalized[0]["content"])
+        self.assertIn("[Task from parent agent", normalized[0]["content"])
         self.assertIn("returned", normalized[1]["content"])
         self.assertIn("Analysis done", normalized[1]["content"])
 
@@ -562,11 +562,11 @@ class MultiAgentNormalizationTests(unittest.TestCase):
 
         # All should be message items
         self.assertEqual(normalized[0]["type"], "message")
-        self.assertEqual(normalized[0]["role"], "assistant")
+        self.assertEqual(normalized[0]["role"], "user")
         self.assertIn("subagent_agent", normalized[0]["content"])
-        self.assertIn("invoked", normalized[0]["content"])
+        self.assertIn("[Task from parent agent", normalized[0]["content"])
         # Verify fallback call_id is in content
-        self.assertIn("subagent_call_0", normalized[0]["content"])
+        self.assertIn("subagent_agent ()", normalized[0]["content"])
 
         self.assertEqual(normalized[1]["type"], "message")
         self.assertEqual(normalized[1]["role"], "user")
@@ -651,10 +651,10 @@ class MultiAgentNormalizationTests(unittest.TestCase):
 
         # Second item: subagent_call -> message
         self.assertEqual(normalized[1]["type"], "message")
-        self.assertEqual(normalized[1]["role"], "assistant")
+        self.assertEqual(normalized[1]["role"], "user")
         self.assertIn("subagent_coder", normalized[1]["content"])
         self.assertIn("sub_1", normalized[1]["content"])
-        self.assertIn("invoked", normalized[1]["content"])
+        self.assertIn("[Task from parent agent", normalized[1]["content"])
 
         # Third item: subagent_call_output -> message
         self.assertEqual(normalized[2]["type"], "message")
@@ -683,8 +683,8 @@ class MultiAgentNormalizationTests(unittest.TestCase):
             self.assertEqual(item["type"], "message")
 
         # Check roles
-        self.assertEqual(normalized[0]["role"], "assistant")
-        self.assertEqual(normalized[1]["role"], "assistant")
+        self.assertEqual(normalized[0]["role"], "user")
+        self.assertEqual(normalized[1]["role"], "user")
         self.assertEqual(normalized[2]["role"], "user")
         self.assertEqual(normalized[3]["role"], "user")
         self.assertEqual(normalized[4]["role"], "assistant")
@@ -724,3 +724,26 @@ class MultiAgentNormalizationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+    def test_extract_subagent_task_encrypted_content(self):
+        from responses_native import _extract_subagent_task
+        args = {
+            "input_text": "Message Type: NEW_TASK\nSender: User\nActual task here",
+            "encrypted_content": "Plain text extraction"
+        }
+        self.assertEqual(_extract_subagent_task(args), "Plain text extraction")
+
+    def test_extract_subagent_task_input_text_strip_headers(self):
+        from responses_native import _extract_subagent_task
+        args = {
+            "input_text": "Message Type: NEW_TASK\nSender: User\nActual task here"
+        }
+        self.assertEqual(_extract_subagent_task(args), "Actual task here")
+
+    def test_extract_subagent_task_fallback(self):
+        from responses_native import _extract_subagent_task
+        args = "Just a string"
+        self.assertEqual(_extract_subagent_task(args), "Just a string")
+        
+        args = {"unknown": "data"}
+        self.assertEqual(_extract_subagent_task(args), str({"unknown": "data"}))

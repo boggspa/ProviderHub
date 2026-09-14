@@ -54,11 +54,58 @@ class ResponseOwnership:
             atomic_json(self.path, self.records)
 
 
+_TASK_HEADER_PREFIXES = ("Message Type:", "Task name:", "Sender:", "Payload:")
+
+
+def _strip_task_header(text):
+    """Strip Codex NEW_TASK routing header lines (may return ""; caller falls back)."""
+    kept = [line for line in text.splitlines() if not line.strip().startswith(_TASK_HEADER_PREFIXES)]
+    return "\n".join(kept).strip()
+
+
+def _extract_subagent_task(args):
+    """Extract a human-readable instruction from a subagent call payload.
+
+    Codex multi_agent_v2 wraps delegations in a wire envelope: a list of
+    blocks where input_text blocks carry routing headers and an
+    encrypted_content block carries the plaintext instruction. Unknown
+    shapes fall back to readable stringification so content is never
+    silently dropped.
+    """
+    if isinstance(args, list):
+        parts = []
+        for block in args:
+            if not isinstance(block, dict):
+                if block is not None:
+                    parts.append(str(block))
+                continue
+            kind = block.get("type")
+            if kind == "input_text":
+                text = block.get("text", "")
+                if isinstance(text, str) and text.strip():
+                    parts.append(_strip_task_header(text))
+                elif text:
+                    parts.append(str(text))
+            elif kind == "encrypted_content":
+                value = block.get("encrypted_content", "")
+                parts.append(value if isinstance(value, str) else str(value))
+            elif block:
+                parts.append(json.dumps(block))
+        combined = "\n".join(part for part in parts if part).strip()
+        if combined:
+            return combined
+    elif isinstance(args, str) and args.strip():
+        return _strip_task_header(args) or args.strip()
+    if isinstance(args, (dict, list)):
+        return json.dumps(args)
+    return str(args)
+
+
 def _normalize_multi_agent_items(input_list):
     """Normalize Codex multi_agent_v2 history items to standard message items at ingress.
     
     Maps:
-    - multi_agent_call / subagent_call -> message (synthetic subagent invocation description)
+    - multi_agent_call / subagent_call -> user message (extracted task instruction)
     - multi_agent_call_output / subagent_call_output -> message (synthetic subagent result description)
     - agent_message -> message (with agent prefix)
     
@@ -77,17 +124,18 @@ def _normalize_multi_agent_items(input_list):
         
         item_type = item.get("type", "message")
         
-        # multi_agent_call / subagent_call -> message describing the subagent delegation
+        # multi_agent_call / subagent_call -> user message with the extracted task.
+        # The delegation is a prompt for the subagent to execute, not assistant
+        # speech; a user-role tail also sidesteps the Mistral prefill trap.
         if item_type in ("multi_agent_call", "subagent_call"):
             agent_name = item.get("agent") or item.get("recipient") or "agent"
-            call_id = item.get("call_id") or item.get("id") or f"subagent_call_{index}"
             args = item.get("arguments") or item.get("input") or {}
-            # Stringify arguments to ensure content is always a string
-            args_str = json.dumps(args) if isinstance(args, (dict, list)) else str(args)
-            content = f"[subagent_{agent_name} ({call_id}) invoked with {args_str}]"
+            call_id = item.get("id", item.get("call_id", ""))
+            task = _extract_subagent_task(args)
+            content = f"[Task from parent agent for subagent_{agent_name} ({call_id})]: {task}"
             normalized.append({
                 "type": "message",
-                "role": "assistant",
+                "role": "user",
                 "content": content,
             })
         # multi_agent_call_output / subagent_call_output -> message describing the subagent result
