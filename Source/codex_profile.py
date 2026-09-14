@@ -14,8 +14,10 @@ import tempfile
 sys.path.insert(0, str(Path(__file__).with_name("vendor")))
 import tomlkit
 
+from branding import BrandingError, resolve_presentation
 from bridge_core import BridgeError, atomic_json, private_directory, read_json
 from codex_catalogue import project_codex
+from hub_config import split_route
 
 
 PROVIDER_ID = "provider_hub"
@@ -27,7 +29,19 @@ ROOT_KEYS = (
 )
 # Nested keys owned inside a table we do not replace wholesale, so the user's
 # other entries in that table survive activation and restoration.
-NESTED_KEYS = (("features", "multi_agent_v2"),)
+#
+# The desktop appearance keys are the Codex app's vendor chrome-theme hook:
+# accent tints the highlight elements (effort slider fill, level labels) and
+# accentSource "custom" is required, otherwise the app re-derives the accent
+# from the server account theme and ignores the configured hex.
+NESTED_KEYS = (
+    ("features", "multi_agent_v2"),
+    ("desktop", "appearanceLightChromeTheme", "accent"),
+    ("desktop", "appearanceLightChromeTheme", "accentSource"),
+    ("desktop", "appearanceDarkChromeTheme", "accent"),
+    ("desktop", "appearanceDarkChromeTheme", "accentSource"),
+)
+ACCENT_SOURCE = "custom"
 
 
 def codex_running():
@@ -162,6 +176,16 @@ class CodexProfile:
                 json.dumps({**original_values, **nested_originals})
             except (TypeError, ValueError) as exc:
                 raise BridgeError("Codex model settings contain unsupported values and were not changed.") from exc
+            # The desktop accent follows the selected route's visible brand
+            # (including user branding overrides), so the app's highlight
+            # elements match the Hub's provider chip. Resolved before any
+            # mutation so a branding failure changes nothing.
+            try:
+                provider_id, model_id = split_route(selected)
+                accent = resolve_presentation(
+                    provider_id, model_id, settings.get("branding_overrides"))["accent"]
+            except (BrandingError, ValueError) as exc:
+                raise BridgeError("The provider accent for the Codex desktop theme could not be resolved.") from exc
             # default_subagent_model / default_subagent_reasoning_effort point
             # the Codex multi-agent runtime at a hub catalogue route so spawned
             # sub-agents use the configured provider connection instead of an
@@ -187,18 +211,22 @@ class CodexProfile:
                     document[key] = applied[key]
                 elif key in document:
                     del document[key]
+            nested_targets = {("features", "multi_agent_v2"): True if multi_agent else None}
+            for mode in ("appearanceLightChromeTheme", "appearanceDarkChromeTheme"):
+                nested_targets[("desktop", mode, "accent")] = accent
+                nested_targets[("desktop", mode, "accentSource")] = ACCENT_SOURCE
             nested_applied = {}
             for path in NESTED_KEYS:
                 table = ensure_nested_table(document, path[:-1])
                 path_str = ".".join(path)
-                if multi_agent and path == ("features", "multi_agent_v2"):
-                    table[path[-1]] = True
-                    nested_applied[path_str] = True
-                elif path[-1] in table:
-                    del table[path[-1]]
+                target = nested_targets[path]
+                if target is None:
+                    if path[-1] in table:
+                        del table[path[-1]]
                     nested_applied[path_str] = None
                 else:
-                    nested_applied[path_str] = None
+                    table[path[-1]] = target
+                    nested_applied[path_str] = target
             if "model_providers" not in document:
                 document["model_providers"] = tomlkit.table()
             owned_provider = self.provider(settings["port"])
@@ -213,10 +241,12 @@ class CodexProfile:
                 container = expected
                 for part in path[:-1]:
                     container = container.setdefault(part, {})
-                if multi_agent and path == ("features", "multi_agent_v2"):
-                    container[path[-1]] = True
-                elif path[-1] in container:
-                    del container[path[-1]]
+                target = nested_targets[path]
+                if target is None:
+                    if path[-1] in container:
+                        del container[path[-1]]
+                else:
+                    container[path[-1]] = target
             expected.setdefault("model_providers", {})[PROVIDER_ID] = owned_provider
             if after != expected:
                 raise BridgeError("Codex configuration verification failed; no configuration was changed.")
@@ -237,7 +267,7 @@ class CodexProfile:
                 raise BridgeError("Codex configuration changed during preparation. No settings were overwritten; retry after closing the app.")
             atomic_text(self.config, updated, mode=mode)
             return {"codex_profile_active": True, "codex_recovery_needed": True,
-                    "model_count": len(catalog["models"])}
+                    "model_count": len(catalog["models"]), "codex_accent": accent}
 
     def restore(self):
         if self.running():
