@@ -127,7 +127,31 @@ final class BridgeModel: ObservableObject {
         var options = settings.mapping_options[slot] ?? MappingOptions()
         if let omitSystem { options.omit_system = omitSystem }
         if let omitTools { options.omit_tools = omitTools }
-        if options.omit_system || options.omit_tools {
+        storeMappingOptions(slot, options)
+    }
+    func compactLimit(for slot: String) -> Binding<String> {
+        Binding(
+            get: {
+                if let limit = self.settings.mapping_options[slot]?.compact_limit { return String(limit) }
+                return ""
+            },
+            set: { self.setMappingCompactLimit(slot, $0) }
+        )
+    }
+    private func setMappingCompactLimit(_ slot: String, _ text: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespaces)
+        var options = settings.mapping_options[slot] ?? MappingOptions()
+        if trimmed.isEmpty {
+            options.compact_limit = nil
+        } else if let value = Int(trimmed), 1...15000000 ~= value {
+            options.compact_limit = value
+        } else {
+            return
+        }
+        storeMappingOptions(slot, options)
+    }
+    private func storeMappingOptions(_ slot: String, _ options: MappingOptions) {
+        if options.omit_system || options.omit_tools || options.compact_limit != nil {
             settings.mapping_options[slot] = options
         } else {
             settings.mapping_options.removeValue(forKey: slot)
@@ -1011,6 +1035,13 @@ struct BridgeWindow: View {
                                 Toggle("Omit system", isOn: model.omitSystem(for: slot.id)).toggleStyle(.checkbox)
                                 Toggle("Omit tools", isOn: model.omitTools(for: slot.id)).toggleStyle(.checkbox)
                             }.font(.caption).foregroundStyle(.secondary)
+                            HStack(spacing: 6) {
+                                Text("Compact at").font(.caption).foregroundStyle(.secondary)
+                                TextField("auto", text: model.compactLimit(for: slot.id))
+                                    .textFieldStyle(.roundedBorder).font(.system(size: 10, design: .monospaced)).frame(width: 90)
+                                    .help("Per-model auto-compact threshold in tokens. Blank follows the catalogue window at 85%.")
+                                Text("tokens · blank = auto 85%").font(.caption).foregroundStyle(.secondary)
+                            }
                         }.frame(maxWidth: .infinity)
                         Button("Test") { Task { await model.testRoute(slot.id) } }.disabled(model.busy)
                     }

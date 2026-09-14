@@ -115,15 +115,21 @@ def _normalize_mapping_options(value, slots) -> dict:
             continue
         if not isinstance(options, dict):
             raise ValueError("Each mapping option must be an object.")
-        unknown = set(options) - {"omit_system", "omit_tools"}
+        unknown = set(options) - {"omit_system", "omit_tools", "compact_limit"}
         if unknown:
             raise ValueError("Unknown mapping option field.")
         omit_system = options.get("omit_system", False)
         omit_tools = options.get("omit_tools", False)
         if type(omit_system) is not bool or type(omit_tools) is not bool:
             raise ValueError("omit_system and omit_tools must be true or false.")
-        if omit_system or omit_tools:
-            result[slot] = {"omit_system": omit_system, "omit_tools": omit_tools}
+        limit = options.get("compact_limit")
+        if limit is not None and (type(limit) is not int or not 1000 <= limit <= 15000000):
+            raise ValueError("compact_limit must be an integer between 1000 and 15000000 tokens.")
+        if omit_system or omit_tools or limit is not None:
+            entry = {"omit_system": omit_system, "omit_tools": omit_tools}
+            if limit is not None:
+                entry["compact_limit"] = limit
+            result[slot] = entry
     return result
 
 

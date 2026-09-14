@@ -176,6 +176,97 @@ def validate_messages(
     return result
 
 
+def sanitize_compacted_messages(
+    messages,
+    upstream_model: str,
+    scope: str,
+    gateway_token,
+    require_tool_reasoning: bool = True,
+) -> tuple[list, dict[int, str], dict]:
+    """Repair desktop-compacted history so a follow-up turn can still run.
+
+    Desktop compaction rewrites old assistant content while gateway signatures
+    bind reasoning to the exact visible output, model, and scope. Any rewrite,
+    dropped trace, model switch, or credential rotation therefore fails strict
+    validation. This repair strips thinking blocks that no longer validate and
+    drops tool calls (plus results for calls with no surviving trace) while
+    keeping the text, so the session continues instead of returning HTTP 400.
+
+    Returns ``(sanitized_messages, reasoning_by_message, report)``. When
+    nothing needs repair the original list is returned unchanged with
+    ``report["repaired"]`` False. Unverified text is never forwarded as
+    reasoning; structurally malformed history still raises CerebrasReplayError.
+    """
+    _text(upstream_model, "Upstream model", allow_empty=False)
+    _text(scope, "Cerebras connection scope", allow_empty=False)
+    _token_bytes(gateway_token)
+    if not isinstance(messages, list):
+        raise CerebrasReplayError("Messages must be an array.")
+    for message in messages:
+        if not isinstance(message, dict):
+            raise CerebrasReplayError("Every message must be an object.")
+    failed = set()
+    for index, message in enumerate(messages):
+        if message.get("role") != "assistant":
+            continue
+        try:
+            validate_messages([message], upstream_model, scope, gateway_token,
+                              require_tool_reasoning=require_tool_reasoning)
+        except CerebrasReplayError:
+            failed.add(index)
+    report = {"stripped_thinking": 0, "dropped_tool_uses": 0,
+              "dropped_tool_results": 0, "dropped_messages": 0, "repaired": False}
+    if not failed:
+        reasoning = validate_messages(messages, upstream_model, scope, gateway_token,
+                                      require_tool_reasoning=require_tool_reasoning)
+        return messages, reasoning, report
+    working = copy.deepcopy(messages)
+    for index in failed:
+        message = working[index]
+        content = message.get("content", "")
+        if not isinstance(content, list):
+            continue
+        stripped = [block for block in content
+                    if not (isinstance(block, dict)
+                            and block.get("type") in {"thinking", "redacted_thinking"})]
+        report["stripped_thinking"] += len(content) - len(stripped)
+        kept_blocks = []
+        for block in stripped:
+            if isinstance(block, dict) and block.get("type") == "tool_use":
+                report["dropped_tool_uses"] += 1
+                continue
+            kept_blocks.append(block)
+        message["content"] = kept_blocks
+    # Keep results only for calls whose verified trace survived in the final
+    # transcript; anything else would replay an unverified tool cycle.
+    live_tool_ids = set()
+    for message in working:
+        content = message.get("content", "")
+        if isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "tool_use" and block.get("id"):
+                    live_tool_ids.add(block["id"])
+    sanitized = []
+    for message in working:
+        content = message.get("content", "")
+        if (message.get("role") == "user" and isinstance(content, list)
+                and any(isinstance(block, dict) and block.get("type") == "tool_result"
+                        for block in content)):
+            remaining = [block for block in content
+                         if not (isinstance(block, dict) and block.get("type") == "tool_result"
+                                 and block.get("tool_use_id") not in live_tool_ids)]
+            report["dropped_tool_results"] += len(content) - len(remaining)
+            if not remaining:
+                report["dropped_messages"] += 1
+                continue
+            message["content"] = remaining
+        sanitized.append(message)
+    report["repaired"] = True
+    reasoning = validate_messages(sanitized, upstream_model, scope, gateway_token,
+                                  require_tool_reasoning=require_tool_reasoning)
+    return sanitized, reasoning, report
+
+
 class CerebrasStreamAdapter:
     """Buffer a Chat stream and emit a signed Anthropic reasoning envelope."""
 

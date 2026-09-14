@@ -770,6 +770,51 @@ class GatewayHubHTTPTests(unittest.TestCase):
         self.assertEqual(self.runtime.status()["providers"]["cerebras"]["completed"], 2)
         self.assert_upstream_secret_boundary("cerebras")
 
+    def test_cerebras_followup_after_desktop_compaction_is_repaired_not_rejected(self):
+        self.start_gateway("cerebras", "gpt-oss-120b", {
+            "effort_modes": ["low", "medium", "high"],
+            "max_output": 40960,
+            "reasoning_history": "gateway_signed_replay",
+            "complete_tool_cycles": True,
+        })
+        payload = {
+            "model": "claude-fable-5",
+            "max_tokens": 256,
+            "messages": [{"role": "user", "content": "read json.txt"}],
+            "tools": [tool_definition()],
+            "output_config": {"effort": "medium"},
+        }
+        status, raw, _ = self.request(payload)
+        self.assertEqual(status, 200)
+        first = json.loads(raw)
+        tool = next(block for block in first["content"] if block["type"] == "tool_use")
+        # Simulate Claude Desktop compaction: old assistant text is summarized in
+        # place while the gateway-signed thinking block is left behind, so the
+        # signature no longer matches the visible output.
+        compacted_assistant = copy.deepcopy(first["content"])
+        for block in compacted_assistant:
+            if block["type"] == "text":
+                block["text"] = "Summary: read json.txt earlier."
+        second = copy.deepcopy(payload)
+        second["messages"] += [
+            {"role": "assistant", "content": compacted_assistant},
+            {"role": "user", "content": [{
+                "type": "tool_result",
+                "tool_use_id": tool["id"],
+                "content": "json contents",
+            }]},
+            {"role": "user", "content": "Summarize the file."},
+        ]
+        status, raw, _ = self.request(second)
+        self.assertEqual(status, 200, raw)
+        upstream = MockProvider.requests[1]
+        assistant = next(message for message in upstream["messages"] if message["role"] == "assistant")
+        self.assertNotIn("tool_calls", assistant)
+        self.assertNotIn("reasoning", assistant)
+        self.assertTrue(all(message.get("role") != "tool" for message in upstream["messages"]))
+        repair = self.runtime.plan(second)["compatibility"]["cerebras_history_repair"]
+        self.assertTrue(repair["repaired"])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

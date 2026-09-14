@@ -14,7 +14,7 @@ from unittest.mock import patch
 from bridge_core import (BridgeError, ClaudeProfile, PROFILE_ID, atomic_json, default_settings,
                          read_json, validate_settings)
 from gateway import Runtime, Server
-from protocol import (StreamTranslator, apply_mapping_options, estimated_tokens, function_name,
+from protocol import (StreamTranslator, apply_mapping_options, compact_conversation, estimated_tokens, function_name,
                       mapping_options_for, model_catalog, rewrite_context_reminders, tool_id,
                       translate_request, translate_response)
 from catalogue import build_catalogue, read_observations, route_specs
@@ -34,6 +34,14 @@ def prompt(**extra):
     value = {"model": "claude-fable-5", "max_tokens": 64, "messages": [{"role": "user", "content": "hello"}]}
     value.update(extra)
     return value
+
+
+def sized_conversation(turns, chars_per_turn, **extra):
+    messages = []
+    for index in range(turns):
+        messages.append({"role": "user", "content": f"u{index}-" + "U" * chars_per_turn})
+        messages.append({"role": "assistant", "content": f"a{index}-" + "A" * chars_per_turn})
+    return prompt(messages=messages, **extra)
 
 
 class ProtocolTests(unittest.TestCase):
@@ -102,6 +110,54 @@ class ProtocolTests(unittest.TestCase):
         shared = apply_mapping_options(prompt(model="test-model", system="keep"), settings)
         self.assertEqual(shared.get("system"), "keep")
 
+    def test_mapping_options_compact_limit_defaults_to_none(self):
+        settings = config()
+        self.assertIsNone(mapping_options_for("claude-fable-5", settings)["compact_limit"])
+        settings["mapping_options"] = {"claude-fable-5": {"compact_limit": 100000}}
+        options = mapping_options_for("claude-fable-5", settings)
+        self.assertEqual(options["compact_limit"], 100000)
+        self.assertFalse(options["omit_system"])
+        self.assertFalse(options["omit_tools"])
+        self.assertEqual(mapping_options_for("fable", settings)["compact_limit"], 100000)
+        self.assertEqual(mapping_options_for("claude-fable-5[1m]", settings)["compact_limit"], 100000)
+        self.assertIsNone(mapping_options_for("claude-haiku-4-5", settings)["compact_limit"])
+
+    def test_compact_conversation_drops_oldest_and_keeps_chronological_order(self):
+        body = sized_conversation(5, 1500)
+        full = estimated_tokens(body)
+        compacted = compact_conversation(body, int(full * 0.5))
+        self.assertIsNot(compacted, body)
+        self.assertEqual(body["messages"][0]["content"][:3], "u0-")
+        kept = compacted["messages"]
+        self.assertLess(len(kept), len(body["messages"]))
+        self.assertLessEqual(estimated_tokens(compacted), int(full * 0.5) + full * 0.2)
+        original = [message["content"][:3] for message in body["messages"]]
+        markers = [message["content"][:3] for message in kept]
+        # Newest turns survive, oldest are dropped, order stays chronological.
+        self.assertEqual(markers[-2:], ["u4-", "a4-"])
+        self.assertNotIn("u0-", markers)
+        self.assertEqual(markers, [marker for marker in original if marker in set(markers)])
+        roles = [message["role"] for message in kept]
+        for first, second in zip(roles, roles[1:]):
+            self.assertNotEqual(first, second)
+
+    def test_compact_conversation_drops_tool_results_for_dropped_calls(self):
+        body = prompt(messages=[
+            {"role": "user", "content": "old work " + "U" * 3000},
+            {"role": "assistant", "content": [
+                {"type": "text", "text": "reading"},
+                {"type": "tool_use", "id": "toolu_old", "name": "Read", "input": {"path": "old.txt"}},
+            ]},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "toolu_old", "content": "old contents"},
+            ]},
+            {"role": "user", "content": "new work " + "N" * 3000},
+        ])
+        compacted = compact_conversation(body, estimated_tokens(body) // 2)
+        transcript = json.dumps(compacted["messages"])
+        self.assertNotIn("toolu_old", transcript)
+        self.assertIn("new work", transcript)
+        self.assertTrue(all(message.get("content") for message in compacted["messages"]))
 
     def test_context_limits_and_model_mappings(self):
         small = config(); small["_model_specs"]["test-model"]["context"] = 8000
@@ -592,6 +648,51 @@ class GatewayTests(unittest.TestCase):
         self.assertEqual(count_status, 200)
         self.assertLess(json.loads(count_data)["input_tokens"], 2048)
 
+    def test_plan_compacts_before_enforcing_context_limit(self):
+        for spec in self.runtime.settings["_model_specs"].values():
+            spec["context"] = 12000
+        body = sized_conversation(8, 2600)
+        body["messages"].append({"role": "user", "content": "continue"})
+        self.assertGreaterEqual(estimated_tokens(body), 12000)
+        plan = self.runtime.plan(body)
+        self.assertLess(len(plan["body"]["messages"]), len(body["messages"]))
+        report = plan.get("compatibility", {}).get("auto_compact", {})
+        self.assertEqual(report.get("threshold"), int(12000 * 0.85))
+        self.assertLess(report.get("estimated_after", 0), report.get("estimated_before", 0))
+
+    def test_plan_honors_per_slot_compact_limit(self):
+        body = sized_conversation(30, 2600)
+        body["messages"].append({"role": "user", "content": "continue"})
+        estimate = estimated_tokens(body)
+        self.assertGreater(estimate, 40000)
+        self.assertLess(estimate, int(240000 * 0.85))
+        plain = self.runtime.plan(body)
+        self.assertEqual(len(plain["body"]["messages"]), len(body["messages"]))
+        self.assertNotIn("auto_compact", plain.get("compatibility", {}))
+        self.runtime.settings["mapping_options"] = {
+            "claude-fable-5": {"compact_limit": 40000},
+        }
+        plan = self.runtime.plan(body)
+        self.assertLess(len(plan["body"]["messages"]), len(body["messages"]))
+        self.assertEqual(plan["compatibility"]["auto_compact"]["threshold"], 40000)
+        # An override above the catalogue window clamps to the window instead
+        # of disabling protection: an over-limit conversation still compacts.
+        huge = sized_conversation(150, 2600)
+        huge["messages"].append({"role": "user", "content": "continue"})
+        self.assertGreaterEqual(estimated_tokens(huge), 240000)
+        self.runtime.settings["mapping_options"] = {
+            "claude-fable-5": {"compact_limit": 1000000},
+        }
+        clamped = self.runtime.plan(huge)
+        self.assertEqual(clamped["compatibility"]["auto_compact"]["threshold"], 240000)
+
+    def test_plan_rejects_conversation_that_cannot_compact(self):
+        for spec in self.runtime.settings["_model_specs"].values():
+            spec["context"] = 12000
+        body = prompt(system="S" * 40000)
+        self.assertGreaterEqual(estimated_tokens(body), 12000)
+        with self.assertRaisesRegex(BridgeError, "12,000-token context limit"):
+            self.runtime.plan(body)
 
     def test_client_cancellation_clears_active_request(self):
         MockMistral.mode = "slow"

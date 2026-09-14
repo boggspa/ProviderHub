@@ -5,6 +5,7 @@ import unittest
 from cerebras_replay import (
     CerebrasReplayError,
     CerebrasStreamAdapter,
+    sanitize_compacted_messages,
     sign_thinking,
     validate_messages,
 )
@@ -340,6 +341,92 @@ class StreamAdapterTests(unittest.TestCase):
         self.assertEqual(truncated.feed({"choices": [{"delta": {"content": "partial"}}]}), [])
         with self.assertRaisesRegex(CerebrasReplayError, "before a valid completion signal"):
             truncated.end()
+
+
+class CompactionRepairTests(unittest.TestCase):
+    def signed_message(self, reasoning="Check both paths first.", content=None):
+        visible = content if content is not None else assistant_content()
+        block = sign_thinking(reasoning, visible, MODEL, SCOPE, TOKEN)
+        return {"role": "assistant", "content": [block, *copy.deepcopy(visible)]}
+
+    def test_pristine_history_is_returned_unchanged(self):
+        messages = [
+            {"role": "user", "content": "Read a.txt"},
+            self.signed_message(),
+            {"role": "user", "content": [{
+                "type": "tool_result", "tool_use_id": "call_one", "content": "contents",
+            }]},
+        ]
+        sanitized, reasoning, report = sanitize_compacted_messages(messages, MODEL, SCOPE, TOKEN)
+        self.assertIs(sanitized, messages)
+        self.assertEqual(reasoning, {1: "Check both paths first."})
+        self.assertFalse(report["repaired"])
+        self.assertEqual(report["stripped_thinking"], 0)
+
+    def test_desktop_summary_keeps_text_but_drops_broken_signatures(self):
+        message = self.signed_message(content=[{"type": "text", "text": "I will inspect both files."}])
+        message["content"][1]["text"] = "Summary: inspected both files earlier."
+        with self.assertRaisesRegex(CerebrasReplayError, "signature does not match"):
+            validate_messages([message], MODEL, SCOPE, TOKEN)
+        sanitized, reasoning, report = sanitize_compacted_messages([message], MODEL, SCOPE, TOKEN)
+        self.assertTrue(report["repaired"])
+        self.assertEqual(report["stripped_thinking"], 1)
+        self.assertEqual(sanitized[0]["content"],
+                         [{"type": "text", "text": "Summary: inspected both files earlier."}])
+        self.assertEqual(reasoning, {})
+        self.assertEqual(validate_messages(sanitized, MODEL, SCOPE, TOKEN), {})
+        # The caller's history is never mutated.
+        self.assertEqual(message["content"][0]["type"], "thinking")
+
+    def test_unsigned_tool_cycle_is_dropped_with_its_results(self):
+        assistant = {"role": "assistant", "content": assistant_content()}
+        messages = [
+            {"role": "user", "content": "Read both"},
+            assistant,
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "call_one", "content": "a"},
+                {"type": "tool_result", "tool_use_id": "call_two", "content": "b"},
+            ]},
+            {"role": "user", "content": "Summarize what you found."},
+        ]
+        with self.assertRaisesRegex(CerebrasReplayError, "missing its signed reasoning"):
+            validate_messages(messages, MODEL, SCOPE, TOKEN)
+        sanitized, reasoning, report = sanitize_compacted_messages(messages, MODEL, SCOPE, TOKEN)
+        self.assertTrue(report["repaired"])
+        self.assertEqual(reasoning, {})
+        transcript = json.dumps(sanitized)
+        self.assertNotIn("call_one", transcript)
+        self.assertNotIn("tool_use", transcript)
+        self.assertNotIn("tool_result", transcript)
+        self.assertIn("Summarize what you found.", transcript)
+        # Kept assistant text still explains the earlier turn.
+        self.assertIn("I will inspect both files.", transcript)
+        self.assertEqual(validate_messages(sanitized, MODEL, SCOPE, TOKEN), {})
+
+    def test_valid_tool_cycles_survive_alongside_repaired_ones(self):
+        fresh = self.signed_message(reasoning="Fresh trace.")
+        stale = self.signed_message(reasoning="Stale trace.")
+        stale["content"][1]["text"] = "Desktop rewrote this text."
+        messages = [
+            {"role": "user", "content": "first"},
+            stale,
+            {"role": "user", "content": "second"},
+            fresh,
+            {"role": "user", "content": [{
+                "type": "tool_result", "tool_use_id": "call_one", "content": "fresh result",
+            }]},
+        ]
+        sanitized, reasoning, report = sanitize_compacted_messages(messages, MODEL, SCOPE, TOKEN)
+        self.assertTrue(report["repaired"])
+        self.assertEqual(reasoning, {3: "Fresh trace."})
+        self.assertEqual(validate_messages(sanitized, MODEL, SCOPE, TOKEN), {3: "Fresh trace."})
+
+    def test_malformed_history_still_fails_closed(self):
+        with self.assertRaises(CerebrasReplayError):
+            sanitize_compacted_messages("not-a-list", MODEL, SCOPE, TOKEN)
+        with self.assertRaises(CerebrasReplayError):
+            sanitize_compacted_messages(
+                [{"role": "assistant", "content": ["not-a-block"]}], MODEL, SCOPE, TOKEN)
 
 
 if __name__ == "__main__":

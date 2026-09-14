@@ -65,6 +65,7 @@ struct ProviderSummary: Decodable {
 struct MappingOptions: Codable, Equatable {
     var omit_system = false
     var omit_tools = false
+    var compact_limit: Int?
 }
 struct RouteSettings: Codable, Equatable {
     var schema_version = 3

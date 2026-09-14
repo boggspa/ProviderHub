@@ -39,9 +39,9 @@ from devin_agent import (DESCRIPTOR as DEVIN_DESCRIPTOR, DevinAgentError,
                          cancel_session as devin_cancel_session,
                          submit_task as devin_submit_task,
                          catalogue as devin_catalogue)
-from cerebras_replay import CerebrasReplayError, CerebrasStreamAdapter, sign_thinking, validate_messages
+from cerebras_replay import CerebrasReplayError, CerebrasStreamAdapter, sanitize_compacted_messages, sign_thinking, validate_messages
 from gemini_provider import GeminiError, GeminiStreamAdapter, translate_response as translate_gemini_response, _estimated_input_tokens as estimated_gemini_tokens
-from protocol import (StreamTranslator, apply_mapping_options, compact_conversation, estimated_tokens, mapping_options_for, validate_mistral_roles,
+from protocol import (StreamTranslator, apply_mapping_options, compact_conversation, compact_threshold, estimated_tokens, mapping_options_for, validate_mistral_roles,
                       model_catalog, resolve_model, rewrite_context_reminders, translate_request, translate_response)
 from responses_native import ResponseOwnership, handle_responses, NATIVE_PROVIDERS
 from codex_catalogue import catalogue_digest, choices as codex_choices, launch_settings as codex_launch_settings
@@ -110,17 +110,24 @@ class Runtime:
         provider_id, upstream_model = split_route(route)
         spec = self.settings["_model_specs"][route]
         context = spec.get("context")
-        omitted = mapping_options_for(payload.get("model"), self.settings)
+        options = mapping_options_for(payload.get("model"), self.settings)
         payload = apply_mapping_options(payload, self.settings)
-        estimate = estimated_gemini_tokens(payload) if provider_id == "gemini" else estimated_tokens(payload)
+        estimate_fn = estimated_gemini_tokens if provider_id == "gemini" else estimated_tokens
+        estimate = estimate_fn(payload)
+        # Compact before enforcing the hard window: Claude Desktop meters the
+        # session at 200K/1M regardless of the selected route, so a small-window
+        # route would otherwise fail instead of trimming old turns first.
+        auto_compact = None
+        threshold = compact_threshold(context, options)
+        if threshold is not None and estimate >= threshold:
+            compacted_payload = compact_conversation(payload, threshold, estimate=estimate_fn)
+            after = estimate_fn(compacted_payload)
+            if after < estimate:
+                auto_compact = {"threshold": threshold, "estimated_before": estimate, "estimated_after": after}
+                payload = compacted_payload
+                estimate = after
         if type(context) is int and estimate >= context:
             raise BridgeError(f"This conversation is above the provider's reported {context:,}-token context limit.")
-        # Auto-compact at 85% of context limit for providers that support it
-        if type(context) is int and estimate >= context * 0.85 and context > 10000:
-            compacted_payload = compact_conversation(payload, int(context * 0.85))
-            # Re-estimate after compaction
-            estimate = estimated_gemini_tokens(compacted_payload) if provider_id == "gemini" else estimated_tokens(compacted_payload)
-            payload = compacted_payload
         if payload.get("model", "").endswith("[1m]") and (type(context) is not int or context < 1000000):
             raise BridgeError("A 1M context window has not been established for this route.")
         # Validate Mistral-specific role requirements
@@ -135,13 +142,27 @@ class Runtime:
         # This covers Vibe/environment credential rotation between gateway runs.
         scope += ":" + hmac.new(self.replay_key.encode(), key.encode(), hashlib.sha256).hexdigest()
         replay_required = provider_id == "cerebras" and spec.get("reasoning_history") in {"adapter_required", "gateway_signed_replay", "gateway_signed_replay_required"}
+        cerebras_repair = None
         try:
-            replay = validate_messages(payload.get("messages"), upstream_model, scope, self.replay_key,
-                                       require_tool_reasoning=replay_required) if provider_id == "cerebras" else None
-            options = {"reasoning_by_message": replay} if provider_id == "cerebras" else {}
+            if provider_id == "cerebras":
+                try:
+                    replay = validate_messages(payload.get("messages"), upstream_model, scope, self.replay_key,
+                                               require_tool_reasoning=replay_required)
+                except CerebrasReplayError:
+                    # Desktop compaction rewrites old assistant output, which
+                    # invalidates gateway-bound signatures. Repair the history
+                    # (strip broken traces, drop unverified tool cycles) so the
+                    # follow-up turn runs instead of failing with HTTP 400.
+                    sanitized, replay, cerebras_repair = sanitize_compacted_messages(
+                        payload.get("messages"), upstream_model, scope, self.replay_key,
+                        require_tool_reasoning=replay_required)
+                    payload = {**payload, "messages": sanitized}
+            else:
+                replay = None
+            request_options = {"reasoning_by_message": replay} if provider_id == "cerebras" else {}
             if provider_id == "gemini":
-                options.update(replay_scope=scope, replay_key=self.replay_key)
-            plan = (self.request_planner or prepare_request)(provider_id, self.settings["providers"][provider_id], key, payload, upstream_model, spec, **options)
+                request_options.update(replay_scope=scope, replay_key=self.replay_key)
+            plan = (self.request_planner or prepare_request)(provider_id, self.settings["providers"][provider_id], key, payload, upstream_model, spec, **request_options)
         except (ProviderError, CerebrasReplayError) as exc:
             raise BridgeError(str(exc).replace(key, "[redacted]") if key else str(exc)) from exc
         plan.update(route=route, provider_id=provider_id, provider_name=PROVIDERS[provider_id]["name"],
@@ -149,9 +170,13 @@ class Runtime:
                     model_spec=spec)
         if reminders_rewritten:
             plan.setdefault("compatibility", {})["context_reminders"] = "catalogue_remaining"
-        dropped = [name for name, on in (("system", omitted["omit_system"]), ("tools", omitted["omit_tools"])) if on]
+        dropped = [name for name, on in (("system", options["omit_system"]), ("tools", options["omit_tools"])) if on]
         if dropped:
             plan.setdefault("compatibility", {})["omitted_mapping_fields"] = dropped
+        if auto_compact is not None:
+            plan.setdefault("compatibility", {})["auto_compact"] = auto_compact
+        if cerebras_repair is not None and cerebras_repair.get("repaired"):
+            plan.setdefault("compatibility", {})["cerebras_history_repair"] = cerebras_repair
         if type(context) is int and provider_id != "gemini":
             plan["body"]["max_tokens"] = min(plan["body"].get("max_tokens", 4096), max(1, context - estimate))
         # The only override is an explicit in-process test-harness argument,

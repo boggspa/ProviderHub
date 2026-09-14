@@ -110,7 +110,7 @@ def resolve_mapping_slot(requested, mappings: dict) -> str | None:
 
 
 def mapping_options_for(requested, settings: dict) -> dict:
-    options = {"omit_system": False, "omit_tools": False}
+    options = {"omit_system": False, "omit_tools": False, "compact_limit": None}
     if not isinstance(settings, dict):
         return options
     slot = resolve_mapping_slot(requested, settings.get("mappings") or {})
@@ -121,6 +121,9 @@ def mapping_options_for(requested, settings: dict) -> dict:
         options["omit_system"] = True
     if configured.get("omit_tools") is True:
         options["omit_tools"] = True
+    limit = configured.get("compact_limit")
+    if type(limit) is int and limit > 0:
+        options["compact_limit"] = limit
     return options
 
 
@@ -762,50 +765,95 @@ class StreamTranslator:
         return events + result
 
 
-def compact_conversation(payload: dict, max_tokens: int) -> dict:
+def compact_threshold(context, options=None) -> int | None:
+    """Return the estimated token count that triggers gateway-side compaction.
+
+    An explicit per-slot ``compact_limit`` override always applies and clamps
+    to the catalogue window, so small-window routes can compact earlier than
+    Claude Desktop's own session meter would. Otherwise compaction starts at
+    85 percent of a known window larger than 10,000 tokens. Returns None when
+    no automatic compaction applies.
+    """
+    if type(context) is not int or context <= 0:
+        return None
+    override = (options or {}).get("compact_limit")
+    if type(override) is int and override > 0:
+        return min(override, context)
+    if context > 10000:
+        return int(context * 0.85)
+    return None
+
+
+def compact_conversation(payload: dict, max_tokens: int, estimate=None) -> dict:
     """Compact conversation history to fit within max_tokens budget.
-    
-    Strategy: Remove oldest messages first, preserving system prompt and most recent context.
-    Returns a new payload with compacted messages.
+
+    Strategy: Remove oldest messages first, preserving system prompt and most
+    recent context. Chronological order is preserved. Tool results whose tool
+    calls were dropped are removed as well so the remaining history still
+    forms complete tool cycles. Returns a new payload; the input is unchanged.
     """
     import copy
+    estimator = estimate or estimated_tokens
     result = copy.deepcopy(payload)
-    
+
     messages = result.get("messages", [])
     if not messages:
         return result
-    
+
     # Always preserve system message if present
     system_message = None
     non_system_messages = []
-    
+
     for msg in messages:
-        if msg.get("role") == "system":
+        if isinstance(msg, dict) and msg.get("role") == "system":
             system_message = msg
         else:
             non_system_messages.append(msg)
-    
+
     if not non_system_messages:
         return result
-    
-    # Build compacted message list starting from most recent
-    compacted = []
-    if system_message:
-        compacted.append(system_message)
-    
-    # Add messages from newest to oldest until we fit
-    for msg in reversed(non_system_messages):
-        test_payload = {"messages": compacted + [msg], "system": result.get("system")}
-        test_estimate = estimated_tokens(test_payload)
-        
-        if test_estimate <= max_tokens:
-            compacted.append(msg)
-        else:
-            # This message would exceed the limit, skip it
+
+    # Add messages from newest to oldest until the budget is spent, then
+    # restore chronological order.
+    kept = []
+    kept_flags = [False] * len(non_system_messages)
+    for position in range(len(non_system_messages) - 1, -1, -1):
+        msg = non_system_messages[position]
+        trial = {"messages": ([system_message] if system_message else []) + kept + [msg],
+                 "system": result.get("system")}
+        if estimator(trial) <= max_tokens:
+            kept.append(msg)
+            kept_flags[position] = True
+        # Otherwise this message would exceed the limit; skip it and keep
+        # trying older (possibly smaller) messages.
+    kept.reverse()
+
+    dropped_tool_ids = set()
+    for position, msg in enumerate(non_system_messages):
+        if kept_flags[position] or not isinstance(msg, dict):
             continue
-    
-    # Reverse back to chronological order (system, then oldest to newest of kept messages)
-    result["messages"] = compacted
+        content = msg.get("content")
+        if isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "tool_use" and block.get("id"):
+                    dropped_tool_ids.add(block["id"])
+    if dropped_tool_ids:
+        # A tool result without its call is meaningless to every upstream, so
+        # strip results for dropped calls, dropping messages left empty.
+        survivors = []
+        for msg in kept:
+            content = msg.get("content") if isinstance(msg, dict) else None
+            if isinstance(msg, dict) and msg.get("role") == "user" and isinstance(content, list):
+                remaining = [block for block in content
+                             if not (isinstance(block, dict) and block.get("type") == "tool_result"
+                                     and block.get("tool_use_id") in dropped_tool_ids)]
+                if not remaining:
+                    continue
+                msg["content"] = remaining
+            survivors.append(msg)
+        kept = survivors
+
+    result["messages"] = ([system_message] if system_message else []) + kept
     return result
 
 

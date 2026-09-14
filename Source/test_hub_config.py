@@ -107,6 +107,23 @@ class SettingsMigrationTests(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 normalize({"mapping_options": value}, SLOTS, "mistral-test")
 
+    def test_mapping_options_compact_limit_is_validated_and_persisted(self):
+        only = normalize({
+            "mapping_options": {"claude-fable-5": {"compact_limit": 100000}},
+        }, SLOTS, "mistral-test")
+        self.assertEqual(only["mapping_options"], {
+            "claude-fable-5": {"omit_system": False, "omit_tools": False, "compact_limit": 100000},
+        })
+        # Null from an older or hand-edited file means "no override".
+        cleared = normalize({
+            "mapping_options": {"claude-fable-5": {"compact_limit": None}},
+        }, SLOTS, "mistral-test")
+        self.assertEqual(cleared["mapping_options"], {})
+        for value in (0, -100, 999, 15000001, True, 100000.0, "100000", [100000]):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                normalize({"mapping_options": {"claude-fable-5": {"compact_limit": value}}},
+                          SLOTS, "mistral-test")
+
 
     def test_legacy_credential_mode_is_validated_before_migration(self):
         vibe = normalize({"credential_mode": "vibe"}, SLOTS, "mistral-test")
