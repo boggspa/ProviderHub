@@ -56,6 +56,13 @@ class ResponseOwnership:
 
 _TASK_HEADER_PREFIXES = ("Message Type:", "Task name:", "Sender:", "Payload:")
 
+# Codex multi_agent_v2 call arguments follow the Responses convention where
+# arguments travel as a JSON string, so the wire envelope can arrive as a
+# list, a dict, or a stringified list/dict. A previous turn's leak can also
+# re-enter history as `subagent: [...]` prose once a weaker model echoes it.
+_SUBAGENT_ECHO_PREFIX = "subagent:"
+_MAX_WIRE_DEPTH = 5
+
 
 def _strip_task_header(text):
     """Strip Codex NEW_TASK routing header lines (may return ""; caller falls back)."""
@@ -63,40 +70,150 @@ def _strip_task_header(text):
     return "\n".join(kept).strip()
 
 
+def _looks_like_wire_json(text):
+    stripped = text.lstrip()
+    return stripped.startswith(("{", "["))
+
+
+def _extract_wire_value(value, depth=0):
+    """Extract plaintext from a parsed wire-envelope value, or None.
+
+    Returns None for shapes that are not recognisably part of the Codex
+    inter-assistant protocol, so callers keep their existing stringification
+    fallback for genuinely opaque data.
+    """
+    if depth > _MAX_WIRE_DEPTH:
+        return None
+    if isinstance(value, list):
+        parts = []
+        matched = False
+        for block in value:
+            if isinstance(block, dict):
+                kind = block.get("type")
+                if kind == "input_text":
+                    matched = True
+                    text = block.get("text", "")
+                    cleaned = _clean_wire_text(text, depth + 1) if isinstance(text, str) else str(text)
+                    if cleaned:
+                        parts.append(cleaned)
+                elif kind == "encrypted_content":
+                    matched = True
+                    inner = block.get("encrypted_content", "")
+                    parts.append(_clean_wire_text(inner, depth + 1) if isinstance(inner, str) else str(inner))
+                else:
+                    nested = _extract_wire_value(block, depth + 1)
+                    if nested is not None:
+                        matched = True
+                        parts.append(nested)
+                    elif block:
+                        parts.append(json.dumps(block))
+            elif isinstance(block, str):
+                nested = _clean_wire_text(block, depth + 1)
+                if nested != block:
+                    matched = True
+                parts.append(nested)
+            elif block is not None:
+                parts.append(str(block))
+        if not matched:
+            return None
+        return "\n".join(part for part in parts if part).strip()
+    if isinstance(value, dict):
+        kind = value.get("type")
+        if kind == "input_text" and isinstance(value.get("text"), str):
+            return _clean_wire_text(value["text"], depth + 1)
+        if kind == "encrypted_content":
+            inner = value.get("encrypted_content", "")
+            return _clean_wire_text(inner, depth + 1) if isinstance(inner, str) else str(inner)
+        # Dict-form envelope: the encrypted_content/input_text keys are
+        # protocol vocabulary, so their values are always unwrapped. A bare
+        # "text" key is generic prose storage: only treat it as an envelope
+        # when cleaning actually removes protocol markers, otherwise the
+        # caller stringifies (preserving key names for opaque data).
+        if isinstance(value.get("encrypted_content"), str):
+            return _clean_wire_text(value["encrypted_content"], depth + 1)
+        if isinstance(value.get("input_text"), str):
+            return _clean_wire_text(value["input_text"], depth + 1)
+        if isinstance(value.get("text"), str):
+            cleaned = _clean_wire_text(value["text"], depth + 1)
+            if cleaned != value["text"]:
+                return cleaned
+        for key in ("input", "arguments", "blocks", "content", "payload"):
+            if key in value:
+                nested = _extract_wire_value(value[key], depth + 1)
+                if nested is not None:
+                    return nested
+        return None
+    return None
+
+
+def _clean_wire_text(text, depth=0):
+    """Reduce inter-assistant protocol text to the plaintext it carries.
+
+    Plain prose passes through unchanged. Routing headers are stripped, and
+    a remainder that is itself a stringified envelope (including a previous
+    turn's `subagent: [...]` model echo) is unwrapped recursively so wire
+    JSON never compounds across turns.
+    """
+    if not isinstance(text, str) or depth > _MAX_WIRE_DEPTH:
+        return text
+    stripped = _strip_task_header(text)
+    if not stripped:
+        # Pure routing headers (or blank): no payload to forward. Falling
+        # back to the original here would re-emit the headers as the leak.
+        return ""
+    candidate = stripped
+    lowered = candidate.lstrip().lower()
+    if lowered.startswith(_SUBAGENT_ECHO_PREFIX):
+        remainder = candidate.lstrip()[len(_SUBAGENT_ECHO_PREFIX):].strip()
+        if _looks_like_wire_json(remainder):
+            try:
+                parsed = json.loads(remainder)
+            except ValueError:
+                parsed = None
+            extracted = _extract_wire_value(parsed, depth + 1) if parsed is not None else None
+            if extracted:
+                return extracted
+        elif remainder:
+            return _clean_wire_text(remainder, depth + 1)
+        return candidate
+    if candidate != text.strip() and not _looks_like_wire_json(candidate):
+        return candidate
+    if _looks_like_wire_json(candidate):
+        try:
+            parsed = json.loads(candidate)
+        except ValueError:
+            return candidate
+        extracted = _extract_wire_value(parsed, depth + 1)
+        if extracted is not None:
+            return extracted
+    return candidate
+
+
 def _extract_subagent_task(args):
     """Extract a human-readable instruction from a subagent call payload.
 
     Codex multi_agent_v2 wraps delegations in a wire envelope: a list of
     blocks where input_text blocks carry routing headers and an
-    encrypted_content block carries the plaintext instruction. Unknown
-    shapes fall back to readable stringification so content is never
-    silently dropped.
+    encrypted_content block carries the plaintext instruction. The envelope
+    may also arrive stringified (Responses arguments are strings by
+    convention) or in dict form. Unknown shapes fall back to readable
+    stringification so content is never silently dropped.
     """
-    if isinstance(args, list):
-        parts = []
-        for block in args:
-            if not isinstance(block, dict):
-                if block is not None:
-                    parts.append(str(block))
-                continue
-            kind = block.get("type")
-            if kind == "input_text":
-                text = block.get("text", "")
-                if isinstance(text, str) and text.strip():
-                    parts.append(_strip_task_header(text))
-                elif text:
-                    parts.append(str(text))
-            elif kind == "encrypted_content":
-                value = block.get("encrypted_content", "")
-                parts.append(value if isinstance(value, str) else str(value))
-            elif block:
-                parts.append(json.dumps(block))
-        combined = "\n".join(part for part in parts if part).strip()
-        if combined:
-            return combined
-    elif isinstance(args, str) and args.strip():
-        return _strip_task_header(args) or args.strip()
-    if isinstance(args, (dict, list)):
+    if isinstance(args, str):
+        if not args.strip():
+            return str(args)
+        return _clean_wire_text(args)
+    if isinstance(args, (list, dict)):
+        extracted = _extract_wire_value(args)
+        if extracted:
+            return extracted
+        if isinstance(args, list):
+            combined = "\n".join(
+                json.dumps(block) if isinstance(block, dict) else str(block)
+                for block in args if block is not None
+            ).strip()
+            if combined:
+                return combined
         return json.dumps(args)
     return str(args)
 
@@ -142,8 +259,12 @@ def _normalize_multi_agent_items(input_list):
         elif item_type in ("multi_agent_call_output", "subagent_call_output"):
             call_id = item.get("call_id") or item.get("id") or f"subagent_call_{index}"
             output = item.get("output") or item.get("result") or ""
-            # Stringify output to ensure content is always a string
-            output_str = json.dumps(output) if isinstance(output, (dict, list)) else str(output)
+            if isinstance(output, str):
+                output_str = _clean_wire_text(output) if output.strip() else ""
+            elif isinstance(output, (dict, list)):
+                output_str = _extract_subagent_task(output)
+            else:
+                output_str = str(output)
             content = f"[subagent_{call_id} returned: {output_str}]"
             normalized.append({
                 "type": "message",
@@ -159,12 +280,22 @@ def _normalize_multi_agent_items(input_list):
             content = item.get("content") or ""
             # Guard: only add prefix if content is a string and doesn't already have it
             if isinstance(content, str):
+                # Break the echo chamber: a previous turn's leaked envelope
+                # re-enters here as `subagent: [...]` prose once the model
+                # repeats it. Unwrap it instead of amplifying it.
+                content = _clean_wire_text(content) if content else ""
                 prefix = f"[subagent_{agent_name}]"
                 if not content.startswith(prefix):
                     content = f"{prefix}: {content}" if content else prefix
+            elif isinstance(content, (dict, list)):
+                extracted = _extract_wire_value(content)
+                if extracted:
+                    content = f"[subagent_{agent_name}]: {extracted}"
+                else:
+                    # Stringify non-string content
+                    content = f"{agent_name}: {json.dumps(content)}"
             else:
-                # Stringify non-string content
-                content = f"{agent_name}: {json.dumps(content) if isinstance(content, (dict, list)) else str(content)}"
+                content = f"{agent_name}: {str(content)}"
             normalized.append({
                 "type": "message",
                 "role": role,

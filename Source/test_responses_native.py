@@ -721,29 +721,122 @@ class MultiAgentNormalizationTests(unittest.TestCase):
             prepare_native(runtime, {"model": route, "input": [{"type": "weird_future"}]})
         self.assertIn("'weird_future'", str(ctx.exception))
 
-
-if __name__ == "__main__":
-    unittest.main()
-
-    def test_extract_subagent_task_encrypted_content(self):
+    def test_extract_subagent_task_prefers_encrypted_content(self):
+        """Dict-form envelopes expose the plaintext instruction, not the routing text."""
         from responses_native import _extract_subagent_task
+
         args = {
             "input_text": "Message Type: NEW_TASK\nSender: User\nActual task here",
-            "encrypted_content": "Plain text extraction"
+            "encrypted_content": "Plain text extraction",
         }
         self.assertEqual(_extract_subagent_task(args), "Plain text extraction")
 
-    def test_extract_subagent_task_input_text_strip_headers(self):
+    def test_extract_subagent_task_strips_headers_from_input_text(self):
+        """Dict-form routing text is header-stripped like list-form blocks."""
         from responses_native import _extract_subagent_task
-        args = {
-            "input_text": "Message Type: NEW_TASK\nSender: User\nActual task here"
-        }
+
+        args = {"input_text": "Message Type: NEW_TASK\nSender: User\nActual task here"}
         self.assertEqual(_extract_subagent_task(args), "Actual task here")
 
     def test_extract_subagent_task_fallback(self):
+        """Plain strings pass through; unknown dicts stay JSON-stringified."""
+        import json
+
         from responses_native import _extract_subagent_task
-        args = "Just a string"
-        self.assertEqual(_extract_subagent_task(args), "Just a string")
-        
-        args = {"unknown": "data"}
-        self.assertEqual(_extract_subagent_task(args), str({"unknown": "data"}))
+
+        self.assertEqual(_extract_subagent_task("Just a string"), "Just a string")
+        # Unknown shapes keep the suite's JSON stringification contract (see
+        # test_multi_agent_v2_stringifies_non_string_payloads), not str().
+        self.assertEqual(_extract_subagent_task({"unknown": "data"}), json.dumps({"unknown": "data"}))
+
+    def test_stringified_envelope_arguments_are_unwrapped(self):
+        """Responses arguments travel as strings: a stringified wire envelope unwraps to plaintext."""
+        import json
+
+        from responses_native import _normalize_multi_agent_items
+
+        envelope = [
+            {"type": "input_text",
+             "text": "Message Type: NEW_TASK\nTask name: /root/doc_analyzer_2\nSender: /root\nPayload:\n"},
+            {"type": "encrypted_content", "encrypted_content": "Review the provider docs."},
+        ]
+        inputs = [
+            {"type": "multi_agent_call", "call_id": "call_1", "agent": "doc_analyzer_2",
+             "arguments": json.dumps(envelope)},
+        ]
+        normalized = _normalize_multi_agent_items(inputs)
+
+        self.assertEqual(normalized[0]["role"], "user")
+        self.assertIn("Review the provider docs.", normalized[0]["content"])
+        for token in ("input_text", "encrypted_content", "Message Type:", "Task name:"):
+            self.assertNotIn(token, normalized[0]["content"])
+
+    def test_output_envelopes_are_unwrapped_not_dumped(self):
+        """Subagent outputs carrying FINAL_ANSWER envelopes (incl. nested echoes) unwrap to plaintext."""
+        import json
+
+        from responses_native import _normalize_multi_agent_items
+
+        nested_echo = (
+            "Message Type: FINAL_ANSWER\nTask name: /root\nSender: /root/doc_analyzer_2\nPayload:\n"
+            "subagent: " + json.dumps([
+                {"type": "input_text",
+                 "text": "Message Type: NEW_TASK\nTask name: /root/doc_analyzer_2\nSender: /root\nPayload:\n"},
+                {"type": "encrypted_content", "encrypted_content": "Review the provider docs."},
+            ])
+        )
+        inputs = [
+            {"type": "multi_agent_call_output", "call_id": "call_1",
+             "output": [{"type": "input_text", "text": nested_echo}]},
+            {"type": "multi_agent_call_output", "call_id": "call_2",
+             "output": json.dumps([{"type": "input_text", "text": nested_echo}])},
+        ]
+        normalized = _normalize_multi_agent_items(inputs)
+
+        for item in normalized:
+            self.assertEqual(item["role"], "user")
+            self.assertIn("Review the provider docs.", item["content"])
+            for token in ("input_text", "encrypted_content", "Message Type:", "Task name:", "subagent:"):
+                self.assertNotIn(token, item["content"])
+
+    def test_agent_message_subagent_echo_is_unwrapped(self):
+        """A previous turn's `subagent: [...]` model echo unwraps instead of compounding."""
+        import json
+
+        from responses_native import _normalize_multi_agent_items
+
+        envelope = [
+            {"type": "input_text",
+             "text": "Message Type: NEW_TASK\nTask name: /root/doc_analyzer_2\nSender: /root\nPayload:\n"},
+            {"type": "encrypted_content", "encrypted_content": "Review the provider docs."},
+        ]
+        inputs = [
+            {"type": "agent_message", "agent": "doc_analyzer_2", "role": "assistant",
+             "content": "subagent: " + json.dumps(envelope)},
+        ]
+        normalized = _normalize_multi_agent_items(inputs)
+
+        self.assertEqual(normalized[0]["role"], "assistant")
+        self.assertIn("Review the provider docs.", normalized[0]["content"])
+        for token in ("input_text", "encrypted_content", "Message Type:", "subagent: ["):
+            self.assertNotIn(token, normalized[0]["content"])
+
+    def test_multi_agent_plain_prose_passes_through_unchanged(self):
+        """Ordinary prose in multi-agent items is never rewritten by wire cleanup."""
+        from responses_native import _normalize_multi_agent_items
+
+        inputs = [
+            {"type": "multi_agent_call", "call_id": "call_1", "agent": "coder",
+             "arguments": "Write the migration guide."},
+            {"type": "multi_agent_call_output", "call_id": "call_1", "output": "Guide written."},
+            {"type": "agent_message", "agent": "coder", "role": "assistant", "content": "Working on it."},
+        ]
+        normalized = _normalize_multi_agent_items(inputs)
+
+        self.assertIn("Write the migration guide.", normalized[0]["content"])
+        self.assertIn("Guide written.", normalized[1]["content"])
+        self.assertIn("Working on it.", normalized[2]["content"])
+
+
+if __name__ == "__main__":
+    unittest.main()
