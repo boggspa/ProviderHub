@@ -1,5 +1,6 @@
 """Catalogue and configuration transactions in disposable homes only."""
 import copy
+import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -7,7 +8,7 @@ import unittest
 from branding import resolve_presentation
 from bridge_core import BridgeError, SLOTS
 from codex_catalogue import catalogue_digest, project_codex
-from codex_profile import CodexProfile, parse, tomlkit
+from codex_profile import ROOT_KEYS, CodexProfile, digest, parse, tomlkit, value_at
 from hub_config import defaults
 
 
@@ -216,48 +217,71 @@ command = "existing-command"
         self.manager.restore()
         self.assertEqual(self.manager.config.read_text(), self.original)
 
-    def test_activate_writes_provider_accent_to_both_chrome_themes(self):
-        expected = resolve_presentation("grok", "grok-4.6")["accent"]
-        result = self.activate()
-        self.assertEqual(result["codex_accent"], expected)
-        doc = parse(self.manager.config.read_text())
-        for mode in ("appearanceLightChromeTheme", "appearanceDarkChromeTheme"):
-            with self.subTest(mode=mode):
-                self.assertEqual(doc["desktop"][mode]["accent"], expected)
-                self.assertEqual(doc["desktop"][mode]["accentSource"], "custom")
-
-    def test_restore_removes_hub_accent_when_previously_absent(self):
-        self.activate()
-        self.assertIn("desktop", parse(self.manager.config.read_text()))
-        self.manager.restore()
-        self.assertEqual(self.manager.config.read_text(), self.original)
-
-    def test_restore_returns_previous_custom_accent(self):
+    def test_activate_leaves_desktop_chrome_theme_untouched(self):
+        # The desktop chrome theme is global to the app and has no live-update
+        # path: activation requires a quit app, and in-app model switches never
+        # re-run activation. The hub therefore owns no theme keys: a prior
+        # custom accent survives byte-wise and none is written when absent.
         self.manager.config.write_text(
-            self.original + '\n[desktop.appearanceDarkChromeTheme]\naccent = "#123456"\n')
+            self.original + '\n[desktop.appearanceDarkChromeTheme]\naccent = "#123456"\naccentSource = "custom"\n')
         original = self.manager.config.read_text()
-        self.activate()
+        result = self.activate()
+        self.assertNotIn("codex_accent", result)
         doc = parse(self.manager.config.read_text())
-        self.assertEqual(doc["desktop"]["appearanceDarkChromeTheme"]["accent"],
-                         resolve_presentation("grok", "grok-4.6")["accent"])
+        self.assertEqual(doc["desktop"]["appearanceDarkChromeTheme"]["accent"], "#123456")
         self.assertEqual(doc["desktop"]["appearanceDarkChromeTheme"]["accentSource"], "custom")
+        self.assertNotIn("appearanceLightChromeTheme", doc["desktop"])
         self.manager.restore()
         self.assertEqual(self.manager.config.read_text(), original)
 
-    def test_in_session_theme_change_is_preserved_on_restore(self):
-        self.activate()
-        self.edit(lambda doc: doc["desktop"]["appearanceDarkChromeTheme"].update({"accent": "#ABCDEF"}))
+    def test_legacy_hub_accent_is_removed_on_restore(self):
+        # Journals written while the hub owned the desktop chrome theme still
+        # restore: the hub accent is removed and the prior theme returns.
+        hub_accent = resolve_presentation("grok", "grok-4.6")["accent"]
+        original = self.original + '\n[desktop.appearanceDarkChromeTheme]\naccent = "#123456"\n'
+        current = ('model = "grok/grok-4.6"\nmodel_provider = "provider_hub"\n'
+                   'model_catalog_json = "/tmp/codex-models.json"\nweb_search = "disabled"\n'
+                   'default_subagent_model = "grok/grok-4.6"\ndefault_subagent_reasoning_effort = "xhigh"\n'
+                   '\n[features]\nmulti_agent_v2 = true\n'
+                   '\n[desktop.appearanceLightChromeTheme]\naccent = "%s"\naccentSource = "custom"\n'
+                   '\n[desktop.appearanceDarkChromeTheme]\naccent = "%s"\naccentSource = "custom"\n'
+                   '\n[model_providers.provider_hub]\nname = "Provider Hub"\n') % (hub_accent, hub_accent)
+        before_doc, applied_doc = parse(original), parse(current)
+        journal = {
+            "version": 2, "config_path": str(self.manager.config), "existed": True,
+            "mode": 0o600,
+            "before": {key: value_at(before_doc, key) for key in ROOT_KEYS},
+            "applied": {key: value_at(applied_doc, key) for key in ROOT_KEYS},
+            "nested_before": {
+                "features.multi_agent_v2": {"present": False, "value": None},
+                "desktop.appearanceLightChromeTheme.accent": {"present": False, "value": None},
+                "desktop.appearanceLightChromeTheme.accentSource": {"present": False, "value": None},
+                "desktop.appearanceDarkChromeTheme.accent": {"present": True, "value": "#123456"},
+                "desktop.appearanceDarkChromeTheme.accentSource": {"present": False, "value": None},
+            },
+            "nested_applied": {
+                "features.multi_agent_v2": True,
+                "desktop.appearanceLightChromeTheme.accent": hub_accent,
+                "desktop.appearanceLightChromeTheme.accentSource": "custom",
+                "desktop.appearanceDarkChromeTheme.accent": hub_accent,
+                "desktop.appearanceDarkChromeTheme.accentSource": "custom",
+            },
+            "providers_existed": False,
+            "provider": {"name": "Provider Hub"},
+            "before_digest": digest(original),
+            "applied_digest": "legacy-hub-applied-state",
+        }
+        self.manager.root.mkdir(parents=True, exist_ok=True)
+        self.manager.backup.write_text(original)
+        self.manager.config.write_text(current)
+        self.manager.catalogue.write_text(json.dumps({"models": [{"slug": "grok/grok-4.6"}]}))
+        self.manager.journal.write_text(json.dumps(journal))
         result = self.manager.restore()
+        self.assertTrue(result["restored"])
         doc = parse(self.manager.config.read_text())
-        self.assertEqual(doc["desktop"]["appearanceDarkChromeTheme"]["accent"], "#ABCDEF")
-        self.assertGreater(result["preserved_external_changes"], 0)
-
-    def test_user_branding_override_drives_desktop_accent(self):
-        self.settings["branding_overrides"] = {"grok": {"accent": "#112233"}}
-        self.activate()
-        doc = parse(self.manager.config.read_text())
-        self.assertEqual(doc["desktop"]["appearanceDarkChromeTheme"]["accent"], "#112233")
-        self.assertEqual(doc["desktop"]["appearanceDarkChromeTheme"]["accentSource"], "custom")
+        self.assertEqual(doc["desktop"]["appearanceDarkChromeTheme"]["accent"], "#123456")
+        self.assertNotIn("accentSource", doc["desktop"]["appearanceDarkChromeTheme"])
+        self.assertNotIn("accent", doc["desktop"]["appearanceLightChromeTheme"])
 
 
 if __name__ == "__main__":
