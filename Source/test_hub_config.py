@@ -380,6 +380,40 @@ class CataloguePresentationTests(unittest.TestCase):
                 self.assertEqual(by_id[model_id], narrow)
         self.assertEqual(by_id["mistral-small-2501"], [])
 
+    def test_live_vibe_alias_cannot_inherit_a_narrow_canonical_twin(self):
+        # The Codex desktop routes Mistral Medium 3.5 as
+        # mistral/mistral-vibe-cli-latest, an alias the live Mistral API
+        # advertises on the narrow "magistral-medium" card whose canonical
+        # and billing names carry the same Mistral Medium 3.5 identity as
+        # the full-ladder card. The configured alias must be re-derived from
+        # that identity instead of inheriting the stale narrow bytes, and
+        # the gateway spec built from the projection must agree.
+        settings = self.settings("mistral/mistral-vibe-cli-latest")
+        shared = {
+            "context": 262_144, "tools": True, "vision": True,
+            "reasoning": True, "canonical_id": "mistral-medium-latest",
+            "display_name": "mistral-medium-latest",
+            "billing_model_name": "mistral-medium-3-5",
+        }
+        rows = [
+            {**shared, "id": "magistral-medium-latest",
+             "aliases": ["magistral-medium-latest", "mistral-vibe-cli-latest",
+                         "mistral-vibe-cli-with-tools"],
+             "effort_modes": ["none", "high"]},
+            {**shared, "id": "mistral-medium-latest",
+             "aliases": ["mistral-medium-latest", "mistral-medium-3-5"],
+             "effort_modes": ["none", "low", "medium", "high", "max"]},
+        ]
+        projected = project_catalogue(
+            "mistral", {"source": "provider_api", "models": rows}, settings)
+        vibe = next(item for item in projected
+                    if item["model_id"] == "mistral-vibe-cli-latest")
+        self.assertEqual(vibe["effort_modes"], list(MISTRAL_REASONING_EFFORTS))
+        specs = route_specs({"models": projected})
+        self.assertEqual(
+            specs["mistral/mistral-vibe-cli-latest"]["effort_modes"],
+            list(MISTRAL_REASONING_EFFORTS))
+
     def test_catalogue_cannot_claim_another_provider_identity(self):
         settings = self.settings("mistral/model-a")
         with self.assertRaisesRegex(ValueError, "identity"):
