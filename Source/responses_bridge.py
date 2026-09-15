@@ -45,7 +45,7 @@ class ReasoningEnvelope:
 
 def content_blocks(content):
     if isinstance(content, str):
-        return [{"type": "text", "text": content}]
+        return [{"type": "text", "text": content}] if content else []
     if not isinstance(content, list):
         raise BridgeError("Message content must be text or content blocks.")
     result = []
@@ -53,8 +53,12 @@ def content_blocks(content):
         if not isinstance(part, dict):
             raise BridgeError("Message content blocks must be objects.")
         kind = part.get("type")
+        # Anthropic-compatible providers reject empty text blocks with
+        # "text content is empty" (HTTP 400); drop them instead of failing
+        # the whole replayed history.
         if kind in {"input_text", "output_text", "text"} and isinstance(part.get("text"), str):
-            result.append({"type": "text", "text": part["text"]})
+            if part["text"]:
+                result.append({"type": "text", "text": part["text"]})
         elif kind == "input_image":
             url = part.get("image_url")
             if isinstance(url, str) and url.startswith("data:") and ";base64," in url:
@@ -65,7 +69,9 @@ def content_blocks(content):
             else:
                 raise BridgeError("Images need an embedded data URL or an HTTPS URL.")
         elif kind == "refusal":
-            result.append({"type": "text", "text": str(part.get("refusal", ""))})
+            refusal = str(part.get("refusal", ""))
+            if refusal:
+                result.append({"type": "text", "text": refusal})
         else:
             raise BridgeError("This provider needs text or image inputs. Extract documents to text before using them.")
     return result
@@ -103,7 +109,9 @@ def to_messages(body, route, spec, envelope, scope):
             target = item.get("role")
             if target not in {"user", "assistant", "system", "developer"}:
                 raise BridgeError("Unsupported message role.")
-            add(target, content_blocks(item.get("content", "")))
+            blocks = content_blocks(item.get("content", ""))
+            if blocks:
+                add(target, blocks)
         elif kind == "function_call":
             try:
                 arguments = json.loads(item.get("arguments", "{}"))
@@ -113,8 +121,11 @@ def to_messages(body, route, spec, envelope, scope):
                 raise BridgeError("Function arguments must be an object.")
             add("assistant", [{"type": "tool_use", "id": item.get("call_id"), "name": item.get("name"), "input": arguments}])
         elif kind == "function_call_output":
+            blocks = content_blocks(item.get("output", ""))
             add("user", [{"type": "tool_result", "tool_use_id": item.get("call_id"),
-                           "content": content_blocks(item.get("output", ""))}])
+                          # An empty string is valid tool_result content; an empty
+                          # text block is not (see content_blocks above).
+                          "content": blocks if blocks else ""}])
         elif kind == "reasoning":
             token = item.get("encrypted_content")
             if token:
@@ -124,6 +135,8 @@ def to_messages(body, route, spec, envelope, scope):
         else:
             raise BridgeError("Unsupported Responses history item.")
     flush()
+    if not messages:
+        raise BridgeError("The conversation history has no content to send.")
     result = {"model": route, "messages": messages, "stream": body["stream"],
               "max_tokens": body.get("max_output_tokens") or min(spec.get("max_output") or 16384, 16384)}
     if body.get("instructions"):

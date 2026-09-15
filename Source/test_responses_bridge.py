@@ -110,6 +110,42 @@ class ResponsesBridgeTests(unittest.TestCase):
             self.assertEqual(translated["messages"], [{"role": "user", "content": [{"type": "text", "text": "hello"}]}])
             self.assertEqual(translated["max_tokens"], 16384)
 
+    def test_empty_history_items_do_not_emit_empty_text_blocks(self):
+        # A restarted Codex thread replays tool calls whose output was empty as
+        # function_call_output items with output:"". Anthropic-compatible
+        # providers (Kimi) reject {"type":"text","text":""} with HTTP 400
+        # "text content is empty", which permanently wedges the parent thread.
+        with tempfile.TemporaryDirectory() as directory:
+            envelope = ReasoningEnvelope(Path(directory))
+            body = {"input": [
+                {"type": "message", "role": "user", "content": "start"},
+                {"type": "function_call", "call_id": "tool_1", "name": "exec", "arguments": "{}"},
+                {"type": "function_call_output", "call_id": "tool_1", "output": ""},
+                {"type": "function_call", "call_id": "tool_2", "name": "exec", "arguments": "{}"},
+                {"type": "function_call_output", "call_id": "tool_2", "output": [{"type": "output_text", "text": ""}]},
+                {"type": "message", "role": "assistant", "content": ""},
+                {"type": "message", "role": "user", "content": [
+                    {"type": "input_text", "text": ""},
+                    {"type": "input_text", "text": "kept"},
+                ]},
+            ], "stream": False, "store": False, "tools": []}
+            translated = to_messages(body, "kimi/k3", {"context": 131072}, envelope, "scope")
+            messages = translated["messages"]
+            results = [block for message in messages for block in message["content"]
+                       if block["type"] == "tool_result"]
+            self.assertEqual(len(results), 2)
+            self.assertTrue(all(result["content"] == "" for result in results))
+            self.assertEqual(
+                [block["text"] for message in messages for block in message["content"]
+                 if block["type"] == "text"],
+                ["start", "kept"])
+            self.assertEqual([message["role"] for message in messages],
+                             ["user", "assistant", "user", "assistant", "user"])
+            self.assertTrue(all(message["content"] for message in messages))
+            with self.assertRaisesRegex(BridgeError, "no content"):
+                to_messages({"input": "", "stream": False, "store": False, "tools": []},
+                            "kimi/k3", {"context": 131072}, envelope, "scope")
+
     def test_chatgpt_effort_slider_and_fast_reach_translated_messages(self):
         with tempfile.TemporaryDirectory() as directory:
             envelope = ReasoningEnvelope(Path(directory))
