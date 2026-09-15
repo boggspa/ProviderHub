@@ -14,11 +14,14 @@ import tempfile
 sys.path.insert(0, str(Path(__file__).with_name("vendor")))
 import tomlkit
 
-from bridge_core import BridgeError, atomic_json, private_directory, read_json
+from bridge_core import BridgeError, atomic_json, gateway_token, private_directory, read_json
 from codex_catalogue import project_codex
 
 
 PROVIDER_ID = "provider_hub"
+# Journal stand-in for the gateway credential so the transaction record never
+# carries the secret; restore matches the live entry token-insensitively.
+BEARER_PLACEHOLDER = "<provider-hub-gateway-token>"
 ROOT_KEYS = (
     "model", "model_provider", "model_catalog_json", "model_context_window",
     "model_auto_compact_token_limit", "model_reasoning_effort", "model_reasoning_summary",
@@ -36,6 +39,13 @@ ROOT_KEYS = (
 NESTED_KEYS = (
     ("features", "multi_agent_v2"),
 )
+
+
+def redact_provider(entry):
+    """The provider table with any bearer credential replaced by the placeholder."""
+    if isinstance(entry, dict) and "experimental_bearer_token" in entry:
+        return {**entry, "experimental_bearer_token": BEARER_PLACEHOLDER}
+    return entry
 
 
 def codex_running():
@@ -139,13 +149,34 @@ class CodexProfile:
         return {"codex_running": self.running(), "codex_profile_active": active,
                 "codex_recovery_needed": self.journal.exists(), "codex_app_path": installed_app()}
 
-    def provider(self, port):
-        return {"name": "Provider Hub", "base_url": f"http://127.0.0.1:{port}/v1",
-                "wire_api": "responses", "supports_websockets": False,
-                "supports_standalone_web_search": False,
-                "auth": {"command": self.python,
+    def provider(self, port, chatgpt_account=False):
+        """The owned provider table written into the Codex configuration.
+
+        Default: command-backed auth. The gateway credential never enters the
+        config file; Codex runs codex_token.py to fetch it on demand.
+
+        chatgpt_account: the desktop only presents the user's ChatGPT sign-in
+        (native composer model pill, account chrome, ChatGPT-backed settings)
+        when the active provider reports requires_openai_auth; the app-server
+        hides the sign-in for any provider that does not. A command-backed auth
+        block cannot be combined with it: Codex then swaps in a bearer-only
+        auth manager that reports an API-key account. So the credential moves
+        into experimental_bearer_token for the session. Codex resolves that
+        bearer ahead of the ChatGPT token for every hub request, so the sign-in
+        never leaves the machine through this route, and restore removes the
+        entry again.
+        """
+        entry = {"name": "Provider Hub", "base_url": f"http://127.0.0.1:{port}/v1",
+                 "wire_api": "responses", "supports_websockets": False,
+                 "supports_standalone_web_search": False}
+        if chatgpt_account:
+            entry["requires_openai_auth"] = True
+            entry["experimental_bearer_token"] = gateway_token(self.root)
+            return entry
+        entry["auth"] = {"command": self.python,
                          "args": ["-I", "-B", str(Path(__file__).with_name("codex_token.py")), str(self.root)],
-                         "timeout_ms": 5000, "refresh_interval_ms": 300000}}
+                         "timeout_ms": 5000, "refresh_interval_ms": 300000}
+        return entry
 
     def activate(self, settings, inventory):
         if self.running():
@@ -216,7 +247,7 @@ class CodexProfile:
                     nested_applied[path_str] = target
             if "model_providers" not in document:
                 document["model_providers"] = tomlkit.table()
-            owned_provider = self.provider(settings["port"])
+            owned_provider = self.provider(settings["port"], settings.get("codex_chatgpt_account") is True)
             document["model_providers"][PROVIDER_ID] = owned_provider
             updated = tomlkit.dumps(document)
             after = parse(updated).unwrap()
@@ -246,7 +277,7 @@ class CodexProfile:
                        "nested_applied": nested_applied,
                        "providers_existed": "model_providers" in before,
                        "applied": {key: value_at(document, key) for key in ROOT_KEYS},
-                       "provider": owned_provider, "before_digest": digest(original),
+                       "provider": redact_provider(owned_provider), "before_digest": digest(original),
                        "applied_digest": digest(updated)}
             atomic_json(self.journal, journal)
             if self.running() or self.read() != original:
@@ -301,7 +332,7 @@ class CodexProfile:
                         del document[key]
                 providers = document.get("model_providers", {})
                 if PROVIDER_ID in providers:
-                    if providers[PROVIDER_ID].unwrap() == journal["provider"] and document.get("model_provider") != PROVIDER_ID:
+                    if redact_provider(providers[PROVIDER_ID].unwrap()) == journal["provider"] and document.get("model_provider") != PROVIDER_ID:
                         del providers[PROVIDER_ID]
                         if not providers and not journal["providers_existed"]:
                             del document["model_providers"]

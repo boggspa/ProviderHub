@@ -74,6 +74,15 @@ a new login. Existing tasks, credentials, projects, and unrelated settings are
 retained. Quit the desktop app to restore its previous model configuration.
 The **Restore previous setup** button is available for recovery after it closes.
 
+**Show your ChatGPT account in Codex** (off by default) keeps your ChatGPT
+sign-in visible while Provider Hub is active. The composer then uses the
+native model pill (white label, chevron, Ultra colour) for hub models, and
+the account chrome and usage banners reflect your ChatGPT plan even though
+hub traffic does not spend it. A ChatGPT sign-in is required to launch in
+this mode, and the gateway credential is written into the Codex config for
+the session instead of being fetched by the helper command; it is removed
+when the previous setup is restored.
+
 Claude and Codex can run on the same gateway. While one desktop harness is
 live, you can change the other's model selection and save; launching briefly
 restarts the gateway so both share the new snapshot, and the running app

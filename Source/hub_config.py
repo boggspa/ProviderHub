@@ -163,7 +163,7 @@ def defaults(slots, vibe_model: str, port: int = 11436) -> dict:
             "mapping_options": {},
             "providers": connections, "branding_overrides": {},
             "auto_stop": True, "auto_mode": False, "codex_model": None,
-            "codex_catalogue": None}
+            "codex_catalogue": None, "codex_chatgpt_account": False}
 
 
 def normalize(value: dict, slots, vibe_model: str, port: int = 11436) -> dict:
@@ -240,7 +240,9 @@ def normalize(value: dict, slots, vibe_model: str, port: int = 11436) -> dict:
             if qualified not in qualified_routes:
                 qualified_routes.append(qualified)
         result["codex_apply_patch"] = qualified_routes
-    for key, fallback in (("auto_stop", True), ("auto_mode", False)):
+    # codex_chatgpt_account: present the user's ChatGPT sign-in to the Codex
+    # desktop while the hub provider is active (see CodexProfile.provider).
+    for key, fallback in (("auto_stop", True), ("auto_mode", False), ("codex_chatgpt_account", False)):
         requested = value.get(key, fallback)
         if type(requested) is not bool:
             raise ValueError(f"{key} must be true or false.")

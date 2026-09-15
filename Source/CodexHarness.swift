@@ -220,6 +220,14 @@ struct CodexPage: View {
                     .font(.caption).foregroundStyle(.secondary)
                 Text("File editing and terminal tools are available. Web search is off in this setup.")
                     .font(.caption).foregroundStyle(.secondary)
+                Toggle(isOn: $model.settings.codex_chatgpt_account) {
+                    Text("Show your ChatGPT account in Codex").font(.system(size: 13, weight: .medium))
+                }
+                .toggleStyle(.switch).disabled(model.busy)
+                Text(model.settings.codex_chatgpt_account
+                     ? "Codex keeps your ChatGPT sign-in visible while Provider Hub is active: the composer uses the native model pill (white label, chevron, Ultra colour) and the account chrome and usage banners reflect your ChatGPT plan. A ChatGPT sign-in is required to launch. The gateway credential is written into the Codex config for the session and removed when the previous setup is restored. Save, then launch."
+                     : "Off: Codex runs as an accountless custom-provider session with a plain gray model pill. Turn on to present your ChatGPT sign-in and the native composer styling.")
+                    .font(.caption).foregroundStyle(.secondary)
                 HStack {
                     Button(model.codexProfileActive && model.codexRunning ? "Show Codex / ChatGPT" : "Launch Codex / ChatGPT") { Task { await model.launchCodex() } }
                         .buttonStyle(.borderedProminent).controlSize(.large)

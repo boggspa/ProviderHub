@@ -69,6 +69,14 @@ class SettingsMigrationTests(unittest.TestCase):
         self.assertEqual(
             without_default["codex_catalogue"], ["mistral/mistral-small-4"])
 
+    def test_codex_chatgpt_account_defaults_off_and_must_be_boolean(self):
+        self.assertIs(defaults(SLOTS, "mistral-test")["codex_chatgpt_account"], False)
+        self.assertIs(normalize({}, SLOTS, "mistral-test")["codex_chatgpt_account"], False)
+        self.assertIs(normalize({"codex_chatgpt_account": True}, SLOTS, "mistral-test")["codex_chatgpt_account"], True)
+        for value in (1, "yes", None):
+            with self.assertRaises(ValueError):
+                normalize({"codex_chatgpt_account": value}, SLOTS, "mistral-test")
+
     def test_codex_apply_patch_is_optional_deduped_and_defaults_off(self):
         self.assertNotIn("codex_apply_patch", defaults(SLOTS, "mistral-test"))
         self.assertNotIn("codex_apply_patch", normalize({}, SLOTS, "mistral-test"))

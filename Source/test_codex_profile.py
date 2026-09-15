@@ -8,7 +8,7 @@ import unittest
 from branding import resolve_presentation
 from bridge_core import BridgeError, SLOTS
 from codex_catalogue import catalogue_digest, project_codex
-from codex_profile import ROOT_KEYS, CodexProfile, digest, parse, tomlkit, value_at
+from codex_profile import BEARER_PLACEHOLDER, ROOT_KEYS, CodexProfile, digest, parse, redact_provider, tomlkit, value_at
 from hub_config import defaults
 
 
@@ -147,6 +147,50 @@ command = "existing-command"
         self.assertEqual(self.manager.restore()["preserved_external_changes"], 0)
         self.assertEqual(self.manager.config.read_text(), self.original)
         self.assertFalse(self.manager.journal.exists())
+
+    def test_default_mode_keeps_command_backed_auth_without_a_login_requirement(self):
+        self.activate()
+        entry = parse(self.manager.config.read_text())["model_providers"]["provider_hub"]
+        self.assertIn("auth", entry)
+        self.assertNotIn("requires_openai_auth", entry)
+        self.assertNotIn("experimental_bearer_token", entry)
+        self.assertFalse((self.root / "gateway-token").exists())
+
+    def test_chatgpt_account_mode_presents_the_login_without_journaling_the_bearer(self):
+        self.settings["codex_chatgpt_account"] = True
+        self.activate()
+        updated = self.manager.config.read_text()
+        entry = parse(updated)["model_providers"]["provider_hub"]
+        token = (self.root / "gateway-token").read_text().strip()
+        self.assertGreaterEqual(len(token), 32)
+        self.assertIs(entry["requires_openai_auth"], True)
+        self.assertEqual(entry["experimental_bearer_token"], token)
+        self.assertNotIn("auth", entry)
+        self.assertEqual(entry["base_url"], "http://127.0.0.1:11438/v1")
+        self.assertEqual(entry["wire_api"], "responses")
+        journal = self.manager.journal.read_text()
+        self.assertNotIn(token, journal)
+        self.assertEqual(json.loads(journal)["provider"]["experimental_bearer_token"], BEARER_PLACEHOLDER)
+        self.assertEqual(redact_provider(entry.unwrap()), json.loads(journal)["provider"])
+        self.assertNotIn("PRIVATE-AUTH-SENTINEL", updated)
+        self.assertEqual(self.manager.restore()["preserved_external_changes"], 0)
+        self.assertEqual(self.manager.config.read_text(), self.original)
+        self.assertFalse(self.manager.journal.exists())
+
+    def test_chatgpt_account_mode_restores_after_the_bearer_rotates(self):
+        self.settings["codex_chatgpt_account"] = True
+        self.activate()
+
+        def rotate(doc):
+            doc["model_providers"]["provider_hub"]["experimental_bearer_token"] = "rotated-elsewhere"
+        self.edit(rotate)
+        self.assertEqual(self.manager.restore()["preserved_external_changes"], 0)
+        restored = self.manager.config.read_text()
+        doc = parse(restored)
+        self.assertNotIn("provider_hub", doc["model_providers"])
+        self.assertEqual(doc["model"], "my-usual-model")
+        self.assertEqual(doc["model_provider"], "my-provider")
+        self.assertNotIn("rotated-elsewhere", restored)
 
     def test_unrelated_edits_after_launch_survive_restore(self):
         self.activate()
