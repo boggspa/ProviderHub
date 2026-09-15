@@ -66,7 +66,11 @@ class OpenRouterProviderTests(unittest.TestCase):
         rows = project_catalogue("openrouter", inventory, settings)
         models = project_codex(settings, {"models": rows})["models"]
         self.assertEqual({m["context_window"] for m in models}, {1048576, 262144})
-        self.assertTrue(all(m["display_name"].endswith(" · OpenRouter") for m in models))
+        # Composer labels carry a provider suffix only on collision. These
+        # context variants already have distinct upstream names, so they
+        # stand alone exactly as the Composer will render them.
+        self.assertEqual({m["display_name"] for m in models},
+                         {"GLM 5.2 · 1,048,576 context", "GLM 5.2 · 262,144 context"})
 
     def test_unsupported_nested_endpoints_cannot_escape_base_slug_routing(self):
         rows = catalogue(endpoints=[endpoint("host", 262144), endpoint("host/fast", 1048576),

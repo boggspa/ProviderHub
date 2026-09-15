@@ -268,5 +268,61 @@ class EffortAndFastProjectionTests(unittest.TestCase):
         self.assertEqual(row["service_tiers"], [])
 
 
+class ComposerLabelTests(unittest.TestCase):
+    def projected(self, *models):
+        selected = settings(codex_model=models[0]["id"])
+        return {row["slug"]: row for row in project_codex(selected, inventory(*models))["models"]}
+
+    def test_unique_names_stand_alone_without_provider_suffix(self):
+        rows = self.projected(
+            model("kimi/k3", name="K3"),
+            model("mistral/mistral-medium-3-5", name="Mistral Medium 3.5"),
+            model("ollama/deepseek-v4-pro:cloud", name="DeepSeek V4 Pro · Cloud"),
+            model("openrouter/thinkingmachines/inkling:free", name="Inkling · Free"),
+        )
+        self.assertEqual(rows["kimi/k3"]["display_name"], "K3")
+        self.assertEqual(rows["mistral/mistral-medium-3-5"]["display_name"], "Mistral Medium 3.5")
+        self.assertEqual(
+            rows["ollama/deepseek-v4-pro:cloud"]["display_name"], "DeepSeek V4 Pro · Cloud")
+        self.assertEqual(
+            rows["openrouter/thinkingmachines/inkling:free"]["display_name"], "Inkling · Free")
+
+    def test_cross_provider_collision_gains_provider_suffix(self):
+        rows = self.projected(
+            model("kimi/k3", name="K3"),
+            model("ollama/k3-local", name="K3"),
+        )
+        self.assertEqual(rows["kimi/k3"]["display_name"], "K3 · Kimi")
+        self.assertEqual(rows["ollama/k3-local"]["display_name"], "K3 · Ollama")
+
+    def test_same_provider_collision_falls_back_to_route(self):
+        rows = self.projected(
+            model("ollama/alpha", name="Same"),
+            model("ollama/beta", name="Same"),
+        )
+        self.assertEqual(rows["ollama/alpha"]["display_name"], "Same · ollama/alpha")
+        self.assertEqual(rows["ollama/beta"]["display_name"], "Same · ollama/beta")
+
+    def test_collision_matching_is_case_insensitive(self):
+        rows = self.projected(
+            model("mistral/one", name="Dup"),
+            model("kimi/two", name="dup"),
+        )
+        self.assertEqual(rows["mistral/one"]["display_name"], "Dup · Mistral")
+        self.assertEqual(rows["kimi/two"]["display_name"], "dup · Kimi")
+
+    def test_synthesized_ultra_description_is_native_text(self):
+        rows = self.projected(
+            model("mistral/narrow", effort_modes=["none", "low", "high"]),
+            model("mistral/ultra-native", effort_modes=["none", "low", "ultra"]),
+        )
+        narrow = [row for row in rows["mistral/narrow"]["supported_reasoning_levels"]
+                  if row["effort"] == "ultra"]
+        self.assertEqual([row["description"] for row in narrow], ["Ultra reasoning"])
+        native = [row for row in rows["mistral/ultra-native"]["supported_reasoning_levels"]
+                  if row["effort"] == "ultra"]
+        self.assertEqual([row["description"] for row in native], ["Ultra reasoning"])
+
+
 if __name__ == "__main__":
     unittest.main()

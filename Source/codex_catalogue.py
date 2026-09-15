@@ -58,17 +58,16 @@ def _ultra_level(entry, levels):
     Only added when the model advertises a reasoning ladder and does not
     already name ultra itself. The alias keeps the slider available across
     providers that cap at max/xhigh/high; the gateway maps ultra onto the
-    provider's highest advertised rank at request time.
+    provider's highest advertised rank at request time. The description is
+    always the native Ultra text: the Composer shows it verbatim next to
+    native rows, so a Hub-specific suffix would read as a different level.
     """
     if "ultra" in {row["effort"] for row in levels}:
         return None
     advertised = [rank for rank in entry.get("effort_modes") or [] if rank in _HIGH_END_RANKS]
     if not advertised:
         return None
-    top = max(advertised, key=_HIGH_END_RANKS.index)
-    if top == "max":
-        return {"effort": "ultra", "description": _EFFORT_DESCRIPTIONS["ultra"]}
-    return {"effort": "ultra", "description": "Ultra reasoning · maps to " + top}
+    return {"effort": "ultra", "description": _EFFORT_DESCRIPTIONS["ultra"]}
 
 
 def _default_reasoning_level(provider_id, entry, efforts):
@@ -112,8 +111,47 @@ def _codex_description(provider_id, provider, context, service_tiers):
     return text
 
 
+def _provider_suffix(provider_id, provider):
+    # The historical qualifier each account/transport used when the friendly
+    # name did not already identify it, including the account/transport when
+    # Ollama presents an upstream brand.
+    if provider_id == "ollama":
+        return " · Ollama"
+    if provider_id == "openrouter":
+        return " · OpenRouter"
+    return " · " + provider
+
+
+def _composer_labels(rows):
+    """Native-clean Composer labels, disambiguated only on collision.
+
+    The Composer renders display_name verbatim next to native rows, so a
+    unique friendly name stands alone ("K3", "DeepSeek V4 Pro"). The
+    provider suffix appears only when two projected models would otherwise
+    share a label, and the full route only when provider-qualified labels
+    still collide. Routes are unique, so the fallback always terminates.
+    """
+    counts = {}
+    for _, _, _, base in rows:
+        key = base.casefold()
+        counts[key] = counts.get(key, 0) + 1
+    qualified = []
+    for route, provider_id, provider, base in rows:
+        if counts[base.casefold()] == 1:
+            qualified.append((route, base, base))
+        else:
+            qualified.append((route, base, base + _provider_suffix(provider_id, provider)))
+    counts = {}
+    for _, _, label in qualified:
+        key = label.casefold()
+        counts[key] = counts.get(key, 0) + 1
+    return [label if counts[label.casefold()] == 1 else base + " · " + route
+            for route, base, label in qualified]
+
+
 def project_codex(settings, inventory):
     models = []
+    label_rows = []
     excluded = []
     seen = set()
     entries = inventory.get("models", [])
@@ -151,9 +189,7 @@ def project_codex(settings, inventory):
         seen.add(route)
         provider = entry.get("presentation", {}).get("displayProvider") or provider_id.title()
         name = entry.get("display_name") or route
-        # Include the account/transport when Ollama presents an upstream brand.
-        label = name + (" · Ollama" if provider_id == "ollama" else " · OpenRouter" if provider_id == "openrouter"
-                        else ("" if name.casefold().startswith(provider.casefold()) else " · " + provider))
+        label_rows.append((route, provider_id, provider, name))
         levels = _reasoning_levels(provider_id, entry)
         ultra = _ultra_level(entry, levels)
         if ultra is not None:
@@ -162,7 +198,7 @@ def project_codex(settings, inventory):
         service_tiers = _service_tiers(provider_id, entry)
         models.append({
             "slug": route,
-            "display_name": label,
+            "display_name": name,
             "description": _codex_description(provider_id, provider, context, service_tiers),
             "default_reasoning_level": _default_reasoning_level(provider_id, entry, efforts),
             "supported_reasoning_levels": levels,
@@ -203,6 +239,8 @@ def project_codex(settings, inventory):
             "multi_agent_version": "v2" if (entry.get("reasoning") is True and efforts) else None,
             "multi_agent_reasoning_effort": "xhigh" if (entry.get("reasoning") is True and efforts) else None,
         })
+    for model, label in zip(models, _composer_labels(label_rows)):
+        model["display_name"] = label
     models.sort(key=lambda model: (model["display_name"].casefold(), model["slug"]))
     selected = settings.get("codex_model")
     for index, model in enumerate(models):
