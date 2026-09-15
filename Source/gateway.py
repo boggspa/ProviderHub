@@ -45,7 +45,7 @@ from devin_agent import (DESCRIPTOR as DEVIN_DESCRIPTOR, DevinAgentError,
 from cerebras_replay import CerebrasReplayError, CerebrasStreamAdapter, sanitize_compacted_messages, sign_thinking, validate_messages
 from gemini_provider import GeminiError, GeminiStreamAdapter, translate_response as translate_gemini_response, _estimated_input_tokens as estimated_gemini_tokens
 from protocol import (StreamTranslator, apply_mapping_options, apply_mistral_prefix, compact_conversation, compact_threshold, estimated_tokens, mapping_options_for, validate_mistral_roles,
-                      model_catalog, resolve_model, rewrite_context_reminders, translate_request, translate_response)
+                      model_catalog, resolve_model, rewrite_context_reminders, translate_request, translate_response, _effective_context)
 from responses_native import ResponseOwnership, handle_responses, NATIVE_PROVIDERS
 from codex_catalogue import catalogue_digest, choices as codex_choices, launch_settings as codex_launch_settings
 from codex_profile import CodexProfile
@@ -113,7 +113,7 @@ class Runtime:
         route = self.resolve_route(payload.get("model"))
         provider_id, upstream_model = split_route(route)
         spec = self.settings["_model_specs"][route]
-        context = spec.get("context")
+        context = _effective_context(spec)
         options = mapping_options_for(payload.get("model"), self.settings)
         payload = apply_mapping_options(payload, self.settings)
         estimate_fn = estimated_gemini_tokens if provider_id == "gemini" else estimated_tokens

@@ -217,8 +217,10 @@ class ProtocolTests(unittest.TestCase):
     def test_exact_context_limits_and_no_fabricated_fast_mode(self):
         settings = config(); spec = settings["_model_specs"]["test-model"]
         spec["context"] = 1048576
-        self.assertEqual(model_catalog(settings)["data"][0]["max_input_tokens"], 1048576)
-        self.assertTrue(model_catalog(settings)["data"][0]["supports_1m"])
+        row = model_catalog(settings)["data"][0]
+        self.assertEqual(row["max_input_tokens"], 1048576)
+        self.assertTrue(row["id"].endswith("[1m]"))
+        self.assertFalse(row["supports_1m"])
         result, _ = translate_request(prompt(model="claude-fable-5[1m]", max_tokens=50000), settings)
         self.assertEqual(result["max_tokens"], 50000)
         spec["context"] = 32768

@@ -43,10 +43,12 @@ integration. Grok here also uses its pay-as-you-go API.
 2. Open **Claude** and choose **Launch Claude**.
 3. If Claude is already open, the app asks before restarting it.
 
-Claude uses its native third-party profile system. It may show both standard
-and 1M choices for a model with long-context support. Provider Hub retains the
-provider's model identity and context metadata; it does not expose an editable
-context-size guess.
+Claude uses its native third-party profile system. A model whose effective
+context is at least 1M is advertised under a single `[1m]`-suffixed slot id, so
+the picker shows one row metered at 1M instead of separate standard and 1M
+choices. Routes below 1M are advertised bare at their catalogued window.
+Provider Hub retains the provider's model identity and context metadata; it
+does not expose an editable context-size guess.
 
 Quitting Claude restores the previous Claude profile. Keep Provider Hub running
 while using this session. Your existing Claude and Ollama conversations remain

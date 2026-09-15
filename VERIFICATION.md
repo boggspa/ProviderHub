@@ -84,11 +84,14 @@ metadata are prepared before the gateway starts, and activation refuses a
 stale gateway snapshot.
 
 The installed Desktop's pure discovery/picker functions were also evaluated:
-truthful 1M capability always expands to standard plus 1M rows, including static
-profiles. A suffixed discovery ID creates incorrect double expansion. The
-supported `modelPrefer1mContext` preference changes defaults only and retains
-saved selections. No duplicate-suppression workaround or false capability flag
-was introduced; exact-context and generic Kimi plan limitations remain visible.
+its discovery layer folds a `supports_1m: true` (or `max_input_tokens >= 1e6`)
+entry into a bare plus `[1m]` pair, and its engines meter any id ending in `[1m]`
+at 1,000,000 tokens. The gateway therefore advertises each 1M-capable route under
+a single `[1m]`-suffixed slot id with `supports_1m: false`, yielding one picker
+row at the 1M preset instead of a standard-plus-1M pair. Routes below 1M are
+advertised bare as before. Plan-dependent routes (Kimi K3) qualify when
+`max(context_options) >= 1M`, so K3 gets the 1M meter without asserting a single
+fixed window; the explicit `k3-256k` entry stays bare at 262144.
 
 
 **0.3.2 Muse API and version labels**

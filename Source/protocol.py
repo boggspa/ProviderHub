@@ -158,6 +158,24 @@ def apply_mapping_options(payload: dict, settings: dict) -> dict:
     return result
 
 
+def _effective_context(spec: dict) -> int | None:
+    """Return the effective context window for a route spec.
+
+    For routes with a single numeric context, return that.
+    For plan-dependent routes (e.g. Kimi K3 with context_options),
+    return the maximum advertised window so the gateway can advertise
+    the 1M variant when any plan offers 1M.
+    """
+    context = spec.get("context")
+    if type(context) is int:
+        return context
+    # context_options: list of available windows for the same route
+    options = spec.get("context_options")
+    if isinstance(options, list) and options:
+        return max(options)
+    return None
+
+
 def model_catalog(settings: dict):
     rows, seen = [], set()
     for slot, _, family, default in SLOTS:
@@ -169,27 +187,37 @@ def model_catalog(settings: dict):
         if key in seen:
             continue
         seen.add(key)
-        context = spec.get("context")
-        context_text = f"{context:,} token context" if type(context) is int else "Provider-managed context"
+        effective_context = _effective_context(spec)
+        context_text = f"{effective_context:,} token context" if type(effective_context) is int else "Provider-managed context"
         provider = spec.get("presentation", {}).get("displayProvider")
         title = spec["display_name"]
         if provider and provider.casefold() not in title.casefold():
             title += " · " + provider
-        row = {"id": slot, "type": "model", "display_name": title,
+        # Advertise a single [1m]-suffixed slot id for routes whose effective
+        # context >= 1M, so Desktop shows one picker row metered at 1M instead
+        # of synthesizing a separate 1M variant row (which doubles the offerings).
+        row_slot = slot
+        if type(effective_context) is int and effective_context >= 1000000:
+            row_slot = f"{slot}[1m]"
+        row = {"id": row_slot, "type": "model", "display_name": title,
                "description": f"{spec.get('provider_id', 'mistral')} account · {context_text} · {status_label(spec)}",
                "created_at": "2026-09-12T00:00:00Z",
                "anthropic_family_tier": family, "is_family_default": default,
-               "fits_desktop_baseline": fits_desktop_baseline(context)}
-        if fits_desktop_baseline(context) is False:
+               "fits_desktop_baseline": fits_desktop_baseline(effective_context)}
+        if fits_desktop_baseline(effective_context) is False:
             row["description"] += " · below desktop baseline"
-        if type(context) is int:
+        if type(effective_context) is int:
             # Use the per-model auto-compact threshold as max_input_tokens so
             # Claude Desktop compacts at the hub's catalogue boundary (typically
             # 85%% of context) instead of waiting for the full window.  The
             # gateway's server-side compaction handles the remaining headroom.
             compact_limit = spec.get("auto_compact_token_limit")
-            input_limit = compact_limit if type(compact_limit) is int and 0 < compact_limit < context else context
-            row.update(max_tokens=context, max_input_tokens=input_limit, supports_1m=context >= 1000000)
+            input_limit = compact_limit if type(compact_limit) is int and 0 < compact_limit < effective_context else effective_context
+            # supports_1m is deliberately false even for 1M routes: Desktop folds
+            # a supports_1m:true entry into a bare + [1m] pair, and the id here
+            # already carries the [1m] suffix (row_slot above) as the single 1M
+            # offering. Keeping it false stops the second, smaller-window row.
+            row.update(max_tokens=effective_context, max_input_tokens=input_limit, supports_1m=False)
         rows.append(row)
     return {"data": rows, "first_id": rows[0]["id"] if rows else None,
             "last_id": rows[-1]["id"] if rows else None, "has_more": False}
@@ -381,9 +409,10 @@ def translate_request(payload: dict, settings: dict):
     requested = payload.get("model", "")
     upstream = resolve_model(requested, settings["mappings"])
     spec = settings.get("_model_specs", {}).get(upstream)
-    if not spec or type(spec.get("context")) is not int:
+    effective_context = _effective_context(spec) if spec else None
+    if type(effective_context) is not int or effective_context <= 0:
         raise BridgeError("Model limits are not in the current catalogue. Refresh models in Provider Hub first.")
-    if requested.endswith("[1m]") and spec["context"] < 1000000:
+    if requested.endswith("[1m]") and effective_context < 1000000:
         raise BridgeError("The selected model does not have a 1M context window.")
     if payload.get("speed") == "fast" or payload.get("service_tier") in {"fast", "priority"}:
         raise BridgeError("Claude Fast mode is not available for this Mistral connection. Use standard speed; the Vibe fast alias is a different model.")
@@ -393,9 +422,9 @@ def translate_request(payload: dict, settings: dict):
     if type(max_tokens) is not int or max_tokens <= 0:
         raise BridgeError("max_tokens must be a positive integer.")
     estimate = estimated_tokens(payload)
-    if estimate >= spec["context"]:
-        raise BridgeError(f"This conversation is above the model's reported {spec['context']:,}-token context limit. Compact it or start a new session.")
-    payload = rewrite_context_reminders(payload, spec["context"], estimate)
+    if estimate >= effective_context:
+        raise BridgeError(f"This conversation is above the model's reported {effective_context:,}-token context limit. Compact it or start a new session.")
+    payload = rewrite_context_reminders(payload, effective_context, estimate)
     messages = []
     if payload.get("system"):
         system = [content_part(p) for p in blocks(payload["system"])]
@@ -478,7 +507,7 @@ def translate_request(payload: dict, settings: dict):
         names[mapped] = name
         tools.append({"type": "function", "function": {"name": mapped, "description": tool.get("description", ""),
                       "parameters": tool["input_schema"]}})
-    result = {"model": upstream, "messages": messages, "max_tokens": min(max_tokens, spec["context"] - estimate),
+    result = {"model": upstream, "messages": messages, "max_tokens": min(max_tokens, effective_context - estimate),
               "stream": bool(payload.get("stream", False))}
     if tools:
         result["tools"] = tools
