@@ -2,9 +2,9 @@
 
 ## Executive Summary
 
-**CRITICAL PIVOT**: Devin is NOT an LLM chat_completions provider. Devin is a **SESSION-BASED AI AGENT SERVICE** with a v3 API that uses `POST /v3/organizations/{org_id}/sessions` for task execution.
+**Key Design Insight**: Devin is NOT an LLM chat_completions provider. Devin is a **session-based AI agent service** with a v3 API that uses `POST /v3/organizations/{org_id}/sessions` for task execution.
 
-This requires a **NEW ARCHITECTURE** for agent providers, separate from the existing LLM provider system.
+This requires a **new architecture** for agent providers, separate from the existing LLM provider system.
 
 ## Current Architecture Analysis
 
@@ -64,7 +64,7 @@ Add new protocol type to existing provider system:
 ```python
 PROVIDERS = {
     "mistral": {"protocol": "chat_completions", ...},
-    "devin": {"protocol": "agent_sessions", ...},  # NEW
+    "devin": {"protocol": "agent_sessions", ...},  # New agent protocol
 }
 ```
 
@@ -82,7 +82,7 @@ PROVIDERS = {
 ### 1. New Agent Provider Registry
 
 ```python
-# agents.py (NEW FILE)
+# agents.py
 
 AGENT_PROVIDERS = {
     "devin": {
@@ -98,7 +98,7 @@ AGENT_PROVIDERS = {
             "task_submission": True,
             "state_tracking": True,
         },
-        "requires_org_id": True,  # Devin needs org_id
+        "requires_org_id": True,  # Organization ID required for all Devin operations
     },
 }
 ```
@@ -106,7 +106,7 @@ AGENT_PROVIDERS = {
 ### 2. Agent Gateway (NEW)
 
 ```python
-# agent_gateway.py (NEW FILE)
+# agent_gateway.py
 
 class AgentHandler(BaseHTTPRequestHandler):
     def do_POST(self):
@@ -122,10 +122,10 @@ class AgentHandler(BaseHTTPRequestHandler):
         self.error(404, "Unknown agent endpoint")
     
     def handle_create_session(self):
-        # Parse request
-        # Validate org_id
+        # Parse incoming request
+        # Validate organization ID
         # Create session via agent provider
-        # Return session_id
+        # Return session ID
         pass
     
     def handle_submit_task(self):
@@ -135,26 +135,26 @@ class AgentHandler(BaseHTTPRequestHandler):
         pass
     
     def handle_session_operation(self):
-        # GET: status
-        # POST /cancel: cancel
-        # DELETE: delete/archive
+        # GET: retrieve session status
+        # POST /cancel: cancel session
+        # DELETE: delete or archive session
         pass
 ```
 
 ### 3. Agent Runtime
 
 ```python
-# agent_runtime.py (NEW FILE)
+# agent_runtime.py
 
 class AgentRuntime:
     """Manages agent sessions and their lifecycle."""
     
     def __init__(self):
-        self.sessions = {}  # session_id -> AgentSession
-        self.org_sessions = defaultdict(dict)  # org_id -> {session_id -> AgentSession}
+        self.sessions = {}  # Maps session_id to AgentSession
+        self.org_sessions = defaultdict(dict)  # Maps org_id to {session_id -> AgentSession}
         self.lock = threading.Lock()
         self.active_sessions = 0
-        self.max_concurrent = 5  # Devin limit
+        self.max_concurrent = 5  # Devin concurrent session limit
     
     def create_session(self, provider_id, org_id, task, **kwargs):
         """Create a new agent session."""
@@ -179,7 +179,7 @@ class AgentRuntime:
 ### 4. Agent Provider Interface
 
 ```python
-# agent_providers.py (NEW FILE)
+# agent_providers.py
 
 class AgentProvider(ABC):
     """Abstract base class for agent providers."""
@@ -282,11 +282,11 @@ Add Devin as a special agent provider:
 ```python
 # In providers.py
 
-# Add to PROVIDERS dict (but mark as agent protocol)
+# Add to PROVIDERS dict (marked as agent protocol)
 PROVIDERS["devin"] = {
     "id": "devin",
     "name": "Devin AI",
-    "protocol": "agent_sessions",  # NEW protocol type
+    "protocol": "agent_sessions",  # New agent protocol type
     "default_base_url": "https://api.devin.ai/v3",
     "default_region": "global",
     "regions": {"global": "https://api.devin.ai/v3"},
@@ -301,7 +301,7 @@ PROVIDERS["devin"] = {
         "vision": "model_dependent",
         "model_discovery": "documentation",
         "reasoning_history": "not_applicable",
-        # Agent-specific
+        # Agent-specific capabilities
         "session_management": True,
         "async_execution": True,
         "requires_org_id": True,
@@ -322,7 +322,7 @@ Add new agent endpoints:
 def do_POST(self):
     # ... existing code ...
     
-    # NEW: Agent endpoints
+    # Agent endpoints
     if path == "/v1/agents/sessions":
         return self.handle_agent_sessions()
     if path == "/v1/agents/tasks":
@@ -341,7 +341,7 @@ def handle_agent_tasks(self):
     pass
 
 def handle_agent_session_operation(self):
-    # GET, POST/cancel, DELETE on session
+    # GET session, POST/cancel session, DELETE session
     pass
 ```
 
