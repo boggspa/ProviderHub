@@ -745,8 +745,21 @@ final class BridgeModel: ObservableObject {
         } catch { }
     }
 
+    // The 2s poll only re-reads the log when the gateway actually rewrote it,
+    // and then only the tail: the activity list shows just the newest rows.
+    private var activityFileStamp: (size: Int, mtime: Date)?
+
     func loadActivity() {
-        guard let text = try? String(contentsOf: root.appendingPathComponent("activity.jsonl"), encoding: .utf8) else { return }
+        let url = root.appendingPathComponent("activity.jsonl")
+        guard let values = try? url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey]),
+              let size = values.fileSize, let mtime = values.contentModificationDate else { return }
+        if let stamp = activityFileStamp, stamp.size == size, stamp.mtime == mtime { return }
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return }
+        defer { try? handle.close() }
+        let window = 64 * 1024
+        try? handle.seek(toOffset: size > window ? UInt64(size - window) : 0)
+        guard let data = try? handle.readToEnd(), let text = String(data: data, encoding: .utf8) else { return }
+        activityFileStamp = (size, mtime)
         let entries = text.split(separator: "\n").suffix(30).reversed().compactMap { line -> ActivityEntry? in
             guard let raw = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any] else { return nil }
             return ActivityEntry(time: raw["time"] as? String ?? "", event: raw["event"] as? String ?? "", model: raw["model"] as? String ?? "", status: raw["status"] as? Int)
