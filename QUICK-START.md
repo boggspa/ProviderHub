@@ -1,7 +1,6 @@
 # Provider Hub Preview 0.5.0
 
-Use your model accounts inside Claude Desktop or the Codex coding workspace
-in Codex / ChatGPT Desktop.
+Use your model accounts inside Claude Desktop or the Codex coding workspace in Codex / ChatGPT Desktop.
 
 ## Install
 
@@ -19,18 +18,15 @@ settings, or conversations from its developer.
 
 - **Mistral:** use the API key already saved by Vibe, or enter your Mistral API
   key directly. Starting Vibe is optional when using an API key directly.
-- **Kimi, MiMo, DeepSeek, Cerebras, Muse, Grok, Qwen Token Plan, OpenRouter, or Gemini:** configure the corresponding
-  account/key in its card.
+- **Kimi, MiMo, DeepSeek, Cerebras, Muse, Grok, Qwen Token Plan, OpenRouter, or Gemini:** configure the corresponding account/key in its card.
 - **Ollama:** run your existing Ollama app or daemon. It manages its own models,
   downloads, and cloud sign-in.
 
-The app refreshes configured catalogues on startup, after credential changes,
-and when preparing a desktop launch. **Refresh catalogue** and **Refresh all**
+The app refreshes configured catalogues on startup, after credential changes, and when preparing a desktop launch. **Refresh catalogue** and **Refresh all**
 are available when you want to refresh them manually. A listed model is
 advertised by its provider; listing alone does not prove inference access.
 
-Usage is charged or counted by the selected provider/account. Provider Hub
-does not change a key's billing arrangement. The tested Muse Model API key
+Usage is charged or counted by the selected provider or account. Provider Hub does not change a key's billing arrangement. The tested Muse Model API key
 uses pay-as-you-go billing; the Muse Code subscription is a separate agent
 integration. Grok here also uses its pay-as-you-go API.
 
