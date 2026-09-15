@@ -163,6 +163,16 @@ struct CodexPage: View {
         if model.settings.codex_model == route { model.settings.codex_model = list.first }
     }
 
+    var applyPatchExclusionNote: String {
+        let excluded = model.settings.codex_apply_patch_exclude?.count ?? 0
+        return excluded == 0 ? "" : " except \(excluded) excluded in the settings file"
+    }
+
+    var applyPatchListNote: String {
+        let listed = model.settings.codex_apply_patch?.count ?? 0
+        return listed == 0 ? "" : " \(listed) model\(listed == 1 ? " is" : "s are") qualified individually in the settings file."
+    }
+
     func clearCatalogue() {
         guard let keep = curatedRoutes.contains(model.settings.codex_model ?? "") ? model.settings.codex_model : curatedRoutes.first else { return }
         model.settings.codex_catalogue = [keep]
@@ -227,6 +237,14 @@ struct CodexPage: View {
                 Text(model.settings.codex_chatgpt_account
                      ? "Codex keeps your ChatGPT sign-in visible while Provider Hub is active: the composer uses the native model pill (white label, chevron, Ultra colour) and the account chrome and usage banners reflect your ChatGPT plan. A ChatGPT sign-in is required to launch. The gateway credential is written into the Codex config for the session and removed when the previous setup is restored. Save, then launch."
                      : "Off: Codex runs as an accountless custom-provider session with a plain gray model pill. Turn on to present your ChatGPT sign-in and the native composer styling.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Toggle(isOn: $model.settings.codex_apply_patch_all) {
+                    Text("Offer apply_patch to catalogue models").font(.system(size: 13, weight: .medium))
+                }
+                .toggleStyle(.switch).disabled(model.busy)
+                Text(model.settings.codex_apply_patch_all
+                     ? "Codex offers its apply_patch editing tool to every model in the catalogue\(applyPatchExclusionNote). Edits made with it feed the close-out diff card, its per-file rows, Undo and Review. A model that keeps failing the patch format falls back to shell edits, which the card does not show. Save, then relaunch Codex."
+                     : "Off: catalogue models edit through the shell, so Codex shows no close-out diff card, Undo or Review for their turns.\(applyPatchListNote) Turn on to offer apply_patch to every catalogue model.")
                     .font(.caption).foregroundStyle(.secondary)
                 HStack {
                     Button(model.codexProfileActive && model.codexRunning ? "Show Codex / ChatGPT" : "Launch Codex / ChatGPT") { Task { await model.launchCodex() } }

@@ -79,6 +79,18 @@ this mode, and the gateway credential is written into the Codex config for
 the session instead of being fetched by the helper command; it is removed
 when the previous setup is restored.
 
+**Offer apply_patch to catalogue models** (off by default) advertises Codex's
+own `apply_patch` editing tool for every model in the catalogue. Codex draws
+its close-out diff card (the "Edited N files" card with per-file `+N -N`
+rows, Undo and Review) only from edits made with that tool, so hub models,
+which otherwise edit through the shell, never produce one. With the switch
+on, Provider Hub projects the tool as a plain JSON function for the provider
+and converts the calls back, and the card returns. A model that keeps
+failing the patch format gets the error back and usually falls back to shell
+edits; hold such a route back by listing it under `codex_apply_patch_exclude`
+in the settings file. Quit Codex, save, then launch again: the catalogue is
+written at launch.
+
 Claude and Codex can run on the same gateway. While one desktop harness is
 live, you can change the other's model selection and save; launching briefly
 restarts the gateway so both share the new snapshot, and the running app

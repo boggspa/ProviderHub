@@ -149,10 +149,18 @@ def _composer_labels(rows):
             for route, base, label in qualified]
 
 
-def _apply_patch_routes(settings):
-    """Routes qualified for the JSON-wrapped apply_patch projection."""
-    configured = settings.get("codex_apply_patch") or []
-    return {route for route in configured if isinstance(route, str)}
+def apply_patch_qualified(settings, route):
+    """Whether a route gets the JSON-wrapped apply_patch projection.
+
+    The Codex tab's switch (codex_apply_patch_all) qualifies the whole
+    catalogue except the codex_apply_patch_exclude routes; with the switch
+    off only the routes listed in codex_apply_patch are qualified.
+    """
+    if route in (settings.get("codex_apply_patch_exclude") or []):
+        return False
+    if settings.get("codex_apply_patch_all") is True:
+        return True
+    return route in (settings.get("codex_apply_patch") or [])
 
 
 def project_codex(settings, inventory):
@@ -224,11 +232,12 @@ def project_codex(settings, inventory):
             "default_verbosity": None,
             # This installed Codex catalogue accepts only "freeform" or null.
             # Routes stay on shell/function tools until they are qualified
-            # for the JSON-wrapped apply_patch projection (settings key
-            # codex_apply_patch); advertising freeform makes Codex core
-            # offer apply_patch, which feeds the TurnDiffTracker behind
-            # the close-out diff card.
-            "apply_patch_tool_type": "freeform" if route in _apply_patch_routes(settings) else None,
+            # for the JSON-wrapped apply_patch projection, either by the
+            # Codex tab's switch (codex_apply_patch_all, minus
+            # codex_apply_patch_exclude) or route by route (codex_apply_patch).
+            # Advertising freeform makes Codex core offer apply_patch, which
+            # feeds the TurnDiffTracker behind the close-out diff card.
+            "apply_patch_tool_type": "freeform" if apply_patch_qualified(settings, route) else None,
             "web_search_tool_type": "text",
             "truncation_policy": {"mode": "bytes", "limit": 10000},
             "supports_parallel_tool_calls": entry.get("parallel_tool_calls") is True,

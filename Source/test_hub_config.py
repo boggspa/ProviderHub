@@ -89,6 +89,25 @@ class SettingsMigrationTests(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 normalize({"codex_apply_patch": value}, SLOTS, "mistral-test")
 
+    def test_codex_apply_patch_all_defaults_off_and_must_be_boolean(self):
+        self.assertIs(defaults(SLOTS, "mistral-test")["codex_apply_patch_all"], False)
+        self.assertIs(normalize({}, SLOTS, "mistral-test")["codex_apply_patch_all"], False)
+        self.assertIs(normalize({"codex_apply_patch_all": True}, SLOTS, "mistral-test")["codex_apply_patch_all"], True)
+        for value in (1, "true", None, []):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                normalize({"codex_apply_patch_all": value}, SLOTS, "mistral-test")
+
+    def test_codex_apply_patch_exclude_is_optional_deduped_and_validated(self):
+        self.assertNotIn("codex_apply_patch_exclude", defaults(SLOTS, "mistral-test"))
+        self.assertNotIn("codex_apply_patch_exclude", normalize({}, SLOTS, "mistral-test"))
+        normalized = normalize({"codex_apply_patch_all": True, "codex_apply_patch_exclude": [
+            "mistral/mistral-small-4", "mistral/mistral-small-4"]}, SLOTS, "mistral-test")
+        self.assertEqual(normalized["codex_apply_patch_exclude"], ["mistral/mistral-small-4"])
+        self.assertEqual(normalize({"codex_apply_patch_exclude": []}, SLOTS, "mistral-test")["codex_apply_patch_exclude"], [])
+        for value in ("mistral/mistral-small-4", [None], ["mistral/"]):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                normalize({"codex_apply_patch_exclude": value}, SLOTS, "mistral-test")
+
     def test_auto_flags_require_json_booleans(self):
         for key in ("auto_mode", "auto_stop"):
             for value in ("false", "true", 0, 1, None, [], {}):

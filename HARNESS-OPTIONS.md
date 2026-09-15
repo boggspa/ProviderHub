@@ -65,8 +65,14 @@ Provider Hub deterministically flattens a namespaced Codex function into a
 provider-safe name and reverses that mapping on returned calls. A collision is
 rejected. Hosted tools, including `web_search`, are disabled in the generated
 profile. The dedicated free-form `apply_patch` catalogue metadata is `null`
-because that wire format has not been qualified; the installed Codex engine's
-function and shell path can still inspect and edit files.
+by default, so the installed Codex engine's function and shell path inspects
+and edits files and the desktop shows no close-out diff card. The Codex tab's
+**Offer apply_patch to catalogue models** switch (`codex_apply_patch_all`)
+advertises `freeform` for every catalogue route, minus any
+`codex_apply_patch_exclude` entries; Provider Hub projects the tool as a JSON
+`apply_patch(patch)` function and converts the calls back (see
+`CLOSEOUT_CARDS.md`). The per-route `codex_apply_patch` list still qualifies
+individual routes while the switch is off.
 
 Provider-specific continuation rules remain explicit:
 

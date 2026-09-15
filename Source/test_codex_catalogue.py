@@ -140,6 +140,28 @@ class CuratedCatalogueProjectionTests(unittest.TestCase):
         self.assertNotEqual(catalogue_digest({**base, "codex_apply_patch": ["mistral/b-model"]}, stock),
                             catalogue_digest(base, stock))
 
+    def test_apply_patch_switch_covers_the_catalogue_minus_exclusions(self):
+        stock = inventory(model("mistral/a-model"), model("mistral/b-model"), model("ollama/z-model"))
+        base = settings(codex_model="mistral/a-model",
+                        codex_catalogue=["mistral/a-model", "mistral/b-model", "ollama/z-model"])
+        everything = {row["slug"]: row["apply_patch_tool_type"] for row in project_codex(
+            {**base, "codex_apply_patch_all": True}, stock)["models"]}
+        self.assertEqual(everything, {"mistral/a-model": "freeform", "mistral/b-model": "freeform",
+                                      "ollama/z-model": "freeform"})
+        held_back = {row["slug"]: row["apply_patch_tool_type"] for row in project_codex(
+            {**base, "codex_apply_patch_all": True, "codex_apply_patch_exclude": ["ollama/z-model"]},
+            stock)["models"]}
+        self.assertEqual(held_back, {"mistral/a-model": "freeform", "mistral/b-model": "freeform",
+                                     "ollama/z-model": None})
+        # An exclusion also overrides the per-route list while the switch is off.
+        listed = {row["slug"]: row["apply_patch_tool_type"] for row in project_codex(
+            {**base, "codex_apply_patch": ["mistral/b-model"], "codex_apply_patch_exclude": ["mistral/b-model"]},
+            stock)["models"]}
+        self.assertIsNone(listed["mistral/b-model"])
+        # The switch changes the projected catalogue, so snapshots refresh.
+        self.assertNotEqual(catalogue_digest({**base, "codex_apply_patch_all": True}, stock),
+                            catalogue_digest(base, stock))
+
     def test_digest_tracks_selection_but_not_the_default(self):
         stock = inventory(
             model("mistral/a-model"), model("mistral/b-model"),

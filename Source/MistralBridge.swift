@@ -177,6 +177,9 @@ final class BridgeModel: ObservableObject {
         mine.codex_model = savedSettings.codex_model
         mine.codex_catalogue = savedSettings.codex_catalogue
         mine.codex_chatgpt_account = savedSettings.codex_chatgpt_account
+        mine.codex_apply_patch_all = savedSettings.codex_apply_patch_all
+        mine.codex_apply_patch = savedSettings.codex_apply_patch
+        mine.codex_apply_patch_exclude = savedSettings.codex_apply_patch_exclude
         if mine == savedSettings { return .codexOnly }
         var prefsOnly = mine
         prefsOnly.auto_stop = savedSettings.auto_stop
@@ -185,6 +188,9 @@ final class BridgeModel: ObservableObject {
         let codexChanged = settings.codex_model != savedSettings.codex_model
             || settings.codex_catalogue != savedSettings.codex_catalogue
             || settings.codex_chatgpt_account != savedSettings.codex_chatgpt_account
+            || settings.codex_apply_patch_all != savedSettings.codex_apply_patch_all
+            || settings.codex_apply_patch != savedSettings.codex_apply_patch
+            || settings.codex_apply_patch_exclude != savedSettings.codex_apply_patch_exclude
         return codexChanged ? .mixed : .claudeRouting
     }
     var routeOptions: [String] {

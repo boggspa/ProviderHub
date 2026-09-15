@@ -163,7 +163,7 @@ def defaults(slots, vibe_model: str, port: int = 11436) -> dict:
             "mapping_options": {},
             "providers": connections, "branding_overrides": {},
             "auto_stop": True, "auto_mode": False, "codex_model": None,
-            "codex_catalogue": None, "codex_chatgpt_account": False}
+            "codex_catalogue": None, "codex_chatgpt_account": False, "codex_apply_patch_all": False}
 
 
 def normalize(value: dict, slots, vibe_model: str, port: int = 11436) -> dict:
@@ -230,19 +230,27 @@ def normalize(value: dict, slots, vibe_model: str, port: int = 11436) -> dict:
         result["codex_catalogue"] = selected
         if result["codex_model"] is not None and result["codex_model"] not in selected:
             raise ValueError("Choose the Codex default model from the catalogue selection.")
-    apply_patch = value.get("codex_apply_patch")
-    if apply_patch is not None:
-        if not isinstance(apply_patch, list):
-            raise ValueError("The Codex apply_patch qualification must be a list of model routes.")
+    # codex_apply_patch qualifies routes for the JSON-wrapped apply_patch
+    # projection one by one; codex_apply_patch_exclude holds routes back once
+    # codex_apply_patch_all switches the projection on for the whole
+    # catalogue (see codex_catalogue.apply_patch_qualified).
+    for key, label in (("codex_apply_patch", "qualification"), ("codex_apply_patch_exclude", "exclusion")):
+        routes = value.get(key)
+        if routes is None:
+            continue
+        if not isinstance(routes, list):
+            raise ValueError(f"The Codex apply_patch {label} must be a list of model routes.")
         qualified_routes = []
-        for route in apply_patch:
+        for route in routes:
             qualified = qualify(*split_route(route))
             if qualified not in qualified_routes:
                 qualified_routes.append(qualified)
-        result["codex_apply_patch"] = qualified_routes
+        result[key] = qualified_routes
     # codex_chatgpt_account: present the user's ChatGPT sign-in to the Codex
     # desktop while the hub provider is active (see CodexProfile.provider).
-    for key, fallback in (("auto_stop", True), ("auto_mode", False), ("codex_chatgpt_account", False)):
+    # codex_apply_patch_all: the Codex tab's apply_patch switch.
+    for key, fallback in (("auto_stop", True), ("auto_mode", False), ("codex_chatgpt_account", False),
+                          ("codex_apply_patch_all", False)):
         requested = value.get(key, fallback)
         if type(requested) is not bool:
             raise ValueError(f"{key} must be true or false.")

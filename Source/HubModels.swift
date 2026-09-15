@@ -79,6 +79,11 @@ struct RouteSettings: Codable, Equatable {
     var codex_model: String?
     var codex_catalogue: [String]?
     var codex_chatgpt_account = false
+    // Codex tab apply_patch switch plus the hand-edited per-route lists it
+    // preserves across saves (see codex_catalogue.apply_patch_qualified).
+    var codex_apply_patch_all = false
+    var codex_apply_patch: [String]?
+    var codex_apply_patch_exclude: [String]?
 }
 struct ModelEntry: Decodable, Identifiable {
     var id: String

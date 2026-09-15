@@ -44,16 +44,27 @@ implements. The bridge now adapts it per qualified route:
 - `Source/responses_bridge.py`: same treatment on the Messages translation
   path, including a tool-map-aware response adapter.
 - `Source/codex_catalogue.py` + `Source/hub_config.py`: advertise
-  `"freeform"` only for routes listed in the new `codex_apply_patch`
-  settings key. Default is unchanged (`None`).
+  `"freeform"` for a route when the Codex tab's **Offer apply_patch to
+  catalogue models** switch (`codex_apply_patch_all`) is on and the route is
+  not in `codex_apply_patch_exclude`, or when the route is listed in
+  `codex_apply_patch`. Default is unchanged (`None` everywhere).
+- `Source/CodexHarness.swift` + `Source/HubModels.swift`: the switch lives
+  beside the ChatGPT-account toggle; the two route lists are carried in the
+  Swift settings model so a hand edit survives a Save from the app. Changing
+  any of the three counts as a Codex catalogue change (quit Codex first, then
+  Save and relaunch: the catalogue file is written at launch).
 
-To qualify a route, add it to `codex_apply_patch` in settings, exercise real
-file edits through Codex, and confirm the close-out card appears with correct
-per-file diffs. JSON-wrapped patch text is easier for models than raw
-freeform, but discipline varies per provider, so qualification stays
-per-route and explicit. A bridge-side "diff the workspace around shell calls"
-fallback is not possible: the desktop renders the card only from core's
-`turn/diff/updated`, which the bridge cannot inject.
+To qualify a route, turn the switch on (or add the route to
+`codex_apply_patch`), relaunch Codex from the hub, exercise real file edits,
+and confirm the close-out card appears with correct per-file diffs. A model
+that keeps failing the patch format gets the parse error back and usually
+falls back to shell edits, which the card does not show; hold such a route
+back with `codex_apply_patch_exclude`. JSON-wrapped patch text is easier for
+models than raw freeform, but discipline varies per provider, so the
+exclusion list stays per-route and explicit. A bridge-side "diff the
+workspace around shell calls" fallback is not possible: the desktop renders
+the card only from core's `turn/diff/updated`, which the bridge cannot
+inject.
 
 ## Claude Desktop: two mechanisms
 
@@ -76,7 +87,9 @@ fallback is not possible: the desktop renders the card only from core's
 
 ## Status
 
-- Codex card: restorable via the adapter above once a route is qualified.
+- Codex card: restorable via the adapter above; the Codex tab switch turns
+  it on for the whole catalogue, and per-route qualification against live
+  providers is still pending.
 - Claude per-turn rows: best-effort steering shipped; effectiveness depends
   on model compliance.
 - Claude checkpoint/rewind: blocked on the server-side gate; needs
