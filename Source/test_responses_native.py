@@ -311,8 +311,8 @@ class NativeResponsesTests(unittest.TestCase):
 
     def test_streaming_apply_patch_returns_custom_tool_calls_without_json_deltas(self):
         self.start()
-        patch = "*** Begin Patch\n*** Update File: a.txt\n@@\n-old\n+new\n*** End Patch"
-        arguments = json.dumps({"patch": patch})
+        patch_text = "*** Begin Patch\n*** Update File: a.txt\n@@\n-old\n+new\n*** End Patch"
+        arguments = json.dumps({"patch": patch_text})
 
         def handler(server):
             upstream = server.read_body()
@@ -350,7 +350,7 @@ class NativeResponsesTests(unittest.TestCase):
         self.assertEqual(added["type"], "custom_tool_call")
         self.assertEqual(done["type"], "custom_tool_call")
         self.assertEqual(done["name"], "apply_patch")
-        self.assertEqual(done["input"], patch)
+        self.assertEqual(done["input"], patch_text)
         self.assertEqual(events[-1]["response"]["output"][0]["type"], "custom_tool_call")
 
     def test_authentication_and_browser_origin_checks_apply(self):
