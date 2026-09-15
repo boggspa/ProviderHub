@@ -3,6 +3,7 @@ import copy
 import http.client
 import json
 import socket
+import threading
 import time
 import unittest
 from unittest.mock import patch
@@ -25,6 +26,21 @@ def handle_native_response(server):
     body = server.read_body()
     if MockProvider.mode == "quota":
         server.send_json(429, {"error": {"message": "Quota " + fixtures.PROVIDER_KEY}})
+        return
+    if MockProvider.mode == "flaky_quota":
+        # Fail twice with a provider Retry-After hint, then recover, so a
+        # single client request can prove the gateway absorbs transient
+        # pressure instead of forwarding it.
+        with MockProvider.lock:
+            seen = len(MockProvider.requests)
+        if seen <= 2:
+            server.send_json(429, {"error": {"message": "mock quota exhausted"}},
+                             headers={"Retry-After": "0.01"})
+            return
+        # Fall through to normal handling below.
+    if MockProvider.mode == "exhausted_quota":
+        server.send_json(429, {"error": {"message": "mock monthly quota exhausted"}},
+                         headers={"Retry-After": "3600"})
         return
     inputs = body.get("input", [])
     second = bool(body.get("previous_response_id")) or any(isinstance(item, dict) and item.get("type") == "function_call_output" for item in inputs)
@@ -209,7 +225,13 @@ class NativeResponsesTests(unittest.TestCase):
     def test_quota_and_native_failed_response_redact_credentials(self):
         self.start()
         MockProvider.mode = "quota"
-        status, raw = self.request(self.body())
+        # Sustained pressure still reaches the client, but only after the
+        # gateway's own absorb-and-retry budget is spent. The delays are
+        # patched down; real backoff timing is unit-covered in test_rate_limit.
+        with patch("rate_limit.BACKOFF_BASE", 0.01), \
+                patch("rate_limit.BACKOFF_CAP", 0.05), \
+                patch("rate_limit.random.uniform", return_value=0):
+            status, raw = self.request(self.body())
         self.assertEqual(status, 429)
         self.assertNotIn(fixtures.PROVIDER_KEY, raw.decode())
         MockProvider.mode = "failed"
@@ -218,6 +240,98 @@ class NativeResponsesTests(unittest.TestCase):
             self.assertEqual(status, 200)
             self.assertNotIn(fixtures.PROVIDER_KEY, raw.decode())
         self.assertEqual(self.runtime.status()["failed"], 3)
+
+    def raw_request(self, body, timeout=10):
+        connection = http.client.HTTPConnection("127.0.0.1", self.gateway.server_port, timeout=timeout)
+        connection.request("POST", "/v1/responses", json.dumps(body), {
+            "Authorization": "Bearer " + self.runtime.token, "Content-Type": "application/json"})
+        response = connection.getresponse()
+        status, raw = response.status, response.read()
+        headers = {key.lower(): value for key, value in response.getheaders()}
+        connection.close()
+        deadline = time.monotonic() + 2
+        while self.runtime.status()["active"] and time.monotonic() < deadline:
+            time.sleep(.01)
+        return status, raw, headers
+
+    def test_transient_quota_is_absorbed_with_backoff(self):
+        self.start("ollama")
+        MockProvider.mode = "flaky_quota"
+        with patch("rate_limit.random.uniform", return_value=0):
+            status, raw, _ = self.raw_request(self.body())
+        self.assertEqual(status, 200, raw)
+        self.assertEqual(len(MockProvider.requests), 3)
+        self.assertEqual(self.runtime.status()["completed"], 1)
+        self.assertEqual(self.runtime.status()["failed"], 0)
+        log = (self.root / "activity.jsonl").read_text()
+        self.assertEqual(log.count('"event": "throttled"'), 2)
+        self.assertIn('"status": 429', log)
+
+    def test_long_retry_after_is_handed_back_not_absorbed(self):
+        self.start("ollama")
+        MockProvider.mode = "exhausted_quota"
+        status, raw, headers = self.raw_request(self.body())
+        self.assertEqual(status, 429, raw)
+        # One upstream hit only: an hour-long quota wait must not pin a
+        # worker slot, so the provider's own hint is passed straight back.
+        self.assertEqual(len(MockProvider.requests), 1)
+        self.assertEqual(headers.get("retry-after"), "3600")
+
+    def test_sustained_quota_reaches_client_after_absorb_budget(self):
+        self.start("ollama")
+        MockProvider.mode = "quota"
+        with patch("rate_limit.BACKOFF_BASE", 0.01), \
+                patch("rate_limit.BACKOFF_CAP", 0.05), \
+                patch("rate_limit.random.uniform", return_value=0):
+            status, raw, headers = self.raw_request(self.body())
+        self.assertEqual(status, 429)
+        self.assertEqual(len(MockProvider.requests), 5)
+        self.assertEqual(self.runtime.status()["failed"], 1)
+        self.assertGreaterEqual(int(headers.get("retry-after", "0")), 1)
+        self.assertNotIn(fixtures.PROVIDER_KEY, raw.decode())
+        log = (self.root / "activity.jsonl").read_text()
+        self.assertEqual(log.count('"event": "throttled"'), 4)
+
+    def test_ninth_request_queues_for_a_slot(self):
+        self.start("ollama")
+        for _ in range(8):
+            self.assertTrue(self.runtime.semaphore.acquire(blocking=False))
+        outcome = {}
+
+        def ninth():
+            try:
+                outcome["result"] = self.raw_request(self.body(), timeout=10)
+            except Exception as exc:
+                outcome["error"] = exc
+
+        with patch("responses_native.SLOT_WAIT_TIMEOUT", 5):
+            thread = threading.Thread(target=ninth)
+            thread.start()
+            time.sleep(0.5)
+            # Still queued: the old fail-fast 429 would have answered by now.
+            self.assertNotIn("result", outcome)
+            self.assertNotIn("error", outcome)
+            self.runtime.semaphore.release()
+            thread.join(timeout=10)
+            for _ in range(7):
+                self.runtime.semaphore.release()
+        self.assertNotIn("error", outcome)
+        status, raw, _ = outcome["result"]
+        self.assertEqual(status, 200, raw)
+
+    def test_slot_wait_expiry_returns_retry_after(self):
+        self.start("ollama")
+        for _ in range(8):
+            self.assertTrue(self.runtime.semaphore.acquire(blocking=False))
+        try:
+            with patch("responses_native.SLOT_WAIT_TIMEOUT", 0.2):
+                status, raw, headers = self.raw_request(self.body())
+        finally:
+            for _ in range(8):
+                self.runtime.semaphore.release()
+        self.assertEqual(status, 429)
+        self.assertEqual(json.loads(raw)["error"]["type"], "rate_limit_error")
+        self.assertGreaterEqual(int(headers.get("retry-after", "0")), 1)
 
     def test_truncated_or_malformed_stream_is_not_recorded_as_complete(self):
         self.start()
@@ -895,6 +1009,47 @@ class MultiAgentNormalizationTests(unittest.TestCase):
             "[subagent_subagent]: Review the Source/ directory")
         self.assertEqual(
             normalized[2]["content"], "[subagent_researcher]: Found some data")
+
+    def test_request_shape_records_attribution_not_content(self):
+        """The shape log captures agent/call-id/tool names without message text."""
+        import json
+
+        from responses_native import _request_shape
+
+        payload = {
+            "model": "mistral/mistral-medium-2508",
+            "input": [
+                {"type": "message", "role": "user", "content": "secret prompt"},
+                {"type": "multi_agent_call", "call_id": "call_1", "agent": "researcher",
+                 "arguments": {"task": "secret task"}},
+                {"type": "agent_message", "agent": "researcher", "role": "assistant",
+                 "content": "secret findings"},
+                "string_item",
+            ],
+            "tools": [
+                {"type": "namespace", "name": "collaboration",
+                 "tools": [{"type": "function", "name": "spawn_agent"}]},
+                {"type": "function", "name": "read_file"},
+            ],
+            "tool_choice": "auto",
+        }
+        shape = _request_shape(payload)
+
+        self.assertEqual(shape["model"], "mistral/mistral-medium-2508")
+        self.assertEqual(shape["input_types"],
+                         ["message", "multi_agent_call", "agent_message", "str"])
+        self.assertEqual(shape["input_items"][1],
+                         {"type": "multi_agent_call", "agent": "researcher",
+                          "call_id": "call_1"})
+        self.assertEqual(shape["input_items"][2],
+                         {"type": "agent_message", "agent": "researcher",
+                          "role": "assistant"})
+        self.assertEqual(shape["tool_names"],
+                         ["collaboration.spawn_agent", "read_file"])
+        self.assertEqual(shape["tool_choice"], "auto")
+        blob = json.dumps(shape)
+        for secret in ("secret prompt", "secret task", "secret findings"):
+            self.assertNotIn(secret, blob)
 
 
 if __name__ == "__main__":

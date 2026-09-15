@@ -18,6 +18,8 @@ from responses_tools import flatten_tools, input_names, output_names, register
 from responses_bridge import ENVELOPE_PREFIX, MessagesResponsesAdapter, ReasoningEnvelope, to_messages
 from openrouter_provider import OpenRouterError, finalize as openrouter_finalize, app_headers as openrouter_app_headers
 from effort_map import cap_high_end, map_effort, ollama_effort_aliases
+from rate_limit import (MAX_UPSTREAM_ATTEMPTS, RETRYABLE_STATUSES, SLOT_RETRY_AFTER, SLOT_WAIT_TIMEOUT,
+                        THROTTLE_CAP, parse_retry_after, wait_for_slot)
 
 
 NATIVE_PROVIDERS = frozenset({"grok", "ollama", "openrouter"})
@@ -346,8 +348,73 @@ def _normalize_multi_agent_items(input_list):
             })
         else:
             normalized.append(item)
-    
+
     return normalized
+
+
+def _request_shape(payload):
+    """Summarize a Responses request for last-responses-shape.json.
+
+    Records the ordered input-type sequence plus multi-agent
+    attribution (agent names, call ids) and pre-flattening tool names,
+    so a later transcript can be correlated with what each
+    parent/child request actually carried. All free text is truncated;
+    no message content or credentials are recorded.
+    """
+    shape = {
+        "fields": sorted(payload),
+        "model": str(payload.get("model", ""))[:120],
+    }
+    inputs = payload.get("input", [])
+    if isinstance(inputs, str):
+        shape["input"] = "text"
+    elif isinstance(inputs, list):
+        items = []
+        for item in inputs:
+            if not isinstance(item, dict):
+                items.append({"type": type(item).__name__[:20]})
+                continue
+            kind = str(item.get("type", "message"))[:50]
+            entry = {"type": kind}
+            if kind in ("multi_agent_call", "subagent_call"):
+                entry["agent"] = str(item.get("agent") or item.get("recipient") or "")[:80]
+                entry["call_id"] = str(item.get("id", item.get("call_id", "")))[:80]
+            elif kind in ("multi_agent_call_output", "subagent_call_output"):
+                entry["call_id"] = str(item.get("call_id") or item.get("id") or "")[:80]
+            elif kind == "agent_message":
+                entry["agent"] = str(item.get("agent") or item.get("sender") or "")[:80]
+                entry["role"] = str(item.get("role") or "")[:20]
+            elif kind == "function_call":
+                entry["name"] = str(item.get("name") or "")[:80]
+            elif kind == "function_call_output":
+                entry["call_id"] = str(item.get("call_id") or "")[:80]
+            elif kind == "message":
+                entry["role"] = str(item.get("role") or "")[:20]
+            items.append(entry)
+        shape["input_types"] = [entry["type"] for entry in items]
+        shape["input_items"] = items
+    else:
+        shape["input"] = type(inputs).__name__[:20]
+    tools = payload.get("tools", [])
+    if isinstance(tools, list):
+        names = []
+        for tool in tools:
+            if not isinstance(tool, dict):
+                continue
+            if tool.get("type") == "namespace":
+                namespace = str(tool.get("name", ""))[:60]
+                children = tool.get("tools")
+                if isinstance(children, list):
+                    for child in children:
+                        if isinstance(child, dict):
+                            names.append(f"{namespace}.{child.get('name', '')}"[:120])
+                else:
+                    names.append(namespace + ".*")
+            else:
+                names.append(str(tool.get("name", ""))[:120])
+        shape["tool_names"] = sorted(set(names))
+    shape["tool_choice"] = str(payload.get("tool_choice", ""))[:120]
+    return shape
 
 
 def prepare_native(runtime, payload):
@@ -475,6 +542,15 @@ def prepare_native(runtime, payload):
             "private_key": key, "provider_name": PROVIDERS[provider_id]["name"]}
 
 
+def _client_gone(handler):
+    """True when the local client disconnected (socket peek only, like the monitors)."""
+    try:
+        ready, _, _ = select.select([handler.connection], [], [], 0)
+        return bool(ready and handler.connection.recv(1, socket.MSG_PEEK | socket.MSG_DONTWAIT) == b"")
+    except (OSError, ValueError):
+        return True
+
+
 def usage_metadata(value):
     usage = value if isinstance(value, dict) else {}
     return {key: usage[key] if type(usage.get(key)) is int and usage[key] >= 0 else 0
@@ -496,19 +572,24 @@ def handle_responses(handler):
             raise BridgeError("The request body was interrupted.")
         payload = json.loads(raw)
         plan = prepare_native(runtime, payload)
-        atomic_json(runtime.root / "last-responses-shape.json", {
-            "fields": sorted(payload),
-            "input_types": sorted({str(item.get("type", "message"))[:50] for item in payload.get("input", []) if isinstance(item, dict)}),
-            "tool_types": sorted({tool.get("type", "") for tool in payload.get("tools", [])}),
-        })
+        atomic_json(runtime.root / "last-responses-shape.json", _request_shape(payload))
     except (ValueError, TypeError, KeyError, BridgeError, ProviderError) as exc:
         handler.error(400, str(exc))
         return
     delegated = plan["protocol"] == "messages_bridge"
     if delegated:
         plan["url"] = f"http://127.0.0.1:{handler.server.server_port}/v1/messages"
-    if not delegated and not runtime.semaphore.acquire(blocking=False):
-        handler.error(429, "Eight requests are already active. Try again shortly.")
+    # Queue for a worker slot instead of failing fast: Codex subagent bursts
+    # briefly exceed the worker count by design, and every instant 429 burns
+    # one of the desktop client's retries toward its "exceeded retry limit"
+    # terminal state. Mirrors the Messages path that shields Mistral.
+    if not delegated and not wait_for_slot(runtime.semaphore, cancel=lambda: _client_gone(handler),
+                                           timeout=SLOT_WAIT_TIMEOUT):
+        if _client_gone(handler):
+            runtime.record("cancelled", plan["route"])
+            return
+        handler.error(429, "Eight requests are already active. Try again shortly.",
+                      headers={"Retry-After": str(SLOT_RETRY_AFTER)})
         return
     closed = threading.Event()
     disconnected = threading.Event()
@@ -572,10 +653,13 @@ def handle_responses(handler):
                     disconnected.set()
             if disconnected.is_set():
                 try:
-                    sock = connection.sock or upstream_socket
+                    # Retry backoff leaves no live connection between attempts.
+                    live = connection if connection is not None else None
+                    sock = (live.sock if live is not None else None) or upstream_socket
                     if sock:
                         sock.shutdown(socket.SHUT_RDWR)
-                    connection.close()
+                    if live is not None:
+                        live.close()
                 except OSError:
                     pass
                 return
@@ -592,26 +676,63 @@ def handle_responses(handler):
         if not delegated:
             with runtime.lock:
                 runtime.active += 1
-        connection, endpoint = runtime.upstream(plan["url"])
-        with runtime.lock:
-            runtime.connections.add(connection)
         threading.Thread(target=cancel_monitor, daemon=True).start()
-        connection.request("POST", endpoint, json.dumps(plan["body"]).encode(), {
-            **plan["headers"], "Accept": "text/event-stream" if plan["body"]["stream"] else "application/json",
-        })
-        response = connection.getresponse()
-        upstream_socket = connection.sock or getattr(getattr(response.fp, "raw", None), "_sock", None)
-        if response.status != 200:
+        encoded = json.dumps(plan["body"]).encode()
+        headers = {**plan["headers"], "Accept": "text/event-stream" if plan["body"]["stream"] else "application/json"}
+        attempts = 0
+        while True:
+            # Serialize on the shared provider gate: a sibling's 429 parks
+            # this route, so bursts pause here instead of firing requests a
+            # depleted quota is certain to reject. Delegated requests rely on
+            # the inner Messages handler's own gate and retry budget.
+            if not delegated and not runtime.throttle.wait(plan["provider_id"],
+                                                           cancel=lambda: _client_gone(handler)):
+                runtime.record("cancelled", plan["route"])
+                return
+            connection, endpoint = runtime.upstream(plan["url"])
+            with runtime.lock:
+                runtime.connections.add(connection)
+            connection.request("POST", endpoint, encoded, headers)
+            response = connection.getresponse()
+            upstream_socket = connection.sock or getattr(getattr(response.fp, "raw", None), "_sock", None)
+            if response.status == 200:
+                if not delegated:
+                    runtime.throttle.note_success(plan["provider_id"])
+                break
             data = response.read(65536)
             try:
                 error = json.loads(data).get("error", {})
                 detail = error.get("message", "") if isinstance(error, dict) else ""
             except (ValueError, AttributeError):
                 detail = ""
+            detail = redact(detail)
+            retry_after = parse_retry_after(response.getheader("Retry-After")) if response.status in RETRYABLE_STATUSES else None
+            if (not delegated and response.status in RETRYABLE_STATUSES
+                    and attempts + 1 < MAX_UPSTREAM_ATTEMPTS
+                    and (retry_after is None or retry_after <= THROTTLE_CAP)):
+                # Transient provider pressure: absorb it in-bridge with
+                # backoff instead of burning one of the client's retries.
+                # Absorbed attempts are logged, never counted as failures.
+                attempts += 1
+                runtime.throttle.note_limit(plan["provider_id"], retry_after, attempts - 1)
+                runtime.record("throttled", plan["route"], response.status)
+                response.close()
+                connection.close()
+                with runtime.lock:
+                    runtime.connections.discard(connection)
+                connection = None
+                response = None
+                upstream_socket = None
+                continue
             status = response.status if response.status in {400, 401, 402, 403, 404, 413, 429, 500, 502, 503, 504} else 502
             if not delegated:
                 runtime.record("error", plan["route"], status)
-            handler.error(status, plan["provider_name"] + f" returned HTTP {response.status}. " + redact(detail))
+            terminal_headers = None
+            if response.status in RETRYABLE_STATUSES:
+                hint = retry_after if retry_after is not None else SLOT_RETRY_AFTER
+                terminal_headers = {"Retry-After": str(max(1, int(hint)))}
+            handler.error(status, plan["provider_name"] + f" returned HTTP {response.status}. " + detail,
+                          headers=terminal_headers)
             return
         if not plan["body"]["stream"]:
             raw = response.read(MAX_BODY + 1)
