@@ -1,4 +1,4 @@
-tomlkit 0.13.3 is vendored from its published PyPI wheel for preserving user TOML configuration.
+tomlkit 0.13.3 is vendored from its published PyPI wheel to preserve user TOML configuration.
 
 License: MIT; see tomlkit-LICENSE.
 Source: https://github.com/python-poetry/tomlkit

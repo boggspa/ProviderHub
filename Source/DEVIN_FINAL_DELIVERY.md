@@ -2,7 +2,7 @@
 
 ## Mission Complete
 
-Agent Peirce has successfully analyzed the Mistral Bridge codebase and created a **complete agent provider implementation** for Devin AI.
+Agent Peirce has completed analysis of the Mistral Bridge codebase and created a **complete agent provider implementation** for Devin AI.
 
 ## Key Design Insight Implemented
 
@@ -104,9 +104,9 @@ DESCRIPTOR = {
         "task_submission": True,
         "state_tracking": True,
         "result_retrieval": True,
-        "streaming": False,  # Streaming not supported
-        "tools": True,      # Tool execution managed internally
-        "thinking": True,   # Reasoning managed internally
+        "streaming": False,  # Streaming is not supported
+        "tools": True,      # Tool execution is managed internally
+        "thinking": True,   # Reasoning is managed internally
     },
 }
 

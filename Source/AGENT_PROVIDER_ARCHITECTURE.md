@@ -4,7 +4,7 @@
 
 **Key Design Insight**: Devin is NOT an LLM chat_completions provider. Devin is a **session-based AI agent service** with a v3 API that uses `POST /v3/organizations/{org_id}/sessions` for task execution.
 
-This requires a **new architecture** for agent providers, separate from the existing LLM provider system.
+This calls for a **new architecture** for agent providers, kept separate from the existing LLM provider system.
 
 ## Current Architecture Analysis
 
@@ -150,8 +150,8 @@ class AgentRuntime:
     """Manages agent sessions and their lifecycle."""
     
     def __init__(self):
-        self.sessions = {}  # Maps session_id to AgentSession
-        self.org_sessions = defaultdict(dict)  # Maps org_id to {session_id -> AgentSession}
+        self.sessions = {}  # Maps each session_id to its AgentSession
+        self.org_sessions = defaultdict(dict)  # Maps each org_id to its {session_id -> AgentSession} table
         self.lock = threading.Lock()
         self.active_sessions = 0
         self.max_concurrent = 5  # Devin concurrent session limit
