@@ -21,7 +21,7 @@ records present dirtiness; markers only promise future work.
 ### The one thing to understand first
 
 A work marker is a **promise about the future** ("I am going to keep editing
-this"). Promises rot: sessions crash, get reassigned, or finish one task and
+this"). Promises rot: sessions crash, get reassigned, or finish one task then
 silently start another. Git, by contrast, records the **present** and cannot
 lie about it. So:
 
@@ -45,7 +45,7 @@ Split the two questions and use the right tool for each:
    ls -1a | grep -E '^(SHIP-HOLD|\.WORK-IN-PROGRESS|SESSION-IN-PROGRESS)'
    ```
 
-   Do not use a bare multi-glob `ls`; zsh `nomatch` can make a failed check
+   Avoid a bare multi-glob `ls`; under zsh `nomatch` a failed check can
    look empty. A _decayed_ marker (expired, or its pid dead) is not noise — it
    is work to adopt; see "Adopting a decayed claim" below.
 3. **Raise your own marker before your first edit to a clean file** — not
@@ -138,8 +138,8 @@ ancestor of the `git` process, not the transient shell, tool subprocess, or
 an unrelated process. Verify the same PID across separate invocations and
 confirm that the commit shell descends from it.
 
-**With no pid there is no process to probe, so `expires` is the only decay
-signal your claim has.** A missing or unparseable `expires` is treated as
+**Without a pid there is no process to probe, so `expires` is your claim's only decay
+signal.** A missing or unparseable `expires` is treated as
 decayed — the marker claims nothing — precisely so a dead seat cannot wedge
 the tree forever. Keep the lease short and renew it.
 

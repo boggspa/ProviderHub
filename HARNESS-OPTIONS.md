@@ -1,6 +1,6 @@
 **Provider Hub: Codex / ChatGPT Desktop harness — 13 September 2026**
 
-Provider Hub Preview 0.5.0 extends the second desktop harness introduced in 0.4.0 with Qwen Token Plan, curated OpenRouter and Gemini API. Every configured provider connection is now
+Provider Hub Preview 0.5.0 extends the second desktop harness from 0.4.0 with Qwen Token Plan, curated OpenRouter and Gemini API. Every configured provider connection is now
 available to Codex. Grok, Ollama and OpenRouter retain native Responses forwarding;
 Mistral, Kimi, MiMo, DeepSeek, Cerebras, Muse, Qwen Token Plan and Gemini use a local
 Responses-to-Messages translation over their existing provider adapters. This
@@ -60,7 +60,7 @@ provider concurrency slot and activity record, so a translated turn is bounded
 and counted once. Closing the outer Responses request propagates cancellation
 through the local Messages request to the provider connection.
 
-Only function tools and function namespaces are enabled for this route.
+This route enables only function tools and function namespaces.
 Provider Hub deterministically flattens a namespaced Codex function into a
 provider-safe name and reverses that mapping on returned calls. A collision is
 rejected. Hosted tools, including `web_search`, are disabled in the generated

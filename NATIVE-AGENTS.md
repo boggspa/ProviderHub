@@ -1,6 +1,6 @@
 # Native agent and Auto-mode integration boundaries
 
-Research date: 12 September 2026. The TaskWraith source observations below
+Research date: 12 September 2026. The TaskWraith source notes below
 refer to the read-only AGBench checkout at
 `b6eba91e9216eefdd7a75572585e79b48ed4e1b0`. That research did not run an
 ACP/MSP agent, read a provider credential, or live-test xAI. The separate 0.4.0
@@ -124,7 +124,7 @@ to an outer desktop conversation.
 
 Already-executed Grok tool activity must stay an executed activity event. It
 must not be converted to a pending outer-harness tool call, because the desktop
-would then believe the call still needed execution and could run it a second
+would then treat the call as still needing execution and could run it a second
 time.
 
 ### Unknown or unsupported
