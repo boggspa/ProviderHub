@@ -10,9 +10,9 @@ This document describes the implementation pattern for adding Devin AI support t
 
 ```python
 DESCRIPTOR = {
-    "id": "devin",                    # Provider identifier
-    "name": "Devin AI",               # Human-readable name
-    "protocol": "chat_completions",    # API protocol type
+    "id": "devin",                    # Unique provider key
+    "name": "Devin AI",               # Display name for UI
+    "protocol": "chat_completions",    # API protocol family
     "default_base_url": "https://api.devin.ai/v1",
     "default_region": "global",
     "regions": {"global": "https://api.devin.ai/v1"},
@@ -101,7 +101,7 @@ Devin uses standard OpenAI chat_completions tool format:
 
 ### 1. Source/devin_provider.py
 
-Complete implementation with:
+Complete implementation providing:
 - DESCRIPTOR for Devin provider metadata
 - OFFICIAL_PATHS for valid API endpoints
 - DevinError custom exception class

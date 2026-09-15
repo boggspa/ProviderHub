@@ -251,15 +251,15 @@ if path.startswith("/v1/agents/sessions/"):
 **Add handler methods:**
 ```python
 def handle_agent_sessions(self):
-    # Create new agent session
+    # Create a new agent session
     pass
 
 def handle_agent_tasks(self):
-    # Submit task to agent
+    # Submit a task to the agent
     pass
 
 def handle_agent_session_operation(self):
-    # GET, POST/cancel, DELETE on session
+    # Session ops: GET, POST/cancel, DELETE
     pass
 ```
 
