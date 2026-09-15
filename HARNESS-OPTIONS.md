@@ -269,6 +269,11 @@ tokens reported across the complete cycle. The engine reported the exact
 the Responses-to-Messages path, Cerebras reasoning replay, and that specific
 account/model; other Cerebras models still require their own qualification.
 
+One harness caution: never pipe the Mistral Vibe CLI through `head`. On a closed
+pipe the CLI busy-spins at 100% CPU and ignores SIGTERM (15 September 2026:
+`vibe models 2>&1 | head -30` left PID 44574 spinning for ~40 hours until SIGKILL).
+Capture full output and truncate after the CLI exits.
+
 **Shareable bundle and signing status**
 
 The shareable app can embed a clean relocatable Python runtime so its Messages
