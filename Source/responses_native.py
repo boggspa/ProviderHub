@@ -14,7 +14,8 @@ import time
 from bridge_core import BridgeError, atomic_json, read_json
 from hub_config import connection_signature, qualify, split_route
 from providers import PROVIDERS, ProviderError, _auth_headers, _chat_effort, validate_connection
-from responses_tools import flatten_tools, input_names, output_names, register
+from responses_tools import (flatten_tools, input_names, normalize_custom_calls, output_names, register,
+                             restore_custom_call)
 from responses_bridge import ENVELOPE_PREFIX, MessagesResponsesAdapter, ReasoningEnvelope, to_messages
 from openrouter_provider import OpenRouterError, finalize as openrouter_finalize, app_headers as openrouter_app_headers
 from effort_map import cap_high_end, map_effort, ollama_effort_aliases
@@ -454,6 +455,7 @@ def prepare_native(runtime, payload):
         raise BridgeError("The selected model does not support tool calls.")
     if isinstance(body["input"], list):
         body["input"] = _normalize_multi_agent_items(body["input"])
+        normalize_custom_calls(body["input"], tool_map)
         for item in body["input"]:
             if not isinstance(item, dict) or item.get("type", "message") not in {"message", "function_call", "function_call_output", "reasoning"}:
                 offending_type = item.get("type", "unknown") if isinstance(item, dict) else type(item).__name__
@@ -483,7 +485,7 @@ def prepare_native(runtime, payload):
                 "url": None, "route": route, "requested": requested, "provider_id": provider_id,
                 "scope": scope, "tool_map": tool_map, "private_key": key,
                 "provider_name": PROVIDERS[provider_id]["name"], "protocol": "messages_bridge",
-                "adapter": MessagesResponsesAdapter(requested, envelope, scope)}
+                "adapter": MessagesResponsesAdapter(requested, envelope, scope, tool_map)}
     if isinstance(body["input"], list) and any(isinstance(item, dict) and str(item.get("encrypted_content", "")).startswith(ENVELOPE_PREFIX) for item in body["input"]):
         raise BridgeError("This reasoning history belongs to a different provider connection. Start a new task when changing providers.")
     if provider_id == "openrouter":
@@ -542,6 +544,27 @@ def prepare_native(runtime, payload):
             "private_key": key, "provider_name": PROVIDERS[provider_id]["name"]}
 
 
+def rewrite_stream_event(event, tool_map, custom_items):
+    """Restore provider tool names on one relayed Responses stream event.
+
+    Returns False when the event is a JSON argument delta for a mapped
+    apply_patch call. Codex core builds custom calls from
+    output_item.done, so forwarding the JSON bytes would corrupt the
+    patch input buffer; the full converted call still arrives via the
+    output_item events.
+    """
+    if isinstance(event.get("item"), dict):
+        if restore_custom_call(event["item"], tool_map):
+            if isinstance(event["item"].get("id"), str):
+                custom_items.add(event["item"]["id"])
+        else:
+            output_names(event["item"], tool_map)
+    if event.get("type") in {"response.function_call_arguments.delta", "response.function_call_arguments.done"}:
+        if event.get("item_id") in custom_items:
+            return False
+    return True
+
+
 def _client_gone(handler):
     """True when the local client disconnected (socket peek only, like the monitors)."""
     try:
@@ -598,6 +621,7 @@ def handle_responses(handler):
     streaming = False
     terminal = None
     final = None
+    custom_items = set()
     service_tier = None
     usage = {}
 
@@ -632,7 +656,8 @@ def handle_responses(handler):
             raise BridgeError("The provider returned an invalid terminal Responses object.")
         value["model"] = plan["requested"]
         for item in value["output"]:
-            output_names(item, plan["tool_map"])
+            if not restore_custom_call(item, plan["tool_map"]):
+                output_names(item, plan["tool_map"])
         if value.get("error"):
             value["error"] = clean_error(value["error"])
         if plan["provider_id"] == "grok" and plan["body"]["store"] and value["status"] != "failed":
@@ -778,8 +803,8 @@ def handle_responses(handler):
                             event["response"]["model"] = plan["requested"]
                             if event["response"].get("error"):
                                 event["response"]["error"] = clean_error(event["response"]["error"])
-                        if isinstance(event.get("item"), dict):
-                            output_names(event["item"], plan["tool_map"])
+                        if not rewrite_stream_event(event, plan["tool_map"], custom_items):
+                            continue
                         if kind == "error":
                             event = {"type": "error", "code": "provider_error", "message": redact(event.get("message", "Provider stream error.")), "param": None}
                         if kind in TERMINAL_EVENTS and kind != "error":

@@ -12,6 +12,78 @@ import test_gateway_hub as fixtures
 from test_gateway_hub import MockProvider
 
 
+class CustomApplyPatchUnitTests(unittest.TestCase):
+    """Socket-free coverage for the custom_tool_call adapter path."""
+
+    PATCH = "*** Begin Patch\n*** Update File: a.txt\n@@\n-old\n+new\n*** End Patch"
+
+    def test_stream_rewrite_restores_custom_items_and_drops_json_deltas(self):
+        from responses_native import rewrite_stream_event
+        from responses_tools import flatten_tools
+        _, tool_map = flatten_tools([{"type": "custom", "name": "apply_patch"}])
+        tracked = set()
+        added = {"type": "response.output_item.added", "output_index": 0, "item": {
+            "type": "function_call", "id": "fc-1", "call_id": "call-1",
+            "name": "apply_patch", "arguments": "", "status": "in_progress"}}
+        self.assertTrue(rewrite_stream_event(added, tool_map, tracked))
+        self.assertEqual(added["item"]["type"], "custom_tool_call")
+        self.assertEqual(tracked, {"fc-1"})
+        delta = {"type": "response.function_call_arguments.delta", "item_id": "fc-1",
+                 "output_index": 0, "delta": '{"patch": "'}
+        self.assertFalse(rewrite_stream_event(delta, tool_map, tracked))
+        done_args = {"type": "response.function_call_arguments.done", "item_id": "fc-1",
+                     "output_index": 0, "arguments": '{"patch": "x"}'}
+        self.assertFalse(rewrite_stream_event(done_args, tool_map, tracked))
+        # Deltas for untracked items still pass through untouched.
+        other = {"type": "response.function_call_arguments.delta", "item_id": "fc-2",
+                 "output_index": 1, "delta": "{}"}
+        self.assertTrue(rewrite_stream_event(other, tool_map, tracked))
+        # Plain namespaced tools keep the existing restore path.
+        flat, namespaced = flatten_tools([
+            {"type": "namespace", "name": "ws", "tools": [{"type": "function", "name": "read"}]}])
+        event = {"type": "response.output_item.done", "output_index": 0, "item": {
+            "type": "function_call", "id": "fc-3", "call_id": "call-3",
+            "name": flat[0]["name"], "arguments": "{}"}}
+        self.assertTrue(rewrite_stream_event(event, namespaced, set()))
+        self.assertEqual(event["item"]["type"], "function_call")
+        self.assertEqual(event["item"]["name"], "read")
+        self.assertEqual(event["item"]["namespace"], "ws")
+
+    def test_prepare_native_projects_custom_tool_and_history(self):
+        from types import SimpleNamespace
+        import responses_native
+        from responses_tools import flatten_tools  # noqa: F401 (adapter import check)
+        route = "grok/grok-4.6"
+        runtime = SimpleNamespace(
+            settings={"providers": {"grok": {"base_url": "https://x.invalid"}},
+                      "_model_specs": {route: {"context": 500000, "vision": True,
+                                               "effort_modes": ["low", "high"]}}},
+            replay_key="replay", token="token", upstream_url=None,
+            provider_key=lambda provider_id: "provider-key")
+        payload = {"model": route, "store": False, "stream": False,
+                   "tools": [{"type": "custom", "name": "apply_patch",
+                              "format": {"type": "grammar", "syntax": "lark"}}],
+                   "input": [{"role": "user", "content": "edit it"},
+                             {"type": "custom_tool_call", "call_id": "call-1",
+                              "name": "apply_patch", "input": self.PATCH},
+                             {"type": "custom_tool_call_output", "call_id": "call-1",
+                              "output": "applied"}]}
+        with patch.object(responses_native, "validate_connection",
+                          return_value={"base_url": "https://x.invalid"}), \
+                patch.object(responses_native, "_auth_headers", return_value={}), \
+                patch.object(responses_native, "connection_signature", return_value="sig"):
+            plan = responses_native.prepare_native(runtime, copy.deepcopy(payload))
+        self.assertEqual(plan["protocol"], "responses")
+        self.assertEqual(plan["body"]["tools"][0]["type"], "function")
+        self.assertEqual(plan["body"]["tools"][0]["parameters"]["required"], ["patch"])
+        kinds = [item.get("type") for item in plan["body"]["input"]]
+        self.assertNotIn("custom_tool_call", kinds)
+        self.assertNotIn("custom_tool_call_output", kinds)
+        call = next(item for item in plan["body"]["input"] if item.get("type") == "function_call")
+        self.assertEqual(json.loads(call["arguments"]), {"patch": self.PATCH})
+        self.assertEqual(plan["tool_map"]["apply_patch"]["custom"], "apply_patch")
+
+
 def response_object(body, second=False):
     output = ([{"type": "message", "id": "message-final", "role": "assistant", "status": "completed",
                 "content": [{"type": "output_text", "text": "Checked.", "annotations": []}]}] if second else
@@ -210,11 +282,76 @@ class NativeResponsesTests(unittest.TestCase):
 
     def test_unsupported_tools_fields_and_providers_are_explicit(self):
         self.start()
-        for changes in ({"tools": [{"type": "custom", "name": "apply_patch"}]}, {"background": True},
-                        {"input": [{"type": "custom_tool_call"}]}, {"stream": "true"},
+        for changes in ({"tools": [{"type": "custom", "name": "other_freeform"}]}, {"background": True},
+                        {"input": [{"type": "custom_tool_call", "name": "other_freeform"}]}, {"stream": "true"},
                         {"model": "muse/muse-spark-1.3"}):
             self.assertEqual(self.request(self.body(**changes))[0], 400)
         self.assertEqual(len(MockProvider.requests), 0)
+
+    def test_custom_apply_patch_round_trip_projects_and_restores(self):
+        self.start()
+        patch = "*** Begin Patch\n*** Update File: a.txt\n@@\n-old\n+new\n*** End Patch"
+        body = self.body(
+            tools=[{"type": "custom", "name": "apply_patch",
+                    "format": {"type": "grammar", "syntax": "lark", "definition": "start: patch"}}],
+            input=[{"role": "user", "content": fixtures.LOCAL_REQUEST_TEXT},
+                   {"type": "custom_tool_call", "call_id": "call-prior", "name": "apply_patch", "input": patch},
+                   {"type": "custom_tool_call_output", "call_id": "call-prior", "output": "applied"}])
+        status, raw = self.request(body)
+        self.assertEqual(status, 200, raw)
+        sent = MockProvider.requests[0]
+        self.assertEqual(sent["tools"][0]["type"], "function")
+        self.assertEqual(sent["tools"][0]["name"], "apply_patch")
+        self.assertEqual(sent["tools"][0]["parameters"]["required"], ["patch"])
+        kinds = [item.get("type") for item in sent["input"]]
+        self.assertNotIn("custom_tool_call", kinds)
+        self.assertNotIn("custom_tool_call_output", kinds)
+        call = next(item for item in sent["input"] if item.get("type") == "function_call")
+        self.assertEqual(json.loads(call["arguments"]), {"patch": patch})
+
+    def test_streaming_apply_patch_returns_custom_tool_calls_without_json_deltas(self):
+        self.start()
+        patch = "*** Begin Patch\n*** Update File: a.txt\n@@\n-old\n+new\n*** End Patch"
+        arguments = json.dumps({"patch": patch})
+
+        def handler(server):
+            upstream = server.read_body()
+            item = {"type": "function_call", "id": "fc-patch", "call_id": "call-patch",
+                    "name": "apply_patch", "arguments": arguments, "status": "completed"}
+            terminal = {"id": "resp-patch", "object": "response", "created_at": 123,
+                        "model": upstream["model"], "status": "completed", "output": [item],
+                        "error": None, "usage": {"input_tokens": 9, "output_tokens": 3}}
+            server.send_sse([
+                {"type": "response.created",
+                 "response": {**terminal, "status": "in_progress", "output": []}},
+                {"type": "response.output_item.added", "output_index": 0,
+                 "item": {**item, "arguments": ""}},
+                {"type": "response.function_call_arguments.delta", "item_id": "fc-patch",
+                 "output_index": 0, "delta": '{"patch": "'},
+                {"type": "response.output_item.done", "output_index": 0, "item": item},
+                {"type": "response.completed", "response": terminal},
+            ])
+
+        self.patch.stop()
+        try:
+            with patch.object(MockProvider, "do_POST", handler):
+                status, raw = self.request(self.body(
+                    stream=True,
+                    tools=[{"type": "custom", "name": "apply_patch",
+                            "format": {"type": "grammar", "syntax": "lark"}}]))
+        finally:
+            self.patch.start()
+        self.assertEqual(status, 200, raw)
+        events = fixtures.parse_sse(raw)
+        kinds = [event["type"] for event in events]
+        self.assertNotIn("response.function_call_arguments.delta", kinds)
+        added = next(event["item"] for event in events if event["type"] == "response.output_item.added")
+        done = next(event["item"] for event in events if event["type"] == "response.output_item.done")
+        self.assertEqual(added["type"], "custom_tool_call")
+        self.assertEqual(done["type"], "custom_tool_call")
+        self.assertEqual(done["name"], "apply_patch")
+        self.assertEqual(done["input"], patch)
+        self.assertEqual(events[-1]["response"]["output"][0]["type"], "custom_tool_call")
 
     def test_authentication_and_browser_origin_checks_apply(self):
         self.start()

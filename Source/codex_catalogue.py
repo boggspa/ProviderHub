@@ -149,6 +149,12 @@ def _composer_labels(rows):
             for route, base, label in qualified]
 
 
+def _apply_patch_routes(settings):
+    """Routes qualified for the JSON-wrapped apply_patch projection."""
+    configured = settings.get("codex_apply_patch") or []
+    return {route for route in configured if isinstance(route, str)}
+
+
 def project_codex(settings, inventory):
     models = []
     label_rows = []
@@ -217,8 +223,12 @@ def project_codex(settings, inventory):
             "support_verbosity": False,
             "default_verbosity": None,
             # This installed Codex catalogue accepts only "freeform" or null.
-            # Native Grok/Ollama qualification uses shell/function tools.
-            "apply_patch_tool_type": None,
+            # Routes stay on shell/function tools until they are qualified
+            # for the JSON-wrapped apply_patch projection (settings key
+            # codex_apply_patch); advertising freeform makes Codex core
+            # offer apply_patch, which feeds the TurnDiffTracker behind
+            # the close-out diff card.
+            "apply_patch_tool_type": "freeform" if route in _apply_patch_routes(settings) else None,
             "web_search_tool_type": "text",
             "truncation_policy": {"mode": "bytes", "limit": 10000},
             "supports_parallel_tool_calls": entry.get("parallel_tool_calls") is True,

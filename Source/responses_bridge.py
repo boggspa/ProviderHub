@@ -9,6 +9,7 @@ import time
 import uuid
 
 from bridge_core import BridgeError, private_token
+from responses_tools import APPLY_PATCH_PARAM, APPLY_PATCH_TOOL_NAME, is_custom_tool
 
 
 ENVELOPE_PREFIX = "ph_reasoning_v1."
@@ -132,6 +133,20 @@ def to_messages(body, route, spec, envelope, scope):
                 add("assistant", envelope.open(token, scope))
             elif item.get("summary"):
                 raise BridgeError("Reasoning summaries cannot replace authenticated provider reasoning. Start a new task.")
+        elif kind == "custom_tool_call":
+            # The gateway normalizes these before delegating; direct callers
+            # get the same projection so every layer accepts Codex history.
+            if item.get("name") != APPLY_PATCH_TOOL_NAME:
+                raise BridgeError("This Responses route only adapts the apply_patch custom tool. Other free-form tools need a separate adapter.")
+            patch = item.get("input", "")
+            if not isinstance(patch, str):
+                patch = json.dumps(patch, ensure_ascii=False)
+            add("assistant", [{"type": "tool_use", "id": item.get("call_id"), "name": item.get("name"),
+                               "input": {APPLY_PATCH_PARAM: patch}}])
+        elif kind == "custom_tool_call_output":
+            blocks = content_blocks(item.get("output", ""))
+            add("user", [{"type": "tool_result", "tool_use_id": item.get("call_id"),
+                          "content": blocks if blocks else ""}])
         else:
             raise BridgeError("Unsupported Responses history item.")
     flush()
@@ -180,8 +195,9 @@ def response_usage(value):
 
 
 class MessagesResponsesAdapter:
-    def __init__(self, requested, envelope, scope):
+    def __init__(self, requested, envelope, scope, tool_map=None):
         self.requested, self.envelope, self.scope = requested, envelope, scope
+        self.tool_map = tool_map or {}
         self.identifier = "resp_" + uuid.uuid4().hex
         self.created = int(time.time())
         self.output = []
@@ -209,6 +225,12 @@ class MessagesResponsesAdapter:
         if kind == "tool_use":
             if not isinstance(block.get("input"), dict):
                 raise BridgeError("The provider returned invalid function arguments.")
+            if is_custom_tool(self.tool_map, block["name"]):
+                patch = block["input"].get(APPLY_PATCH_PARAM)
+                if not isinstance(patch, str):
+                    patch = json.dumps(block["input"], ensure_ascii=False)
+                return {"id": "ct_" + uuid.uuid4().hex, "type": "custom_tool_call", "call_id": block["id"],
+                        "name": self.tool_map[block["name"]]["name"], "input": patch, "status": "completed"}
             return {"id": "fc_" + uuid.uuid4().hex, "type": "function_call", "call_id": block["id"],
                     "name": block["name"], "arguments": json.dumps(block["input"], separators=(",", ":")), "status": "completed"}
         if kind in {"thinking", "redacted_thinking"}:
@@ -266,6 +288,12 @@ class MessagesResponsesAdapter:
                                    content_index=0, delta=delta["text"])]
             if dtype == "input_json_delta":
                 state["partial"] += delta["partial_json"]
+                if item["type"] == "custom_tool_call":
+                    # The provider streams JSON-wrapped arguments for the
+                    # projected apply_patch function; Codex core builds the
+                    # call from output_item.done, so the JSON bytes are
+                    # dropped instead of entering the patch input buffer.
+                    return []
                 return [self.event("response.function_call_arguments.delta", item_id=item["id"], output_index=index,
                                    delta=delta["partial_json"])]
             if dtype == "thinking_delta":

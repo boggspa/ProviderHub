@@ -69,6 +69,18 @@ class SettingsMigrationTests(unittest.TestCase):
         self.assertEqual(
             without_default["codex_catalogue"], ["mistral/mistral-small-4"])
 
+    def test_codex_apply_patch_is_optional_deduped_and_defaults_off(self):
+        self.assertNotIn("codex_apply_patch", defaults(SLOTS, "mistral-test"))
+        self.assertNotIn("codex_apply_patch", normalize({}, SLOTS, "mistral-test"))
+        normalized = normalize({"codex_apply_patch": [
+            "mistral/mistral-small-4", "mistral/mistral-small-4"]}, SLOTS, "mistral-test")
+        self.assertEqual(normalized["codex_apply_patch"], ["mistral/mistral-small-4"])
+        # An explicit empty list qualifies nothing and stays valid.
+        self.assertEqual(normalize({"codex_apply_patch": []}, SLOTS, "mistral-test")["codex_apply_patch"], [])
+        for value in ("mistral/mistral-small-4", [None], ["mistral/"]):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                normalize({"codex_apply_patch": value}, SLOTS, "mistral-test")
+
     def test_auto_flags_require_json_booleans(self):
         for key in ("auto_mode", "auto_stop"):
             for value in ("false", "true", 0, 1, None, [], {}):

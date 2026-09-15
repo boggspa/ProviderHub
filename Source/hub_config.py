@@ -230,6 +230,16 @@ def normalize(value: dict, slots, vibe_model: str, port: int = 11436) -> dict:
         result["codex_catalogue"] = selected
         if result["codex_model"] is not None and result["codex_model"] not in selected:
             raise ValueError("Choose the Codex default model from the catalogue selection.")
+    apply_patch = value.get("codex_apply_patch")
+    if apply_patch is not None:
+        if not isinstance(apply_patch, list):
+            raise ValueError("The Codex apply_patch qualification must be a list of model routes.")
+        qualified_routes = []
+        for route in apply_patch:
+            qualified = qualify(*split_route(route))
+            if qualified not in qualified_routes:
+                qualified_routes.append(qualified)
+        result["codex_apply_patch"] = qualified_routes
     for key, fallback in (("auto_stop", True), ("auto_mode", False)):
         requested = value.get(key, fallback)
         if type(requested) is not bool:

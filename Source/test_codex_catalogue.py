@@ -125,6 +125,21 @@ class CuratedCatalogueProjectionTests(unittest.TestCase):
         # One pseudo-slot per curated entry plus the Codex default slot.
         self.assertEqual(len(launch["mappings"]), 4)
 
+    def test_apply_patch_freeform_is_a_per_route_opt_in(self):
+        stock = inventory(model("mistral/a-model"), model("mistral/b-model"))
+        base = settings(codex_model="mistral/a-model",
+                        codex_catalogue=["mistral/a-model", "mistral/b-model"])
+        default = {row["slug"]: row for row in project_codex(base, stock)["models"]}
+        self.assertIsNone(default["mistral/a-model"]["apply_patch_tool_type"])
+        self.assertIsNone(default["mistral/b-model"]["apply_patch_tool_type"])
+        qualified = {row["slug"]: row for row in project_codex(
+            {**base, "codex_apply_patch": ["mistral/b-model"]}, stock)["models"]}
+        self.assertIsNone(qualified["mistral/a-model"]["apply_patch_tool_type"])
+        self.assertEqual(qualified["mistral/b-model"]["apply_patch_tool_type"], "freeform")
+        # Qualification changes the projected catalogue, so snapshots refresh.
+        self.assertNotEqual(catalogue_digest({**base, "codex_apply_patch": ["mistral/b-model"]}, stock),
+                            catalogue_digest(base, stock))
+
     def test_digest_tracks_selection_but_not_the_default(self):
         stock = inventory(
             model("mistral/a-model"), model("mistral/b-model"),

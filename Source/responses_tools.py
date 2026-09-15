@@ -22,10 +22,49 @@ def tool_name(namespace, name):
 def register(mapping, namespace, name):
     mapped = tool_name(namespace, name)
     identity = {"namespace": namespace, "name": name}
+    existing = mapping.get(mapped)
+    if existing is not None and existing != identity:
+        # A custom-tool marker for the same provider name wins: the plain
+        # function identity describes the same provider-side tool, so a
+        # returning custom_tool_call history must not clobber the marker
+        # that egress conversion needs.
+        if (isinstance(existing, dict) and existing.get("custom")
+                and existing.get("namespace") == namespace and existing.get("name") == name):
+            return mapped
+        raise BridgeError("A provider tool name collides after namespace translation.")
+    mapping[mapped] = identity
+    return mapped
+
+
+# Codex advertises apply_patch as a Lark-grammar custom tool, which no
+# third-party Responses provider implements. The bridge projects it as a
+# plain function tool carrying the patch in one string parameter, and
+# converts calls back to custom_tool_call on the way out so Codex core
+# feeds its TurnDiffTracker (the close-out diff card) from real patches.
+APPLY_PATCH_TOOL_NAME = "apply_patch"
+APPLY_PATCH_PARAM = "patch"
+
+
+def register_custom(mapping, namespace, name):
+    mapped = tool_name(namespace, name)
+    identity = {"namespace": namespace, "name": name, "custom": APPLY_PATCH_TOOL_NAME}
     if mapped in mapping and mapping[mapped] != identity:
         raise BridgeError("A provider tool name collides after namespace translation.")
     mapping[mapped] = identity
     return mapped
+
+
+def is_custom_tool(mapping, provider_name):
+    identity = mapping.get(provider_name)
+    return isinstance(identity, dict) and identity.get("custom") == APPLY_PATCH_TOOL_NAME
+
+
+def apply_patch_parameters():
+    return {"type": "object",
+            "properties": {APPLY_PATCH_PARAM: {
+                "type": "string",
+                "description": "The complete apply_patch patch text for the requested file edits."}},
+            "required": [APPLY_PATCH_PARAM]}
 
 
 def flatten_tools(tools):
@@ -44,6 +83,18 @@ def flatten_tools(tools):
                 raise BridgeError("A tool namespace must contain tools.")
             for child in children:
                 add(child, tool.get("name"), str(tool.get("description", "")))
+            return
+        if tool.get("type") == "custom":
+            if tool.get("name") != APPLY_PATCH_TOOL_NAME:
+                raise BridgeError("This Responses route only adapts the apply_patch custom tool. Other free-form tools need a separate adapter.")
+            # The incoming Lark-grammar description tells the model not to
+            # wrap the patch in JSON; the provider side needs the opposite
+            # instruction, so the description is replaced, not forwarded.
+            item = {"type": "function", "name": register_custom(mapping, namespace, tool.get("name")),
+                    "description": ((description + "\n") if description else "")
+                    + "Edit workspace files with an apply_patch patch. Pass the complete patch text in the 'patch' string parameter.",
+                    "parameters": apply_patch_parameters()}
+            result.append(item)
             return
         if tool.get("type") != "function":
             raise BridgeError("This Responses route accepts function tools and function namespaces. Hosted and free-form tools need a separate adapter.")
@@ -75,3 +126,70 @@ def output_names(item, mapping):
         if identity["namespace"] is not None:
             item["namespace"] = identity["namespace"]
     return item
+
+
+def normalize_custom_calls(items, mapping):
+    """Rewrite custom_tool_call history to provider-side function items.
+
+    Runs at ingress before the history whitelist, so providers only ever
+    see function_call/function_call_output. The namespace is left for
+    input_names so namespaced tools keep their reversible mapping.
+    """
+    if not isinstance(items, list):
+        return items
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        kind = item.get("type")
+        if kind == "custom_tool_call":
+            if item.get("name") != APPLY_PATCH_TOOL_NAME:
+                raise BridgeError("This Responses route only adapts the apply_patch custom tool. Other free-form tools need a separate adapter.")
+            mapped = register_custom(mapping, item.get("namespace"), item.get("name"))
+            patch = item.pop("input", "")
+            if not isinstance(patch, str):
+                patch = json.dumps(patch, ensure_ascii=False)
+            item["type"] = "function_call"
+            item["name"] = mapped
+            item["arguments"] = json.dumps({APPLY_PATCH_PARAM: patch}, ensure_ascii=False)
+        elif kind == "custom_tool_call_output":
+            output = item.get("output", "")
+            if not isinstance(output, str):
+                item["output"] = json.dumps(output, ensure_ascii=False)
+            item["type"] = "function_call_output"
+    return items
+
+
+def extract_patch(arguments):
+    """Unwrap the provider-side patch argument back to raw patch text."""
+    if not isinstance(arguments, str):
+        return "" if arguments is None else str(arguments)
+    try:
+        value = json.loads(arguments)
+    except ValueError:
+        # Lenient: a model that sent raw patch text instead of JSON still
+        # yields a usable patch for Codex core to parse or reject itself.
+        return arguments
+    if isinstance(value, dict) and isinstance(value.get(APPLY_PATCH_PARAM), str):
+        return value[APPLY_PATCH_PARAM]
+    if isinstance(value, str):
+        return value
+    return arguments
+
+
+def restore_custom_call(item, mapping):
+    """Convert a mapped provider function_call back to custom_tool_call.
+
+    Returns True when the item was converted. Call before output_names:
+    the provider-side name is the mapping key, and output_names skips
+    anything that is no longer a function_call.
+    """
+    if not isinstance(item, dict) or item.get("type") != "function_call":
+        return False
+    provider_name = item.get("name")
+    if not is_custom_tool(mapping, provider_name):
+        return False
+    item["type"] = "custom_tool_call"
+    item["name"] = mapping[provider_name]["name"]
+    item.pop("namespace", None)
+    item["input"] = extract_patch(item.pop("arguments", ""))
+    return True

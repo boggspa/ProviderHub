@@ -196,5 +196,58 @@ class ResponsesBridgeTests(unittest.TestCase):
                           "input_tokens_details": {"cached_tokens": 30}})
 
 
+class CustomApplyPatchBridgeTests(unittest.TestCase):
+    PATCH = "*** Begin Patch\n*** Update File: a.txt\n@@\n-old\n+new\n*** End Patch"
+    TOOL_MAP = {"apply_patch": {"namespace": None, "name": "apply_patch", "custom": "apply_patch"}}
+
+    def test_custom_history_translates_to_patch_tool_blocks(self):
+        from responses_bridge import to_messages
+        body = {"input": [
+            {"type": "message", "role": "user", "content": "edit it"},
+            {"type": "custom_tool_call", "call_id": "call-1", "name": "apply_patch", "input": self.PATCH},
+            {"type": "custom_tool_call_output", "call_id": "call-1", "output": "applied"},
+        ], "stream": False, "store": False, "tools": []}
+        translated = to_messages(body, "mistral/mistral-medium-latest", {"context": 131072}, None, "scope")
+        messages = translated["messages"]
+        use = next(block for message in messages if message["role"] == "assistant"
+                   for block in message["content"] if block["type"] == "tool_use")
+        self.assertEqual(use["input"], {"patch": self.PATCH})
+        result = next(block for message in messages if message["role"] == "user"
+                      for block in message["content"] if block["type"] == "tool_result")
+        self.assertEqual(result["tool_use_id"], "call-1")
+        with self.assertRaises(BridgeError):
+            to_messages({"input": [{"type": "custom_tool_call", "name": "other_tool"}],
+                         "stream": False, "store": False, "tools": []},
+                        "mistral/mistral-medium-latest", {"context": 131072}, None, "scope")
+
+    def test_mapped_tool_use_returns_custom_tool_call(self):
+        from responses_bridge import MessagesResponsesAdapter
+        adapter = MessagesResponsesAdapter("mistral/mistral-medium-latest", None, "scope", dict(self.TOOL_MAP))
+        item = adapter.item({"type": "tool_use", "id": "call-1", "name": "apply_patch",
+                             "input": {"patch": self.PATCH}})
+        self.assertEqual(item["type"], "custom_tool_call")
+        self.assertEqual(item["input"], self.PATCH)
+        self.assertEqual(item["name"], "apply_patch")
+        plain = MessagesResponsesAdapter("mistral/mistral-medium-latest", None, "scope",
+                                         dict(self.TOOL_MAP)).item(
+            {"type": "tool_use", "id": "call-2", "name": "read_file", "input": {"path": "a"}})
+        self.assertEqual(plain["type"], "function_call")
+
+    def test_streaming_drops_json_deltas_for_mapped_calls(self):
+        from responses_bridge import MessagesResponsesAdapter
+        adapter = MessagesResponsesAdapter("mistral/mistral-medium-latest", None, "scope", dict(self.TOOL_MAP))
+        started = adapter.feed({"type": "content_block_start", "index": 0, "content_block": {
+            "type": "tool_use", "id": "call-1", "name": "apply_patch", "input": {}}})
+        self.assertEqual(started[0]["item"]["type"], "custom_tool_call")
+        self.assertEqual(adapter.feed({"type": "content_block_delta", "index": 0, "delta": {
+            "type": "input_json_delta", "partial_json": '{"patch": "x"}'}}), [])
+        stopped = adapter.feed({"type": "content_block_stop", "index": 0})
+        kinds = [event["type"] for event in stopped]
+        self.assertNotIn("response.function_call_arguments.done", kinds)
+        done = next(event["item"] for event in stopped if event["type"] == "response.output_item.done")
+        self.assertEqual(done["type"], "custom_tool_call")
+        self.assertEqual(done["input"], "x")
+
+
 if __name__ == "__main__":
     unittest.main()
