@@ -7,7 +7,7 @@ import tempfile
 import unittest
 
 import test_gateway_hub as fixtures
-from responses_bridge import ReasoningEnvelope, response_usage, to_messages
+from responses_bridge import MessagesResponsesAdapter, ReasoningEnvelope, response_usage, to_messages
 from bridge_core import BridgeError
 from providers import ProviderError, prepare_request
 
@@ -248,6 +248,67 @@ class CustomApplyPatchBridgeTests(unittest.TestCase):
         self.assertEqual(done["type"], "custom_tool_call")
         self.assertEqual(done["input"], "x")
 
+
+class ReasoningStoreCapTests(unittest.TestCase):
+    """Bounded storage of sealed provider thinking traces."""
+
+    TRACE = "".join(f"chunk-{index:06d}\n" for index in range(20000))  # 220,000 characters
+
+    def round_trip(self, cap, blocks):
+        with tempfile.TemporaryDirectory() as directory:
+            envelope = ReasoningEnvelope(Path(directory), cap)
+            token = envelope.seal(copy.deepcopy(blocks), "account-one")
+            return envelope.open(token, "account-one")
+
+    def test_default_envelope_preserves_full_trace(self):
+        blocks = [{"type": "thinking", "thinking": self.TRACE}]
+        self.assertEqual(self.round_trip(0, blocks), blocks)
+
+    def test_bounded_cap_keeps_head_prefix_with_marker(self):
+        cap = 16384
+        opened = self.round_trip(cap, [{"type": "thinking", "thinking": self.TRACE}])
+        thinking = opened[0]["thinking"]
+        self.assertTrue(thinking.startswith(self.TRACE[:cap].rstrip()))
+        self.assertIn(f"{len(self.TRACE) - cap:,} of {len(self.TRACE):,} characters omitted", thinking)
+        self.assertTrue(thinking.endswith("characters omitted]"))
+        self.assertLess(len(thinking), cap + 120)
+        self.assertNotIn("chunk-019999", thinking)
+
+    def test_short_trace_passes_through(self):
+        blocks = [{"type": "thinking", "thinking": "brief"}]
+        self.assertEqual(self.round_trip(16384, blocks), blocks)
+
+    def test_redacted_thinking_passes_through(self):
+        blocks = [{"type": "redacted_thinking", "data": "x" * 500000}]
+        self.assertEqual(self.round_trip(16384, blocks), blocks)
+
+    def test_nonpositive_or_noninteger_cap_is_unbounded(self):
+        blocks = [{"type": "thinking", "thinking": "y" * 50000}]
+        for cap in (0, -5, None, True, "16384"):
+            with self.subTest(cap=cap):
+                self.assertEqual(self.round_trip(cap, blocks), blocks)
+
+    def test_streaming_path_seals_bounded_trace(self):
+        with tempfile.TemporaryDirectory() as directory:
+            envelope = ReasoningEnvelope(Path(directory), 32)
+            adapter = MessagesResponsesAdapter("kimi/kimi-for-coding", envelope, "scope")
+            adapter.feed({"type": "content_block_start", "index": 0,
+                          "content_block": {"type": "thinking", "thinking": ""}})
+            adapter.feed({"type": "content_block_delta", "index": 0,
+                          "delta": {"type": "thinking_delta", "thinking": "y" * 500}})
+            events = adapter.feed({"type": "content_block_stop", "index": 0})
+            done = next(event["item"] for event in events if event["type"] == "response.output_item.done")
+            self.assertEqual(done["type"], "reasoning")
+            opened = envelope.open(done["encrypted_content"], "scope")
+            self.assertEqual(opened[0]["thinking"],
+                             "y" * 32 + "\n\n[Provider Hub: earlier reasoning truncated - 468 of 500 characters omitted]")
+
+    def test_store_cap_advertised_only_on_rambling_providers(self):
+        from providers import PROVIDERS
+        for provider_id in ("kimi", "mimo", "qwen-token-plan"):
+            self.assertEqual(PROVIDERS[provider_id].get("reasoning_store_cap"), 16384)
+        for provider_id in ("mistral", "deepseek", "cerebras", "ollama", "grok", "openrouter", "muse"):
+            self.assertIsNone(PROVIDERS[provider_id].get("reasoning_store_cap"))
 
 if __name__ == "__main__":
     unittest.main()

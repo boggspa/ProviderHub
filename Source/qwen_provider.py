@@ -14,6 +14,7 @@ DESCRIPTOR = {
     "auth_header": {"name": "x-api-key", "prefix": ""},
     "credential_account": "QWEN_TOKEN_PLAN_API_KEY", "credential_env": "QWEN_TOKEN_PLAN_API_KEY",
     "setup_url": "https://modelstudio.console.alibabacloud.com/",
+    "reasoning_store_cap": 16384,
     "capabilities": {"streaming": True, "tools": True, "thinking": True,
                      "vision": "model_dependent", "model_discovery": "documentation", "reasoning_history": "native"},
 }

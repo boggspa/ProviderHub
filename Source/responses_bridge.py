@@ -15,8 +15,34 @@ from responses_tools import APPLY_PATCH_PARAM, APPLY_PATCH_TOOL_NAME, is_custom_
 ENVELOPE_PREFIX = "ph_reasoning_v1."
 
 
+def bound_reasoning_blocks(blocks, cap):
+    """Bound stored thinking traces to a head prefix of ``cap`` characters.
+
+    Sealed reasoning only re-enters the next request as continuity context;
+    the desktop retains every sealed item verbatim until compaction, so an
+    uncapped thinking trace from a verbose reasoning model grows the client
+    transcript without bound. A positive cap keeps the first ``cap``
+    characters and appends a truncation marker so the model sees the
+    discontinuity; short traces and ``redacted_thinking`` pass through
+    unchanged. A missing or non-positive cap preserves full fidelity.
+    """
+    if type(cap) is not int or cap <= 0:
+        return blocks
+    bounded = []
+    for block in blocks:
+        if isinstance(block, dict) and block.get("type") == "thinking":
+            thinking = block.get("thinking")
+            if isinstance(thinking, str) and len(thinking) > cap:
+                head = thinking[:cap].rstrip()
+                marker = (f"\n\n[Provider Hub: earlier reasoning truncated - "
+                          f"{len(thinking) - cap:,} of {len(thinking):,} characters omitted]")
+                block = {**block, "thinking": head + marker}
+        bounded.append(block)
+    return bounded
+
+
 class ReasoningEnvelope:
-    def __init__(self, root):
+    def __init__(self, root, store_cap=0):
         try:
             from cryptography.fernet import Fernet
         except ImportError as exc:
@@ -24,9 +50,12 @@ class ReasoningEnvelope:
         key = private_token(root, "responses-encryption-key")
         material = hashlib.sha256(("provider-hub-responses-v1:" + key).encode()).digest()
         self.cipher = Fernet(base64.urlsafe_b64encode(material))
+        # Character cap for stored thinking traces; zero keeps full fidelity.
+        self.store_cap = store_cap if type(store_cap) is int and store_cap > 0 else 0
 
     def seal(self, blocks, scope):
-        value = json.dumps({"scope": scope, "blocks": blocks}, separators=(",", ":")).encode()
+        value = json.dumps({"scope": scope, "blocks": bound_reasoning_blocks(blocks, self.store_cap)},
+                           separators=(",", ":")).encode()
         return ENVELOPE_PREFIX + self.cipher.encrypt(value).decode()
 
     def open(self, token, scope):

@@ -63,6 +63,7 @@ PROVIDERS = {
         "credential_account": "KIMI_CODE_API_KEY",
         "credential_env": "KIMI_CODE_API_KEY",
         "setup_url": "https://www.kimi.com/code/console",
+        "reasoning_store_cap": 16384,
         "capabilities": {
             "streaming": True,
             "tools": True,
@@ -87,6 +88,7 @@ PROVIDERS = {
         "credential_account": "MIMO_TOKEN_PLAN_API_KEY",
         "credential_env": "MIMO_API_KEY",
         "setup_url": "https://platform.xiaomimimo.com/",
+        "reasoning_store_cap": 16384,
         "capabilities": {
             "streaming": True,
             "tools": True,

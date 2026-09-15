@@ -479,7 +479,9 @@ def prepare_native(runtime, payload):
     if provider_id == "openrouter":
         headers.update(openrouter_app_headers())
     if provider_id not in NATIVE_PROVIDERS:
-        envelope = ReasoningEnvelope(runtime.root)
+        # Bound stored thinking traces for verbose reasoning providers;
+        # descriptors without the field keep full fidelity.
+        envelope = ReasoningEnvelope(runtime.root, PROVIDERS[provider_id].get("reasoning_store_cap") or 0)
         translated = to_messages(body, route, spec, envelope, scope)
         return {"body": translated, "headers": {"Content-Type": "application/json", "Authorization": "Bearer " + runtime.token},
                 "url": None, "route": route, "requested": requested, "provider_id": provider_id,
