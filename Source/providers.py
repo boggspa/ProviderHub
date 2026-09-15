@@ -236,6 +236,24 @@ _LOCAL_CREDENTIAL_FIELDS = {
     "api_key", "api-key", "x-api-key", "authorization", "gateway_token", "gateway-token",
 }
 
+# Claude Desktop renders its per-turn file rows and +N/-N diff chips only
+# for the Edit, Write, MultiEdit, and NotebookEdit tool uses; file changes
+# made through Bash heredocs never appear as close-out cards. When the
+# harness offers both, steer the model toward the tracked file tools.
+FILE_EDIT_TOOLS = frozenset({"Edit", "Write", "MultiEdit", "NotebookEdit"})
+FILE_TOOL_STEERING = (
+    "When editing files in the workspace, use the Edit, Write, MultiEdit, or NotebookEdit "
+    "tools instead of shell redirection, heredocs, or other Bash file writes, "
+    "so every file change is tracked per file."
+)
+
+
+def _needs_file_tool_steering(source_tools) -> bool:
+    if not isinstance(source_tools, list) or not source_tools:
+        return False
+    names = {tool.get("name") for tool in source_tools if isinstance(tool, dict)}
+    return bool(names & FILE_EDIT_TOOLS) and "Bash" in names
+
 _KIMI_DOCS = "https://www.kimi.com/code/docs/en/kimi-code/models.html"
 _KIMI_MODELS = [
     {
@@ -1634,6 +1652,8 @@ def _normalize_native_payload(
         # preserve when each instruction entered the history; exact cache
         # placement cannot be retained across this protocol boundary.
         result["system"] = _append_system_value(result.get("system"), message_system)
+    if _needs_file_tool_steering(result.get("tools")):
+        result["system"] = _append_system_value(result.get("system"), [{"type": "text", "text": FILE_TOOL_STEERING}])
     result["messages"] = normalized_messages
     result["model"] = upstream_model
     compatibility = _normalize_native_controls(
@@ -2027,6 +2047,9 @@ def _translate_chat_payload(
 
     # For Cerebras: insert the consolidated system message at the beginning.
     # Qwen 3.8 27B's chat template requires exactly one system message at messages[0].
+    steer_files = _needs_file_tool_steering(payload.get("tools"))
+    if provider_id == "cerebras" and steer_files:
+        system_parts.append(FILE_TOOL_STEERING)
     if provider_id == "cerebras" and system_parts:
         messages.insert(0, {"role": "system", "content": "\n\n".join(system_parts)})
 
@@ -2117,6 +2140,11 @@ def _translate_chat_payload(
         last = body["messages"][-1]
         if isinstance(last, dict) and last.get("role") == "assistant" and not last.get("tool_calls"):
             last["prefix"] = True
+    if steer_files and provider_id != "cerebras":
+        # Trailing instruction: appending keeps every existing message index
+        # stable, and the Mistral prefill marker above still lands on the
+        # final assistant message.
+        body["messages"].append({"role": "system", "content": FILE_TOOL_STEERING})
     return body, name_map
 
 

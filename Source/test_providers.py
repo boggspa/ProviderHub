@@ -1058,5 +1058,52 @@ class MistralPrefixTests(unittest.TestCase):
         self.assertNotIn("prefix", plan["body"]["messages"][-1])
 
 
+class FileToolSteeringTests(unittest.TestCase):
+    def agentic_tools(self):
+        return [{"name": name, "description": name, "input_schema": {"type": "object"}}
+                for name in ("Read", "Edit", "Write", "Bash")]
+
+    def test_chat_branch_appends_trailing_steering_for_agentic_tool_sets(self):
+        from providers import FILE_TOOL_STEERING
+        payload = text_prompt(messages=[{"role": "user", "content": "go"}], tools=self.agentic_tools())
+        plan = prepare_request("mistral", {}, "key", payload, "mistral-medium-latest", {"vision": True})
+        messages = plan["body"]["messages"]
+        self.assertEqual(messages[0], {"role": "user", "content": "go"})
+        self.assertEqual(messages[-1], {"role": "system", "content": FILE_TOOL_STEERING})
+
+    def test_steering_is_skipped_without_the_full_choice(self):
+        for names in (["Read"], ["Read", "Bash"], ["Read", "Edit"], ["get_weather"]):
+            tools = [{"name": name, "description": name, "input_schema": {"type": "object"}} for name in names]
+            payload = text_prompt(messages=[{"role": "user", "content": "go"}], tools=tools)
+            plan = prepare_request("mistral", {}, "key", payload, "mistral-medium-latest", {"vision": True})
+            roles = [message["role"] for message in plan["body"]["messages"]]
+            self.assertEqual(roles, ["user"], names)
+
+    def test_cerebras_keeps_a_single_leading_system_message(self):
+        from providers import FILE_TOOL_STEERING
+        payload = text_prompt(system="Base instructions.",
+                              messages=[{"role": "user", "content": "go"}], tools=self.agentic_tools())
+        plan = prepare_request("cerebras", {}, "key", payload, "gpt-oss-120b", {"vision": True})
+        messages = plan["body"]["messages"]
+        systems = [message for message in messages if message["role"] == "system"]
+        self.assertEqual(len(systems), 1)
+        self.assertEqual(messages[0], systems[0])
+        self.assertIn("Base instructions.", systems[0]["content"])
+        self.assertIn(FILE_TOOL_STEERING, systems[0]["content"])
+
+    def test_native_branch_appends_steering_to_top_level_system(self):
+        from providers import FILE_TOOL_STEERING
+        payload = text_prompt(system="Base instructions.",
+                              messages=[{"role": "user", "content": "go"}], tools=self.agentic_tools())
+        plan = prepare_request("kimi", {}, "key", payload, "k3-256k", {})
+        system = plan["body"]["system"]
+        texts = [block["text"] for block in system] if isinstance(system, list) else [system]
+        self.assertTrue(any("Base instructions." in text for text in texts))
+        self.assertTrue(any(FILE_TOOL_STEERING in text for text in texts))
+        plain = prepare_request("kimi", {}, "key", text_prompt(messages=[{"role": "user", "content": "go"}]),
+                                "k3-256k", {})
+        self.assertNotIn("system", plain["body"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
