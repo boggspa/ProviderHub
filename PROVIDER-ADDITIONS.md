@@ -13,12 +13,7 @@ retired preview aliases are not seeded. Catalogue listing does not prove account
 inference access. The endpoint/model roster comes from Alibaba's Token Plan
 Personal/Team documentation and its Anthropic Messages API reference.
 
-TaskWraith's `PiModels.ts` and the installed `@earendil-works/pi-ai` 0.84.2
-catalogue corroborate exact limits for the same Token Plan endpoint: 1,000,000
-context tokens for Qwen 3.6 Flash/Plus, 3.7 Max/Plus, and 3.8 Max; output caps are
-65,536 for Flash/Plus and 131,072 for the Max models. The source filename,
-package version, endpoint and SHA-256 are recorded in `qwen_provider.py`.
-This is imported catalogue evidence, not a new live long-context measurement.
+TaskWraith's `PiModels.ts` and the installed `@earendil-works/pi-ai` 0.84.2 catalogue corroborate exact limits for the same Token Plan endpoint: 1,000,000 context tokens for Qwen 3.6 Flash/Plus, 3.7 Max/Plus, and 3.8 Max; output caps are 65,536 for Flash/Plus and 131,072 for the Max models. The source filename, package version, endpoint and SHA-256 are recorded in `qwen_provider.py`. This is imported catalogue evidence, not a new live long-context measurement.
 Qwen 3.8 Flash is newer than that snapshot, so its exact limits remain unknown.
 
 Qwen 3.8 exposes None/Low/Medium/Extra High to Codex. Claude High/Max normalize
@@ -50,11 +45,7 @@ for Claude, and native Responses for Codex. The source shortlist is TaskWraith's
 current Models API, then fetches endpoint metadata concurrently. Limits and
 effort sets come from the current API, not the shortlist's older snapshot.
 
-Different endpoint context limits become distinct model choices. The highest
-context retains the ordinary model route; other choices have local
-`/context-N` route suffixes. All send the original upstream model ID. Explicit
-endpoint allow/ignore lists prevent a selected context from silently moving to
-a smaller endpoint, including variants matched by a base provider slug.
+Different endpoint context limits become distinct model choices. The highest context retains the ordinary model route; other choices have local `/context-N` route suffixes. All send the original upstream model ID. Explicit endpoint allow/ignore lists prevent a selected context from silently moving to a smaller endpoint, including variants matched by a base provider slug.
 Reasoning/forced-tool/sampling/structured-output controls further restrict the
 eligible hosts. Routine token and default parallel controls are forwarded to
 OpenRouter's native adapter without a blanket `require_parameters` check that

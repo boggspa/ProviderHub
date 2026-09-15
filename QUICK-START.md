@@ -9,10 +9,7 @@ in Codex / ChatGPT Desktop.
 2. Drag **Provider Hub Preview.app** into **Applications**, then open it.
 3. Open **Models & Settings…** from its menu bar icon whenever you need it.
 
-Requires an Apple Silicon Mac (M1 or newer) with macOS 14 or newer. This
-distribution is Developer ID signed and Apple-notarized, and includes its own
-Python runtime. You do not need to install Python or run terminal commands.
-Install the desktop app you want to use separately.
+Requires an Apple Silicon Mac (M1 or newer) with macOS 14 or newer. This distribution is Developer ID signed and Apple-notarized, and includes its own Python runtime. You do not need to install Python or run terminal commands. Install the desktop app you want to use separately.
 
 ## Connect a provider
 

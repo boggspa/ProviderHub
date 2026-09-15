@@ -23,7 +23,7 @@ The managed harness used:
 
 It ran in print/restricted/bare mode with only Read and Edit, an isolated `CLAUDE_CONFIG_DIR`, no session persistence, no loaded user/project settings or MCP servers, and a temporary working directory. The real requests sent `thinking.type=adaptive`, `thinking.display=omitted`, and `output_config.effort=high`. The adapter normalized these to the provider's supported control. All four requests succeeded, with 2,558 input tokens and 218 output tokens. The final response was “The verified colour is **green**.” The open Claude Desktop window and its profile were not restarted or changed for this test.
 
-Two pre-inference harness attempts exposed the native Effort/adaptive normalization issue and were rejected locally before any model inference. Those failures were fixed and covered by regression tests before the successful run.
+Two pre-inference harness attempts exposed the native Effort/adaptive normalization issue and were rejected locally before any model inference. These failures were fixed and covered by regression tests before the successful run.
 
 **Offline coverage**
 

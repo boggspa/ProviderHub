@@ -1,8 +1,8 @@
 **Provider Hub Preview 0.5.0**
 
-A native macOS menu bar app that connects Claude Desktop and the Codex coding workspace to eleven model API connections: Mistral, Kimi Code, Xiaomi MiMo Token Plan, Ollama, DeepSeek, Cerebras, Muse, Grok, Qwen Token Plan, curated OpenRouter, and Gemini API. Claude uses the local Messages endpoint. Codex uses Responses: Grok, Ollama and OpenRouter retain native Responses transports; the other eight use the local Messages bridge and their provider adapters.
+A native macOS menu bar app that connects Claude Desktop and the Codex coding workspace to eleven model API connections: Mistral, Kimi Code, Xiaomi MiMo Token Plan, Ollama, DeepSeek, Cerebras, Muse, Grok, Qwen Token Plan, curated OpenRouter, and Gemini API. Claude uses the local Messages endpoint. Codex uses Responses: Grok, Ollama and OpenRouter retain native Responses transports, while the other eight use the local Messages bridge and their provider adapters.
 
-Provider Hub Preview remains labelled Preview while the remaining provider accounts and desktop paths are qualified. Stable Mistral Bridge 0.2 is preserved separately. The stable app and the preview have separate bundle IDs, settings directories, Keychain namespaces, gateway ports, and Claude profile IDs; installing or building the preview does not replace the stable app.
+Provider Hub Preview remains labelled Preview while the remaining provider accounts and desktop paths are qualified. Stable Mistral Bridge 0.2 is preserved separately. The stable app and the preview have separate bundle IDs, settings directories, Keychain namespaces, gateway ports, and Claude profile IDs. Installing or building the preview does not replace the stable app.
 
 **Start using the preview**
 

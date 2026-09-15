@@ -3,9 +3,7 @@
 Why the changed-files row (per-file Diff element with `+N -N`) was missing in
 both desktop apps, and what Provider Hub now does about it.
 
-Evidence: Codex citations are from `openai/codex` tag `rust-v0.154.0-alpha.6.2`
-(matching the installed `codex-cli 0.154.0-alpha.6.2` runtime) and the extracted
-ChatGPT `app.asar`. Claude citations are from the extracted Claude Desktop
+Evidence: Codex citations are from `openai/codex` tag `rust-v0.154.0-alpha.6.2` (matching the installed `codex-cli 0.154.0-alpha.6.2` runtime) and the extracted ChatGPT `app.asar`. Claude citations are from the extracted Claude Desktop
 bundle (`index.chunk-CrLS8br-.js` and related chunks).
 
 ## Codex / ChatGPT Desktop: certain root cause
@@ -25,9 +23,7 @@ The card renders exclusively from Codex core's per-turn diff tracker:
    (`bespoke_event_handling.rs`), the webview stores it as `turn.diff`, and
    the card component parses it into per-file rows. Null diff: no card.
 
-Provider Hub projected `"apply_patch_tool_type": None` for every model, so the
-tool was never offered, every edit went through the shell, the tracker stayed
-empty, and the card never appeared. Ruled out: auth mode, workspace git state
+Provider Hub projected `"apply_patch_tool_type": None` for every model, so the tool was never offered. All edits went through the shell, the tracker stayed empty, and the card never appeared. Ruled out: auth mode, workspace git state
 (the tracker is not git-based), and config switches (none exists for this).
 
 ## Codex fix: JSON-wrapped apply_patch projection (per-route opt-in)

@@ -15,21 +15,11 @@ restoration state:
 | Claude Desktop | Anthropic Messages at `/v1/messages` | All eleven | Claude executes returned tool calls |
 | Codex / ChatGPT Desktop | Responses at `/v1/responses` | All eleven: native Grok/Ollama/OpenRouter; local Messages translation for the other eight connections | Codex executes returned function/shell calls |
 
-The current implementation includes model discovery and provenance, exact
-context where known, readable names, alias grouping, Claude slot mappings,
-native and translated Messages streaming/tool history, native Responses
-streaming/function history, Responses-to-Messages translation, authenticated
-encrypted reasoning replay, per-provider account settings, provider-qualified
-Codex catalogue IDs, documented effort/Fast controls, profile and configuration
-launch/recovery, installed-runtime catalogue validation, cancellation, and
-metadata-only activity logs. See `README.md` for setup, `HARNESS-OPTIONS.md` for
+The current implementation includes model discovery and provenance, exact context where known, readable names, alias grouping, Claude slot mappings, native and translated Messages streaming/tool history, native Responses streaming/function history, Responses-to-Messages translation, authenticated encrypted reasoning replay, per-provider account settings, provider-qualified Codex catalogue IDs, documented effort/Fast controls, profile and configuration launch/recovery, installed-runtime catalogue validation, cancellation, and metadata-only activity logs. See `README.md` for setup, `HARNESS-OPTIONS.md` for
 the Codex implementation and qualification, and `VERIFICATION.md` for the
 broader evidence matrix.
 
-Grok, Ollama and OpenRouter expose native Responses endpoints, so their protocol objects and
-opaque reasoning pass through without a Messages translation. Mistral, Kimi,
-MiMo, DeepSeek, Cerebras, Muse, Qwen Token Plan and Gemini translate Codex Responses through the
-authenticated local Messages endpoint and their existing provider adapters.
+Grok, Ollama and OpenRouter expose native Responses endpoints, so their protocol objects and opaque reasoning pass through without a Messages translation. Mistral, Kimi, MiMo, DeepSeek, Cerebras, Muse, Qwen Token Plan, and Gemini translate Codex Responses through the authenticated local Messages endpoint and their existing provider adapters.
 The bridge requires full history and `store:false`; native xAI remains the only
 route with scoped `previous_response_id` continuation. The inner Messages hop
 owns the existing provider concurrency slot and activity record, avoiding
@@ -43,9 +33,7 @@ cross-account reasoning history requires a new task. Mock JSON and streaming
 function-tool cycles pass for all eight translated providers, including
 Cerebras's signed thinking replay.
 
-The custom Codex catalogue includes every compatible model published by the
-configured account catalogues. OpenRouter publishes a curated shortlist with
-separate context choices; there is no additional user inclusion checklist.
+The custom Codex catalogue includes every compatible model published by the configured account catalogues. OpenRouter publishes a curated shortlist with separate context choices; there is no additional user inclusion checklist.
 The selected default sets the starting model. Models explicitly marked as
 tool-incompatible are omitted. Known numeric
 contexts remain 100 percent with an 85 percent automatic-compaction threshold;
