@@ -18,6 +18,7 @@ environment and detached stdio so nothing of the hub's reaches it.
 """
 from __future__ import annotations
 
+import base64
 import fcntl
 import json
 import os
@@ -34,6 +35,20 @@ from codex_catalogue import project_codex
 
 PROPERTY = "--color-chart-blue"
 _HEX = re.compile(r"^#[0-9A-Fa-f]{6}$")
+GLYPH_ATTRIBUTE = "data-provider-hub-glyph"
+THEME_ATTRIBUTE = "data-provider-hub-theme"
+ACCENT_PROPERTY = "--provider-hub-accent"
+# How much of the model's accent goes into the activity shimmer's sweep.
+SHIMMER_MIX = "35%"
+GLYPH_DIR = Path(__file__).with_name("provider-logos") / "glyphs"
+# Brand hue key (or runtime provider id) -> glyph file stem under
+# provider-logos/glyphs: 40px marks trimmed from the bundled brand lockups.
+GLYPH_KEYS = {
+    "mistral": "mistral", "kimi": "kimi", "deepseek": "deepseek", "gemini": "gemini", "antigravity": "gemini",
+    "ollama": "ollama", "cerebras": "cerebras", "grok": "grok", "alibaba": "qwen", "qwen": "qwen",
+    "qwen-token-plan": "qwen", "meta": "meta", "muse": "meta", "xiaomi": "mimo", "mimo": "mimo",
+    "openrouter": "openrouter",
+}
 _LAUNCH_SWITCH = "--remote-debugging-pipe"
 _APP_ORIGIN = "app://-/"
 _AUTO_ATTACH = {"autoAttach": True, "waitForDebuggerOnStart": False, "flatten": True}
@@ -63,6 +78,65 @@ def accent_map(settings: dict, inventory: dict) -> dict:
     return accents
 
 
+def glyph_map(settings: dict, inventory: dict) -> dict:
+    """Composer label -> glyph stem: the model's brand hue first, then its
+    runtime provider (an OpenRouter-hosted brand without a mark of its own
+    wears OpenRouter's)."""
+    entries = {entry.get("id"): entry for entry in inventory.get("models", []) if isinstance(entry, dict)}
+    glyphs = {}
+    for model in project_codex(settings, inventory)["models"]:
+        entry = entries.get(model["slug"]) or {}
+        presentation = entry.get("presentation") or {}
+        for key in (presentation.get("hueKey"), entry.get("provider_id"), str(model["slug"]).split("/", 1)[0]):
+            stem = GLYPH_KEYS.get(str(key or "").strip().lower())
+            if stem and (GLYPH_DIR / f"{stem}.png").is_file():
+                glyphs[model["display_name"]] = stem
+                break
+    return glyphs
+
+
+def glyph_assets(stems) -> dict:
+    """Glyph stem -> {"light": data URL, "dark": data URL} for the marks that exist."""
+    assets = {}
+    for stem in sorted(set(stems)):
+        variants = {}
+        for variant, name in (("light", f"{stem}.png"), ("dark", f"{stem}-on-dark.png")):
+            path = GLYPH_DIR / name
+            if path.is_file():
+                variants[variant] = "data:image/png;base64," + base64.b64encode(path.read_bytes()).decode()
+        if variants:
+            assets[stem] = variants
+    return assets
+
+
+def glyph_css(assets: dict) -> str:
+    """The stylesheet the watcher adopts.
+
+    A 14px brand mark before the pill's model name is drawn by a
+    pseudo-element keyed on the attribute the watcher sets, so nothing is
+    inserted into the app's own DOM tree. The activity shimmer ("Thinking",
+    "Editing files") gets a sweep tinted with the selected model's accent:
+    the app resets its ``--loading-shimmer-highlight`` on the element with a
+    zero-specificity rule and falls back to a per-theme constant, so a
+    zero-specificity rule of ours later in the cascade wins over that reset
+    while any component that sets its own highlight still wins over ours;
+    without an accent the ``var()`` is invalid and the app's fallback returns.
+    """
+    shimmer = f"[{THEME_ATTRIBUTE}] :is(.loading-shimmer-pure-text,.loading-shimmer)"
+    rules = [f':where({shimmer}){{--loading-shimmer-highlight:color-mix(in srgb,var({ACCENT_PROPERTY}) {SHIMMER_MIX},#ffffffbf)}}',
+             f':where([{THEME_ATTRIBUTE}="dark"] :is(.loading-shimmer-pure-text,.loading-shimmer))'
+             f'{{--loading-shimmer-highlight:color-mix(in srgb,var({ACCENT_PROPERTY}) {SHIMMER_MIX},#0009)}}',
+             f'[{GLYPH_ATTRIBUTE}]::before{{content:"";display:block;flex:none;width:14px;height:14px;'
+             'background-position:center;background-repeat:no-repeat;background-size:contain}',
+             f'[{GLYPH_ATTRIBUTE}][{GLYPH_ATTRIBUTE}-inline]::before{{display:inline-block;vertical-align:-2px;margin-inline-end:4px}}']
+    for stem, variants in assets.items():
+        light = variants.get("light") or variants.get("dark")
+        rules.append(f'[{GLYPH_ATTRIBUTE}="{stem}"]::before{{background-image:url("{light}")}}')
+        if "light" in variants and "dark" in variants:
+            rules.append(f'[{GLYPH_ATTRIBUTE}="{stem}"][{GLYPH_ATTRIBUTE}-theme="dark"]::before{{background-image:url("{variants["dark"]}")}}')
+    return "".join(rules)
+
+
 _WATCHER = r"""
 (() => {
   // The completion value goes back to the helper's log. Only the app's own
@@ -75,9 +149,14 @@ _WATCHER = r"""
   if (window.__providerHubAccent) { return { skipped: "installed" }; }
   try {
     const ACCENTS = __HUB_ACCENTS__;
+    const GLYPHS = __HUB_GLYPHS__;
+    const GLYPH_CSS = __HUB_GLYPH_CSS__;
     const PROPERTY = "__HUB_PROPERTY__";
     const MARK = "data-provider-hub-tint";
-    const state = { targets: [], label: "", colour: "", words: [] };
+    const GLYPH = "__HUB_GLYPH_ATTRIBUTE__";
+    const THEME = "__HUB_THEME_ATTRIBUTE__";
+    const ACCENT_PROPERTY = "__HUB_ACCENT_PROPERTY__";
+    const state = { targets: [], label: "", colour: "", words: [], glyphs: [], sheet: null, accent: "", theme: "" };
     const norm = (text) => (text || "").replace(/\s+/g, " ").trim().toLowerCase();
     // Labels may carry a leading glyph (a bullet, a tier mark); match the words.
     const lookup = (text) => {
@@ -85,15 +164,54 @@ _WATCHER = r"""
       return key && Object.prototype.hasOwnProperty.call(ACCENTS, key) ? key : "";
     };
     const effortLabel = (container) => container.querySelector("[data-effort-only],[data-accent],[data-maximum]");
-    function modelLabel(container, skip) {
+    function findModel(container, skip) {
       // The explicit-model layout shows the effort label (data-accent /
       // data-maximum) on one row and the model's display name on the next.
       for (const span of container.querySelectorAll("span")) {
         if (skip && (span === skip || skip.contains(span) || span.contains(skip))) { continue; }
         const key = lookup(span.textContent);
-        if (key) { return key; }
+        if (key) { return { key: key, element: span }; }
       }
-      return "";
+      return null;
+    }
+    function modelLabel(container, skip) {
+      const found = findModel(container, skip);
+      return found ? found.key : "";
+    }
+    // The innermost span carrying the name: the one whose colour is the text's.
+    function textElement(found) {
+      let element = found.element;
+      for (const span of found.element.querySelectorAll("span")) {
+        if (lookup(span.textContent) === found.key) { element = span; }
+      }
+      return element;
+    }
+    // Light text means a dark surface: pick the on-dark mark there.
+    function themeOf(element) {
+      try {
+        const match = /rgba?\(\s*([\d.]+)[,\s]+([\d.]+)[,\s]+([\d.]+)/.exec(getComputedStyle(element).color);
+        if (!match) { return "light"; }
+        return (0.2126 * match[1] + 0.7152 * match[2] + 0.0722 * match[3]) / 255 > 0.5 ? "dark" : "light";
+      } catch (error) { return "light"; }
+    }
+    function installStyles() {
+      if (!GLYPH_CSS) { return; }
+      try {
+        if (!state.sheet) {
+          state.sheet = new CSSStyleSheet();
+          state.sheet.replaceSync(GLYPH_CSS);
+        }
+        if (!document.adoptedStyleSheets.includes(state.sheet)) {
+          document.adoptedStyleSheets = [...document.adoptedStyleSheets, state.sheet];
+        }
+      } catch (error) {
+        if (!state.sheet && document.head) {
+          const style = document.createElement("style");
+          style.textContent = GLYPH_CSS;
+          document.head.appendChild(style);
+          state.sheet = style;
+        }
+      }
     }
     function clearMenu() {
       // Only undo our own value: leave any inline value the app set itself.
@@ -129,9 +247,11 @@ _WATCHER = r"""
     // (model span + effort span) is handled the same way as a fallback.
     function pillWords() {
       const words = [];
+      const glyphs = [];
+      let accent = "";
+      let theme = "";
       for (const trigger of document.querySelectorAll("[data-codex-intelligence-trigger]")) {
         const effort = norm(trigger.getAttribute("data-selected-reasoning-effort"));
-        if (!effort || effort === "ultra") { continue; }
         const labels = [];
         for (const layer of trigger.querySelectorAll("[data-reasoning-effort]")) {
           const label = layer.closest("[data-composer-footer-collapse]") || (layer.parentElement && layer.parentElement.parentElement && layer.parentElement.parentElement.parentElement);
@@ -142,13 +262,44 @@ _WATCHER = r"""
           const wrapper = content.firstElementChild;
           if (wrapper && wrapper.children.length >= 2) { labels.push(wrapper.lastElementChild); }
         }
+        const model = findModel(trigger, labels[0] || null);
+        if (!model) { continue; }
+        const surface = themeOf(textElement(model));
+        // The selected model's accent also tints the activity shimmer; the
+        // first pill wins if there are several.
+        if (!accent) { accent = ACCENTS[model.key]; theme = surface; }
+        // The brand mark goes before the model name, as the first flex item
+        // of the model group (or inline when the layout is not a flex row).
+        const stem = GLYPHS[model.key];
+        if (stem) {
+          const group = model.element.closest('[class*="ModelPickerTriggerModelGroup"]') || model.element;
+          let inline = true;
+          try { inline = !/flex|grid/.test(getComputedStyle(group).display); } catch (error) {}
+          glyphs.push({ element: group, stem: stem, theme: surface, inline: inline });
+        }
+        // Ultra is left to the app (its own purple), as is anything it
+        // already paints purple.
+        if (!effort || effort === "ultra") { continue; }
         for (const label of labels) {
           if (!label || label.classList.contains("text-chart-purple")) { continue; }
-          const model = modelLabel(trigger, label);
-          if (model) { words.push({ element: label, colour: ACCENTS[model] }); }
+          words.push({ element: label, colour: ACCENTS[model.key] });
         }
       }
-      return words;
+      return { words: words, glyphs: glyphs, accent: accent, theme: theme };
+    }
+    function applyShimmer(accent, theme) {
+      if (accent === state.accent && theme === state.theme) { return; }
+      const root = document.documentElement;
+      if (!root) { return; }
+      if (accent) {
+        installStyles();
+        root.style.setProperty(ACCENT_PROPERTY, accent);
+        root.setAttribute(THEME, theme);
+      } else {
+        if (norm(root.style.getPropertyValue(ACCENT_PROPERTY)) === norm(state.accent)) { root.style.removeProperty(ACCENT_PROPERTY); }
+        root.removeAttribute(THEME);
+      }
+      state.accent = accent; state.theme = theme;
     }
     function clearWords() {
       for (const entry of state.words) {
@@ -158,13 +309,34 @@ _WATCHER = r"""
       }
       state.words = [];
     }
+    function clearGlyphs() {
+      for (const entry of state.glyphs) {
+        try {
+          entry.element.removeAttribute(GLYPH); entry.element.removeAttribute(GLYPH + "-theme"); entry.element.removeAttribute(GLYPH + "-inline");
+        } catch (error) {}
+      }
+      state.glyphs = [];
+    }
     function applyPills() {
-      const words = pillWords();
-      const same = words.length === state.words.length && words.every((entry, index) => entry.element === state.words[index].element && entry.colour === state.words[index].colour);
-      if (same) { return; }
-      clearWords();
-      for (const entry of words) { entry.element.style.setProperty("color", entry.colour); entry.element.setAttribute(MARK, "1"); }
-      state.words = words;
+      const found = pillWords();
+      const sameWords = found.words.length === state.words.length && found.words.every((entry, index) => entry.element === state.words[index].element && entry.colour === state.words[index].colour);
+      if (!sameWords) {
+        clearWords();
+        for (const entry of found.words) { entry.element.style.setProperty("color", entry.colour); entry.element.setAttribute(MARK, "1"); }
+        state.words = found.words;
+      }
+      const sameGlyphs = found.glyphs.length === state.glyphs.length && found.glyphs.every((entry, index) => entry.element === state.glyphs[index].element && entry.stem === state.glyphs[index].stem && entry.theme === state.glyphs[index].theme);
+      if (!sameGlyphs) {
+        clearGlyphs();
+        if (found.glyphs.length) { installStyles(); }
+        for (const entry of found.glyphs) {
+          entry.element.setAttribute(GLYPH, entry.stem);
+          entry.element.setAttribute(GLYPH + "-theme", entry.theme);
+          if (entry.inline) { entry.element.setAttribute(GLYPH + "-inline", ""); }
+        }
+        state.glyphs = found.glyphs;
+      }
+      applyShimmer(found.accent, found.theme);
     }
     function apply() {
       try { applyMenu(); } catch (error) {}
@@ -181,12 +353,13 @@ _WATCHER = r"""
     observer.observe(document, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ["data-explicit-model", "data-accent", "data-maximum", "data-selected-reasoning-effort"] });
     if (document.readyState === "loading") { document.addEventListener("DOMContentLoaded", schedule, { once: true }); }
     window.__providerHubAccent = {
-      version: 3,
+      version: 4,
       accents: Object.keys(ACCENTS).length,
-      check: () => ({ container: !!document.querySelector('[data-explicit-model="true"]'), label: state.label, colour: state.colour, targets: state.targets.length, pills: state.words.map((entry) => entry.colour) }),
+      glyphs: Object.keys(GLYPHS).length,
+      check: () => ({ container: !!document.querySelector('[data-explicit-model="true"]'), label: state.label, colour: state.colour, targets: state.targets.length, pills: state.words.map((entry) => entry.colour), glyphs: state.glyphs.map((entry) => entry.stem + ":" + entry.theme), shimmer: state.accent ? state.accent + ":" + state.theme : "" }),
     };
     schedule();
-    return { installed: true, accents: Object.keys(ACCENTS).length, ready: document.readyState };
+    return { installed: true, accents: Object.keys(ACCENTS).length, glyphs: Object.keys(GLYPHS).length, ready: document.readyState };
   } catch (error) {
     return { error: String(error && error.message ? error.message : error) };
   }
@@ -194,9 +367,20 @@ _WATCHER = r"""
 """
 
 
-def watcher_script(accents: dict, property_name: str = PROPERTY) -> str:
-    table = {label.replace(" ", " ").strip().lower(): colour for label, colour in accents.items()}
+def _label_key(label: str) -> str:
+    return label.replace("\u00a0", " ").strip().lower()
+
+
+def watcher_script(accents: dict, property_name: str = PROPERTY, glyphs: dict | None = None,
+                   assets: dict | None = None) -> str:
+    table = {_label_key(label): colour for label, colour in accents.items()}
+    marks = {_label_key(label): stem for label, stem in (glyphs or {}).items()}
     return (_WATCHER.replace("__HUB_ACCENTS__", json.dumps(table, ensure_ascii=False))
+            .replace("__HUB_GLYPHS__", json.dumps(marks, ensure_ascii=False))
+            .replace("__HUB_GLYPH_CSS__", json.dumps(glyph_css(assets or {})))
+            .replace("__HUB_GLYPH_ATTRIBUTE__", GLYPH_ATTRIBUTE)
+            .replace("__HUB_THEME_ATTRIBUTE__", THEME_ATTRIBUTE)
+            .replace("__HUB_ACCENT_PROPERTY__", ACCENT_PROPERTY)
             .replace("__HUB_PROPERTY__", property_name))
 
 
@@ -527,9 +711,10 @@ def bridge_command(app_path: str, settings: dict, inventory: dict, emit=None, lo
             emit({"event": "error", "stage": "launch", "message": "The app is already running; quit it first."})
             return 2
         accents = accent_map(settings, inventory)
-        emit({"event": "accents", "count": len(accents)})
+        glyphs = glyph_map(settings, inventory)
+        emit({"event": "accents", "count": len(accents), "glyphs": len(glyphs)})
         run_options.setdefault("environment", child_environment(bundle))
-        return run(binary, watcher_script(accents), emit=emit, **run_options)
+        return run(binary, watcher_script(accents, glyphs=glyphs, assets=glyph_assets(glyphs.values())), emit=emit, **run_options)
     finally:
         if stream is not None:
             stream.close()

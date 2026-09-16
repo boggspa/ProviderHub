@@ -13,8 +13,9 @@ from unittest import mock
 
 from bridge_core import SLOTS
 import codex_accent
-from codex_accent import (PROPERTY, AccentBridge, DevToolsPipe, accent_map, already_running, bridge_command,
-                          child_environment, executable_path, launch, run, watcher_script)
+from codex_accent import (ACCENT_PROPERTY, GLYPH_ATTRIBUTE, PROPERTY, THEME_ATTRIBUTE, AccentBridge, DevToolsPipe, accent_map, already_running,
+                          bridge_command, child_environment, executable_path, glyph_assets, glyph_css, glyph_map,
+                          launch, run, watcher_script)
 from hub_config import defaults
 
 
@@ -69,6 +70,34 @@ class AccentMapTests(unittest.TestCase):
         self.assertIn("[data-reasoning-effort]", script)  # its stacked effort layers
         self.assertIn('effort === "ultra"', script)  # Ultra keeps the app's own purple
         self.assertNotIn("__HUB_", script)
+
+    def test_glyphs_follow_the_brand_hue_then_the_runtime_provider(self):
+        settings, inventory = fixture()
+        self.assertEqual(glyph_map(settings, inventory), {"Kimi for Coding": "kimi", "Qwen 3": "qwen", "Grok 4.6": "grok"})
+        assets = glyph_assets(["kimi", "ollama", "nope"])
+        self.assertEqual(sorted(assets), ["kimi", "ollama"])
+        self.assertEqual(sorted(assets["ollama"]), ["dark", "light"])
+        self.assertEqual(list(assets["kimi"]), ["light"])
+        self.assertTrue(assets["kimi"]["light"].startswith("data:image/png;base64,iVBORw0KGgo"))
+        css = glyph_css(assets)
+        self.assertIn(f'[{GLYPH_ATTRIBUTE}]::before{{content:"";display:block;flex:none;width:14px;height:14px;', css)
+        self.assertIn(f'[{GLYPH_ATTRIBUTE}="kimi"]::before{{background-image:url("data:image/png;base64,', css)
+        self.assertIn(f'[{GLYPH_ATTRIBUTE}="ollama"][{GLYPH_ATTRIBUTE}-theme="dark"]::before', css)
+        self.assertNotIn('"kimi"][data-provider-hub-glyph-theme', css)
+        # The activity shimmer sweep takes the accent at zero specificity, per theme.
+        self.assertIn(f':where([{THEME_ATTRIBUTE}] :is(.loading-shimmer-pure-text,.loading-shimmer)){{--loading-shimmer-highlight:color-mix(in srgb,var({ACCENT_PROPERTY}) 35%,#ffffffbf)}}', css)
+        self.assertIn(f':where([{THEME_ATTRIBUTE}="dark"] :is(.loading-shimmer-pure-text,.loading-shimmer)){{--loading-shimmer-highlight:color-mix(in srgb,var({ACCENT_PROPERTY}) 35%,#0009)}}', css)
+        self.assertNotIn("background-image", glyph_css({}))
+        self.assertIn("--loading-shimmer-highlight", glyph_css({}))
+        script = watcher_script({"Kimi for Coding": "#0073E6"}, glyphs={"Kimi for Coding": "kimi"}, assets=assets)
+        self.assertIn('"kimi for coding": "kimi"', script)
+        self.assertIn("adoptedStyleSheets", script)
+        self.assertIn('[class*=\"ModelPickerTriggerModelGroup\"]'.replace('\\"', '"'), script)
+        self.assertNotIn("__HUB_", script)
+        plain = watcher_script({"Kimi for Coding": "#0073E6"})
+        self.assertIn("--loading-shimmer-highlight", plain)
+        self.assertIn(f'const THEME = "{THEME_ATTRIBUTE}";', plain)
+        self.assertIn(f'const ACCENT_PROPERTY = "{ACCENT_PROPERTY}";', plain)
 
 
 class EnvironmentTests(unittest.TestCase):
@@ -310,7 +339,7 @@ class LaunchTests(unittest.TestCase):
             events.clear()
             with mock.patch.object(codex_accent, "already_running", lambda path: False):
                 self.assertEqual(bridge_command(str(app), settings, inventory, emit=events.append, log_path=log, poll_interval=0.05), 0)
-            self.assertEqual(events[0], {"event": "accents", "count": 2})
+            self.assertEqual(events[0], {"event": "accents", "count": 2, "glyphs": 3})
             self.assertEqual([event["event"] for event in events[1:]], ["launched", "exited"])
             self.assertEqual(len(log.read_text().splitlines()), 3)
 
