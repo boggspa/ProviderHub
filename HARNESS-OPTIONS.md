@@ -374,6 +374,30 @@ Claude Desktop: its composer is remote claude.ai content, the Ultracode
 violet is a fixed design-system ramp, and the app refuses to start with a
 debugging switch unless an Anthropic-signed token is present.
 
+**ChatGPT usage banner (opt-in, with the accents)**
+
+With **Show your ChatGPT account in Codex** on, the app shows its
+rate-limit banner ("You're out of Codex and Work usage") above the composer
+whenever the signed-in plan is exhausted, although hub traffic never spends
+that plan. The banner is the app's generic banner component: an `aside`
+with utility classes only, no role and no test id, and a title from a
+localised message table (`codex.upsellBanner.*`; the per-model variant,
+`codex.modelLimitBanner.*`, sits alongside; the bundle ships those tables
+in some sixty locales), so neither classes nor text give a hook that
+survives an update or a locale. What both variants share is their icon,
+the gauge glyph, whose path begins `M10.8343 12.0693`; that icon appears
+inside an `aside` nowhere else in the app (its other two uses are the
+`/status` and `/usage` slash-command rows). With the Codex-tab switch on,
+the watcher's adopted stylesheet carries
+`aside:has(svg path[d^="M10.8343 12.0693"]){display:none}`: the selector
+outranks the utility classes on specificity alone, so no `!important` is
+needed, and the watcher's status reports how many banners it currently
+matches. The state behind the banner is not touched: the app still receives
+the account's rate-limit status, the modal it may open on submit and the
+account and usage pages are unchanged, and an update that redraws the icon
+brings the banner back with no other effect. Off by default, and only
+reachable through the helper, since the stylesheet is the helper's.
+
 **Shareable bundle and signing status**
 
 The shareable app can embed a clean relocatable Python runtime so its Messages

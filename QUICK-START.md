@@ -143,6 +143,16 @@ the helper holds. The helper stays until Codex quits and outlives Provider
 Hub; if the helper itself is killed, Codex treats the closed pipe as a
 request to quit.
 
+**Hide the ChatGPT usage banner** (off by default; needs the power-slider
+switch) makes the same watcher hide the "You're out of Codex and Work
+usage" banner, and its per-model "out of usage" variant, above the
+composer. The banner appears only with **Show your ChatGPT account in
+Codex** on, reports that account's plan usage, and hub traffic does not
+spend it. It is recognised by its gauge icon, so an app update that redraws
+the icon brings the banner back and changes nothing else; the account and
+usage pages, and the rate-limit prompt Codex may open on submit, are
+untouched. Save, then launch.
+
 **Offer apply_patch to catalogue models** (off by default) advertises Codex's
 own `apply_patch` editing tool for every model in the catalogue. Codex draws
 its close-out diff card (the "Edited N files" card with per-file `+N -N`

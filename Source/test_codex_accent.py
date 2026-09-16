@@ -13,7 +13,7 @@ from unittest import mock
 
 from bridge_core import SLOTS
 import codex_accent
-from codex_accent import (ACCENT_PROPERTY, PROPERTY, THEME_ATTRIBUTE, ULTRA_ACCENT_PROPERTY, ULTRA_MARK, ULTRA_PROPERTY, AccentBridge,
+from codex_accent import (ACCENT_PROPERTY, PROPERTY, THEME_ATTRIBUTE, ULTRA_ACCENT_PROPERTY, ULTRA_MARK, ULTRA_PROPERTY, AccentBridge, usage_banner_css, usage_banner_selector,
                           DevToolsPipe, accent_map, already_running, bridge_command, child_environment, executable_path, launch, run,
                           shimmer_css, ultra_accents, ultra_css, ultra_map, watcher_script)
 from hub_config import defaults
@@ -77,6 +77,19 @@ class AccentMapTests(unittest.TestCase):
         self.assertIn('[data-maximum="true"]', script)  # the popover's title at Ultra (and Max)
         self.assertIn("[data-model-picker-power-slider]", script)  # the slider's fill reads the same token
         self.assertNotIn("__HUB_", script)
+
+    def test_usage_banner_rule_is_opt_in_and_keys_on_the_gauge_icon(self):
+        selector = usage_banner_selector()
+        self.assertEqual(selector, 'aside:has(svg path[d^="M10.8343 12.0693"])')
+        self.assertEqual(usage_banner_css(), selector + "{display:none}")
+        plain = watcher_script({"Kimi for Coding": "#0073E6"})
+        self.assertNotIn("aside:has(", plain)
+        self.assertIn('const USAGE_SELECTOR = "";', plain)
+        hiding = watcher_script({"Kimi for Coding": "#0073E6"}, hide_usage_banner=True)
+        self.assertIn(json.dumps(usage_banner_css())[1:-1], hiding)  # inside the adopted stylesheet
+        self.assertIn(f"const USAGE_SELECTOR = {json.dumps(selector)};", hiding)
+        self.assertIn("document.querySelectorAll(USAGE_SELECTOR).length", hiding)  # the status reports matches
+        self.assertNotIn("__HUB_", hiding)
 
     def test_shimmer_rules_take_the_accent_per_theme(self):
         css = shimmer_css()
@@ -368,9 +381,17 @@ class LaunchTests(unittest.TestCase):
             events.clear()
             with mock.patch.object(codex_accent, "already_running", lambda path: False):
                 self.assertEqual(bridge_command(str(app), settings, inventory, emit=events.append, log_path=log, poll_interval=0.05), 0)
-            self.assertEqual(events[0], {"event": "accents", "count": 2})
+            self.assertEqual(events[0], {"event": "accents", "count": 2, "usage_banner": "shown"})
             self.assertEqual([event["event"] for event in events[1:]], ["launched", "exited"])
             self.assertEqual(len(log.read_text().splitlines()), 3)
+            events.clear()
+            scripts = []
+            with mock.patch.object(codex_accent, "already_running", lambda path: False), \
+                    mock.patch.object(codex_accent, "run", lambda binary, script, **options: scripts.append(script) or 0):
+                hiding = dict(settings, codex_hide_usage_banner=True)
+                self.assertEqual(bridge_command(str(app), hiding, inventory, emit=events.append, log_path=log), 0)
+            self.assertEqual(events, [{"event": "accents", "count": 2, "usage_banner": "hidden"}])
+            self.assertIn("aside:has(", scripts[0])
 
     def test_executable_path_reads_the_bundle_plist(self):
         with tempfile.TemporaryDirectory() as directory:

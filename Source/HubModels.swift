@@ -109,6 +109,9 @@ struct RouteSettings: Codable, Equatable {
     // Codex tab: launch the desktop app through the DevTools-pipe helper
     // that tints its power slider per model (see codex_accent.py).
     var codex_accent_slider = false
+    // With that helper on, also hide the app's ChatGPT usage banner
+    // ("You're out of Codex and Work usage") in its windows.
+    var codex_hide_usage_banner = false
     // Codex tab apply_patch switch plus the hand-edited per-route lists it
     // preserves across saves (see codex_catalogue.apply_patch_qualified).
     var codex_apply_patch_all = false

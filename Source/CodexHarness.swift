@@ -309,6 +309,14 @@ struct CodexPage: View {
                      ? "Provider Hub starts Codex / ChatGPT itself with a DevTools pipe and installs a small watcher that colours the power slider and the pill’s effort word with the selected model’s provider accent and gives the activity shimmer a faint trace of the same hue; at Ultra the slider, the picker’s title and the pill’s word take a deeper, more saturated cut of that hue and the word shimmers. Only Provider Hub holds the pipe; nothing listens on a port. Unsupported by OpenAI: an app update that changes the picker switches the colour off with no other effect, and a Codex self-relaunch after an update runs without it until the next launch from here. In this mode macOS attributes Codex’s privacy prompts (microphone, camera, calendars, reminders, location, folders, automation) to Provider Hub, and the pipe is a full control channel into Codex that only this helper holds. The helper stays until Codex quits and outlives Provider Hub; if the helper itself is killed, Codex treats the closed pipe as a request to quit. Save, then launch."
                      : "Off: Codex / ChatGPT opens the usual way and the power slider keeps its standard blue. Turn on to tint it with each model’s provider accent, the same hues as the Providers page.")
                     .font(.caption).foregroundStyle(.secondary)
+                Toggle(isOn: $model.settings.codex_hide_usage_banner) {
+                    Text("Hide the ChatGPT usage banner").font(.system(size: 13, weight: .medium))
+                }
+                .toggleStyle(.switch).disabled(model.busy || !model.settings.codex_accent_slider)
+                Text(model.settings.codex_hide_usage_banner
+                     ? "The same watcher hides Codex’s “You’re out of Codex and Work usage” banner, and its per-model “out of usage” variant, above the composer. The banner appears only with your ChatGPT sign-in shown, reports that account’s plan usage, and hub traffic does not spend it. It is recognised by its gauge icon, so an app update that redraws the icon brings the banner back and changes nothing else; the account and usage pages, and the rate-limit prompt Codex may open on submit, are untouched. Save, then launch."
+                     : "Off: with your ChatGPT account shown, Codex keeps its usage banner above the composer even though hub traffic does not spend that plan. Needs the power-slider watcher above; save, then launch.")
+                    .font(.caption).foregroundStyle(.secondary)
                 HStack {
                     Button(model.codexProfileActive && model.codexRunning ? "Show Codex / ChatGPT" : "Launch Codex / ChatGPT") { Task { await model.launchCodex() } }
                         .buttonStyle(.borderedProminent).controlSize(.large)

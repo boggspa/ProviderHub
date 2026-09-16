@@ -11,7 +11,8 @@ The pipe is a pair of file descriptors only this helper holds, so nothing
 listens on a port. The watcher only reads the picker's own labels and sets
 CSS custom properties on the picker. Ultra, which the app paints with its
 purple token, takes a more saturated cut of the same provider hue instead,
-and its word gets a shimmer sweep.
+and its word gets a shimmer sweep. With the Codex tab's banner switch on,
+the same stylesheet also hides the app's ChatGPT usage banner.
 
 The pipe is also the app's lifeline: Electron quits when it closes. So the
 helper ignores termination signals, never lets a failed status write or a
@@ -56,6 +57,12 @@ ULTRA_MARK = "data-provider-hub-ultra"
 ULTRA_CHROMA_GAIN = 1.5
 ULTRA_LIGHTNESS_SHIFT = 0.05
 ULTRA_SWEEP = "3.2s"
+# The ChatGPT usage banner ("You're out of Codex and Work usage", and the
+# per-model "out of usage" variant) is the app's generic banner, an <aside>
+# with utility classes only, no role and localised text. What both share is
+# the gauge icon, whose path starts with this; nothing else in the app puts
+# that icon inside an <aside>.
+USAGE_BANNER_ICON = "M10.8343 12.0693"
 _LAUNCH_SWITCH = "--remote-debugging-pipe"
 _APP_ORIGIN = "app://-/"
 _AUTO_ATTACH = {"autoAttach": True, "waitForDebuggerOnStart": False, "flatten": True}
@@ -182,6 +189,23 @@ def shimmer_css() -> str:
             f'{{--loading-shimmer-highlight:color-mix(in srgb,var({ACCENT_PROPERTY}) {SHIMMER_MIX},#0009)}}')
 
 
+def usage_banner_selector() -> str:
+    """The ChatGPT usage banners: the app's generic banner (an ``aside``)
+    carrying the gauge icon. The account-wide banner and the per-model one
+    both draw it; the icon's other uses are slash-command rows, not banners.
+    """
+    return f'aside:has(svg path[d^="{USAGE_BANNER_ICON}"])'
+
+
+def usage_banner_css() -> str:
+    """Hide the usage banners. The selector outranks the app's utility
+    classes on specificity alone, so no ``!important`` is needed; the state
+    behind the banner (the account's rate-limit status, the modal it may
+    open on submit, the account and usage pages) is untouched.
+    """
+    return f"{usage_banner_selector()}{{display:none}}"
+
+
 _WATCHER = r"""
 (() => {
   // The completion value goes back to the helper's log. Only the app's own
@@ -203,6 +227,7 @@ _WATCHER = r"""
     const ULTRA_PROPERTY = "__HUB_ULTRA_PROPERTY__";
     const ULTRA_ACCENT_PROPERTY = "__HUB_ULTRA_ACCENT_PROPERTY__";
     const ULTRA_MARK = "__HUB_ULTRA_MARK__";
+    const USAGE_SELECTOR = __HUB_USAGE_SELECTOR__;
     const state = { targets: [], label: "", colour: "", ultra: "", title: null, words: [], pills: [], marks: [], sheet: null, accent: "", theme: "" };
     const norm = (text) => (text || "").replace(/\s+/g, " ").trim().toLowerCase();
     // Labels may carry a leading glyph (a bullet, a tier mark); match the words.
@@ -430,14 +455,15 @@ _WATCHER = r"""
     observer.observe(document, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ["data-explicit-model", "data-accent", "data-maximum", "data-selected-reasoning-effort"] });
     if (document.readyState === "loading") { document.addEventListener("DOMContentLoaded", schedule, { once: true }); }
     window.__providerHubAccent = {
-      version: 6,
+      version: 7,
       accents: Object.keys(ACCENTS).length,
       check: () => ({ container: !!document.querySelector('[data-explicit-model="true"]'), label: state.label, colour: state.colour, ultra: state.ultra, targets: state.targets.length,
                       pills: state.words.map((entry) => entry.colour), ultraPills: state.pills.map((entry) => entry.colour), marks: state.marks.length,
-                      shimmer: state.accent ? state.accent + ":" + state.theme : "" }),
+                      shimmer: state.accent ? state.accent + ":" + state.theme : "",
+                      banners: USAGE_SELECTOR ? document.querySelectorAll(USAGE_SELECTOR).length : null }),
     };
     schedule();
-    return { installed: true, accents: Object.keys(ACCENTS).length, ready: document.readyState };
+    return { installed: true, accents: Object.keys(ACCENTS).length, usageBanner: !!USAGE_SELECTOR, ready: document.readyState };
   } catch (error) {
     return { error: String(error && error.message ? error.message : error) };
   }
@@ -449,11 +475,13 @@ def _label_key(label: str) -> str:
     return label.replace("\u00a0", " ").strip().lower()
 
 
-def watcher_script(accents: dict, property_name: str = PROPERTY) -> str:
+def watcher_script(accents: dict, property_name: str = PROPERTY, hide_usage_banner: bool = False) -> str:
     table = {_label_key(label): colour for label, colour in accents.items()}
+    css = shimmer_css() + ultra_css() + (usage_banner_css() if hide_usage_banner else "")
     return (_WATCHER.replace("__HUB_ACCENTS__", json.dumps(table, ensure_ascii=False))
             .replace("__HUB_ULTRA__", json.dumps(ultra_map(table), ensure_ascii=False))
-            .replace("__HUB_STYLE_CSS__", json.dumps(shimmer_css() + ultra_css()))
+            .replace("__HUB_STYLE_CSS__", json.dumps(css))
+            .replace("__HUB_USAGE_SELECTOR__", json.dumps(usage_banner_selector() if hide_usage_banner else ""))
             .replace("__HUB_THEME_ATTRIBUTE__", THEME_ATTRIBUTE)
             .replace("__HUB_ACCENT_PROPERTY__", ACCENT_PROPERTY)
             .replace("__HUB_ULTRA_ACCENT_PROPERTY__", ULTRA_ACCENT_PROPERTY)
@@ -789,9 +817,10 @@ def bridge_command(app_path: str, settings: dict, inventory: dict, emit=None, lo
             emit({"event": "error", "stage": "launch", "message": "The app is already running; quit it first."})
             return 2
         accents = accent_map(settings, inventory)
-        emit({"event": "accents", "count": len(accents)})
+        hide_banner = settings.get("codex_hide_usage_banner") is True
+        emit({"event": "accents", "count": len(accents), "usage_banner": "hidden" if hide_banner else "shown"})
         run_options.setdefault("environment", child_environment(bundle))
-        return run(binary, watcher_script(accents), emit=emit, **run_options)
+        return run(binary, watcher_script(accents, hide_usage_banner=hide_banner), emit=emit, **run_options)
     finally:
         if stream is not None:
             stream.close()
