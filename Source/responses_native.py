@@ -66,6 +66,9 @@ _TASK_HEADER_PREFIXES = ("Message Type:", "Task name:", "Sender:", "Payload:")
 # re-enter history as `subagent: [...]` prose once a weaker model echoes it.
 _SUBAGENT_ECHO_PREFIX = "subagent:"
 _MAX_WIRE_DEPTH = 5
+_MAX_SCHEMA_DEPTH = 64
+_VACUOUS_SCHEMA_KEYWORDS = ("anyOf", "oneOf", "type")
+_SCHEMA_MAPS = ("properties", "patternProperties", "$defs", "definitions", "dependentSchemas")
 
 # Codex typed envelopes (NEW_TASK/MESSAGE/FINAL_ANSWER) also carry a trailing
 # end-of-message frame. Like the routing headers it is harness framing, not
@@ -418,6 +421,55 @@ def _request_shape(payload):
     return shape
 
 
+def prune_vacuous_schema(value, depth=0):
+    """Drop the structured-output keywords Ollama's GGUF runner cannot compile.
+
+    llama.cpp turns a json_schema format into a GBNF grammar, and an empty
+    alternation compiles to a rule with no body - a literal `root ::= ` - which
+    its own grammar parser then refuses. The request dies as "Failed to
+    initialize samplers: failed to parse grammar", which names neither the
+    schema nor the keyword, so the turn fails with nothing in it to act on.
+    Measured against a local GGUF model, an empty anyOf, oneOf or type does it
+    at any depth including through $defs; an empty allOf or enum converts
+    cleanly and is left alone.
+
+    Each of the three is vacuous in the first place. An empty anyOf or oneOf
+    admits no value at all and an empty type permits no type, so a schema
+    carrying one cannot be satisfied by any output the model could produce -
+    there is no constraint here to preserve. Dropping the keyword leaves that
+    position unconstrained, which is the one reading that yields a usable
+    grammar, and it is already how the same request behaves on Ollama's MLX
+    runner, which does not go through GBNF at all. GGUF was the odd one out,
+    not the request.
+
+    Tool schemas are deliberately untouched: the same empty anyOf in a tool's
+    parameters is accepted, with a free, forced or required tool choice alike,
+    because tool calls do not take this path. Repairing them too would be
+    rewriting schemas that upstream had no quarrel with.
+    """
+    repairs = 0
+    if depth > _MAX_SCHEMA_DEPTH:
+        return value, repairs
+    if isinstance(value, list):
+        for item in value:
+            repairs += prune_vacuous_schema(item, depth + 1)[1]
+        return value, repairs
+    if not isinstance(value, dict):
+        return value, repairs
+    for keyword in _VACUOUS_SCHEMA_KEYWORDS:
+        if isinstance(value.get(keyword), list) and not value[keyword]:
+            del value[keyword]
+            repairs += 1
+    for key, item in value.items():
+        # Under properties and its siblings the keys are property names, not
+        # keywords, so a field that happens to be called "type" is descended
+        # into rather than read as one.
+        children = item.values() if key in _SCHEMA_MAPS and isinstance(item, dict) else (item,)
+        for child in children:
+            repairs += prune_vacuous_schema(child, depth + 1)[1]
+    return value, repairs
+
+
 def prepare_native(runtime, payload):
     if not isinstance(payload, dict):
         raise BridgeError("The Responses request must be an object.")
@@ -515,6 +567,10 @@ def prepare_native(runtime, payload):
     elif provider_id == "ollama":
         if body.get("previous_response_id") or body.get("store"):
             raise BridgeError("Ollama Responses is stateless. Send the full input history with store:false.")
+        text_format = body.get("text")
+        text_format = text_format.get("format") if isinstance(text_format, dict) else None
+        if isinstance(text_format, dict) and isinstance(text_format.get("schema"), dict):
+            prune_vacuous_schema(text_format["schema"])
         # The daemon owns its cloud login. Never send the local gateway token.
         headers = {"Content-Type": "application/json", "Authorization": "Bearer ollama", "User-Agent": "ProviderHub/0.5"}
         tier = body.pop("service_tier", None)

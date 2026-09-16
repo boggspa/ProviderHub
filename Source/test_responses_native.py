@@ -1001,6 +1001,63 @@ class MultiAgentNormalizationTests(unittest.TestCase):
             prepare_native(runtime, {"model": route, "input": [{"type": "weird_future"}]})
         self.assertIn("'weird_future'", str(ctx.exception))
 
+    def test_a_schema_ollama_cannot_compile_is_repaired_instead_of_failing_the_turn(self):
+        """llama.cpp compiles a json_schema format into a GBNF grammar, and an
+        empty alternation becomes a rule with no body that its own parser then
+        refuses: the turn dies as "failed to parse grammar", naming neither the
+        schema nor the keyword. Measured against a local GGUF model, anyOf,
+        oneOf and type do it at any depth including through $defs, while allOf
+        and enum compile cleanly. All three are vacuous - nothing satisfies an
+        empty alternation - so dropping them costs no constraint the model
+        could have met, and each case below turns a 400 into a 200 upstream."""
+        from responses_native import prune_vacuous_schema
+
+        schema = {"$defs": {"x": {"oneOf": []}}, "type": "object", "required": ["a"],
+                  "properties": {"a": {"anyOf": []}, "b": {"type": []}, "type": {"type": "string"}}}
+        repaired, repairs = prune_vacuous_schema(schema)
+        self.assertEqual(repairs, 3)
+        self.assertEqual(repaired["$defs"]["x"], {})
+        self.assertEqual(repaired["properties"]["a"], {})
+        self.assertEqual(repaired["properties"]["b"], {})
+        # Under properties the keys are field names, not keywords, so a field
+        # that happens to be called "type" keeps its own schema, and the
+        # object's own declared type is untouched.
+        self.assertEqual(repaired["properties"]["type"], {"type": "string"})
+        self.assertEqual((repaired["type"], repaired["required"]), ("object", ["a"]))
+        # allOf and enum are accepted upstream, so they are not rewritten.
+        self.assertEqual(prune_vacuous_schema({"allOf": [], "enum": []}), ({"allOf": [], "enum": []}, 0))
+
+    def test_ollama_gets_the_repaired_schema_and_the_caller_keeps_its_own(self):
+        """The repair belongs on the Ollama branch: it is that runner's grammar
+        compiler that cannot take the schema, and no other provider is rewritten
+        on its behalf. Tool schemas stay out of it - the same empty anyOf in a
+        tool's parameters is accepted upstream under a free, forced or required
+        tool choice alike, so there is nothing there to repair."""
+        from types import SimpleNamespace
+
+        import responses_native
+
+        route = "ollama/ornith-1.5:9b"
+        runtime = SimpleNamespace(
+            settings={"providers": {"ollama": {"base_url": "http://127.0.0.1:11434"}},
+                      "_model_specs": {route: {"context": 131072}}},
+            replay_key="replay", token="token", upstream_url=None,
+            provider_key=lambda provider_id: "")
+        payload = {"model": route, "store": False, "stream": False, "input": "hi",
+                   "tools": [{"type": "function", "name": "cua",
+                              "parameters": {"type": "object", "properties": {"arg": {"anyOf": []}}}}],
+                   "text": {"format": {"type": "json_schema", "name": "out",
+                                       "schema": {"type": "object", "properties": {"a": {"anyOf": []}}}}}}
+        with patch.object(responses_native, "validate_connection",
+                          return_value={"base_url": "http://127.0.0.1:11434"}), \
+                patch.object(responses_native, "_auth_headers", return_value={}), \
+                patch.object(responses_native, "connection_signature", return_value="sig"):
+            plan = responses_native.prepare_native(runtime, copy.deepcopy(payload))
+        self.assertEqual(plan["body"]["text"]["format"]["schema"]["properties"]["a"], {})
+        self.assertEqual(plan["body"]["tools"][0]["parameters"]["properties"]["arg"], {"anyOf": []})
+        # The caller's own payload is never edited underneath it.
+        self.assertEqual(payload["text"]["format"]["schema"]["properties"]["a"], {"anyOf": []})
+
     def test_hosted_search_is_refused_by_name_where_the_provider_runs_no_search(self):
         """A route whose provider has no search of its own says exactly that,
         rather than the turn dying on the tool array as a whole. Validation
