@@ -222,6 +222,14 @@ class MockProvider(BaseHTTPRequestHandler):
                 pass
             self.close_connection = True
             return
+        if self.mode == "native_null_content":
+            self.send_json(200, {"id": "msg_probe", "type": "message", "role": "assistant", "model": body.get("model"),
+                                 "content": None, "stop_reason": "max_tokens", "stop_sequence": None,
+                                 "usage": {"input_tokens": 3, "output_tokens": 1}})
+            return
+        if self.mode == "native_bare_error":
+            self.send_json(200, {"error": {"type": "rate_limit_error", "message": "slow down"}})
+            return
         if self.path == "/v1/messages":
             self.handle_native(body)
             return
@@ -463,6 +471,26 @@ class GatewayHubHTTPTests(unittest.TestCase):
             encoded = json.dumps(body)
             self.assertNotIn(self.runtime.token, encoded)
             self.assertNotIn(self.runtime.replay_key, encoded)
+
+    def test_desktop_one_token_probe_survives_a_null_content_native_reply(self):
+        route = self.start_gateway("deepseek", "deepseek-flash", {"reasoning_history": "native", "context": 1100000})
+        MockProvider.reset("native_null_content")
+        probe = {"model": "claude-haiku-4-5[1m]", "max_tokens": 1, "messages": [{"role": "user", "content": "."}]}
+        status, raw, _ = self.request(probe, extra_headers={"anthropic-version": "2023-06-01"})
+        self.assertEqual(status, 200, raw)
+        reply = json.loads(raw)
+        self.assertEqual((reply["type"], reply["role"], reply["content"], reply["stop_reason"]), ("message", "assistant", [], "max_tokens"))
+        self.assertEqual(reply["model"], "claude-haiku-4-5[1m]")
+        self.assertEqual(MockProvider.requests[0], {"model": "deepseek-flash", "max_tokens": 1, "messages": [{"role": "user", "content": "."}]})
+        self.assertFalse((self.root / "last-upstream-shape.json").exists())
+        # A reply that is not a message at all is still rejected, with its shape recorded.
+        MockProvider.reset("native_bare_error")
+        status, raw, _ = self.request(probe)
+        self.assertEqual(status, 502)
+        self.assertIn(b"invalid Messages response (keys: error; type: None)", raw)
+        shape = json.loads((self.root / "last-upstream-shape.json").read_text())
+        self.assertEqual(shape, {"route": route, "keys": ["error"], "type": "None", "content": "NoneType", "error_type": "rate_limit_error"})
+        self.assertNotIn("slow down", json.dumps(shape))
 
     def test_native_json_qualified_route_raw_model_auth_and_complete_tool_cycle(self):
         route = self.start_gateway("deepseek", "deepseek-flash", {

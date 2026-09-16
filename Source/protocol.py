@@ -1259,3 +1259,51 @@ def apply_mistral_prefix(payload: dict) -> dict:
     updated = list(messages)
     updated[target_index] = patched
     return {**payload, "messages": updated}
+
+
+def normalize_native_message(value):
+    """Coerce a provider's own Messages-shaped JSON reply into a usable one.
+
+    A one-token probe such as Claude Desktop's health check can leave a
+    thinking model with nothing to say, and some compatible endpoints then
+    serialise ``content`` as null or omit it, or leave ``type`` off. Those
+    replies are still messages: fill the shape in so the desktop's own
+    validator (a content array with text blocks) accepts them. Anything
+    that is not message-shaped is returned unchanged for the caller to
+    reject.
+    """
+    if not isinstance(value, dict):
+        return value
+    looks_like_message = value.get("type") == "message" or value.get("role") == "assistant" or "content" in value
+    if not looks_like_message:
+        return value
+    message = dict(value)
+    content = message.get("content")
+    if content is None:
+        message["content"] = []
+    elif isinstance(content, str):
+        message["content"] = [{"type": "text", "text": content}] if content else []
+    elif isinstance(content, dict):
+        message["content"] = [content]
+    if message.get("type") is None:
+        message["type"] = "message"
+    message.setdefault("role", "assistant")
+    message.setdefault("stop_reason", "end_turn" if message["content"] else "max_tokens")
+    message.setdefault("stop_sequence", None)
+    if not isinstance(message.get("usage"), dict):
+        message["usage"] = {"input_tokens": 0, "output_tokens": 0}
+    return message
+
+
+def response_shape(value) -> dict:
+    """A privacy-safe description of a provider reply: shape, never content."""
+    if not isinstance(value, dict):
+        return {"json": type(value).__name__}
+    shape = {"keys": sorted(str(key)[:40] for key in value)[:16], "type": str(value.get("type"))[:40]}
+    content = value.get("content")
+    shape["content"] = ("list:" + ",".join(sorted({str(b.get("type"))[:20] for b in content if isinstance(b, dict)})[:8])
+                        if isinstance(content, list) else type(content).__name__)
+    error = value.get("error")
+    if isinstance(error, dict):
+        shape["error_type"] = str(error.get("type"))[:40]
+    return shape

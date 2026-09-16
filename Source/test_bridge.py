@@ -1140,4 +1140,29 @@ class GatewayTests(unittest.TestCase):
         self.assertEqual(self.runtime.completed, 0)
 
 
+class NativeMessageNormalisationTests(unittest.TestCase):
+    def test_null_string_and_missing_fields_are_filled_in(self):
+        from protocol import normalize_native_message, response_shape
+        self.assertEqual(normalize_native_message({"type": "message", "role": "assistant", "content": None})["content"], [])
+        text = normalize_native_message({"role": "assistant", "content": "hi"})
+        self.assertEqual((text["type"], text["content"], text["stop_reason"]), ("message", [{"type": "text", "text": "hi"}], "end_turn"))
+        bare = normalize_native_message({"content": []})
+        self.assertEqual((bare["type"], bare["role"], bare["stop_reason"], bare["usage"]),
+                         ("message", "assistant", "max_tokens", {"input_tokens": 0, "output_tokens": 0}))
+        block = normalize_native_message({"type": "message", "content": {"type": "text", "text": "one"}})
+        self.assertEqual(block["content"], [{"type": "text", "text": "one"}])
+        untouched = {"error": {"type": "x", "message": "secret"}}
+        self.assertEqual(normalize_native_message(untouched), untouched)
+        self.assertEqual(normalize_native_message("nope"), "nope")
+
+    def test_response_shape_describes_without_content(self):
+        from protocol import response_shape
+        self.assertEqual(response_shape({"error": {"type": "x", "message": "secret"}}),
+                         {"keys": ["error"], "type": "None", "content": "NoneType", "error_type": "x"})
+        self.assertEqual(response_shape({"type": "message", "content": [{"type": "text", "text": "secret"}, {"type": "thinking"}]}),
+                         {"keys": ["content", "type"], "type": "message", "content": "list:text,thinking"})
+        self.assertEqual(response_shape([1]), {"json": "list"})
+        self.assertNotIn("secret", json.dumps(response_shape({"content": "secret", "type": "message"})))
+
+
 if __name__ == "__main__": unittest.main(verbosity=2)

@@ -45,7 +45,8 @@ from devin_agent import (DESCRIPTOR as DEVIN_DESCRIPTOR, DevinAgentError,
 from cerebras_replay import CerebrasReplayError, CerebrasStreamAdapter, sanitize_compacted_messages, sign_thinking, validate_messages
 from gemini_provider import GeminiError, GeminiStreamAdapter, translate_response as translate_gemini_response, _estimated_input_tokens as estimated_gemini_tokens
 from protocol import (StreamTranslator, apply_mapping_options, apply_mistral_prefix, compact_conversation, compact_threshold, estimated_tokens, mapping_options_for, reported_input_tokens, TokenCalibration, validate_mistral_roles,
-                      model_catalog, resolve_model, rewrite_context_reminders, translate_request, translate_response, _effective_context)
+                      model_catalog, normalize_native_message, resolve_model, response_shape, rewrite_context_reminders, translate_request,
+                      translate_response, _effective_context)
 from responses_native import ResponseOwnership, handle_responses, NATIVE_PROVIDERS
 from codex_accent import bridge_command as codex_accent_bridge
 from codex_catalogue import catalogue_digest, choices as codex_choices, launch_settings as codex_launch_settings
@@ -730,9 +731,15 @@ class Handler(BaseHTTPRequestHandler):
                     result = translate_gemini_response(decoded, payload["model"], names, plan["upstream_model"],
                                                        plan["replay_scope"], self.runtime.replay_key, model_spec=plan["model_spec"])
                 else:
-                    result = translate_response(decoded, payload["model"], names) if plan["protocol"] == "chat_completions" else decoded
-                if result.get("type") != "message" or not isinstance(result.get("content"), list):
-                    raise BridgeError("The provider returned an invalid Messages response.")
+                    result = (translate_response(decoded, payload["model"], names) if plan["protocol"] == "chat_completions"
+                              else normalize_native_message(decoded))
+                if not isinstance(result, dict) or result.get("type") != "message" or not isinstance(result.get("content"), list):
+                    # Record the reply's shape (never its content) so a
+                    # failing desktop probe can be explained after the fact.
+                    shape = response_shape(decoded)
+                    atomic_json(self.runtime.root / "last-upstream-shape.json", {"route": plan["route"], **shape})
+                    raise BridgeError("The provider returned an invalid Messages response "
+                                      f"(keys: {', '.join(shape.get('keys', [])) or 'none'}; type: {shape.get('type')}).")
                 if plan["protocol"] == "anthropic":
                     result["model"] = payload["model"]
                 if plan["provider_id"] == "cerebras":

@@ -80,6 +80,13 @@ calls through the gateway. Save, then launch Claude again for them to apply.
 Whether dictation and scheduled tasks appear depends on the installed Claude
 build honouring the field.
 
+Claude Desktop checks the connection with a one-token test message to the
+Haiku tier's default model. A provider that spends that token before saying
+anything is answered with an empty reply so the check passes; if a provider
+returns something that is not a message at all, the gateway reports the
+reply's shape (never its content) in the error and in
+`last-upstream-shape.json` under its state folder.
+
 Quitting Claude restores the previous Claude profile. Keep Provider Hub running
 while using this session. Your existing Claude and Ollama conversations remain
 in their respective profiles.
