@@ -283,6 +283,49 @@ pipe the CLI busy-spins at 100% CPU and ignores SIGTERM (15 September 2026:
 `vibe models 2>&1 | head -30` left PID 44574 spinning for ~40 hours until SIGKILL).
 Capture full output and truncate after the CLI exits.
 
+**Power-slider provider accents (opt-in)**
+
+The Codex composer paints its power slider with one app-wide design token
+(`--color-chart-blue`); model records carry no colour and the app has no
+theming hook, so the hub cannot colour the slider through the catalogue.
+With the Codex-tab switch on, the worker's `codex-accent` command starts the
+app's executable as a child with `--remote-debugging-pipe`, attaches to each
+page target over the pipe (the app's fds 3 and 4; nothing listens on a
+port), and installs a watcher with `Page.addScriptToEvaluateOnNewDocument`
+plus `Runtime.evaluate`. The watcher keys on the picker's data attributes,
+not its hashed class names: it reads the explicit-model row's display name,
+looks it up in the label-to-accent table the hub projected from the
+catalogue's presentation, and sets the token on the picker; Ultra's purple
+is untouched. The helper ignores SIGTERM and lives until the app exits,
+because closing the pipe is the app's cue to quit (Electron's pipe handler
+calls `Browser::Quit()` on EOF); it also outlives Provider Hub, discarding
+its status output once the hub is gone, and a message it cannot handle is
+reported rather than raised. Should the helper itself die, the app treats
+the closed pipe as a quit request and, with local chats running, shows its
+own "Quit?" dialog first. Verified against the installed 26.908.70816
+build: its picker CSS is byte-identical to the 26.908.40834 build the hooks
+were read from, the app neither strips nor requires the switch, and its
+`devTools:false` window preference only gates the in-app DevTools. The app
+takes no single-instance lock on macOS, so the helper refuses to spawn while
+a copy is running; pipe ends are parked above fd 10 before the dup2 so the
+child never inherits a close-on-exec descriptor; the app starts in its own
+session with its stdio on `/dev/null` and a launch-services-like environment
+(login basics, launchd's PATH, the bundle's `LSEnvironment`) rather than the
+hub's, so no provider key or `NODE_OPTIONS` reaches it. The bridge
+auto-attaches to page targets only and detaches again from anything that is
+not the app's own `app://-/` document (sandboxed app frames, browser-panel
+windows on outside sites), and the watcher bails out in any frame that is
+not such a top-level document. What remains by design: the pipe is a full
+control channel into the app (the injected script sits in the origin the
+app's main process trusts for its own IPC), so only this helper holds it and
+no gateway endpoint reaches it; and macOS attributes the child's privacy
+prompts (microphone, camera, calendars, reminders, location, folders,
+automation) to Provider Hub. Unsupported by OpenAI; a picker redesign
+switches the colour off with no other effect. The same route is closed for
+Claude Desktop: its composer is remote claude.ai content, the Ultracode
+violet is a fixed design-system ramp, and the app refuses to start with a
+debugging switch unless an Anthropic-signed token is present.
+
 **Shareable bundle and signing status**
 
 The shareable app can embed a clean relocatable Python runtime so its Messages

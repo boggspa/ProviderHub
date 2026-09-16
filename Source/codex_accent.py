@@ -1,0 +1,460 @@
+"""Codex power-slider accents.
+
+The ChatGPT desktop app paints its model picker's power slider with one
+app-wide design token (``--color-chart-blue``); its model records carry no
+colour, and it offers no theming hook. This module gives each hub model its
+provider's accent anyway without touching the app bundle: the app is started
+as a child of the worker with Chromium's ``--remote-debugging-pipe`` switch,
+and a small watcher script is injected into its windows over that pipe.
+
+The pipe is a pair of file descriptors only this helper holds, so nothing
+listens on a port. The watcher only reads the picker's own labels and sets
+one CSS custom property on the picker; it keeps Ultra's purple untouched.
+
+The pipe is also the app's lifeline: Electron quits when it closes. So the
+helper ignores termination signals, never lets a failed status write or a
+malformed message end it, and hands the app a launch-services-like
+environment and detached stdio so nothing of the hub's reaches it.
+"""
+from __future__ import annotations
+
+import fcntl
+import json
+import os
+import plistlib
+import re
+import select
+import signal
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+from codex_catalogue import project_codex
+
+PROPERTY = "--color-chart-blue"
+_HEX = re.compile(r"^#[0-9A-Fa-f]{6}$")
+_LAUNCH_SWITCH = "--remote-debugging-pipe"
+_APP_ORIGIN = "app://-/"
+_AUTO_ATTACH = {"autoAttach": True, "waitForDebuggerOnStart": False, "flatten": True}
+# What launchd hands a LaunchServices launch, and nothing of the hub's own
+# process: no provider keys, no NODE_OPTIONS, no ELECTRON_* or CODEX_* knobs.
+_ENVIRONMENT_KEYS = ("HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE", "TZ",
+                     "__CF_USER_TEXT_ENCODING", "XPC_FLAGS", "XPC_SERVICE_NAME", "SSH_AUTH_SOCK", "SECURITYSESSIONID")
+_LAUNCHD_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
+
+
+def accent_map(settings: dict, inventory: dict) -> dict:
+    """Composer label -> provider accent for every model Codex will list.
+
+    Labels are the display names the hub itself projects into the Codex
+    catalogue, so the watcher can match them exactly. Accents come from the
+    projected catalogue's presentation, which already applies the hub's
+    branding overrides and model brand rules (an Ollama-hosted Qwen keeps
+    the Qwen hue).
+    """
+    entries = {entry.get("id"): entry for entry in inventory.get("models", []) if isinstance(entry, dict)}
+    accents = {}
+    for model in project_codex(settings, inventory)["models"]:
+        presentation = (entries.get(model["slug"]) or {}).get("presentation") or {}
+        colour = presentation.get("accent")
+        if isinstance(colour, str) and _HEX.match(colour):
+            accents[model["display_name"]] = colour.upper()
+    return accents
+
+
+_WATCHER = r"""
+(() => {
+  // Only the app's own top-level documents: never sandboxed app frames or
+  // browser-panel windows showing outside content.
+  try {
+    if (window !== window.top) { return; }
+    if (!/^app:\/\/-\//.test(String(location.href))) { return; }
+  } catch (error) { return; }
+  if (window.__providerHubAccent) { return; }
+  const ACCENTS = __HUB_ACCENTS__;
+  const PROPERTY = "__HUB_PROPERTY__";
+  const state = { host: null, label: "", colour: "" };
+  const norm = (text) => (text || "").replace(/\s+/g, " ").trim().toLowerCase();
+  const effortLabel = (container) => container.querySelector("[data-effort-only],[data-accent],[data-maximum]");
+  function modelLabel(container) {
+    // The explicit-model layout shows the effort label (data-accent /
+    // data-maximum) on one row and the model's display name on the next.
+    const effort = effortLabel(container);
+    for (const span of container.querySelectorAll("span")) {
+      if (effort && (span === effort || effort.contains(span) || span.contains(effort))) { continue; }
+      const text = norm(span.textContent);
+      if (text && Object.prototype.hasOwnProperty.call(ACCENTS, text)) { return text; }
+    }
+    return "";
+  }
+  function clear() {
+    // Only undo our own value: leave any inline value the app set itself.
+    if (state.host) {
+      try {
+        if (norm(state.host.style.getPropertyValue(PROPERTY)) === norm(state.colour)) { state.host.style.removeProperty(PROPERTY); }
+      } catch (error) {}
+    }
+    state.host = null; state.label = ""; state.colour = "";
+  }
+  function apply() {
+    const container = document.querySelector('[data-explicit-model="true"]');
+    if (!container) { clear(); return; }
+    const label = modelLabel(container);
+    const colour = label ? ACCENTS[label] : "";
+    const host = container.closest("[data-transitions-ready],[data-side]") || container.parentElement;
+    if (!host || !colour) { clear(); return; }
+    if (state.host !== host || state.colour !== colour) {
+      clear();
+      host.style.setProperty(PROPERTY, colour);
+      state.host = host; state.label = label; state.colour = colour;
+    }
+  }
+  let scheduled = false;
+  function schedule() {
+    if (scheduled) { return; }
+    scheduled = true;
+    requestAnimationFrame(() => { scheduled = false; try { apply(); } catch (error) {} });
+  }
+  const observer = new MutationObserver(schedule);
+  observer.observe(document.documentElement, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ["data-explicit-model", "data-accent", "data-maximum"] });
+  window.__providerHubAccent = {
+    version: 1,
+    accents: Object.keys(ACCENTS).length,
+    check: () => ({ container: !!document.querySelector('[data-explicit-model="true"]'), label: state.label, colour: state.colour, host: state.host ? state.host.tagName : null }),
+  };
+  schedule();
+})();
+"""
+
+
+def watcher_script(accents: dict, property_name: str = PROPERTY) -> str:
+    table = {label.replace(" ", " ").strip().lower(): colour for label, colour in accents.items()}
+    return (_WATCHER.replace("__HUB_ACCENTS__", json.dumps(table, ensure_ascii=False))
+            .replace("__HUB_PROPERTY__", property_name))
+
+
+def executable_path(app_path: Path) -> Path:
+    """The binary inside an .app bundle, from its Info.plist."""
+    info = app_path / "Contents" / "Info.plist"
+    try:
+        with info.open("rb") as stream:
+            name = plistlib.load(stream).get("CFBundleExecutable")
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"Cannot read {info.name}; is this an app bundle?") from exc
+    if not isinstance(name, str) or not name:
+        raise ValueError("The app bundle does not name its executable.")
+    binary = app_path / "Contents" / "MacOS" / name
+    if not os.access(binary, os.X_OK):
+        raise ValueError("The app's executable is missing or not runnable.")
+    return binary
+
+
+def child_environment(app_path: Path | None = None) -> dict:
+    """The environment a LaunchServices launch would give the app.
+
+    Only the login session's basics pass through, with launchd's PATH, plus
+    the bundle's own ``LSEnvironment`` entries (which a direct spawn would
+    otherwise drop). Nothing from the hub's process reaches the app.
+    """
+    environment = {key: os.environ[key] for key in _ENVIRONMENT_KEYS if key in os.environ}
+    environment["PATH"] = _LAUNCHD_PATH
+    if app_path is not None:
+        try:
+            with (app_path / "Contents" / "Info.plist").open("rb") as stream:
+                extra = plistlib.load(stream).get("LSEnvironment") or {}
+        except (OSError, ValueError):
+            extra = {}
+        if isinstance(extra, dict):
+            environment.update({key: str(value) for key, value in extra.items() if isinstance(key, str)})
+    return environment
+
+
+class DevToolsPipe:
+    """NUL-delimited JSON over the two descriptors Chromium's pipe uses.
+
+    The browser reads commands from its fd 3 and writes responses and
+    events to its fd 4; this end holds the other side of each pipe.
+    """
+
+    def __init__(self, read_fd: int, write_fd: int):
+        self.read_fd = read_fd
+        self.write_fd = write_fd
+        self.buffer = b""
+        self.next_id = 0
+
+    def send(self, method: str, params: dict | None = None, session_id: str | None = None) -> int:
+        self.next_id += 1
+        message = {"id": self.next_id, "method": method, "params": params or {}}
+        if session_id:
+            message["sessionId"] = session_id
+        data = json.dumps(message).encode() + b"\0"
+        while data:
+            written = os.write(self.write_fd, data)
+            data = data[written:]
+        return self.next_id
+
+    def poll(self, timeout: float) -> list[dict]:
+        ready, _, _ = select.select([self.read_fd], [], [], timeout)
+        if not ready:
+            return []
+        chunk = os.read(self.read_fd, 65536)
+        if not chunk:
+            raise EOFError("The DevTools pipe closed.")
+        self.buffer += chunk
+        messages = []
+        while b"\0" in self.buffer:
+            raw, self.buffer = self.buffer.split(b"\0", 1)
+            try:
+                message = json.loads(raw)
+            except ValueError:
+                continue
+            if isinstance(message, dict):
+                messages.append(message)
+        return messages
+
+    def close(self) -> None:
+        for fd in (self.read_fd, self.write_fd):
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+
+class AccentBridge:
+    """Attach to the app's own windows and install the watcher in each.
+
+    Auto-attach covers windows that exist and windows still to come. Only
+    page targets showing the app's own ``app://-/`` documents keep their
+    session; anything else (sandboxed app frames, browser-panel windows on
+    outside sites, workers) is detached again at once.
+    """
+
+    def __init__(self, pipe: DevToolsPipe, script: str, emit=None):
+        self.pipe = pipe
+        self.script = script
+        self.emit = emit or (lambda event: None)
+        self.pending: dict[int, tuple[str, str | None]] = {}
+        self.injected: set[str] = set()
+
+    def start(self) -> None:
+        params = dict(_AUTO_ATTACH, filter=[{"type": "page"}])
+        self.pending[self.pipe.send("Target.setAutoAttach", params)] = ("autoattach", None)
+
+    @staticmethod
+    def wanted(info: dict) -> bool:
+        url = info.get("url") or ""
+        return info.get("type") == "page" and (url in ("", "about:blank") or url.startswith(_APP_ORIGIN))
+
+    def handle(self, message: dict) -> None:
+        method = message.get("method")
+        params = message.get("params") or {}
+        if method == "Target.attachedToTarget":
+            self._attached(params.get("sessionId"), params.get("targetInfo") or {})
+            return
+        if method == "Target.detachedFromTarget":
+            self.injected.discard(params.get("sessionId") or "")
+            return
+        identifier = message.get("id")
+        if identifier not in self.pending:
+            return
+        kind, session_id = self.pending.pop(identifier)
+        if message.get("error"):
+            if kind == "autoattach":
+                # A protocol without the target filter: attach to everything
+                # and sort the targets out as they arrive.
+                self.pending[self.pipe.send("Target.setAutoAttach", dict(_AUTO_ATTACH))] = ("autoattach-unfiltered", None)
+                return
+            self.emit({"event": "error", "stage": kind, "message": message["error"].get("message", "")})
+            return
+        if kind == "evaluate":
+            exception = (message.get("result") or {}).get("exceptionDetails")
+            if exception:
+                self.emit({"event": "error", "stage": "evaluate", "message": exception.get("text", "")})
+            else:
+                self.emit({"event": "injected", "session": session_id})
+
+    def _attached(self, session_id, info: dict) -> None:
+        if not session_id or session_id in self.injected:
+            return
+        if not self.wanted(info):
+            self.pipe.send("Target.detachFromTarget", {"sessionId": session_id})
+            return
+        self.injected.add(session_id)
+        self.pipe.send("Page.enable", session_id=session_id)
+        self.pipe.send("Page.addScriptToEvaluateOnNewDocument", {"source": self.script, "runImmediately": True}, session_id=session_id)
+        self.pending[self.pipe.send("Runtime.evaluate", {"expression": self.script, "returnByValue": True}, session_id=session_id)] = ("evaluate", session_id)
+
+
+def _parked(fd: int) -> int:
+    """Move a pipe end above the numbers the child's pipe ends will take.
+
+    A fresh process hands out 3 and 4 first, and dup2(3, 3) is a no-op that
+    keeps the close-on-exec flag, so the child would find fd 3 closed.
+    """
+    if fd >= 10:
+        return fd
+    moved = fcntl.fcntl(fd, fcntl.F_DUPFD_CLOEXEC, 10)
+    os.close(fd)
+    return moved
+
+
+def launch(binary: Path, arguments=(), environment: dict | None = None) -> tuple[int, DevToolsPipe]:
+    """Spawn the app in its own session with the DevTools pipe on its fds 3
+    and 4 and its stdio detached, the way a launch-services launch has it."""
+    command_read, command_write = (_parked(fd) for fd in os.pipe())
+    event_read, event_write = (_parked(fd) for fd in os.pipe())
+    argv = [str(binary), _LAUNCH_SWITCH, *arguments]
+    actions = [(os.POSIX_SPAWN_OPEN, 0, os.devnull, os.O_RDONLY, 0),
+               (os.POSIX_SPAWN_OPEN, 1, os.devnull, os.O_WRONLY, 0),
+               (os.POSIX_SPAWN_OPEN, 2, os.devnull, os.O_WRONLY, 0),
+               (os.POSIX_SPAWN_DUP2, command_read, 3),
+               (os.POSIX_SPAWN_DUP2, event_write, 4)]
+    env = environment if environment is not None else child_environment()
+    try:
+        try:
+            pid = os.posix_spawn(str(binary), argv, env, file_actions=actions, setsid=True)
+        except NotImplementedError:
+            pid = os.posix_spawn(str(binary), argv, env, file_actions=actions, setpgroup=0)
+    finally:
+        os.close(command_read)
+        os.close(event_write)
+    return pid, DevToolsPipe(event_read, command_write)
+
+
+def already_running(binary: Path) -> bool:
+    """The app on macOS takes no single-instance lock: a second copy on the
+    same profile must never be spawned.
+
+    A LaunchServices launch runs the binary by its full path, which ps
+    reports as the command; the full argument list is checked as well.
+    """
+    target = str(binary)
+    try:
+        listing = subprocess.run(["/bin/ps", "-axo", "pid=,comm=,command="], capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    own = str(os.getpid())
+    for line in listing.stdout.splitlines():
+        pid, _, rest = line.strip().partition(" ")
+        if pid == own:
+            continue
+        rest = rest.strip()
+        if rest.startswith(target + " ") or rest == target:
+            return True
+    return False
+
+
+def run(binary: Path, script: str, *, emit=None, arguments=(), environment=None, poll_interval=0.25,
+        launch_timeout=45.0) -> int:
+    """Launch the app, install the watcher, then stay attached until it exits.
+
+    Returns the app's exit status. SIGTERM and SIGHUP are ignored once the
+    app runs, a status sink that fails (the hub quit and took the helper's
+    stdout with it) is dropped, and a message the bridge cannot handle is
+    reported rather than raised: this helper's exit would close the pipe,
+    which is the app's cue to quit, so only the app's own exit ends it.
+    """
+    sink = emit or (lambda event: None)
+
+    def emit(event):
+        try:
+            sink(event)
+        except Exception:
+            pass
+
+    pid, pipe = launch(binary, arguments, environment)
+    emit({"event": "launched", "pid": pid})
+    for signum in (signal.SIGTERM, signal.SIGHUP):
+        signal.signal(signum, signal.SIG_IGN)
+    bridge = AccentBridge(pipe, script, emit)
+    started = time.monotonic()
+    status = None
+    try:
+        try:
+            bridge.start()
+        except OSError as exc:
+            # An app that exits at once (a running copy took the launch over,
+            # or the switch was refused) closes the pipe before we can talk.
+            emit({"event": "error", "stage": "start", "message": str(exc)})
+        while True:
+            try:
+                messages = pipe.poll(poll_interval)
+            except EOFError:
+                break
+            except OSError as exc:
+                emit({"event": "error", "stage": "session", "message": str(exc)})
+                break
+            for message in messages:
+                try:
+                    bridge.handle(message)
+                except Exception as exc:  # a surprise in the protocol must not end the helper
+                    emit({"event": "error", "stage": "handle", "message": f"{type(exc).__name__}: {exc}"})
+            done, raw = os.waitpid(pid, os.WNOHANG)
+            if done:
+                status = raw
+                break
+            if not bridge.injected and time.monotonic() - started > launch_timeout:
+                emit({"event": "error", "stage": "attach", "message": "No window accepted the watcher in time."})
+                started = float("inf")
+        if status is None:
+            _, status = os.waitpid(pid, 0)
+    finally:
+        pipe.close()
+    code = os.waitstatus_to_exitcode(status) if status is not None else 0
+    emit({"event": "exited", "status": code})
+    return code
+
+
+def _print_event(event: dict) -> None:
+    try:
+        print(json.dumps(event), flush=True)
+    except (OSError, ValueError):
+        pass  # stdout is gone with the hub; the app must not follow
+
+
+def bridge_command(app_path: str, settings: dict, inventory: dict, emit=None, log_path: Path | None = None,
+                   **run_options) -> int:
+    """Worker entry point: `gateway.py codex-accent --app <bundle>`.
+
+    Events go to stdout as JSON lines and, when a log path is given, to that
+    file as well, so a session can be inspected after the hub drained stdout.
+    """
+    stream = None
+    if log_path is not None:
+        try:
+            stream = log_path.open("w")
+        except OSError:
+            stream = None
+    base_emit = emit or _print_event
+
+    def emit(event):  # noqa: F811 - the caller's sink plus the log file
+        try:
+            base_emit(event)
+        except Exception:
+            pass
+        if stream is not None:
+            try:
+                stream.write(json.dumps(event) + "\n")
+                stream.flush()
+            except (OSError, ValueError):
+                pass
+
+    try:
+        bundle = Path(app_path)
+        binary = executable_path(bundle)
+        if already_running(binary):
+            emit({"event": "error", "stage": "launch", "message": "The app is already running; quit it first."})
+            return 2
+        accents = accent_map(settings, inventory)
+        emit({"event": "accents", "count": len(accents)})
+        run_options.setdefault("environment", child_environment(bundle))
+        return run(binary, watcher_script(accents), emit=emit, **run_options)
+    finally:
+        if stream is not None:
+            stream.close()
+
+
+if __name__ == "__main__":  # pragma: no cover - manual smoke run
+    sys.exit(run(executable_path(Path(sys.argv[1])), watcher_script({}), emit=_print_event,
+                 environment=child_environment(Path(sys.argv[1]))))

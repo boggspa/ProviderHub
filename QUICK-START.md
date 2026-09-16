@@ -116,6 +116,22 @@ this mode, and the gateway credential is written into the Codex config for
 the session instead of being fetched by the helper command; it is removed
 when the previous setup is restored.
 
+**Colour the power slider by provider** (off by default) makes Provider Hub
+start Codex / ChatGPT itself with a Chromium DevTools pipe and install a small
+watcher in its windows that colours the model picker's power slider with the
+selected model's provider accent, the same hues as the Providers page. Ultra
+keeps its purple. Only Provider Hub holds the pipe; nothing listens on a
+port. The route is unsupported by OpenAI: the slider's colour is an app-wide
+design token, so if an update changes the picker the colour falls back to
+blue and nothing else changes, and a Codex self-relaunch after an update runs
+without the colour until the next launch from Provider Hub. Because Codex is
+then a child of Provider Hub, macOS attributes its privacy prompts
+(microphone, camera, calendars, reminders, location, folders, automation)
+to Provider Hub, and the pipe is a full control channel into Codex that only
+the helper holds. The helper stays until Codex quits and outlives Provider
+Hub; if the helper itself is killed, Codex treats the closed pipe as a
+request to quit.
+
 **Offer apply_patch to catalogue models** (off by default) advertises Codex's
 own `apply_patch` editing tool for every model in the catalogue. Codex draws
 its close-out diff card (the "Edited N files" card with per-file `+N -N`

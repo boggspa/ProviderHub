@@ -47,6 +47,7 @@ from gemini_provider import GeminiError, GeminiStreamAdapter, translate_response
 from protocol import (StreamTranslator, apply_mapping_options, apply_mistral_prefix, compact_conversation, compact_threshold, estimated_tokens, mapping_options_for, reported_input_tokens, TokenCalibration, validate_mistral_roles,
                       model_catalog, resolve_model, rewrite_context_reminders, translate_request, translate_response, _effective_context)
 from responses_native import ResponseOwnership, handle_responses, NATIVE_PROVIDERS
+from codex_accent import bridge_command as codex_accent_bridge
 from codex_catalogue import catalogue_digest, choices as codex_choices, launch_settings as codex_launch_settings
 from codex_profile import CodexProfile
 from codex_runtime import qualify_runtime, runtime_signature
@@ -941,15 +942,25 @@ def catalogue_command_result(settings, root, lifecycle):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=["inspect", "validate", "save", "discover", "refresh-all", "prepare-launch", "activate", "restore", "serve", "codex-status", "codex-prepare", "codex-activate", "codex-restore"])
+    parser.add_argument("command", choices=["inspect", "validate", "save", "discover", "refresh-all", "prepare-launch", "activate", "restore", "serve", "codex-status", "codex-prepare", "codex-activate", "codex-restore", "codex-accent"])
     parser.add_argument("--provider", choices=list(PROVIDERS), default="mistral")
     parser.add_argument("--parent-pipe", action="store_true")
+    parser.add_argument("--app", help="App bundle to launch for codex-accent")
     args = parser.parse_args()
     root = state_root()
     bootstrap_metadata(root)
     if args.command == "serve":
         serve(root, args.parent_pipe)
         return
+    if args.command == "codex-accent":
+        # Long-lived: launches the desktop app with a DevTools pipe, tints
+        # its power slider per model, and exits when the app does. Events are
+        # JSON lines on stdout; the exit status is the app's.
+        if not args.app:
+            raise BridgeError("codex-accent needs --app <bundle path>.")
+        settings = load_settings(root)
+        private_directory(root)
+        sys.exit(codex_accent_bridge(args.app, settings, cached_catalogue(settings, root), log_path=root / "codex-accent.log"))
     if args.command == "inspect":
         result = inspect_state(root)
         settings = load_settings(root)

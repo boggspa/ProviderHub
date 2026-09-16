@@ -57,6 +57,9 @@ final class BridgeModel: ObservableObject {
     var catalogueRefreshTask: Task<Void, Never>?
     @Published var claudeInstalled = false
     @Published var claudeRunning = false
+    /// The codex-accent helper holding the DevTools pipe into a Codex session
+    /// launched with the power-slider colour switch on.
+    var codexAccentProcess: Process?
     @Published var profileActive = false
     @Published var recoveryNeeded = false
     @Published var codexModels: [CodexModelOption] = []
@@ -290,6 +293,7 @@ final class BridgeModel: ObservableObject {
         mine.codex_apply_patch_all = savedSettings.codex_apply_patch_all
         mine.codex_apply_patch = savedSettings.codex_apply_patch
         mine.codex_apply_patch_exclude = savedSettings.codex_apply_patch_exclude
+        mine.codex_accent_slider = savedSettings.codex_accent_slider
         if mine == savedSettings { return .codexOnly }
         var prefsOnly = mine
         prefsOnly.auto_stop = savedSettings.auto_stop
@@ -304,6 +308,7 @@ final class BridgeModel: ObservableObject {
             || settings.codex_apply_patch_all != savedSettings.codex_apply_patch_all
             || settings.codex_apply_patch != savedSettings.codex_apply_patch
             || settings.codex_apply_patch_exclude != savedSettings.codex_apply_patch_exclude
+            || settings.codex_accent_slider != savedSettings.codex_accent_slider
         return codexChanged ? .mixed : .claudeRouting
     }
     var routeOptions: [String] {

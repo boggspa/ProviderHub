@@ -76,20 +76,75 @@ extension BridgeModel {
             readCodexState(try await command("codex-activate"))
             codexRecoveryNeeded = true; codexProfileActive = true
             observedOwnedCodex = false; codexLaunchTime = Date()
-            let configuration = NSWorkspace.OpenConfiguration()
-            configuration.activates = true
-            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-                NSWorkspace.shared.openApplication(at: URL(fileURLWithPath: appPath), configuration: configuration) { _, error in
-                    if let error { continuation.resume(throwing: error) } else { continuation.resume() }
+            if savedSettings.codex_accent_slider {
+                try await launchCodexWithAccentBridge(appPath: appPath)
+                tell("Codex / ChatGPT is opening with your provider catalogue and a provider-coloured power slider. Its previous configuration will be restored after it quits.")
+            } else {
+                let configuration = NSWorkspace.OpenConfiguration()
+                configuration.activates = true
+                try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                    NSWorkspace.shared.openApplication(at: URL(fileURLWithPath: appPath), configuration: configuration) { _, error in
+                        if let error { continuation.resume(throwing: error) } else { continuation.resume() }
+                    }
                 }
+                tell("Codex / ChatGPT is opening with your provider catalogue. Its previous configuration will be restored after it quits.")
             }
-            tell("Codex / ChatGPT is opening with your provider catalogue. Its previous configuration will be restored after it quits.")
         } catch {
             updateCodexRunning()
             if codexRecoveryNeeded && !codexRunning {
                 if (try? await command("codex-restore")) != nil { codexRecoveryNeeded = false; codexProfileActive = false }
             }
             tell(error.localizedDescription, error: true)
+        }
+    }
+
+    /// Start the desktop app through the worker's codex-accent helper, which
+    /// holds a DevTools pipe into the app and tints the power slider per model.
+    /// The helper lives as long as the app and is never terminated from here:
+    /// closing its pipe is the app's cue to quit.
+    func launchCodexWithAccentBridge(appPath: String) async throws {
+        guard let python else { throw WorkerError(message: "Provider Hub needs Python 3.11 or newer for the accent helper.") }
+        if let existing = codexAccentProcess, existing.isRunning {
+            throw WorkerError(message: "A previous Codex accent helper is still running. Quit Codex / ChatGPT, then launch again.")
+        }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: python)
+        process.arguments = [helper.path, "codex-accent", "--app", appPath]
+        process.environment = workerEnvironment
+        let output = Pipe(), errors = Pipe()
+        process.standardOutput = output; process.standardError = errors
+        process.standardInput = FileHandle.nullDevice
+        try process.run()
+        codexAccentProcess = process
+        // The helper reports the app's spawn as a JSON line; an early exit
+        // means the app never started (or handed off to a running copy).
+        let launched = await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+            let lock = NSLock()
+            var finished = false
+            func finish(_ value: Bool) {
+                lock.lock(); defer { lock.unlock() }
+                if !finished { finished = true; continuation.resume(returning: value) }
+            }
+            DispatchQueue.global(qos: .userInitiated).async {
+                var buffer = Data()
+                while true {
+                    let chunk = output.fileHandleForReading.availableData
+                    if chunk.isEmpty { finish(false); return }
+                    buffer.append(chunk)
+                    if String(decoding: buffer, as: UTF8.self).contains("\"launched\"") { finish(true); return }
+                }
+            }
+            DispatchQueue.global().asyncAfter(deadline: .now() + 20) { finish(false) }
+        }
+        DispatchQueue.global(qos: .utility).async {
+            // Drain the helper's remaining output so it never blocks on a full pipe.
+            _ = output.fileHandleForReading.readDataToEndOfFile()
+            _ = errors.fileHandleForReading.readDataToEndOfFile()
+        }
+        guard launched else {
+            if process.isRunning { process.terminate() }
+            codexAccentProcess = nil
+            throw WorkerError(message: "Codex / ChatGPT did not start through the accent helper. Turn the power-slider colour switch off to launch it the usual way.")
         }
     }
 
@@ -245,6 +300,14 @@ struct CodexPage: View {
                 Text(model.settings.codex_apply_patch_all
                      ? "Codex offers its apply_patch editing tool to every model in the catalogue\(applyPatchExclusionNote). Edits made with it feed the close-out diff card, its per-file rows, Undo and Review. A model that keeps failing the patch format falls back to shell edits, which the card does not show. Save, then relaunch Codex."
                      : "Off: catalogue models edit through the shell, so Codex shows no close-out diff card, Undo or Review for their turns.\(applyPatchListNote) Turn on to offer apply_patch to every catalogue model.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Toggle(isOn: $model.settings.codex_accent_slider) {
+                    Text("Colour the power slider by provider").font(.system(size: 13, weight: .medium))
+                }
+                .toggleStyle(.switch).disabled(model.busy)
+                Text(model.settings.codex_accent_slider
+                     ? "Provider Hub starts Codex / ChatGPT itself with a DevTools pipe and installs a small watcher that colours the power slider with the selected model’s provider accent; Ultra keeps its purple. Only Provider Hub holds the pipe; nothing listens on a port. Unsupported by OpenAI: an app update that changes the picker switches the colour off with no other effect, and a Codex self-relaunch after an update runs without it until the next launch from here. In this mode macOS attributes Codex’s privacy prompts (microphone, camera, calendars, reminders, location, folders, automation) to Provider Hub, and the pipe is a full control channel into Codex that only this helper holds. The helper stays until Codex quits and outlives Provider Hub; if the helper itself is killed, Codex treats the closed pipe as a request to quit. Save, then launch."
+                     : "Off: Codex / ChatGPT opens the usual way and the power slider keeps its standard blue. Turn on to tint it with each model’s provider accent, the same hues as the Providers page.")
                     .font(.caption).foregroundStyle(.secondary)
                 HStack {
                     Button(model.codexProfileActive && model.codexRunning ? "Show Codex / ChatGPT" : "Launch Codex / ChatGPT") { Task { await model.launchCodex() } }

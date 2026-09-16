@@ -62,6 +62,10 @@ class SettingsMigrationTests(unittest.TestCase):
                 normalize({"claude_catalogue": bad}, SLOTS, "mistral-test")
         with self.assertRaises(ValueError):
             normalize({"claude_code_settings": "on"}, SLOTS, "mistral-test")
+        self.assertIs(base["codex_accent_slider"], False)
+        self.assertIs(normalize({"codex_accent_slider": True}, SLOTS, "mistral-test")["codex_accent_slider"], True)
+        with self.assertRaises(ValueError):
+            normalize({"codex_accent_slider": 1}, SLOTS, "mistral-test")
 
     def test_claude_row_ids_embed_the_tier_model_and_stay_unique(self):
         self.assertEqual(claude_row_id("mistral/mistral-vibe-cli-latest", "sonnet"), "claude-sonnet-5-mistral-vibe-cli-latest")

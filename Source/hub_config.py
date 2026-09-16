@@ -276,7 +276,8 @@ def defaults(slots, vibe_model: str, port: int = 11436) -> dict:
             "auto_stop": True, "auto_mode": False, "codex_model": None,
             "codex_catalogue": None, "codex_chatgpt_account": False, "codex_apply_patch_all": False,
             "claude_features": {key: False for key in CLAUDE_FEATURE_KEYS},
-            "claude_catalogue": None, "claude_code_settings": True, "claude_workflows": False}
+            "claude_catalogue": None, "claude_code_settings": True, "claude_workflows": False,
+            "codex_accent_slider": False}
 
 
 def normalize(value: dict, slots, vibe_model: str, port: int = 11436) -> dict:
@@ -379,9 +380,11 @@ def normalize(value: dict, slots, vibe_model: str, port: int = 11436) -> dict:
     # ~/.claude/settings.json while the Claude profile is active.
     # claude_workflows: also enable Claude Code dynamic workflows there, which
     # the Ultracode effort level needs.
+    # codex_accent_slider: launch Codex through the DevTools-pipe helper that
+    # tints its power slider per model (see codex_accent).
     for key, fallback in (("auto_stop", True), ("auto_mode", False), ("codex_chatgpt_account", False),
                           ("codex_apply_patch_all", False), ("claude_code_settings", True),
-                          ("claude_workflows", False)):
+                          ("claude_workflows", False), ("codex_accent_slider", False)):
         requested = value.get(key, fallback)
         if type(requested) is not bool:
             raise ValueError(f"{key} must be true or false.")

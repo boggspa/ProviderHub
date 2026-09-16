@@ -1,0 +1,318 @@
+"""Codex power-slider accent helper: offline, against a fake browser only."""
+import io
+import json
+import os
+from pathlib import Path
+import plistlib
+import stat
+import subprocess
+import sys
+import tempfile
+import unittest
+from unittest import mock
+
+from bridge_core import SLOTS
+import codex_accent
+from codex_accent import (PROPERTY, AccentBridge, DevToolsPipe, accent_map, already_running, bridge_command,
+                          child_environment, executable_path, launch, run, watcher_script)
+from hub_config import defaults
+
+
+def fixture():
+    settings = defaults(SLOTS, "mistral-medium-latest", 11438)
+    settings["codex_model"] = "kimi/kimi-for-coding"
+    inventory = {"models": [
+        {"id": "kimi/kimi-for-coding", "display_name": "Kimi for Coding", "provider_id": "kimi",
+         "context": 256000, "tools": True, "vision": False, "reasoning": True, "effort_modes": ["low", "high"],
+         "presentation": {"displayProvider": "Kimi", "hueKey": "kimi", "accent": "#0073e6"}},
+        {"id": "ollama/qwen3:cloud", "display_name": "Qwen 3", "provider_id": "ollama",
+         "context": 131072, "tools": True, "vision": False,
+         "presentation": {"displayProvider": "Alibaba", "hueKey": "alibaba", "accent": "#8C52EF"}},
+        {"id": "grok/grok-4.6", "display_name": "Grok 4.6", "provider_id": "grok",
+         "context": 500000, "tools": True, "vision": True,
+         "presentation": {"displayProvider": "Grok", "accent": "not-a-colour"}},
+    ]}
+    return settings, inventory
+
+
+def demo_bundle(directory: Path, body: str = "#!/bin/sh\nexit 0\n", environment: dict | None = None) -> Path:
+    app = directory / "Demo.app"
+    (app / "Contents" / "MacOS").mkdir(parents=True)
+    info = {"CFBundleExecutable": "Demo"}
+    if environment is not None:
+        info["LSEnvironment"] = environment
+    with (app / "Contents" / "Info.plist").open("wb") as stream:
+        plistlib.dump(info, stream)
+    binary = app / "Contents" / "MacOS" / "Demo"
+    binary.write_text(body)
+    binary.chmod(binary.stat().st_mode | stat.S_IXUSR)
+    return app
+
+
+class AccentMapTests(unittest.TestCase):
+    def test_labels_map_to_presentation_accents_and_bad_colours_are_skipped(self):
+        settings, inventory = fixture()
+        accents = accent_map(settings, inventory)
+        self.assertEqual(accents, {"Kimi for Coding": "#0073E6", "Qwen 3": "#8C52EF"})
+
+    def test_watcher_embeds_lowercased_labels_the_property_and_the_origin_guard(self):
+        script = watcher_script({"Kimi for Coding": "#0073E6", "Qwen 3": "#8C52EF"})
+        self.assertIn('"kimi for coding": "#0073E6"', script)
+        self.assertIn('"qwen 3": "#8C52EF"', script)
+        self.assertIn(PROPERTY, script)
+        self.assertIn("window.__providerHubAccent", script)
+        self.assertIn('[data-explicit-model="true"]', script)
+        self.assertIn("window !== window.top", script)
+        self.assertIn(r"/^app:\/\/-\//", script)
+        self.assertNotIn("__HUB_", script)
+
+
+class EnvironmentTests(unittest.TestCase):
+    def test_child_environment_is_an_allowlist_plus_the_bundle_lsenvironment(self):
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(os.environ, {
+                "HOME": "/Users/demo", "USER": "demo", "PATH": "/opt/homebrew/bin:/usr/bin",
+                "OPENAI_API_KEY": "sk-secret", "NODE_OPTIONS": "--require evil", "ELECTRON_RUN_AS_NODE": "1",
+                "MISTRAL_BRIDGE_TOKEN": "t", "CODEX_HOME": "/elsewhere", "PYTHONPATH": "/x", "TMPDIR": "/tmp/demo/"}):
+            plain = child_environment()
+            self.assertEqual(plain["HOME"], "/Users/demo")
+            self.assertEqual(plain["TMPDIR"], "/tmp/demo/")
+            self.assertEqual(plain["PATH"], "/usr/bin:/bin:/usr/sbin:/sbin")
+            for key in ("OPENAI_API_KEY", "NODE_OPTIONS", "ELECTRON_RUN_AS_NODE", "MISTRAL_BRIDGE_TOKEN", "CODEX_HOME", "PYTHONPATH"):
+                self.assertNotIn(key, plain)
+            app = demo_bundle(Path(directory), environment={"MallocNanoZone": "0"})
+            self.assertEqual(child_environment(app)["MallocNanoZone"], "0")
+            self.assertNotIn("MallocNanoZone", child_environment(Path(directory) / "Missing.app"))
+
+
+class FakeTransport(DevToolsPipe):
+    """Records sends and lets a test feed replies without descriptors."""
+
+    def __init__(self):
+        super().__init__(-1, -1)
+        self.sent = []
+
+    def send(self, method, params=None, session_id=None):
+        self.next_id += 1
+        self.sent.append({"id": self.next_id, "method": method, "params": params or {}, "sessionId": session_id})
+        return self.next_id
+
+
+class BridgeTests(unittest.TestCase):
+    def test_pipe_frames_nul_delimited_json_and_reports_eof(self):
+        command_read, command_write = os.pipe()
+        event_read, event_write = os.pipe()
+        try:
+            pipe = DevToolsPipe(event_read, command_write)
+            identifier = pipe.send("Target.getTargets", session_id="abc")
+            raw = os.read(command_read, 4096)
+            self.assertTrue(raw.endswith(b"\0"))
+            self.assertEqual(json.loads(raw[:-1]), {"id": identifier, "method": "Target.getTargets", "params": {}, "sessionId": "abc"})
+            os.write(event_write, b'{"id": 1, "result": {"a": 1}}\0{"method": "Target.targetCreated", "params": {}}\0{"partial":')
+            self.assertEqual([m.get("id", m.get("method")) for m in pipe.poll(1.0)], [1, "Target.targetCreated"])
+            os.write(event_write, b' 1}\0not json\0')
+            self.assertEqual(pipe.poll(1.0), [{"partial": 1}])
+            self.assertEqual(pipe.poll(0.05), [])
+            os.close(event_write)
+            with self.assertRaises(EOFError):
+                pipe.poll(1.0)
+        finally:
+            for fd in (command_read, command_write, event_read):
+                os.close(fd)
+
+    def test_bridge_auto_attaches_to_app_pages_only_and_injects_once_per_session(self):
+        transport = FakeTransport()
+        events = []
+        bridge = AccentBridge(transport, "SCRIPT", events.append)
+        bridge.start()
+        self.assertEqual([m["method"] for m in transport.sent], ["Target.setAutoAttach"])
+        self.assertEqual(transport.sent[0]["params"], {"autoAttach": True, "waitForDebuggerOnStart": False, "flatten": True, "filter": [{"type": "page"}]})
+        bridge.handle({"id": transport.sent[0]["id"], "result": {}})
+        # The app's own window gets the watcher.
+        bridge.handle({"method": "Target.attachedToTarget", "params": {"sessionId": "S1", "targetInfo": {"targetId": "page-1", "type": "page", "url": "app://-/index.html?initialRoute=/"}}})
+        injected = [m for m in transport.sent if m["sessionId"] == "S1"]
+        self.assertEqual([m["method"] for m in injected], ["Page.enable", "Page.addScriptToEvaluateOnNewDocument", "Runtime.evaluate"])
+        self.assertEqual(injected[1]["params"], {"source": "SCRIPT", "runImmediately": True})
+        bridge.handle({"id": injected[2]["id"], "result": {"result": {"type": "undefined"}}})
+        self.assertEqual(events[-1], {"event": "injected", "session": "S1"})
+        # A repeated attach notification for the same session is a no-op.
+        bridge.handle({"method": "Target.attachedToTarget", "params": {"sessionId": "S1", "targetInfo": {"targetId": "page-1", "type": "page", "url": "app://-/index.html"}}})
+        self.assertEqual(sum(1 for m in transport.sent if m["method"] == "Page.addScriptToEvaluateOnNewDocument"), 1)
+        # A browser-panel window on an outside site and a worker are detached again.
+        bridge.handle({"method": "Target.attachedToTarget", "params": {"sessionId": "S2", "targetInfo": {"targetId": "page-2", "type": "page", "url": "https://example.com/"}}})
+        bridge.handle({"method": "Target.attachedToTarget", "params": {"sessionId": "S3", "targetInfo": {"targetId": "w", "type": "service_worker", "url": "app://-/sw.js"}}})
+        detached = [m for m in transport.sent if m["method"] == "Target.detachFromTarget"]
+        self.assertEqual([m["params"]["sessionId"] for m in detached], ["S2", "S3"])
+        self.assertEqual(bridge.injected, {"S1"})
+        # A fresh blank window is accepted (the document arrives later) and an evaluate error is reported.
+        bridge.handle({"method": "Target.attachedToTarget", "params": {"sessionId": "S4", "targetInfo": {"targetId": "page-4", "type": "page", "url": "about:blank"}}})
+        evaluate = [m for m in transport.sent if m["sessionId"] == "S4" and m["method"] == "Runtime.evaluate"][0]
+        bridge.handle({"id": evaluate["id"], "result": {"exceptionDetails": {"text": "boom"}}})
+        self.assertEqual(events[-1], {"event": "error", "stage": "evaluate", "message": "boom"})
+        bridge.handle({"method": "Target.detachedFromTarget", "params": {"sessionId": "S4"}})
+        self.assertEqual(bridge.injected, {"S1"})
+        bridge.handle({"id": 999, "result": {}})  # unknown ids are ignored
+
+    def test_bridge_falls_back_to_an_unfiltered_auto_attach(self):
+        transport = FakeTransport()
+        events = []
+        bridge = AccentBridge(transport, "SCRIPT", events.append)
+        bridge.start()
+        bridge.handle({"id": transport.sent[0]["id"], "error": {"code": -32602, "message": "Invalid parameters"}})
+        self.assertEqual(transport.sent[1]["method"], "Target.setAutoAttach")
+        self.assertNotIn("filter", transport.sent[1]["params"])
+        bridge.handle({"id": transport.sent[1]["id"], "error": {"code": -32601, "message": "no"}})
+        self.assertEqual(events, [{"event": "error", "stage": "autoattach-unfiltered", "message": "no"}])
+
+
+FAKE_BROWSER = r'''
+import json, os, sys
+buffer = b""
+def send(message):
+    os.write(4, json.dumps(message).encode() + b"\0")
+seen = []
+while True:
+    chunk = os.read(3, 65536)
+    if not chunk:
+        sys.exit(3)
+    buffer += chunk
+    while b"\0" in buffer:
+        raw, buffer = buffer.split(b"\0", 1)
+        message = json.loads(raw)
+        seen.append(message["method"])
+        if message["method"] == "Target.setAutoAttach":
+            send({"id": message["id"], "result": {}})
+            send({"method": "Target.attachedToTarget", "params": {"sessionId": "S1", "targetInfo": {"targetId": "T1", "type": "page", "url": "app://-/index.html"}}})
+        elif message["method"] == "Runtime.evaluate":
+            with open(sys.argv[1], "w") as stream:
+                json.dump({"argv": sys.argv[2:], "script": message["params"]["expression"], "seen": seen,
+                           "env": {k: v for k, v in os.environ.items() if k in ("OPENAI_API_KEY", "HOME", "DEMO_LS")},
+                           "stdout_is_null": os.fstat(1).st_rdev == os.stat(os.devnull).st_rdev}, stream)
+            send({"id": message["id"], "result": {"result": {"type": "undefined"}}})
+            sys.exit(7)
+        else:
+            send({"id": message["id"], "result": {}})
+'''
+
+
+class LaunchTests(unittest.TestCase):
+    def test_run_launches_over_a_pipe_injects_and_returns_the_exit_status(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            (base / "fake_browser.py").write_text(FAKE_BROWSER)
+            marker = base / "seen.json"
+            wrapper = base / "browser.sh"
+            wrapper.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{base / "fake_browser.py"}" "{marker}" "$@"\n')
+            wrapper.chmod(wrapper.stat().st_mode | stat.S_IXUSR)
+            events = []
+            environment = dict(child_environment(), OPENAI_API_KEY="leak-check", DEMO_LS="1")
+            status = run(wrapper, watcher_script({"Kimi for Coding": "#0073E6"}), emit=events.append,
+                         environment=environment, poll_interval=0.05)
+            self.assertEqual(status, 7)
+            self.assertEqual([event["event"] for event in events], ["launched", "injected", "exited"])
+            record = json.loads(marker.read_text())
+            self.assertEqual(record["argv"], ["--remote-debugging-pipe"])
+            self.assertIn('"kimi for coding": "#0073E6"', record["script"])
+            self.assertEqual(record["seen"][:2], ["Target.setAutoAttach", "Page.enable"])
+            self.assertEqual(record["env"], {"OPENAI_API_KEY": "leak-check", "HOME": os.environ["HOME"], "DEMO_LS": "1"})
+            self.assertTrue(record["stdout_is_null"])
+
+    def test_run_survives_a_failing_status_sink(self):
+        with tempfile.TemporaryDirectory() as directory:
+            script = Path(directory) / "exit.sh"
+            script.write_text("#!/bin/sh\nexit 5\n")
+            script.chmod(script.stat().st_mode | stat.S_IXUSR)
+
+            def broken(event):
+                raise BrokenPipeError("stdout gone")
+
+            self.assertEqual(run(script, "SCRIPT", emit=broken, environment=child_environment(), poll_interval=0.05), 5)
+
+    def test_launch_closes_its_copies_of_the_child_ends(self):
+        with tempfile.TemporaryDirectory() as directory:
+            script = Path(directory) / "exit.sh"
+            script.write_text("#!/bin/sh\nexit 0\n")
+            script.chmod(script.stat().st_mode | stat.S_IXUSR)
+            pid, pipe = launch(script, environment=child_environment())
+            self.assertEqual(os.waitpid(pid, 0)[0], pid)
+            with self.assertRaises(EOFError):
+                pipe.poll(2.0)
+            pipe.close()
+
+    def test_launch_hands_the_child_fds_3_and_4_even_when_the_pipes_land_there(self):
+        # A fresh process gets 3 and 4 from os.pipe(); dup2(3, 3) would keep
+        # close-on-exec set and the child would see them closed.
+        with tempfile.TemporaryDirectory() as directory:
+            script = Path(directory) / "fds.sh"
+            marker = Path(directory) / "fds.txt"
+            script.write_text(f'#!/bin/sh\nprintf "%s" "$1" >&4\nread line <&3\nprintf "%s|%s" "$line" "$1" > "{marker}"\n')
+            script.chmod(script.stat().st_mode | stat.S_IXUSR)
+            pid, pipe = launch(script, environment=child_environment())
+            self.assertGreaterEqual(pipe.read_fd, 10)
+            self.assertGreaterEqual(pipe.write_fd, 10)
+            os.write(pipe.write_fd, b"hello\n")
+            self.assertEqual(os.waitpid(pid, 0)[0], pid)
+            self.assertEqual(marker.read_text(), "hello|--remote-debugging-pipe")
+            self.assertEqual(os.read(pipe.read_fd, 100), b"--remote-debugging-pipe")
+            pipe.close()
+
+    def test_launch_puts_the_app_in_its_own_session(self):
+        with tempfile.TemporaryDirectory() as directory:
+            script = Path(directory) / "sid.sh"
+            marker = Path(directory) / "sid.txt"
+            script.write_text(f'#!/bin/sh\n/bin/ps -o pgid= -p $$ > "{marker}"\n')
+            script.chmod(script.stat().st_mode | stat.S_IXUSR)
+            pid, pipe = launch(script, environment=child_environment())
+            self.assertEqual(os.waitpid(pid, 0)[0], pid)
+            pipe.close()
+            self.assertEqual(int(marker.read_text().strip()), pid)
+            self.assertNotEqual(os.getpgrp(), pid)
+
+    def test_already_running_matches_the_binary_command_line(self):
+        child = subprocess.Popen(["/bin/sleep", "30"])
+        try:
+            self.assertTrue(already_running(Path("/bin/sleep")))
+        finally:
+            child.terminate()
+            child.wait()
+        self.assertFalse(already_running(Path("/bin/slee")))  # a prefix of a running command is no match
+        self.assertFalse(already_running(Path("/nonexistent/Provider Hub Test.app/Contents/MacOS/Nope")))
+
+    def test_bridge_command_refuses_a_running_app_logs_and_keeps_going_without_stdout(self):
+        settings, inventory = fixture()
+        with tempfile.TemporaryDirectory() as directory:
+            app = demo_bundle(Path(directory))
+            events = []
+            log = Path(directory) / "codex-accent.log"
+            with mock.patch.object(codex_accent, "already_running", lambda path: True):
+                self.assertEqual(bridge_command(str(app), settings, inventory, emit=events.append, log_path=log), 2)
+                self.assertIn("already running", log.read_text())
+                self.assertEqual(events, [{"event": "error", "stage": "launch", "message": "The app is already running; quit it first."}])
+                closed = io.StringIO()
+                closed.close()
+                with mock.patch.object(sys, "stdout", closed):
+                    self.assertEqual(bridge_command(str(app), settings, inventory, log_path=log), 2)
+            events.clear()
+            with mock.patch.object(codex_accent, "already_running", lambda path: False):
+                self.assertEqual(bridge_command(str(app), settings, inventory, emit=events.append, log_path=log, poll_interval=0.05), 0)
+            self.assertEqual(events[0], {"event": "accents", "count": 2})
+            self.assertEqual([event["event"] for event in events[1:]], ["launched", "exited"])
+            self.assertEqual(len(log.read_text().splitlines()), 3)
+
+    def test_executable_path_reads_the_bundle_plist(self):
+        with tempfile.TemporaryDirectory() as directory:
+            app = Path(directory) / "Demo.app"
+            (app / "Contents" / "MacOS").mkdir(parents=True)
+            with self.assertRaises(ValueError):
+                executable_path(app)
+            with (app / "Contents" / "Info.plist").open("wb") as stream:
+                plistlib.dump({"CFBundleExecutable": "Demo"}, stream)
+            with self.assertRaises(ValueError):
+                executable_path(app)
+            binary = app / "Contents" / "MacOS" / "Demo"
+            binary.write_text("#!/bin/sh\n")
+            binary.chmod(binary.stat().st_mode | stat.S_IXUSR)
+            self.assertEqual(executable_path(app), binary)
+
+
+if __name__ == "__main__":
+    unittest.main()
