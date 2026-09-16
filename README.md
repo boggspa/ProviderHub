@@ -16,7 +16,7 @@ Provider Hub Preview retains the Preview label while additional provider account
 8. Quitting a launched desktop app restores that harness's prior selection. The shared gateway stays available while either owned harness remains open and normally stops after both have closed. The menu bar app remains available.
 9. While one desktop harness is live, you can still change the *other* harness's model selection (e.g., edit the Codex catalogue while Claude is running). Save writes the change without stopping the gateway; launching the second app briefly restarts the gateway so both share the new snapshot, and the running app reconnects automatically. Changing shared provider settings (keys, regions, port, branding) while either app is live still requires quitting both desktop apps first.
 
-Build from the repository root to create `Provider Hub Preview.app` alongside the stable Mistral app. The local `main` branch has moved past 0.5.0 and 0.5.1: 0.5.3 build 15 is the current notarized distribution, matching the in-tree build. The repository remains local-only, with no GitHub remote. A shorter recipient guide is in `QUICK-START.md`.
+Build from the repository root to create `Provider Hub Preview.app` alongside the stable Mistral app. The local `main` branch is now at 0.5.3 build 15, the current notarized distribution, matching the in-tree build. The repository remains local-only, with no GitHub remote. A shorter recipient guide is in `QUICK-START.md`.
 
 **Provider connections**
 
@@ -164,6 +164,6 @@ Use Python 3.11 or newer for source tests. Building requires Apple's command-lin
 `VERIFICATION.md` records the complete test matrix and its limits; `HARNESS-OPTIONS.md` contains the Codex-specific evidence. The stable Mistral Bridge 0.2 baseline completed a live Claude read → edit → read cycle before the provider expansion. For 0.4.0, all six translated providers passed mocked JSON and streaming function-tool cycles, including Cerebras encrypted-thinking replay. The installed Codex engine completed live disposable read → edit → read cycles on both `ollama/deepseek-v4-flash:cloud` and `cerebras/gpt-oss-120b`. Each cycle made three successful HTTP 200 requests; the engine reported 1,048,576 and 131,072 context tokens respectively. These live results qualify those exact routes and account states only. The user's normal Codex GUI/configuration has not been switched, and no xAI key was available for live Grok qualification.
 
 
-**0.5.0 qualification**
+**Qualification**
 
 All 226 automated tests pass under the bundled Python runtime. Live, disposable read/edit/read cycles passed through both Messages and streaming Responses for `openrouter/cohere/north-mini-code:free` and `gemini/gemini-3.8-flash`. Gemini’s first Responses run encountered a provider limit after file verification; a paced retry completed successfully. `qwen-token-plan/qwen3.8-max` reached the intended subscription endpoint in both formats but returned HTTP 429 for exhausted weekly quota. Qwen’s live tool cycle remains unverified until quota returns. See `VERIFICATION.md` and the metadata-only live receipts.
