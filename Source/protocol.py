@@ -848,13 +848,104 @@ def compact_threshold(context, options=None, *, reserve_output=None) -> int | No
     return threshold
 
 
+def _tool_use_ids(message):
+    content = message.get("content") if isinstance(message, dict) else None
+    if not (isinstance(message, dict) and message.get("role") == "assistant" and isinstance(content, list)):
+        return set()
+    return {block["id"] for block in content
+            if isinstance(block, dict) and block.get("type") == "tool_use" and block.get("id")}
+
+
+def _tool_result_ids(message):
+    content = message.get("content") if isinstance(message, dict) else None
+    if not (isinstance(message, dict) and message.get("role") == "user" and isinstance(content, list)):
+        return set()
+    return {block["tool_use_id"] for block in content
+            if isinstance(block, dict) and block.get("type") == "tool_result" and block.get("tool_use_id")}
+
+
+def conversation_units(messages):
+    """Group messages into units that must survive or fall together.
+
+    An assistant message that issues tool calls forms one unit with the
+    messages that answer those calls (tool results, plus any user text the
+    harness interleaves before the last result). Every other message is a
+    unit of its own. Dropping whole units keeps every tool call paired with
+    its result, which chat-completions upstreams such as Mistral require.
+    """
+    units = []
+    index = 0
+    while index < len(messages):
+        message = messages[index]
+        pending = set(_tool_use_ids(message))
+        unit = [message]
+        index += 1
+        while pending and index < len(messages):
+            candidate = messages[index]
+            if _tool_use_ids(candidate):
+                break
+            answered = _tool_result_ids(candidate)
+            if not answered and index + 1 < len(messages) and not (pending & _tool_result_ids(messages[index + 1])):
+                break
+            unit.append(candidate)
+            pending -= answered
+            index += 1
+        units.append(unit)
+    return units
+
+
+def _plain_user_unit(unit):
+    return (len(unit) == 1 and isinstance(unit[0], dict) and unit[0].get("role") == "user"
+            and not _tool_result_ids(unit[0]))
+
+
+def _as_blocks(content):
+    if isinstance(content, str):
+        return [{"type": "text", "text": content}] if content else []
+    return list(content) if isinstance(content, list) else []
+
+
+def _user_with_note(message, note, prefix=None):
+    """One user message carrying ``prefix``'s content, then ``note``, then ``message``."""
+    merged = dict(message)
+    head = prefix.get("content") if isinstance(prefix, dict) else None
+    body = message.get("content")
+    if isinstance(body, str) and (head is None or isinstance(head, str)):
+        merged["content"] = "\n\n".join(part for part in (head, note, body) if part)
+    else:
+        merged["content"] = _as_blocks(head) + [{"type": "text", "text": note}] + _as_blocks(body)
+    return merged
+
+
+def _append_note(message, note):
+    """``message`` with ``note`` added after its own content."""
+    merged = dict(message)
+    body = message.get("content")
+    if isinstance(body, str):
+        merged["content"] = "\n\n".join(part for part in (body, note) if part)
+    else:
+        merged["content"] = _as_blocks(body) + [{"type": "text", "text": note}]
+    return merged
+
+
+# Kept in front of a compacted tail only while it stays a small share of the
+# budget, so a huge opening paste cannot crowd out the recent turns.
+COMPACT_HEAD_SHARE = 0.25
+
+
 def compact_conversation(payload: dict, max_tokens: int, estimate=None) -> dict:
     """Compact conversation history to fit within max_tokens budget.
 
-    Strategy: Remove oldest messages first, preserving system prompt and most
-    recent context. Chronological order is preserved. Tool results whose tool
-    calls were dropped are removed as well so the remaining history still
-    forms complete tool cycles. Returns a new payload; the input is unchanged.
+    Strategy: keep the newest contiguous run of conversation units that fits
+    the budget and drop everything older, preserving the system prompt and
+    chronological order. Units bind an assistant tool call to its results
+    (see ``conversation_units``), so compaction never leaves a tool result
+    without its call or a call without its result. The opening user message
+    is pinned when it is small (it usually carries the task), and a short
+    user-role note marks the cut so the history still starts with a user
+    turn, which chat and Messages upstreams both require. The newest unit is
+    kept even when it does not fit on its own. Returns a new payload; the
+    input is unchanged.
     """
     import copy
     estimator = estimate or estimated_tokens
@@ -877,48 +968,115 @@ def compact_conversation(payload: dict, max_tokens: int, estimate=None) -> dict:
     if not non_system_messages:
         return result
 
-    # Add messages from newest to oldest until the budget is spent, then
-    # restore chronological order.
-    kept = []
-    kept_flags = [False] * len(non_system_messages)
-    for position in range(len(non_system_messages) - 1, -1, -1):
-        msg = non_system_messages[position]
-        trial = {"messages": ([system_message] if system_message else []) + kept + [msg],
+    units = conversation_units(non_system_messages)
+    system_prefix = [system_message] if system_message else []
+    head = units[0] if len(units) > 1 and _plain_user_unit(units[0]) else None
+    if head is not None and estimator({"messages": system_prefix + head, "system": result.get("system")}) > max_tokens * COMPACT_HEAD_SHARE:
+        head = None
+    candidates = units[1:] if head is not None else units
+    kept_units = []
+    for unit in reversed(candidates):
+        trial = {"messages": system_prefix + (head or []) + unit + [m for u in kept_units for m in u],
                  "system": result.get("system")}
-        if estimator(trial) <= max_tokens:
-            kept.append(msg)
-            kept_flags[position] = True
-        # Otherwise this message would exceed the limit; skip it and keep
-        # trying older (possibly smaller) messages.
-    kept.reverse()
+        if kept_units and estimator(trial) > max_tokens:
+            break
+        kept_units.insert(0, unit)
+    dropped = sum(len(unit) for unit in candidates[:len(candidates) - len(kept_units)])
+    kept = [message for unit in kept_units for message in unit]
+    if dropped:
+        note = (f"[Provider Hub removed {dropped} earlier message{'s' if dropped != 1 else ''} from this conversation "
+                "so it fits the model's context window.]")
+        if kept and isinstance(kept[0], dict) and kept[0].get("role") == "user":
+            kept[0] = _user_with_note(kept[0], note, prefix=head[0] if head else None)
+        else:
+            kept = [(_append_note(head[0], note) if head else {"role": "user", "content": note})] + kept
+    elif head is not None:
+        kept = head + kept
 
-    dropped_tool_ids = set()
-    for position, msg in enumerate(non_system_messages):
-        if kept_flags[position] or not isinstance(msg, dict):
-            continue
-        content = msg.get("content")
-        if isinstance(content, list):
-            for block in content:
-                if isinstance(block, dict) and block.get("type") == "tool_use" and block.get("id"):
-                    dropped_tool_ids.add(block["id"])
-    if dropped_tool_ids:
-        # A tool result without its call is meaningless to every upstream, so
-        # strip results for dropped calls, dropping messages left empty.
-        survivors = []
-        for msg in kept:
-            content = msg.get("content") if isinstance(msg, dict) else None
-            if isinstance(msg, dict) and msg.get("role") == "user" and isinstance(content, list):
-                remaining = [block for block in content
-                             if not (isinstance(block, dict) and block.get("type") == "tool_result"
-                                     and block.get("tool_use_id") in dropped_tool_ids)]
-                if not remaining:
-                    continue
-                msg["content"] = remaining
-            survivors.append(msg)
-        kept = survivors
+    kept_tool_ids = set()
+    for msg in kept:
+        kept_tool_ids |= _tool_use_ids(msg)
+    # A tool result without its call is meaningless to every upstream. Units
+    # keep cycles whole, so this only trims results whose call never existed
+    # in the history (or sat outside its unit), dropping messages left empty.
+    survivors = []
+    for msg in kept:
+        content = msg.get("content") if isinstance(msg, dict) else None
+        if isinstance(msg, dict) and msg.get("role") == "user" and isinstance(content, list):
+            remaining = [block for block in content
+                         if not (isinstance(block, dict) and block.get("type") == "tool_result"
+                                 and block.get("tool_use_id") not in kept_tool_ids)]
+            if not remaining:
+                continue
+            msg["content"] = remaining
+        survivors.append(msg)
+    kept = survivors
 
     result["messages"] = ([system_message] if system_message else []) + kept
     return result
+
+
+class TokenCalibration:
+    """Learn how far the byte-based estimate sits from a provider's count.
+
+    ``estimated_tokens`` is deliberately pessimistic (bytes / 3), which fits
+    prose and dense JSON but over-counts source code by roughly 40 percent on
+    Mistral's tokenizer. Every completed request reports the provider's real
+    input count for a payload whose estimate is known, so the gateway keeps
+    an exponential moving average of real / estimate per route and scales the
+    next estimate by it. The factor only ever lowers an estimate, clamps to
+    [FLOOR, 1.0] and keeps a small safety margin, so an unlearned route or a
+    JSON-heavy conversation stays exactly as conservative as before.
+    """
+
+    FLOOR = 0.5
+    MARGIN = 1.05
+    ALPHA = 0.3
+    MIN_REAL = 2000
+
+    def __init__(self):
+        import threading
+        self._lock = threading.Lock()
+        self._ratios = {}
+
+    def observe(self, route, estimate, real):
+        """Record one provider-reported input count against its estimate."""
+        if type(estimate) is not int or type(real) is not int or estimate <= 0 or real < self.MIN_REAL:
+            return None
+        ratio = real / estimate
+        with self._lock:
+            previous = self._ratios.get(route)
+            value = ratio if previous is None else previous + self.ALPHA * (ratio - previous)
+            self._ratios[route] = value
+        return value
+
+    def factor(self, route):
+        with self._lock:
+            value = self._ratios.get(route)
+        if value is None:
+            return 1.0
+        return min(1.0, max(self.FLOOR, value * self.MARGIN))
+
+    def calibrated(self, route, estimate):
+        return max(1, int(estimate * self.factor(route)))
+
+    def snapshot(self):
+        with self._lock:
+            return {route: round(value, 3) for route, value in self._ratios.items()}
+
+
+def reported_input_tokens(usage):
+    """Total prompt tokens the provider billed, including cached prefixes."""
+    if not isinstance(usage, dict):
+        return None
+    total = 0
+    seen = False
+    for key in ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"):
+        value = usage.get(key)
+        if type(value) is int and value >= 0:
+            total += value
+            seen = True
+    return total if seen else None
 
 
 def validate_mistral_roles(payload: dict) -> None:

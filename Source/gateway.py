@@ -44,7 +44,7 @@ from devin_agent import (DESCRIPTOR as DEVIN_DESCRIPTOR, DevinAgentError,
                          catalogue as devin_catalogue)
 from cerebras_replay import CerebrasReplayError, CerebrasStreamAdapter, sanitize_compacted_messages, sign_thinking, validate_messages
 from gemini_provider import GeminiError, GeminiStreamAdapter, translate_response as translate_gemini_response, _estimated_input_tokens as estimated_gemini_tokens
-from protocol import (StreamTranslator, apply_mapping_options, apply_mistral_prefix, compact_conversation, compact_threshold, estimated_tokens, mapping_options_for, validate_mistral_roles,
+from protocol import (StreamTranslator, apply_mapping_options, apply_mistral_prefix, compact_conversation, compact_threshold, estimated_tokens, mapping_options_for, reported_input_tokens, TokenCalibration, validate_mistral_roles,
                       model_catalog, resolve_model, rewrite_context_reminders, translate_request, translate_response, _effective_context)
 from responses_native import ResponseOwnership, handle_responses, NATIVE_PROVIDERS
 from codex_catalogue import catalogue_digest, choices as codex_choices, launch_settings as codex_launch_settings
@@ -75,6 +75,7 @@ class Runtime:
         self.lock = threading.Lock()
         self.semaphore = threading.BoundedSemaphore(8)
         self.throttle = ProviderThrottle()
+        self.calibration = TokenCalibration()
         self.active = 0
         self.completed = 0
         self.failed = 0
@@ -116,7 +117,13 @@ class Runtime:
         context = _effective_context(spec)
         options = mapping_options_for(payload.get("model"), self.settings)
         payload = apply_mapping_options(payload, self.settings)
-        estimate_fn = estimated_gemini_tokens if provider_id == "gemini" else estimated_tokens
+        raw_estimate_fn = estimated_gemini_tokens if provider_id == "gemini" else estimated_tokens
+        # Scale the pessimistic byte estimate by what this route's provider
+        # has actually reported for earlier requests (never upwards), so a
+        # code-heavy Codex thread is not refused or compacted long before
+        # the provider's own window, or the client's own compaction, applies.
+        calibration_factor = self.calibration.factor(route)
+        estimate_fn = lambda value: max(1, int(raw_estimate_fn(value) * calibration_factor))
         estimate = estimate_fn(payload)
         # Compact before enforcing the hard window: Claude Desktop meters the
         # session at 200K/1M regardless of the selected route, so a small-window
@@ -143,8 +150,9 @@ class Runtime:
                 self.record("compacted", route, 200, {"estimated_before": auto_compact["estimated_before"],
                                                       "estimated_after": after})
         if type(context) is int and estimate >= context:
-            raise BridgeError(f"This conversation (~{estimate:,} tokens) is above the provider's reported "
-                              f"{context:,}-token context limit.")
+            raise BridgeError(f"Provider Hub did not send this request: the conversation (~{estimate:,} tokens, "
+                              f"gateway estimate) is above the {context:,}-token context limit "
+                              f"{PROVIDERS[provider_id]['name']} reports for this model.")
         if payload.get("model", "").endswith("[1m]") and (type(context) is not int or context < 1000000):
             raise BridgeError("A 1M context window has not been established for this route.")
         # Translate a trailing bare assistant message to a Mistral prefill
@@ -181,12 +189,18 @@ class Runtime:
             request_options = {"reasoning_by_message": replay} if provider_id == "cerebras" else {}
             if provider_id == "gemini":
                 request_options.update(replay_scope=scope, replay_key=self.replay_key)
+            if calibration_factor < 1.0:
+                # The provider builder repeats the window check on its own
+                # byte estimate; hand it the same learned factor.
+                request_options["estimate_factor"] = calibration_factor
             plan = (self.request_planner or prepare_request)(provider_id, self.settings["providers"][provider_id], key, payload, upstream_model, spec, **request_options)
         except (ProviderError, CerebrasReplayError) as exc:
             raise BridgeError(str(exc).replace(key, "[redacted]") if key else str(exc)) from exc
         plan.update(route=route, provider_id=provider_id, provider_name=PROVIDERS[provider_id]["name"],
                     private_key=key, upstream_model=upstream_model, replay_scope=scope, replay_required=replay_required,
-                    model_spec=spec)
+                    model_spec=spec, estimate_raw=raw_estimate_fn(payload))
+        if calibration_factor < 1.0:
+            plan.setdefault("compatibility", {})["estimate_calibration"] = round(calibration_factor, 3)
         if reminders_rewritten:
             plan.setdefault("compatibility", {})["context_reminders"] = "catalogue_remaining"
         dropped = [name for name, on in (("system", options["omit_system"]), ("tools", options["omit_tools"])) if on]
@@ -590,7 +604,9 @@ class Handler(BaseHTTPRequestHandler):
             if details is not None:
                 model, usage = details
                 self.runtime.record("rejected", model, 400, usage)
-            self.error(400, str(exc))
+            # The Responses relay reads this header so a gateway-side
+            # rejection is never reworded as a provider error.
+            self.error(400, str(exc), headers={"X-Provider-Hub-Origin": "gateway"})
             return
         # Queue for a worker slot instead of failing fast: subagent bursts
         # briefly exceed the worker count by design, and every instant 429
@@ -821,6 +837,7 @@ class Handler(BaseHTTPRequestHandler):
                     self.wfile.write(b"0\r\n\r\n")
                     self.wfile.flush()
                 self.close_connection = True
+            self.runtime.calibration.observe(plan["route"], plan.get("estimate_raw"), reported_input_tokens(usage))
             self.runtime.record("completed", plan["route"], 200, usage, service_tier=service_tier)
         except (BrokenPipeError, ConnectionResetError):
             self.runtime.record("cancelled", plan["route"])

@@ -66,6 +66,11 @@ class CustomApplyPatchAdapterTests(unittest.TestCase):
         # provider side, which needs the opposite discipline.
         self.assertNotIn("Do not wrap", flat[0]["description"])
         self.assertIn("'patch'", flat[0]["description"])
+        # The grammar Codex sends cannot be forwarded as a JSON function, so
+        # the description restates the format the model must produce.
+        self.assertIn("*** Begin Patch", flat[0]["description"])
+        self.assertIn("*** Update File:", flat[0]["description"])
+        self.assertIn("SEARCH/REPLACE", flat[0]["description"])
         self.assertEqual(flat[0]["parameters"]["required"], ["patch"])
         self.assertEqual(flat[0]["parameters"]["properties"]["patch"]["type"], "string")
         self.assertEqual(mapping["apply_patch"]["custom"], "apply_patch")

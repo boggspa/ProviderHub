@@ -138,7 +138,10 @@ replaces the ordinary picker list rather than merging with OpenAI models.
 
 For a known numeric context, `context_window` and `max_context_window` contain
 the full value, `effective_context_window_percent` is 100, and automatic
-compaction is set to 85 percent. When the provider does not establish a numeric
+compaction is set to 85 percent, and the gateway's own compaction (which
+drops whole tool cycles and keeps a contiguous tail, with a per-route estimate
+calibrated from the provider's reported input counts) remains as a backstop
+behind it. When the provider does not establish a numeric
 limit, the context values and automatic-compaction threshold are `null` rather
 than an invented 200,000 tokens; the picker tells the user to compact manually
 when needed. Each provider publishes only its known effort levels. Muse Spark 1.3

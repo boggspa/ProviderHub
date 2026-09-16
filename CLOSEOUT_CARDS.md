@@ -88,8 +88,14 @@ inject.
 ## Status
 
 - Codex card: restorable via the adapter above; the Codex tab switch turns
-  it on for the whole catalogue, and per-route qualification against live
-  providers is still pending.
+  it on for the whole catalogue. Live qualification so far (2026-09-16):
+  Kimi for Coding produced correct patches first time and the card, Undo
+  and Review appeared. Mistral Medium 3.5 called apply_patch four times
+  but wrote SEARCH/REPLACE blocks and unified diffs, which core rejects,
+  because the projected description dropped the grammar; the description
+  now restates the format (`APPLY_PATCH_FORMAT_GUIDE`) and the base
+  instructions prefer apply_patch for edits, which a live probe with the
+  same guide showed yields a valid patch on the first attempt.
 - Claude per-turn rows: best-effort steering shipped; effectiveness depends
   on model compliance.
 - Claude checkpoint/rewind: blocked on the server-side gate; needs

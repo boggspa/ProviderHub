@@ -1737,7 +1737,8 @@ def _image_capability_error() -> ProviderError:
     return ProviderError("The selected model does not advertise image input.")
 
 
-def _apply_native_model_limits(body: dict, model_spec: dict, provider_id: str | None = None) -> None:
+def _apply_native_model_limits(body: dict, model_spec: dict, provider_id: str | None = None,
+                               estimate_factor: float = 1.0) -> None:
     max_tokens = body.get("max_tokens", 4096)
     if type(max_tokens) is not int or max_tokens <= 0:
         raise ProviderError("max_tokens must be a positive integer.")
@@ -1746,7 +1747,9 @@ def _apply_native_model_limits(body: dict, model_spec: dict, provider_id: str | 
         max_tokens = min(max_tokens, max_output)
     context = model_spec.get("context")
     if type(context) is int and context > 0:
-        estimate = _estimated_input_tokens(body)
+        # estimate_factor is the gateway's learned ratio of the provider's
+        # real input count to this byte estimate (never above 1.0).
+        estimate = max(1, int(_estimated_input_tokens(body) * estimate_factor))
         if estimate >= context:
             raise ProviderError(f"Request (~{estimate:,} tokens) exceeds the model's reported "
                                 f"{context:,}-token context limit.")
@@ -1933,6 +1936,7 @@ def _translate_chat_payload(
     model_spec: dict,
     *,
     reasoning_by_message=None,
+    estimate_factor: float = 1.0,
 ) -> tuple[dict, dict]:
     if not isinstance(payload, dict):
         raise ProviderError("Anthropic request payload must be an object.")
@@ -1953,7 +1957,8 @@ def _translate_chat_payload(
         max_tokens = min(max_tokens, max_output)
     context = model_spec.get("context")
     if type(context) is int and context > 0:
-        estimate = _estimated_input_tokens(payload)
+        # estimate_factor: see _apply_native_model_limits.
+        estimate = max(1, int(_estimated_input_tokens(payload) * estimate_factor))
         if estimate >= context:
             raise ProviderError(f"Request (~{estimate:,} tokens) exceeds the model's reported "
                                 f"{context:,}-token context limit.")
@@ -2187,6 +2192,7 @@ def prepare_request(
     reasoning_by_message=None,
     replay_scope=None,
     replay_key=None,
+    estimate_factor: float = 1.0,
 ) -> dict:
     """Build a plain outbound request plan for the streaming gateway.
 
@@ -2211,7 +2217,7 @@ def prepare_request(
     if descriptor["protocol"] == "anthropic":
         body, normalized_system_roles, control_compatibility = _normalize_native_payload(
             provider_id, anthropic_payload, upstream_model, model_spec)
-        _apply_native_model_limits(body, model_spec, provider_id)
+        _apply_native_model_limits(body, model_spec, provider_id, estimate_factor)
         if provider_id == "openrouter":
             try:
                 openrouter_finalize(body, model_spec, api_key)
@@ -2238,7 +2244,7 @@ def prepare_request(
         anthropic_payload,
         upstream_model,
         model_spec,
-        reasoning_by_message=normalized_reasoning,
+        reasoning_by_message=normalized_reasoning, estimate_factor=estimate_factor
     )
     reasoning_replay = _requires_cerebras_replay(provider_id, model_spec)
     controls = {}

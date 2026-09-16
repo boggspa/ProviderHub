@@ -44,6 +44,24 @@ def register(mapping, namespace, name):
 APPLY_PATCH_TOOL_NAME = "apply_patch"
 APPLY_PATCH_PARAM = "patch"
 
+# Codex's freeform tool carries its patch syntax as a Lark grammar, which a
+# JSON function cannot forward. Models that were not trained on Codex's
+# format (Mistral Medium 3.5 answered with SEARCH/REPLACE blocks and unified
+# diffs, which core rejects) need the rules spelled out, so the projected
+# description restates the grammar compactly. Kimi already knew the format.
+APPLY_PATCH_FORMAT_GUIDE = (
+    "Patch format (Codex apply_patch, not a unified diff): the text starts with '*** Begin Patch' and ends with "
+    "'*** End Patch'. Each file edit is a header line '*** Update File: relative/path', '*** Add File: relative/path' "
+    "or '*** Delete File: relative/path' (paths relative to the workspace root; add '*** Move to: new/path' on the "
+    "line after an Update header to rename). An Update section holds one or more hunks that each begin with '@@' "
+    "(optionally followed by a nearby function or class line for context), then the changed region as full lines: "
+    "unchanged context lines start with a single space, removed lines with '-', added lines with '+'. Include about "
+    "three unchanged lines around each change so it matches exactly once. An Add section lists every new line with a "
+    "leading '+'. Never use '--- a/', '+++ b/', line numbers, or SEARCH/REPLACE markers. Example:\n"
+    "*** Begin Patch\n*** Update File: src/app.py\n@@ def greet():\n     name = \"world\"\n-    return \"hi\"\n"
+    "+    return f\"hello {name}\"\n*** End Patch"
+)
+
 
 def register_custom(mapping, namespace, name):
     mapped = tool_name(namespace, name)
@@ -63,7 +81,7 @@ def apply_patch_parameters():
     return {"type": "object",
             "properties": {APPLY_PATCH_PARAM: {
                 "type": "string",
-                "description": "The complete apply_patch patch text for the requested file edits."}},
+                "description": "The complete apply_patch patch text, from '*** Begin Patch' to '*** End Patch'."}},
             "required": [APPLY_PATCH_PARAM]}
 
 
@@ -89,10 +107,13 @@ def flatten_tools(tools):
                 raise BridgeError("This Responses route only adapts the apply_patch custom tool. Other free-form tools need a separate adapter.")
             # The incoming Lark-grammar description tells the model not to
             # wrap the patch in JSON; the provider side needs the opposite
-            # instruction, so the description is replaced, not forwarded.
+            # instruction, so the description is replaced, not forwarded,
+            # and the grammar it drops is restated as APPLY_PATCH_FORMAT_GUIDE.
             item = {"type": "function", "name": register_custom(mapping, namespace, tool.get("name")),
                     "description": ((description + "\n") if description else "")
-                    + "Edit workspace files with an apply_patch patch. Pass the complete patch text in the 'patch' string parameter.",
+                    + "Edit workspace files with an apply_patch patch. Pass the complete patch text in the 'patch' "
+                    + "string parameter. Prefer this tool over shell rewrites for edits: it records the change for review.\n"
+                    + APPLY_PATCH_FORMAT_GUIDE,
                     "parameters": apply_patch_parameters()}
             result.append(item)
             return

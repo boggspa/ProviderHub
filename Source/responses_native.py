@@ -758,8 +758,16 @@ def handle_responses(handler):
             if response.status in RETRYABLE_STATUSES:
                 hint = retry_after if retry_after is not None else SLOT_RETRY_AFTER
                 terminal_headers = {"Retry-After": str(max(1, int(hint)))}
-            handler.error(status, plan["provider_name"] + f" returned HTTP {response.status}. " + detail,
-                          headers=terminal_headers)
+            if delegated and response.getheader("X-Provider-Hub-Origin") == "gateway":
+                # The inner Messages handler rejected the request itself
+                # (context window, capability mismatch); it never reached
+                # the provider, so do not present it as a provider reply.
+                message = detail or "Provider Hub rejected this request."
+            elif detail.startswith(plan["provider_name"] + " returned HTTP"):
+                message = detail
+            else:
+                message = plan["provider_name"] + f" returned HTTP {response.status}. " + detail
+            handler.error(status, message, headers=terminal_headers)
             return
         if not plan["body"]["stream"]:
             raw = response.read(MAX_BODY + 1)

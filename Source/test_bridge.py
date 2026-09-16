@@ -14,7 +14,8 @@ from unittest.mock import patch
 from bridge_core import (BridgeError, ClaudeProfile, PROFILE_ID, atomic_json, default_settings,
                          read_json, validate_settings)
 from gateway import Runtime, Server, rejection_details
-from protocol import (StreamTranslator, apply_mapping_options, compact_conversation, compact_threshold, estimated_tokens, function_name,
+from protocol import (StreamTranslator, TokenCalibration, apply_mapping_options, compact_conversation, compact_threshold, conversation_units,
+                      estimated_tokens, function_name, reported_input_tokens,
                       mapping_options_for, model_catalog, rewrite_context_reminders, tool_id,
                       translate_request, translate_response)
 from catalogue import build_catalogue, read_observations, route_specs
@@ -133,10 +134,15 @@ class ProtocolTests(unittest.TestCase):
         self.assertLessEqual(estimated_tokens(compacted), int(full * 0.5) + full * 0.2)
         original = [message["content"][:3] for message in body["messages"]]
         markers = [message["content"][:3] for message in kept]
-        # Newest turns survive, oldest are dropped, order stays chronological.
+        # Newest turns survive, the middle is dropped, order stays
+        # chronological. The small opening prompt is pinned and carries the
+        # compaction note, merged with the first surviving user turn so the
+        # history still alternates.
         self.assertEqual(markers[-2:], ["u4-", "a4-"])
-        self.assertNotIn("u0-", markers)
-        self.assertEqual(markers, [marker for marker in original if marker in set(markers)])
+        self.assertEqual(markers[0], "u0-")
+        self.assertIn("Provider Hub removed", kept[0]["content"])
+        self.assertNotIn("u1-", "".join(m["content"] for m in kept))
+        self.assertEqual(markers[1:], [marker for marker in original if marker in set(markers[1:])])
         roles = [message["role"] for message in kept]
         for first, second in zip(roles, roles[1:]):
             self.assertNotEqual(first, second)
@@ -184,6 +190,92 @@ class ProtocolTests(unittest.TestCase):
         self.assertNotIn("toolu_old", transcript)
         self.assertIn("new work", transcript)
         self.assertTrue(all(message.get("content") for message in compacted["messages"]))
+
+    def test_compact_conversation_keeps_tool_cycles_whole_and_contiguous(self):
+        messages = [{"role": "user", "content": "Read the sources and summarise."}]
+        for index in range(12):
+            messages.append({"role": "assistant", "content": [
+                {"type": "tool_use", "id": f"toolu_{index}", "name": "shell", "input": {"command": ["cat", f"f{index}.py"]}}]})
+            messages.append({"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": f"toolu_{index}", "content": f"r{index}-" + "X" * 2500}]})
+        messages.append({"role": "user", "content": "Reply with DONE"})
+        body = prompt(messages=messages)
+        budget = estimated_tokens(body) // 3
+        compacted = compact_conversation(body, budget)
+        kept = compacted["messages"]
+        self.assertLess(len(kept), len(messages))
+        self.assertEqual(kept[-1]["content"], "Reply with DONE")
+        self.assertLessEqual(estimated_tokens(compacted), budget)
+        calls = {block["id"] for message in kept if message["role"] == "assistant"
+                 for block in message["content"] if block.get("type") == "tool_use"}
+        results = {block["tool_use_id"] for message in kept
+                   if message["role"] == "user" and isinstance(message["content"], list)
+                   for block in message["content"] if block.get("type") == "tool_result"}
+        # Every surviving call has its result and vice versa (Mistral rejects
+        # either orphan), and the survivors are a contiguous tail.
+        self.assertTrue(calls)
+        self.assertEqual(calls, results)
+        # The opening prompt is pinned with the note; after it, the survivors
+        # are a contiguous tail of the original history.
+        self.assertTrue(kept[0]["content"].startswith("Read the sources"))
+        self.assertIn("Provider Hub removed", kept[0]["content"])
+        self.assertEqual(kept[1]["role"], "assistant")
+        positions = [messages.index(message) for message in kept[1:]]
+        self.assertEqual(positions, list(range(positions[0], len(messages))))
+
+    def test_compact_conversation_binds_interleaved_user_text_to_its_tool_cycle(self):
+        body = prompt(messages=[
+            {"role": "user", "content": "old work " + "O" * 6000},
+            {"role": "assistant", "content": [{"type": "tool_use", "id": "toolu_a", "name": "Read", "input": {}}]},
+            {"role": "user", "content": [{"type": "text", "text": "note while reading"}]},
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_a", "content": "A" * 2000}]},
+            {"role": "user", "content": "new question"},
+        ])
+        self.assertEqual([len(unit) for unit in conversation_units(body["messages"])], [1, 3, 1])
+        compacted = compact_conversation(body, estimated_tokens(body) // 2)
+        transcript = json.dumps(compacted["messages"])
+        self.assertIn("new question", transcript)
+        self.assertNotIn("OOOO", transcript)
+        self.assertIn("toolu_a", transcript)
+        self.assertIn("note while reading", transcript)
+        self.assertEqual(transcript.count('"tool_use"'), transcript.count('"tool_result"'))
+
+    def test_compact_conversation_keeps_the_newest_unit_even_when_it_does_not_fit(self):
+        body = prompt(messages=[
+            {"role": "user", "content": "earlier " + "E" * 3000},
+            {"role": "assistant", "content": "ok"},
+            {"role": "user", "content": "latest " + "L" * 3000},
+        ])
+        compacted = compact_conversation(body, 10)
+        self.assertEqual(len(compacted["messages"]), 1)
+        self.assertEqual(compacted["messages"][0]["role"], "user")
+        self.assertIn("Provider Hub removed 2 earlier messages", compacted["messages"][0]["content"])
+        self.assertTrue(compacted["messages"][0]["content"].endswith("L" * 10))
+
+    def test_token_calibration_only_lowers_estimates_within_bounds(self):
+        calibration = TokenCalibration()
+        self.assertEqual(calibration.factor("mistral/x"), 1.0)
+        self.assertEqual(calibration.calibrated("mistral/x", 9000), 9000)
+        # Tiny requests are ignored: fixed overhead dominates their ratio.
+        self.assertIsNone(calibration.observe("mistral/x", 400, 300))
+        self.assertEqual(calibration.factor("mistral/x"), 1.0)
+        calibration.observe("mistral/x", 10000, 7000)
+        self.assertAlmostEqual(calibration.factor("mistral/x"), 0.735)
+        self.assertEqual(calibration.calibrated("mistral/x", 10000), 7350)
+        self.assertEqual(calibration.snapshot(), {"mistral/x": 0.7})
+        # A provider counting above the estimate never lifts it past 1.0.
+        dense = TokenCalibration()
+        dense.observe("kimi/y", 10000, 13000)
+        self.assertEqual(dense.factor("kimi/y"), 1.0)
+        # The floor bounds how far a run of small ratios can pull.
+        floor = TokenCalibration()
+        for _ in range(20):
+            floor.observe("r", 10000, 2000)
+        self.assertEqual(floor.factor("r"), 0.5)
+        # Cached prefixes count as real input for the ratio.
+        self.assertEqual(reported_input_tokens({"input_tokens": 100, "cache_read_input_tokens": 5000, "output_tokens": 9}), 5100)
+        self.assertIsNone(reported_input_tokens({"output_tokens": 9}))
+        self.assertIsNone(reported_input_tokens(None))
 
     def test_context_limits_and_model_mappings(self):
         small = config(); small["_model_specs"]["test-model"]["context"] = 8000
@@ -781,7 +873,8 @@ class GatewayTests(unittest.TestCase):
         body = prompt(system="S" * 800000, messages=[{"role": "user", "content": "hi"}])
         status, data, _ = self.request("POST", "/v1/messages", body)
         self.assertEqual(status, 400)
-        self.assertIn("above the provider's reported 240,000-token context limit", data.decode())
+        self.assertIn("Provider Hub did not send this request", data.decode())
+        self.assertIn("above the 240,000-token context limit", data.decode())
         events = [json.loads(line) for line in (self.root / "activity.jsonl").read_text().splitlines()]
         rejected = [event for event in events if event.get("event") == "rejected"]
         self.assertEqual(len(rejected), 1)
