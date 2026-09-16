@@ -193,6 +193,38 @@ def discover(connection, api_key, *, transport):
             "fetched_at": datetime.now(timezone.utc).isoformat(), "warnings": warnings}
 
 
+def reasoning_axis(spec) -> bool:
+    """Whether the model advertises a reasoning control at all.
+
+    An empty ladder means the model never reasons, which is not the same as a
+    ladder without a ``none`` stop: the first is already switched off, the
+    second cannot be switched off. Discovery gives a reasoning-capable model
+    at least one level, so an empty ladder only ever means the former.
+    """
+    return bool(spec.get("effort_modes"))
+
+
+def _drop_reasoning(body, output, requested, thinking):
+    """Remove a reasoning control a model without a reasoning axis cannot use.
+
+    Asking such a model not to think is already true, so the control goes
+    rather than the request: the shared provider layer admits ``none`` and a
+    disabled thinking block for exactly these models, and a control left in
+    the body would make the endpoint selector demand a reasoning-capable
+    host. Asking one to think is a real mismatch and still raises.
+    """
+    if requested not in (None, "none") or (thinking and thinking.get("type") != "disabled"):
+        raise OpenRouterError("This OpenRouter model does not advertise that reasoning control.")
+    asked = requested == "none" or bool(thinking)
+    body.pop("thinking", None)
+    output.pop("effort", None)
+    if output:
+        body["output_config"] = output
+    else:
+        body.pop("output_config", None)
+    return {"reasoning_control": "dropped_model_has_no_reasoning"} if asked else {}
+
+
 def normalized_effort(requested, spec):
     if requested is None:
         return None
@@ -200,7 +232,7 @@ def normalized_effort(requested, spec):
         raise OpenRouterError("Reasoning effort must be text.")
     requested = {"ultra": "max"}.get(requested, requested)
     levels = spec.get("effort_modes") or []
-    if requested == "none" and "none" not in levels:
+    if requested == "none" and levels and "none" not in levels:
         raise OpenRouterError("This OpenRouter model does not advertise a reasoning-off control.")
     if requested not in EFFORT_ORDER or not levels:
         raise OpenRouterError("This OpenRouter model does not advertise that reasoning control.")
@@ -213,8 +245,10 @@ def normalized_effort(requested, spec):
 def normalize_messages(body, model_id, spec):
     output = body.get("output_config") or {}
     requested = output.get("effort")
-    effort = normalized_effort(requested, spec)
     thinking = body.get("thinking")
+    if not reasoning_axis(spec):
+        return _drop_reasoning(body, output, requested, thinking)
+    effort = normalized_effort(requested, spec)
     if thinking and thinking.get("type") == "disabled" and "none" not in (spec.get("effort_modes") or []):
         raise OpenRouterError("This OpenRouter model does not advertise a reasoning-off control.")
     compatibility = {}
@@ -313,9 +347,17 @@ def finalize(body, spec, api_key, *, responses=False):
         if body.get("previous_response_id") or body.get("store"):
             raise OpenRouterError("This OpenRouter profile uses full history with store:false.")
         reasoning = body.get("reasoning")
+        if reasoning is not None and not isinstance(reasoning, dict):
+            raise OpenRouterError("reasoning must be an object.")
+        if reasoning is not None and not reasoning_axis(spec):
+            # Already switched off: drop the control instead of refusing it.
+            if "enabled" in reasoning and type(reasoning["enabled"]) is not bool:
+                raise OpenRouterError("reasoning.enabled must be true or false.")
+            if reasoning.get("effort") not in (None, "none") or reasoning.get("enabled") is True:
+                raise OpenRouterError("This OpenRouter model does not advertise that reasoning control.")
+            body.pop("reasoning", None)
+            reasoning = None
         if reasoning is not None:
-            if not isinstance(reasoning, dict):
-                raise OpenRouterError("reasoning must be an object.")
             effort = normalized_effort(reasoning.get("effort"), spec)
             enabled = reasoning.get("enabled")
             if "enabled" in reasoning and type(enabled) is not bool:

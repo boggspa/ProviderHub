@@ -8,7 +8,8 @@ from bridge_core import SLOTS
 from codex_catalogue import project_codex, catalogue_digest
 from hub_config import defaults, project_catalogue
 from providers import ProviderError, discover, prepare_request, validate_connection
-from openrouter_provider import BASE_URL, MODELS_URL, CURATED, OpenRouterError, finalize, normalized_effort, _entries
+from openrouter_provider import (BASE_URL, MODELS_URL, CURATED, OpenRouterError, finalize, normalize_messages,
+                                 normalized_effort, reasoning_axis, _entries)
 from catalogue_lifecycle import catalogue_fingerprint
 import test_gateway_hub as fixtures
 import test_responses_native as native_fixtures
@@ -175,6 +176,53 @@ class OpenRouterProviderTests(unittest.TestCase):
         finalize(body, rows[0], "key", responses=True)
         self.assertEqual(body["model"], identifier)
         self.assertEqual(body["provider"]["only"], ["stealth"])
+
+    def test_a_model_with_no_reasoning_axis_takes_reasoning_off_instead_of_refusing_it(self):
+        """A model that never reasons is already switched off, so a client
+        asking it not to think is satisfied, not refused. The shared provider
+        layer admits `none` and a disabled thinking block for exactly these
+        models; refusing them here made Union Alpha unusable from Claude
+        Desktop, which sends a disabled block whenever thinking is off."""
+        # Union Alpha's live card: no reasoning, reasoning_effort or include_reasoning.
+        parameters = ["max_tokens", "response_format", "temperature", "tool_choice", "tools", "top_p"]
+        model = {"id": "stealth/union-alpha", "context_length": 262144, "reasoning": None,
+                 "architecture": {"input_modalities": ["text", "image"], "output_modalities": ["text"]},
+                 "supported_parameters": parameters}
+        row = _entries(model, {"data": {"id": "stealth/union-alpha", "endpoints": [
+            {"tag": "stealth", "model_id": "stealth/union-alpha", "context_length": 262144,
+             "max_completion_tokens": 131072, "status": 0, "supported_parameters": parameters}]}})[0]
+        self.assertEqual((row["reasoning"], row["effort_modes"], row["effort_control"]), (False, [], "none"))
+        self.assertFalse(reasoning_axis(row))
+
+        body = {"model": "m", "messages": [{"role": "user", "content": "hi"}], "thinking": {"type": "disabled"}}
+        self.assertEqual(normalize_messages(body, "stealth/union-alpha", row),
+                         {"reasoning_control": "dropped_model_has_no_reasoning"})
+        # The control is removed, not just ignored: left in place it would make
+        # the endpoint selector demand a reasoning-capable host.
+        self.assertEqual(body, {"model": "m", "messages": [{"role": "user", "content": "hi"}]})
+        keeps = {"model": "m", "messages": [], "output_config": {"effort": "none", "verbosity": "low"}}
+        normalize_messages(keeps, "stealth/union-alpha", row)
+        self.assertEqual(keeps["output_config"], {"verbosity": "low"})
+
+        responses = {"input": "hi", "store": False, "tools": [{"name": "read"}], "reasoning": {"enabled": False}}
+        finalize(responses, row, "key", responses=True)
+        self.assertNotIn("reasoning", responses)
+        self.assertEqual(responses["provider"]["only"], ["stealth"])
+
+        # Asking such a model to think is a real mismatch and still refused.
+        for asked in ({"output_config": {"effort": "high"}}, {"thinking": {"type": "enabled"}}):
+            with self.subTest(asked=asked), self.assertRaises(OpenRouterError):
+                normalize_messages({"model": "m", "messages": [], **asked}, "stealth/union-alpha", row)
+        with self.assertRaises(OpenRouterError):
+            finalize({"input": "hi", "store": False, "reasoning": {"enabled": True}}, row, "key", responses=True)
+        with self.assertRaises(OpenRouterError):
+            finalize({"input": "hi", "store": False, "reasoning": {"enabled": "yes"}}, row, "key", responses=True)
+        # A ladder that genuinely cannot be switched off is untouched by this.
+        mandatory = {**row, "reasoning": True, "effort_modes": ["high"], "effort_control": "levels",
+                     "reasoning_mandatory": True}
+        self.assertTrue(reasoning_axis(mandatory))
+        with self.assertRaises(OpenRouterError):
+            normalize_messages({"model": "m", "messages": [], "thinking": {"type": "disabled"}}, "m", mandatory)
 
     def test_a_withdrawn_stealth_preview_leaves_no_route_behind(self):
         """The seven-day window is OpenRouter's to close, not ours to encode:
