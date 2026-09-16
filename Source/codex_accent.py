@@ -40,8 +40,13 @@ PROPERTY = "--color-chart-blue"
 _HEX = re.compile(r"^#[0-9A-Fa-f]{6}$")
 THEME_ATTRIBUTE = "data-provider-hub-theme"
 ACCENT_PROPERTY = "--provider-hub-accent"
-# How much of the model's accent goes into the activity shimmer's sweep.
-SHIMMER_MIX = "35%"
+# The activity shimmer's gray takes the model's hue: its base colour becomes
+# the app's own gray, at its own lightness, with this much OKLCH chroma in
+# the accent's hue, which the watcher publishes on the root in degrees. An
+# accent with less chroma than the floor is a gray itself and lends none.
+HUE_PROPERTY = "--provider-hub-hue"
+SHIMMER_CHROMA = "0.07"
+SHIMMER_HUE_FLOOR = 0.03
 # Ultra: the app paints its top level (the popover's title, the slider's
 # fill gradient, the pill's Ultra layer) with one purple token. On the
 # picker and the pill that token is given the model's Ultra hue instead,
@@ -153,6 +158,17 @@ def ultra_map(accents: dict) -> dict:
     return {label: ultra_accents(colour) for label, colour in accents.items()}
 
 
+def hue_map(accents: dict) -> dict:
+    """Each accent's OKLCH hue in degrees, for the shimmer's gray; an accent
+    without enough chroma to carry a hue is left out."""
+    hues = {}
+    for key, colour in accents.items():
+        _, chroma, hue = _srgb_to_oklch(colour)
+        if chroma >= SHIMMER_HUE_FLOOR:
+            hues[key] = round(math.degrees(hue) % 360, 1)
+    return hues
+
+
 def ultra_css() -> str:
     """The Ultra word's sweep: the marked element's text is filled with a
     gradient of the Ultra hue carrying one lighter highlight, slid across it.
@@ -175,18 +191,20 @@ def ultra_css() -> str:
 
 def shimmer_css() -> str:
     """The stylesheet the watcher adopts: the activity shimmer ("Thinking",
-    "Editing files") gets a sweep tinted with the selected model's accent.
+    "Editing files") keeps the app's sweep, but its gray takes the model's hue.
 
-    The app resets its ``--loading-shimmer-highlight`` on the element with a
-    zero-specificity rule and falls back to a per-theme constant, so a
-    zero-specificity rule of ours later in the cascade wins over that reset
-    while any component that sets its own highlight still wins over ours;
-    without an accent the ``var()`` is invalid and the app's fallback returns.
+    The shimmer text derives every tone from ``--loading-shimmer-foreground``
+    and falls back to the app's description gray; the app resets that knob on
+    the element with a zero-specificity rule, so a zero-specificity rule of
+    ours later in the cascade wins over the reset while any component that
+    sets its own foreground still wins over ours. The value is the app's own
+    gray at its own lightness and alpha with a fixed chroma in the accent's
+    hue, so legibility does not move; without a hue the ``var()`` is invalid
+    and the app's fallback returns.
     """
     shimmer = f"[{THEME_ATTRIBUTE}] :is(.loading-shimmer-pure-text,.loading-shimmer)"
-    return (f':where({shimmer}){{--loading-shimmer-highlight:color-mix(in srgb,var({ACCENT_PROPERTY}) {SHIMMER_MIX},#ffffffbf)}}'
-            f':where([{THEME_ATTRIBUTE}="dark"] :is(.loading-shimmer-pure-text,.loading-shimmer))'
-            f'{{--loading-shimmer-highlight:color-mix(in srgb,var({ACCENT_PROPERTY}) {SHIMMER_MIX},#0009)}}')
+    return (f":where({shimmer}){{--loading-shimmer-foreground:"
+            f"oklch(from var(--color-codex-description) l {SHIMMER_CHROMA} var({HUE_PROPERTY}))}}")
 
 
 def usage_banner_selector() -> str:
@@ -228,7 +246,9 @@ _WATCHER = r"""
     const ULTRA_ACCENT_PROPERTY = "__HUB_ULTRA_ACCENT_PROPERTY__";
     const ULTRA_MARK = "__HUB_ULTRA_MARK__";
     const USAGE_SELECTOR = __HUB_USAGE_SELECTOR__;
-    const state = { targets: [], label: "", colour: "", ultra: "", title: null, words: [], pills: [], marks: [], sheet: null, accent: "", theme: "" };
+    const HUES = __HUB_HUES__;
+    const HUE_PROPERTY = "__HUB_HUE_PROPERTY__";
+    const state = { targets: [], label: "", colour: "", ultra: "", title: null, words: [], pills: [], marks: [], sheet: null, accent: "", theme: "", hue: "" };
     const norm = (text) => (text || "").replace(/\s+/g, " ").trim().toLowerCase();
     // Labels may carry a leading glyph (a bullet, a tier mark); match the words.
     const lookup = (text) => {
@@ -353,6 +373,7 @@ _WATCHER = r"""
       const marks = [];
       let accent = "";
       let theme = "";
+      let hue = "";
       for (const trigger of document.querySelectorAll("[data-codex-intelligence-trigger]")) {
         const effort = norm(trigger.getAttribute("data-selected-reasoning-effort"));
         const labels = [];
@@ -368,9 +389,9 @@ _WATCHER = r"""
         const model = findModel(trigger, labels[0] || null);
         if (!model) { continue; }
         const surface = themeOf(textElement(model));
-        // The selected model's accent also tints the activity shimmer; the
-        // first pill wins if there are several.
-        if (!accent) { accent = ACCENTS[model.key]; theme = surface; }
+        // The selected model's hue also tints the activity shimmer's gray;
+        // the first pill wins if there are several.
+        if (!accent) { accent = ACCENTS[model.key]; theme = surface; hue = Object.prototype.hasOwnProperty.call(HUES, model.key) ? String(HUES[model.key]) : ""; }
         if (!effort) { continue; }
         if (effort === "ultra") {
           const ultra = ultraColour(model.key, surface);
@@ -387,21 +408,24 @@ _WATCHER = r"""
           words.push({ element: label, colour: ACCENTS[model.key] });
         }
       }
-      return { words: words, pills: pills, marks: marks, accent: accent, theme: theme };
+      return { words: words, pills: pills, marks: marks, accent: accent, theme: theme, hue: hue };
     }
-    function applyShimmer(accent, theme) {
-      if (accent === state.accent && theme === state.theme) { return; }
+    function applyShimmer(accent, theme, hue) {
+      if (accent === state.accent && theme === state.theme && hue === state.hue) { return; }
       const root = document.documentElement;
       if (!root) { return; }
+      const ours = (property, value) => norm(root.style.getPropertyValue(property)) === norm(value);
       if (accent) {
         installStyles();
         root.style.setProperty(ACCENT_PROPERTY, accent);
+        if (hue) { root.style.setProperty(HUE_PROPERTY, hue); } else if (ours(HUE_PROPERTY, state.hue)) { root.style.removeProperty(HUE_PROPERTY); }
         root.setAttribute(THEME, theme);
       } else {
-        if (norm(root.style.getPropertyValue(ACCENT_PROPERTY)) === norm(state.accent)) { root.style.removeProperty(ACCENT_PROPERTY); }
+        if (ours(ACCENT_PROPERTY, state.accent)) { root.style.removeProperty(ACCENT_PROPERTY); }
+        if (ours(HUE_PROPERTY, state.hue)) { root.style.removeProperty(HUE_PROPERTY); }
         root.removeAttribute(THEME);
       }
-      state.accent = accent; state.theme = theme;
+      state.accent = accent; state.theme = theme; state.hue = hue;
     }
     function clearWords() {
       for (const entry of state.words) {
@@ -438,7 +462,7 @@ _WATCHER = r"""
         for (const element of found.marks) { element.setAttribute(ULTRA_MARK, "1"); }
         state.pills = found.pills; state.marks = found.marks;
       }
-      applyShimmer(found.accent, found.theme);
+      applyShimmer(found.accent, found.theme, found.hue);
     }
     function apply() {
       try { applyMenu(); } catch (error) {}
@@ -455,11 +479,11 @@ _WATCHER = r"""
     observer.observe(document, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ["data-explicit-model", "data-accent", "data-maximum", "data-selected-reasoning-effort"] });
     if (document.readyState === "loading") { document.addEventListener("DOMContentLoaded", schedule, { once: true }); }
     window.__providerHubAccent = {
-      version: 7,
+      version: 8,
       accents: Object.keys(ACCENTS).length,
       check: () => ({ container: !!document.querySelector('[data-explicit-model="true"]'), label: state.label, colour: state.colour, ultra: state.ultra, targets: state.targets.length,
                       pills: state.words.map((entry) => entry.colour), ultraPills: state.pills.map((entry) => entry.colour), marks: state.marks.length,
-                      shimmer: state.accent ? state.accent + ":" + state.theme : "",
+                      shimmer: state.accent ? state.accent + ":" + state.theme : "", hue: state.hue,
                       banners: USAGE_SELECTOR ? document.querySelectorAll(USAGE_SELECTOR).length : null }),
     };
     schedule();
@@ -482,6 +506,8 @@ def watcher_script(accents: dict, property_name: str = PROPERTY, hide_usage_bann
             .replace("__HUB_ULTRA__", json.dumps(ultra_map(table), ensure_ascii=False))
             .replace("__HUB_STYLE_CSS__", json.dumps(css))
             .replace("__HUB_USAGE_SELECTOR__", json.dumps(usage_banner_selector() if hide_usage_banner else ""))
+            .replace("__HUB_HUES__", json.dumps(hue_map(table)))
+            .replace("__HUB_HUE_PROPERTY__", HUE_PROPERTY)
             .replace("__HUB_THEME_ATTRIBUTE__", THEME_ATTRIBUTE)
             .replace("__HUB_ACCENT_PROPERTY__", ACCENT_PROPERTY)
             .replace("__HUB_ULTRA_ACCENT_PROPERTY__", ULTRA_ACCENT_PROPERTY)

@@ -348,15 +348,23 @@ vanish, and `prefers-reduced-motion` gets a still fill in the plain hue.
 Max, which shares the title attribute, keeps the app's purple, as do
 tokens and marks the watcher did not set; all of it is removed again when
 the level changes. The activity shimmer ("Thinking", "Listing files…") is
-tinted through the app's own knobs: its shimmer text reads
-`--loading-shimmer-highlight` for the sweep, resets it on the element with a
-zero-specificity `:where()` rule and falls back to a per-theme constant
-(`#ffffffbf` light, `#0009` dark). The watcher sets `--provider-hub-accent`
-and `data-provider-hub-theme` on the root from the pill's model, and a
-zero-specificity rule in the adopted stylesheet makes the highlight a 35%
-mix of that accent into the theme constant; being later in the cascade it
-beats the reset, while any component that sets its own highlight still wins,
-and with no accent the `var()` is invalid and the app's fallback returns.
+tinted through the app's own knobs: its shimmer text derives every tone
+from `--loading-shimmer-foreground` (the base gray, falling back to
+`--color-codex-description`, which in the desktop windows is the text
+colour at 70%), takes its sweep from `--loading-shimmer-highlight` (a
+per-theme constant, `#ffffffbf` light, `#0009` dark), and resets both on
+the element with a zero-specificity `:where()` rule. The watcher sets
+`--provider-hub-accent`, `--provider-hub-hue` (the accent's OKLCH hue in
+degrees, projected by the hub; an achromatic accent gets none) and
+`data-provider-hub-theme` on the root from the pill's model, and a
+zero-specificity rule in the adopted stylesheet sets the foreground to
+`oklch(from var(--color-codex-description) l 0.07 var(--provider-hub-hue))`:
+the app's own gray at its own lightness and alpha with a fixed 0.07 of
+chroma in the provider's hue, so the text reads as a slightly cooler gray
+and its legibility does not move, while the sweep stays the app's own.
+Being later in the cascade the rule beats the reset, while any component
+that sets its own foreground still wins, and with no hue the value is
+invalid and the app's fallback returns.
 The watcher observes the document node rather
 than its root element (a document-start script runs before the root exists,
 and the evaluate sent at attach time is queued until the window's first real

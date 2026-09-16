@@ -13,7 +13,7 @@ from unittest import mock
 
 from bridge_core import SLOTS
 import codex_accent
-from codex_accent import (ACCENT_PROPERTY, PROPERTY, THEME_ATTRIBUTE, ULTRA_ACCENT_PROPERTY, ULTRA_MARK, ULTRA_PROPERTY, AccentBridge, usage_banner_css, usage_banner_selector,
+from codex_accent import (ACCENT_PROPERTY, PROPERTY, THEME_ATTRIBUTE, ULTRA_ACCENT_PROPERTY, ULTRA_MARK, ULTRA_PROPERTY, AccentBridge, usage_banner_css, usage_banner_selector, HUE_PROPERTY, hue_map,
                           DevToolsPipe, accent_map, already_running, bridge_command, child_environment, executable_path, launch, run,
                           shimmer_css, ultra_accents, ultra_css, ultra_map, watcher_script)
 from hub_config import defaults
@@ -91,15 +91,24 @@ class AccentMapTests(unittest.TestCase):
         self.assertIn("document.querySelectorAll(USAGE_SELECTOR).length", hiding)  # the status reports matches
         self.assertNotIn("__HUB_", hiding)
 
-    def test_shimmer_rules_take_the_accent_per_theme(self):
+    def test_shimmer_gray_takes_the_accent_hue_and_the_sweep_stays_the_apps(self):
         css = shimmer_css()
-        self.assertIn(f':where([{THEME_ATTRIBUTE}] :is(.loading-shimmer-pure-text,.loading-shimmer)){{--loading-shimmer-highlight:color-mix(in srgb,var({ACCENT_PROPERTY}) 35%,#ffffffbf)}}', css)
-        self.assertIn(f':where([{THEME_ATTRIBUTE}="dark"] :is(.loading-shimmer-pure-text,.loading-shimmer)){{--loading-shimmer-highlight:color-mix(in srgb,var({ACCENT_PROPERTY}) 35%,#0009)}}', css)
-        script = watcher_script({"Kimi for Coding": "#0073E6"})
-        self.assertIn("--loading-shimmer-highlight", script)
+        self.assertEqual(css, f':where([{THEME_ATTRIBUTE}] :is(.loading-shimmer-pure-text,.loading-shimmer))'
+                              f'{{--loading-shimmer-foreground:oklch(from var(--color-codex-description) l 0.07 var({HUE_PROPERTY}))}}')
+        self.assertNotIn("--loading-shimmer-highlight", css)  # the sweep is the app's own again
+        hues = hue_map({"kimi for coding": "#0073E6", "antigravity": "#308713", "gray": "#808080", "white": "#FFFFFF"})
+        self.assertEqual(set(hues), {"kimi for coding", "antigravity"})  # grays have no hue to lend
+        self.assertAlmostEqual(hues["kimi for coding"], 256.0, delta=0.2)
+        self.assertAlmostEqual(hues["antigravity"], 139.7, delta=0.2)
+        script = watcher_script({"Kimi for Coding": "#0073E6", "Plain": "#808080"})
+        self.assertIn(f'const HUES = {json.dumps(hues["kimi for coding"] and {"kimi for coding": hues["kimi for coding"]})};', script)
+        self.assertIn(f'const HUE_PROPERTY = "{HUE_PROPERTY}";', script)
+        self.assertIn("--loading-shimmer-foreground", script)
+        self.assertNotIn("--loading-shimmer-highlight", script)
         self.assertIn("adoptedStyleSheets", script)
         self.assertIn(f'const THEME = "{THEME_ATTRIBUTE}";', script)
         self.assertIn(f'const ACCENT_PROPERTY = "{ACCENT_PROPERTY}";', script)
+        self.assertIn("applyShimmer(found.accent, found.theme, found.hue)", script)
         self.assertNotIn("__HUB_", script)
 
 

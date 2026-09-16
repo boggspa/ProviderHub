@@ -128,8 +128,10 @@ start Codex / ChatGPT itself with a Chromium DevTools pipe and install a small
 watcher in its windows that colours the model picker's power slider, and the
 effort word in the composer's model pill, with the selected model's provider
 accent, the same hues as the Providers page (Gemini wears Google's
-Antigravity green). The activity shimmer ("Thinking", "Editing files")
-sweeps with a faint trace of the same hue. At Ultra the slider, the picker's
+Antigravity green). The activity text ("Thinking", "Editing files") turns
+a slightly cooler gray: the app's own gray at its own lightness with a hint
+of the provider hue, while the shimmer's sweep keeps the app's highlight. At
+Ultra the slider, the picker's
 title and the pill's word take a deeper, more saturated cut of the same hue
 in place of the app's purple, and the word shimmers. Only Provider Hub holds
 the pipe; nothing listens on a port. The route is unsupported by OpenAI: the slider's colour is an app-wide
