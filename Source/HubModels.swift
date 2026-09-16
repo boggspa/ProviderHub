@@ -12,6 +12,11 @@ struct ProviderConnection: Codable, Equatable {
     var base_url: String
     var credential_mode: String
     var credential_revision = 0
+    /// Ollama only: how long a model the hub ran stays resident after its
+    /// turn. Optional so it encodes as an omitted key rather than a null:
+    /// absent takes the gateway's own default, and no other provider's
+    /// saved connection grows a field its daemon-less routes ignore.
+    var idle_unload_seconds: Int?
 }
 struct BrandLogo: Codable, Equatable {
     var light: String

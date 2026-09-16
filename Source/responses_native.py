@@ -950,3 +950,4 @@ def handle_responses(handler):
         if not delegated:
             runtime.semaphore.release()
         handler.close_connection = True
+        runtime.release_local_model(plan)

@@ -271,6 +271,22 @@ final class BridgeModel: ObservableObject {
         }
     }
 
+    /// The gateway's own lease when the Ollama connection names none.
+    /// Kept equal to ollama_lifecycle.DEFAULT_LEASE_SECONDS so the picker
+    /// shows the seconds the worker will actually use.
+    static let defaultIdleUnloadSeconds = 90
+
+    /// Seconds an Ollama model stays resident after the turn that used it.
+    /// Reading falls back to the gateway default rather than to an empty
+    /// selection, because a connection without the key is not unset — it
+    /// is that default.
+    var ollamaIdleUnload: Binding<Int> {
+        Binding(
+            get: { self.settings.providers["ollama"]?.idle_unload_seconds ?? Self.defaultIdleUnloadSeconds },
+            set: { self.settings.providers["ollama"]?.idle_unload_seconds = $0 }
+        )
+    }
+
     enum ChangeKind {
         /// Nothing to write.
         case unchanged

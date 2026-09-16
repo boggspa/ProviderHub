@@ -12,6 +12,7 @@ import re
 
 from providers import PROVIDERS, provider_defaults, validate_connection
 from branding import resolve_presentation, validate_overrides
+from ollama_lifecycle import DEFAULT_LEASE_SECONDS, KEEP_RESIDENT, MAX_LEASE_SECONDS
 from effort_map import mistral_ladder_for_model
 from model_names import PINNED_LABELS, friendly_model_name
 
@@ -70,6 +71,29 @@ def _spawn_depth_limit(value):
         return None
     if type(value) is not int or value not in (0, 1):
         raise ValueError("spawn_depth_limit must be 0 (no subagent spawning) or 1 (children cannot spawn).")
+    return value
+
+
+def _idle_unload_seconds(provider_id: str, value):
+    """Validate the post-turn keep_alive lease for a local model.
+
+    Absent/None takes the module default, which is the point of the
+    setting: a hub that never says anything leaves every model it touches
+    resident for the daemon's own five minutes. ``0`` unloads the model
+    as soon as its turn ends, and ``-1`` is Ollama's own "never expire"
+    for a machine that would rather hold the weights than reload them.
+
+    Only Ollama takes it. A hosted provider has no resident weights to
+    lease, so accepting the field there would be a setting that silently
+    does nothing.
+    """
+    if value is None:
+        return None
+    if provider_id != "ollama":
+        raise ValueError("idle_unload_seconds applies to the Ollama connection; a hosted provider keeps no model resident.")
+    if type(value) is not int or not KEEP_RESIDENT <= value <= MAX_LEASE_SECONDS:
+        raise ValueError(f"idle_unload_seconds must be -1 (keep resident), 0 (unload when the turn ends), "
+                         f"or up to {MAX_LEASE_SECONDS} seconds. The default is {DEFAULT_LEASE_SECONDS}.")
     return value
 
 
@@ -328,6 +352,9 @@ def normalize(value: dict, slots, vibe_model: str, port: int = 11436) -> dict:
         depth = _spawn_depth_limit(requested.get("spawn_depth_limit", baseline.get("spawn_depth_limit")))
         if depth is not None:
             connection["spawn_depth_limit"] = depth
+        lease = _idle_unload_seconds(provider_id, requested.get("idle_unload_seconds", baseline.get("idle_unload_seconds")))
+        if lease is not None:
+            connection["idle_unload_seconds"] = lease
         result["providers"][provider_id] = connection
     result["branding_overrides"] = validate_overrides(value.get("branding_overrides", {}))
     if value.get("codex_model") is not None:

@@ -72,6 +72,10 @@ struct ProviderPage: View {
                     if provider.id == "ollama" {
                         TextField("Daemon address", text: connectionField(\.base_url)).textFieldStyle(.roundedBorder)
                         Text("Uses the models already available in your Ollama daemon. Local and cloud-tagged models keep their actual Ollama IDs.").font(.caption).foregroundStyle(.secondary)
+                        Picker("Unload a finished model after", selection: model.ollamaIdleUnload) {
+                            ForEach(idleUnloadChoices, id: \.self) { Text(idleUnloadLabel($0)).tag($0) }
+                        }.help("Ollama holds a model for five minutes after a turn and the compatibility endpoints cannot say otherwise, so the hub sets this lease on the daemon itself after each turn on this connection.")
+                        Text("Weights stay loaded this long after a turn, so a steer or a quick follow-up reuses them, and an abandoned conversation stops holding memory until the daemon restarts. Only models this hub ran are leased; the daemon still does the unloading, so the lease outlives the hub.").font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                     } else {
                         Picker("Credential source", selection: connectionField(\.credential_mode)) {
                             if provider.id == "mistral" { Text("Vibe saved API key").tag("vibe") }
@@ -211,6 +215,23 @@ struct ProviderPage: View {
             }
             Text("Grok Build and Muse Code subscriptions expose their own agent sessions. Their native-agent integration is documented separately; it needs a different connection from these model APIs.").font(.caption).foregroundStyle(.secondary).lineSpacing(3)
         }
+    }
+    /// Presets, plus whatever a hand-edited settings file already holds, so
+    /// the picker can never silently rewrite a value it cannot display.
+    /// "Keep in memory" sorts last: it is the end of the ladder, not -1.
+    var idleUnloadChoices: [Int] {
+        let presets = [0, 30, 60, 90, 300, 900, -1]
+        guard let current = model.settings.providers["ollama"]?.idle_unload_seconds,
+              !presets.contains(current) else { return presets }
+        return (presets + [current]).sorted { ($0 < 0 ? Int.max : $0) < ($1 < 0 ? Int.max : $1) }
+    }
+    func idleUnloadLabel(_ seconds: Int) -> String {
+        if seconds < 0 { return "Keep in memory" }
+        if seconds == 0 { return "As soon as the turn ends" }
+        if seconds < 60 { return "\(seconds) seconds" }
+        if seconds % 60 != 0 { return "\(seconds) seconds" }
+        let minutes = seconds / 60
+        return minutes == 1 ? "1 minute" : "\(minutes) minutes"
     }
     func regionLabel(_ region: String) -> String {
         ["ams": "Amsterdam", "sgp": "Singapore", "cn": "China"][region] ?? region.capitalized

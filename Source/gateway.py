@@ -30,6 +30,7 @@ from catalogue_lifecycle import (CataloguePreparationError, catalogue_fingerprin
                                  validate_prepared_launch)
 from catalogue import build_catalogue, read_observations
 from hub_config import claude_routes, connection_signature, provider_presentations, qualify, split_route
+from ollama_lifecycle import http_transport, lease_seconds, release as release_resident_model
 from providers import PROVIDERS, prepare_request, ProviderError
 from rate_limit import (MAX_UPSTREAM_ATTEMPTS, RETRYABLE_STATUSES, SLOT_RETRY_AFTER, SLOT_WAIT_TIMEOUT,
                         THROTTLE_CAP, ProviderThrottle, parse_retry_after, wait_for_slot)
@@ -227,6 +228,25 @@ class Runtime:
             endpoint = "/v1/messages" if plan["protocol"] == "anthropic" else "/chat/completions"
             plan["url"] = self.upstream_url.rstrip("/") + endpoint
         return plan
+
+    def release_local_model(self, plan):
+        """Hand this turn's Ollama model its idle lease, and nothing else.
+
+        Ollama re-arms its own five-minute default as each turn's upstream
+        connection closes, and its Messages/Responses compatibility layers
+        drop the keep_alive that would have said otherwise, so the lease is
+        set here instead — after the client has its answer, after that
+        connection is closed, and only for a model the daemon still holds.
+        Housekeeping for an answered turn never reports a failure upward.
+        """
+        if not isinstance(plan, dict) or plan.get("provider_id") != "ollama":
+            return
+        try:
+            connection = self.settings["providers"]["ollama"]
+            release_resident_model(connection["base_url"], split_route(plan["route"])[1],
+                                   lease_seconds(connection), transport=http_transport())
+        except (OSError, ValueError, TypeError, KeyError):
+            pass
 
     def status(self):
         with self.lock:
@@ -878,6 +898,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.runtime.active -= 1
             self.runtime.semaphore.release()
             self.close_connection = True
+            self.runtime.release_local_model(plan)
 
 
 class Server(ThreadingHTTPServer):
