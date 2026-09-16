@@ -228,6 +228,15 @@ def project_codex(settings, inventory):
             "upgrade": None,
             "base_instructions": BASE_INSTRUCTIONS,
             "model_messages": None,
+            # Codex resolves an omitted include_* flag to false. The skills are
+            # still listed either way, but without these the model never gets
+            # the progressive-disclosure how-to (read SKILL.md before acting,
+            # resolve relative paths against it) or the plugin briefing, so a
+            # projected route reads a thinner prompt than the native rows for
+            # the same installed plugins.
+            "include_skills_usage_instructions": True,
+            "include_plugin_usage_instructions": True,
+            "include_apps_usage_instructions": True,
             "supports_reasoning_summaries": False,
             "default_reasoning_summary": "none",
             "support_verbosity": False,
@@ -252,6 +261,13 @@ def project_codex(settings, inventory):
             "experimental_supported_tools": [],
             "input_modalities": ["text", "image"] if entry.get("vision") is True else ["text"],
             "supports_search_tool": False,
+            # node_repl - the runtime behind Computer Use and Browser Use - is
+            # wired per install rather than per provider, so a projected route
+            # is handed the js tools like any native row. Ask for the strict
+            # auto-review the installed catalogue's own rows carry, so model
+            # written JavaScript is reviewed before it runs; the desktop
+            # honours the flag when its node_repl model check is enabled.
+            "node_repl_auto_review_required": True,
             # Multi-agent capability: advertise the native multi_agent runtime
             # the installed Codex engine supports for reasoning-capable models.
             # ultra/v2 let the desktop slider opt into autonomous sub-agent

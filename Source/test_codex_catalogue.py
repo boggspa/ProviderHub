@@ -178,6 +178,34 @@ class CuratedCatalogueProjectionTests(unittest.TestCase):
         self.assertNotEqual(narrowed, catalogue_digest(base, stock))
 
 
+class DesktopBriefingProjectionTests(unittest.TestCase):
+    """Flags the installed catalogue resolves to false when a route omits them."""
+
+    def projected(self, *models):
+        selected = settings(codex_model=models[0]["id"])
+        return {row["slug"]: row for row in project_codex(selected, inventory(*models))["models"]}
+
+    def rows(self):
+        return self.projected(
+            model("mistral/a-model"),
+            model("mistral/plain-model", reasoning=False, effort_modes=[]),
+        )
+
+    def test_every_route_asks_for_the_skill_plugin_and_app_briefings(self):
+        for slug, row in self.rows().items():
+            with self.subTest(slug=slug):
+                self.assertTrue(row["include_skills_usage_instructions"])
+                self.assertTrue(row["include_plugin_usage_instructions"])
+                self.assertTrue(row["include_apps_usage_instructions"])
+
+    def test_node_repl_javascript_keeps_the_strict_auto_review(self):
+        # node_repl is wired per install, so even a route with no reasoning
+        # ladder (and therefore no multi-agent runtime) is handed the js tools.
+        for slug, row in self.rows().items():
+            with self.subTest(slug=slug):
+                self.assertTrue(row["node_repl_auto_review_required"])
+
+
 class EffortAndFastProjectionTests(unittest.TestCase):
     def projected(self, *models):
         selected = settings(codex_model=models[0]["id"])

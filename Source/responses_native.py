@@ -460,12 +460,17 @@ def prepare_native(runtime, payload):
             if not isinstance(item, dict) or item.get("type", "message") not in {"message", "function_call", "function_call_output", "reasoning"}:
                 offending_type = item.get("type", "unknown") if isinstance(item, dict) else type(item).__name__
                 raise BridgeError(f"Unsupported Responses history item '{offending_type}'. Use the function-tool catalogue.")
-            content = item.get("content")
             # Ollama's Responses endpoint accepts or rejects images itself.
             # Catalogue vision is picker metadata, not a request interceptor.
-            if isinstance(content, list) and provider_id != "ollama" and spec.get("vision") is False:
-                if any(isinstance(part, dict) and part.get("type") == "input_image" for part in content):
-                    raise BridgeError("The selected model does not advertise image input.")
+            # A tool result carries its parts in `output`, not `content`: a
+            # Computer Use screenshot or a view_image call returns an
+            # input_image there, so both fields have to be checked or the
+            # provider rejects the turn instead of this gateway.
+            if provider_id != "ollama" and spec.get("vision") is False:
+                for parts in (item.get("content"), item.get("output")):
+                    if isinstance(parts, list) and any(
+                            isinstance(part, dict) and part.get("type") == "input_image" for part in parts):
+                        raise BridgeError("The selected model does not advertise image input.")
     input_names(body["input"], tool_map)
     choice = body.get("tool_choice")
     if isinstance(choice, dict) and choice.get("type") == "function":

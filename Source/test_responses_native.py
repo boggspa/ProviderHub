@@ -280,6 +280,35 @@ class NativeResponsesTests(unittest.TestCase):
         self.assertIn(b"does not advertise image input", raw)
         self.assertEqual(len(MockProvider.requests), 0)
 
+    def test_tool_result_images_are_rejected_for_a_route_without_vision(self):
+        # Computer Use returns a screenshot as an input_image inside the tool
+        # result, where the parts live under `output` rather than `content`.
+        self.start("grok")
+        self.runtime.settings["_model_specs"][self.route]["vision"] = False
+        status, raw = self.request(self.body(input=[
+            {"role": "user", "content": fixtures.LOCAL_REQUEST_TEXT},
+            {"type": "function_call", "call_id": "call-shot", "name": "read_file", "arguments": "{}"},
+            {"type": "function_call_output", "call_id": "call-shot", "output": [
+                {"type": "input_text", "text": "screenshot"},
+                {"type": "input_image", "image_url": "data:image/png;base64,AAAA"},
+            ]},
+        ]))
+        self.assertEqual(status, 400, raw)
+        self.assertIn(b"does not advertise image input", raw)
+        self.assertEqual(len(MockProvider.requests), 0)
+
+    def test_tool_result_images_reach_a_route_that_advertises_vision(self):
+        self.start("grok")
+        image = {"type": "input_image", "image_url": "data:image/png;base64,AAAA"}
+        status, raw = self.request(self.body(input=[
+            {"role": "user", "content": fixtures.LOCAL_REQUEST_TEXT},
+            {"type": "function_call", "call_id": "call-shot", "name": "read_file", "arguments": "{}"},
+            {"type": "function_call_output", "call_id": "call-shot", "output": [
+                {"type": "input_text", "text": "screenshot"}, image]},
+        ]))
+        self.assertEqual(status, 200, raw)
+        self.assertEqual(MockProvider.requests[0]["input"][2]["output"][1], image)
+
     def test_unsupported_tools_fields_and_providers_are_explicit(self):
         self.start()
         for changes in ({"tools": [{"type": "custom", "name": "other_freeform"}]}, {"background": True},

@@ -115,6 +115,30 @@ By default, every compatible model published by the configured account
 catalogues appears. OpenRouter publishes a curated shortlist with separate
 context choices. The selected default sets the starting model.
 
+**Desktop briefing and image-capable routes**
+
+Codex resolves a catalogue flag it is not given to `false`, so a projected
+route read a thinner prompt than a native row on the same machine: its skills
+were still listed, but the progressive-disclosure how-to, the plugin briefing,
+and the strict auto-review of `node_repl` JavaScript were absent. The
+projection now states `include_skills_usage_instructions`,
+`include_plugin_usage_instructions`, `include_apps_usage_instructions`, and
+`node_repl_auto_review_required` for every route. The installed 26.908.70816
+runtime accepts and echoes all four through `codex debug models`, and
+`codex debug prompt-input` against a disposable `CODEX_HOME` shows the restored
+"How to use skills" block for a hub route.
+
+The bundled Computer Use and Browser Use plugins are wired per install rather
+than per provider: the desktop app writes their `node_repl` and `cua_repl` MCP
+servers into the Codex configuration at launch, and it keeps doing so while the
+hub provider is selected, so a projected route is handed the `js` tools exactly
+like a native row. Only the screenshots need image input — `sky.get_app_state`
+returns an accessibility tree as text — and Codex delivers a screenshot as an
+`input_image` inside the tool result, where the parts live under `output`
+rather than `content`. The native Responses path checks both fields, so a route
+whose catalogue entry advertises text alone is refused at this gateway with a
+clear message instead of failing at the provider.
+
 **Codex catalogue curation**
 
 Provider Hub 0.5.0 adds an optional Codex catalogue selection on the Codex page.
