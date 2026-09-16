@@ -212,7 +212,7 @@ def project_codex(settings, inventory):
             levels = list(levels) + [ultra]
         efforts = [row["effort"] for row in levels]
         service_tiers = _service_tiers(provider_id, entry)
-        models.append({
+        row = {
             "slug": route,
             "display_name": name,
             "description": _codex_description(provider_id, provider, context, service_tiers),
@@ -256,7 +256,7 @@ def project_codex(settings, inventory):
             # translate into. Offered anywhere else, Codex sends a tool the
             # request cannot carry and the whole turn fails rather than the
             # search quietly going missing.
-            "web_search_tool_type": "text" if entry.get("web_search") else None,
+            "web_search_tool_type": "text",
             "truncation_policy": {"mode": "bytes", "limit": 10000},
             "supports_parallel_tool_calls": entry.get("parallel_tool_calls") is True,
             "supports_image_detail_original": False,
@@ -282,7 +282,17 @@ def project_codex(settings, inventory):
             # highest advertised reasoning rank at request time.
             "multi_agent_version": "v2" if (entry.get("reasoning") is True and efforts) else None,
             "multi_agent_reasoning_effort": "xhigh" if (entry.get("reasoning") is True and efforts) else None,
-        })
+        }
+        # Absence is the only way to say "no search" here. The field takes
+        # "text" or "text_and_image" and nothing else - not null, not "none",
+        # not an empty string - and one unreadable value makes Codex discard
+        # the whole catalogue file and fall back to its own models, so the
+        # switch reads as the hub failing to load rather than as a route
+        # declining a tool. apply_patch_tool_type above does accept null; this
+        # one does not, and the asymmetry is the runtime's, not a choice here.
+        if not entry.get("web_search"):
+            del row["web_search_tool_type"]
+        models.append(row)
     for model, label in zip(models, _composer_labels(label_rows)):
         model["display_name"] = label
     models.sort(key=lambda model: (model["display_name"].casefold(), model["slug"]))

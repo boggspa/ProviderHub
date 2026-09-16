@@ -136,7 +136,13 @@ class CuratedCatalogueProjectionTests(unittest.TestCase):
             settings(), inventory(model("openrouter/searching", web_search=True),
                                   model("mistral/plain")))["models"]}
         self.assertEqual(rows["openrouter/searching"]["web_search_tool_type"], "text")
-        self.assertIsNone(rows["mistral/plain"]["web_search_tool_type"])
+        # Absent, not null. Codex's catalogue parser reads this field as one of
+        # "text" or "text_and_image" and rejects every other value including
+        # null, and a single unreadable field makes it discard the entire file
+        # and fall back to its own models - so a null here does not decline a
+        # tool, it takes the whole hub catalogue down with it.
+        self.assertNotIn("web_search_tool_type", rows["mistral/plain"])
+        self.assertIsNone(rows["mistral/plain"]["apply_patch_tool_type"])
 
     def test_apply_patch_freeform_is_a_per_route_opt_in(self):
         stock = inventory(model("mistral/a-model"), model("mistral/b-model"))
