@@ -32,9 +32,38 @@ integration. Grok here also uses its pay-as-you-go API.
 
 ## Claude Desktop
 
-1. Open **Models** and select the provider model behind each Claude model slot. Optional **Omit system** / **Omit tools** checkboxes drop those Claude-sent fields at this gateway (own risk; tool loops break).
+1. Open **Models**. With **Five Claude slots** selected, pick the provider
+   model behind each Claude model slot. Optional **Omit system** /
+   **Omit tools** checkboxes drop those Claude-sent fields at this gateway
+   (own risk; tool loops break). Switch to **Curated catalogue** to list any
+   number of provider models in Claude's picker instead; each row carries the
+   Claude family tier it plays (Fable, Opus, Sonnet or Haiku) and one row per
+   tier is that tier's default.
 2. Open **Claude** and choose **Launch Claude**.
 3. If Claude is already open, the app asks before restarting it.
+
+**Curated catalogue.** Claude lists each row under a generated id that starts
+with the tier's Claude model (for example `claude-sonnet-5-kimi-k3`), keeps
+the row's own display name, and starts on the Fable tier's default (Opus if
+there is no Fable row). Claude Code's own family requests (its sonnet, opus,
+haiku and fable aliases, dated family ids, older Sonnet fallbacks) go to that
+tier's default, with the nearest tier standing in for a missing one. The
+five slot mappings stay saved for switching back. **Teach Claude Code the
+catalogue ids** (Claude tab, on by default) writes a `modelPicker` row with
+`behavesAs` into `~/.claude/settings.json` for each catalogue model while the
+profile is active, which is Claude Code's own remedy for a model id it does
+not know: the row inherits the effort ladder, capabilities and context
+handling of its tier's Claude model. The rows are removed when the previous
+setup is restored; a terminal Claude Code sees them meanwhile.
+
+**Ultracode.** Claude's Ultracode effort level (xhigh effort plus standing
+dynamic-workflow orchestration) works with catalogue models on the Fable,
+Opus or Sonnet tier once Claude Code's dynamic workflows are enabled. Turn on
+**Enable dynamic workflows for Ultracode** (Claude tab) to add
+`enableWorkflows` to the same settings file while the profile is active.
+With Ultracode on, the gateway sends the provider its highest reasoning
+setting and adds an orchestration note so the external model reaches for the
+Workflow tool the way Claude's own reminders ask.
 
 Claude uses its native third-party profile system. A model whose effective
 context is at least 1M is advertised under a single `[1m]`-suffixed slot id, so

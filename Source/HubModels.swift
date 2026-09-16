@@ -77,6 +77,16 @@ struct ClaudeFeatures: Codable, Equatable {
     var cowork_tab = false
 }
 
+/// One curated Claude catalogue row: a provider route served to Claude Desktop
+/// under a family tier (see hub_config.claude_catalogue_rows for the served id).
+struct ClaudeCatalogueEntry: Codable, Equatable, Identifiable {
+    var route: String
+    var tier: String
+    var tier_default: Bool? = false
+    var compact_limit: Int?
+    var id: String { route }
+}
+
 struct RouteSettings: Codable, Equatable {
     var schema_version = 3
     var port = hubDefaultPort
@@ -87,6 +97,12 @@ struct RouteSettings: Codable, Equatable {
     var auto_stop = true
     var auto_mode = false
     var claude_features = ClaudeFeatures()
+    // Curated Claude catalogue; nil keeps the five slot mappings.
+    var claude_catalogue: [ClaudeCatalogueEntry]?
+    // Claude tab: teach Claude Code the catalogue ids (behavesAs rows) and
+    // enable its dynamic workflows while the profile is active.
+    var claude_code_settings = true
+    var claude_workflows = false
     var codex_model: String?
     var codex_catalogue: [String]?
     var codex_chatgpt_account = false

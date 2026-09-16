@@ -54,7 +54,7 @@ class CataloguePreparationError(Exception):
 def _dependencies():
     from bridge_core import credentials, discover_provider, read_json
     from catalogue import route_specs
-    from hub_config import connection_signature, project_catalogue, split_route
+    from hub_config import claude_routes, connection_signature, project_catalogue, split_route
     from providers import PROVIDERS
     return {
         "credentials": credentials,
@@ -64,6 +64,7 @@ def _dependencies():
         "connection_signature": connection_signature,
         "project_catalogue": project_catalogue,
         "split_route": split_route,
+        "claude_routes": claude_routes,
         "providers": PROVIDERS,
     }
 
@@ -107,9 +108,12 @@ def _transient_error(message: str) -> bool:
 
 
 def _selected(settings: dict) -> dict[str, list[dict]]:
-    split_route = _dependencies()["split_route"]
+    dependencies = _dependencies()
+    split_route = dependencies["split_route"]
     selected: dict[str, list[dict]] = {}
-    for slot_id, route_id in sorted(settings["mappings"].items()):
+    # Catalogue mode plans every curated row (plus the family slots that
+    # point at tier defaults); mapping mode plans the five slots.
+    for slot_id, route_id in sorted(dependencies["claude_routes"](settings).items()):
         provider_id, _ = split_route(route_id)
         selected.setdefault(provider_id, []).append({
             "slot_id": slot_id,
@@ -693,7 +697,7 @@ def runtime_fingerprint_error(
     """Explain when a running gateway predates selected planning metadata."""
     if isinstance(actual, str) and actual == expected:
         return None
-    routes = sorted(set(settings["mappings"].values()))
+    routes = sorted(set(_dependencies()["claude_routes"](settings).values()))
     return ("The running gateway loaded an older catalogue snapshot for selected "
             f"routes {', '.join(routes)}. Restart the gateway after preparing these "
             "routes, then launch the desktop app again.")

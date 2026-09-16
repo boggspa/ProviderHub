@@ -14,10 +14,11 @@ from unittest.mock import patch
 from bridge_core import (BridgeError, ClaudeProfile, PROFILE_ID, atomic_json, default_settings,
                          read_json, validate_settings)
 from gateway import Runtime, Server, rejection_details
-from protocol import (StreamTranslator, TokenCalibration, apply_mapping_options, compact_conversation, compact_threshold, conversation_units,
+from protocol import (StreamTranslator, TokenCalibration, ULTRACODE_NOTE, apply_mapping_options, compact_conversation, compact_threshold, conversation_units,
                       estimated_tokens, function_name, reported_input_tokens,
                       mapping_options_for, model_catalog, rewrite_context_reminders, tool_id,
-                      translate_request, translate_response, resolve_model, resolve_mapping_slot)
+                      translate_request, translate_response, resolve_model, resolve_mapping_slot, ultracode_active)
+from hub_config import claude_routes
 from catalogue import build_catalogue, read_observations, route_specs
 
 
@@ -130,8 +131,87 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(resolve_mapping_slot("claude-haiku-4-5-20251001", mappings), "claude-haiku-4-5")
         # An upstream id that itself ends in a date still resolves exactly.
         self.assertEqual(resolve_model("mistral/x-20250101", mappings), "mistral/x-20250101")
+        # An unlisted Claude family id lands on its family's slot; other ids stay unmapped.
+        self.assertEqual(resolve_model("claude-haiku-4-5-2025", mappings), "mistral/d")
+        self.assertEqual(resolve_model("claude-opus-4-8[1m]", {**mappings, "claude-opus-5": "mistral/o"}), "mistral/o")
+        self.assertEqual(resolve_mapping_slot("claude-sonnet-4-6", mappings), "claude-sonnet-5")
+        self.assertIsNone(resolve_mapping_slot("claude-opus-4-8", mappings))
         with self.assertRaises(BridgeError):
-            resolve_model("claude-haiku-4-5-2025", mappings)
+            resolve_model("gpt-5", mappings)
+        with self.assertRaises(BridgeError):
+            resolve_model("claude-opus-4-8", mappings)
+
+    def catalogue_settings(self):
+        settings = config()
+        settings["_model_specs"]["big-model"] = {**settings["_model_specs"]["test-model"], "id": "big-model", "canonical_id": "big-model",
+                                                 "display_name": "Big Model", "context": 1200000, "aliases": ["big-model"]}
+        settings["claude_catalogue"] = [
+            {"route": "test-model", "tier": "fable", "tier_default": True},
+            {"route": "big-model", "tier": "sonnet", "tier_default": True, "compact_limit": 900000},
+        ]
+        return settings
+
+    def test_catalogue_mode_serves_tier_rows_under_generated_ids(self):
+        settings = self.catalogue_settings()
+        rows = model_catalog(settings)["data"]
+        self.assertEqual([row["id"] for row in rows], ["claude-fable-5-mistral-test-model", "claude-sonnet-5-mistral-big-model[1m]"])
+        self.assertEqual([row["anthropic_family_tier"] for row in rows], ["fable", "sonnet"])
+        self.assertTrue(all(row["is_family_default"] for row in rows))
+        self.assertIn("fable tier", rows[0]["description"])
+        self.assertEqual(rows[1]["max_tokens"], 1200000)
+        self.assertIs(rows[1]["supports_1m"], False)
+        self.assertEqual(rows[0]["display_name"], "Test Model")
+        # The slot table is ignored while a catalogue is set.
+        settings["mappings"] = {slot: "missing-model" for slot in settings["mappings"]}
+        self.assertEqual(len(model_catalog(settings)["data"]), 2)
+
+    def test_catalogue_mode_resolves_rows_aliases_and_family_stand_ins(self):
+        settings = self.catalogue_settings()
+        routes = claude_routes(settings)
+        self.assertEqual(resolve_model("claude-sonnet-5-mistral-big-model[1m]", routes), "big-model")
+        self.assertEqual(resolve_model("claude-fable-5-mistral-test-model", routes), "test-model")
+        self.assertEqual(resolve_model("sonnet", routes), "big-model")
+        self.assertEqual(resolve_model("fable", routes), "test-model")
+        # No haiku or opus rows: Claude Code's own haiku and opus requests use the nearest tier.
+        self.assertEqual(resolve_model("claude-haiku-4-5-20251001", routes), "big-model")
+        self.assertEqual(resolve_model("claude-opus-5", routes), "test-model")
+        self.assertEqual(resolve_model("claude-sonnet-4-6", routes), "big-model")
+        with self.assertRaises(BridgeError):
+            resolve_model("gpt-5", routes)
+        options = mapping_options_for("claude-sonnet-5-mistral-big-model[1m]", settings)
+        self.assertEqual(options["compact_limit"], 900000)
+        self.assertFalse(options["omit_system"])
+        self.assertEqual(mapping_options_for("haiku", settings)["compact_limit"], 900000)
+        self.assertIsNone(mapping_options_for("fable", settings)["compact_limit"])
+        self.assertIsNone(mapping_options_for("gpt-5", settings)["compact_limit"])
+        result, _ = translate_request(prompt(model="claude-fable-5-mistral-test-model"), settings)
+        self.assertEqual(result["model"], "test-model")
+        result, _ = translate_request(prompt(model="claude-sonnet-5-mistral-big-model[1m]"), settings)
+        self.assertEqual(result["model"], "big-model")
+
+    def test_ultracode_reminders_add_an_orchestration_note_for_the_provider(self):
+        settings = config()
+        body = prompt(system="Base rules", messages=[
+            {"role": "user", "content": [
+                {"type": "text", "text": "<system-reminder>Ultracode is on: optimize for the most exhaustive, correct answer.</system-reminder>"},
+                {"type": "text", "text": "Fix the bug"}]},
+            {"role": "assistant", "content": "On it."},
+            {"role": "user", "content": "Next task"}])
+        self.assertTrue(ultracode_active(body))
+        result, _ = translate_request(body, settings)
+        self.assertEqual([m["role"] for m in result["messages"][:3]], ["system", "system", "user"])
+        self.assertEqual(result["messages"][0]["content"], "Base rules")
+        self.assertEqual(result["messages"][1]["content"], ULTRACODE_NOTE)
+        off = prompt(messages=body["messages"] + [{"role": "user", "content": "<system-reminder>Ultracode is off \u2014 the Workflow tool's standard opt-in rule applies again.</system-reminder>"}])
+        self.assertFalse(ultracode_active(off))
+        translated, _ = translate_request(off, settings)
+        self.assertNotIn(ULTRACODE_NOTE, [m.get("content") for m in translated["messages"]])
+        keyword = prompt(messages=[{"role": "user", "content": 'The user included the keyword "ultracode", opting this turn into multi-agent orchestration.'}])
+        self.assertTrue(ultracode_active(keyword))
+        stale = prompt(messages=keyword["messages"] + [{"role": "assistant", "content": "done"}, {"role": "user", "content": "thanks"}])
+        self.assertFalse(ultracode_active(stale))
+        self.assertFalse(ultracode_active(prompt()))
+        self.assertFalse(ultracode_active({"messages": "nope"}))
 
     def test_compact_conversation_drops_oldest_and_keeps_chronological_order(self):
         body = sized_conversation(5, 1500)
@@ -603,7 +683,7 @@ class ProfileTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.base = Path(self.tmp.name)
-        self.profile = ClaudeProfile(self.base / "bridge", self.base / "support")
+        self.profile = ClaudeProfile(self.base / "bridge", self.base / "support", self.base / "claude-home")
         self.previous = {"appliedId": "ollama-profile", "entries": [{"id": "ollama-profile", "name": "Ollama"}], "custom": 7}
         atomic_json(self.profile.meta, self.previous)
         atomic_json(self.profile.normal, {"deploymentMode": "1p", "mcpServers": {"keep": {}}, "unrelated": "retained"})
@@ -652,6 +732,69 @@ class ProfileTests(unittest.TestCase):
         self.assertEqual(read_json(self.profile.normal)["unrelated"], "new value")
         self.assertEqual(read_json(self.profile.meta)["appliedId"], "ollama-profile")
         self.assertEqual([e["id"] for e in read_json(self.profile.meta)["entries"]], ["ollama-profile", "another"])
+
+    def catalogue_settings(self):
+        settings = config()
+        settings["claude_catalogue"] = [{"route": "test-model", "tier": "opus", "tier_default": True}]
+        settings["_display_names"] = {"test-model": "Test Model"}
+        return settings
+
+    def test_catalogue_rows_are_taught_to_claude_code_and_removed_on_restore(self):
+        code = self.profile.code_settings
+        self.assertFalse(code.exists())
+        result = self.profile.activate(self.catalogue_settings(), "local-token", require_closed=False)
+        self.assertEqual(result["claude_code_settings"], "written")
+        written = read_json(code)
+        self.assertEqual(written["modelPicker"]["options"], [
+            {"model": "claude-opus-5-mistral-test-model", "label": "Test Model",
+             "description": "Provider Hub \u00b7 test-model \u00b7 behaves as claude-opus-5", "behavesAs": "claude-opus-5"}])
+        self.assertNotIn("enableWorkflows", written)
+        self.assertTrue(self.profile.restore(require_closed=False)["restored"])
+        self.assertFalse(code.exists())
+        self.assertFalse(self.profile.journal.exists())
+
+    def test_code_settings_keep_user_rows_and_honor_edits_made_meanwhile(self):
+        code = self.profile.code_settings
+        atomic_json(code, {"theme": "dark", "modelPicker": {"replaceBuiltInOptions": False, "options": [
+            {"model": "my-model", "label": "Mine"}, {"model": "old-hub-row", "description": "Provider Hub \u00b7 stale"}]}})
+        settings = self.catalogue_settings()
+        settings["claude_workflows"] = True
+        self.profile.activate(settings, "local-token", require_closed=False)
+        written = read_json(code)
+        self.assertEqual([row["model"] for row in written["modelPicker"]["options"]], ["my-model", "claude-opus-5-mistral-test-model"])
+        self.assertIs(written["modelPicker"]["replaceBuiltInOptions"], False)
+        self.assertIs(written["enableWorkflows"], True)
+        self.assertEqual(written["theme"], "dark")
+        # A row added while the profile is active survives; only the hub's row goes.
+        edited = read_json(code)
+        edited["modelPicker"]["options"].append({"model": "added-later", "label": "Later"})
+        atomic_json(code, edited)
+        self.profile.restore(require_closed=False)
+        after = read_json(code)
+        self.assertEqual([row["model"] for row in after["modelPicker"]["options"]], ["my-model", "added-later"])
+        self.assertIs(after["modelPicker"]["replaceBuiltInOptions"], False)
+        self.assertNotIn("enableWorkflows", after)
+        self.assertEqual(after["theme"], "dark")
+
+    def test_unreadable_code_settings_are_left_alone(self):
+        code = self.profile.code_settings
+        code.parent.mkdir(parents=True)
+        code.write_text("{not json")
+        result = self.profile.activate(self.catalogue_settings(), "local-token", require_closed=False)
+        self.assertTrue(result["claude_code_settings"].startswith("skipped"))
+        self.assertTrue(self.profile.active())
+        self.assertEqual(code.read_text(), "{not json")
+        self.assertTrue(self.profile.restore(require_closed=False)["restored"])
+        self.assertEqual(code.read_text(), "{not json")
+
+    def test_code_settings_switch_off_writes_nothing(self):
+        settings = self.catalogue_settings()
+        settings["claude_code_settings"] = False
+        result = self.profile.activate(settings, "local-token", require_closed=False)
+        self.assertNotIn("claude_code_settings", result)
+        self.assertFalse(self.profile.code_settings.exists())
+        self.profile.restore(require_closed=False)
+        self.assertFalse(self.profile.code_settings.exists())
 
     def test_external_profile_switch_wins(self):
         self.profile.activate(config(), "local-token", require_closed=False)

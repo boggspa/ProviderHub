@@ -5,6 +5,9 @@ import unittest
 from branding import BrandingError
 from effort_map import MISTRAL_NARROW_EFFORTS, MISTRAL_REASONING_EFFORTS
 from hub_config import (
+    claude_catalogue_rows,
+    claude_row_id,
+    claude_routes,
     connection_signature,
     defaults,
     normalize,
@@ -29,6 +32,64 @@ class SettingsMigrationTests(unittest.TestCase):
             normalize({"schema_version": 3}, SLOTS, "mistral-test")["schema_version"], 3)
         with self.assertRaisesRegex(ValueError, "newer version"):
             normalize({"schema_version": 4}, SLOTS, "mistral-test")
+
+    def test_claude_catalogue_rows_validate_dedupe_and_pick_tier_defaults(self):
+        base = defaults(SLOTS, "mistral-test")
+        self.assertIsNone(base["claude_catalogue"])
+        self.assertIs(base["claude_code_settings"], True)
+        self.assertIs(base["claude_workflows"], False)
+        value = {"claude_catalogue": [
+            {"route": "mistral/mistral-small-4", "tier": "sonnet"},
+            {"route": "mistral/mistral-small-4", "tier": "opus"},
+            {"route": "kimi/k3", "tier": "fable", "compact_limit": 200000},
+            {"route": "ollama/deepseek-v4-flash:cloud", "tier": "sonnet", "tier_default": True},
+        ], "claude_workflows": True}
+        normalized = normalize(value, SLOTS, "mistral-test")
+        rows = normalized["claude_catalogue"]
+        self.assertEqual([row["route"] for row in rows],
+                         ["mistral/mistral-small-4", "kimi/k3", "ollama/deepseek-v4-flash:cloud"])
+        self.assertEqual([row["tier_default"] for row in rows], [False, True, True])
+        self.assertEqual(rows[1]["compact_limit"], 200000)
+        self.assertNotIn("compact_limit", rows[0])
+        self.assertIs(normalized["claude_workflows"], True)
+        # The slot mappings stay saved for a switch back to mapping mode.
+        self.assertEqual(set(normalized["mappings"]), {slot[0] for slot in SLOTS})
+        for bad in ([], "mistral/x", [{"route": "mistral/x"}], [{"route": "mistral/x", "tier": "gpt"}],
+                    [{"route": "mistral/x", "tier": "opus", "extra": 1}],
+                    [{"route": "mistral/x", "tier": "opus", "compact_limit": 10}],
+                    [{"route": "mistral/x", "tier": "opus", "tier_default": "yes"}], [None]):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                normalize({"claude_catalogue": bad}, SLOTS, "mistral-test")
+        with self.assertRaises(ValueError):
+            normalize({"claude_code_settings": "on"}, SLOTS, "mistral-test")
+
+    def test_claude_row_ids_embed_the_tier_model_and_stay_unique(self):
+        self.assertEqual(claude_row_id("mistral/mistral-vibe-cli-latest", "sonnet"), "claude-sonnet-5-mistral-vibe-cli-latest")
+        self.assertEqual(claude_row_id("ollama/minimax-m3:cloud", "haiku"), "claude-haiku-4-5-ollama-minimax-m3-cloud")
+        self.assertEqual(claude_row_id("kimi/k3", "fable"), "claude-fable-5-kimi-k3")
+        settings = {"claude_catalogue": [
+            {"route": "ollama/minimax-m3:cloud", "tier": "opus", "tier_default": True},
+            {"route": "ollama/minimax-m3-cloud", "tier": "opus", "tier_default": False}]}
+        self.assertEqual([row["id"] for row in claude_catalogue_rows(settings)],
+                         ["claude-opus-5-ollama-minimax-m3-cloud", "claude-opus-5-ollama-minimax-m3-cloud-2"])
+        self.assertEqual(claude_catalogue_rows({"claude_catalogue": None}), [])
+
+    def test_claude_routes_cover_family_slots_with_tier_stand_ins(self):
+        settings = {"mappings": {"claude-fable-5": "mistral/a"}, "claude_catalogue": None}
+        self.assertEqual(claude_routes(settings), {"claude-fable-5": "mistral/a"})
+        settings["claude_catalogue"] = [
+            {"route": "kimi/k3", "tier": "opus", "tier_default": True},
+            {"route": "mistral/mistral-small-4", "tier": "sonnet", "tier_default": True},
+            {"route": "mistral/glm-5-2", "tier": "sonnet", "tier_default": False}]
+        routes = claude_routes(settings)
+        self.assertEqual(routes["claude-opus-5-kimi-k3"], "kimi/k3")
+        self.assertEqual(routes["claude-sonnet-5-mistral-glm-5-2"], "mistral/glm-5-2")
+        self.assertEqual(routes["claude-sonnet-5"], "mistral/mistral-small-4")
+        self.assertEqual(routes["claude-sonnet-4-6"], "mistral/mistral-small-4")
+        # No fable row: opus stands in. No haiku row: sonnet stands in.
+        self.assertEqual(routes["claude-fable-5"], "kimi/k3")
+        self.assertEqual(routes["claude-haiku-4-5"], "mistral/mistral-small-4")
+        self.assertNotIn("mistral/a", routes.values())
 
     def test_codex_catalogue_is_optional_deduped_and_binds_the_default(self):
         base = defaults(SLOTS, "mistral-test")

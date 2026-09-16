@@ -154,6 +154,112 @@ def _normalize_mapping_options(value, slots) -> dict:
 # bridge_core.ClaudeProfile.prepare for the profile field each one sets).
 CLAUDE_FEATURE_KEYS = ("dictation", "builtin_browser", "claude_in_chrome", "scheduled_tasks", "cowork_tab")
 
+# The Claude Desktop model slots served in mapping mode: id, label, family
+# tier and whether the row is that tier's default.
+SLOTS = [
+    ("claude-fable-5", "Fable 5", "fable", True),
+    ("claude-opus-5", "Opus 5", "opus", True),
+    ("claude-sonnet-5", "Sonnet 5", "sonnet", True),
+    ("claude-haiku-4-5", "Haiku 4.5", "haiku", True),
+    ("claude-sonnet-4-6", "Sonnet 4.6", "sonnet", False),
+]
+
+# Family tiers a curated Claude catalogue row can carry. Claude Desktop only
+# lists a non-Claude model id when its row declares one of these, and the
+# managed Claude Code borrows the tier's Claude model for capabilities and
+# effort through the behavesAs row the hub writes (bridge_core.ClaudeProfile).
+CLAUDE_TIERS = ("fable", "opus", "sonnet", "haiku")
+CLAUDE_TIER_MODELS = {"fable": "claude-fable-5", "opus": "claude-opus-5",
+                      "sonnet": "claude-sonnet-5", "haiku": "claude-haiku-4-5"}
+# Which tier stands in when a catalogue has no row of the requested tier.
+_TIER_FALLBACKS = {"fable": ("opus", "sonnet", "haiku"), "opus": ("fable", "sonnet", "haiku"),
+                   "sonnet": ("opus", "fable", "haiku"), "haiku": ("sonnet", "opus", "fable")}
+_ROW_SLUG_UNSAFE = re.compile(r"[^a-z0-9]+")
+
+
+def _normalize_claude_catalogue(value) -> list[dict]:
+    if not isinstance(value, list) or not value:
+        raise ValueError("The Claude catalogue must be a non-empty list of model rows.")
+    rows, seen = [], set()
+    for item in value:
+        if not isinstance(item, dict):
+            raise ValueError("Each Claude catalogue row must be an object.")
+        if set(item) - {"route", "tier", "tier_default", "compact_limit"}:
+            raise ValueError("Unknown Claude catalogue row field.")
+        route = qualify(*split_route(item.get("route")))
+        tier = item.get("tier")
+        if tier not in CLAUDE_TIERS:
+            raise ValueError("Each Claude catalogue row needs a family tier: fable, opus, sonnet or haiku.")
+        flag = item.get("tier_default", False)
+        if type(flag) is not bool:
+            raise ValueError("tier_default must be true or false.")
+        if route in seen:
+            continue
+        seen.add(route)
+        row = {"route": route, "tier": tier, "tier_default": flag}
+        limit = item.get("compact_limit")
+        if limit is not None:
+            if type(limit) is not int or not 1000 <= limit <= 15000000:
+                raise ValueError("compact_limit must be an integer between 1000 and 15000000 tokens.")
+            row["compact_limit"] = limit
+        rows.append(row)
+    # Exactly one default per tier present: the first flagged row, else the
+    # first row of that tier.
+    for tier in CLAUDE_TIERS:
+        members = [row for row in rows if row["tier"] == tier]
+        if not members:
+            continue
+        chosen = next((row for row in members if row["tier_default"]), members[0])
+        for row in members:
+            row["tier_default"] = row is chosen
+    return rows
+
+
+def claude_row_id(route: str, tier: str) -> str:
+    """The model id Claude Desktop and Claude Code see for a catalogue row.
+
+    It starts with the tier's Claude model id so Claude Code's family checks
+    read the right family, then names the provider and model. The provider
+    prefix is dropped when the model id already starts with it.
+    """
+    provider_id, model_id = split_route(route)
+    provider_slug = _ROW_SLUG_UNSAFE.sub("-", provider_id.casefold()).strip("-")
+    model_slug = _ROW_SLUG_UNSAFE.sub("-", model_id.casefold()).strip("-")
+    slug = model_slug if model_slug.startswith(provider_slug + "-") else f"{provider_slug}-{model_slug}"
+    return f"{CLAUDE_TIER_MODELS[tier]}-{slug}"
+
+
+def claude_catalogue_rows(settings: dict) -> list[dict]:
+    """Served row plan for a curated Claude catalogue; empty in mapping mode."""
+    rows, used = [], set()
+    for entry in settings.get("claude_catalogue") or []:
+        identifier = claude_row_id(entry["route"], entry["tier"])
+        candidate, counter = identifier, 2
+        while candidate in used:
+            candidate, counter = f"{identifier}-{counter}", counter + 1
+        used.add(candidate)
+        rows.append({"id": candidate, **entry})
+    return rows
+
+
+def claude_routes(settings: dict) -> dict:
+    """Model id -> provider route for whichever Claude mode is active.
+
+    Mapping mode returns the slot mappings. Catalogue mode returns every
+    generated row id plus the family slot ids pointing at their tier
+    defaults, so the tier aliases and dated family ids Claude Code resolves
+    on its own still reach a catalogue model.
+    """
+    rows = claude_catalogue_rows(settings)
+    if not rows:
+        return dict(settings.get("mappings") or {})
+    routes = {row["id"]: row["route"] for row in rows}
+    defaults = {row["tier"]: row["route"] for row in rows if row["tier_default"]}
+    for slot, _, family, _ in SLOTS:
+        stand_ins = (family, *_TIER_FALLBACKS[family])
+        routes[slot] = next((defaults[tier] for tier in stand_ins if tier in defaults), rows[0]["route"])
+    return routes
+
 
 def defaults(slots, vibe_model: str, port: int = 11436) -> dict:
     connections = provider_defaults()
@@ -169,7 +275,8 @@ def defaults(slots, vibe_model: str, port: int = 11436) -> dict:
             "providers": connections, "branding_overrides": {},
             "auto_stop": True, "auto_mode": False, "codex_model": None,
             "codex_catalogue": None, "codex_chatgpt_account": False, "codex_apply_patch_all": False,
-            "claude_features": {key: False for key in CLAUDE_FEATURE_KEYS}}
+            "claude_features": {key: False for key in CLAUDE_FEATURE_KEYS},
+            "claude_catalogue": None, "claude_code_settings": True, "claude_workflows": False}
 
 
 def normalize(value: dict, slots, vibe_model: str, port: int = 11436) -> dict:
@@ -260,11 +367,21 @@ def normalize(value: dict, slots, vibe_model: str, port: int = 11436) -> dict:
         if type(flag) is not bool:
             raise ValueError(f"Claude feature {key} must be true or false.")
         result["claude_features"][key] = flag
+    # claude_catalogue replaces the slot mappings with curated, tier-tagged
+    # rows when present (see claude_routes); the mappings stay saved for a
+    # switch back.
+    if value.get("claude_catalogue") is not None:
+        result["claude_catalogue"] = _normalize_claude_catalogue(value["claude_catalogue"])
     # codex_chatgpt_account: present the user's ChatGPT sign-in to the Codex
     # desktop while the hub provider is active (see CodexProfile.provider).
     # codex_apply_patch_all: the Codex tab's apply_patch switch.
+    # claude_code_settings: write behavesAs rows for catalogue ids into
+    # ~/.claude/settings.json while the Claude profile is active.
+    # claude_workflows: also enable Claude Code dynamic workflows there, which
+    # the Ultracode effort level needs.
     for key, fallback in (("auto_stop", True), ("auto_mode", False), ("codex_chatgpt_account", False),
-                          ("codex_apply_patch_all", False)):
+                          ("codex_apply_patch_all", False), ("claude_code_settings", True),
+                          ("claude_workflows", False)):
         requested = value.get(key, fallback)
         if type(requested) is not bool:
             raise ValueError(f"{key} must be true or false.")
@@ -375,7 +492,7 @@ def project_catalogue(provider_id: str, inventory: dict, settings: dict, observa
     """Qualify raw provider IDs once and attach validated presentation data."""
     observations = observations or {}
     output = []
-    selected = [split_route(route)[1] for route in settings["mappings"].values() if split_route(route)[0] == provider_id]
+    selected = [split_route(route)[1] for route in claude_routes(settings).values() if split_route(route)[0] == provider_id]
     for group in _catalogue_groups(provider_id, inventory):
         canonical = group["key"][0]
         preferred = next((identifier for identifier in selected if identifier in group["kept"]), None)

@@ -112,7 +112,9 @@ def build_catalogue(raw, settings, vibe=None, observations=None):
                     bool(caps.get("function_calling")), tuple(sorted(effort_modes)))
         groups.setdefault(group_key, []).append(card)
     models = []
-    configured = list(settings["mappings"].values())
+    configured = list((settings.get("mappings") or {}).values())
+    configured += [row["route"].rsplit("/", 1)[-1] for row in settings.get("claude_catalogue") or []
+                   if isinstance(row, dict) and isinstance(row.get("route"), str)]
     for (canonical, context, reasoning, vision, tools, effort_tuple), cards in groups.items():
         effort_modes = list(effort_tuple) if effort_tuple else []
         ids = [card["id"] for card in cards]

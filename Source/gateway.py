@@ -29,7 +29,7 @@ from catalogue_lifecycle import (CataloguePreparationError, catalogue_fingerprin
                                  runtime_fingerprint_error,
                                  validate_prepared_launch)
 from catalogue import build_catalogue, read_observations
-from hub_config import connection_signature, provider_presentations, qualify, split_route
+from hub_config import claude_routes, connection_signature, provider_presentations, qualify, split_route
 from providers import PROVIDERS, prepare_request, ProviderError
 from rate_limit import (MAX_UPSTREAM_ATTEMPTS, RETRYABLE_STATUSES, SLOT_RETRY_AFTER, SLOT_WAIT_TIMEOUT,
                         THROTTLE_CAP, ProviderThrottle, parse_retry_after, wait_for_slot)
@@ -92,7 +92,7 @@ class Runtime:
         if not isinstance(requested, str):
             raise BridgeError("Choose a model route.")
         try:
-            route = resolve_model(requested, self.settings["mappings"])
+            route = resolve_model(requested, claude_routes(self.settings))
         except BridgeError:
             route = qualify(*split_route(requested.removesuffix("[1m]")))
         if route not in self.settings["_model_specs"]:
@@ -1043,7 +1043,9 @@ def main():
         )
         if fingerprint_error:
             raise BridgeError(fingerprint_error)
-        result = ClaudeProfile(root).activate(settings, token)
+        # Display names label the Claude Code rows written for catalogue ids.
+        labelled, _ = attach_model_specs(settings, root)
+        result = ClaudeProfile(root).activate(labelled, token)
         result["catalogue_lifecycle"] = lifecycle
     else:
         result = ClaudeProfile(root).restore()

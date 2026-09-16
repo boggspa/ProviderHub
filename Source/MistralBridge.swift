@@ -7,6 +7,13 @@ let slots: [(id: String, label: String)] = [
     ("claude-fable-5", "Fable 5"), ("claude-opus-5", "Opus 5"),
     ("claude-sonnet-5", "Sonnet 5"), ("claude-haiku-4-5", "Haiku 4.5"), ("claude-sonnet-4-6", "Sonnet 4.6")
 ]
+/// Family tier behind each slot; seeds a curated catalogue from the mappings.
+let slotTiers: [String: String] = ["claude-fable-5": "fable", "claude-opus-5": "opus", "claude-sonnet-5": "sonnet",
+                                   "claude-haiku-4-5": "haiku", "claude-sonnet-4-6": "sonnet"]
+let claudeTiers: [(id: String, label: String, model: String)] = [
+    ("fable", "Fable", "claude-fable-5"), ("opus", "Opus", "claude-opus-5"),
+    ("sonnet", "Sonnet", "claude-sonnet-5"), ("haiku", "Haiku", "claude-haiku-4-5")
+]
 
 struct ActivityEntry: Identifiable {
     let id = UUID()
@@ -129,6 +136,109 @@ final class BridgeModel: ObservableObject {
         if let omitTools { options.omit_tools = omitTools }
         storeMappingOptions(slot, options)
     }
+    // MARK: Curated Claude catalogue (replaces the slot mappings while set)
+
+    var claudeCatalogue: [ClaudeCatalogueEntry] { settings.claude_catalogue ?? [] }
+
+    var claudeCatalogueMode: Binding<String> {
+        Binding(
+            get: { self.settings.claude_catalogue == nil ? "slots" : "catalogue" },
+            set: { value in
+                if value == "catalogue" {
+                    if self.settings.claude_catalogue == nil { self.settings.claude_catalogue = self.seededClaudeCatalogue() }
+                } else {
+                    self.settings.claude_catalogue = nil
+                }
+            }
+        )
+    }
+
+    /// Each distinct mapped route keeps its slot's tier; the first Sonnet
+    /// route becomes the Sonnet default once the worker normalizes the list.
+    private func seededClaudeCatalogue() -> [ClaudeCatalogueEntry]? {
+        var seed: [ClaudeCatalogueEntry] = []
+        for slot in slots {
+            guard let route = settings.mappings[slot.id], !route.isEmpty, !seed.contains(where: { $0.route == route }) else { continue }
+            seed.append(ClaudeCatalogueEntry(route: route, tier: slotTiers[slot.id] ?? "sonnet", tier_default: true))
+        }
+        if seed.isEmpty, let first = availableModels.first(where: { $0.tools ?? true }) {
+            seed = [ClaudeCatalogueEntry(route: first.id, tier: "fable", tier_default: true)]
+        }
+        return seed.isEmpty ? nil : seed
+    }
+
+    func isClaudeTierDefault(_ entry: ClaudeCatalogueEntry) -> Bool {
+        let members = claudeCatalogue.filter { $0.tier == entry.tier }
+        let chosen = members.first { $0.tier_default == true } ?? members.first
+        return chosen?.route == entry.route
+    }
+
+    func makeClaudeTierDefault(_ route: String) {
+        guard var list = settings.claude_catalogue, let tier = list.first(where: { $0.route == route })?.tier else { return }
+        for index in list.indices where list[index].tier == tier { list[index].tier_default = list[index].route == route }
+        settings.claude_catalogue = list
+    }
+
+    func claudeTier(for route: String) -> Binding<String> {
+        Binding(
+            get: { self.claudeCatalogue.first { $0.route == route }?.tier ?? "sonnet" },
+            set: { tier in
+                guard var list = self.settings.claude_catalogue, let index = list.firstIndex(where: { $0.route == route }) else { return }
+                list[index].tier = tier
+                list[index].tier_default = !list.contains { $0.tier == tier && $0.route != route && $0.tier_default == true }
+                self.settings.claude_catalogue = list
+            }
+        )
+    }
+
+    func addClaudeRoute(_ route: String, tier: String = "sonnet") {
+        guard var list = settings.claude_catalogue, !list.contains(where: { $0.route == route }) else { return }
+        list.append(ClaudeCatalogueEntry(route: route, tier: tier, tier_default: !list.contains { $0.tier == tier && $0.tier_default == true }))
+        settings.claude_catalogue = list
+    }
+
+    func addAllClaudeRoutes() {
+        for entry in availableModels where entry.tools ?? true { addClaudeRoute(entry.id) }
+    }
+
+    func removeClaudeRoute(_ route: String) {
+        guard var list = settings.claude_catalogue, list.count > 1 else { return }
+        list.removeAll { $0.route == route }
+        settings.claude_catalogue = list
+    }
+
+    func claudeCompactLimit(for route: String) -> Binding<String> {
+        Binding(
+            get: { self.claudeCatalogue.first { $0.route == route }?.compact_limit.map(String.init) ?? "" },
+            set: { text in
+                guard var list = self.settings.claude_catalogue, let index = list.firstIndex(where: { $0.route == route }) else { return }
+                let trimmed = text.trimmingCharacters(in: .whitespaces)
+                if trimmed.isEmpty { list[index].compact_limit = nil }
+                else if let value = Int(trimmed), 1...15000000 ~= value { list[index].compact_limit = value }
+                else { return }
+                self.settings.claude_catalogue = list
+            }
+        )
+    }
+
+    /// The id Claude sees for a row (mirrors hub_config.claude_row_id; the
+    /// worker adds a numeric suffix only when two routes collide).
+    func claudeRowID(_ entry: ClaudeCatalogueEntry) -> String {
+        func slug(_ text: String) -> String {
+            var out = ""; var dash = false
+            for character in text.lowercased() {
+                if character.isASCII, character.isLetter || character.isNumber { out.append(character); dash = false }
+                else if !dash { out.append("-"); dash = true }
+            }
+            return out.trimmingCharacters(in: CharacterSet(charactersIn: "-"))
+        }
+        let base = claudeTiers.first { $0.id == entry.tier }?.model ?? "claude-sonnet-5"
+        let parts = entry.route.split(separator: "/", maxSplits: 1).map(String.init)
+        let provider = slug(parts.count > 1 ? parts[0] : "mistral")
+        let modelPart = slug(parts.count > 1 ? parts[1] : (parts.first ?? ""))
+        return base + "-" + (modelPart.hasPrefix(provider + "-") ? modelPart : provider + "-" + modelPart)
+    }
+
     func compactLimit(for slot: String) -> Binding<String> {
         Binding(
             get: {
@@ -185,6 +295,8 @@ final class BridgeModel: ObservableObject {
         prefsOnly.auto_stop = savedSettings.auto_stop
         prefsOnly.auto_mode = savedSettings.auto_mode
         prefsOnly.claude_features = savedSettings.claude_features
+        prefsOnly.claude_code_settings = savedSettings.claude_code_settings
+        prefsOnly.claude_workflows = savedSettings.claude_workflows
         if prefsOnly == savedSettings { return .prefs }
         let codexChanged = settings.codex_model != savedSettings.codex_model
             || settings.codex_catalogue != savedSettings.codex_catalogue
@@ -1017,7 +1129,12 @@ struct BridgeWindow: View {
         VStack(spacing: 18) {
             Panel {
                 HStack {
-                    VStack(alignment: .leading, spacing: 5) { Text("Model mappings").font(.headline); Text("Choose a model by name. Show technical IDs to enter a custom route.").font(.caption).foregroundStyle(.secondary) }
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text(model.settings.claude_catalogue == nil ? "Model mappings" : "Curated catalogue").font(.headline)
+                        Text(model.settings.claude_catalogue == nil
+                             ? "Choose a model by name. Show technical IDs to enter a custom route."
+                             : "Pick the models Claude’s picker lists and the Claude family tier each one plays.").font(.caption).foregroundStyle(.secondary)
+                    }
                     Spacer()
                     Button("Provider catalogues") { model.page = .connection }.disabled(model.busy)
                 }
@@ -1027,6 +1144,17 @@ struct BridgeWindow: View {
                     if model.catalogueRefreshing { ProgressView().controlSize(.small) }
                     Button("Refresh all") { model.beginCatalogueRefresh(userInitiated: true) }.disabled(model.busy || model.catalogueRefreshing)
                 }
+                HStack {
+                    Text("Claude’s picker").font(.system(size: 13, weight: .medium))
+                    Spacer()
+                    Picker("Claude’s picker", selection: model.claudeCatalogueMode) {
+                        Text("Five Claude slots").tag("slots")
+                        Text("Curated catalogue").tag("catalogue")
+                    }.pickerStyle(.segmented).fixedSize().disabled(model.busy)
+                }
+                if model.settings.claude_catalogue != nil {
+                    claudeCatalogueEditor
+                } else {
                 ForEach(slots, id: \.id) { slot in
                     HStack(spacing: 10) {
                         VStack(alignment: .leading, spacing: 4) { Text(slot.label).font(.system(size: 12, weight: .medium)); if model.showRoutingIDs { Text(slot.id).font(.system(size: 8, design: .monospaced)).foregroundStyle(.tertiary) } }.frame(width: 100, alignment: .leading)
@@ -1076,6 +1204,7 @@ struct BridgeWindow: View {
                     Spacer()
                     Button("Use Vibe for all") { for slot in slots { model.settings.mappings[slot.id] = "mistral/" + model.vibeModel } }
                 }
+                }
             }
             Panel {
                 Text("Model controls").font(.headline)
@@ -1087,8 +1216,72 @@ struct BridgeWindow: View {
                 HStack { Text("Fast").font(.system(size: 13, weight: .medium)); Spacer(); Text("Only when supported by the provider").font(.caption).foregroundStyle(.secondary) }
                 Text("A speed toggle never silently swaps models. Distinct models or context variants keep separate catalogue entries. Unsupported Fast requests return a clear compatibility message.").font(.caption).foregroundStyle(.secondary)
             }
-            HStack { Spacer(); Button("Save mappings") { Task { await model.saveFromUI() } }.disabled(model.busy || !model.changed).controlSize(.large); Button("Launch Claude") { Task { await model.launchClaude() } }.buttonStyle(.borderedProminent).controlSize(.large).disabled(model.busy || !model.claudeInstalled) }
+            HStack { Spacer(); Button(model.settings.claude_catalogue == nil ? "Save mappings" : "Save catalogue") { Task { await model.saveFromUI() } }.disabled(model.busy || !model.changed).controlSize(.large); Button("Launch Claude") { Task { await model.launchClaude() } }.buttonStyle(.borderedProminent).controlSize(.large).disabled(model.busy || !model.claudeInstalled) }
         }
+    }
+
+    var claudeCatalogueEditor: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("\(model.claudeCatalogue.count) model\(model.claudeCatalogue.count == 1 ? "" : "s") will appear in Claude’s picker, each under the family tier you assign. Claude starts on the Fable tier’s default (Opus if there is no Fable row); each tier’s default also answers Claude Code’s own fable, opus, sonnet and haiku requests, with the nearest tier standing in for a missing one.")
+                .font(.caption).foregroundStyle(.secondary).lineSpacing(3)
+            ForEach(model.claudeCatalogue) { entry in
+                HStack(spacing: 10) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        HStack(spacing: 6) {
+                            Text(model.modelLabel(entry.route)).font(.system(size: 12, weight: .medium)).lineLimit(1)
+                            if model.isClaudeTierDefault(entry) {
+                                Text("tier default").font(.system(size: 9, weight: .semibold)).padding(.horizontal, 5).padding(.vertical, 1).background(bridgeOrange.opacity(0.2), in: Capsule())
+                            }
+                        }
+                        Text(model.modelFacts(entry.route)).font(.system(size: 9)).foregroundStyle(.secondary)
+                        if model.showRoutingIDs { Text(model.claudeRowID(entry)).font(.system(size: 8, design: .monospaced)).foregroundStyle(.tertiary) }
+                    }
+                    Spacer()
+                    Picker("Tier", selection: model.claudeTier(for: entry.route)) {
+                        ForEach(claudeTiers, id: \.id) { tier in Text(tier.label).tag(tier.id) }
+                    }.labelsHidden().frame(width: 96).help("Claude family tier this model plays")
+                    Button { model.makeClaudeTierDefault(entry.route) } label: {
+                        Image(systemName: model.isClaudeTierDefault(entry) ? "star.fill" : "star").foregroundStyle(model.isClaudeTierDefault(entry) ? bridgeOrange : .secondary)
+                    }.buttonStyle(.plain).help("Make this the tier’s default").disabled(model.busy)
+                    TextField("auto", text: model.claudeCompactLimit(for: entry.route))
+                        .textFieldStyle(.roundedBorder).font(.system(size: 10, design: .monospaced)).frame(width: 78)
+                        .help("Auto-compact threshold in tokens. Blank follows the catalogue window at 85%.")
+                    Button("Test") { Task { await model.testRoute(entry.route) } }.disabled(model.busy)
+                    Button { model.removeClaudeRoute(entry.route) } label: { Image(systemName: "minus.circle").foregroundStyle(.secondary) }
+                        .buttonStyle(.plain)
+                        .disabled(model.claudeCatalogue.count <= 1 || model.busy)
+                        .help(model.claudeCatalogue.count <= 1 ? "Keep at least one model in the catalogue" : "Remove from the Claude catalogue")
+                }
+                .padding(.horizontal, 10).padding(.vertical, 7)
+                .background(Color.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 7))
+            }
+            HStack(spacing: 12) {
+                claudeAddMenu
+                Button("Add all") { model.addAllClaudeRoutes() }.disabled(model.busy || model.availableModels.isEmpty)
+                Spacer()
+                Toggle("Show technical IDs", isOn: $model.showRoutingIDs).toggleStyle(.checkbox).font(.caption)
+            }
+            Text("The tier sets what Claude expects of a model. Fable, Opus and Sonnet rows carry Claude’s full effort ladder, Ultracode included; Haiku rows have no effort control. Claude Code borrows each tier’s Claude model for capabilities while “Teach Claude Code the catalogue ids” is on (Claude tab). The five slot mappings stay saved for switching back.")
+                .font(.caption).foregroundStyle(.secondary).lineSpacing(3)
+        }
+    }
+
+    var claudeAddMenu: some View {
+        Menu {
+            ForEach(model.providerDefinitions) { provider in
+                let options = model.availableModels.filter { candidate in
+                    candidate.provider_id == provider.id && (candidate.tools ?? true) && !model.claudeCatalogue.contains { $0.route == candidate.id }
+                }
+                if !options.isEmpty {
+                    Menu(provider.presentation.displayProvider) {
+                        ForEach(options) { entry in
+                            Button("\(model.modelLabel(entry.id)) — \(model.modelFacts(entry.id))") { model.addClaudeRoute(entry.id) }.help(entry.id)
+                        }
+                    }
+                }
+            }
+        } label: { Label("Add model…", systemImage: "plus") }
+            .disabled(model.busy)
     }
 
     var claudePage: some View {
@@ -1128,6 +1321,12 @@ struct BridgeWindow: View {
                 Toggle(isOn: $model.settings.claude_features.scheduled_tasks) { Text("Scheduled tasks").font(.system(size: 12)) }.toggleStyle(.switch).controlSize(.small)
                 Toggle(isOn: $model.settings.claude_features.cowork_tab) { Text("Cowork tab").font(.system(size: 12)) }.toggleStyle(.switch).controlSize(.small)
                 Text("Dictation and scheduled tasks depend on the installed Claude build honouring the profile field; if one stays hidden after relaunch, that build does not offer it in third-party mode yet.").font(.caption).foregroundStyle(.secondary).lineSpacing(3)
+                Divider()
+                Text("Claude Code and catalogue models").font(.system(size: 13, weight: .medium))
+                Toggle(isOn: $model.settings.claude_code_settings) { Text("Teach Claude Code the catalogue ids").font(.system(size: 12)) }.toggleStyle(.switch).controlSize(.small)
+                Text("In catalogue mode, Provider Hub adds a modelPicker row with behavesAs to ~/.claude/settings.json for each catalogue model while the profile is active, so the Claude Code inside Claude gives it the effort ladder, capabilities and context handling of its tier’s Claude model instead of treating it as an unknown model. The rows are removed when the previous setup is restored; a terminal Claude Code sees them meanwhile.").font(.caption).foregroundStyle(.secondary).lineSpacing(3)
+                Toggle(isOn: $model.settings.claude_workflows) { Text("Enable dynamic workflows for Ultracode").font(.system(size: 12)) }.toggleStyle(.switch).controlSize(.small)
+                Text("Adds enableWorkflows to the same file while the profile is active. Claude’s Ultracode effort level needs dynamic workflows and a model on the Fable, Opus or Sonnet tier. With Ultracode on, the gateway sends the provider its highest reasoning setting and adds an orchestration note so the external model reaches for the Workflow tool.").font(.caption).foregroundStyle(.secondary).lineSpacing(3)
                 Divider()
                 Text("Claude adds a standard and a 1M choice for models that support long context. New selections prefer 1M; existing session choices are preserved.").font(.caption).foregroundStyle(.secondary).lineSpacing(3)
                 Text("This uses Claude’s native third-party profile system, like Ollama. It switches the installed app’s profile; it does not create a simultaneous second Claude app. Existing Ollama and Claude conversations are retained.").font(.caption).foregroundStyle(.secondary).lineSpacing(3)

@@ -21,18 +21,15 @@ import uuid
 
 from model_names import friendly_model_name, label_catalog
 from catalogue import build_catalogue, read_observations, route_specs
-from hub_config import (connection_signature, defaults as hub_defaults, normalize as normalize_hub_settings,
+from hub_config import (CLAUDE_TIER_MODELS, SLOTS, claude_catalogue_rows, claude_routes, connection_signature,
+                        defaults as hub_defaults, normalize as normalize_hub_settings,
                         project_catalogue, provider_presentations, qualify, split_route)
 from providers import PROVIDERS, discover
 
 PROFILE_ID = str(uuid.UUID(os.environ.get("MISTRAL_BRIDGE_PROFILE_ID", "8a93d471-d0f9-428c-b203-48fce46277bc")))
-SLOTS = [
-    ("claude-fable-5", "Fable 5", "fable", True),
-    ("claude-opus-5", "Opus 5", "opus", True),
-    ("claude-sonnet-5", "Sonnet 5", "sonnet", True),
-    ("claude-haiku-4-5", "Haiku 4.5", "haiku", True),
-    ("claude-sonnet-4-6", "Sonnet 4.6", "sonnet", False),
-]
+# Rows the hub adds to Claude Code's modelPicker carry this description
+# prefix so they can be told apart from the user's own rows on restore.
+HUB_ROW_PREFIX = "Provider Hub"
 
 
 class BridgeError(Exception):
@@ -323,7 +320,7 @@ def model_labels(settings: dict, entries=(), vibe=None):
             vibe = vibe_settings()
         except BridgeError:
             vibe = {}
-    identifiers = set(settings["mappings"].values()) | {entry["id"] for entry in entries} | set(vibe.get("configured_models", []))
+    identifiers = set(claude_routes(settings).values()) | {entry["id"] for entry in entries} | set(vibe.get("configured_models", []))
     return label_catalog(identifiers, entries, vibe)
 
 
@@ -346,13 +343,16 @@ def claude_running() -> bool:
 class ClaudeProfile:
     """Small write-ahead transaction over profile pointers, never session data."""
 
-    def __init__(self, root: Path, application_support: Path | None = None):
+    def __init__(self, root: Path, application_support: Path | None = None, claude_home: Path | None = None):
         self.root = root
         self.support = application_support or Path.home() / "Library/Application Support"
         self.normal = self.support / "Claude/claude_desktop_config.json"
         self.third_party = self.support / "Claude-3p/claude_desktop_config.json"
         self.meta = self.support / "Claude-3p/configLibrary/_meta.json"
         self.profile = self.meta.parent / (PROFILE_ID + ".json")
+        # The managed Claude Code inside Claude Desktop reads the user's own
+        # Claude Code settings; catalogue rows are taught to it there.
+        self.code_settings = (claude_home or Path.home() / ".claude") / "settings.json"
         self.journal = root / "profile-transaction.json"
 
     def active(self) -> bool:
@@ -385,6 +385,50 @@ class ClaudeProfile:
             "coworkTabEnabled": features.get("cowork_tab") is True,
         }
 
+    @staticmethod
+    def hub_row(row) -> bool:
+        return isinstance(row, dict) and str(row.get("description", "")).startswith(HUB_ROW_PREFIX)
+
+    def code_settings_operation(self, settings: dict):
+        """Journal operation teaching Claude Code the catalogue ids, or (None, why not).
+
+        Claude Code treats an id it does not know as an unknown model: no
+        effort ladder, an assumed context window and a notice in every
+        session. Its documented remedy is a modelPicker row whose behavesAs
+        names a model it knows, so each catalogue row gets one that points at
+        its tier's Claude model. enableWorkflows is added on request because
+        the Ultracode level needs dynamic workflows.
+        """
+        rows = claude_catalogue_rows(settings) if settings.get("claude_code_settings", True) else []
+        workflows = settings.get("claude_workflows") is True
+        if not rows and not workflows:
+            return None, None
+        try:
+            current = read_json(self.code_settings)
+        except BridgeError as exc:
+            return None, str(exc)
+        changes, hub_ids = {}, []
+        if rows:
+            picker = current.get("modelPicker")
+            picker = dict(picker) if isinstance(picker, dict) else {}
+            options = picker.get("options")
+            kept = [row for row in options if not self.hub_row(row)] if isinstance(options, list) else []
+            labels = settings.get("_display_names") or {}
+            added = []
+            for row in rows:
+                target = CLAUDE_TIER_MODELS[row["tier"]]
+                hub_ids.append(row["id"])
+                added.append({"model": row["id"], "label": labels.get(row["route"], row["route"]),
+                              "description": f"{HUB_ROW_PREFIX} · {row['route']} · behaves as {target}",
+                              "behavesAs": target})
+            picker["options"] = kept + added
+            changes["modelPicker"] = picker
+        if workflows:
+            changes["enableWorkflows"] = True
+        return {"path": str(self.code_settings), "existed": self.code_settings.exists(), "changes": changes,
+                "previous": {k: {"present": k in current, "value": current.get(k)} for k in changes},
+                "hub_rows": hub_ids}, None
+
     def activate(self, settings: dict, token: str, *, require_closed: bool = True) -> dict:
         if require_closed and claude_running():
             raise BridgeError("Claude is already open. Finish your current work and quit Claude, then launch it here.")
@@ -402,6 +446,9 @@ class ClaudeProfile:
             before = read_json(path)
             operations.append({"path": str(path), "existed": path.exists(), "changes": changes,
                                "previous": {k: {"present": k in before, "value": before.get(k)} for k in changes}})
+        code_operation, code_note = self.code_settings_operation(settings)
+        if code_operation:
+            operations.append(code_operation)
         atomic_json(self.journal, {"version": 1, "operations": operations})
         try:
             for op in operations:
@@ -412,7 +459,42 @@ class ClaudeProfile:
         except Exception:
             self.restore(require_closed=False, rollback=True)
             raise
-        return {"active": True, "profile_id": PROFILE_ID}
+        result = {"active": True, "profile_id": PROFILE_ID}
+        if code_operation:
+            result["claude_code_settings"] = "written"
+        elif code_note:
+            result["claude_code_settings"] = "skipped: " + code_note
+        return result
+
+    def restore_code_settings(self, data: dict, op: dict) -> bool:
+        """Undo the Claude Code settings operation, leaving the user's rows alone."""
+        changed = False
+        hub_ids = set(op.get("hub_rows", []))
+        for key, applied in op["changes"].items():
+            previous = op["previous"][key]
+            current = data.get(key)
+            if key == "modelPicker" and current != applied and isinstance(current, dict):
+                # Edited since activation: drop only the rows the hub added.
+                options = current.get("options")
+                if isinstance(options, list):
+                    kept = [row for row in options
+                            if not self.hub_row(row) and not (isinstance(row, dict) and row.get("model") in hub_ids)]
+                    if kept != options:
+                        picker = {**current, "options": kept}
+                        if not kept and not previous["present"] and set(picker) <= {"options"}:
+                            data.pop(key, None)
+                        else:
+                            data[key] = picker
+                        changed = True
+                continue
+            if current != applied or key not in data:
+                continue
+            if previous["present"]:
+                data[key] = previous["value"]
+            else:
+                data.pop(key, None)
+            changed = True
+        return changed
 
     def restore(self, *, require_closed: bool = True, rollback: bool = False) -> dict:
         if require_closed and claude_running():
@@ -420,7 +502,7 @@ class ClaudeProfile:
         if not self.journal.exists():
             return {"restored": False, "message": "No saved profile change needs restoration."}
         journal = read_json(self.journal)
-        allowed = {str(p) for p in (self.normal, self.third_party, self.meta, self.profile)}
+        allowed = {str(p) for p in (self.normal, self.third_party, self.meta, self.profile, self.code_settings)}
         if journal.get("version") != 1 or any(op.get("path") not in allowed for op in journal.get("operations", [])):
             raise BridgeError("The profile recovery journal is invalid; no Claude files were changed.")
         # If another manager selected a different profile, preserve its choices.
@@ -428,6 +510,18 @@ class ClaudeProfile:
         skipped = []
         for op in reversed(journal["operations"]):
             path = Path(op["path"])
+            if path == self.code_settings:
+                try:
+                    data = read_json(path)
+                except BridgeError:
+                    skipped.append(path.name + ":unreadable")
+                    continue
+                if self.restore_code_settings(data, op):
+                    if not data and not op["existed"]:
+                        path.unlink(missing_ok=True)
+                    else:
+                        atomic_json(path, data)
+                continue
             data = read_json(path)
             changed = False
             for key, applied in op["changes"].items():

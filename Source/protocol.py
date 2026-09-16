@@ -13,6 +13,7 @@ import re
 import secrets
 
 from bridge_core import BridgeError, SLOTS
+from hub_config import claude_catalogue_rows, claude_routes
 from model_names import friendly_model_name
 from catalogue import fits_desktop_baseline, status_label
 from effort_map import MISTRAL_EFFORT_ALIASES, MISTRAL_REASONING_EFFORTS, cap_high_end, map_effort, mistral_effort_modes
@@ -96,6 +97,20 @@ def _model_id_candidates(requested: str):
         yield undated
 
 
+# A Claude family id the hub does not list itself (an older Sonnet the CLI
+# falls back to, a future dated build) still lands on that family's slot.
+_FAMILY_ID = re.compile(r"^claude-(fable|mythos|opus|sonnet|haiku)-")
+
+
+def _family_slot(requested: str) -> str | None:
+    base = requested[:-4] if requested.endswith("[1m]") else requested
+    match = _FAMILY_ID.match(base)
+    if not match:
+        return None
+    family = "opus" if match.group(1) == "mythos" else match.group(1)
+    return SLOT_ALIASES[family]
+
+
 def resolve_model(requested: str, mappings: dict) -> str:
     for candidate in _model_id_candidates(requested):
         if candidate in mappings:
@@ -105,6 +120,9 @@ def resolve_model(requested: str, mappings: dict) -> str:
         # Only explicitly configured upstream IDs are callable through this gateway.
         if candidate in mappings.values():
             return candidate
+    slot = _family_slot(requested)
+    if slot in mappings:
+        return mappings[slot]
     raise BridgeError(f"Model {requested!r} is not mapped. Choose it in Provider Hub first.")
 
 
@@ -120,12 +138,28 @@ def resolve_mapping_slot(requested, mappings: dict) -> str | None:
         matches = [slot for slot, route in mappings.items() if route == candidate]
         if len(matches) == 1:
             return matches[0]
-    return None
+    slot = _family_slot(requested)
+    return slot if slot in mappings else None
 
 
 def mapping_options_for(requested, settings: dict) -> dict:
     options = {"omit_system": False, "omit_tools": False, "compact_limit": None}
     if not isinstance(settings, dict):
+        return options
+    rows = claude_catalogue_rows(settings)
+    if rows:
+        # Catalogue rows carry only a compaction threshold; the omit switches
+        # belong to the slot table. Family ids and aliases follow the tier
+        # default they resolve to.
+        if isinstance(requested, str):
+            try:
+                route = resolve_model(requested, claude_routes(settings))
+            except BridgeError:
+                return options
+            limits = [row["compact_limit"] for row in rows
+                      if row["route"] == route and type(row.get("compact_limit")) is int and row["compact_limit"] > 0]
+            if limits:
+                options["compact_limit"] = min(limits)
         return options
     mappings = settings.get("mappings") or {}
     slot = resolve_mapping_slot(requested, mappings)
@@ -192,8 +226,12 @@ def _effective_context(spec: dict) -> int | None:
 
 def model_catalog(settings: dict):
     rows, seen = [], set()
-    for slot, _, family, default in SLOTS:
-        identifier = settings["mappings"][slot]
+    catalogue = claude_catalogue_rows(settings)
+    # Catalogue mode serves one tier-tagged row per curated route under its
+    # generated id; mapping mode serves the five family slots.
+    plan = ([(row["id"], row["route"], row["tier"], row["tier_default"]) for row in catalogue] if catalogue
+            else [(slot, settings["mappings"][slot], family, default) for slot, _, family, default in SLOTS])
+    for slot, identifier, family, default in plan:
         spec = settings.get("_model_specs", {}).get(identifier)
         if not spec:
             continue
@@ -218,6 +256,8 @@ def model_catalog(settings: dict):
                "created_at": "2026-09-12T00:00:00Z",
                "anthropic_family_tier": family, "is_family_default": default,
                "fits_desktop_baseline": fits_desktop_baseline(effective_context)}
+        if catalogue:
+            row["description"] += f" · {family} tier"
         if fits_desktop_baseline(effective_context) is False:
             row["description"] += " · below desktop baseline"
         if type(effective_context) is int:
@@ -419,9 +459,53 @@ def rewrite_context_reminders(payload: dict, context, used):
     return result if changed else payload
 
 
+# Claude Code's Ultracode level (xhigh effort plus standing dynamic-workflow
+# orchestration) announces itself to the model through reminders in user
+# turns. A non-Claude model gets one extra, explicit system note so the
+# orchestration intent survives the provider translation; Claude Code's own
+# reminder still names the workflow authoring reference.
+_ULTRACODE_ON = ("Ultracode is on:", "Ultracode is still on")
+_ULTRACODE_OFF = "Ultracode is off"
+_ULTRACODE_KEYWORD = 'The user included the keyword "ultracode"'
+ULTRACODE_NOTE = (
+    "Ultracode is on for this session. You are a non-Claude model working through Provider Hub, so be explicit "
+    "about orchestration: on every substantive task call the Workflow tool with a script that fans out subagents "
+    "for investigation, implementation and verification, loading the workflow-authoring skill first for the script "
+    "API. Answer solo only on conversational or trivial turns."
+)
+
+
+def ultracode_active(payload: dict) -> bool:
+    """True when Claude Code's own reminders show Ultracode is on for this turn.
+
+    The newest standing reminder wins; the per-turn keyword reminder counts
+    only when it sits in the final user message.
+    """
+    state = False
+    messages = payload.get("messages") if isinstance(payload, dict) else None
+    if not isinstance(messages, list):
+        return False
+    for index, message in enumerate(messages):
+        if not isinstance(message, dict) or message.get("role") != "user":
+            continue
+        for block in blocks(message.get("content", "")):
+            if not isinstance(block, dict) or block.get("type") != "text":
+                continue
+            text = block.get("text", "")
+            if not isinstance(text, str):
+                continue
+            if any(marker in text for marker in _ULTRACODE_ON):
+                state = True
+            elif _ULTRACODE_OFF in text:
+                state = False
+            if _ULTRACODE_KEYWORD in text and index == len(messages) - 1:
+                state = True
+    return state
+
+
 def translate_request(payload: dict, settings: dict):
     requested = payload.get("model", "")
-    upstream = resolve_model(requested, settings["mappings"])
+    upstream = resolve_model(requested, claude_routes(settings))
     spec = settings.get("_model_specs", {}).get(upstream)
     effective_context = _effective_context(spec) if spec else None
     if type(effective_context) is not int or effective_context <= 0:
@@ -508,6 +592,9 @@ def translate_request(payload: dict, settings: dict):
                 if part:
                     pending.append(part)
         flush()
+    if ultracode_active(payload):
+        first_turn = next((index for index, item in enumerate(messages) if item["role"] != "system"), len(messages))
+        messages.insert(first_turn, {"role": "system", "content": ULTRACODE_NOTE})
     tools = []
     for tool in payload.get("tools", []):
         if "input_schema" not in tool:
