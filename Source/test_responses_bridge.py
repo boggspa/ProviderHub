@@ -161,6 +161,35 @@ class ResponsesBridgeTests(unittest.TestCase):
                 body, "kimi/k3", {"context": 131072, "max_output": 4096}, envelope, "scope")
             self.assertEqual(disabled["thinking"], {"type": "disabled"})
 
+    def test_kimi_highspeed_accepts_codex_effort_none_with_thinking_fixed_on(self):
+        # Codex persists model_reasoning_effort = "none" for a model with no
+        # slider ladder and sends it on every turn; the bridge turns that into
+        # thinking disabled. HighSpeed cannot turn thinking off, so the gateway
+        # drops both controls on the wire instead of failing the turn.
+        fixture = fixtures.GatewayHubHTTPTests()
+        fixture.setUp()
+        try:
+            route = fixture.start_gateway("kimi", "kimi-for-coding-highspeed", {
+                "context": 262144, "effort_modes": [], "speed_tier": "highspeed",
+                "reasoning_history": "native"})
+            client = http.client.HTTPConnection("127.0.0.1", fixture.gateway.server_port, timeout=8)
+            client.request("POST", "/v1/responses", json.dumps({
+                "model": route, "input": [{"role": "user", "content": fixtures.LOCAL_REQUEST_TEXT}],
+                "max_output_tokens": 512, "reasoning": {"effort": "none"}, "stream": False, "store": False,
+                "tools": [{"type": "function", "name": "read_file", "parameters": {"type": "object"}}],
+            }), {"Authorization": "Bearer " + fixture.runtime.token, "Content-Type": "application/json"})
+            response = client.getresponse()
+            status, raw = response.status, response.read()
+            client.close()
+            self.assertEqual(status, 200, raw)
+            self.assertEqual(json.loads(raw)["status"], "completed", raw)
+            upstream = fixtures.MockProvider.requests[-1]
+            self.assertEqual(upstream["model"], "kimi-for-coding-highspeed")
+            self.assertNotIn("thinking", upstream)
+            self.assertNotIn("output_config", upstream)
+        finally:
+            fixture.tearDown()
+
     def test_muse_slider_xhigh_and_max_reach_native_messages(self):
         spec = {
             "id": "muse-spark-1.3", "context": 1048576, "max_output": 131072,

@@ -257,6 +257,11 @@ def _needs_file_tool_steering(source_tools) -> bool:
     return bool(names & FILE_EDIT_TOOLS) and "Bash" in names
 
 _KIMI_DOCS = "https://www.kimi.com/code/docs/en/kimi-code/models.html"
+# K2.7 Code HighSpeed is documented as "Thinking: ON" with no reasoning_effort
+# ladder, and it is not one of the routes ("the K3 series and K2.8 Preview")
+# that Kimi serves as K2.8 Preview when thinking is off. Neither a desktop
+# effort rank nor a thinking-off request selects anything on this route.
+_KIMI_FIXED_THINKING_MODELS = frozenset({"kimi-for-coding-highspeed"})
 _KIMI_MODELS = [
     {
         "id": "k3",
@@ -1507,6 +1512,20 @@ def _normalize_native_controls(
         return compatibility
 
     if provider_id == "kimi":
+        if upstream_model in _KIMI_FIXED_THINKING_MODELS:
+            # Thinking is fixed on with no effort ladder, so there is no
+            # higher, lower, or off state for a desktop control to select.
+            # Codex always sends its slider effort (and the Responses bridge
+            # turns "none" into thinking disabled), so rejecting here made
+            # the model unusable from Codex. Drop the non-controls on the
+            # wire and record the loss; the served model never changes.
+            if requested is not None:
+                _write_output_effort(body, None)
+                compatibility["reasoning_effort"] = f"{requested}_ignored_thinking_fixed_on"
+            if thinking_type == "disabled":
+                body.pop("thinking", None)
+                compatibility["thinking"] = "disabled_ignored_thinking_fixed_on"
+            return compatibility
         supported = set(model_spec.get("effort_modes") or [])
         aliases = {
             "ultra": "max", "max": "max", "xhigh": "max",

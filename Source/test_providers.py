@@ -612,6 +612,46 @@ class NativePlanTests(unittest.TestCase):
         )["body"]
         self.assertEqual(disabled["thinking"]["type"], "disabled")
 
+    def test_kimi_highspeed_fixed_thinking_ignores_controls_it_cannot_serve(self):
+        # K2.7 Code HighSpeed documents "Thinking: ON" and no effort ladder, so
+        # a desktop rank or a thinking-off request selects nothing on the route.
+        # Codex always sends its slider effort; the turn must still run.
+        spec = {"reasoning": True, "effort_modes": [], "fast_mode": False, "speed_tier": "highspeed"}
+        for requested in ("none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"):
+            payload = text_prompt(output_config={"effort": requested, "future_option": {"keep": True}})
+            before = copy.deepcopy(payload)
+            plan = prepare_request("kimi", {}, "key", payload, "kimi-for-coding-highspeed", spec)
+            with self.subTest(requested=requested):
+                self.assertEqual(plan["body"]["model"], "kimi-for-coding-highspeed")
+                self.assertEqual(plan["body"]["output_config"], {"future_option": {"keep": True}})
+                self.assertNotIn("thinking", plan["body"])
+                self.assertEqual(plan["compatibility"]["reasoning_effort"],
+                                 f"{requested}_ignored_thinking_fixed_on")
+                self.assertEqual(payload, before)
+        # The Responses bridge translates a Codex "none" into both controls.
+        disabled = prepare_request(
+            "kimi", {}, "key",
+            text_prompt(thinking={"type": "disabled"}, output_config={"effort": "none"}),
+            "kimi-for-coding-highspeed", spec,
+        )
+        self.assertNotIn("thinking", disabled["body"])
+        self.assertNotIn("output_config", disabled["body"])
+        self.assertEqual(disabled["compatibility"]["reasoning_effort"], "none_ignored_thinking_fixed_on")
+        self.assertEqual(disabled["compatibility"]["thinking"], "disabled_ignored_thinking_fixed_on")
+        # Enabled (or adaptive) thinking is the documented state and passes through.
+        enabled = prepare_request(
+            "kimi", {}, "key", text_prompt(thinking={"type": "adaptive"}),
+            "kimi-for-coding-highspeed", spec,
+        )
+        self.assertEqual(enabled["body"]["thinking"], {"type": "enabled"})
+        self.assertNotIn("reasoning_effort", enabled["compatibility"])
+        # Exact K3 routes still fail closed: thinking off would serve K2.8 Preview.
+        k3 = {"reasoning": True, "effort_modes": ["low", "high", "max"], "fast_mode": False}
+        for payload in (text_prompt(thinking={"type": "disabled"}),
+                        text_prompt(output_config={"effort": "none"})):
+            with self.assertRaisesRegex(ProviderError, "exact-model"):
+                prepare_request("kimi", {}, "key", payload, "k3", k3)
+
     def test_mimo_maps_effort_to_its_documented_coarse_thinking_switch(self):
         spec = {"reasoning": True, "effort_modes": ["none", "high"], "fast_mode": False}
         for requested, expected in (("none", "disabled"), ("minimal", "enabled"), ("max", "enabled")):
