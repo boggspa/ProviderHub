@@ -366,7 +366,10 @@ final class BridgeModel: ObservableObject {
         if Bundle.main.object(forInfoDictionaryKey: "BridgeSeedMistralMetadata") as? Bool == true {
             env["MISTRAL_BRIDGE_SEED_CATALOG"] = NSHomeDirectory() + "/Library/Application Support/Mistral Bridge/catalog.json"
         }
-        env["PYTHONDONTWRITEBYTECODE"] = "1"
+        // Bytecode caches live in the hub's state directory, never inside the
+        // signed bundle: a __pycache__ under Resources breaks the app's
+        // resource seal, which Gatekeeper and future updaters check.
+        env["PYTHONPYCACHEPREFIX"] = root.appendingPathComponent("pycache", isDirectory: true).path
         env["PYTHONUNBUFFERED"] = "1"
         env["PYTHONNOUSERSITE"] = "1"
         env.removeValue(forKey: "PYTHONHOME")
@@ -391,9 +394,25 @@ final class BridgeModel: ObservableObject {
         return candidates.first { FileManager.default.isExecutableFile(atPath: $0) }
     }
 
+    /// Remove any bytecode cache that an outside Python run left inside the
+    /// worker directory, so the bundle matches its signature again before the
+    /// helper runs. Caches are disposable; nothing else in the bundle is touched.
+    nonisolated static func scrubWorkerCaches(helper: String) {
+        let worker = URL(fileURLWithPath: helper).deletingLastPathComponent()
+        let manager = FileManager.default
+        guard let walker = manager.enumerator(at: worker, includingPropertiesForKeys: [.isDirectoryKey]) else { return }
+        var caches: [URL] = []
+        for case let url as URL in walker where url.lastPathComponent == "__pycache__" {
+            caches.append(url)
+            walker.skipDescendants()
+        }
+        for url in caches { try? manager.removeItem(at: url) }
+    }
+
     nonisolated static func execute(python: String, helper: String, environment: [String: String], command: String, provider: String?, input: Data?) async throws -> Data {
         try await withCheckedThrowingContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
+                scrubWorkerCaches(helper: helper)
                 let process = Process()
                 process.executableURL = URL(fileURLWithPath: python)
                 process.arguments = [helper, command]
@@ -642,6 +661,7 @@ final class BridgeModel: ObservableObject {
         if running { return }
         guard gatewayProcess == nil else { throw WorkerError(message: "The gateway is still starting or stopping.") }
         guard let python else { throw WorkerError(message: "Provider Hub needs Python 3.11 or newer. Install a supported Python runtime, then reconnect.") }
+        Self.scrubWorkerCaches(helper: helper.path)
         let process = Process()
         process.executableURL = URL(fileURLWithPath: python)
         process.arguments = [helper.path, "serve", "--parent-pipe"]

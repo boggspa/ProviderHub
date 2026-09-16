@@ -303,6 +303,13 @@ verification passes, and Gatekeeper identifies it as `Notarized Developer ID`.
 The recipient zip is recreated after stapling. A later source rebuild requires
 its own signing and notarization.
 
+The bundle must stay byte-identical to its signature after installation, so
+the app never writes into it: the worker's Python bytecode cache is redirected
+to the hub's Application Support directory (`PYTHONPYCACHEPREFIX`), the build
+strips any `__pycache__` before signing, and the app removes a cache that an
+outside Python run left under `Resources/worker` before it starts the worker.
+`codesign --verify --deep --strict` on the installed app is the check.
+
 
 **0.5.0 provider expansion**
 

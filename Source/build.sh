@@ -16,6 +16,10 @@ done
 cp "$SOURCE_DIR/provider_branding.json" "$APP_DIR/Contents/Resources/worker/"
 cp -R "$SOURCE_DIR/provider-logos" "$APP_DIR/Contents/Resources/worker/"
 cp -R "$SOURCE_DIR/vendor" "$APP_DIR/Contents/Resources/worker/"
+# Bytecode caches never ship: the worker writes its own cache into the hub's
+# state directory at run time, and a cache inside Resources would be sealed
+# into the signature only to go stale.
+find "$APP_DIR/Contents/Resources/worker" -type d -name __pycache__ -prune -exec rm -rf {} +
 if [ -n "${PROVIDER_HUB_PYTHON_RUNTIME:-}" ]; then
   if [ ! -x "$PROVIDER_HUB_PYTHON_RUNTIME/bin/python3" ]; then
     printf 'The supplied Python runtime is missing bin/python3.\n' >&2
