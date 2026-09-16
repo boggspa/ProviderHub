@@ -20,6 +20,12 @@
     "muse": "#1671EA",
     "meta": "#1671EA",
     "alibaba": "#8C52EF",
+    "codex": "#705AFF",
+    "deep-reinforce": "#BE5809",
+    "essential": "#8462CA",
+    "ibm": "#3079BC",
+    "liquid": "#D72D82",
+    "openbmb": "#E22B17",
     "zai": "#177DAA",
     "openrouter": "#E02948",
     "poolside": "#0C8194",
@@ -31,13 +37,15 @@
     "inception": "#7C5BE9",
     "nexagi": "#747A42",
     "sakana": "#EA0C2D",
-    "stealth": "#A06B00",
+    "stealth": "#9E6C00",
     "gemini": "#346EEC",
     "antigravity": "#308713"
   },
   "accentAliases": {
     "mimo": "xiaomi",
-    "qwen": "alibaba"
+    "qwen": "alibaba",
+    "openai": "codex",
+    "google": "antigravity"
   },
   "providers": {
     "qwen-token-plan": {
@@ -111,6 +119,41 @@
       "displayProvider": "Alibaba",
       "hueKey": "alibaba",
       "shortCode": "QWN"
+    },
+    "deep-reinforce": {
+      "displayProvider": "Deep Reinforce",
+      "hueKey": "deep-reinforce",
+      "shortCode": "DR"
+    },
+    "essential": {
+      "displayProvider": "Essential AI",
+      "hueKey": "essential",
+      "shortCode": "ESS"
+    },
+    "google": {
+      "displayProvider": "Google",
+      "hueKey": "google",
+      "shortCode": "GGL"
+    },
+    "ibm": {
+      "displayProvider": "IBM",
+      "hueKey": "ibm",
+      "shortCode": "IBM"
+    },
+    "liquid": {
+      "displayProvider": "Liquid",
+      "hueKey": "liquid",
+      "shortCode": "LIQ"
+    },
+    "openai": {
+      "displayProvider": "OpenAI",
+      "hueKey": "openai",
+      "shortCode": "OAI"
+    },
+    "openbmb": {
+      "displayProvider": "OpenBMB",
+      "hueKey": "openbmb",
+      "shortCode": "BMB"
     },
     "meta": {
       "displayProvider": "Meta",
@@ -215,6 +258,18 @@
     },
     {
       "runtimeProvider": "ollama",
+      "id": "cohere",
+      "providerLabel": "Cohere",
+      "providerClass": "cohere",
+      "needles": [
+        "north-mini-code-1.0",
+        "north mini code 1.0",
+        "north mini code"
+      ],
+      "fallbackModelLabel": "Cohere model"
+    },
+    {
+      "runtimeProvider": "ollama",
       "id": "deepseek",
       "providerLabel": "DeepSeek",
       "providerClass": "deepseek",
@@ -227,6 +282,51 @@
     },
     {
       "runtimeProvider": "ollama",
+      "id": "deep-reinforce",
+      "providerLabel": "Deep Reinforce",
+      "providerClass": "deep-reinforce",
+      "needles": [
+        "ornith"
+      ],
+      "fallbackModelLabel": "Deep Reinforce model"
+    },
+    {
+      "runtimeProvider": "ollama",
+      "id": "essential",
+      "providerLabel": "Essential AI",
+      "providerClass": "essential",
+      "needles": [
+        "rnj-1",
+        "rnj 1"
+      ],
+      "fallbackModelLabel": "Essential AI model"
+    },
+    {
+      "runtimeProvider": "ollama",
+      "id": "google",
+      "providerLabel": "Google",
+      "providerClass": "google",
+      "needles": [
+        "gemma4",
+        "gemma 4",
+        "gemma"
+      ],
+      "fallbackModelLabel": "Gemma model"
+    },
+    {
+      "runtimeProvider": "ollama",
+      "id": "ibm",
+      "providerLabel": "IBM",
+      "providerClass": "ibm",
+      "needles": [
+        "granite4.1",
+        "granite 4.1",
+        "granite"
+      ],
+      "fallbackModelLabel": "Granite model"
+    },
+    {
+      "runtimeProvider": "ollama",
       "id": "kimi",
       "providerLabel": "Kimi",
       "providerClass": "kimi",
@@ -234,6 +334,18 @@
         "kimi-"
       ],
       "fallbackModelLabel": "Kimi model"
+    },
+    {
+      "runtimeProvider": "ollama",
+      "id": "liquid",
+      "providerLabel": "Liquid",
+      "providerClass": "liquid",
+      "needles": [
+        "lfm2.5",
+        "lfm 2.5",
+        "lfm"
+      ],
+      "fallbackModelLabel": "Liquid model"
     },
     {
       "runtimeProvider": "ollama",
@@ -252,6 +364,17 @@
     },
     {
       "runtimeProvider": "ollama",
+      "id": "minimax",
+      "providerLabel": "MiniMax",
+      "providerClass": "minimax",
+      "needles": [
+        "minimax-",
+        "minimax "
+      ],
+      "fallbackModelLabel": "MiniMax model"
+    },
+    {
+      "runtimeProvider": "ollama",
       "id": "mistral",
       "providerLabel": "Mistral",
       "providerClass": "mistral",
@@ -262,6 +385,54 @@
         "mistral"
       ],
       "fallbackModelLabel": "Mistral model"
+    },
+    {
+      "runtimeProvider": "ollama",
+      "id": "nvidia",
+      "providerLabel": "NVIDIA",
+      "providerClass": "nvidia",
+      "needles": [
+        "nemotron3",
+        "nemotron 3",
+        "nemotron"
+      ],
+      "fallbackModelLabel": "NVIDIA model"
+    },
+    {
+      "runtimeProvider": "ollama",
+      "id": "openai",
+      "providerLabel": "OpenAI",
+      "providerClass": "openai",
+      "needles": [
+        "gpt-oss",
+        "gpt oss",
+        "openai/gpt-oss"
+      ],
+      "fallbackModelLabel": "GPT OSS model"
+    },
+    {
+      "runtimeProvider": "ollama",
+      "id": "openbmb",
+      "providerLabel": "OpenBMB",
+      "providerClass": "openbmb",
+      "needles": [
+        "minicpm-v4.5",
+        "minicpm v4.5",
+        "minicpm"
+      ],
+      "fallbackModelLabel": "MiniCPM model"
+    },
+    {
+      "runtimeProvider": "ollama",
+      "id": "poolside",
+      "providerLabel": "Poolside",
+      "providerClass": "poolside",
+      "needles": [
+        "laguna-xs-2.1",
+        "laguna xs 2.1",
+        "laguna"
+      ],
+      "fallbackModelLabel": "Poolside model"
     },
     {
       "runtimeProvider": "ollama",

@@ -152,30 +152,38 @@ single route, `openrouter/stealth/union-alpha`, labelled Union Alpha.
 Two consequences follow from that metadata rather than from a choice made here.
 The model advertises no `reasoning`, `reasoning_effort` or `include_reasoning`
 parameter, so it publishes an empty effort ladder and no reasoning control
-appears beside it in either picker; a client that asks for one is refused
-rather than silently ignored. And the endpoint advertises `auto` tool choice
-only, with `required`, `function` and `none` all false, so a forced or
-suppressed tool choice fails the endpoint check instead of being sent to a host
-that does not support it. Ordinary auto tool cycles are unaffected. If
+appears beside it in either picker. Asking it to think is refused rather than
+silently ignored; asking it *not* to think is accepted, since an empty ladder
+means a model that never reasons rather than one whose reasoning cannot be
+switched off (`reasoning_axis`, added in `3b3a39a` after Claude Desktop's
+always-present disabled thinking block made the route unusable). And the
+endpoint advertises `auto` tool choice only, with `required`, `function` and
+`none` all false, so a forced or suppressed tool choice fails the endpoint
+check instead of being sent to a host that does not support it. Ordinary auto tool cycles are unaffected. If
 OpenRouter later advertises a reasoning parameter or a wider tool-choice set,
 a catalogue refresh picks it up with no code change.
 
 An anonymous provider has no brand to borrow, so it gets an arbitrary accent:
-`stealth`, `#A06B00`. The palette's rule is that an accent is a foreground
+`stealth`, `#9E6C00`. The palette's rule is that an accent is a foreground
 colour on both the light and the dark surface, so every hue is normalized to
-one WCAG relative luminance — 0.176 to 0.182 across the existing accents —
-rather than to a brand's own lightness, giving 4.5:1 or better against white
-and a clear step off the hub's dark chrome. `#A06B00` is the most saturated
-gold sRGB holds at that luminance: OKLCH lightness 0.570, hue 74.9, chroma
-0.120, which is the gamut edge at that lightness, matching the way NVIDIA
-green, Xiaomi green and Kimi blue sit at their own edges. It measures 4.57:1 on
-white and 3.85:1 on the hub's `#18191A`, inside the palette's existing
-4.54-4.64 and 3.80-3.88 bands. Its hue is 23 degrees off Ollama's brown and 37
-off Mistral's orange, and Grok's grey carries no hue to collide with. Its Ultra
-cut is `#B37800` on dark and `#8D5E00` on light.
+one WCAG relative luminance — 0.176 to 0.182 across the accents — rather than
+to a brand's own lightness, giving 4.5:1 or better against white and a clear
+step off the hub's dark chrome. `#9E6C00` is about the most saturated gold sRGB
+holds at that luminance: OKLCH lightness 0.569, hue 76.8, chroma 0.119, near
+the gamut edge there, the way NVIDIA green, Xiaomi green and Kimi blue sit at
+their own edges. It measures 4.57:1 on white, 4.60:1 on black and 3.86:1 on the
+hub's `#18191A`, inside the palette's existing bands. It is placed between the
+two accents it could be confused with, Claude's amber `#B16105` and Cursor's
+yellow `#8C7508`, and its Ultra cut is `#B17A00` on dark, `#8B5F00` on light.
 `test_accent_palette_holds_one_readable_luminance_band` now asserts that band
-for every accent, so the next arbitrary hue cannot drift out of it. TaskWraith
-is taking the same `#A06B00` for the same model on its own Pi-routed path.
+for every accent, so the next arbitrary hue cannot drift out of it.
+
+The value is TaskWraith's, not this repo's. Both sides minted a gold
+independently for the same namespace and landed one hue degree apart — an
+unremarkable outcome, since the luminance band and the sRGB gamut leave almost
+no room at that hue. `#9E6C00` is the one in AGBench's
+`--provider-stealth-color`, so it is the one kept; this file's first draft
+recorded the local `#A06B00` before the two were compared.
 
 The accent is display only. The brand rule keys on the `stealth/` prefix and
 changes the label, hue and initials to Stealth; `runtimeProvider` stays
@@ -197,5 +205,58 @@ Sources:
 - https://openrouter.ai/stealth/union-alpha
 - https://openrouter.ai/api/v1/models
 - https://openrouter.ai/api/v1/models/stealth/union-alpha/endpoints
-- TaskWraith chat "OpenRouter Stealth model in Pi Catalogue", which registers
-  the same model on Pi and takes the same `#A06B00` override.
+- AGBench `src/renderer/src/styles/theme.css` (`--provider-stealth-color`) and
+  `src/shared/piBrandTable.ts` (`openrouter/stealth`), read-only.
+
+## Ollama display brands — filling in the rest of the table
+
+The hub carried six of AGBench's seventeen `OLLAMA_DISPLAY_BRANDS` entries.
+The other eleven — Cohere, Deep Reinforce, Essential AI, Google (the Gemma
+spoof class), IBM, Liquid, MiniMax, NVIDIA, OpenAI, OpenBMB and Poolside —
+were missing, so those local and Cloud models fell through to Ollama's own
+walnut brown. They are now mirrored in full, in AGBench's order, with the
+needles copied verbatim: the needles are the attribution, and inventing a
+looser one here would put the two tables quietly out of step. The six that
+were already present matched AGBench exactly and are unchanged.
+
+Cloud tags need no separate rules. An Ollama Cloud id is the same name with a
+`:…-cloud` suffix, so `gpt-oss:120b-cloud`, `deepseek-v3.1:671b-cloud`,
+`qwen3-coder:480b-cloud`, `kimi-k2:1t-cloud`, `minimax-m2:cloud` and
+`glm-4.6:cloud` all match on the local needle. Where a needle is
+version-pinned — Cohere's `north-mini-code-1.0` — an unversioned tag reaches
+the brand through the humanised label the hub always supplies, which is the
+same second pass the upstream matcher makes. An unrecognised tag keeps
+Ollama's brown rather than guessing a maker.
+
+Six accents came with them, at AGBench's exact values: `codex` `#705AFF`,
+`deep-reinforce` `#BE5809`, `essential` `#8462CA`, `ibm` `#3079BC`, `liquid`
+`#D72D82` and `openbmb` `#E22B17`. Two are aliases rather than new hues,
+mirroring the `var()` indirection upstream: `openai` resolves to `codex`, so
+an Ollama-hosted GPT-OSS wears the same violet the Codex seat does, and
+`google` resolves to `antigravity`, so Gemma wears Google's green rather than
+the retired Gemini blue. Every one of them measures 4.5:1 or better on white
+and sits inside the palette's shared luminance band, which the band test now
+checks for the whole palette rather than for the accents that happened to be
+there when it was written.
+
+Each new class also gets a presentation entry so its chip carries a chosen
+mnemonic instead of a derived one — OpenAI and OpenBMB both derive `OPE`, and
+`NVIDIA` derives `NVI` where the palette already says `NV`. Fallback model
+labels keep this repository's generic form (`Granite model`) rather than
+AGBench's (`Granite 4.1 (3B Param)`), which names that project's own pulled
+tags and parameter counts; the hub has not observed them, and the fallback is
+only reached when no label is available at all.
+
+None of this changes routing. `runtimeProvider` stays `ollama`, the daemon,
+the model tag and the absence of a credential are untouched, and the Cloud
+source classifier is unaffected. The visible effect is in the Codex /
+ChatGPT desktop watcher, where the composer pill, the power slider, the Ultra
+cut and the activity shimmer take the model's accent: before this, every
+Ollama row that was not Qwen, DeepSeek, Kimi, Llama, Mistral or GLM shared one
+brown.
+
+Sources:
+
+- AGBench `src/shared/ollamaBrandTable.ts` (`OLLAMA_DISPLAY_BRANDS`),
+  `src/renderer/src/lib/ollamaDisplayBrand.ts`, and
+  `src/renderer/src/styles/theme.css` (`--provider-*-color`), read-only.

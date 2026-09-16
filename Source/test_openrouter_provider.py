@@ -171,7 +171,7 @@ class OpenRouterProviderTests(unittest.TestCase):
         # the key and the bill stay OpenRouter's.
         self.assertEqual(projected["presentation"]["runtimeProvider"], "openrouter")
         self.assertEqual(projected["presentation"]["displayProvider"], "Stealth")
-        self.assertEqual(projected["presentation"]["accent"], "#A06B00")
+        self.assertEqual(projected["presentation"]["accent"], "#9E6C00")
         body = {"input": "hello", "tools": [{"name": "read"}]}
         finalize(body, rows[0], "key", responses=True)
         self.assertEqual(body["model"], identifier)

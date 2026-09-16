@@ -70,10 +70,10 @@ class BrandingTests(unittest.TestCase):
 
     def test_openrouter_stealth_preview_wears_its_own_gold(self):
         """`stealth/union-alpha` is an anonymous provider's free preview, so
-        it has no brand to borrow. It gets an arbitrary accent: the most
-        saturated gold sRGB holds at the palette's luminance (OKLCH hue 75,
-        chroma at the gamut edge), clear of Mistral's orange and Ollama's
-        brown. The route and the bill remain OpenRouter's.
+        it has no brand to borrow. It gets an arbitrary accent, the gold
+        TaskWraith minted for the same namespace: the most saturated gold
+        this palette's luminance can hold, clear of Claude's amber and
+        Cursor's yellow. The route and the bill remain OpenRouter's.
         """
         presentation = resolve_presentation(
             "openrouter", "stealth/union-alpha", supplied_label="Union Alpha",
@@ -82,7 +82,7 @@ class BrandingTests(unittest.TestCase):
             "runtimeProvider": "openrouter",
             "displayProvider": "Stealth",
             "hueKey": "stealth",
-            "accent": "#A06B00",
+            "accent": "#9E6C00",
             "shortCode": "STL",
             "model": "stealth/union-alpha",
             "modelLabel": "Union Alpha",
@@ -110,6 +110,60 @@ class BrandingTests(unittest.TestCase):
             "light": "provider-logos/provider-logo-deepseek.png",
             "dark": "provider-logos/provider-logo-deepseek.png",
         })
+
+    def test_ollama_brand_table_covers_the_agbench_roster_local_and_cloud(self):
+        """The Ollama display-brand table is mirrored from AGBench's
+        `OLLAMA_DISPLAY_BRANDS`, needles included, so a local or Cloud tag
+        wears its maker's hue while the runtime stays `ollama`. Cloud tags
+        are the same names with a `:…-cloud` suffix, so one needle set
+        serves both.
+        """
+        expected = {
+            "qwen3:8b": ("Alibaba", "alibaba", "#8C52EF"),
+            "qwen3-coder:480b-cloud": ("Alibaba", "alibaba", "#8C52EF"),
+            "north-mini-code-1.0:30b-a3b-q4": ("Cohere", "cohere", "#5E7C6F"),
+            "deepseek-r1:8b": ("DeepSeek", "deepseek", "#4E6AEE"),
+            "deepseek-v3.1:671b-cloud": ("DeepSeek", "deepseek", "#4E6AEE"),
+            "ornith:9b": ("Deep Reinforce", "deep-reinforce", "#BE5809"),
+            "rnj-1:8b": ("Essential AI", "essential", "#8462CA"),
+            # The Gemma spoof class wears Google's Antigravity green.
+            "gemma4:12b": ("Google", "google", "#308713"),
+            "granite4.1:3b": ("IBM", "ibm", "#3079BC"),
+            "kimi-k2:1t-cloud": ("Kimi", "kimi", "#0073E6"),
+            "lfm2.5:8b": ("Liquid", "liquid", "#D72D82"),
+            "llama3.2:3b": ("Meta", "meta", "#1671EA"),
+            "minimax-m2:cloud": ("MiniMax", "minimax", "#C044A4"),
+            "devstral:24b": ("Mistral", "mistral", "#D44404"),
+            # 'mistral' is not a substring of 'ministral'; it needs its own needle.
+            "ministral:8b": ("Mistral", "mistral", "#D44404"),
+            "nemotron3:33b": ("NVIDIA", "nvidia", "#538200"),
+            # OpenAI's spoof hue is the Codex token, as it is upstream.
+            "gpt-oss:120b-cloud": ("OpenAI", "openai", "#705AFF"),
+            "minicpm-v4.5:8b": ("OpenBMB", "openbmb", "#E22B17"),
+            "laguna-xs-2.1:33b": ("Poolside", "poolside", "#0C8194"),
+            "glm-4.6:cloud": ("Z.ai", "zai", "#177DAA"),
+        }
+        for tag, (label, hue, accent) in expected.items():
+            with self.subTest(model=tag):
+                presentation = resolve_presentation("ollama", tag, catalogue=self.catalogue)
+                self.assertEqual(presentation["runtimeProvider"], "ollama")
+                self.assertEqual(presentation["displayProvider"], label)
+                self.assertEqual(presentation["hueKey"], hue)
+                self.assertEqual(presentation["accent"], accent)
+        self.assertEqual(
+            {rule["id"] for rule in self.catalogue["modelBrandOverrides"]
+             if rule["runtimeProvider"] == "ollama"},
+            {hue for _, hue, _ in expected.values()},
+        )
+        # A version-pinned needle still reaches its brand through the
+        # humanised label the hub always supplies, as it does upstream.
+        spaced = resolve_presentation("ollama", "north-mini-code:30b",
+                                      supplied_label="North Mini Code \u00b7 30B",
+                                      catalogue=self.catalogue)
+        self.assertEqual(spaced["hueKey"], "cohere")
+        # An unrecognised tag keeps Ollama's own walnut rather than guessing.
+        unknown = resolve_presentation("ollama", "mystery-model:7b", catalogue=self.catalogue)
+        self.assertEqual((unknown["displayProvider"], unknown["accent"]), ("Ollama", "#976C52"))
 
     def test_model_id_brand_match_wins_over_a_stale_label(self):
         presentation = resolve_presentation(
