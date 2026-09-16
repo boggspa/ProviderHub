@@ -94,8 +94,16 @@ inject.
   but wrote SEARCH/REPLACE blocks and unified diffs, which core rejects,
   because the projected description dropped the grammar; the description
   now restates the format (`APPLY_PATCH_FORMAT_GUIDE`) and the base
-  instructions prefer apply_patch for edits, which a live probe with the
-  same guide showed yields a valid patch on the first attempt.
+  instructions prefer apply_patch for edits. With the guide, a second run
+  used the right envelope and headers and copied long lines verbatim, but
+  wrote the removed line bare with the `-` on its own line, left blank
+  hunk lines unprefixed, and once split a paragraph at a sentence; twelve
+  attempts failed verification before it fell back to shell. The hub now
+  mends those slips before Codex verifies the patch
+  (`responses_tools.repair_apply_patch`: bare line -> context, detached
+  `-` -> removed line, `--- a/` / `+++ b/` dropped, Add-section lines
+  prefixed); Codex still verifies the result against the workspace, so a
+  wrong guess is rejected, never applied.
 - Claude per-turn rows: best-effort steering shipped; effectiveness depends
   on model compliance.
 - Claude checkpoint/rewind: blocked on the server-side gate; needs

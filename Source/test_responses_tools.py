@@ -3,7 +3,7 @@ import json
 import unittest
 
 from bridge_core import BridgeError
-from responses_tools import (flatten_tools, input_names, normalize_custom_calls, output_names, register,
+from responses_tools import (flatten_tools, input_names, normalize_custom_calls, output_names, register, repair_apply_patch, extract_patch,
                              restore_custom_call, tool_name)
 
 
@@ -74,6 +74,42 @@ class CustomApplyPatchAdapterTests(unittest.TestCase):
         self.assertEqual(flat[0]["parameters"]["required"], ["patch"])
         self.assertEqual(flat[0]["parameters"]["properties"]["patch"]["type"], "string")
         self.assertEqual(mapping["apply_patch"]["custom"], "apply_patch")
+
+    def test_repair_apply_patch_mends_detached_markers_and_bare_context(self):
+        raw = ("*** Begin Patch\n*** Update File: README.md\n@@\n"
+               "The old line\n-\n+The new line\n@@\n**0.5.0 qualification**\n-\n+**Qualification**\n\n"
+               "All tests pass\n*** End Patch")
+        self.assertEqual(repair_apply_patch(raw).split("\n"), [
+            "*** Begin Patch", "*** Update File: README.md", "@@", "-The old line", "+The new line",
+            "@@", "-**0.5.0 qualification**", "+**Qualification**", "", " All tests pass", "*** End Patch"])
+
+    def test_repair_apply_patch_turns_context_plus_detached_minus_into_a_replace(self):
+        raw = ("*** Begin Patch\n*** Update File: README.md\n@@\n"
+               " Build from the root to create the app. Old tail.\n-\n+Build from the root to create the app. New tail.\n"
+               "\n **Provider connections**\n*** End Patch")
+        self.assertIn("@@\n-Build from the root to create the app. Old tail.\n+Build from the root to create the app. New tail.\n"
+                      "\n **Provider connections**\n", repair_apply_patch(raw))
+        # A genuine blank-line removal next to unrelated context is left alone.
+        legit = "*** Begin Patch\n*** Update File: a.txt\n@@\n keep\n-\n+totally different content here\n*** End Patch"
+        self.assertEqual(repair_apply_patch(legit), legit)
+
+    def test_repair_apply_patch_drops_diff_headers_and_prefixes_add_lines(self):
+        raw = ("*** Begin Patch\n*** Update File: README.md\n--- a/README.md\n+++ b/README.md\n@@\n-old\n+new\n"
+               "*** Add File: notes.txt\nfirst line\n+second line\n\n*** End Patch")
+        self.assertEqual(repair_apply_patch(raw).split("\n"), [
+            "*** Begin Patch", "*** Update File: README.md", "@@", "-old", "+new",
+            "*** Add File: notes.txt", "+first line", "+second line", "+", "*** End Patch"])
+
+    def test_repair_apply_patch_leaves_valid_patches_and_non_patches_alone(self):
+        valid = "*** Begin Patch\n*** Update File: a.py\n@@ def f():\n     x = 1\n-    return 1\n+    return 2\n*** End Patch"
+        self.assertEqual(repair_apply_patch(valid), valid)
+        search = "<<<<<<<SEARCH\nfoo\n=======\nbar\n>>>>>>>REPLACE"
+        self.assertEqual(repair_apply_patch(search), search)
+        self.assertIsNone(repair_apply_patch(None))
+
+    def test_extract_patch_repairs_provider_text(self):
+        arguments = json.dumps({"patch": "*** Begin Patch\n*** Update File: a.txt\n@@\nold\n-\n+new\n*** End Patch"})
+        self.assertEqual(extract_patch(arguments), "*** Begin Patch\n*** Update File: a.txt\n@@\n-old\n+new\n*** End Patch")
 
     def test_other_custom_tools_still_need_a_separate_adapter(self):
         for tool in ({"type": "custom", "name": "other_tool"},

@@ -9,7 +9,7 @@ import time
 import uuid
 
 from bridge_core import BridgeError, private_token
-from responses_tools import APPLY_PATCH_PARAM, APPLY_PATCH_TOOL_NAME, is_custom_tool
+from responses_tools import APPLY_PATCH_PARAM, APPLY_PATCH_TOOL_NAME, is_custom_tool, repair_apply_patch
 
 
 ENVELOPE_PREFIX = "ph_reasoning_v1."
@@ -258,6 +258,8 @@ class MessagesResponsesAdapter:
                 patch = block["input"].get(APPLY_PATCH_PARAM)
                 if not isinstance(patch, str):
                     patch = json.dumps(block["input"], ensure_ascii=False)
+                else:
+                    patch = repair_apply_patch(patch)
                 return {"id": "ct_" + uuid.uuid4().hex, "type": "custom_tool_call", "call_id": block["id"],
                         "name": self.tool_map[block["name"]]["name"], "input": patch, "status": "completed"}
             return {"id": "fc_" + uuid.uuid4().hex, "type": "function_call", "call_id": block["id"],

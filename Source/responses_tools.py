@@ -56,8 +56,11 @@ APPLY_PATCH_FORMAT_GUIDE = (
     "line after an Update header to rename). An Update section holds one or more hunks that each begin with '@@' "
     "(optionally followed by a nearby function or class line for context), then the changed region as full lines: "
     "unchanged context lines start with a single space, removed lines with '-', added lines with '+'. Include about "
-    "three unchanged lines around each change so it matches exactly once. An Add section lists every new line with a "
-    "leading '+'. Never use '--- a/', '+++ b/', line numbers, or SEARCH/REPLACE markers. Example:\n"
+    "three unchanged lines around each change so it matches exactly once. Put each marker at the start of the line it "
+    "applies to ('-' directly before the old text, '+' directly before the new text), never on a line of its own; a "
+    "blank context line is a single space. Copy every existing line whole, exactly as it appears in the file, however "
+    "long it is. An Add section lists every new line with a leading '+'. Never use '--- a/', '+++ b/', line numbers, "
+    "or SEARCH/REPLACE markers. Example:\n"
     "*** Begin Patch\n*** Update File: src/app.py\n@@ def greet():\n     name = \"world\"\n-    return \"hi\"\n"
     "+    return f\"hello {name}\"\n*** End Patch"
 )
@@ -180,6 +183,100 @@ def normalize_custom_calls(items, mapping):
     return items
 
 
+_PATCH_BEGIN = "*** Begin Patch"
+_PATCH_END = "*** End Patch"
+_PATCH_EOF = "*** End of File"
+_UPDATE_FILE = "*** Update File: "
+_ADD_FILE = "*** Add File: "
+_DELETE_FILE = "*** Delete File: "
+_REPLACE_SIMILARITY = 0.6
+
+
+def _unified_diff_header(line, path):
+    """True for a '--- a/path' or '+++ b/path' line that names the section's file."""
+    for prefix in ("--- ", "+++ "):
+        if not line.startswith(prefix):
+            continue
+        target = line[len(prefix):].strip()
+        if target == "/dev/null":
+            return True
+        candidates = {target}
+        if target[:2] in ("a/", "b/"):
+            candidates.add(target[2:])
+        return bool(path) and any(
+            candidate == path or path.endswith("/" + candidate) or candidate.endswith("/" + path)
+            for candidate in candidates if candidate)
+    return False
+
+
+def _similar(left, right):
+    import difflib
+    return left[:24] == right[:24] or difflib.SequenceMatcher(None, left, right).ratio() >= _REPLACE_SIMILARITY
+
+
+def repair_apply_patch(text):
+    """Mend the syntax slips chat models make in Codex's apply_patch format.
+
+    Codex core verifies every patch against the workspace before applying
+    it, so a repair can only turn a certain rejection into a candidate; lines
+    that already parse are never changed. Inside an Update section a bare
+    line becomes a context line; a '-' on a line of its own after a bare line
+    marks that line as removed; a lone '-' between a context line and a
+    similar '+' line marks the context line as the removed one (a replace
+    written with the marker detached, Mistral Medium 3.5's habit); and stray
+    '--- a/' / '+++ b/' headers for the section's file are dropped. Inside an
+    Add section bare lines get their '+'. Everything else passes through.
+    """
+    if not isinstance(text, str) or _PATCH_BEGIN not in text:
+        return text
+    lines = text.split("\n")
+    out, bare = [], []
+    section, path = None, None
+    for index, line in enumerate(lines):
+        header = line.rstrip()
+        if header.startswith("*** "):
+            if header.startswith(_UPDATE_FILE):
+                section, path = "update", header[len(_UPDATE_FILE):].strip()
+            elif header.startswith(_ADD_FILE):
+                section, path = "add", header[len(_ADD_FILE):].strip()
+            elif header.startswith(_DELETE_FILE):
+                section, path = "delete", None
+            elif header in (_PATCH_END, _PATCH_EOF):
+                section = None if header == _PATCH_END else section
+            out.append(line); bare.append(False)
+            continue
+        if section == "update":
+            if header == "@@" or header.startswith("@@ "):
+                out.append(line); bare.append(False)
+                continue
+            if _unified_diff_header(header, path):
+                continue
+            if header == "-" and out:
+                previous = out[-1]
+                following = lines[index + 1] if index + 1 < len(lines) else ""
+                if bare[-1]:
+                    out[-1] = "-" + previous[1:]
+                    bare[-1] = False
+                    continue
+                if previous.startswith(" ") and following.startswith("+") and _similar(previous[1:], following[1:]):
+                    out[-1] = "-" + previous[1:]
+                    continue
+            if line == "" or line[:1] in (" ", "+", "-"):
+                out.append(line); bare.append(False)
+                continue
+            out.append(" " + line); bare.append(True)
+            continue
+        if section == "add":
+            if line.startswith("+"):
+                out.append(line)
+            else:
+                out.append("+" + line)
+            bare.append(False)
+            continue
+        out.append(line); bare.append(False)
+    return "\n".join(out)
+
+
 def extract_patch(arguments):
     """Unwrap the provider-side patch argument back to raw patch text."""
     if not isinstance(arguments, str):
@@ -189,11 +286,11 @@ def extract_patch(arguments):
     except ValueError:
         # Lenient: a model that sent raw patch text instead of JSON still
         # yields a usable patch for Codex core to parse or reject itself.
-        return arguments
+        return repair_apply_patch(arguments)
     if isinstance(value, dict) and isinstance(value.get(APPLY_PATCH_PARAM), str):
-        return value[APPLY_PATCH_PARAM]
+        return repair_apply_patch(value[APPLY_PATCH_PARAM])
     if isinstance(value, str):
-        return value
+        return repair_apply_patch(value)
     return arguments
 
 
