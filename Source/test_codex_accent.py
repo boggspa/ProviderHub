@@ -66,6 +66,7 @@ class AccentMapTests(unittest.TestCase):
         self.assertIn(r"/^app:\/\/-\//", script)
         self.assertIn("observer.observe(document, ", script)  # never the root element: absent at document start
         self.assertIn("[data-codex-intelligence-trigger]", script)  # the composer pill
+        self.assertIn("[data-reasoning-effort]", script)  # its stacked effort layers
         self.assertIn('effort === "ultra"', script)  # Ultra keeps the app's own purple
         self.assertNotIn("__HUB_", script)
 

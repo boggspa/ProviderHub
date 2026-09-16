@@ -120,21 +120,33 @@ _WATCHER = r"""
         state.targets = targets; state.label = label; state.colour = colour;
       }
     }
-    // The composer pill: "<model> <effort>". Its effort word inherits the
-    // pill's tertiary grey; give it the model's accent. Ultra is left to the
-    // app (its own purple), as is anything the app already colours purple.
+    // The composer pill: "<model> <effort>". The model picker trigger stacks
+    // one span per effort level ([data-reasoning-effort]) and crossfades
+    // them inside an effort label that carries the pill's tertiary grey; the
+    // Ultra span has its own purple rule, which beats an inherited colour.
+    // Give that label the model's accent. Ultra is left to the app, as is
+    // anything the app already colours purple. The older two-part pill
+    // (model span + effort span) is handled the same way as a fallback.
     function pillWords() {
       const words = [];
       for (const trigger of document.querySelectorAll("[data-codex-intelligence-trigger]")) {
         const effort = norm(trigger.getAttribute("data-selected-reasoning-effort"));
         if (!effort || effort === "ultra") { continue; }
-        const content = trigger.querySelector("[data-tooltip-overflow-target]") || trigger;
-        const wrapper = content.firstElementChild;
-        if (!wrapper || wrapper.children.length < 2) { continue; }
-        const word = wrapper.lastElementChild;
-        if (!word || word.classList.contains("text-chart-purple")) { continue; }
-        const label = modelLabel(wrapper, word);
-        if (label) { words.push({ element: word, colour: ACCENTS[label] }); }
+        const labels = [];
+        for (const layer of trigger.querySelectorAll("[data-reasoning-effort]")) {
+          const label = layer.closest("[data-composer-footer-collapse]") || (layer.parentElement && layer.parentElement.parentElement && layer.parentElement.parentElement.parentElement);
+          if (label && !labels.includes(label)) { labels.push(label); }
+        }
+        if (!labels.length) {
+          const content = trigger.querySelector("[data-tooltip-overflow-target]") || trigger;
+          const wrapper = content.firstElementChild;
+          if (wrapper && wrapper.children.length >= 2) { labels.push(wrapper.lastElementChild); }
+        }
+        for (const label of labels) {
+          if (!label || label.classList.contains("text-chart-purple")) { continue; }
+          const model = modelLabel(trigger, label);
+          if (model) { words.push({ element: label, colour: ACCENTS[model] }); }
+        }
       }
       return words;
     }

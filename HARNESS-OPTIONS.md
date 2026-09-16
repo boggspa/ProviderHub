@@ -317,11 +317,13 @@ not the app's own `app://-/` document (sandboxed app frames, browser-panel
 windows on outside sites), and the watcher bails out in any frame that is
 not such a top-level document. The watcher also tints the effort word of the
 composer's model pill (`[data-codex-intelligence-trigger]`, whose
-`data-selected-reasoning-effort` names the level): the word inherits the
-pill's tertiary grey, so an inline colour marked with
-`data-provider-hub-tint` gives it the model's accent, skipped for `ultra`
-and for anything the app already paints purple, and removed again when the
-pill changes. The watcher observes the document node rather
+`data-selected-reasoning-effort` names the level): the trigger stacks one
+span per level (`[data-reasoning-effort]`) and crossfades them inside an
+effort label that carries the pill's tertiary grey, while the Ultra span has
+its own purple rule. An inline colour on that label, marked with
+`data-provider-hub-tint`, gives the visible word the model's accent; it is
+skipped for `ultra` and for anything the app already paints purple, and
+removed again when the pill changes. The watcher observes the document node rather
 than its root element (a document-start script runs before the root exists,
 and the evaluate sent at attach time is queued until the window's first real
 document is created, so it lands at that same moment), and the helper
