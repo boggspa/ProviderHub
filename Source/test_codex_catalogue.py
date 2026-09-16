@@ -125,6 +125,19 @@ class CuratedCatalogueProjectionTests(unittest.TestCase):
         # One pseudo-slot per curated entry plus the Codex default slot.
         self.assertEqual(len(launch["mappings"]), 4)
 
+    def test_search_is_advertised_only_where_the_route_can_serve_it(self):
+        """web_search is a hosted tool: the model's own server runs it, and
+        nothing behind this gateway is OpenAI. Offered on a route whose
+        provider has no search of its own, Codex sends a tool the request
+        cannot carry and the whole turn fails rather than the search quietly
+        going missing, so the projection advertises it only where the route
+        layer has a translation to make."""
+        rows = {row["slug"]: row for row in project_codex(
+            settings(), inventory(model("openrouter/searching", web_search=True),
+                                  model("mistral/plain")))["models"]}
+        self.assertEqual(rows["openrouter/searching"]["web_search_tool_type"], "text")
+        self.assertIsNone(rows["mistral/plain"]["web_search_tool_type"])
+
     def test_apply_patch_freeform_is_a_per_route_opt_in(self):
         stock = inventory(model("mistral/a-model"), model("mistral/b-model"))
         base = settings(codex_model="mistral/a-model",

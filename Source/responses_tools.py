@@ -107,6 +107,53 @@ def describe_tool(tool, namespace=None) -> str:
     return f"a tool of type '{kind}'{where}"
 
 
+SEARCH_TOOL_TYPE = "web_search"
+SEARCH_CONTEXT_SIZES = ("low", "medium", "high")
+
+
+def split_hosted_search(tools):
+    """Lift a hosted web-search request out of the tools array.
+
+    Codex asks for search the way the OpenAI Responses API does: a hosted
+    `web_search` tool that whoever serves the model is expected to run. No
+    third-party provider in this catalogue runs OpenAI's hosted tool, so the
+    request cannot travel as it stands, and left in the array it only earns
+    the whole turn a refusal from flatten_tools. Pulling it out first lets
+    the route decide - translate it into the provider's own search where one
+    exists, refuse it by name where none does.
+
+    Returns the tools that still need flattening, and a plain description of
+    what was asked for when search was asked for at all. The dated and
+    preview spellings name the same hosted tool, so all of them are
+    recognised. Only a top-level request is lifted: a search tool nested in
+    a namespace is not something Codex sends, and guessing at one would be a
+    silent reinterpretation of the turn rather than a translation of it.
+
+    `user_location` is deliberately left behind. No provider here accepts an
+    equivalent, and it is the one field in the request that describes the
+    person rather than the search.
+    """
+    if not isinstance(tools, list):
+        return tools, None
+    kept, request = [], None
+    for tool in tools:
+        kind = tool.get("type") if isinstance(tool, dict) else None
+        if not isinstance(kind, str) or not (kind == SEARCH_TOOL_TYPE or kind.startswith(SEARCH_TOOL_TYPE + "_")):
+            kept.append(tool)
+            continue
+        if request is not None:
+            continue  # One search per turn; the first spelling wins.
+        size = tool.get("search_context_size")
+        filters = tool.get("filters") if isinstance(tool.get("filters"), dict) else {}
+        allowed = filters.get("allowed_domains")
+        request = {
+            "context_size": size if size in SEARCH_CONTEXT_SIZES else None,
+            "allowed_domains": [domain for domain in allowed if isinstance(domain, str) and domain][:20]
+            if isinstance(allowed, list) else [],
+        }
+    return kept, request
+
+
 def flatten_tools(tools):
     if not isinstance(tools, list):
         raise BridgeError("tools must be an array.")

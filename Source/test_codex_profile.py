@@ -123,6 +123,24 @@ command = "existing-command"
         edit(doc)
         self.manager.config.write_text(tomlkit.dumps(doc))
 
+    def test_codex_search_is_switched_on_only_for_a_route_that_can_serve_it(self):
+        """The hosted search tool reaches whichever route is selected, so the
+        Codex setting follows that route's catalogue row: live where the
+        gateway can translate the request into the provider's own search,
+        disabled where Codex would otherwise offer search it cannot perform.
+        Either value is journalled, so the user's own setting still returns."""
+        self.activate()
+        self.assertEqual(parse(self.manager.config.read_text())["web_search"], "disabled")
+        self.manager.restore()
+        searching = copy.deepcopy(self.inventory)
+        for entry in searching["models"]:
+            if entry["id"] == self.settings["codex_model"]:
+                entry["web_search"] = True
+        self.manager.activate(self.settings, searching)
+        self.assertEqual(parse(self.manager.config.read_text())["web_search"], "live")
+        self.manager.restore()
+        self.assertNotIn("web_search", parse(self.manager.config.read_text()))
+
     def test_switch_and_restore_preserve_original_bytes_and_unrelated_state(self):
         self.activate()
         updated = self.manager.config.read_text()

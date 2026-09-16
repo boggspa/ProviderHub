@@ -210,8 +210,15 @@ class CodexProfile:
             catalog_models = {model["slug"]: model for model in catalog["models"]}
             selected_model = catalog_models.get(selected, {})
             multi_agent = selected_model.get("multi_agent_version") is not None
+            # Search follows the catalogue row rather than being switched off
+            # outright: the projection only sets web_search_tool_type for a
+            # route whose provider runs search of its own (codex_catalogue),
+            # and on those the gateway translates the hosted tool into that
+            # provider's search. Everywhere else the tool would reach a route
+            # that cannot serve it, so the setting stays disabled and Codex
+            # never offers search it would fail to perform.
             applied = {"model": selected, "model_provider": PROVIDER_ID, "model_catalog_json": str(self.catalogue),
-                       "web_search": "disabled"}
+                       "web_search": "live" if selected_model.get("web_search_tool_type") else "disabled"}
             # model_reasoning_effort is a ROOT_KEY but intentionally absent from
             # `applied`: it is deleted on activation so the catalogue's
             # default_reasoning_level governs the starting slider position

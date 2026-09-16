@@ -154,6 +154,66 @@ class OpenRouterProviderTests(unittest.TestCase):
                 finalize(second, row, "key", responses=True)
                 self.assertEqual(body["session_id"], second["session_id"])
 
+    def test_hosted_search_is_taken_only_where_the_endpoints_advertise_native_search(self):
+        """OpenRouter can bolt an Exa search onto any model, but that engine
+        searches on every request rather than when the model decides it needs
+        to look something up - billed per result, and a coding turn polluted
+        with excerpts it never asked for. Only endpoints advertising the
+        model's own search are marked capable, and the plugin pins that engine
+        so a capable route can never quietly fall back to the other kind."""
+        identifier = "sakana/fugu-max"
+        native = ["tools", "tool_choice", "reasoning", "reasoning_effort", "web_search_options"]
+
+        def rows_for(parameters):
+            return _entries(card(identifier), {"data": {"id": identifier, "endpoints": [
+                {**endpoint("sakana", 1000000), "model_id": identifier, "supported_parameters": parameters}]}})
+
+        row = rows_for(native)[0]
+        self.assertTrue(row["web_search"])
+        self.assertFalse(rows_for(native[:-1])[0]["web_search"])
+        body = {"input": "hello", "tools": []}
+        finalize(body, row, "key", responses=True,
+                 search={"context_size": "high", "allowed_domains": ["arxiv.org"]})
+        self.assertEqual(body["plugins"], [{"id": "web", "engine": "native", "include_domains": ["arxiv.org"]}])
+        self.assertEqual(body["web_search_options"], {"search_context_size": "high"})
+        # A turn that asked for no search carries no search controls at all.
+        plain = {"input": "hello"}
+        finalize(plain, row, "key", responses=True)
+        self.assertNotIn("plugins", plain)
+        self.assertNotIn("web_search_options", plain)
+
+    def test_a_codex_search_request_reaches_openrouter_as_its_own_plugin(self):
+        """End to end: the hosted tool is lifted out of the array, the router's
+        search is switched on in its place, and the function tools around it
+        travel untouched. Codex asked for search and gets search; what it never
+        gets back is a tool call it would have to serve itself."""
+        from types import SimpleNamespace
+        from unittest.mock import patch
+
+        import responses_native
+
+        identifier = "sakana/fugu-max"
+        row = _entries(card(identifier), {"data": {"id": identifier, "endpoints": [
+            {**endpoint("sakana", 1000000), "model_id": identifier,
+             "supported_parameters": ["tools", "tool_choice", "reasoning", "reasoning_effort",
+                                      "web_search_options"]}]}})[0]
+        route = "openrouter/" + identifier
+        runtime = SimpleNamespace(
+            settings={"providers": {"openrouter": {"base_url": BASE_URL}}, "_model_specs": {route: row}},
+            replay_key="replay", token="token", upstream_url=None,
+            provider_key=lambda provider_id: "provider-key")
+        payload = {"model": route, "input": "what shipped today?",
+                   "tools": [{"type": "function", "name": "read", "parameters": {"type": "object"}},
+                             {"type": "web_search", "search_context_size": "medium"}]}
+        with patch.object(responses_native, "validate_connection", return_value={"base_url": BASE_URL}), \
+                patch.object(responses_native, "_auth_headers", return_value={}), \
+                patch.object(responses_native, "connection_signature", return_value="sig"):
+            plan = responses_native.prepare_native(runtime, copy.deepcopy(payload))
+        self.assertEqual(plan["body"]["plugins"], [{"id": "web", "engine": "native"}])
+        self.assertEqual(plan["body"]["web_search_options"], {"search_context_size": "medium"})
+        self.assertEqual([tool["name"] for tool in plan["body"]["tools"]], ["read"])
+        self.assertTrue(plan["url"].endswith("/v1/responses"))
+
     def test_stealth_union_alpha_is_curated_by_id_and_carries_the_stealth_gold(self):
         identifier = "stealth/union-alpha"
         self.assertEqual(CURATED[identifier], "Union Alpha")

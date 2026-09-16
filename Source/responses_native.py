@@ -15,7 +15,7 @@ from bridge_core import BridgeError, atomic_json, read_json
 from hub_config import connection_signature, qualify, split_route
 from providers import PROVIDERS, ProviderError, _auth_headers, _chat_effort, validate_connection
 from responses_tools import (flatten_tools, input_names, normalize_custom_calls, output_names, register,
-                             restore_custom_call)
+                             restore_custom_call, split_hosted_search)
 from responses_bridge import ENVELOPE_PREFIX, MessagesResponsesAdapter, ReasoningEnvelope, to_messages
 from openrouter_provider import OpenRouterError, finalize as openrouter_finalize, app_headers as openrouter_app_headers
 from effort_map import cap_high_end, map_effort, ollama_effort_aliases
@@ -450,9 +450,20 @@ def prepare_native(runtime, payload):
         if type(spec.get("max_output")) is int:
             body["max_output_tokens"] = min(count, spec["max_output"])
     tools = body.get("tools", [])
+    # The hosted search tool is OpenAI's, and nothing here serves OpenAI, so it
+    # is lifted out before flattening and answered by the provider's own search
+    # if the provider has one. Only a route whose catalogue entry carries
+    # web_search has that translation written for it; the rest say so plainly,
+    # because a model told it can search and then handed no search answers from
+    # memory and presents it as fresh.
+    tools, search = split_hosted_search(tools)
     body["tools"], tool_map = flatten_tools(tools)
     if tools and spec.get("tools") is False:
         raise BridgeError("The selected model does not support tool calls.")
+    if search is not None and not spec.get("web_search"):
+        raise BridgeError("This route's provider does not run web search of its own, so the hosted web_search tool "
+                          "cannot be honoured. Turn Codex web search off for this route, or choose a route on a "
+                          "provider that searches.")
     if isinstance(body["input"], list):
         body["input"] = _normalize_multi_agent_items(body["input"])
         normalize_custom_calls(body["input"], tool_map)
@@ -497,7 +508,7 @@ def prepare_native(runtime, payload):
         raise BridgeError("This reasoning history belongs to a different provider connection. Start a new task when changing providers.")
     if provider_id == "openrouter":
         try:
-            openrouter_finalize(body, spec, key, responses=True)
+            openrouter_finalize(body, spec, key, responses=True, search=search)
         except OpenRouterError as exc:
             raise BridgeError(str(exc)) from exc
         url = connection["base_url"] + "/v1/responses"

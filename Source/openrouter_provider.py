@@ -147,6 +147,12 @@ def _entries(card, details):
             "max_output": min(caps) if caps and all(caps) else None,
             "context_kind": "provider_endpoint_reported" if context else "unknown",
             "tools": True, "vision": "image" in architecture.get("input_modalities", []),
+            # web_search_options is how an OpenRouter endpoint advertises the
+            # model's own search. Only those routes are offered the hosted
+            # web_search tool: the router can bolt an Exa search onto any model,
+            # but that engine runs on every request rather than when the model
+            # decides it needs to look something up (see web_plugin).
+            "web_search": bool(rows) and all("web_search_options" in row["parameters"] for row in rows),
             "reasoning": capable, "effort_modes": efforts, "effort_control": control,
             "default_effort": default, "reasoning_mandatory": mandatory,
             "parallel_tool_calls": bool(rows) and all("parallel_tool_calls" in row["parameters"] for row in rows),
@@ -333,7 +339,30 @@ def _routing(body, spec, responses):
     return {"require_parameters": False, "only": sorted(allowed), "ignore": sorted(ignored)}
 
 
-def finalize(body, spec, api_key, *, responses=False):
+def web_plugin(search):
+    """OpenRouter's web plugin, standing in for the hosted search tool.
+
+    OpenRouter runs search on its side rather than handing the model a tool
+    to call, so the hosted tool is dropped from the request and the router's
+    search switched on instead; the turn comes back as ordinary text carrying
+    url_citation annotations.
+
+    The engine is pinned to "native" - the model's own search, which the model
+    reaches for only when the question needs it. Left to auto-select, a route
+    without native search silently falls back to Exa, and that engine searches
+    on every single request whether or not the turn has anything to look up:
+    billed per result, and a coding turn polluted with web excerpts it never
+    asked for. Pinning it means a route either has real on-demand search or is
+    not offered search at all, which is why the catalogue marks a route
+    capable only when its endpoints advertise web_search_options.
+    """
+    plugin = {"id": "web", "engine": "native"}
+    if search.get("allowed_domains"):
+        plugin["include_domains"] = list(search["allowed_domains"])
+    return plugin
+
+
+def finalize(body, spec, api_key, *, responses=False, search=None):
     upstream = spec.get("upstream_model_id")
     if upstream not in CURATED:
         raise OpenRouterError("Choose an OpenRouter model from the curated catalogue.")
@@ -375,6 +404,12 @@ def finalize(body, spec, api_key, *, responses=False):
             elif effort is not None:
                 reasoning["effort"] = effort
     body["model"] = upstream
+    if search is not None:
+        body["plugins"] = [web_plugin(search)]
+        if search.get("context_size"):
+            # Context size is a top-level control on OpenRouter, not a plugin
+            # field: it sizes how much of each result reaches the model.
+            body["web_search_options"] = {"search_context_size": search["context_size"]}
     body.pop("speed", None)
     body.pop("service_tier", None)
     body["provider"] = _routing(body, spec, responses)

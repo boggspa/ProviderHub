@@ -4,7 +4,7 @@ import unittest
 
 from bridge_core import BridgeError
 from responses_tools import (describe_tool, flatten_tools, input_names, normalize_custom_calls, output_names, register, repair_apply_patch, extract_patch,
-                             restore_custom_call, tool_name)
+                             restore_custom_call, split_hosted_search, tool_name)
 
 
 class ResponsesToolTests(unittest.TestCase):
@@ -35,6 +35,37 @@ class ResponsesToolTests(unittest.TestCase):
                      {"type": "web_search"}):
             with self.assertRaises(BridgeError):
                 flatten_tools([tool])
+
+    def test_a_hosted_search_request_is_lifted_out_instead_of_failing_the_turn(self):
+        """web_search is OpenAI's hosted tool and nothing here serves OpenAI,
+        so it cannot travel as it stands - but refusing the array outright
+        fails a whole thread over a tool the route may be able to answer its
+        own way. It comes out first and the route decides. user_location stays
+        behind: no provider here takes an equivalent, and it is the one field
+        that describes the person rather than the search."""
+        tools = [{"type": "function", "name": "read", "parameters": {"type": "object"}},
+                 {"type": "web_search", "search_context_size": "high",
+                  "filters": {"allowed_domains": ["docs.python.org", 7, ""]},
+                  "user_location": {"type": "approximate", "city": "Edinburgh"}}]
+        kept, search = split_hosted_search(tools)
+        self.assertEqual([tool["name"] for tool in kept], ["read"])
+        self.assertEqual(search, {"context_size": "high", "allowed_domains": ["docs.python.org"]})
+        self.assertNotIn("Edinburgh", json.dumps(search))
+        # What is left flattens exactly as it would have without the request.
+        self.assertEqual(flatten_tools(kept)[0][0]["name"], "read")
+        # The preview and dated spellings name the same hosted tool.
+        for kind in ("web_search_preview", "web_search_2025_08_26"):
+            self.assertIsNotNone(split_hosted_search([{"type": kind}])[1])
+        # An unrecognised context size is dropped, not forwarded verbatim.
+        self.assertEqual(split_hosted_search([{"type": "web_search", "search_context_size": "enormous"}])[1],
+                         {"context_size": None, "allowed_domains": []})
+        # A turn that asked for no search is handed back untouched.
+        self.assertEqual(split_hosted_search(tools[:1]), (tools[:1], None))
+        # Nested is not lifted: Codex does not send it there, and guessing
+        # would reinterpret the turn rather than translate it.
+        with self.assertRaises(BridgeError):
+            flatten_tools(split_hosted_search([{"type": "namespace", "name": "browser",
+                                                "tools": [{"type": "web_search"}]}])[0])
 
     def test_a_refused_tool_is_named_with_its_type_and_never_its_schema(self):
         """The refusal has to identify the tool: a desktop that ships one

@@ -249,7 +249,14 @@ def project_codex(settings, inventory):
             # Advertising freeform makes Codex core offer apply_patch, which
             # feeds the TurnDiffTracker behind the close-out diff card.
             "apply_patch_tool_type": "freeform" if apply_patch_qualified(settings, route) else None,
-            "web_search_tool_type": "text",
+            # Only advertise search where the route can actually serve it.
+            # web_search is a hosted tool: the model's own server runs it, and
+            # nothing behind this gateway is OpenAI, so it is honoured only
+            # where the provider has search of its own for the route layer to
+            # translate into. Offered anywhere else, Codex sends a tool the
+            # request cannot carry and the whole turn fails rather than the
+            # search quietly going missing.
+            "web_search_tool_type": "text" if entry.get("web_search") else None,
             "truncation_policy": {"mode": "bytes", "limit": 10000},
             "supports_parallel_tool_calls": entry.get("parallel_tool_calls") is True,
             "supports_image_detail_original": False,

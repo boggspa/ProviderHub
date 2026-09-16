@@ -1001,6 +1001,27 @@ class MultiAgentNormalizationTests(unittest.TestCase):
             prepare_native(runtime, {"model": route, "input": [{"type": "weird_future"}]})
         self.assertIn("'weird_future'", str(ctx.exception))
 
+    def test_hosted_search_is_refused_by_name_where_the_provider_runs_no_search(self):
+        """A route whose provider has no search of its own says exactly that,
+        rather than the turn dying on the tool array as a whole. Validation
+        runs before any provider or network access, so a stub runtime carrying
+        the model spec is enough to reach it."""
+        from types import SimpleNamespace
+
+        from bridge_core import BridgeError
+        from hub_config import qualify
+        from responses_native import prepare_native
+
+        route = qualify("mistral", "mistral-medium-2508")
+        runtime = SimpleNamespace(settings={"_model_specs": {route: {}}})
+        with self.assertRaises(BridgeError) as ctx:
+            prepare_native(runtime, {"model": route, "input": "hi", "tools": [{"type": "web_search"}]})
+        message = str(ctx.exception)
+        self.assertIn("does not run web search", message)
+        # Not the flatten refusal: the request was understood and answered on
+        # its merits, not rejected as a shape the adapter cannot read.
+        self.assertNotIn("separate adapter", message)
+
     def test_extract_subagent_task_prefers_encrypted_content(self):
         """Dict-form envelopes expose the plaintext instruction, not the routing text."""
         from responses_native import _extract_subagent_task
