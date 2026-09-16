@@ -261,6 +261,7 @@ _KIMI_DOCS = "https://www.kimi.com/code/docs/en/kimi-code/models.html"
 # ladder, and it is not one of the routes ("the K3 series and K2.8 Preview")
 # that Kimi serves as K2.8 Preview when thinking is off. Neither a desktop
 # effort rank nor a thinking-off request selects anything on this route.
+# Its catalogue ladder below is a placeholder slider position, not a control.
 _KIMI_FIXED_THINKING_MODELS = frozenset({"kimi-for-coding-highspeed"})
 _KIMI_MODELS = [
     {
@@ -302,7 +303,13 @@ _KIMI_MODELS = [
         "tools": True,
         "vision": True,
         "reasoning": True,
-        "effort_modes": [],
+        # Kimi documents "Thinking: ON" and no reasoning_effort ladder here.
+        # "high" is a deliberate placeholder slider position, not a wire
+        # control: an empty ladder left Codex with no position and it
+        # persisted effort "none"; one base rank also lets the synthesized
+        # Ultra alias carry the multi-agent affordance on this fast route.
+        # The gateway drops any rank sent here (_KIMI_FIXED_THINKING_MODELS).
+        "effort_modes": ["high"],
         # HighSpeed is a distinct model/tier selected by this exact id.  It is
         # not evidence for Claude's same-model Fast request control.
         "fast_mode": False,

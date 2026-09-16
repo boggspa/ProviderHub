@@ -222,6 +222,24 @@ class EffortAndFastProjectionTests(unittest.TestCase):
         self.assertIsNone(row["multi_agent_version"])
         self.assertIsNone(row["multi_agent_reasoning_effort"])
 
+    def test_kimi_highspeed_placeholder_rank_yields_a_two_step_ladder(self):
+        # HighSpeed documents thinking always on and no effort ladder. Its one
+        # placeholder rank keeps the slider from being empty and lets the
+        # synthesized Ultra alias carry the multi-agent affordance; the
+        # gateway drops both ranks on the wire.
+        rows = self.projected(model(
+            "kimi/kimi-for-coding-highspeed", name="Kimi for Coding HighSpeed",
+            context=262144, effort_modes=["high"], speed_tier="highspeed",
+        ))
+        row = rows["kimi/kimi-for-coding-highspeed"]
+        self.assertEqual(
+            [entry["effort"] for entry in row["supported_reasoning_levels"]],
+            ["high", "ultra"],
+        )
+        self.assertEqual(row["default_reasoning_level"], "high")
+        self.assertEqual(row["multi_agent_version"], "v2")
+        self.assertEqual(row["multi_agent_reasoning_effort"], "xhigh")
+
     def test_ultra_is_not_duplicated_when_model_advertises_it(self):
         rows = self.projected(model(
             "mistral/ultra-native", effort_modes=["none", "low", "ultra"],

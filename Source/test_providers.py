@@ -151,6 +151,9 @@ class DiscoveryTests(unittest.TestCase):
         self.assertEqual(by_id["kimi-for-coding"]["context"], 1048576)
         self.assertFalse(by_id["kimi-for-coding-highspeed"]["fast_mode"])
         self.assertEqual(by_id["kimi-for-coding-highspeed"]["speed_tier"], "highspeed")
+        self.assertEqual(by_id["kimi-for-coding"]["effort_modes"], ["low", "high", "max"])
+        # Placeholder slider position only; thinking is fixed on (see providers).
+        self.assertEqual(by_id["kimi-for-coding-highspeed"]["effort_modes"], ["high"])
         self.assertEqual(result["source"], "provider_documentation")
         self.assertTrue(all(model["inference_status"] == "advertised" for model in by_id.values()))
         self.assertTrue(any("membership" in warning for warning in result["warnings"]))
@@ -615,8 +618,9 @@ class NativePlanTests(unittest.TestCase):
     def test_kimi_highspeed_fixed_thinking_ignores_controls_it_cannot_serve(self):
         # K2.7 Code HighSpeed documents "Thinking: ON" and no effort ladder, so
         # a desktop rank or a thinking-off request selects nothing on the route.
-        # Codex always sends its slider effort; the turn must still run.
-        spec = {"reasoning": True, "effort_modes": [], "fast_mode": False, "speed_tier": "highspeed"}
+        # The catalogue's "high" is a placeholder slider position, and Codex
+        # always sends its slider effort; the turn must still run.
+        spec = {"reasoning": True, "effort_modes": ["high"], "fast_mode": False, "speed_tier": "highspeed"}
         for requested in ("none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"):
             payload = text_prompt(output_config={"effort": requested, "future_option": {"keep": True}})
             before = copy.deepcopy(payload)
