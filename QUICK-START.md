@@ -129,9 +129,10 @@ watcher in its windows that colours the model picker's power slider, and the
 effort word in the composer's model pill, with the selected model's provider
 accent, the same hues as the Providers page (Gemini wears Google's
 Antigravity green). The activity shimmer ("Thinking", "Editing files")
-sweeps with a faint trace of the same hue. Ultra keeps its purple in both
-places. Only Provider Hub holds the pipe; nothing listens on a
-port. The route is unsupported by OpenAI: the slider's colour is an app-wide
+sweeps with a faint trace of the same hue. At Ultra the slider, the picker's
+title and the pill's word take a deeper, more saturated cut of the same hue
+in place of the app's purple, and the word shimmers. Only Provider Hub holds
+the pipe; nothing listens on a port. The route is unsupported by OpenAI: the slider's colour is an app-wide
 design token, so if an update changes the picker the colour falls back to
 blue and nothing else changes, and a Codex self-relaunch after an update runs
 without the colour until the next launch from Provider Hub. Because Codex is

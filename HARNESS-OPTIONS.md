@@ -295,8 +295,8 @@ port), and installs a watcher with `Page.addScriptToEvaluateOnNewDocument`
 plus `Runtime.evaluate`. The watcher keys on the picker's data attributes,
 not its hashed class names: it reads the explicit-model row's display name,
 looks it up in the label-to-accent table the hub projected from the
-catalogue's presentation, and sets the token on the picker; Ultra's purple
-is untouched. The helper ignores SIGTERM and lives until the app exits,
+catalogue's presentation, and sets the token on the picker. The helper
+ignores SIGTERM and lives until the app exits,
 because closing the pipe is the app's cue to quit (Electron's pipe handler
 calls `Browser::Quit()` on EOF); it also outlives Provider Hub, discarding
 its status output once the hub is gone, and a message it cannot handle is
@@ -319,11 +319,35 @@ not such a top-level document. The watcher also tints the effort word of the
 composer's model pill (`[data-codex-intelligence-trigger]`, whose
 `data-selected-reasoning-effort` names the level): the trigger stacks one
 span per level (`[data-reasoning-effort]`) and crossfades them inside an
-effort label that carries the pill's tertiary grey, while the Ultra span has
-its own purple rule. An inline colour on that label, marked with
-`data-provider-hub-tint`, gives the visible word the model's accent; it is
-skipped for `ultra` and for anything the app already paints purple, and
-removed again when the pill changes. The activity shimmer ("Thinking", "Listing files…") is
+effort label that carries the pill's tertiary grey, while the Ultra span
+paints itself with the app's purple token. An inline colour on that label,
+marked with `data-provider-hub-tint`, gives the visible word the model's
+accent below Ultra; anything the app already paints purple is left alone,
+and the colour is removed again when the pill changes. Ultra itself takes
+the model's hue rather than the app's purple: the app paints its top level
+with one token (`--color-chart-purple`) in three places (the popover's
+title, `[data-maximum="true"]`; the slider's fill gradient beneath it,
+which blends that token with chart-blue; and the pill's Ultra layer,
+`[data-reasoning-effort="ultra"]`), so while the pill's
+`data-selected-reasoning-effort` is `ultra` the watcher sets that token,
+and `--provider-hub-ultra`, inline on the picker targets and on the pill
+trigger to the model's Ultra hue, and marks the title and the Ultra layer
+with `data-provider-hub-ultra` for a shimmer sweep. The Ultra hue is the
+accent in OKLCH with its lightness moved 0.05 away from the surface, up on
+dark and down on light, and its chroma raised by half or to the sRGB gamut
+edge at that lightness, whichever comes first (an accent already at the
+edge can end a little under its base chroma once moved, and a grey stays
+grey); contrast can only improve, and the step stays visible for every
+accent. The surface is read from the model name's text colour, as for the
+shimmer. The sweep is a zero-specificity rule in the
+adopted stylesheet: a 240%-wide gradient of the hue with one lighter
+highlight, clipped to the text and slid across it every 3.2 s; only the
+text fill goes transparent, so `color` keeps drawing anything that uses
+it, the hue falls back to `currentColor` so a marked word can never
+vanish, and `prefers-reduced-motion` gets a still fill in the plain hue.
+Max, which shares the title attribute, keeps the app's purple, as do
+tokens and marks the watcher did not set; all of it is removed again when
+the level changes. The activity shimmer ("Thinking", "Listing files…") is
 tinted through the app's own knobs: its shimmer text reads
 `--loading-shimmer-highlight` for the sweep, resets it on the element with a
 zero-specificity `:where()` rule and falls back to a per-theme constant

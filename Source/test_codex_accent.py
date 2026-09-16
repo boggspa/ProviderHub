@@ -13,8 +13,9 @@ from unittest import mock
 
 from bridge_core import SLOTS
 import codex_accent
-from codex_accent import (ACCENT_PROPERTY, PROPERTY, THEME_ATTRIBUTE, AccentBridge, DevToolsPipe, accent_map, already_running,
-                          bridge_command, child_environment, executable_path, launch, run, shimmer_css, watcher_script)
+from codex_accent import (ACCENT_PROPERTY, PROPERTY, THEME_ATTRIBUTE, ULTRA_ACCENT_PROPERTY, ULTRA_MARK, ULTRA_PROPERTY, AccentBridge,
+                          DevToolsPipe, accent_map, already_running, bridge_command, child_environment, executable_path, launch, run,
+                          shimmer_css, ultra_accents, ultra_css, ultra_map, watcher_script)
 from hub_config import defaults
 
 
@@ -67,7 +68,14 @@ class AccentMapTests(unittest.TestCase):
         self.assertIn("observer.observe(document, ", script)  # never the root element: absent at document start
         self.assertIn("[data-codex-intelligence-trigger]", script)  # the composer pill
         self.assertIn("[data-reasoning-effort]", script)  # its stacked effort layers
-        self.assertIn('effort === "ultra"', script)  # Ultra keeps the app's own purple
+        self.assertIn('effort === "ultra"', script)  # Ultra takes the model's Ultra hue and the sweep
+        self.assertIn('"kimi for coding": {"dark": "#0A82FF", "light": "#0065CC"}', script)
+        self.assertIn('const ULTRA_PROPERTY = "--color-chart-purple";', script)  # the app's own token for Ultra
+        self.assertIn(f'const ULTRA_ACCENT_PROPERTY = "{ULTRA_ACCENT_PROPERTY}";', script)
+        self.assertIn(f'const ULTRA_MARK = "{ULTRA_MARK}";', script)
+        self.assertIn('[data-reasoning-effort="ultra"]', script)  # the pill's Ultra layer
+        self.assertIn('[data-maximum="true"]', script)  # the popover's title at Ultra (and Max)
+        self.assertIn("[data-model-picker-power-slider]", script)  # the slider's fill reads the same token
         self.assertNotIn("__HUB_", script)
 
     def test_shimmer_rules_take_the_accent_per_theme(self):
@@ -80,6 +88,45 @@ class AccentMapTests(unittest.TestCase):
         self.assertIn(f'const THEME = "{THEME_ATTRIBUTE}";', script)
         self.assertIn(f'const ACCENT_PROPERTY = "{ACCENT_PROPERTY}";', script)
         self.assertNotIn("__HUB_", script)
+
+
+class UltraTests(unittest.TestCase):
+    def test_ultra_hue_moves_lightness_away_from_the_surface_and_takes_all_the_chroma_the_gamut_allows(self):
+        for colour in ("#0073E6", "#D44404", "#308713", "#976C52", "#4E6AEE", "#5E7C6F", "#EA0C2D"):
+            base_l, base_c, base_h = codex_accent._srgb_to_oklch(colour)
+            variants = ultra_accents(colour)
+            self.assertEqual(set(variants), {"dark", "light"})
+            for theme, sign in (("dark", 1), ("light", -1)):
+                self.assertRegex(variants[theme], r"^#[0-9A-F]{6}$")
+                level, chroma, hue = codex_accent._srgb_to_oklch(variants[theme])
+                self.assertGreater(sign * (level - base_l), 0.03, (colour, theme, variants))
+                self.assertAlmostEqual(hue, base_h, delta=0.05, msg=(colour, theme, variants))
+                # Chroma reaches the target or the gamut edge at the new lightness, whichever comes first;
+                # an accent already at the edge may end a little under its base chroma once moved.
+                self.assertGreaterEqual(chroma, 0.9 * base_c, (colour, theme, variants))
+                at_target = chroma >= 1.5 * base_c - 0.005
+                at_edge = not codex_accent._in_gamut(codex_accent._oklch_to_srgb(level, chroma * 1.03, hue))
+                self.assertTrue(at_target or at_edge, (colour, theme, variants, chroma / base_c))
+        self.assertEqual(ultra_accents("#0073E6"), {"dark": "#0A82FF", "light": "#0065CC"})
+        self.assertEqual(ultra_accents("#D44404"), {"dark": "#ED4C00", "light": "#BD3B00"})
+        # A grey has no chroma to raise: it only moves away from the surface.
+        self.assertEqual(ultra_accents("#757575"), {"dark": "#848484", "light": "#676767"})
+        self.assertEqual(ultra_map({"kimi for coding": "#0073E6"}), {"kimi for coding": {"dark": "#0A82FF", "light": "#0065CC"}})
+
+    def test_ultra_css_sweeps_the_marked_word_and_never_loses_it(self):
+        css = ultra_css()
+        self.assertIn("@keyframes provider-hub-ultra-sweep{from{background-position:100% 0}to{background-position:0% 0}}", css)
+        self.assertIn(f':where([{ULTRA_MARK}="1"]){{background-image:linear-gradient(100deg,var({ULTRA_ACCENT_PROPERTY},currentColor) 0%', css)
+        self.assertIn(f"color-mix(in srgb,var({ULTRA_ACCENT_PROPERTY},currentColor) 55%,#fff) 50%", css)
+        self.assertIn("background-size:240% 100%;-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;", css)
+        self.assertIn("animation:provider-hub-ultra-sweep 3.2s linear infinite}", css)
+        self.assertNotRegex(css, r"[;{]color:transparent")  # only the fill: currentColor keeps drawing whatever uses it
+        self.assertIn(f':where([{THEME_ATTRIBUTE}="light"] [{ULTRA_MARK}="1"])', css)
+        self.assertIn(f"@media (prefers-reduced-motion:reduce){{:where([{ULTRA_MARK}=\"1\"]){{animation:none;background-image:none;-webkit-text-fill-color:var({ULTRA_ACCENT_PROPERTY},currentColor)}}}}", css)
+        self.assertEqual(ULTRA_PROPERTY, "--color-chart-purple")
+        script = watcher_script({"Kimi for Coding": "#0073E6"})
+        self.assertIn("provider-hub-ultra-sweep", script)
+        self.assertIn(json.dumps(shimmer_css() + ultra_css()), script)  # both stylesheets travel together
 
 
 class EnvironmentTests(unittest.TestCase):
