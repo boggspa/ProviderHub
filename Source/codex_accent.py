@@ -65,65 +65,76 @@ def accent_map(settings: dict, inventory: dict) -> dict:
 
 _WATCHER = r"""
 (() => {
-  // Only the app's own top-level documents: never sandboxed app frames or
+  // The completion value goes back to the helper's log. Only the app's own
+  // top-level documents are touched: never sandboxed app frames or
   // browser-panel windows showing outside content.
   try {
-    if (window !== window.top) { return; }
-    if (!/^app:\/\/-\//.test(String(location.href))) { return; }
-  } catch (error) { return; }
-  if (window.__providerHubAccent) { return; }
-  const ACCENTS = __HUB_ACCENTS__;
-  const PROPERTY = "__HUB_PROPERTY__";
-  const state = { host: null, label: "", colour: "" };
-  const norm = (text) => (text || "").replace(/\s+/g, " ").trim().toLowerCase();
-  const effortLabel = (container) => container.querySelector("[data-effort-only],[data-accent],[data-maximum]");
-  function modelLabel(container) {
-    // The explicit-model layout shows the effort label (data-accent /
-    // data-maximum) on one row and the model's display name on the next.
-    const effort = effortLabel(container);
-    for (const span of container.querySelectorAll("span")) {
-      if (effort && (span === effort || effort.contains(span) || span.contains(effort))) { continue; }
-      const text = norm(span.textContent);
-      if (text && Object.prototype.hasOwnProperty.call(ACCENTS, text)) { return text; }
+    if (window !== window.top) { return { skipped: "frame" }; }
+    if (!/^app:\/\/-\//.test(String(location.href))) { return { skipped: "origin" }; }
+  } catch (error) { return { skipped: "guard" }; }
+  if (window.__providerHubAccent) { return { skipped: "installed" }; }
+  try {
+    const ACCENTS = __HUB_ACCENTS__;
+    const PROPERTY = "__HUB_PROPERTY__";
+    const state = { targets: [], label: "", colour: "" };
+    const norm = (text) => (text || "").replace(/\s+/g, " ").trim().toLowerCase();
+    const effortLabel = (container) => container.querySelector("[data-effort-only],[data-accent],[data-maximum]");
+    function modelLabel(container) {
+      // The explicit-model layout shows the effort label (data-accent /
+      // data-maximum) on one row and the model's display name on the next.
+      const effort = effortLabel(container);
+      for (const span of container.querySelectorAll("span")) {
+        if (effort && (span === effort || effort.contains(span) || span.contains(effort))) { continue; }
+        const text = norm(span.textContent);
+        if (text && Object.prototype.hasOwnProperty.call(ACCENTS, text)) { return text; }
+      }
+      return "";
     }
-    return "";
-  }
-  function clear() {
-    // Only undo our own value: leave any inline value the app set itself.
-    if (state.host) {
-      try {
-        if (norm(state.host.style.getPropertyValue(PROPERTY)) === norm(state.colour)) { state.host.style.removeProperty(PROPERTY); }
-      } catch (error) {}
+    function clear() {
+      // Only undo our own value: leave any inline value the app set itself.
+      for (const target of state.targets) {
+        try {
+          if (norm(target.style.getPropertyValue(PROPERTY)) === norm(state.colour)) { target.style.removeProperty(PROPERTY); }
+        } catch (error) {}
+      }
+      state.targets = []; state.label = ""; state.colour = "";
     }
-    state.host = null; state.label = ""; state.colour = "";
-  }
-  function apply() {
-    const container = document.querySelector('[data-explicit-model="true"]');
-    if (!container) { clear(); return; }
-    const label = modelLabel(container);
-    const colour = label ? ACCENTS[label] : "";
-    const host = container.closest("[data-transitions-ready],[data-side]") || container.parentElement;
-    if (!host || !colour) { clear(); return; }
-    if (state.host !== host || state.colour !== colour) {
-      clear();
-      host.style.setProperty(PROPERTY, colour);
-      state.host = host; state.label = label; state.colour = colour;
+    function apply() {
+      const container = document.querySelector('[data-explicit-model="true"]');
+      if (!container) { clear(); return; }
+      const label = modelLabel(container);
+      const colour = label ? ACCENTS[label] : "";
+      const host = container.closest("[data-transitions-ready],[data-side]") || container.parentElement;
+      if (!host || !colour) { clear(); return; }
+      // Themed subtrees re-declare the token, so set it on those too.
+      const targets = [host, ...host.querySelectorAll("[data-theme],[data-model-picker-power-slider]")];
+      const same = state.colour === colour && targets.length === state.targets.length && targets.every((target, index) => target === state.targets[index]);
+      if (!same) {
+        clear();
+        for (const target of targets) { target.style.setProperty(PROPERTY, colour); }
+        state.targets = targets; state.label = label; state.colour = colour;
+      }
     }
+    let scheduled = false;
+    function schedule() {
+      if (scheduled) { return; }
+      scheduled = true;
+      requestAnimationFrame(() => { scheduled = false; try { apply(); } catch (error) {} });
+    }
+    // Observe the document node: at document start there is no root element yet.
+    const observer = new MutationObserver(schedule);
+    observer.observe(document, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ["data-explicit-model", "data-accent", "data-maximum"] });
+    if (document.readyState === "loading") { document.addEventListener("DOMContentLoaded", schedule, { once: true }); }
+    window.__providerHubAccent = {
+      version: 2,
+      accents: Object.keys(ACCENTS).length,
+      check: () => ({ container: !!document.querySelector('[data-explicit-model="true"]'), label: state.label, colour: state.colour, targets: state.targets.length }),
+    };
+    schedule();
+    return { installed: true, accents: Object.keys(ACCENTS).length, ready: document.readyState };
+  } catch (error) {
+    return { error: String(error && error.message ? error.message : error) };
   }
-  let scheduled = false;
-  function schedule() {
-    if (scheduled) { return; }
-    scheduled = true;
-    requestAnimationFrame(() => { scheduled = false; try { apply(); } catch (error) {} });
-  }
-  const observer = new MutationObserver(schedule);
-  observer.observe(document.documentElement, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ["data-explicit-model", "data-accent", "data-maximum"] });
-  window.__providerHubAccent = {
-    version: 1,
-    accents: Object.keys(ACCENTS).length,
-    check: () => ({ container: !!document.querySelector('[data-explicit-model="true"]'), label: state.label, colour: state.colour, host: state.host ? state.host.tagName : null }),
-  };
-  schedule();
 })();
 """
 
@@ -255,6 +266,14 @@ class AccentBridge:
         if method == "Target.detachedFromTarget":
             self.injected.discard(params.get("sessionId") or "")
             return
+        if method in ("Page.domContentEventFired", "Page.loadEventFired"):
+            # The evaluate sent at attach time can land before the first
+            # document exists; the script is idempotent, so run it again once
+            # the document is there.
+            session_id = message.get("sessionId")
+            if session_id in self.injected:
+                self._evaluate(session_id)
+            return
         identifier = message.get("id")
         if identifier not in self.pending:
             return
@@ -268,11 +287,17 @@ class AccentBridge:
             self.emit({"event": "error", "stage": kind, "message": message["error"].get("message", "")})
             return
         if kind == "evaluate":
-            exception = (message.get("result") or {}).get("exceptionDetails")
+            result = message.get("result") or {}
+            exception = result.get("exceptionDetails")
             if exception:
-                self.emit({"event": "error", "stage": "evaluate", "message": exception.get("text", "")})
+                detail = (exception.get("exception") or {}).get("description") or exception.get("text", "")
+                self.emit({"event": "error", "stage": "evaluate", "session": session_id, "message": str(detail)[:300],
+                           "line": exception.get("lineNumber"), "column": exception.get("columnNumber")})
             else:
-                self.emit({"event": "injected", "session": session_id})
+                self.emit({"event": "injected", "session": session_id, "result": (result.get("result") or {}).get("value")})
+
+    def _evaluate(self, session_id: str) -> None:
+        self.pending[self.pipe.send("Runtime.evaluate", {"expression": self.script, "returnByValue": True}, session_id=session_id)] = ("evaluate", session_id)
 
     def _attached(self, session_id, info: dict) -> None:
         if not session_id or session_id in self.injected:
@@ -283,7 +308,7 @@ class AccentBridge:
         self.injected.add(session_id)
         self.pipe.send("Page.enable", session_id=session_id)
         self.pipe.send("Page.addScriptToEvaluateOnNewDocument", {"source": self.script, "runImmediately": True}, session_id=session_id)
-        self.pending[self.pipe.send("Runtime.evaluate", {"expression": self.script, "returnByValue": True}, session_id=session_id)] = ("evaluate", session_id)
+        self._evaluate(session_id)
 
 
 def _parked(fd: int) -> int:

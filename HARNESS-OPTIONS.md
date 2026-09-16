@@ -315,7 +315,13 @@ hub's, so no provider key or `NODE_OPTIONS` reaches it. The bridge
 auto-attaches to page targets only and detaches again from anything that is
 not the app's own `app://-/` document (sandboxed app frames, browser-panel
 windows on outside sites), and the watcher bails out in any frame that is
-not such a top-level document. What remains by design: the pipe is a full
+not such a top-level document. The watcher observes the document node rather
+than its root element (a document-start script runs before the root exists,
+and the evaluate sent at attach time is queued until the window's first real
+document is created, so it lands at that same moment), and the helper
+evaluates the idempotent script again on each load event, logging the
+script's own status (`installed`, `skipped`, or `error` with the exception
+text). What remains by design: the pipe is a full
 control channel into the app (the injected script sits in the origin the
 app's main process trusts for its own IPC), so only this helper holds it and
 no gateway endpoint reaches it; and macOS attributes the child's privacy

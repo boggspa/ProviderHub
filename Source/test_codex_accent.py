@@ -64,6 +64,7 @@ class AccentMapTests(unittest.TestCase):
         self.assertIn('[data-explicit-model="true"]', script)
         self.assertIn("window !== window.top", script)
         self.assertIn(r"/^app:\/\/-\//", script)
+        self.assertIn("observer.observe(document, ", script)  # never the root element: absent at document start
         self.assertNotIn("__HUB_", script)
 
 
@@ -132,11 +133,19 @@ class BridgeTests(unittest.TestCase):
         injected = [m for m in transport.sent if m["sessionId"] == "S1"]
         self.assertEqual([m["method"] for m in injected], ["Page.enable", "Page.addScriptToEvaluateOnNewDocument", "Runtime.evaluate"])
         self.assertEqual(injected[1]["params"], {"source": "SCRIPT", "runImmediately": True})
-        bridge.handle({"id": injected[2]["id"], "result": {"result": {"type": "undefined"}}})
-        self.assertEqual(events[-1], {"event": "injected", "session": "S1"})
+        bridge.handle({"id": injected[2]["id"], "result": {"result": {"type": "object", "value": {"skipped": "origin"}}}})
+        self.assertEqual(events[-1], {"event": "injected", "session": "S1", "result": {"skipped": "origin"}})
         # A repeated attach notification for the same session is a no-op.
         bridge.handle({"method": "Target.attachedToTarget", "params": {"sessionId": "S1", "targetInfo": {"targetId": "page-1", "type": "page", "url": "app://-/index.html"}}})
         self.assertEqual(sum(1 for m in transport.sent if m["method"] == "Page.addScriptToEvaluateOnNewDocument"), 1)
+        # Once the document is there the script is evaluated again (it is idempotent).
+        bridge.handle({"method": "Page.loadEventFired", "sessionId": "S1", "params": {"timestamp": 1.0}})
+        again = [m for m in transport.sent if m["sessionId"] == "S1" and m["method"] == "Runtime.evaluate"]
+        self.assertEqual(len(again), 2)
+        bridge.handle({"id": again[1]["id"], "result": {"result": {"type": "object", "value": {"installed": True, "accents": 2, "ready": "complete"}}}})
+        self.assertEqual(events[-1]["result"], {"installed": True, "accents": 2, "ready": "complete"})
+        bridge.handle({"method": "Page.loadEventFired", "sessionId": "unknown", "params": {}})  # not ours: ignored
+        self.assertEqual(len([m for m in transport.sent if m["method"] == "Runtime.evaluate"]), 2)
         # A browser-panel window on an outside site and a worker are detached again.
         bridge.handle({"method": "Target.attachedToTarget", "params": {"sessionId": "S2", "targetInfo": {"targetId": "page-2", "type": "page", "url": "https://example.com/"}}})
         bridge.handle({"method": "Target.attachedToTarget", "params": {"sessionId": "S3", "targetInfo": {"targetId": "w", "type": "service_worker", "url": "app://-/sw.js"}}})
@@ -146,8 +155,12 @@ class BridgeTests(unittest.TestCase):
         # A fresh blank window is accepted (the document arrives later) and an evaluate error is reported.
         bridge.handle({"method": "Target.attachedToTarget", "params": {"sessionId": "S4", "targetInfo": {"targetId": "page-4", "type": "page", "url": "about:blank"}}})
         evaluate = [m for m in transport.sent if m["sessionId"] == "S4" and m["method"] == "Runtime.evaluate"][0]
-        bridge.handle({"id": evaluate["id"], "result": {"exceptionDetails": {"text": "boom"}}})
-        self.assertEqual(events[-1], {"event": "error", "stage": "evaluate", "message": "boom"})
+        bridge.handle({"id": evaluate["id"], "result": {"exceptionDetails": {
+            "text": "Uncaught", "lineNumber": 60, "columnNumber": 14,
+            "exception": {"type": "object", "description": "TypeError: Failed to execute 'observe' on 'MutationObserver': parameter 1 is not of type 'Node'.\n    at <anonymous>:61:14"}}}})
+        self.assertEqual(events[-1]["stage"], "evaluate")
+        self.assertTrue(events[-1]["message"].startswith("TypeError: Failed to execute 'observe'"))
+        self.assertEqual((events[-1]["line"], events[-1]["column"]), (60, 14))
         bridge.handle({"method": "Target.detachedFromTarget", "params": {"sessionId": "S4"}})
         self.assertEqual(bridge.injected, {"S1"})
         bridge.handle({"id": 999, "result": {}})  # unknown ids are ignored
