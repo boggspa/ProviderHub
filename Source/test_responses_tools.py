@@ -3,7 +3,7 @@ import json
 import unittest
 
 from bridge_core import BridgeError
-from responses_tools import (flatten_tools, input_names, normalize_custom_calls, output_names, register, repair_apply_patch, extract_patch,
+from responses_tools import (describe_tool, flatten_tools, input_names, normalize_custom_calls, output_names, register, repair_apply_patch, extract_patch,
                              restore_custom_call, tool_name)
 
 
@@ -35,6 +35,30 @@ class ResponsesToolTests(unittest.TestCase):
                      {"type": "web_search"}):
             with self.assertRaises(BridgeError):
                 flatten_tools([tool])
+
+    def test_a_refused_tool_is_named_with_its_type_and_never_its_schema(self):
+        """The refusal has to identify the tool: a desktop that ships one
+        unsupported hosted tool otherwise fails every thread on every
+        provider with nothing to point at. Only identity travels, so a
+        refusal cannot leak what the tool would have been asked to do."""
+        with self.assertRaises(BridgeError) as raised:
+            flatten_tools([{"type": "local_shell", "name": "shell",
+                            "description": "run SECRET commands", "parameters": {"secret": True}}])
+        message = str(raised.exception)
+        self.assertIn("tool 'shell' of type 'local_shell'", message)
+        self.assertNotIn("SECRET", message)
+        self.assertNotIn("parameters", message)
+        with self.assertRaises(BridgeError) as nested:
+            flatten_tools([{"type": "namespace", "name": "browser",
+                            "tools": [{"type": "computer_use", "name": "click"}]}])
+        self.assertIn("tool 'click' of type 'computer_use' in namespace 'browser'", str(nested.exception))
+        with self.assertRaises(BridgeError) as freeform:
+            flatten_tools([{"type": "custom", "name": "other_tool", "format": {"type": "grammar"}}])
+        self.assertIn("tool 'other_tool' of type 'custom'", str(freeform.exception))
+        # Shapes that carry no usable identity still describe themselves.
+        self.assertEqual(describe_tool({"type": "mcp"}), "a tool of type 'mcp'")
+        self.assertEqual(describe_tool({"name": "x"}), "tool 'x' of type 'an unnamed type'")
+        self.assertEqual(describe_tool("nope"), "a tool of type str")
 
     def test_flat_names_cannot_collide_with_encoded_namespace_names(self):
         encoded = tool_name("ns", "run")

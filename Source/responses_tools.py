@@ -88,6 +88,25 @@ def apply_patch_parameters():
             "required": [APPLY_PATCH_PARAM]}
 
 
+def describe_tool(tool, namespace=None) -> str:
+    """Name a tool the adapter cannot take, for the client-facing refusal.
+
+    Only the tool's own identity travels: its declared type, its name and
+    the namespace it arrived under. Descriptions, schemas and arguments are
+    never included, so a refusal cannot leak what the tool would have been
+    asked to do.
+    """
+    if not isinstance(tool, dict):
+        return f"a tool of type {type(tool).__name__}"
+    kind = tool.get("type")
+    kind = str(kind)[:40] if isinstance(kind, str) and kind else "an unnamed type"
+    name = tool.get("name")
+    where = f" in namespace '{str(namespace)[:40]}'" if isinstance(namespace, str) and namespace else ""
+    if isinstance(name, str) and name:
+        return f"tool '{name[:60]}' of type '{kind}'{where}"
+    return f"a tool of type '{kind}'{where}"
+
+
 def flatten_tools(tools):
     if not isinstance(tools, list):
         raise BridgeError("tools must be an array.")
@@ -107,7 +126,8 @@ def flatten_tools(tools):
             return
         if tool.get("type") == "custom":
             if tool.get("name") != APPLY_PATCH_TOOL_NAME:
-                raise BridgeError("This Responses route only adapts the apply_patch custom tool. Other free-form tools need a separate adapter.")
+                raise BridgeError("This Responses route only adapts the apply_patch custom tool. Other free-form tools "
+                                  f"need a separate adapter. Rejected {describe_tool(tool, namespace)}.")
             # The incoming Lark-grammar description tells the model not to
             # wrap the patch in JSON; the provider side needs the opposite
             # instruction, so the description is replaced, not forwarded,
@@ -121,7 +141,8 @@ def flatten_tools(tools):
             result.append(item)
             return
         if tool.get("type") != "function":
-            raise BridgeError("This Responses route accepts function tools and function namespaces. Hosted and free-form tools need a separate adapter.")
+            raise BridgeError("This Responses route accepts function tools and function namespaces. Hosted and free-form "
+                              f"tools need a separate adapter. Rejected {describe_tool(tool, namespace)}.")
         item = copy.deepcopy(tool)
         item["name"] = register(mapping, namespace, tool.get("name"))
         if description:
