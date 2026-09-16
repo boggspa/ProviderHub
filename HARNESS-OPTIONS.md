@@ -323,16 +323,7 @@ effort label that carries the pill's tertiary grey, while the Ultra span has
 its own purple rule. An inline colour on that label, marked with
 `data-provider-hub-tint`, gives the visible word the model's accent; it is
 skipped for `ultra` and for anything the app already paints purple, and
-removed again when the pill changes. The same pass puts a brand mark before
-the pill's model name: the watcher sets `data-provider-hub-glyph` (plus a
-`-theme` of `dark` when the pill's text is light) on the model group, and a
-stylesheet it adopts draws a 14px `::before` pseudo-element from a data-URL
-PNG, so nothing is inserted into the app's React-managed tree and the app's
-CSP (`img-src data:`, `style-src 'unsafe-inline'`) allows it. The marks are
-the 40px files under `provider-logos/glyphs` (trimmed from the bundled
-lockups; Limit Counter supplied Qwen, Meta, MiMo and OpenRouter), chosen by
-the model's brand hue key, then its runtime provider, via `GLYPH_KEYS` in
-`codex_accent.py`. The activity shimmer ("Thinking", "Listing files…") is
+removed again when the pill changes. The activity shimmer ("Thinking", "Listing files…") is
 tinted through the app's own knobs: its shimmer text reads
 `--loading-shimmer-highlight` for the sweep, resets it on the element with a
 zero-specificity `:where()` rule and falls back to a per-theme constant
