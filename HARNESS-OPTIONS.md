@@ -315,7 +315,13 @@ hub's, so no provider key or `NODE_OPTIONS` reaches it. The bridge
 auto-attaches to page targets only and detaches again from anything that is
 not the app's own `app://-/` document (sandboxed app frames, browser-panel
 windows on outside sites), and the watcher bails out in any frame that is
-not such a top-level document. The watcher observes the document node rather
+not such a top-level document. The watcher also tints the effort word of the
+composer's model pill (`[data-codex-intelligence-trigger]`, whose
+`data-selected-reasoning-effort` names the level): the word inherits the
+pill's tertiary grey, so an inline colour marked with
+`data-provider-hub-tint` gives it the model's accent, skipped for `ultra`
+and for anything the app already paints purple, and removed again when the
+pill changes. The watcher observes the document node rather
 than its root element (a document-start script runs before the root exists,
 and the evaluate sent at attach time is queued until the window's first real
 document is created, so it lands at that same moment), and the helper

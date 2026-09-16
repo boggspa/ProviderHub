@@ -76,21 +76,26 @@ _WATCHER = r"""
   try {
     const ACCENTS = __HUB_ACCENTS__;
     const PROPERTY = "__HUB_PROPERTY__";
-    const state = { targets: [], label: "", colour: "" };
+    const MARK = "data-provider-hub-tint";
+    const state = { targets: [], label: "", colour: "", words: [] };
     const norm = (text) => (text || "").replace(/\s+/g, " ").trim().toLowerCase();
+    // Labels may carry a leading glyph (a bullet, a tier mark); match the words.
+    const lookup = (text) => {
+      const key = norm(text).replace(/^[^a-z0-9]+/, "").replace(/[^a-z0-9)\]]+$/, "");
+      return key && Object.prototype.hasOwnProperty.call(ACCENTS, key) ? key : "";
+    };
     const effortLabel = (container) => container.querySelector("[data-effort-only],[data-accent],[data-maximum]");
-    function modelLabel(container) {
+    function modelLabel(container, skip) {
       // The explicit-model layout shows the effort label (data-accent /
       // data-maximum) on one row and the model's display name on the next.
-      const effort = effortLabel(container);
       for (const span of container.querySelectorAll("span")) {
-        if (effort && (span === effort || effort.contains(span) || span.contains(effort))) { continue; }
-        const text = norm(span.textContent);
-        if (text && Object.prototype.hasOwnProperty.call(ACCENTS, text)) { return text; }
+        if (skip && (span === skip || skip.contains(span) || span.contains(skip))) { continue; }
+        const key = lookup(span.textContent);
+        if (key) { return key; }
       }
       return "";
     }
-    function clear() {
+    function clearMenu() {
       // Only undo our own value: leave any inline value the app set itself.
       for (const target of state.targets) {
         try {
@@ -99,36 +104,74 @@ _WATCHER = r"""
       }
       state.targets = []; state.label = ""; state.colour = "";
     }
-    function apply() {
+    function applyMenu() {
       const container = document.querySelector('[data-explicit-model="true"]');
-      if (!container) { clear(); return; }
-      const label = modelLabel(container);
+      if (!container) { clearMenu(); return; }
+      const label = modelLabel(container, effortLabel(container));
       const colour = label ? ACCENTS[label] : "";
       const host = container.closest("[data-transitions-ready],[data-side]") || container.parentElement;
-      if (!host || !colour) { clear(); return; }
+      if (!host || !colour) { clearMenu(); return; }
       // Themed subtrees re-declare the token, so set it on those too.
       const targets = [host, ...host.querySelectorAll("[data-theme],[data-model-picker-power-slider]")];
       const same = state.colour === colour && targets.length === state.targets.length && targets.every((target, index) => target === state.targets[index]);
       if (!same) {
-        clear();
+        clearMenu();
         for (const target of targets) { target.style.setProperty(PROPERTY, colour); }
         state.targets = targets; state.label = label; state.colour = colour;
       }
+    }
+    // The composer pill: "<model> <effort>". Its effort word inherits the
+    // pill's tertiary grey; give it the model's accent. Ultra is left to the
+    // app (its own purple), as is anything the app already colours purple.
+    function pillWords() {
+      const words = [];
+      for (const trigger of document.querySelectorAll("[data-codex-intelligence-trigger]")) {
+        const effort = norm(trigger.getAttribute("data-selected-reasoning-effort"));
+        if (!effort || effort === "ultra") { continue; }
+        const content = trigger.querySelector("[data-tooltip-overflow-target]") || trigger;
+        const wrapper = content.firstElementChild;
+        if (!wrapper || wrapper.children.length < 2) { continue; }
+        const word = wrapper.lastElementChild;
+        if (!word || word.classList.contains("text-chart-purple")) { continue; }
+        const label = modelLabel(wrapper, word);
+        if (label) { words.push({ element: word, colour: ACCENTS[label] }); }
+      }
+      return words;
+    }
+    function clearWords() {
+      for (const entry of state.words) {
+        try {
+          if (entry.element.getAttribute(MARK) === "1") { entry.element.style.removeProperty("color"); entry.element.removeAttribute(MARK); }
+        } catch (error) {}
+      }
+      state.words = [];
+    }
+    function applyPills() {
+      const words = pillWords();
+      const same = words.length === state.words.length && words.every((entry, index) => entry.element === state.words[index].element && entry.colour === state.words[index].colour);
+      if (same) { return; }
+      clearWords();
+      for (const entry of words) { entry.element.style.setProperty("color", entry.colour); entry.element.setAttribute(MARK, "1"); }
+      state.words = words;
+    }
+    function apply() {
+      try { applyMenu(); } catch (error) {}
+      try { applyPills(); } catch (error) {}
     }
     let scheduled = false;
     function schedule() {
       if (scheduled) { return; }
       scheduled = true;
-      requestAnimationFrame(() => { scheduled = false; try { apply(); } catch (error) {} });
+      requestAnimationFrame(() => { scheduled = false; apply(); });
     }
     // Observe the document node: at document start there is no root element yet.
     const observer = new MutationObserver(schedule);
-    observer.observe(document, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ["data-explicit-model", "data-accent", "data-maximum"] });
+    observer.observe(document, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ["data-explicit-model", "data-accent", "data-maximum", "data-selected-reasoning-effort"] });
     if (document.readyState === "loading") { document.addEventListener("DOMContentLoaded", schedule, { once: true }); }
     window.__providerHubAccent = {
-      version: 2,
+      version: 3,
       accents: Object.keys(ACCENTS).length,
-      check: () => ({ container: !!document.querySelector('[data-explicit-model="true"]'), label: state.label, colour: state.colour, targets: state.targets.length }),
+      check: () => ({ container: !!document.querySelector('[data-explicit-model="true"]'), label: state.label, colour: state.colour, targets: state.targets.length, pills: state.words.map((entry) => entry.colour) }),
     };
     schedule();
     return { installed: true, accents: Object.keys(ACCENTS).length, ready: document.readyState };

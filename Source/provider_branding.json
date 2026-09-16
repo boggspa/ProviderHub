@@ -31,7 +31,8 @@
     "inception": "#7C5BE9",
     "nexagi": "#747A42",
     "sakana": "#EA0C2D",
-    "gemini": "#346EEC"
+    "gemini": "#346EEC",
+    "antigravity": "#308713"
   },
   "accentAliases": {
     "mimo": "xiaomi",
@@ -172,7 +173,7 @@
     },
     "gemini": {
       "displayProvider": "Gemini",
-      "hueKey": "gemini",
+      "hueKey": "antigravity",
       "shortCode": "GEM",
       "logo": {
         "light": "provider-logos/provider-logo-gemini.png"

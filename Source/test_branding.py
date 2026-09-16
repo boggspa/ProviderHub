@@ -20,6 +20,9 @@ class BrandingTests(unittest.TestCase):
             "cerebras": ("Cerebras", "#BB584A"),
             "grok": ("Grok", "#757575"),
             "muse": ("Muse", "#1671EA"),
+            # Gemini wears Google's Antigravity green (TaskWraith's
+            # --provider-antigravity-color), not the retired Gemini blue.
+            "gemini": ("Gemini", "#308713"),
         }
         for provider, (label, accent) in expected.items():
             with self.subTest(provider=provider):
@@ -27,6 +30,8 @@ class BrandingTests(unittest.TestCase):
                 self.assertEqual(presentation["runtimeProvider"], provider)
                 self.assertEqual(presentation["displayProvider"], label)
                 self.assertEqual(presentation["accent"], accent)
+        self.assertEqual(resolve_presentation("gemini", catalogue=self.catalogue)["hueKey"], "antigravity")
+        self.assertEqual(self.catalogue["accents"]["gemini"], "#346EEC")  # the contract keeps the retired hue
 
     def test_model_brand_override_never_changes_runtime_identity(self):
         presentation = resolve_presentation(
