@@ -47,6 +47,12 @@ ACCENT_PROPERTY = "--provider-hub-accent"
 HUE_PROPERTY = "--provider-hub-hue"
 SHIMMER_CHROMA = "0.07"
 SHIMMER_HUE_FLOOR = 0.03
+# The icon that leads an activity row ("Reading …", "Thinking") takes the
+# accent flat. The row is an inline-flex box holding the icon and the
+# shimmer label as siblings, and it paints every non-button descendant with
+# its muted grey using !important, so the rule matches an icon by that
+# shimmer sibling and has to carry !important of its own.
+ACTIVITY_SHIMMER = ":is(.loading-shimmer-pure-text,.loading-shimmer)"
 # Ultra: the app paints its top level (the popover's title, the slider's
 # fill gradient, the pill's Ultra layer) with one purple token. On the
 # picker and the pill that token is given the model's Ultra hue instead,
@@ -189,6 +195,34 @@ def ultra_css() -> str:
             f"@media (prefers-reduced-motion:reduce){{{marked}{{animation:none;background-image:none;-webkit-text-fill-color:{hue}}}}}")
 
 
+def activity_icon_selectors() -> tuple[str, ...]:
+    """Icons that lead an activity row: an ``svg`` whose later sibling is a
+    shimmer label, or one sitting alone in a wrapper in that position.
+
+    Keying on the shimmer sibling rather than on the row's own utility
+    classes keeps the hook to the same class the shimmer tint already
+    depends on. A trailing icon (a chevron, a spinner) is left alone.
+    """
+    return (f"svg:has(~ {ACTIVITY_SHIMMER})",
+            f":is(span,div):has(> svg):has(~ {ACTIVITY_SHIMMER}) > svg")
+
+
+def activity_icon_selector() -> str:
+    """The same selectors as one list, for the watcher's own status count."""
+    return ",".join(activity_icon_selectors())
+
+
+def activity_icon_css() -> str:
+    """Paint those icons with the accent. The row's own rule is an
+    ``!important`` colour on every non-button descendant, so this one is
+    ``!important`` too and outranks it on specificity; the theme attribute
+    is only on the root while the watcher holds an accent, and the fallback
+    keeps the row's own grey if it is ever missing.
+    """
+    return "".join(f'[{THEME_ATTRIBUTE}] {selector}{{color:var({ACCENT_PROPERTY},currentColor)!important}}'
+                   for selector in activity_icon_selectors())
+
+
 def shimmer_css() -> str:
     """The stylesheet the watcher adopts: the activity shimmer ("Thinking",
     "Editing files") keeps the app's sweep, but its gray takes the model's hue.
@@ -248,6 +282,7 @@ _WATCHER = r"""
     const USAGE_SELECTOR = __HUB_USAGE_SELECTOR__;
     const HUES = __HUB_HUES__;
     const HUE_PROPERTY = "__HUB_HUE_PROPERTY__";
+    const ICON_SELECTOR = "__HUB_ICON_SELECTOR__";
     const state = { targets: [], label: "", colour: "", ultra: "", title: null, words: [], pills: [], marks: [], sheet: null, accent: "", theme: "", hue: "" };
     const norm = (text) => (text || "").replace(/\s+/g, " ").trim().toLowerCase();
     // Labels may carry a leading glyph (a bullet, a tier mark); match the words.
@@ -479,12 +514,13 @@ _WATCHER = r"""
     observer.observe(document, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ["data-explicit-model", "data-accent", "data-maximum", "data-selected-reasoning-effort"] });
     if (document.readyState === "loading") { document.addEventListener("DOMContentLoaded", schedule, { once: true }); }
     window.__providerHubAccent = {
-      version: 8,
+      version: 9,
       accents: Object.keys(ACCENTS).length,
       check: () => ({ container: !!document.querySelector('[data-explicit-model="true"]'), label: state.label, colour: state.colour, ultra: state.ultra, targets: state.targets.length,
                       pills: state.words.map((entry) => entry.colour), ultraPills: state.pills.map((entry) => entry.colour), marks: state.marks.length,
                       shimmer: state.accent ? state.accent + ":" + state.theme : "", hue: state.hue,
-                      banners: USAGE_SELECTOR ? document.querySelectorAll(USAGE_SELECTOR).length : null }),
+                      banners: USAGE_SELECTOR ? document.querySelectorAll(USAGE_SELECTOR).length : null,
+                      icons: document.querySelectorAll(ICON_SELECTOR).length }),
     };
     schedule();
     return { installed: true, accents: Object.keys(ACCENTS).length, usageBanner: !!USAGE_SELECTOR, ready: document.readyState };
@@ -501,13 +537,14 @@ def _label_key(label: str) -> str:
 
 def watcher_script(accents: dict, property_name: str = PROPERTY, hide_usage_banner: bool = False) -> str:
     table = {_label_key(label): colour for label, colour in accents.items()}
-    css = shimmer_css() + ultra_css() + (usage_banner_css() if hide_usage_banner else "")
+    css = shimmer_css() + activity_icon_css() + ultra_css() + (usage_banner_css() if hide_usage_banner else "")
     return (_WATCHER.replace("__HUB_ACCENTS__", json.dumps(table, ensure_ascii=False))
             .replace("__HUB_ULTRA__", json.dumps(ultra_map(table), ensure_ascii=False))
             .replace("__HUB_STYLE_CSS__", json.dumps(css))
             .replace("__HUB_USAGE_SELECTOR__", json.dumps(usage_banner_selector() if hide_usage_banner else ""))
             .replace("__HUB_HUES__", json.dumps(hue_map(table)))
             .replace("__HUB_HUE_PROPERTY__", HUE_PROPERTY)
+            .replace("__HUB_ICON_SELECTOR__", activity_icon_selector())
             .replace("__HUB_THEME_ATTRIBUTE__", THEME_ATTRIBUTE)
             .replace("__HUB_ACCENT_PROPERTY__", ACCENT_PROPERTY)
             .replace("__HUB_ULTRA_ACCENT_PROPERTY__", ULTRA_ACCENT_PROPERTY)

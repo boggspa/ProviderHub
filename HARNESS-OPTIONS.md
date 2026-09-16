@@ -364,7 +364,19 @@ chroma in the provider's hue, so the text reads as a slightly cooler gray
 and its legibility does not move, while the sweep stays the app's own.
 Being later in the cascade the rule beats the reset, while any component
 that sets its own foreground still wins, and with no hue the value is
-invalid and the app's fallback returns.
+invalid and the app's fallback returns. The icon that leads such a row
+("Reading …", "Thinking") takes the accent flat, so the row reads as a
+tinted grey label behind a coloured mark. That row is an inline-flex box
+holding the icon and the shimmer label as siblings, and it paints every
+non-button descendant with its muted grey through an `!important` utility
+(`[&_*:not(button)]:!text-text/60`, specificity 0-1-1), so the watcher's
+rule matches `svg:has(~ .loading-shimmer-pure-text)` (and the same icon
+one wrapper deep), scopes it to the root's theme attribute for a
+specificity of 0-2-1, and carries `!important` of its own. Keying on the
+shimmer sibling rather than on the row's utility classes reuses the class
+the shimmer tint already depends on, and the icons themselves draw with
+`currentColor`; a trailing icon keeps the row's grey, and with no accent
+the `var()` falls back to `currentColor`, which is that grey.
 The watcher observes the document node rather
 than its root element (a document-start script runs before the root exists,
 and the evaluate sent at attach time is queued until the window's first real

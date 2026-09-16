@@ -13,7 +13,7 @@ from unittest import mock
 
 from bridge_core import SLOTS
 import codex_accent
-from codex_accent import (ACCENT_PROPERTY, PROPERTY, THEME_ATTRIBUTE, ULTRA_ACCENT_PROPERTY, ULTRA_MARK, ULTRA_PROPERTY, AccentBridge, usage_banner_css, usage_banner_selector, HUE_PROPERTY, hue_map,
+from codex_accent import (ACCENT_PROPERTY, PROPERTY, THEME_ATTRIBUTE, ULTRA_ACCENT_PROPERTY, ULTRA_MARK, ULTRA_PROPERTY, AccentBridge, usage_banner_css, usage_banner_selector, HUE_PROPERTY, hue_map, activity_icon_css, activity_icon_selector,
                           DevToolsPipe, accent_map, already_running, bridge_command, child_environment, executable_path, launch, run,
                           shimmer_css, ultra_accents, ultra_css, ultra_map, watcher_script)
 from hub_config import defaults
@@ -91,6 +91,23 @@ class AccentMapTests(unittest.TestCase):
         self.assertIn("document.querySelectorAll(USAGE_SELECTOR).length", hiding)  # the status reports matches
         self.assertNotIn("__HUB_", hiding)
 
+    def test_activity_icon_takes_the_flat_accent_over_the_rows_important_grey(self):
+        selector = activity_icon_selector()
+        self.assertEqual(selector, "svg:has(~ :is(.loading-shimmer-pure-text,.loading-shimmer)),"
+                                   ":is(span,div):has(> svg):has(~ :is(.loading-shimmer-pure-text,.loading-shimmer)) > svg")
+        css = activity_icon_css()
+        # Two rules, each scoped to the theme attribute the watcher only sets with an accent.
+        self.assertEqual(css.count(f"[{THEME_ATTRIBUTE}] "), 2)
+        self.assertEqual(css.count(f"{{color:var({ACCENT_PROPERTY},currentColor)!important}}"), 2)
+        self.assertIn(f"[{THEME_ATTRIBUTE}] svg:has(~ :is(.loading-shimmer-pure-text,.loading-shimmer))"
+                      f"{{color:var({ACCENT_PROPERTY},currentColor)!important}}", css)
+        self.assertNotIn("~ svg", css)  # a trailing chevron or spinner keeps the row's grey
+        script = watcher_script({"Kimi for Coding": "#0073E6"})
+        self.assertIn(f'const ICON_SELECTOR = "{selector}";', script)
+        self.assertIn("document.querySelectorAll(ICON_SELECTOR).length", script)  # the status reports matches
+        self.assertIn("svg:has(~ :is(.loading-shimmer-pure-text,.loading-shimmer))", script)
+        self.assertNotIn("__HUB_", script)
+
     def test_shimmer_gray_takes_the_accent_hue_and_the_sweep_stays_the_apps(self):
         css = shimmer_css()
         self.assertEqual(css, f':where([{THEME_ATTRIBUTE}] :is(.loading-shimmer-pure-text,.loading-shimmer))'
@@ -148,7 +165,7 @@ class UltraTests(unittest.TestCase):
         self.assertEqual(ULTRA_PROPERTY, "--color-chart-purple")
         script = watcher_script({"Kimi for Coding": "#0073E6"})
         self.assertIn("provider-hub-ultra-sweep", script)
-        self.assertIn(json.dumps(shimmer_css() + ultra_css()), script)  # both stylesheets travel together
+        self.assertIn(json.dumps(shimmer_css() + activity_icon_css() + ultra_css()), script)  # the stylesheets travel together
 
 
 class EnvironmentTests(unittest.TestCase):
