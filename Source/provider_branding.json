@@ -31,6 +31,7 @@
     "inception": "#7C5BE9",
     "nexagi": "#747A42",
     "sakana": "#EA0C2D",
+    "stealth": "#A06B00",
     "gemini": "#346EEC",
     "antigravity": "#308713"
   },
@@ -170,6 +171,11 @@
       "displayProvider": "Sakana",
       "hueKey": "sakana",
       "shortCode": "SAK"
+    },
+    "stealth": {
+      "displayProvider": "Stealth",
+      "hueKey": "stealth",
+      "shortCode": "STL"
     },
     "gemini": {
       "displayProvider": "Gemini",
@@ -367,6 +373,16 @@
         "sakana/"
       ],
       "fallbackModelLabel": "Sakana model"
+    },
+    {
+      "runtimeProvider": "openrouter",
+      "id": "stealth",
+      "providerLabel": "Stealth",
+      "providerClass": "stealth",
+      "needles": [
+        "stealth/"
+      ],
+      "fallbackModelLabel": "Stealth model"
     }
   ]
 }

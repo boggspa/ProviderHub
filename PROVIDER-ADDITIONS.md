@@ -125,3 +125,77 @@ Sources:
 - https://ai.google.dev/gemini-api/docs/function-calling
 - https://ai.google.dev/gemini-api/docs/partner-integration
 - TaskWraith `src/main/GeminiApiProvider.ts` and `GeminiApiProvider.test.ts`.
+
+## Union Alpha — OpenRouter stealth preview
+
+`stealth/union-alpha` joins the curated OpenRouter roster as a fifteenth ID. It
+is a free, anonymously operated stealth preview: OpenRouter routes to a single
+provider it does not own, and the model page carries the Stealth Model Terms
+notice that prompts and completions may be retained by that provider though
+they are not used for training. OpenRouter published it on 16 September 2026,
+and it was announced as a seven-day window. Nothing in this repository pins
+that window. Membership is the intersection of the curated shortlist with the
+live Models API, so when the preview is withdrawn the route disappears and the
+catalogue warning names it as no longer listed, rather than leaving a dead
+choice selectable in the picker.
+
+The ID reaches the picker on the ordinary OpenRouter API-key route, with no
+separate connection, credential, or Pi hop: Provider Hub ingests OpenRouter as
+a provider directly. Context, output cap, effort ladder and tool-capable
+endpoints come from current endpoint metadata like every other curated entry,
+so none of the figures below are hard-coded. On 16 September 2026 the public
+metadata described one standard endpoint, `stealth`, with 262,144 context and
+131,072 max completion tokens, text and image input, and `tools`, `tool_choice`,
+`response_format`, `temperature`, `top_p` and `max_tokens`. That yields a
+single route, `openrouter/stealth/union-alpha`, labelled Union Alpha.
+
+Two consequences follow from that metadata rather than from a choice made here.
+The model advertises no `reasoning`, `reasoning_effort` or `include_reasoning`
+parameter, so it publishes an empty effort ladder and no reasoning control
+appears beside it in either picker; a client that asks for one is refused
+rather than silently ignored. And the endpoint advertises `auto` tool choice
+only, with `required`, `function` and `none` all false, so a forced or
+suppressed tool choice fails the endpoint check instead of being sent to a host
+that does not support it. Ordinary auto tool cycles are unaffected. If
+OpenRouter later advertises a reasoning parameter or a wider tool-choice set,
+a catalogue refresh picks it up with no code change.
+
+An anonymous provider has no brand to borrow, so it gets an arbitrary accent:
+`stealth`, `#A06B00`. The palette's rule is that an accent is a foreground
+colour on both the light and the dark surface, so every hue is normalized to
+one WCAG relative luminance — 0.176 to 0.182 across the existing accents —
+rather than to a brand's own lightness, giving 4.5:1 or better against white
+and a clear step off the hub's dark chrome. `#A06B00` is the most saturated
+gold sRGB holds at that luminance: OKLCH lightness 0.570, hue 74.9, chroma
+0.120, which is the gamut edge at that lightness, matching the way NVIDIA
+green, Xiaomi green and Kimi blue sit at their own edges. It measures 4.57:1 on
+white and 3.85:1 on the hub's `#18191A`, inside the palette's existing
+4.54-4.64 and 3.80-3.88 bands. Its hue is 23 degrees off Ollama's brown and 37
+off Mistral's orange, and Grok's grey carries no hue to collide with. Its Ultra
+cut is `#B37800` on dark and `#8D5E00` on light.
+`test_accent_palette_holds_one_readable_luminance_band` now asserts that band
+for every accent, so the next arbitrary hue cannot drift out of it. TaskWraith
+is taking the same `#A06B00` for the same model on its own Pi-routed path.
+
+The accent is display only. The brand rule keys on the `stealth/` prefix and
+changes the label, hue and initials to Stealth; `runtimeProvider` stays
+`openrouter`, and the connection, the key and the bill stay OpenRouter's. There
+is no sourced mark for an anonymous provider and no borrowed one, so the chip
+falls back to its mnemonic glyph.
+
+Four tests cover the addition: the curated ID keeping its real upstream model
+ID through projection and finalization while carrying the Stealth presentation,
+a withdrawal leaving no route behind, the palette-band rule across every
+accent, and the resolved Stealth presentation. The metadata quoted above was
+read from the public, unauthenticated Models and endpoints APIs and pushed
+through the real discovery, catalogue and Codex projection path. No OpenRouter
+key and no paid or free inference was used; catalogue listing is not an
+inference test, and account access to a stealth route still follows key entry.
+
+Sources:
+
+- https://openrouter.ai/stealth/union-alpha
+- https://openrouter.ai/api/v1/models
+- https://openrouter.ai/api/v1/models/stealth/union-alpha/endpoints
+- TaskWraith chat "OpenRouter Stealth model in Pi Catalogue", which registers
+  the same model on Pi and takes the same `#A06B00` override.

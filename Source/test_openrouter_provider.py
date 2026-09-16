@@ -153,6 +153,37 @@ class OpenRouterProviderTests(unittest.TestCase):
                 finalize(second, row, "key", responses=True)
                 self.assertEqual(body["session_id"], second["session_id"])
 
+    def test_stealth_union_alpha_is_curated_by_id_and_carries_the_stealth_gold(self):
+        identifier = "stealth/union-alpha"
+        self.assertEqual(CURATED[identifier], "Union Alpha")
+        model = card(identifier)
+        rows = _entries(model, {"data": {"id": identifier, "endpoints": [
+            {**endpoint("stealth", 262144, 131072), "model_id": identifier}]}})
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["upstream_model_id"], identifier)
+        self.assertEqual((rows[0]["context"], rows[0]["max_output"]), (262144, 131072))
+        settings = defaults(SLOTS, "unused")
+        projected = project_catalogue("openrouter", {"models": rows, "source": "provider_api"}, settings)[0]
+        self.assertEqual(projected["id"], "openrouter/" + identifier)
+        self.assertEqual(projected["display_name"], "Union Alpha")
+        # An anonymous upstream brand is presentation only: the connection,
+        # the key and the bill stay OpenRouter's.
+        self.assertEqual(projected["presentation"]["runtimeProvider"], "openrouter")
+        self.assertEqual(projected["presentation"]["displayProvider"], "Stealth")
+        self.assertEqual(projected["presentation"]["accent"], "#A06B00")
+        body = {"input": "hello", "tools": [{"name": "read"}]}
+        finalize(body, rows[0], "key", responses=True)
+        self.assertEqual(body["model"], identifier)
+        self.assertEqual(body["provider"]["only"], ["stealth"])
+
+    def test_a_withdrawn_stealth_preview_leaves_no_route_behind(self):
+        """The seven-day window is OpenRouter's to close, not ours to encode:
+        membership comes from the live list, so a withdrawal removes the
+        choice and says so instead of leaving a dead route selectable."""
+        inventory = catalogue(cards=[card()])
+        self.assertNotIn("stealth/union-alpha", {row["upstream_model_id"] for row in inventory["models"]})
+        self.assertTrue(any("stealth/union-alpha" in warning for warning in inventory["warnings"]))
+
     def test_thinking_display_survives_and_speed_variants_are_ignored(self):
         row = catalogue(endpoints=[endpoint("host", 262144), endpoint("host/fast-us", 1048576)])["models"][0]
         self.assertEqual(row["routing_ignore"], ["host/fast-us"])
