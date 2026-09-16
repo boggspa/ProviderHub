@@ -17,7 +17,7 @@ from gateway import Runtime, Server, rejection_details
 from protocol import (StreamTranslator, TokenCalibration, apply_mapping_options, compact_conversation, compact_threshold, conversation_units,
                       estimated_tokens, function_name, reported_input_tokens,
                       mapping_options_for, model_catalog, rewrite_context_reminders, tool_id,
-                      translate_request, translate_response)
+                      translate_request, translate_response, resolve_model, resolve_mapping_slot)
 from catalogue import build_catalogue, read_observations, route_specs
 
 
@@ -122,6 +122,16 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(mapping_options_for("fable", settings)["compact_limit"], 100000)
         self.assertEqual(mapping_options_for("claude-fable-5[1m]", settings)["compact_limit"], 100000)
         self.assertIsNone(mapping_options_for("claude-haiku-4-5", settings)["compact_limit"])
+
+    def test_resolve_model_accepts_dated_gateway_family_ids(self):
+        mappings = {"claude-fable-5": "mistral/a", "claude-haiku-4-5": "mistral/d", "claude-sonnet-5": "mistral/x-20250101"}
+        self.assertEqual(resolve_model("claude-haiku-4-5-20251001", mappings), "mistral/d")
+        self.assertEqual(resolve_model("claude-haiku-4-5-20251001[1m]", mappings), "mistral/d")
+        self.assertEqual(resolve_mapping_slot("claude-haiku-4-5-20251001", mappings), "claude-haiku-4-5")
+        # An upstream id that itself ends in a date still resolves exactly.
+        self.assertEqual(resolve_model("mistral/x-20250101", mappings), "mistral/x-20250101")
+        with self.assertRaises(BridgeError):
+            resolve_model("claude-haiku-4-5-2025", mappings)
 
     def test_compact_conversation_drops_oldest_and_keeps_chronological_order(self):
         body = sized_conversation(5, 1500)
@@ -611,6 +621,9 @@ class ProfileTests(unittest.TestCase):
         self.assertEqual(read_json(self.profile.normal)["mcpServers"], {"keep": {}})
         self.assertEqual(read_json(self.profile.profile)["inferenceCredentialKind"], "static")
         self.assertIs(read_json(self.profile.profile)["modelPrefer1mContext"], True)
+        # Profile features default off and are written explicitly.
+        for field in ("dictationEnabled", "builtinBrowserEnabled", "claudeInChromeEnabled", "scheduledTasksEnabled", "coworkTabEnabled"):
+            self.assertIs(read_json(self.profile.profile)[field], False)
         result = self.profile.restore(require_closed=False)
         self.assertTrue(result["restored"])
         self.assertEqual(read_json(self.profile.meta), self.previous)
@@ -619,6 +632,17 @@ class ProfileTests(unittest.TestCase):
         self.assertEqual(self.session.read_bytes(), before)
         self.assertFalse(self.profile.profile.exists())
         self.assertFalse(self.profile.journal.exists())
+
+    def test_enabled_claude_features_reach_the_profile(self):
+        settings = config()
+        settings["claude_features"] = {**settings["claude_features"], "dictation": True, "cowork_tab": True}
+        self.profile.activate(settings, "local-token", require_closed=False)
+        written = read_json(self.profile.profile)
+        self.assertIs(written["dictationEnabled"], True)
+        self.assertIs(written["coworkTabEnabled"], True)
+        self.assertIs(written["builtinBrowserEnabled"], False)
+        self.profile.restore(require_closed=False)
+        self.assertFalse(self.profile.profile.exists())
 
     def test_restore_preserves_unrelated_concurrent_edits(self):
         self.profile.activate(config(), "local-token", require_closed=False)

@@ -108,6 +108,17 @@ class SettingsMigrationTests(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 normalize({"codex_apply_patch_exclude": value}, SLOTS, "mistral-test")
 
+    def test_claude_features_default_off_and_validate(self):
+        expected = {"dictation": False, "builtin_browser": False, "claude_in_chrome": False,
+                    "scheduled_tasks": False, "cowork_tab": False}
+        self.assertEqual(defaults(SLOTS, "mistral-test")["claude_features"], expected)
+        self.assertEqual(normalize({}, SLOTS, "mistral-test")["claude_features"], expected)
+        enabled = normalize({"claude_features": {"dictation": True, "cowork_tab": True}}, SLOTS, "mistral-test")
+        self.assertEqual(enabled["claude_features"], {**expected, "dictation": True, "cowork_tab": True})
+        for value in ({"dictation": 1}, {"unknown": True}, ["dictation"], "dictation"):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                normalize({"claude_features": value}, SLOTS, "mistral-test")
+
     def test_auto_flags_require_json_booleans(self):
         for key in ("auto_mode", "auto_stop"):
             for value in ("false", "true", 0, 1, None, [], {}):

@@ -150,6 +150,11 @@ def _normalize_mapping_options(value, slots) -> dict:
     return result
 
 
+# Opt-in Claude Desktop third-party profile features (see
+# bridge_core.ClaudeProfile.prepare for the profile field each one sets).
+CLAUDE_FEATURE_KEYS = ("dictation", "builtin_browser", "claude_in_chrome", "scheduled_tasks", "cowork_tab")
+
+
 def defaults(slots, vibe_model: str, port: int = 11436) -> dict:
     connections = provider_defaults()
     for provider_id, connection in connections.items():
@@ -163,7 +168,8 @@ def defaults(slots, vibe_model: str, port: int = 11436) -> dict:
             "mapping_options": {},
             "providers": connections, "branding_overrides": {},
             "auto_stop": True, "auto_mode": False, "codex_model": None,
-            "codex_catalogue": None, "codex_chatgpt_account": False, "codex_apply_patch_all": False}
+            "codex_catalogue": None, "codex_chatgpt_account": False, "codex_apply_patch_all": False,
+            "claude_features": {key: False for key in CLAUDE_FEATURE_KEYS}}
 
 
 def normalize(value: dict, slots, vibe_model: str, port: int = 11436) -> dict:
@@ -246,6 +252,14 @@ def normalize(value: dict, slots, vibe_model: str, port: int = 11436) -> dict:
             if qualified not in qualified_routes:
                 qualified_routes.append(qualified)
         result[key] = qualified_routes
+    requested_features = value.get("claude_features", {})
+    if not isinstance(requested_features, dict) or set(requested_features) - set(CLAUDE_FEATURE_KEYS):
+        raise ValueError("Claude feature toggles must be an object with known keys.")
+    for key in CLAUDE_FEATURE_KEYS:
+        flag = requested_features.get(key, False)
+        if type(flag) is not bool:
+            raise ValueError(f"Claude feature {key} must be true or false.")
+        result["claude_features"][key] = flag
     # codex_chatgpt_account: present the user's ChatGPT sign-in to the Codex
     # desktop while the hub provider is active (see CodexProfile.provider).
     # codex_apply_patch_all: the Codex tab's apply_patch switch.

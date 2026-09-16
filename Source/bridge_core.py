@@ -359,6 +359,7 @@ class ClaudeProfile:
         return read_json(self.meta).get("appliedId") == PROFILE_ID
 
     def prepare(self, settings: dict, token: str) -> dict:
+        features = settings.get("claude_features") or {}
         return {
             "inferenceProvider": "gateway", "inferenceCredentialKind": "static",
             "inferenceGatewayBaseUrl": f"http://127.0.0.1:{settings['port']}",
@@ -374,6 +375,14 @@ class ClaudeProfile:
             # Chat Completions has no hosted WebSearch tool; local WebFetch and
             # all normal coding tools retain the desktop's permission handling.
             "disabledBuiltinTools": ["WebSearch"],
+            # Opt-in profile features (all default off in Claude's schema).
+            # Each is a local capability whose inference still runs through
+            # this gateway; field names follow the third-party profile schema.
+            "dictationEnabled": features.get("dictation") is True,
+            "builtinBrowserEnabled": features.get("builtin_browser") is True,
+            "claudeInChromeEnabled": features.get("claude_in_chrome") is True,
+            "scheduledTasksEnabled": features.get("scheduled_tasks") is True,
+            "coworkTabEnabled": features.get("cowork_tab") is True,
         }
 
     def activate(self, settings: dict, token: str, *, require_closed: bool = True) -> dict:

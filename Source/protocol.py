@@ -80,32 +80,46 @@ SLOT_ALIASES = {
     "haiku": "claude-haiku-4-5",
 }
 
-def resolve_model(requested: str, mappings: dict) -> str:
+# Claude Code sends some family ids to a gateway with a release date appended
+# (claude-haiku-4-5-20251001 for the claude-haiku-4-5 row). The exact id is
+# always tried first, so an upstream id that happens to end in a date still
+# resolves as itself.
+_DATED_SUFFIX = re.compile(r"-20\d{6}$")
+
+
+def _model_id_candidates(requested: str):
     if requested.endswith("[1m]"):
         requested = requested[:-4]
-    if requested in mappings:
-        return mappings[requested]
-    if requested in SLOT_ALIASES:
-        return mappings[SLOT_ALIASES[requested]]
-    # Only explicitly configured upstream IDs are callable through this gateway.
-    if requested in mappings.values():
-        return requested
+    yield requested
+    undated = _DATED_SUFFIX.sub("", requested)
+    if undated != requested:
+        yield undated
+
+
+def resolve_model(requested: str, mappings: dict) -> str:
+    for candidate in _model_id_candidates(requested):
+        if candidate in mappings:
+            return mappings[candidate]
+        if candidate in SLOT_ALIASES:
+            return mappings[SLOT_ALIASES[candidate]]
+        # Only explicitly configured upstream IDs are callable through this gateway.
+        if candidate in mappings.values():
+            return candidate
     raise BridgeError(f"Model {requested!r} is not mapped. Choose it in Provider Hub first.")
 
 
 def resolve_mapping_slot(requested, mappings: dict) -> str | None:
     if not isinstance(requested, str) or not isinstance(mappings, dict):
         return None
-    if requested.endswith("[1m]"):
-        requested = requested[:-4]
-    if requested in mappings:
-        return requested
-    if requested in SLOT_ALIASES:
-        slot = SLOT_ALIASES[requested]
-        return slot if slot in mappings else None
-    matches = [slot for slot, route in mappings.items() if route == requested]
-    if len(matches) == 1:
-        return matches[0]
+    for candidate in _model_id_candidates(requested):
+        if candidate in mappings:
+            return candidate
+        if candidate in SLOT_ALIASES:
+            slot = SLOT_ALIASES[candidate]
+            return slot if slot in mappings else None
+        matches = [slot for slot, route in mappings.items() if route == candidate]
+        if len(matches) == 1:
+            return matches[0]
     return None
 
 

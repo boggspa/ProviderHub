@@ -43,6 +43,14 @@ choices. Routes below 1M are advertised bare at their catalogued window.
 Provider Hub retains the provider's model identity and context metadata; it
 does not expose an editable context-size guess.
 
+**Claude features in this profile** (all off by default) switch on Claude
+Desktop capabilities that a third-party profile hides unless the profile asks
+for them: dictation, the built-in browser, Claude in Chrome, scheduled tasks,
+and the Cowork tab. Each runs locally inside Claude and still sends its model
+calls through the gateway. Save, then launch Claude again for them to apply.
+Whether dictation and scheduled tasks appear depends on the installed Claude
+build honouring the field.
+
 Quitting Claude restores the previous Claude profile. Keep Provider Hub running
 while using this session. Your existing Claude and Ollama conversations remain
 in their respective profiles.

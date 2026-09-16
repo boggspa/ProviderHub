@@ -67,6 +67,16 @@ struct MappingOptions: Codable, Equatable {
     var omit_tools = false
     var compact_limit: Int?
 }
+/// Opt-in Claude Desktop third-party profile features; each maps to a profile
+/// field written at launch (see bridge_core.ClaudeProfile.prepare).
+struct ClaudeFeatures: Codable, Equatable {
+    var dictation = false
+    var builtin_browser = false
+    var claude_in_chrome = false
+    var scheduled_tasks = false
+    var cowork_tab = false
+}
+
 struct RouteSettings: Codable, Equatable {
     var schema_version = 3
     var port = hubDefaultPort
@@ -76,6 +86,7 @@ struct RouteSettings: Codable, Equatable {
     var branding_overrides: [String: BrandOverride] = [:]
     var auto_stop = true
     var auto_mode = false
+    var claude_features = ClaudeFeatures()
     var codex_model: String?
     var codex_catalogue: [String]?
     var codex_chatgpt_account = false

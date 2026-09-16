@@ -184,6 +184,7 @@ final class BridgeModel: ObservableObject {
         var prefsOnly = mine
         prefsOnly.auto_stop = savedSettings.auto_stop
         prefsOnly.auto_mode = savedSettings.auto_mode
+        prefsOnly.claude_features = savedSettings.claude_features
         if prefsOnly == savedSettings { return .prefs }
         let codexChanged = settings.codex_model != savedSettings.codex_model
             || settings.codex_catalogue != savedSettings.codex_catalogue
@@ -1118,6 +1119,16 @@ struct BridgeWindow: View {
                 Toggle(isOn: $model.settings.auto_stop) { VStack(alignment: .leading, spacing: 5) { Text("Stop gateway after the desktop sessions close").font(.system(size: 13, weight: .medium)); Text("The menu bar app stays available for your next session.").font(.caption).foregroundStyle(.secondary) } }.toggleStyle(.switch)
                 Divider()
                 Toggle(isOn: $model.settings.auto_mode) { VStack(alignment: .leading, spacing: 5) { Text("Enable Claude Auto mode").font(.system(size: 13, weight: .medium)); Text("Use Claude’s approval classifier through the configured gateway. Claude chooses its reviewer model internally.").font(.caption).foregroundStyle(.secondary) } }.toggleStyle(.switch)
+                Divider()
+                Text("Claude features in this profile").font(.system(size: 13, weight: .medium))
+                Text("Claude keeps these off in a third-party profile unless the profile asks for them. Each runs locally in Claude; its model calls still go through this gateway. They apply at the next launch.").font(.caption).foregroundStyle(.secondary).lineSpacing(3)
+                Toggle(isOn: $model.settings.claude_features.dictation) { Text("Dictation").font(.system(size: 12)) }.toggleStyle(.switch).controlSize(.small)
+                Toggle(isOn: $model.settings.claude_features.builtin_browser) { Text("Built-in browser").font(.system(size: 12)) }.toggleStyle(.switch).controlSize(.small)
+                Toggle(isOn: $model.settings.claude_features.claude_in_chrome) { Text("Claude in Chrome").font(.system(size: 12)) }.toggleStyle(.switch).controlSize(.small)
+                Toggle(isOn: $model.settings.claude_features.scheduled_tasks) { Text("Scheduled tasks").font(.system(size: 12)) }.toggleStyle(.switch).controlSize(.small)
+                Toggle(isOn: $model.settings.claude_features.cowork_tab) { Text("Cowork tab").font(.system(size: 12)) }.toggleStyle(.switch).controlSize(.small)
+                Text("Dictation and scheduled tasks depend on the installed Claude build honouring the profile field; if one stays hidden after relaunch, that build does not offer it in third-party mode yet.").font(.caption).foregroundStyle(.secondary).lineSpacing(3)
+                Divider()
                 Text("Claude adds a standard and a 1M choice for models that support long context. New selections prefer 1M; existing session choices are preserved.").font(.caption).foregroundStyle(.secondary).lineSpacing(3)
                 Text("This uses Claude’s native third-party profile system, like Ollama. It switches the installed app’s profile; it does not create a simultaneous second Claude app. Existing Ollama and Claude conversations are retained.").font(.caption).foregroundStyle(.secondary).lineSpacing(3)
             }
