@@ -24,12 +24,6 @@ struct ProviderPage: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
-            HStack(spacing: 8) {
-                if model.catalogueRefreshing { ProgressView().controlSize(.small) }
-                Text(model.catalogueNotice.isEmpty ? "Models update automatically when the app opens." : model.catalogueNotice).font(.caption).foregroundStyle(.secondary)
-                Spacer()
-                Button("Refresh all") { model.beginCatalogueRefresh(userInitiated: true) }.disabled(model.busy || model.catalogueRefreshing)
-            }
             LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: 3), spacing: 10) {
                 ForEach(model.providerDefinitions) { provider in
                     Button {
@@ -59,7 +53,7 @@ struct ProviderPage: View {
                             Text(accountDescription(provider.id)).font(.caption).foregroundStyle(.secondary)
                         }
                         Spacer()
-                        Button("Account setup") { if let url = URL(string: provider.setup_url) { NSWorkspace.shared.open(url) } }
+                        Button(provider.id == "ollama" ? "Daemon docs" : "Account setup") { if let url = URL(string: provider.setup_url) { NSWorkspace.shared.open(url) } }
                     }
                     if provider.regions.count > 1 {
                         Picker("Account region", selection: Binding(get: { connection.region }, set: { region in
@@ -71,11 +65,10 @@ struct ProviderPage: View {
                     }
                     if provider.id == "ollama" {
                         TextField("Daemon address", text: connectionField(\.base_url)).textFieldStyle(.roundedBorder)
-                        Text("Uses the models already available in your Ollama daemon. Local and cloud-tagged models keep their actual Ollama IDs.").font(.caption).foregroundStyle(.secondary)
+                        Text("Serves the models already installed in your Ollama daemon.").font(.caption).foregroundStyle(.secondary)
                         Picker("Unload a finished model after", selection: model.ollamaIdleUnload) {
                             ForEach(idleUnloadChoices, id: \.self) { Text(idleUnloadLabel($0)).tag($0) }
-                        }.help("Ollama holds a model for five minutes after a turn and the compatibility endpoints cannot say otherwise, so the hub sets this lease on the daemon itself after each turn on this connection.")
-                        Text("Weights stay loaded this long after a turn, so a steer or a quick follow-up reuses them, and an abandoned conversation stops holding memory until the daemon restarts. Only models this hub ran are leased; the daemon still does the unloading, so the lease outlives the hub.").font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                        }.help("Ollama keeps a model loaded for five minutes after a turn; the hub sets this lease on the daemon after each turn it runs.")
                     } else {
                         Picker("Credential source", selection: connectionField(\.credential_mode)) {
                             if provider.id == "mistral" { Text("Vibe saved API key").tag("vibe") }
@@ -87,7 +80,7 @@ struct ProviderPage: View {
                                 SecureField(provider.id == "muse" ? "Meta Model API key" : (provider.id == "devin" ? "Devin API key (cog_ / pat_ / apk_)" : "Provider API key"), text: $model.secretDraft).textFieldStyle(.roundedBorder)
                                 Button("Save key") { Task { await model.saveKey() } }.disabled(model.busy || model.secretDraft.isEmpty)
                             }
-                            Text("Stored in Provider Hub’s macOS Keychain entry. Keys stay out of settings and logs.").font(.caption).foregroundStyle(.secondary)
+                            Text("Stored in the app’s macOS Keychain entry — never in settings or logs.").font(.caption).foregroundStyle(.secondary)
                         } else if connection.credential_mode == "vibe" {
                             HStack {
                                 Text(model.vibeAlias.isEmpty ? "Start Vibe and sign in, then reconnect." : "Vibe model: " + model.vibeAlias).font(.caption).foregroundStyle(.secondary)
@@ -95,52 +88,29 @@ struct ProviderPage: View {
                                 Button("Open Vibe") { model.openVibe() }
                             }
                         } else {
-                            Text("Reads " + (provider.credential_env ?? "the provider key") + " from the app’s launch environment. Finder launches may not inherit shell variables.").font(.caption).foregroundStyle(.secondary)
+                            Text("Reads " + (provider.credential_env ?? "the provider key") + " from the app’s launch environment; a Finder launch may not inherit shell variables.").font(.caption).foregroundStyle(.secondary)
                         }
                     }
-                    if provider.id == "mistral" {
-                        Text("Billing follows the Mistral workspace and usage policy attached to this key. Provider Hub does not select or verify a subscription tier.")
-                            .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                    }
-                    if provider.id == "muse" {
-                        Text("Use a key created for the Meta Model API. Usage follows Meta’s API billing; this connection does not use your Muse Code subscription login.")
-                            .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                    }
-                    if provider.id == "grok" {
-                        Text("Use an xAI API key for pay-as-you-go access. Claude’s Fast toggle requests xAI Priority processing at a premium token price. Your Grok Build subscription login is separate.")
-                            .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                    }
-                    if provider.id == "qwen-token-plan" {
-                        Text("Use your Token Plan subscription key for Singapore. This connection keeps Token Plan separate from Coding Plan and pay-as-you-go access.")
-                            .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                    }
-                    if provider.id == "openrouter" {
-                        Text("A curated selection based on TaskWraith’s Pi catalogue. Models and controls refresh from OpenRouter; distinct context choices use matching provider endpoints. Usage follows your OpenRouter account.")
-                            .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                    }
                     if provider.id == "gemini" {
-                        Text("Use a Gemini API key from Google AI Studio. Model access and usage follow its billing project. This connection uses the public API, independently of Gemini CLI or Google app subscriptions.")
-                            .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                        Text("Gemini replies currently appear after generation finishes, so the information needed to continue the conversation can be retained. The connection stays active while it waits.")
-                            .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                    }
-                    if provider.id == "devin" {
-                        Text("Devin is a session-based AI agent, not a chat model. Use a Devin API key (cog_, pat_, or apk_ prefix). Sessions run in modes: normal, fast, lite, ultra, fusion.")
+                        Text("Gemini replies arrive after generation finishes; the connection stays active while it waits.")
                             .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                     }
                     HStack {
-                        Text(state?.credential_source ?? "Checking setup…").font(.system(size: 11)).foregroundStyle(.secondary)
+                        if state?.credential_found == true { Text(state?.credential_source ?? "").font(.system(size: 11)).foregroundStyle(.secondary) }
                         Spacer()
                         Button("Reconnect") { Task { await model.reconnect() } }.disabled(model.busy)
                     }
-                    Text(connection.base_url).font(.system(size: 10, design: .monospaced)).foregroundStyle(.tertiary).textSelection(.enabled)
                 }.tint(provider.presentation.color)
                 Panel {
                     HStack {
                         Text("Model catalogue").font(.headline)
                         Spacer()
+                        if model.catalogueRefreshing { ProgressView().controlSize(.small) }
                         Text("\(allModels.count) models").font(.caption).foregroundStyle(.secondary)
-                        Button("Refresh catalogue") { Task { await model.discover() } }.disabled(model.busy)
+                        Button("Refresh catalogue") { Task { await model.discover() } }.disabled(model.busy || model.catalogueRefreshing)
+                    }
+                    if !model.catalogueNotice.isEmpty {
+                        Text(model.catalogueNotice).font(.caption).foregroundStyle(.secondary)
                     }
                     if let issue = model.providerRefreshIssues[provider.id] {
                         Text(issue).font(.caption).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
@@ -153,7 +123,7 @@ struct ProviderPage: View {
                         }
                     }
                     if inventory.isEmpty {
-                        Text("Models load automatically for configured accounts. Refresh to retry discovery; this fetches metadata without sending a chat request.").font(.caption).foregroundStyle(.secondary).lineSpacing(3)
+                        Text("Models appear once the account is configured. Refresh retries discovery.").font(.caption).foregroundStyle(.secondary).lineSpacing(3)
                     } else {
                         ForEach(inventory) { entry in
                             VStack(alignment: .leading, spacing: 5) {
@@ -176,7 +146,7 @@ struct ProviderPage: View {
                 }
                 DisclosureGroup("Appearance", isExpanded: $expandedBranding) {
                     VStack(alignment: .leading, spacing: 12) {
-                        Text("Personalize provider names and accents. The account and model route stay visible in technical IDs.").font(.caption).foregroundStyle(.secondary)
+                        Text("Rename providers and models, and set accent colors.").font(.caption).foregroundStyle(.secondary)
                         HStack {
                             TextField("Provider name", text: brandingField(\.displayProvider, fallback: provider.presentation.displayProvider))
                             TextField("#RRGGBB", text: brandingField(\.accent, fallback: provider.presentation.accent)).frame(width: 95)
@@ -213,7 +183,7 @@ struct ProviderPage: View {
                     Button("Save settings") { Task { await model.saveFromUI() } }.disabled(model.busy || !model.changed)
                 }
             }
-            Text("Grok Build and Muse Code subscriptions expose their own agent sessions. Their native-agent integration is documented separately; it needs a different connection from these model APIs.").font(.caption).foregroundStyle(.secondary).lineSpacing(3)
+            Text("Grok Build and Muse Code subscriptions use their own agent sessions, not these model API connections.").font(.caption).foregroundStyle(.secondary).lineSpacing(3)
         }
     }
     /// Presets, plus whatever a hand-edited settings file already holds, so
@@ -256,7 +226,7 @@ struct ProviderPage: View {
     func sourceLabel(_ summary: ProviderSummary) -> String {
         if summary.needs_refresh == true { return "Refresh needed for this connection." }
         let source = summary.source ?? "provider metadata"
-        return source.replacingOccurrences(of: "-", with: " ").replacingOccurrences(of: "_", with: " ").capitalized + " · discovery does not prove inference access"
+        return source.replacingOccurrences(of: "-", with: " ").replacingOccurrences(of: "_", with: " ").capitalized
     }
     func capabilities(_ model: ModelEntry) -> String {
         var values: [String] = []
@@ -265,8 +235,7 @@ struct ProviderPage: View {
         if model.reasoning == true { values.append("Reasoning") }
         if let modes = model.effort_modes, !modes.isEmpty { values.append("Effort: " + modes.joined(separator: ", ")) }
         if model.fast_mode == true { values.append("Fast supported") }
-        if model.provider_id == "ollama", model.runtime_context == nil { values.append("Runtime context allocation unknown") }
-        values.append(model.inference_status == "responded" ? "Previously responded" : "Not inference-tested")
+        if model.inference_status == "responded" { values.append("Previously responded") }
         return values.joined(separator: " · ")
     }
 }
