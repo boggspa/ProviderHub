@@ -59,12 +59,13 @@ _FIXED_REASONING_PLACEHOLDER = "high"
 # advertised and cannot serve. It is standing on a value persisted from some
 # other model, which is also what the composer chip shows.
 #
-# "none" is this route's real position, not a stand-in: no extra reasoning is
-# the truth for a model that does not reason. It also keeps the row outside
-# _HIGH_END_RANKS, so no Ultra is synthesized for a row whose
-# multi_agent_version is null and whose Ultra would promise a delegation
-# runtime it does not have.
-_NO_REASONING_PLACEHOLDER = "none"
+# The rank published is the one Codex was already asking these rows for, so
+# the composer reads the same as it does today and the row simply becomes
+# entitled to it. "none" would be the literal truth - the model does no extra
+# reasoning - but it spends a slider position and a line of chrome saying so,
+# and the distinction buys the user nothing on a route that drops the rank
+# either way. Marginally generous beats verbose here.
+_NO_REASONING_PLACEHOLDER = "medium"
 
 # Only providers that reach the shared chat path, where model_effort() drops a
 # rank a non-reasoning model cannot use (verified: it returns None for every
@@ -351,9 +352,17 @@ def project_codex(settings, inventory):
             # ultra/v2 let the desktop slider opt into autonomous sub-agent
             # orchestration; the gateway still maps ultra onto the provider's
             # highest advertised reasoning rank at request time.
-            "multi_agent_version": "v2" if (entry.get("reasoning") is True and efforts) else None,
-            "multi_agent_reasoning_effort": (
-                _subagent_effort(levels) if (entry.get("reasoning") is True and efforts) else None),
+            # A published ladder is the whole requirement. This used to ask for
+            # a reasoning flag as well, which quietly withheld the runtime from
+            # every plain instruct route - and withheld it for no reason, since
+            # the collaboration tools and the multi-agent briefing arrive from
+            # the desktop's own features.multi_agent_v2 either way (measured:
+            # a row with a null multi_agent_version still gets both). All the
+            # flag decided was whether the route could advertise the Ultra
+            # position that selects them, so a route that could already
+            # delegate had no way to say so.
+            "multi_agent_version": "v2" if efforts else None,
+            "multi_agent_reasoning_effort": _subagent_effort(levels) if efforts else None,
         }
         # Absence is the only way to say "no search" here. The field takes
         # "text" or "text_and_image" and nothing else - not null, not "none",

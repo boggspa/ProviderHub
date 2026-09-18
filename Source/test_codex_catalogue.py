@@ -271,16 +271,18 @@ class EffortAndFastProjectionTests(unittest.TestCase):
                               [entry["effort"] for entry in rows[slug]["supported_reasoning_levels"]])
         self.assertEqual(len(rows), 5)
 
-    def test_non_reasoning_model_publishes_no_ultra_or_multi_agent(self):
+    def test_non_reasoning_model_still_reaches_ultra_and_delegation(self):
         rows = self.projected(model(
             "mistral/plain-model", reasoning=False, effort_modes=[],
         ))
         row = rows["mistral/plain-model"]
-        # The row publishes the one rank it runs at (see the placeholder test
-        # below) and nothing above it: no Ultra, and so no delegation runtime.
-        self.assertNotIn("ultra", [entry["effort"] for entry in row["supported_reasoning_levels"]])
-        self.assertIsNone(row["multi_agent_version"])
-        self.assertIsNone(row["multi_agent_reasoning_effort"])
+        # It reaches Ultra and the delegation runtime like any other route: the
+        # collaboration tools arrive from the desktop's own feature switch
+        # regardless, so withholding the Ultra position only stopped the route
+        # selecting what it could already do.
+        self.assertIn("ultra", [entry["effort"] for entry in row["supported_reasoning_levels"]])
+        self.assertEqual(row["multi_agent_version"], "v2")
+        self.assertEqual(row["multi_agent_reasoning_effort"], "medium")
 
     def test_kimi_highspeed_placeholder_rank_yields_a_two_step_ladder(self):
         # HighSpeed documents thinking always on and no effort ladder. Its one
@@ -348,19 +350,27 @@ class EffortAndFastProjectionTests(unittest.TestCase):
         self.assertNotEqual(catalogue_digest(base, inventory(*models)),
                             catalogue_digest(ranked, inventory(*models)))
 
-    def test_non_reasoning_route_publishes_the_rank_it_actually_runs_at(self):
+    def test_non_reasoning_route_publishes_a_rank_it_is_entitled_to(self):
         # An empty ladder leaves Codex standing on a rank persisted from some
         # other model: a projected Mistral Large row makes it ask for "medium",
-        # which that row never advertised. Publishing "none" - the truth for a
-        # model that does not reason - gives it somewhere real to stand.
+        # which that row never advertised. Publishing that same rank is what
+        # makes the request legitimate - nothing the user sees moves.
         rows = self.projected(model("mistral/large-3", reasoning=False, effort_modes=[]))
         row = rows["mistral/large-3"]
-        self.assertEqual([entry["effort"] for entry in row["supported_reasoning_levels"]], ["none"])
-        self.assertEqual(row["default_reasoning_level"], "none")
-        # No Ultra and no delegation runtime: "none" sits outside the high-end
-        # ranks Ultra aliases, so the row cannot promise a runtime it lacks.
-        self.assertIsNone(row["multi_agent_version"])
-        self.assertIsNone(row["multi_agent_reasoning_effort"])
+        self.assertEqual([entry["effort"] for entry in row["supported_reasoning_levels"]],
+                         ["medium", "ultra"])
+        self.assertEqual(row["default_reasoning_level"], "medium")
+        # Ultra follows, and with it the runtime the route could already reach.
+        self.assertEqual(row["multi_agent_version"], "v2")
+        self.assertEqual(row["multi_agent_reasoning_effort"], "medium")
+
+    def test_a_real_ladder_without_a_reasoning_flag_keeps_its_ultra(self):
+        # The Ultra guard keys on the synthesized case, not on the flag alone,
+        # so a route that advertises ranks is untouched by it.
+        rows = self.projected(model("mistral/odd", reasoning=False,
+                                    effort_modes=["low", "high"]))
+        self.assertIn("ultra", [entry["effort"] for entry
+                                in rows["mistral/odd"]["supported_reasoning_levels"]])
 
     def test_native_responses_routes_keep_their_empty_ladder(self):
         # Those three police the rank themselves and refuse the turn instead of
@@ -370,6 +380,7 @@ class EffortAndFastProjectionTests(unittest.TestCase):
             with self.subTest(route=route):
                 rows = self.projected(model(route, reasoning=False, effort_modes=[]))
                 self.assertEqual(rows[route]["supported_reasoning_levels"], [])
+                self.assertIsNone(rows[route]["multi_agent_version"])
 
     def test_placeholder_provider_split_matches_the_gateway(self):
         # The projection mirrors the gateway's own list rather than importing
