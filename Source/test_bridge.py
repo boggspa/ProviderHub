@@ -1402,6 +1402,21 @@ class NativeMessageNormalisationTests(unittest.TestCase):
         self.assertEqual(normalize_native_message(untouched), untouched)
         self.assertEqual(normalize_native_message("nope"), "nope")
 
+    def test_an_empty_discriminator_reads_as_absent_not_as_a_wrong_type(self):
+        from protocol import normalize_native_message
+        # kimi/k3 answers a non-streaming probe with a well-formed message
+        # whose "type" is the empty string; the gateway only accepts
+        # type == "message", so the reply 502'd on a blank field.
+        blank = normalize_native_message({"type": "", "role": "", "id": "msg_1", "stop_reason": "end_turn",
+                                          "content": [{"type": "text", "text": "hi"}]})
+        self.assertEqual((blank["type"], blank["role"]), ("message", "assistant"))
+        self.assertEqual(blank["content"], [{"type": "text", "text": "hi"}])
+        # A type that says something other than "message" is not a blank to
+        # fill in, and an error envelope still has to be rejected.
+        for wrong in ({"type": "error", "error": {"type": "api_error", "message": "secret"}},
+                      {"type": "completion", "content": []}):
+            self.assertEqual(normalize_native_message(wrong)["type"], wrong["type"])
+
     def test_response_shape_describes_without_content(self):
         from protocol import response_shape
         self.assertEqual(response_shape({"error": {"type": "x", "message": "secret"}}),

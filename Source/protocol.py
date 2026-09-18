@@ -1521,9 +1521,14 @@ def normalize_native_message(value):
         message["content"] = [{"type": "text", "text": content}] if content else []
     elif isinstance(content, dict):
         message["content"] = [content]
-    if message.get("type") is None:
+    # An endpoint that serialises an absent discriminator as "" is saying what
+    # one that omits it says, and kimi/k3 says it that way on a reply that is
+    # otherwise a well-formed message. A type that is present and says
+    # something else is left alone: an error envelope stays an error.
+    if not message.get("type"):
         message["type"] = "message"
-    message.setdefault("role", "assistant")
+    if not message.get("role"):
+        message["role"] = "assistant"
     message.setdefault("stop_reason", "end_turn" if message["content"] else "max_tokens")
     message.setdefault("stop_sequence", None)
     if not isinstance(message.get("usage"), dict):
