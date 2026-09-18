@@ -99,6 +99,31 @@ class CuratedCatalogueProjectionTests(unittest.TestCase):
         )
         self.assertEqual(automatic["excluded"][0]["id"], "mistral/no-tools-model")
 
+    def test_an_account_dependent_route_still_gets_a_context_window(self):
+        # The Codex composer's ring has exactly one input, the catalogue's
+        # context_window, and draws nothing when it is null. A route whose
+        # window follows the account carries candidates instead of a number,
+        # and dropping them left the ring dead - K3 among them, while its
+        # fixed-window sibling k3-256k drew fine.
+        selected = settings(
+            codex_model="kimi/k3",
+            codex_catalogue=["kimi/k3", "kimi/k3-256k"],
+        )
+        rows = {row["id"]: row for row in choices(selected, inventory(
+            model("kimi/k3", context=None, context_options=[262144, 1048576]),
+            model("kimi/k3-256k", context=262144)))}
+        # Resolved upwards, matching what the Anthropic projection advertises.
+        self.assertEqual(rows["kimi/k3"]["context"], 1048576)
+        # The fixed-window sibling is untouched: it is the route to pick when
+        # the guaranteed floor is what you want.
+        self.assertEqual(rows["kimi/k3-256k"]["context"], 262144)
+
+    def test_a_route_with_no_window_at_all_still_reports_none(self):
+        selected = settings(codex_model="mistral/a-model", codex_catalogue=["mistral/a-model"])
+        rows = choices(selected, inventory(
+            model("mistral/a-model", context=None, context_options=[])))
+        self.assertIsNone(rows[0]["context"])
+
     def test_choices_reflect_the_curated_selection(self):
         selected = settings(
             codex_model="mistral/a-model",

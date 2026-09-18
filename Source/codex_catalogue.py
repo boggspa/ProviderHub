@@ -268,7 +268,18 @@ def project_codex(settings, inventory):
             continue
         context = entry.get("runtime_context") or entry.get("context")
         if type(context) is not int or context <= 0:
-            context = None
+            # A route whose window follows the account carries its candidates
+            # rather than a single number, and this projection used to drop
+            # them - leaving context_window null, which is the one value the
+            # Codex composer cannot draw a context ring from. Its only input
+            # is this field; there is no fallback and no per-request channel.
+            # Resolved upwards, as the Anthropic projection already does via
+            # protocol._effective_context, so both surfaces tell the route the
+            # same window. The cost is on a smaller membership, where the ring
+            # under-reports how full the window is.
+            options = [value for value in (entry.get("context_options") or [])
+                       if type(value) is int and value > 0]
+            context = max(options) if options else None
         if entry.get("tools") is False:
             excluded.append({"id": route, "reason": "The model does not support coding tools."})
             continue
