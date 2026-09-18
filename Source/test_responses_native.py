@@ -385,7 +385,19 @@ class NativeResponsesTests(unittest.TestCase):
     def test_authentication_and_browser_origin_checks_apply(self):
         self.start()
         self.assertEqual(self.request(self.body(), token="incorrect")[0], 401)
-        self.assertEqual(self.request(self.body(), headers={"Origin": "https://example.invalid"})[0], 403)
+        # Browser-origin requests used to be 403-rejected, but the desktop
+        # webview sends Origin on its model-discovery fetches, so the gateway
+        # now CORS-enables them instead. The token check still applies: a
+        # cross-site page gets a readable 401 and nothing reaches the provider.
+        connection = http.client.HTTPConnection("127.0.0.1", self.gateway.server_port, timeout=6)
+        connection.request("POST", "/v1/responses", json.dumps(self.body()), {
+            "Authorization": "Bearer incorrect", "Content-Type": "application/json",
+            "Origin": "https://example.invalid"})
+        response = connection.getresponse()
+        self.assertEqual(response.status, 401)
+        self.assertEqual(response.getheader("Access-Control-Allow-Origin"), "https://example.invalid")
+        response.read()
+        connection.close()
         self.assertEqual(len(MockProvider.requests), 0)
 
     def test_quota_and_native_failed_response_redact_credentials(self):
