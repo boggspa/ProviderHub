@@ -15,7 +15,7 @@ from unittest.mock import patch
 from bridge_core import SLOTS
 from hub_config import normalize
 from responses_tools import tool_name
-from spawn_depth import (FLATTENED_SPAWN_TOOL, apply_spawn_depth_limit,
+from spawn_depth import (FLATTENED_SPAWN_TOOL, apply_spawn_depth_limit, apply_subagent_model,
                          filter_spawn_tools, should_strip, strip_spawn_tools)
 
 
@@ -240,6 +240,53 @@ class FilterMiddlewareTests(unittest.TestCase):
                                         rfile=io.BytesIO(b"junk"),
                                         runtime=handler.runtime)
                 self.assertEqual(filter_spawn_tools(plain), 0)
+
+
+class SubagentModelTests(unittest.TestCase):
+    def call(self, arguments, namespace="collaboration", name="spawn_agent"):
+        return {"id": "fc_1", "type": "function_call", "namespace": namespace,
+                "name": name, "arguments": json.dumps(arguments)}
+
+    def test_absent_model_is_filled_in(self):
+        item = self.call({"task_name": "t", "message": "do it"})
+        self.assertTrue(apply_subagent_model(item, "mistral/small"))
+        self.assertEqual(json.loads(item["arguments"])["model"], "mistral/small")
+        # Everything the parent did say survives the rewrite.
+        self.assertEqual(json.loads(item["arguments"])["message"], "do it")
+
+    def test_a_model_the_parent_named_is_left_alone(self):
+        # The setting picks who answers when nobody asked for anyone in
+        # particular; it does not overrule a choice the agent made.
+        item = self.call({"task_name": "t", "message": "x", "model": "kimi/k3"})
+        self.assertFalse(apply_subagent_model(item, "mistral/small"))
+        self.assertEqual(json.loads(item["arguments"])["model"], "kimi/k3")
+
+    def test_the_flattened_name_is_recognised_too(self):
+        # By the time egress sees the call the namespace is restored, but a
+        # route that fell back to the qualified name has no namespace at all.
+        item = self.call({"task_name": "t", "message": "x"}, namespace=None,
+                         name=FLATTENED_SPAWN_TOOL)
+        self.assertTrue(apply_subagent_model(item, "mistral/small"))
+
+    def test_unrelated_and_malformed_calls_pass_through(self):
+        for item, why in (
+            (self.call({"a": 1}, namespace=None, name="shell"), "another tool"),
+            ({"type": "message", "role": "assistant"}, "not a call"),
+            (self.call([1, 2]), "arguments are not an object"),
+            ({**self.call({"a": 1}), "arguments": "{not json"}, "unparseable"),
+            ({**self.call({"a": 1}), "arguments": None}, "no arguments"),
+        ):
+            with self.subTest(why=why):
+                before = json.dumps(item, sort_keys=True)
+                self.assertFalse(apply_subagent_model(item, "mistral/small"))
+                self.assertEqual(json.dumps(item, sort_keys=True), before)
+
+    def test_no_configured_route_changes_nothing(self):
+        item = self.call({"task_name": "t", "message": "x"})
+        before = json.dumps(item, sort_keys=True)
+        for route in (None, ""):
+            self.assertFalse(apply_subagent_model(item, route))
+        self.assertEqual(json.dumps(item, sort_keys=True), before)
 
 
 class SpawnDepthSettingsTests(unittest.TestCase):

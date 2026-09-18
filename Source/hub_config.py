@@ -319,7 +319,7 @@ def defaults(slots, vibe_model: str, port: int = 11436) -> dict:
             "claude_features": {key: False for key in CLAUDE_FEATURE_KEYS},
             "claude_catalogue": None, "claude_code_settings": True, "claude_workflows": False,
             "codex_accent_slider": False, "codex_hide_usage_banner": False,
-            "codex_subagent_rank": None}
+            "codex_subagent_rank": None, "codex_subagent_route": None}
 
 
 def normalize(value: dict, slots, vibe_model: str, port: int = 11436) -> dict:
@@ -405,6 +405,16 @@ def normalize(value: dict, slots, vibe_model: str, port: int = 11436) -> dict:
                 raise ValueError(f"A Codex sub-agent rank must be a whole number from 1 to {SUBAGENT_POOL_SIZE}.")
             ranked[qualify(*split_route(route))] = rank
         result["codex_subagent_rank"] = ranked or None
+    # codex_subagent_route is the model a spawned sub-agent runs on when the
+    # parent does not name one itself. Codex has a configuration key for this,
+    # default_subagent_model, and on 26.908 it is inert - a real spawn with it
+    # set still brings the child up on the parent's model - so the choice is
+    # written into the spawn call's own `model` argument on the way out
+    # instead (see spawn_depth.apply_subagent_model). Absent means the child
+    # inherits its parent, which is Codex's own default.
+    route = value.get("codex_subagent_route")
+    if route is not None:
+        result["codex_subagent_route"] = qualify(*split_route(route))
     # codex_apply_patch qualifies routes for the JSON-wrapped apply_patch
     # projection one by one; codex_apply_patch_exclude holds routes back once
     # codex_apply_patch_all switches the projection on for the whole

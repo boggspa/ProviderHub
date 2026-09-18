@@ -411,6 +411,21 @@ struct CodexPage: View {
         VStack(alignment: .leading, spacing: 8) {
             Text("\(curatedRoutes.count) model\(curatedRoutes.count == 1 ? "" : "s") will appear in Codex’s picker.")
                 .font(.caption).foregroundStyle(.secondary)
+            HStack(spacing: 8) {
+                Text("Sub-agents run on").font(.system(size: 12))
+                Picker("", selection: Binding(
+                    get: { model.settings.codex_subagent_route ?? "" },
+                    set: { model.settings.codex_subagent_route = $0.isEmpty ? nil : $0 }
+                )) {
+                    Text("the thread's own model").tag("")
+                    ForEach(curatedRoutes, id: \.self) { route in
+                        Text(model.modelLabel(route)).tag(route)
+                    }
+                }
+                .labelsHidden().pickerStyle(.menu).frame(maxWidth: 260)
+                .disabled(model.busy)
+                .help("The model a sub-agent is spawned on when the parent does not name one itself.")
+            }
             Text("Sub-agent rank picks which models Codex offers when a thread on Ultra delegates. It takes the top \(Self.subagentPoolSize); an unranked route is left out, and a sub-agent with no override inherits its thread's model either way.")
                 .font(.caption).foregroundStyle(.secondary)
             ForEach(curatedRoutes, id: \.self) { route in

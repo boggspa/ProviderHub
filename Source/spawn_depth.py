@@ -62,7 +62,7 @@ QUALIFIED_SPAWN_TOOL = qualified_name(SPAWN_NAMESPACE, SPAWN_TOOL)
 TASK_ITEM_TYPES = frozenset({"multi_agent_call", "subagent_call", "agent_message"})
 
 
-def _is_spawn_tool_reference(namespace, name):
+def is_spawn_tool_reference(namespace, name):
     """True when (namespace, name) identifies our collaboration spawn tool."""
     if namespace == SPAWN_NAMESPACE and name == SPAWN_TOOL:
         return True
@@ -71,11 +71,53 @@ def _is_spawn_tool_reference(namespace, name):
 
 def _is_spawn_call(item):
     return (isinstance(item, dict) and item.get("type") == "function_call"
-            and _is_spawn_tool_reference(item.get("namespace"), item.get("name")))
+            and is_spawn_tool_reference(item.get("namespace"), item.get("name")))
 
 
 def _is_task_item(item):
     return isinstance(item, dict) and item.get("type") in TASK_ITEM_TYPES
+
+
+#: The spawn_agent argument naming the model a sub-agent runs on. Codex
+#: documents it as "Omit unless an explicit override is needed", and omitting
+#: it makes the child inherit its parent.
+SPAWN_MODEL_ARGUMENT = "model"
+
+
+def apply_subagent_model(item, route):
+    """Fill in the model a spawned sub-agent should run on.
+
+    Codex has a configuration key for this - default_subagent_model - and on
+    26.908 it is inert: driving a real spawn with it set, the child thread
+    still arrives on the parent's model. The argument on the spawn call is
+    honoured, so that is where the choice has to be written.
+
+    Only an absent model is filled in. A model the parent named itself is an
+    explicit decision by the running agent, and overwriting it would turn a
+    default into a cage - the setting picks who answers when nobody asked for
+    anyone in particular.
+
+    Returns True when the call was rewritten, so the caller can hold back the
+    argument deltas that still spell the original JSON.
+    """
+    if not route or not isinstance(item, dict) or item.get("type") != "function_call":
+        return False
+    if not is_spawn_tool_reference(item.get("namespace"), item.get("name")):
+        return False
+    raw = item.get("arguments")
+    if not isinstance(raw, str):
+        return False
+    try:
+        arguments = json.loads(raw)
+    except ValueError:
+        return False
+    # Anything but an object is a malformed call; leave it for Codex to
+    # reject as it would have, rather than replacing it with one that works.
+    if not isinstance(arguments, dict) or arguments.get(SPAWN_MODEL_ARGUMENT):
+        return False
+    arguments[SPAWN_MODEL_ARGUMENT] = route
+    item["arguments"] = json.dumps(arguments, ensure_ascii=False)
+    return True
 
 
 def should_strip(body_input, limit):
@@ -116,7 +158,7 @@ def strip_spawn_tools(tools):
                 clone["tools"] = survivors
                 kept.append(clone)
             continue
-        if tool.get("type") == "function" and _is_spawn_tool_reference(
+        if tool.get("type") == "function" and is_spawn_tool_reference(
                 tool.get("namespace"), tool.get("name")):
             removed += 1
             continue

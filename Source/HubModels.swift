@@ -127,6 +127,10 @@ struct RouteSettings: Codable, Equatable {
     // this is a position in one global ordering rather than a per-model
     // allocation; a route with no rank is simply not offered.
     var codex_subagent_rank: [String: Int]?
+    // The model a spawned sub-agent runs on when the parent names none.
+    // Codex's own default_subagent_model is inert on 26.908, so the gateway
+    // writes this into the spawn call's `model` argument instead.
+    var codex_subagent_route: String?
 }
 struct ModelEntry: Decodable, Identifiable {
     var id: String

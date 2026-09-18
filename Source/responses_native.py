@@ -19,6 +19,8 @@ from responses_tools import (flatten_tools, input_names, normalize_custom_calls,
 from responses_bridge import ENVELOPE_PREFIX, MessagesResponsesAdapter, ReasoningEnvelope, to_messages
 from openrouter_provider import OpenRouterError, finalize as openrouter_finalize, app_headers as openrouter_app_headers
 from effort_map import cap_high_end, map_effort, ollama_effort_aliases
+from spawn_depth import (SPAWN_NAMESPACE, SPAWN_TOOL, apply_subagent_model,
+                         is_spawn_tool_reference)
 from rate_limit import (MAX_UPSTREAM_ATTEMPTS, RETRYABLE_STATUSES, SLOT_RETRY_AFTER, SLOT_WAIT_TIMEOUT,
                         THROTTLE_CAP, parse_retry_after, wait_for_slot)
 
@@ -554,6 +556,7 @@ def prepare_native(runtime, payload):
         return {"body": translated, "headers": {"Content-Type": "application/json", "Authorization": "Bearer " + runtime.token},
                 "url": None, "route": route, "requested": requested, "provider_id": provider_id,
                 "scope": scope, "tool_map": tool_map, "private_key": key,
+                "subagent_route": runtime.settings.get("codex_subagent_route"),
                 "provider_name": PROVIDERS[provider_id]["name"], "protocol": "messages_bridge",
                 "adapter": MessagesResponsesAdapter(requested, envelope, scope, tool_map)}
     if isinstance(body["input"], list) and any(isinstance(item, dict) and str(item.get("encrypted_content", "")).startswith(ENVELOPE_PREFIX) for item in body["input"]):
@@ -615,10 +618,11 @@ def prepare_native(runtime, payload):
             "protocol": "responses",
             "requested": requested, "provider_id": provider_id, "scope": scope,
             "tool_map": tool_map,
+            "subagent_route": runtime.settings.get("codex_subagent_route"),
             "private_key": key, "provider_name": PROVIDERS[provider_id]["name"]}
 
 
-def rewrite_stream_event(event, tool_map, custom_items):
+def rewrite_stream_event(event, tool_map, custom_items, subagent_route=None, spawn_items=None):
     """Restore provider tool names on one relayed Responses stream event.
 
     Returns False when the event is a JSON argument delta for a mapped
@@ -626,17 +630,44 @@ def rewrite_stream_event(event, tool_map, custom_items):
     output_item.done, so forwarding the JSON bytes would corrupt the
     patch input buffer; the full converted call still arrives via the
     output_item events.
+
+    A spawn_agent call with no model of its own is given the configured
+    sub-agent route. Its arguments are then spelled two ways in the same
+    stream, so the id is remembered at output_item.added - the one event
+    that carries the name while the arguments are still empty - and the
+    rewrite is applied to every later spelling of that call. The deltas
+    are dropped rather than rewritten: they are fragments of the original
+    JSON and cannot be edited a piece at a time.
     """
+    spawn_items = spawn_items if spawn_items is not None else set()
     if isinstance(event.get("item"), dict):
         if restore_custom_call(event["item"], tool_map):
             if isinstance(event["item"].get("id"), str):
                 custom_items.add(event["item"]["id"])
         else:
             output_names(event["item"], tool_map)
-    if event.get("type") in {"response.function_call_arguments.delta", "response.function_call_arguments.done"}:
+            item = event["item"]
+            if subagent_route and _is_spawn_call_item(item):
+                if isinstance(item.get("id"), str):
+                    spawn_items.add(item["id"])
+                apply_subagent_model(item, subagent_route)
+    kind = event.get("type")
+    if kind in {"response.function_call_arguments.delta", "response.function_call_arguments.done"}:
         if event.get("item_id") in custom_items:
             return False
+        if event.get("item_id") in spawn_items:
+            if kind.endswith(".delta"):
+                return False
+            rewritten = {"type": "function_call", "namespace": SPAWN_NAMESPACE,
+                         "name": SPAWN_TOOL, "arguments": event.get("arguments")}
+            if apply_subagent_model(rewritten, subagent_route):
+                event["arguments"] = rewritten["arguments"]
     return True
+
+
+def _is_spawn_call_item(item):
+    return (item.get("type") == "function_call"
+            and is_spawn_tool_reference(item.get("namespace"), item.get("name")))
 
 
 def _client_gone(handler):
@@ -696,6 +727,7 @@ def handle_responses(handler):
     terminal = None
     final = None
     custom_items = set()
+    spawn_items = set()
     service_tier = None
     usage = {}
 
@@ -732,6 +764,7 @@ def handle_responses(handler):
         for item in value["output"]:
             if not restore_custom_call(item, plan["tool_map"]):
                 output_names(item, plan["tool_map"])
+                apply_subagent_model(item, plan.get("subagent_route"))
         if value.get("error"):
             value["error"] = clean_error(value["error"])
         if plan["provider_id"] == "grok" and plan["body"]["store"] and value["status"] != "failed":
@@ -885,7 +918,8 @@ def handle_responses(handler):
                             event["response"]["model"] = plan["requested"]
                             if event["response"].get("error"):
                                 event["response"]["error"] = clean_error(event["response"]["error"])
-                        if not rewrite_stream_event(event, plan["tool_map"], custom_items):
+                        if not rewrite_stream_event(event, plan["tool_map"], custom_items,
+                                                    plan.get("subagent_route"), spawn_items):
                             continue
                         if kind == "error":
                             event = {"type": "error", "code": "provider_error", "message": redact(event.get("message", "Provider stream error.")), "param": None}
