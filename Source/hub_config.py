@@ -216,6 +216,72 @@ CLAUDE_TIER_MODELS = {"fable": "claude-fable-5", "opus": "claude-opus-5",
 _TIER_FALLBACKS = {"fable": ("opus", "sonnet", "haiku"), "opus": ("fable", "sonnet", "haiku"),
                    "sonnet": ("opus", "fable", "haiku"), "haiku": ("sonnet", "opus", "fable")}
 _ROW_SLUG_UNSAFE = re.compile(r"[^a-z0-9]+")
+_ROW_SLUG_TIDY = re.compile(r"-{2,}")
+
+#: Claude Desktop drops a picker row whose id names a third-party model family.
+#: The check runs in two places and they do not agree: discovery keeps a row
+#: that carries a valid `anthropic_family_tier` even when the id fails, then the
+#: picker filter re-applies the same test with no tier escape and the row is
+#: gone.  That is why an id-only problem reads as `Model discovery: 9 found;
+#: picker = 0 (empty)` in ~/Library/Logs/Claude-3p/main.log while config health
+#: still says `healthy` - nothing in the app names the id as the reason.
+#:
+#: Ported from the installed bundle's `Ixe` (Claude.app 2.2553.1, read from
+#: app.asar on 18 Sep 2026).  It is a copy of someone else's list, so a Desktop
+#: update can add a token this copy has never heard of; re-read it from the
+#: bundle when the picker empties again.  Note `ollama` matches through `llama`.
+_FOREIGN_FAMILY = re.compile(
+    r"ark-code|astron|command-r|deepseek|doubao|gemini|gemma|glm|gpt|grok|hermes|hy3|kimi|lfm|\bling\b"
+    r"|llama|longcat|mimo|minimax|mistral|mixtral|moonshot|nemotron|openai|phi-|qianfan|qwen|tc-code"
+    r"|\bunic\b|yi-|stepfun|step-3|seed-|bytedance|hunyuan|granite|amazon\.nova|nova-|devstral"
+    r"|ministral|ernie|codex|arcee|trinity|abab|phi\d|\bk2\.|\bm2\.|jamba|arctic|solar|mercury"
+    r"|zamba|kat-coder|\bds-|dpsk"
+)
+
+#: A defusing pass inserts one hyphen per round, so the bound is only there to
+#: stop a slug that cannot be defused from spinning; it falls back to a digest.
+_MAX_DEFUSE_ROUNDS = 12
+
+
+def _defuse_row_slug(slug: str):
+    r"""Hyphenate the third-party family names out of a row slug, legibly.
+
+    Desktop matches plain substrings, so one hyphen inside the word is enough,
+    and splitting near the middle keeps the slug readable: `mistral-glm-5-2`
+    becomes `mis-tral-g-lm-5-2`.  The split is not free of consequence - a
+    hyphen makes a word boundary, and three of the denylist's entries want one
+    (`\bds-`, `\bk2\.`, `\bm2\.`) - so each candidate is re-checked and the
+    cut moved along until the occurrence is genuinely gone.  Returns None when
+    no arrangement clears, which is the caller's cue to fall back to a digest.
+    """
+    for _ in range(_MAX_DEFUSE_ROUNDS):
+        hit = _FOREIGN_FAMILY.search(slug)
+        if hit is None:
+            return slug
+        start, width = hit.start(), hit.end() - hit.start()
+        for cut in sorted(range(1, width), key=lambda c: (abs(c - width // 2), c)):
+            candidate = _ROW_SLUG_TIDY.sub("-", f"{slug[:start + cut]}-{slug[start + cut:]}").strip("-")
+            probe = _FOREIGN_FAMILY.search(candidate)
+            if probe is None:
+                return candidate
+            if probe.start() > start:
+                slug = candidate
+                break
+        else:
+            return None
+    return None
+
+
+def _row_slug_digest(route: str) -> str:
+    """A last-resort slug that cannot name a family: hex spells none of them.
+
+    "abab" is the one denylist entry writable in hex, so the digest is rolled
+    until it is clear rather than assumed to be.
+    """
+    digest = hashlib.blake2s(route.encode(), digest_size=8).hexdigest()
+    while _FOREIGN_FAMILY.search(digest):
+        digest = hashlib.blake2s(digest.encode(), digest_size=8).hexdigest()
+    return digest[:8]
 
 
 def _normalize_claude_catalogue(value) -> list[dict]:
@@ -262,12 +328,23 @@ def claude_row_id(route: str, tier: str) -> str:
     It starts with the tier's Claude model id so Claude Code's family checks
     read the right family, then names the provider and model. The provider
     prefix is dropped when the model id already starts with it.
+
+    The name the provider uses cannot survive intact: Desktop refuses a picker
+    row whose id spells a third-party family, so the slug is hyphenated until
+    it no longer does (see _defuse_row_slug).  What the picker shows is the
+    row's display_name, not this, so the rename costs nothing on screen.
     """
     provider_id, model_id = split_route(route)
     provider_slug = _ROW_SLUG_UNSAFE.sub("-", provider_id.casefold()).strip("-")
     model_slug = _ROW_SLUG_UNSAFE.sub("-", model_id.casefold()).strip("-")
     slug = model_slug if model_slug.startswith(provider_slug + "-") else f"{provider_slug}-{model_slug}"
-    return f"{CLAUDE_TIER_MODELS[tier]}-{slug}"
+    defused = _defuse_row_slug(slug)
+    identifier = f"{CLAUDE_TIER_MODELS[tier]}-{defused}" if defused else None
+    # The tier prefix cannot contribute a family name on its own, but the join
+    # is checked rather than trusted: a miss here empties the whole picker.
+    if identifier is None or _FOREIGN_FAMILY.search(identifier):
+        identifier = f"{CLAUDE_TIER_MODELS[tier]}-{_row_slug_digest(route)}"
+    return identifier
 
 
 def claude_catalogue_rows(settings: dict) -> list[dict]:

@@ -5,6 +5,10 @@ import unittest
 from branding import BrandingError
 from effort_map import MISTRAL_NARROW_EFFORTS, MISTRAL_REASONING_EFFORTS
 from hub_config import (
+    CLAUDE_TIER_MODELS,
+    CLAUDE_TIERS,
+    _FOREIGN_FAMILY,
+    _row_slug_digest,
     claude_catalogue_rows,
     claude_row_id,
     claude_routes,
@@ -72,15 +76,32 @@ class SettingsMigrationTests(unittest.TestCase):
             normalize({"codex_hide_usage_banner": "yes"}, SLOTS, "mistral-test")
 
     def test_claude_row_ids_embed_the_tier_model_and_stay_unique(self):
-        self.assertEqual(claude_row_id("mistral/mistral-vibe-cli-latest", "sonnet"), "claude-sonnet-5-mistral-vibe-cli-latest")
-        self.assertEqual(claude_row_id("ollama/minimax-m3:cloud", "haiku"), "claude-haiku-4-5-ollama-minimax-m3-cloud")
-        self.assertEqual(claude_row_id("kimi/k3", "fable"), "claude-fable-5-kimi-k3")
+        self.assertEqual(claude_row_id("mistral/mistral-vibe-cli-latest", "sonnet"), "claude-sonnet-5-mis-tral-vibe-cli-latest")
+        self.assertEqual(claude_row_id("ollama/minimax-m3:cloud", "haiku"), "claude-haiku-4-5-oll-ama-min-imax-m3-cloud")
+        self.assertEqual(claude_row_id("kimi/k3", "fable"), "claude-fable-5-ki-mi-k3")
         settings = {"claude_catalogue": [
             {"route": "ollama/minimax-m3:cloud", "tier": "opus", "tier_default": True},
             {"route": "ollama/minimax-m3-cloud", "tier": "opus", "tier_default": False}]}
         self.assertEqual([row["id"] for row in claude_catalogue_rows(settings)],
-                         ["claude-opus-5-ollama-minimax-m3-cloud", "claude-opus-5-ollama-minimax-m3-cloud-2"])
+                         ["claude-opus-5-oll-ama-min-imax-m3-cloud", "claude-opus-5-oll-ama-min-imax-m3-cloud-2"])
         self.assertEqual(claude_catalogue_rows({"claude_catalogue": None}), [])
+
+    def test_claude_row_ids_never_spell_a_family_desktop_refuses(self):
+        # Desktop drops a picker row whose id names a third-party family, and
+        # says nothing about why: the whole picker just empties.  Every route
+        # below is a name it would have refused verbatim.
+        routes = ["mistral/glm-5-2", "kimi/kimi-for-coding", "ollama/deepseek-v4-flash:cloud",
+                  "gemini/gemini-3.8-flash", "qwen-token-plan/qwen3.8-max", "openai/gpt-5-codex",
+                  "x/ds-pro", "y/abab-6", "z/k2.5-turbo", "a/ark-code-v2", "b/phi4-ling-unic",
+                  "c/amazon.nova-pro", "d/mistral-mixtral-ministral"]
+        for route in routes:
+            for tier in CLAUDE_TIERS:
+                identifier = claude_row_id(route, tier)
+                self.assertIsNone(_FOREIGN_FAMILY.search(identifier), identifier)
+                self.assertTrue(identifier.startswith(CLAUDE_TIER_MODELS[tier] + "-"), identifier)
+        # A slug that cannot be hyphenated clear falls back to the digest, which
+        # hex makes safe by construction.
+        self.assertIsNone(_FOREIGN_FAMILY.search(_row_slug_digest("mistral/glm-5-2")))
 
     def test_claude_routes_cover_family_slots_with_tier_stand_ins(self):
         settings = {"mappings": {"claude-fable-5": "mistral/a"}, "claude_catalogue": None}
@@ -90,8 +111,8 @@ class SettingsMigrationTests(unittest.TestCase):
             {"route": "mistral/mistral-small-4", "tier": "sonnet", "tier_default": True},
             {"route": "mistral/glm-5-2", "tier": "sonnet", "tier_default": False}]
         routes = claude_routes(settings)
-        self.assertEqual(routes["claude-opus-5-kimi-k3"], "kimi/k3")
-        self.assertEqual(routes["claude-sonnet-5-mistral-glm-5-2"], "mistral/glm-5-2")
+        self.assertEqual(routes["claude-opus-5-ki-mi-k3"], "kimi/k3")
+        self.assertEqual(routes["claude-sonnet-5-mis-tral-g-lm-5-2"], "mistral/glm-5-2")
         self.assertEqual(routes["claude-sonnet-5"], "mistral/mistral-small-4")
         self.assertEqual(routes["claude-sonnet-4-6"], "mistral/mistral-small-4")
         # No fable row: opus stands in. No haiku row: sonnet stands in.

@@ -154,7 +154,7 @@ class ProtocolTests(unittest.TestCase):
     def test_catalogue_mode_serves_tier_rows_under_generated_ids(self):
         settings = self.catalogue_settings()
         rows = model_catalog(settings)["data"]
-        self.assertEqual([row["id"] for row in rows], ["claude-fable-5-mistral-test-model", "claude-sonnet-5-mistral-big-model[1m]"])
+        self.assertEqual([row["id"] for row in rows], ["claude-fable-5-mis-tral-test-model", "claude-sonnet-5-mis-tral-big-model[1m]"])
         self.assertEqual([row["anthropic_family_tier"] for row in rows], ["fable", "sonnet"])
         self.assertTrue(all(row["is_family_default"] for row in rows))
         self.assertIn("fable tier", rows[0]["description"])
@@ -168,8 +168,8 @@ class ProtocolTests(unittest.TestCase):
     def test_catalogue_mode_resolves_rows_aliases_and_family_stand_ins(self):
         settings = self.catalogue_settings()
         routes = claude_routes(settings)
-        self.assertEqual(resolve_model("claude-sonnet-5-mistral-big-model[1m]", routes), "big-model")
-        self.assertEqual(resolve_model("claude-fable-5-mistral-test-model", routes), "test-model")
+        self.assertEqual(resolve_model("claude-sonnet-5-mis-tral-big-model[1m]", routes), "big-model")
+        self.assertEqual(resolve_model("claude-fable-5-mis-tral-test-model", routes), "test-model")
         self.assertEqual(resolve_model("sonnet", routes), "big-model")
         self.assertEqual(resolve_model("fable", routes), "test-model")
         # No haiku or opus rows: Claude Code's own haiku and opus requests use the nearest tier.
@@ -178,15 +178,15 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(resolve_model("claude-sonnet-4-6", routes), "big-model")
         with self.assertRaises(BridgeError):
             resolve_model("gpt-5", routes)
-        options = mapping_options_for("claude-sonnet-5-mistral-big-model[1m]", settings)
+        options = mapping_options_for("claude-sonnet-5-mis-tral-big-model[1m]", settings)
         self.assertEqual(options["compact_limit"], 900000)
         self.assertFalse(options["omit_system"])
         self.assertEqual(mapping_options_for("haiku", settings)["compact_limit"], 900000)
         self.assertIsNone(mapping_options_for("fable", settings)["compact_limit"])
         self.assertIsNone(mapping_options_for("gpt-5", settings)["compact_limit"])
-        result, _ = translate_request(prompt(model="claude-fable-5-mistral-test-model"), settings)
+        result, _ = translate_request(prompt(model="claude-fable-5-mis-tral-test-model"), settings)
         self.assertEqual(result["model"], "test-model")
-        result, _ = translate_request(prompt(model="claude-sonnet-5-mistral-big-model[1m]"), settings)
+        result, _ = translate_request(prompt(model="claude-sonnet-5-mis-tral-big-model[1m]"), settings)
         self.assertEqual(result["model"], "big-model")
 
     def test_ultracode_reminders_add_an_orchestration_note_for_the_provider(self):
@@ -752,7 +752,7 @@ class ProfileTests(unittest.TestCase):
         self.assertEqual(result["claude_code_settings"], "written")
         written = read_json(code)
         self.assertEqual(written["modelPicker"]["options"], [
-            {"model": "claude-opus-5-mistral-test-model", "label": "Test Model",
+            {"model": "claude-opus-5-mis-tral-test-model", "label": "Test Model",
              "description": "Provider Hub \u00b7 test-model \u00b7 behaves as claude-opus-5", "behavesAs": "claude-opus-5"}])
         self.assertNotIn("enableWorkflows", written)
         self.assertTrue(self.profile.restore(require_closed=False)["restored"])
@@ -767,7 +767,7 @@ class ProfileTests(unittest.TestCase):
         settings["claude_workflows"] = True
         self.profile.activate(settings, "local-token", require_closed=False)
         written = read_json(code)
-        self.assertEqual([row["model"] for row in written["modelPicker"]["options"]], ["my-model", "claude-opus-5-mistral-test-model"])
+        self.assertEqual([row["model"] for row in written["modelPicker"]["options"]], ["my-model", "claude-opus-5-mis-tral-test-model"])
         self.assertIs(written["modelPicker"]["replaceBuiltInOptions"], False)
         self.assertIs(written["enableWorkflows"], True)
         self.assertEqual(written["theme"], "dark")
