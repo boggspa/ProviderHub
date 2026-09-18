@@ -21,7 +21,7 @@ from bridge_core import SLOTS, atomic_json, default_settings
 from cerebras_replay import validate_messages
 from gateway import Runtime, Server
 from hub_config import connection_signature
-from protocol import estimated_tokens
+from protocol import estimated_tokens, with_identity_note
 
 
 LOCAL_REQUEST_TEXT = "LOCAL-REQUEST-TEXT-MUST-NOT-BE-LOGGED"
@@ -559,7 +559,11 @@ class GatewayHubHTTPTests(unittest.TestCase):
             "system": reminder,
             "messages": [{"role": "user", "content": LOCAL_REQUEST_TEXT + "\n" + reminder}],
         }
-        remaining = 131072 - estimated_tokens(payload)
+        # The identity note is part of the prompt by the time the reminder is
+        # rewritten, so the headroom it leaves has to be predicted with it.
+        spec = self.runtime.settings["_model_specs"][self.runtime.resolve_route(payload["model"])]
+        noted = {**payload, "system": with_identity_note(payload.get("system"), spec)}
+        remaining = 131072 - estimated_tokens(noted)
         status, raw, _ = self.request(payload)
         self.assertEqual(status, 200, raw)
         combined = json.dumps(MockProvider.requests[0])

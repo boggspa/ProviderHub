@@ -48,7 +48,7 @@ from cerebras_replay import CerebrasReplayError, CerebrasStreamAdapter, sanitize
 from gemini_provider import GeminiError, GeminiStreamAdapter, translate_response as translate_gemini_response, _estimated_input_tokens as estimated_gemini_tokens
 from protocol import (StreamTranslator, apply_mapping_options, apply_mistral_prefix, compact_conversation, compact_threshold, estimated_tokens, mapping_options_for, reported_input_tokens, TokenCalibration, validate_mistral_roles,
                       model_catalog, normalize_native_message, resolve_model, response_shape, rewrite_context_reminders, translate_request,
-                      ultracode_active, with_ultracode_note, without_reasoning_controls, mask_effort_rejection,
+                      ultracode_active, with_ultracode_note, with_identity_note, without_reasoning_controls, mask_effort_rejection,
                       translate_response, _effective_context)
 from responses_native import ResponseOwnership, handle_responses, NATIVE_PROVIDERS
 from codex_accent import bridge_command as codex_accent_bridge
@@ -128,6 +128,19 @@ class Runtime:
         # intent across the translation. It rides the top-level system field
         # rather than a message so it survives compaction, and it is skipped
         # for a route the user has asked to run without a system prompt.
+        # Everything here arrives wearing a Claude model id, and the harness
+        # prompt then tells the model it is that Claude model. One line says
+        # who is actually answering, added before the request is built so it
+        # sits inside the prompt-cache key rather than after it was computed.
+        #
+        # Not on a one-token request: that is Desktop's health probe, which
+        # only checks that a valid Messages reply comes back, and nothing
+        # answering in one token can use the information anyway. Keeping the
+        # probe's shape untouched also keeps it diagnosable - a greyed-out
+        # model picker was traced to that request once already.
+        wants_output = payload.get("max_tokens")
+        if not options.get("omit_system") and not (type(wants_output) is int and wants_output <= 1):
+            payload = {**payload, "system": with_identity_note(payload.get("system"), spec)}
         if ultracode_active(payload) and not options.get("omit_system"):
             payload = {**payload, "system": with_ultracode_note(payload.get("system"))}
         # A route with no reasoning axis is still shown the slider, so it will

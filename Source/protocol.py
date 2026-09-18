@@ -5,6 +5,7 @@ Unsupported content/tools fail explicitly instead of silently disappearing.
 """
 from __future__ import annotations
 
+import collections
 import copy
 import hashlib
 import json
@@ -224,10 +225,22 @@ def _effective_context(spec: dict) -> int | None:
     return None
 
 
+ContextClaim = collections.namedtuple("ContextClaim", "kind floor ceiling")
+
+
 def stated_context(spec: dict):
     """What can honestly be claimed about a route's context window.
 
-    Returns one of ("exact", tokens), ("floor", tokens) or ("unknown", None).
+    Returns ContextClaim(kind, floor, ceiling): ("exact", n, n) for a single
+    documented window, ("range", floor, ceiling) where the window follows the
+    account, or ("unknown", None, None) where nothing is sourceable.
+
+    A range rather than a bare floor because the floor alone under-claims: a
+    K3 route on a larger membership really does have the ceiling, and Kimi
+    publishes k3-256k separately for anyone who wants the guarantee. Telling a
+    model the span it might have, and that the span depends on the account,
+    leaves it able to plan conservatively without pretending capacity it may
+    own does not exist.
 
     _effective_context answers a different question - how much room to plan
     for - and resolves an ambiguous route by taking the largest window it
@@ -242,13 +255,13 @@ def stated_context(spec: dict):
     options = spec.get("context_options") if isinstance(spec, dict) else None
     ranked = sorted({value for value in (options or []) if type(value) is int and value > 0})
     if len(ranked) > 1:
-        return "floor", ranked[0]
+        return ContextClaim("range", ranked[0], ranked[-1])
     context = spec.get("context") if isinstance(spec, dict) else None
     if type(context) is int and context > 0:
-        return "exact", context
+        return ContextClaim("exact", context, context)
     if ranked:
-        return "exact", ranked[0]
-    return "unknown", None
+        return ContextClaim("exact", ranked[0], ranked[0])
+    return ContextClaim("unknown", None, None)
 
 
 def model_catalog(settings: dict):
@@ -633,13 +646,81 @@ def without_reasoning_controls(payload: dict):
     return payload, dropped
 
 
-def with_ultracode_note(system):
-    """Append the Ultracode note to a request's top-level system field.
+def _thousands(value: int) -> str:
+    return f"{value:,}"
 
-    Claude Desktop sends `system` as a string or as a list of content blocks,
-    and omits it entirely on a bare request; all three arrive here.
+
+def identity_note(spec: dict, harness: str = "Claude Desktop") -> str | None:
+    """One line telling a model what it actually is, at the top of its prompt.
+
+    Everything served here arrives wearing a Claude model id, because that is
+    the only shape the desktop picker accepts, and the harness's own system
+    prompt then tells the model it is that Claude model. Left alone, a smaller
+    model infers capabilities it does not have and a larger one defers to
+    limits that are not its own; both plan around a context window belonging
+    to something else. This says who is actually answering.
+
+    It states the harness's effort setting rather than the rank the gateway
+    will end up sending, because the two can differ and only the provider
+    builders know the second - predicting it here would mean a second copy of
+    that resolution. The model's own ladder is given instead, which is both
+    knowable at this point and more useful: a model that can see its ladder
+    can tell where the requested rung falls on it.
     """
-    note = {"type": "text", "text": ULTRACODE_NOTE}
+    if not isinstance(spec, dict):
+        return None
+    identifier = spec.get("id")
+    if not isinstance(identifier, str) or not identifier:
+        return None
+    advertised = spec.get("display_name")
+    name = friendly_model_name(identifier.rsplit("/", 1)[-1],
+                               advertised if isinstance(advertised, str) and advertised else None)
+    # Say who makes it as well as what it is - "K3" alone leaves the model to
+    # guess, which is the whole problem this line exists to stop.
+    provider = (spec.get("presentation") or {}).get("displayProvider")
+    if not (isinstance(provider, str) and provider):
+        provider_id = spec.get("provider_id") or (identifier.split("/", 1)[0] if "/" in identifier else None)
+        provider = provider_id.replace("-", " ").title() if isinstance(provider_id, str) and provider_id else None
+    who = f"{name} ({provider})" if provider else name
+
+    kind, floor, ceiling = stated_context(spec)
+    if kind == "exact":
+        window = f"Your context window is {_thousands(floor)} tokens."
+    elif kind == "range":
+        window = (f"Your context window is at least {_thousands(floor)} tokens and at most "
+                  f"{_thousands(ceiling)}; which applies depends on this account's plan, so treat "
+                  f"the lower figure as the one you can rely on.")
+    else:
+        window = ("Your context window is not published to this gateway, so do not assume a size - "
+                  "ask before relying on a long context.")
+
+    ladder = [mode for mode in (spec.get("effort_modes") or []) if isinstance(mode, str)]
+    if spec.get("reasoning") is False:
+        reasoning = "You have no adjustable reasoning setting."
+    elif len(ladder) > 1:
+        reasoning = ("Your reasoning ladder is " + "/".join(ladder)
+                     + "; the harness may ask for a level outside it, which is mapped onto the "
+                       "nearest one you have.")
+    elif ladder:
+        reasoning = f"Your reasoning runs at a fixed {ladder[0]} setting."
+    else:
+        reasoning = "Your reasoning setting is the model's own default."
+
+    return (f"You are {who}, reached through Provider Hub inside the {harness} harness. "
+            f"{window} {reasoning} "
+            "The surrounding system prompt describes that harness and its conventions, and those "
+            "conventions apply to you - follow them. Where it names a model, a context window or a "
+            "capability, this line is the accurate one.")
+
+
+def with_identity_note(system, spec: dict, harness: str = "Claude Desktop"):
+    note = identity_note(spec, harness)
+    return system if note is None else append_system_text(system, note)
+
+
+def append_system_text(system, text: str):
+    """Append one note to a request's system field, in whichever spelling it came."""
+    note = {"type": "text", "text": text}
     if system is None or system == "":
         return [note]
     if isinstance(system, str):
@@ -647,6 +728,15 @@ def with_ultracode_note(system):
     if isinstance(system, list):
         return [*system, note]
     return system
+
+
+def with_ultracode_note(system):
+    """Append the Ultracode note to a request's top-level system field.
+
+    Claude Desktop sends `system` as a string or as a list of content blocks,
+    and omits it entirely on a bare request; all three arrive here.
+    """
+    return append_system_text(system, ULTRACODE_NOTE)
 
 
 def translate_request(payload: dict, settings: dict):

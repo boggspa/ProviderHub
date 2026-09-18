@@ -17,7 +17,7 @@ from gateway import Runtime, Server, rejection_details
 from protocol import (StreamTranslator, TokenCalibration, ULTRACODE_NOTE, apply_mapping_options, compact_conversation, compact_threshold, conversation_units,
                       estimated_tokens, function_name, reported_input_tokens,
                       mapping_options_for, model_catalog, rewrite_context_reminders, tool_id,
-                      translate_request, translate_response, resolve_model, resolve_mapping_slot, stated_context, _effective_context, ultracode_active, with_ultracode_note, mask_effort_rejection)
+                      translate_request, translate_response, resolve_model, resolve_mapping_slot, stated_context, identity_note, with_identity_note, _effective_context, ultracode_active, with_ultracode_note, mask_effort_rejection)
 from hub_config import claude_routes
 from catalogue import build_catalogue, read_observations, route_specs
 
@@ -36,6 +36,16 @@ def prompt(**extra):
     value = {"model": "claude-fable-5", "max_tokens": 64, "messages": [{"role": "user", "content": "hello"}]}
     value.update(extra)
     return value
+
+
+def with_note(runtime, body):
+    """The payload as plan() will see it - identity note included.
+
+    The note is real context: it is added before the estimate is taken, so a
+    test that predicts a threshold or a remaining count has to predict it too.
+    """
+    spec = runtime.settings["_model_specs"][runtime.resolve_route(body["model"])]
+    return {**body, "system": with_identity_note(body.get("system"), spec)}
 
 
 def sized_conversation(turns, chars_per_turn, **extra):
@@ -242,21 +252,54 @@ class ProtocolTests(unittest.TestCase):
         # unsafe answer: a route would claim capacity the account may not own.
         k3 = {"context": None, "context_options": [262144, 1048576]}
         self.assertEqual(_effective_context(k3), 1048576)
-        self.assertEqual(stated_context(k3), ("floor", 262144))
+        # A range, not a bare floor: the floor alone under-claims, because a
+        # larger membership really does have the ceiling, and Kimi publishes
+        # k3-256k separately for anyone who wants the guarantee.
+        self.assertEqual(stated_context(k3), ("range", 262144, 1048576))
         # A published window per tier, with the account reporting neither.
         self.assertEqual(stated_context({"context": 131072, "context_options": [65536, 131072]}),
-                         ("floor", 65536))
+                         ("range", 65536, 131072))
         # One window, however it is spelled, is an exact answer.
-        self.assertEqual(stated_context({"context": 262144}), ("exact", 262144))
+        self.assertEqual(stated_context({"context": 262144}), ("exact", 262144, 262144))
         self.assertEqual(stated_context({"context": None, "context_options": [262144]}),
-                         ("exact", 262144))
+                         ("exact", 262144, 262144))
         self.assertEqual(stated_context({"context": 200000, "context_options": [200000, 200000]}),
-                         ("exact", 200000))
+                         ("exact", 200000, 200000))
         # Nothing sourceable is not a small number, it is no number.
         for spec in ({}, {"context": None}, {"context": 0}, {"context_options": []},
                      {"context": None, "context_options": ["1m"]}):
             with self.subTest(spec=spec):
-                self.assertEqual(stated_context(spec), ("unknown", None))
+                self.assertEqual(stated_context(spec), ("unknown", None, None))
+
+    def test_identity_note_states_what_the_harness_prompt_gets_wrong(self):
+        base = {"id": "kimi/k3", "display_name": "K3", "provider_id": "kimi",
+                "reasoning": True, "effort_modes": ["low", "high", "max"]}
+        ranged = identity_note({**base, "context": None, "context_options": [262144, 1048576]})
+        self.assertIn("You are K3 (Kimi)", ranged)
+        # A window that follows the account is given as a span with the
+        # reliable end named, never as the ceiling alone.
+        self.assertIn("at least 262,144", ranged)
+        self.assertIn("at most 1,048,576", ranged)
+        self.assertIn("lower figure", ranged)
+        exact = identity_note({**base, "context": 262144})
+        self.assertIn("context window is 262,144 tokens", exact)
+        self.assertNotIn("at least", exact)
+        # No number beats an invented one.
+        unknown = identity_note({**base, "context": None})
+        self.assertIn("not published", unknown)
+        self.assertNotIn("0 tokens", unknown)
+        # The ladder is stated rather than the rung the gateway will send,
+        # which is not knowable until the provider builder has run.
+        self.assertIn("low/high/max", ranged)
+        self.assertIn("fixed high setting",
+                      identity_note({**base, "context": 1000, "effort_modes": ["high"]}))
+        self.assertIn("no adjustable reasoning",
+                      identity_note({**base, "context": 1000, "reasoning": False}))
+        # It defers to the harness on conventions while correcting the facts.
+        self.assertIn("follow them", ranged)
+        self.assertIn("this line is the accurate one", ranged)
+        self.assertIsNone(identity_note({}))
+        self.assertIsNone(identity_note(None))
 
     def test_ultracode_note_appends_to_either_system_spelling(self):
         self.assertEqual(with_ultracode_note(None), [{"type": "text", "text": ULTRACODE_NOTE}])
@@ -1050,11 +1093,27 @@ class CompactionPlanTests(unittest.TestCase):
         for detail in ["messages: at least one message is required", ""]:
             self.assertEqual(mask_effort_rejection(detail), detail)
 
+    def test_plan_carries_the_identity_note_except_where_the_prompt_is_not_ours(self):
+        body = prompt(system="House rules.", max_tokens=256)
+        carried = self.runtime.plan(body)["body"]["messages"][0]
+        self.assertEqual(carried["role"], "system")
+        self.assertTrue(carried["content"].startswith("House rules.\n"))
+        self.assertIn("reached through Provider Hub inside the Claude Desktop harness", carried["content"])
+        self.assertEqual(body["system"], "House rules.")
+        # A route asked to send no system prompt at all sends none, and
+        # Desktop's one-token health probe keeps the shape it had.
+        self.runtime.settings["mapping_options"] = {body["model"]: {"omit_system": True, "omit_tools": False}}
+        omitted = self.runtime.plan(body)["body"]["messages"]
+        self.runtime.settings.pop("mapping_options")
+        self.assertNotIn("Provider Hub", json.dumps(omitted))
+        probe = self.runtime.plan(prompt(system=None, max_tokens=1))["body"]["messages"]
+        self.assertNotIn("Provider Hub", json.dumps(probe))
+
     def test_plan_records_output_headroom_clamp(self):
         for spec in self.runtime.settings["_model_specs"].values():
             spec["context"] = 8000
         body = prompt(system="S" * 18000, max_tokens=2000)
-        estimate = estimated_tokens(body)
+        estimate = estimated_tokens(with_note(self.runtime, body))
         self.assertLess(estimate, 8000)
         plan = self.runtime.plan(body)
         note = plan["compatibility"]["output_headroom_clamped"]
@@ -1136,7 +1195,7 @@ class GatewayTests(unittest.TestCase):
     def test_desktop_token_reminders_are_rewritten_before_upstream(self):
         reminder = "<total_tokens>15000000 tokens left</total_tokens>"
         body = prompt(system=reminder, messages=[{"role": "user", "content": "hello"}])
-        remaining = 240000 - estimated_tokens(body)
+        remaining = 240000 - estimated_tokens(with_note(self.runtime, body))
         status, data, _ = self.request("POST", "/v1/messages", body)
         self.assertEqual(status, 200)
         combined = json.dumps(MockMistral.requests[0])
@@ -1283,7 +1342,10 @@ class GatewayTests(unittest.TestCase):
         self.assertGreater(estimate, 40000)
         self.assertLess(estimate, int(240000 * 0.85))
         plain = self.runtime.plan(body)
-        self.assertEqual(len(plain["body"]["messages"]), len(body["messages"]))
+        # Excluding the system message the chat protocol prepends: the point
+        # of the assertion is that no turn was dropped.
+        turns = [message for message in plain["body"]["messages"] if message.get("role") != "system"]
+        self.assertEqual(len(turns), len(body["messages"]))
         self.assertNotIn("auto_compact", plain.get("compatibility", {}))
         self.runtime.settings["mapping_options"] = {
             "claude-fable-5": {"compact_limit": 40000},
