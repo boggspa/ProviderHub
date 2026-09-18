@@ -52,6 +52,39 @@ _HIGH_END_RANKS = ("minimal", "low", "medium", "high", "xhigh", "max")
 # the wire - these providers already drop every rank sent to them.
 _FIXED_REASONING_PLACEHOLDER = "high"
 
+# A route with no reasoning axis at all lands in the identical hole, and the
+# rescue above never caught it because it asks for reasoning first. Measured
+# against 26.908: a projected Mistral Large row - empty ladder, no default -
+# makes Codex send `reasoning: {"effort": "medium"}`, a rank that row never
+# advertised and cannot serve. It is standing on a value persisted from some
+# other model, which is also what the composer chip shows.
+#
+# "none" is this route's real position, not a stand-in: no extra reasoning is
+# the truth for a model that does not reason. It also keeps the row outside
+# _HIGH_END_RANKS, so no Ultra is synthesized for a row whose
+# multi_agent_version is null and whose Ultra would promise a delegation
+# runtime it does not have.
+_NO_REASONING_PLACEHOLDER = "none"
+
+# Only providers that reach the shared chat path, where model_effort() drops a
+# rank a non-reasoning model cannot use (verified: it returns None for every
+# effort value before it validates anything). The native-Responses three
+# police the rank themselves and refuse the turn rather than dropping it -
+# openrouter's _drop_reasoning raises on anything but none - so their rows
+# keep today's shape until that is worked through per provider.
+# Mirrors responses_native.NATIVE_PROVIDERS; a test keeps the two in step
+# rather than importing the gateway into the catalogue projection.
+_NATIVE_RESPONSES_PROVIDERS = frozenset({"grok", "ollama", "openrouter"})
+
+
+def _empty_ladder_placeholder(provider_id, entry):
+    """The one rank to publish for a route that advertises none, or None."""
+    if entry.get("reasoning") is True:
+        return _FIXED_REASONING_PLACEHOLDER
+    if provider_id not in _NATIVE_RESPONSES_PROVIDERS:
+        return _NO_REASONING_PLACEHOLDER
+    return None
+
 
 def _reasoning_levels(provider_id, entry):
     levels = []
@@ -64,11 +97,13 @@ def _reasoning_levels(provider_id, entry):
             "effort": effort,
             "description": _EFFORT_DESCRIPTIONS.get(effort, effort.title() + " reasoning"),
         })
-    if not levels and entry.get("reasoning") is True:
-        levels.append({
-            "effort": _FIXED_REASONING_PLACEHOLDER,
-            "description": _EFFORT_DESCRIPTIONS[_FIXED_REASONING_PLACEHOLDER],
-        })
+    if not levels:
+        placeholder = _empty_ladder_placeholder(provider_id, entry)
+        if placeholder is not None:
+            levels.append({
+                "effort": placeholder,
+                "description": _EFFORT_DESCRIPTIONS[placeholder],
+            })
     return levels
 
 

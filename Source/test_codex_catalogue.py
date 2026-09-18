@@ -276,7 +276,9 @@ class EffortAndFastProjectionTests(unittest.TestCase):
             "mistral/plain-model", reasoning=False, effort_modes=[],
         ))
         row = rows["mistral/plain-model"]
-        self.assertEqual(row["supported_reasoning_levels"], [])
+        # The row publishes the one rank it runs at (see the placeholder test
+        # below) and nothing above it: no Ultra, and so no delegation runtime.
+        self.assertNotIn("ultra", [entry["effort"] for entry in row["supported_reasoning_levels"]])
         self.assertIsNone(row["multi_agent_version"])
         self.assertIsNone(row["multi_agent_reasoning_effort"])
 
@@ -345,6 +347,36 @@ class EffortAndFastProjectionTests(unittest.TestCase):
         ranked = settings(codex_model="mistral/alpha", codex_subagent_rank={"mistral/gamma": 1})
         self.assertNotEqual(catalogue_digest(base, inventory(*models)),
                             catalogue_digest(ranked, inventory(*models)))
+
+    def test_non_reasoning_route_publishes_the_rank_it_actually_runs_at(self):
+        # An empty ladder leaves Codex standing on a rank persisted from some
+        # other model: a projected Mistral Large row makes it ask for "medium",
+        # which that row never advertised. Publishing "none" - the truth for a
+        # model that does not reason - gives it somewhere real to stand.
+        rows = self.projected(model("mistral/large-3", reasoning=False, effort_modes=[]))
+        row = rows["mistral/large-3"]
+        self.assertEqual([entry["effort"] for entry in row["supported_reasoning_levels"]], ["none"])
+        self.assertEqual(row["default_reasoning_level"], "none")
+        # No Ultra and no delegation runtime: "none" sits outside the high-end
+        # ranks Ultra aliases, so the row cannot promise a runtime it lacks.
+        self.assertIsNone(row["multi_agent_version"])
+        self.assertIsNone(row["multi_agent_reasoning_effort"])
+
+    def test_native_responses_routes_keep_their_empty_ladder(self):
+        # Those three police the rank themselves and refuse the turn instead of
+        # dropping it, so a published rank would trade a wrong chip for a dead
+        # route until each is worked through.
+        for route in ("openrouter/base-model", "ollama/base-model", "grok/base-model"):
+            with self.subTest(route=route):
+                rows = self.projected(model(route, reasoning=False, effort_modes=[]))
+                self.assertEqual(rows[route]["supported_reasoning_levels"], [])
+
+    def test_placeholder_provider_split_matches_the_gateway(self):
+        # The projection mirrors the gateway's own list rather than importing
+        # it; drift would silently publish a rank the route then refuses.
+        from codex_catalogue import _NATIVE_RESPONSES_PROVIDERS
+        from responses_native import NATIVE_PROVIDERS
+        self.assertEqual(_NATIVE_RESPONSES_PROVIDERS, NATIVE_PROVIDERS)
 
     def test_fixed_reasoning_route_still_reaches_ultra(self):
         # A provider that runs thinking always-on publishes no rank at all.
