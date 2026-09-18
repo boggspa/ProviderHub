@@ -37,7 +37,7 @@ import io
 import json
 
 from hub_config import split_route
-from responses_tools import tool_name
+from responses_tools import qualified_name, tool_name
 
 
 #: Mirrors the gateway/Responses request-body bound so oversized bodies
@@ -46,10 +46,14 @@ MAX_BODY = 32 * 1024 * 1024
 
 SPAWN_NAMESPACE = "collaboration"
 SPAWN_TOOL = "spawn_agent"
-#: The exact flattened identity our own tool catalogue produces, kept in
+#: The exact flattened identities our own tool catalogue produces, kept in
 #: sync by construction. History items are matched by exact equality only:
-#: substring matching would false-positive on unrelated user tools.
+#: substring matching would false-positive on unrelated user tools. Both
+#: forms are recognised because the preferred flattened name is the bare
+#: leaf and register() only falls back to the qualified form when some
+#: other tool in the same request already claimed it.
 FLATTENED_SPAWN_TOOL = tool_name(SPAWN_NAMESPACE, SPAWN_TOOL)
+QUALIFIED_SPAWN_TOOL = qualified_name(SPAWN_NAMESPACE, SPAWN_TOOL)
 
 #: History item types that record a delegation task flowing down to this
 #: requester. Completion records (*_output) are deliberately excluded: a
@@ -62,7 +66,7 @@ def _is_spawn_tool_reference(namespace, name):
     """True when (namespace, name) identifies our collaboration spawn tool."""
     if namespace == SPAWN_NAMESPACE and name == SPAWN_TOOL:
         return True
-    return namespace is None and name in (SPAWN_TOOL, FLATTENED_SPAWN_TOOL)
+    return namespace is None and name in (SPAWN_TOOL, FLATTENED_SPAWN_TOOL, QUALIFIED_SPAWN_TOOL)
 
 
 def _is_spawn_call(item):

@@ -7,23 +7,64 @@ import re
 from bridge_core import BridgeError
 
 
-def tool_name(namespace, name):
+WIRE_NAME = re.compile(r"[A-Za-z0-9_-]{1,64}")
+
+
+def _check_identity(namespace, name):
     if not isinstance(name, str) or not name:
         raise BridgeError("Function tools need a name.")
     if namespace is not None and (not isinstance(namespace, str) or not namespace):
         raise BridgeError("Tool namespaces need a name.")
-    if namespace is None and re.fullmatch(r"[A-Za-z0-9_-]{1,64}", name):
-        return name
+
+
+def qualified_name(namespace, name):
+    """The collision-proof flattened name: readable prefix plus an identity hash."""
     identity = json.dumps([namespace, name], separators=(",", ":"))
     prefix = re.sub(r"[^A-Za-z0-9_-]", "_", (namespace or "") + "_" + name)[:42]
     return "ph_" + prefix + "_" + hashlib.sha256(identity.encode()).hexdigest()[:16]
 
 
+def tool_name(namespace, name):
+    """The name a namespaced Codex tool should carry on the provider wire.
+
+    Codex's own prompt names these tools the way it declares them - the
+    multi-agent briefing tells the model to "use `spawn_agent`", and the
+    apps briefings name their tools bare. A namespace is structure the
+    Responses function API cannot carry, so it has to be flattened, but
+    flattening is not licence to rename: a model handed
+    `ph_collaboration_spawn_agent_8361b6d8076404de` while its instructions
+    say `spawn_agent` has no callable tool matching anything it was told
+    to call, and simply never delegates. That was the whole of why Ultra
+    stopped spawning sub-agents on every projected route.
+
+    So the leaf name travels as-is when the wire accepts it. The namespace
+    is not lost - flatten_tools already prepends the namespace description
+    to each child - and `mapping` keeps the reverse identity either way, so
+    output_names still restores namespace and name on the way back.
+    Collisions fall back to qualified_name(), which is unique by
+    construction; register() owns that decision because only it can see
+    what the rest of this request already claimed.
+    """
+    _check_identity(namespace, name)
+    if WIRE_NAME.fullmatch(name):
+        return name
+    return qualified_name(namespace, name)
+
+
+def _candidates(namespace, name):
+    """Flattened names to try for one tool, most readable first."""
+    preferred = tool_name(namespace, name)
+    qualified = qualified_name(namespace, name)
+    return (preferred,) if preferred == qualified else (preferred, qualified)
+
+
 def register(mapping, namespace, name):
-    mapped = tool_name(namespace, name)
     identity = {"namespace": namespace, "name": name}
-    existing = mapping.get(mapped)
-    if existing is not None and existing != identity:
+    for mapped in _candidates(namespace, name):
+        existing = mapping.get(mapped)
+        if existing is None or existing == identity:
+            mapping[mapped] = identity
+            return mapped
         # A custom-tool marker for the same provider name wins: the plain
         # function identity describes the same provider-side tool, so a
         # returning custom_tool_call history must not clobber the marker
@@ -31,9 +72,7 @@ def register(mapping, namespace, name):
         if (isinstance(existing, dict) and existing.get("custom")
                 and existing.get("namespace") == namespace and existing.get("name") == name):
             return mapped
-        raise BridgeError("A provider tool name collides after namespace translation.")
-    mapping[mapped] = identity
-    return mapped
+    raise BridgeError("A provider tool name collides after namespace translation.")
 
 
 # Codex advertises apply_patch as a Lark-grammar custom tool, which no
@@ -67,12 +106,16 @@ APPLY_PATCH_FORMAT_GUIDE = (
 
 
 def register_custom(mapping, namespace, name):
-    mapped = tool_name(namespace, name)
     identity = {"namespace": namespace, "name": name, "custom": APPLY_PATCH_TOOL_NAME}
-    if mapped in mapping and mapping[mapped] != identity:
-        raise BridgeError("A provider tool name collides after namespace translation.")
-    mapping[mapped] = identity
-    return mapped
+    for mapped in _candidates(namespace, name):
+        existing = mapping.get(mapped)
+        # The marker replaces a plain identity for the same tool: egress
+        # conversion back to custom_tool_call reads the marker, and both
+        # describe one provider-side tool.
+        if existing is None or existing == identity or existing == {"namespace": namespace, "name": name}:
+            mapping[mapped] = identity
+            return mapped
+    raise BridgeError("A provider tool name collides after namespace translation.")
 
 
 def is_custom_tool(mapping, provider_name):

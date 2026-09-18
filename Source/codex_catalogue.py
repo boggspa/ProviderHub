@@ -31,13 +31,26 @@ _EFFORT_DESCRIPTIONS = {
     "high": "High reasoning",
     "xhigh": "Extra-high reasoning",
     "max": "Maximum reasoning",
-    "ultra": "Ultra reasoning",
+    # The native Ultra row's own wording. The Composer renders it verbatim
+    # beside native rows, and it is the only place the picker says what Ultra
+    # actually buys: the delegation runtime, not just more thinking.
+    "ultra": "Maximum reasoning with automatic task delegation",
 }
 # Ranks below ultra that may head a model's advertised ladder, low to high.
 # Used to synthesize an ultra slider position as an alias for a model's own
 # top advertised rank, so the slider is available even when a provider does
 # not name an ultra level natively.
 _HIGH_END_RANKS = ("minimal", "low", "medium", "high", "xhigh", "max")
+
+# A route whose provider runs its thinking always-on publishes no rank at all.
+# An empty ladder gives Codex nowhere to stand - it persists effort "none" -
+# and because the synthesized Ultra alias only ever aliases an advertised
+# rank, the route could never reach Ultra and so never opt into multi-agent
+# orchestration. One deliberate placeholder rank fixes both: "high" rather
+# than a middle rank, because the model really is thinking at full depth and
+# a lower label would misreport what the provider does. Nothing changes on
+# the wire - these providers already drop every rank sent to them.
+_FIXED_REASONING_PLACEHOLDER = "high"
 
 
 def _reasoning_levels(provider_id, entry):
@@ -50,6 +63,11 @@ def _reasoning_levels(provider_id, entry):
         levels.append({
             "effort": effort,
             "description": _EFFORT_DESCRIPTIONS.get(effort, effort.title() + " reasoning"),
+        })
+    if not levels and entry.get("reasoning") is True:
+        levels.append({
+            "effort": _FIXED_REASONING_PLACEHOLDER,
+            "description": _EFFORT_DESCRIPTIONS[_FIXED_REASONING_PLACEHOLDER],
         })
     return levels
 
@@ -66,10 +84,28 @@ def _ultra_level(entry, levels):
     """
     if "ultra" in {row["effort"] for row in levels}:
         return None
-    advertised = [rank for rank in entry.get("effort_modes") or [] if rank in _HIGH_END_RANKS]
-    if not advertised:
+    # Read the ladder we are about to publish, not the provider's raw
+    # effort_modes: a fixed-reasoning route carries its placeholder rank
+    # only in `levels`, and it is exactly that route that needs Ultra to
+    # become reachable.
+    if not [row for row in levels if row["effort"] in _HIGH_END_RANKS]:
         return None
     return {"effort": "ultra", "description": _EFFORT_DESCRIPTIONS["ultra"]}
+
+
+def _subagent_effort(levels):
+    """The rank Codex should hand a sub-agent: this model's own top rank.
+
+    This was hardcoded to "xhigh", which almost nothing here advertises -
+    Mistral tops out at max, Kimi and DeepSeek at max, Ollama at max - so
+    the catalogue told Codex to spawn children at a rank the same catalogue
+    said the model did not support. Aim for the top and fall back down the
+    model's real ladder (max, then xhigh, then high, ...) instead of naming
+    a rank and hoping, so delegation never resolves to a pair the route
+    would have to deny.
+    """
+    ranked = [row["effort"] for row in levels if row["effort"] in _HIGH_END_RANKS]
+    return max(ranked, key=_HIGH_END_RANKS.index) if ranked else None
 
 
 def _default_reasoning_level(provider_id, entry, efforts):
@@ -281,7 +317,8 @@ def project_codex(settings, inventory):
             # orchestration; the gateway still maps ultra onto the provider's
             # highest advertised reasoning rank at request time.
             "multi_agent_version": "v2" if (entry.get("reasoning") is True and efforts) else None,
-            "multi_agent_reasoning_effort": "xhigh" if (entry.get("reasoning") is True and efforts) else None,
+            "multi_agent_reasoning_effort": (
+                _subagent_effort(levels) if (entry.get("reasoning") is True and efforts) else None),
         }
         # Absence is the only way to say "no search" here. The field takes
         # "text" or "text_and_image" and nothing else - not null, not "none",

@@ -58,17 +58,25 @@ def _credential_revision(value) -> int:
     return value
 
 
+#: One level of delegation by default: a top-level thread may spawn, its
+#: children may not. Unbounded was never a considered choice - the flag
+#: simply had no default - and unbounded is the one setting nobody wants
+#: here, because every grandchild is another full-context streaming request
+#: against the same provider quota. Depth 1 is the shape Ultra is useful in.
+DEFAULT_SPAWN_DEPTH_LIMIT = 1
+
+
 def _spawn_depth_limit(value):
     """Validate the per-provider subagent spawn-depth flag.
 
-    Absent/None leaves delegation untouched, 0 removes the spawn tool
+    Absent/None takes DEFAULT_SPAWN_DEPTH_LIMIT, 0 removes the spawn tool
     from every request on the route, and 1 removes it once the request
     already runs below the top level. Deeper limits are rejected: a
     depth-1 and depth-2 requester are indistinguishable from one
     request's history, so only 0 and 1 have enforceable meanings.
     """
     if value is None:
-        return None
+        return DEFAULT_SPAWN_DEPTH_LIMIT
     if type(value) is not int or value not in (0, 1):
         raise ValueError("spawn_depth_limit must be 0 (no subagent spawning) or 1 (children cannot spawn).")
     return value
@@ -349,9 +357,8 @@ def normalize(value: dict, slots, vibe_model: str, port: int = 11436) -> dict:
         connection["credential_mode"] = _credential_mode(provider_id, mode)
         connection["credential_revision"] = _credential_revision(
             requested.get("credential_revision", baseline["credential_revision"]))
-        depth = _spawn_depth_limit(requested.get("spawn_depth_limit", baseline.get("spawn_depth_limit")))
-        if depth is not None:
-            connection["spawn_depth_limit"] = depth
+        connection["spawn_depth_limit"] = _spawn_depth_limit(
+            requested.get("spawn_depth_limit", baseline.get("spawn_depth_limit")))
         lease = _idle_unload_seconds(provider_id, requested.get("idle_unload_seconds", baseline.get("idle_unload_seconds")))
         if lease is not None:
             connection["idle_unload_seconds"] = lease

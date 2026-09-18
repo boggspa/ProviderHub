@@ -149,11 +149,15 @@ command = "existing-command"
         self.assertEqual(doc["model_provider"], "provider_hub")
         self.assertNotIn("model_context_window", doc)
         self.assertNotIn("model_reasoning_effort", doc)
-        # Multi-agent keys are owned: the selected model advertises v2, so the
-        # subagent defaults and features.multi_agent_v2 are written on activation
-        # and restored to their prior state on restore.
-        self.assertEqual(doc["default_subagent_model"], "grok/grok-4.6")
-        self.assertEqual(doc["default_subagent_reasoning_effort"], "xhigh")
+        # Multi-agent keys are owned: the selected model advertises v2, so
+        # features.multi_agent_v2 is written on activation and restored to its
+        # prior state on restore. The subagent defaults are owned in the other
+        # direction - cleared, never written - because they are resolved once
+        # here while the model is switched in the app, so a pinned target goes
+        # stale the moment the route changes. Cleared, Codex's own rule applies
+        # and a sub-agent inherits the thread's model.
+        self.assertNotIn("default_subagent_model", doc)
+        self.assertNotIn("default_subagent_reasoning_effort", doc)
         self.assertIn("multi_agent_v2", doc["features"])
         self.assertTrue(doc["features"]["multi_agent_v2"])
         self.assertIn('# Preserve my settings and formatting.', updated)

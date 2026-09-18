@@ -253,11 +253,18 @@ class EffortAndFastProjectionTests(unittest.TestCase):
         self.assertEqual(rows["qwen-token-plan/qwen3.8-max"]["default_reasoning_level"], "xhigh")
         self.assertEqual(rows["gemini/gemini-3.8-flash"]["default_reasoning_level"], "medium")
         self.assertEqual(rows["cerebras/gpt-oss-120b"]["service_tiers"], [])
-        # Multi-agent v2 is advertised for every reasoning-capable model with a ladder.
+        # Multi-agent v2 is advertised for every reasoning-capable model with a
+        # ladder, and the sub-agent rank is that model's own top rank rather
+        # than one hardcoded rank most of these never advertise.
+        top_rank = {"mistral/codestral": "high", "kimi/k3": "max",
+                    "qwen-token-plan/qwen3.8-max": "xhigh",
+                    "gemini/gemini-3.8-flash": "high", "cerebras/gpt-oss-120b": "high"}
         for slug in rows:
             with self.subTest(slug=slug):
                 self.assertEqual(rows[slug]["multi_agent_version"], "v2")
-                self.assertEqual(rows[slug]["multi_agent_reasoning_effort"], "xhigh")
+                self.assertEqual(rows[slug]["multi_agent_reasoning_effort"], top_rank[slug])
+                self.assertIn(rows[slug]["multi_agent_reasoning_effort"],
+                              [entry["effort"] for entry in rows[slug]["supported_reasoning_levels"]])
         self.assertEqual(len(rows), 5)
 
     def test_non_reasoning_model_publishes_no_ultra_or_multi_agent(self):
@@ -285,7 +292,20 @@ class EffortAndFastProjectionTests(unittest.TestCase):
         )
         self.assertEqual(row["default_reasoning_level"], "high")
         self.assertEqual(row["multi_agent_version"], "v2")
-        self.assertEqual(row["multi_agent_reasoning_effort"], "xhigh")
+        self.assertEqual(row["multi_agent_reasoning_effort"], "high")
+
+    def test_fixed_reasoning_route_still_reaches_ultra(self):
+        # A provider that runs thinking always-on publishes no rank at all.
+        # Without a placeholder the ladder is empty, Codex stands on "none",
+        # and the Ultra alias - and with it multi-agent orchestration - is
+        # unreachable for the whole route.
+        rows = self.projected(model("mistral/always-thinking", effort_modes=[]))
+        row = rows["mistral/always-thinking"]
+        self.assertEqual([entry["effort"] for entry in row["supported_reasoning_levels"]],
+                         ["high", "ultra"])
+        self.assertEqual(row["default_reasoning_level"], "high")
+        self.assertEqual(row["multi_agent_version"], "v2")
+        self.assertEqual(row["multi_agent_reasoning_effort"], "high")
 
     def test_ultra_is_not_duplicated_when_model_advertises_it(self):
         rows = self.projected(model(
@@ -420,10 +440,11 @@ class ComposerLabelTests(unittest.TestCase):
         )
         narrow = [row for row in rows["mistral/narrow"]["supported_reasoning_levels"]
                   if row["effort"] == "ultra"]
-        self.assertEqual([row["description"] for row in narrow], ["Ultra reasoning"])
+        native_text = "Maximum reasoning with automatic task delegation"
+        self.assertEqual([row["description"] for row in narrow], [native_text])
         native = [row for row in rows["mistral/ultra-native"]["supported_reasoning_levels"]
                   if row["effort"] == "ultra"]
-        self.assertEqual([row["description"] for row in native], ["Ultra reasoning"])
+        self.assertEqual([row["description"] for row in native], [native_text])
 
 
 if __name__ == "__main__":

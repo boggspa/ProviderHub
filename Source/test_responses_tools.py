@@ -4,7 +4,7 @@ import unittest
 
 from bridge_core import BridgeError
 from responses_tools import (describe_tool, flatten_tools, input_names, normalize_custom_calls, output_names, register, repair_apply_patch, extract_patch,
-                             restore_custom_call, split_hosted_search, tool_name)
+                             qualified_name, restore_custom_call, split_hosted_search, tool_name)
 
 
 class ResponsesToolTests(unittest.TestCase):
@@ -91,10 +91,43 @@ class ResponsesToolTests(unittest.TestCase):
         self.assertEqual(describe_tool({"name": "x"}), "tool 'x' of type 'an unnamed type'")
         self.assertEqual(describe_tool("nope"), "a tool of type str")
 
+    def test_namespaced_tools_keep_the_name_the_model_was_told_to_call(self):
+        # Codex's multi-agent briefing names these tools bare ("use
+        # `spawn_agent`"), so renaming them to an opaque hash left the model
+        # with no tool matching anything its instructions mentioned, and it
+        # simply never delegated. The leaf name has to survive flattening.
+        flat, mapping = flatten_tools([{"type": "namespace", "name": "collaboration",
+                                        "description": "Tools for spawning and managing sub-agents.",
+                                        "tools": [{"type": "function", "name": "spawn_agent"},
+                                                  {"type": "function", "name": "send_message"}]}])
+        self.assertEqual([tool["name"] for tool in flat], ["spawn_agent", "send_message"])
+        # The namespace is not lost: it rides the description, and the reverse
+        # mapping still restores it on the way back out.
+        self.assertIn("spawning and managing sub-agents", flat[0]["description"])
+        restored = output_names({"type": "function_call", "name": "spawn_agent"}, mapping)
+        self.assertEqual((restored["namespace"], restored["name"]), ("collaboration", "spawn_agent"))
+
+    def test_a_clashing_leaf_name_falls_back_instead_of_failing_the_turn(self):
+        # Two tools that want the same bare name still both travel: the second
+        # takes the qualified form. Refusing the request instead would fail
+        # every thread on the route over one duplicated leaf.
+        flat, mapping = flatten_tools([
+            {"type": "function", "name": "run"},
+            {"type": "namespace", "name": "ns", "tools": [{"type": "function", "name": "run"}]}])
+        names = [tool["name"] for tool in flat]
+        self.assertEqual(names[0], "run")
+        self.assertEqual(names[1], qualified_name("ns", "run"))
+        self.assertEqual(len(set(names)), 2)
+        for flat_name, (namespace, name) in zip(names, [(None, "run"), ("ns", "run")]):
+            restored = output_names({"type": "function_call", "name": flat_name}, mapping)
+            self.assertEqual((restored.get("namespace"), restored["name"]), (namespace, name))
+
     def test_flat_names_cannot_collide_with_encoded_namespace_names(self):
-        encoded = tool_name("ns", "run")
+        # Both candidate names already taken by unrelated tools is a genuine
+        # collision and still refuses, rather than silently aliasing two tools.
         with self.assertRaises(BridgeError):
-            flatten_tools([{"type": "function", "name": encoded},
+            flatten_tools([{"type": "function", "name": "run"},
+                           {"type": "function", "name": qualified_name("ns", "run")},
                            {"type": "namespace", "name": "ns", "tools": [{"type": "function", "name": "run"}]}])
 
     def test_long_or_nonstandard_names_are_stable_and_reversible(self):

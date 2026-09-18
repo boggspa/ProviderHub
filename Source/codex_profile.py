@@ -201,12 +201,24 @@ class CodexProfile:
                 json.dumps({**original_values, **nested_originals})
             except (TypeError, ValueError) as exc:
                 raise BridgeError("Codex model settings contain unsupported values and were not changed.") from exc
-            # default_subagent_model / default_subagent_reasoning_effort point
-            # the Codex multi-agent runtime at a hub catalogue route so spawned
-            # sub-agents use the configured provider connection instead of an
-            # OpenAI default. Only set when the selected model advertises a
-            # multi-agent runtime, so a non-reasoning route does not inherit a
-            # stale subagent target.
+            # default_subagent_model / default_subagent_reasoning_effort are
+            # deliberately NOT written, and are cleared if an older journal
+            # left them behind. Both are resolved once, here, at activation -
+            # but the model is switched in the app, and an in-app switch never
+            # re-runs activation. So a pinned subagent target goes stale the
+            # moment the user changes route: a thread running DeepSeek would
+            # keep spawning the Mistral model that happened to be selected
+            # when the harness was prepared.
+            #
+            # Omitting them is not a loss of control. Codex's own spawn_agent
+            # contract is "inherited parent model is preferred", so with no
+            # default the children of a Mistral thread are Mistral and the
+            # children of a DeepSeek thread are DeepSeek - which is what a
+            # pinned default was trying and failing to express. The model may
+            # still name a different route per sub-agent through spawn_agent's
+            # `model` argument; Codex builds that override list from this
+            # catalogue (its top rows by `priority`) and states each route's
+            # supported efforts alongside it.
             catalog_models = {model["slug"]: model for model in catalog["models"]}
             selected_model = catalog_models.get(selected, {})
             multi_agent = selected_model.get("multi_agent_version") is not None
@@ -225,9 +237,6 @@ class CodexProfile:
             # (the model's top advertised rank, not a stale OpenAI selection).
             # The user's prior value is saved in the journal and restored on
             # quit, so the original selection returns when the hub deactivates.
-            if multi_agent:
-                applied["default_subagent_model"] = selected
-                applied["default_subagent_reasoning_effort"] = selected_model.get("multi_agent_reasoning_effort")
             # Inject the per-model auto-compact threshold so Claude Desktop
             # compacts at the catalogue's 85%-of-context boundary instead of
             # falling back to the provider-wide default (or the full window).

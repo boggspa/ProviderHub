@@ -243,9 +243,12 @@ class FilterMiddlewareTests(unittest.TestCase):
 
 
 class SpawnDepthSettingsTests(unittest.TestCase):
-    def test_default_absent(self):
+    def test_default_is_one_level_of_delegation(self):
+        # Unbounded was never chosen, only unset, and it is the one setting
+        # nobody wants: every grandchild is another full-context streaming
+        # request against the same provider quota.
         settings = normalize({}, SLOTS, "mistral-medium-2508")
-        self.assertNotIn("spawn_depth_limit", settings["providers"]["mistral"])
+        self.assertEqual(settings["providers"]["mistral"]["spawn_depth_limit"], 1)
 
     def test_zero_and_one_preserved(self):
         for value in (0, 1):
