@@ -311,6 +311,7 @@ final class BridgeModel: ObservableObject {
         mine.codex_apply_patch_exclude = savedSettings.codex_apply_patch_exclude
         mine.codex_accent_slider = savedSettings.codex_accent_slider
         mine.codex_hide_usage_banner = savedSettings.codex_hide_usage_banner
+        mine.codex_subagent_rank = savedSettings.codex_subagent_rank
         if mine == savedSettings { return .codexOnly }
         var prefsOnly = mine
         prefsOnly.auto_stop = savedSettings.auto_stop
@@ -327,6 +328,7 @@ final class BridgeModel: ObservableObject {
             || settings.codex_apply_patch_exclude != savedSettings.codex_apply_patch_exclude
             || settings.codex_accent_slider != savedSettings.codex_accent_slider
             || settings.codex_hide_usage_banner != savedSettings.codex_hide_usage_banner
+            || settings.codex_subagent_rank != savedSettings.codex_subagent_rank
         return codexChanged ? .mixed : .claudeRouting
     }
     var routeOptions: [String] {

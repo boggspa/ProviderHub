@@ -138,6 +138,27 @@ class SettingsMigrationTests(unittest.TestCase):
         self.assertEqual(
             without_default["codex_catalogue"], ["mistral/mistral-small-4"])
 
+    def test_codex_subagent_ranks_are_optional_qualified_and_bounded(self):
+        self.assertIsNone(defaults(SLOTS, "mistral-test")["codex_subagent_rank"])
+        self.assertIsNone(normalize({}, SLOTS, "mistral-test")["codex_subagent_rank"])
+
+        normalized = normalize(
+            {"codex_subagent_rank": {"mistral/mistral-small-4": 1,
+                                     "ollama/deepseek-v4-flash:cloud": 5}},
+            SLOTS, "mistral-test")
+        self.assertEqual(normalized["codex_subagent_rank"],
+                         {"mistral/mistral-small-4": 1, "ollama/deepseek-v4-flash:cloud": 5})
+        # An empty mapping is the same statement as no mapping.
+        self.assertIsNone(normalize({"codex_subagent_rank": {}}, SLOTS, "mistral-test")["codex_subagent_rank"])
+
+        # 0 and 6 are outside the pool, and True is an int in Python but not a
+        # rank anyone typed.
+        for ranks in ({"mistral/a": 0}, {"mistral/a": 6}, {"mistral/a": -1},
+                      {"mistral/a": "1"}, {"mistral/a": 1.0}, {"mistral/a": True},
+                      ["mistral/a"], "mistral/a"):
+            with self.subTest(ranks=ranks), self.assertRaises(ValueError):
+                normalize({"codex_subagent_rank": ranks}, SLOTS, "mistral-test")
+
     def test_codex_chatgpt_account_defaults_off_and_must_be_boolean(self):
         self.assertIs(defaults(SLOTS, "mistral-test")["codex_chatgpt_account"], False)
         self.assertIs(normalize({}, SLOTS, "mistral-test")["codex_chatgpt_account"], False)

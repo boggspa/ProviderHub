@@ -181,7 +181,7 @@ class CuratedCatalogueProjectionTests(unittest.TestCase):
         self.assertNotEqual(catalogue_digest({**base, "codex_apply_patch_all": True}, stock),
                             catalogue_digest(base, stock))
 
-    def test_digest_tracks_selection_but_not_the_default(self):
+    def test_digest_tracks_selection_and_the_default(self):
         stock = inventory(
             model("mistral/a-model"), model("mistral/b-model"),
             model("ollama/z-model"),
@@ -190,9 +190,13 @@ class CuratedCatalogueProjectionTests(unittest.TestCase):
             codex_model="mistral/a-model",
             codex_catalogue=["mistral/a-model", "ollama/z-model"],
         )
+        # The default used to be excluded from the digest, because it only
+        # moved rows around in the picker. It takes the first sub-agent slot
+        # now, so reusing a snapshot across a change to it would leave the
+        # delegation pool naming the route the user just moved away from.
         moved_default = catalogue_digest(
             {**base, "codex_model": "ollama/z-model"}, stock)
-        self.assertEqual(moved_default, catalogue_digest(base, stock))
+        self.assertNotEqual(moved_default, catalogue_digest(base, stock))
         narrowed = catalogue_digest({**base, "codex_catalogue": ["mistral/a-model"]}, stock)
         self.assertNotEqual(narrowed, catalogue_digest(base, stock))
 
@@ -293,6 +297,54 @@ class EffortAndFastProjectionTests(unittest.TestCase):
         self.assertEqual(row["default_reasoning_level"], "high")
         self.assertEqual(row["multi_agent_version"], "v2")
         self.assertEqual(row["multi_agent_reasoning_effort"], "high")
+
+    def pool(self, ranks, *models):
+        """The routes Codex would offer as sub-agent overrides, in order."""
+        chosen = settings(codex_model=models[0]["id"], codex_subagent_rank=ranks)
+        rows = project_codex(chosen, inventory(*models))["models"]
+        rows.sort(key=lambda row: row["priority"])
+        return [row["slug"] for row in rows[:5]]
+
+    def test_subagent_ranks_choose_the_delegation_pool(self):
+        # priority is not only picker order: Codex offers its top five rows as
+        # sub-agent model overrides, so a rank here decides who a thread on
+        # Ultra may delegate to.
+        models = [model("mistral/alpha"), model("mistral/beta"), model("mistral/gamma"),
+                  model("mistral/delta"), model("mistral/epsilon"), model("mistral/zeta")]
+        self.assertEqual(
+            self.pool({"mistral/zeta": 1, "mistral/delta": 2}, *models)[:2],
+            ["mistral/zeta", "mistral/delta"],
+        )
+
+    def test_an_unranked_default_still_travels_with_the_pool(self):
+        # The default does not need the first seat - measured against the
+        # installed runtime, a full pool arrives with it ranked below its
+        # peers - but it should still sit ahead of the unranked remainder.
+        models = [model("mistral/alpha"), model("mistral/beta"), model("mistral/gamma")]
+        pool = self.pool({"mistral/gamma": 1}, *models)
+        self.assertEqual(pool[:3], ["mistral/gamma", "mistral/alpha", "mistral/beta"])
+
+    def test_unranked_catalogue_keeps_the_default_first(self):
+        # Nothing changes for anyone who never opens the control.
+        models = [model("mistral/zulu"), model("mistral/alpha"), model("mistral/bravo")]
+        self.assertEqual(self.pool(None, *models)[0], "mistral/zulu")
+
+    def test_duplicate_ranks_resolve_by_name_rather_than_dropping_a_route(self):
+        # Two routes can hold the same rank. Both still travel, ordered by
+        # display name, because refusing the catalogue over it would take the
+        # whole Codex harness down for a UI slip.
+        models = [model("mistral/alpha"), model("mistral/yankee"), model("mistral/xray")]
+        pool = self.pool({"mistral/yankee": 2, "mistral/xray": 2}, *models)
+        self.assertEqual(pool[:3], ["mistral/xray", "mistral/yankee", "mistral/alpha"])
+
+    def test_ranks_reach_the_catalogue_digest(self):
+        # priority carries runtime meaning now, so a rank change has to force a
+        # new snapshot rather than silently reusing one with a stale pool.
+        models = [model("mistral/alpha"), model("mistral/beta"), model("mistral/gamma")]
+        base = settings(codex_model="mistral/alpha")
+        ranked = settings(codex_model="mistral/alpha", codex_subagent_rank={"mistral/gamma": 1})
+        self.assertNotEqual(catalogue_digest(base, inventory(*models)),
+                            catalogue_digest(ranked, inventory(*models)))
 
     def test_fixed_reasoning_route_still_reaches_ultra(self):
         # A provider that runs thinking always-on publishes no rank at all.

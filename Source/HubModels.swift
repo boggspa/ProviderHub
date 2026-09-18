@@ -122,6 +122,11 @@ struct RouteSettings: Codable, Equatable {
     var codex_apply_patch_all = false
     var codex_apply_patch: [String]?
     var codex_apply_patch_exclude: [String]?
+    // Which routes Codex offers as sub-agent model overrides, rank 1 first.
+    // Codex reads one priority per catalogue row and takes the top five, so
+    // this is a position in one global ordering rather than a per-model
+    // allocation; a route with no rank is simply not offered.
+    var codex_subagent_rank: [String: Int]?
 }
 struct ModelEntry: Decodable, Identifiable {
     var id: String

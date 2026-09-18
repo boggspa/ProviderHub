@@ -33,6 +33,15 @@ MODEL_VARIANT_FIELDS = (
     "multi_agent_version", "multi_agent_reasoning_effort",
 )
 
+#: How many catalogue rows Codex offers as sub-agent model overrides. It reads
+#: one `priority` per row and takes this many from the top - measured against
+#: the installed 26.908 runtime by reordering priority and watching the offered
+#: set follow, not documented anywhere. The pool is therefore one global
+#: ordering: nothing in the wire format can say "Mistral may delegate here but
+#: Kimi may not". Lives here rather than in codex_catalogue because settings
+#: validation needs it and the import runs the other way.
+SUBAGENT_POOL_SIZE = 5
+
 
 def _default_credential_mode(provider_id: str) -> str:
     if provider_id == "mistral":
@@ -309,7 +318,8 @@ def defaults(slots, vibe_model: str, port: int = 11436) -> dict:
             "codex_catalogue": None, "codex_chatgpt_account": False, "codex_apply_patch_all": False,
             "claude_features": {key: False for key in CLAUDE_FEATURE_KEYS},
             "claude_catalogue": None, "claude_code_settings": True, "claude_workflows": False,
-            "codex_accent_slider": False, "codex_hide_usage_banner": False}
+            "codex_accent_slider": False, "codex_hide_usage_banner": False,
+            "codex_subagent_rank": None}
 
 
 def normalize(value: dict, slots, vibe_model: str, port: int = 11436) -> dict:
@@ -378,6 +388,23 @@ def normalize(value: dict, slots, vibe_model: str, port: int = 11436) -> dict:
         result["codex_catalogue"] = selected
         if result["codex_model"] is not None and result["codex_model"] not in selected:
             raise ValueError("Choose the Codex default model from the catalogue selection.")
+    # codex_subagent_rank picks which routes Codex offers as sub-agent model
+    # overrides. Codex reads one `priority` per catalogue row and offers the
+    # top SUBAGENT_POOL_SIZE of them, so the pool is necessarily one global
+    # ordering - there is no per-parent dimension to express, and a rank here
+    # is a position in that single list rather than an independent allocation.
+    # Rank 1 is the first seat offered; absent means the route is not offered.
+    ranks = value.get("codex_subagent_rank")
+    if ranks is not None:
+        if not isinstance(ranks, dict):
+            raise ValueError("The Codex sub-agent ranks must be a mapping of model route to rank.")
+        ranked = {}
+        for route, rank in ranks.items():
+            # bool is an int subclass and would silently rank a route at 1.
+            if type(rank) is not int or not 1 <= rank <= SUBAGENT_POOL_SIZE:
+                raise ValueError(f"A Codex sub-agent rank must be a whole number from 1 to {SUBAGENT_POOL_SIZE}.")
+            ranked[qualify(*split_route(route))] = rank
+        result["codex_subagent_rank"] = ranked or None
     # codex_apply_patch qualifies routes for the JSON-wrapped apply_patch
     # projection one by one; codex_apply_patch_exclude holds routes back once
     # codex_apply_patch_all switches the projection on for the whole

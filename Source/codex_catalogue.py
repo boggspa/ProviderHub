@@ -4,7 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 
-from hub_config import MODEL_VARIANT_FIELDS, connection_signature, split_route
+from hub_config import MODEL_VARIANT_FIELDS, SUBAGENT_POOL_SIZE, connection_signature, split_route
 from catalogue import fits_desktop_baseline
 from providers import PROVIDERS
 
@@ -334,17 +334,33 @@ def project_codex(settings, inventory):
         model["display_name"] = label
     models.sort(key=lambda model: (model["display_name"].casefold(), model["slug"]))
     selected = settings.get("codex_model")
-    for index, model in enumerate(models):
-        model["priority"] = 0 if model["slug"] == selected else index + 1
+    # priority is not only picker order: Codex offers its top SUBAGENT_POOL_SIZE
+    # rows as sub-agent model overrides, so this ordering decides which routes a
+    # thread may delegate to. Ranked routes take the head of the list in rank
+    # order; ties and gaps resolve by display name so the result is stable
+    # rather than rejected. With no ranks set the order is as it always was -
+    # the selected default first, then alphabetical.
+    ranks = settings.get("codex_subagent_rank") or {}
+    ordered = sorted(models, key=lambda model: (
+        ranks.get(model["slug"], SUBAGENT_POOL_SIZE + 1),
+        model["slug"] != selected,
+        model["display_name"].casefold(),
+        model["slug"],
+    ))
+    for index, model in enumerate(ordered):
+        model["priority"] = index
     return {"models": models, "excluded": excluded}
 
 
 def catalogue_digest(settings, inventory):
     projected = project_codex(settings, inventory)
-    # The selected default affects picker ordering, not runtime routing. Both
-    # desktop harnesses can share an existing snapshot when only it changes.
-    for model in projected["models"]:
-        model.pop("priority", None)
+    # priority used to be dropped here, on the grounds that the selected
+    # default only moved rows around in the picker and both desktop harnesses
+    # could share a snapshot when nothing else changed. It is load-bearing now:
+    # Codex offers its top SUBAGENT_POOL_SIZE rows as sub-agent targets, so the
+    # ordering decides what a thread may delegate to. Reusing a snapshot across
+    # a change to it would leave the pool naming routes the settings no longer
+    # choose, which costs a cheap rewrite to avoid.
     material = {"catalogue": projected, "planning": {
         entry["id"]: {key: entry.get(key) for key in MODEL_VARIANT_FIELDS}
         for entry in inventory.get("models", [])

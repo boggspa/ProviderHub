@@ -216,6 +216,14 @@ struct CodexPage: View {
         list.removeAll { $0 == route }
         model.settings.codex_catalogue = list
         if model.settings.codex_model == route { model.settings.codex_model = list.first }
+        // A rank left behind on a route that is no longer in the catalogue is
+        // invisible here and would come back the moment the route is re-added.
+        pruneRanks(to: list)
+    }
+
+    func pruneRanks(to routes: [String]) {
+        let kept = subagentRanks.filter { routes.contains($0.key) }
+        model.settings.codex_subagent_rank = kept.isEmpty ? nil : kept
     }
 
     var applyPatchExclusionNote: String {
@@ -231,6 +239,52 @@ struct CodexPage: View {
     func clearCatalogue() {
         guard let keep = curatedRoutes.contains(model.settings.codex_model ?? "") ? model.settings.codex_model : curatedRoutes.first else { return }
         model.settings.codex_catalogue = [keep]
+        pruneRanks(to: [keep])
+    }
+
+    // Codex offers its top `subagentPoolSize` catalogue rows as sub-agent
+    // model overrides. That is one global ordering, not a per-model setting:
+    // nothing in the wire format can say a route may delegate to one peer but
+    // not another, so a rank here is a seat in the single list everything
+    // shares.
+    static let subagentPoolSize = 5
+
+    var subagentRanks: [String: Int] { model.settings.codex_subagent_rank ?? [:] }
+
+    /// Ranked routes in the order Codex will see them.
+    var rankedOrder: [String] {
+        curatedRoutes.enumerated()
+            .filter { subagentRanks[$0.element] != nil }
+            .sorted { left, right in
+                let lhs = subagentRanks[left.element] ?? Self.subagentPoolSize + 1
+                let rhs = subagentRanks[right.element] ?? Self.subagentPoolSize + 1
+                if lhs != rhs { return lhs < rhs }
+                return left.offset < right.offset
+            }.map(\.element)
+    }
+
+    /// The routes that actually reach Codex, so the UI never implies more
+    /// seats than exist when ranks are duplicated or spread past the cut.
+    var offeredRoutes: Set<String> { Set(rankedOrder.prefix(Self.subagentPoolSize)) }
+
+    var duplicatedRanks: Set<Int> {
+        var counts: [Int: Int] = [:]
+        for rank in subagentRanks.values { counts[rank, default: 0] += 1 }
+        return Set(counts.filter { $0.value > 1 }.keys)
+    }
+
+    func setRank(_ route: String, _ rank: Int?) {
+        var ranks = subagentRanks
+        if let rank { ranks[route] = rank } else { ranks.removeValue(forKey: route) }
+        model.settings.codex_subagent_rank = ranks.isEmpty ? nil : ranks
+    }
+
+    func rankNote(_ route: String) -> String {
+        guard let rank = subagentRanks[route] else { return "" }
+        if !offeredRoutes.contains(route) {
+            return "past the \(Self.subagentPoolSize)-model cut — not offered"
+        }
+        return duplicatedRanks.contains(rank) ? "shares rank \(rank) — ordered by name" : ""
     }
 
     var body: some View {
@@ -357,13 +411,28 @@ struct CodexPage: View {
         VStack(alignment: .leading, spacing: 8) {
             Text("\(curatedRoutes.count) model\(curatedRoutes.count == 1 ? "" : "s") will appear in Codex’s picker.")
                 .font(.caption).foregroundStyle(.secondary)
+            Text("Sub-agent rank picks which models Codex offers when a thread on Ultra delegates. It takes the top \(Self.subagentPoolSize); an unranked route is left out, and a sub-agent with no override inherits its thread's model either way.")
+                .font(.caption).foregroundStyle(.secondary)
             ForEach(curatedRoutes, id: \.self) { route in
                 HStack(spacing: 10) {
                     VStack(alignment: .leading, spacing: 3) {
                         Text(model.modelLabel(route)).font(.system(size: 12, weight: .medium)).lineLimit(1)
                         Text(model.modelFacts(route)).font(.system(size: 9)).foregroundStyle(.secondary)
+                        if !rankNote(route).isEmpty {
+                            Text(rankNote(route)).font(.system(size: 9)).foregroundStyle(.orange)
+                        }
                     }
                     Spacer()
+                    Picker("", selection: Binding(
+                        get: { subagentRanks[route] ?? 0 },
+                        set: { setRank(route, $0 == 0 ? nil : $0) }
+                    )) {
+                        Text("—").tag(0)
+                        ForEach(1...Self.subagentPoolSize, id: \.self) { rank in Text("\(rank)").tag(rank) }
+                    }
+                    .labelsHidden().pickerStyle(.menu).frame(width: 62)
+                    .disabled(model.busy)
+                    .help("Sub-agent rank: 1 is offered first, — is not offered.")
                     Button { removeRoute(route) } label: { Image(systemName: "minus.circle").foregroundStyle(.secondary) }
                         .buttonStyle(.plain)
                         .disabled(curatedRoutes.count <= 1 || model.busy)
