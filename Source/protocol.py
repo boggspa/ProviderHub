@@ -224,6 +224,33 @@ def _effective_context(spec: dict) -> int | None:
     return None
 
 
+def stated_context(spec: dict):
+    """What can honestly be claimed about a route's context window.
+
+    Returns one of ("exact", tokens), ("floor", tokens) or ("unknown", None).
+
+    _effective_context answers a different question - how much room to plan
+    for - and resolves an ambiguous route by taking the largest window it
+    might have. That is the right bias for compaction, which fails safe by
+    trimming early, and the wrong one for telling a model what it has: an
+    account-dependent route would be told the ceiling and would plan around
+    capacity it may not own. K3 is the live case, carrying
+    context_options [262144, 1048576] because the window follows the
+    membership, and Cerebras publishes one window per tier while reporting
+    neither. Both resolve to a floor here and to a maximum there, on purpose.
+    """
+    options = spec.get("context_options") if isinstance(spec, dict) else None
+    ranked = sorted({value for value in (options or []) if type(value) is int and value > 0})
+    if len(ranked) > 1:
+        return "floor", ranked[0]
+    context = spec.get("context") if isinstance(spec, dict) else None
+    if type(context) is int and context > 0:
+        return "exact", context
+    if ranked:
+        return "exact", ranked[0]
+    return "unknown", None
+
+
 def model_catalog(settings: dict):
     rows, seen = [], set()
     catalogue = claude_catalogue_rows(settings)

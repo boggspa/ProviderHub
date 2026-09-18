@@ -457,6 +457,11 @@ _CEREBRAS_PUBLIC_MODELS_URL = "https://api.cerebras.ai/public/v1/models"
 _CEREBRAS_MODEL_METADATA = {
     "gpt-oss-120b": {
         "context": 131072,
+        # Cerebras publishes one window per tier - 65,536 on the free trial,
+        # 131,072 on a paid key - and its account endpoint reports neither, so
+        # which applies here is not known. Both are recorded so a caller can
+        # say the floor rather than assume the ceiling.
+        "context_options": [65536, 131072],
         "max_output": 40960,
         "tools": True,
         "vision": False,
@@ -473,6 +478,7 @@ _CEREBRAS_MODEL_METADATA = {
     },
     "qwen-3.8-27b": {
         "context": 131072,
+        "context_options": [65536, 131072],
         "max_output": 40960,
         "vision": True,
         "reasoning": True,
@@ -989,6 +995,11 @@ def _cerebras_entry(card: dict, public_card: dict | None, evidence: str) -> dict
         identifier,
         display_name=merged.get("name") if isinstance(merged.get("name"), str) else identifier,
         context=context,
+        # Only while the account itself has told us nothing: a reported window
+        # is this key's actual window and settles the question. Omitted rather
+        # than nulled, so a route with one known window carries no key at all.
+        **({"context_options": list(metadata["context_options"])}
+           if reported_context is None and metadata.get("context_options") else {}),
         tools=tools,
         vision=vision,
         reasoning=reasoning,

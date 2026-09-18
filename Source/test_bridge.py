@@ -17,7 +17,7 @@ from gateway import Runtime, Server, rejection_details
 from protocol import (StreamTranslator, TokenCalibration, ULTRACODE_NOTE, apply_mapping_options, compact_conversation, compact_threshold, conversation_units,
                       estimated_tokens, function_name, reported_input_tokens,
                       mapping_options_for, model_catalog, rewrite_context_reminders, tool_id,
-                      translate_request, translate_response, resolve_model, resolve_mapping_slot, ultracode_active, with_ultracode_note, mask_effort_rejection)
+                      translate_request, translate_response, resolve_model, resolve_mapping_slot, stated_context, _effective_context, ultracode_active, with_ultracode_note, mask_effort_rejection)
 from hub_config import claude_routes
 from catalogue import build_catalogue, read_observations, route_specs
 
@@ -234,6 +234,29 @@ class ProtocolTests(unittest.TestCase):
         typed_again = prompt(messages=skill["messages"] + [
             {"role": "assistant", "content": "done"}, {"role": "user", "content": "thanks"}])
         self.assertFalse(ultracode_active(typed_again))
+
+    def test_stated_context_says_the_floor_where_the_window_follows_the_account(self):
+        # _effective_context answers "how much room to plan for" and takes the
+        # ceiling, which fails safe for compaction. stated_context answers
+        # "what can this model be told it has", where the ceiling is the
+        # unsafe answer: a route would claim capacity the account may not own.
+        k3 = {"context": None, "context_options": [262144, 1048576]}
+        self.assertEqual(_effective_context(k3), 1048576)
+        self.assertEqual(stated_context(k3), ("floor", 262144))
+        # A published window per tier, with the account reporting neither.
+        self.assertEqual(stated_context({"context": 131072, "context_options": [65536, 131072]}),
+                         ("floor", 65536))
+        # One window, however it is spelled, is an exact answer.
+        self.assertEqual(stated_context({"context": 262144}), ("exact", 262144))
+        self.assertEqual(stated_context({"context": None, "context_options": [262144]}),
+                         ("exact", 262144))
+        self.assertEqual(stated_context({"context": 200000, "context_options": [200000, 200000]}),
+                         ("exact", 200000))
+        # Nothing sourceable is not a small number, it is no number.
+        for spec in ({}, {"context": None}, {"context": 0}, {"context_options": []},
+                     {"context": None, "context_options": ["1m"]}):
+            with self.subTest(spec=spec):
+                self.assertEqual(stated_context(spec), ("unknown", None))
 
     def test_ultracode_note_appends_to_either_system_spelling(self):
         self.assertEqual(with_ultracode_note(None), [{"type": "text", "text": ULTRACODE_NOTE}])
