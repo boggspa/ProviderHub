@@ -344,14 +344,46 @@ _MIMO_MODELS = [
 ]
 
 _DEEPSEEK_DOCS = "https://api-docs.deepseek.com/quick_start/pricing/"
+#: Where a model's publisher documents a context window, it supersedes what
+#: the local tag declares. An Ollama tag reports the GGUF's rope ceiling,
+#: which is an upper bound on what the weights can address rather than the
+#: window the publisher serves - Ollama's own pages show the split, with the
+#: cloud tag of Devstral Small 2 reading 256K while the local tag of the same
+#: model claims 384K. Keyed by family (the part before the tag), which holds
+#: for these three because each is a single model; a family whose tags really
+#: do differ would need per-tag keys.
+_OLLAMA_PUBLISHED_CONTEXT = {
+    "north-mini-code-1.0": (262144, "https://docs.cohere.com/docs/models"),
+    "devstral-small-2": (262144, "https://docs.mistral.ai/models/devstral-small-2-25-12"),
+    # Ollama's page reads "512K", which is 524288 under its own /1024 display;
+    # the 512000 stored here was that figure mis-transcribed, and it collides
+    # with MiniMax's documented maximum OUTPUT.
+    "minimax-m3": (524288, "https://platform.minimax.io/docs/guides/text-generation"),
+}
+
+
+def _published_ollama_context(identifier: str, declared):
+    """The publisher's window for an Ollama tag, where one is documented."""
+    published = _OLLAMA_PUBLISHED_CONTEXT.get(identifier.split(":", 1)[0].casefold())
+    if published is None:
+        return declared, None
+    return published
+
+
 _DEEPSEEK_MODEL_METADATA = {
     "deepseek-flash": {
+        # DeepSeek's own config.json, max_position_embeddings. The Ollama
+        # route to the same weights already asserted this; the direct route
+        # asserted nothing, so one model answered two different windows.
+        "context": 1048576,
+        "max_output": 393216,
         "tools": True,
         "vision": True,
         "reasoning": True,
         "effort_modes": ["none", "low", "high", "max"],
     },
     "deepseek-v4-pro": {
+        "context": 1048576,
         "tools": True,
         "vision": False,
         "reasoning": True,
@@ -398,6 +430,15 @@ _MUSE_MODEL_METADATA = {
         "reasoning_history": "native",
         "metadata_evidence": _MUSE_REASONING_DOCS,
     },
+    # The contributor tier is the same model on a different entitlement, and
+    # Meta documents the same window for it. Discovery returned context null
+    # here, so the route carried no window at all while its standard-tier
+    # sibling carried 1M.
+    "muse-spark-1.3-contributor": {
+        "context": 1048576,
+        "max_output": 131072,
+        "metadata_evidence": "https://developer.meta.com/ai/models/muse-spark/",
+    },
 }
 
 # Meta's general /v1/models list also returns these exact image-generation and
@@ -415,8 +456,8 @@ _CEREBRAS_PUBLIC_DOCS = "https://inference-docs.cerebras.ai/api-reference/models
 _CEREBRAS_PUBLIC_MODELS_URL = "https://api.cerebras.ai/public/v1/models"
 _CEREBRAS_MODEL_METADATA = {
     "gpt-oss-120b": {
-        "context": 131000,
-        "max_output": 40000,
+        "context": 131072,
+        "max_output": 40960,
         "tools": True,
         "vision": False,
         "reasoning": True,
@@ -861,6 +902,7 @@ def _ollama_models(raw: dict, connection: dict, api_key: str | None, fetch) -> t
             "The daemon's effective runtime context is not reported by /api/show and may be lower than the model maximum."
         )
         details = show.get("details") if isinstance(show.get("details"), dict) else card.get("details")
+        context, published_evidence = _published_ollama_context(identifier, context)
         models.append(_catalogue_entry(
             identifier,
             display_name=card.get("name") if isinstance(card.get("name"), str) else identifier,
@@ -871,9 +913,10 @@ def _ollama_models(raw: dict, connection: dict, api_key: str | None, fetch) -> t
             effort_modes=ollama_effort_modes(identifier, ("thinking" in capabilities) if capabilities is not None else None),
             fast_mode=False,
             source="ollama_daemon",
-            evidence=show_plan["url"],
+            evidence=published_evidence or show_plan["url"],
             details=copy.deepcopy(details) if isinstance(details, dict) else {},
-            context_kind="model_declared_maximum" if context is not None else "unknown",
+            context_kind=("publisher_documented" if published_evidence
+                          else "model_declared_maximum" if context is not None else "unknown"),
             runtime_context=None,
             capability_source="ollama_api_show" if capabilities is not None else "unknown",
             warnings=per_model_warnings,

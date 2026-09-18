@@ -34,8 +34,8 @@ class CerebrasOrgLimitsTests(unittest.TestCase):
         by_id = {model["id"]: model for model in discover(
             "cerebras", {}, "secret", transport=transport,
         )["models"]}
-        self.assertEqual(by_id["gpt-oss-120b"]["context"], 131000)
-        self.assertEqual(by_id["gpt-oss-120b"]["max_output"], 40000)
+        self.assertEqual(by_id["gpt-oss-120b"]["context"], 131072)
+        self.assertEqual(by_id["gpt-oss-120b"]["max_output"], 40960)
         self.assertFalse(by_id["gpt-oss-120b"]["vision"])
         self.assertEqual(by_id["gemma-4-31b"]["context"], 131072)
         self.assertEqual(by_id["gemma-4-31b"]["max_output"], 40000)

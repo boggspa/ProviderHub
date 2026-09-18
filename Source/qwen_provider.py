@@ -33,6 +33,15 @@ MODEL_ROWS = (
     ("qwen3.6-plus", "Qwen 3.6 Plus", True, ["none", "high"]),
     ("qwen3.6-flash", "Qwen 3.6 Flash", True, ["none", "high"]),
 )
+#: Alibaba publishes a COMBINED input+output window for these routes, so the
+#: first figure is not an input budget: qwen3.8-max is 1,000,000 combined with
+#: 991,808 available to input. The combined number stays the model's context
+#: because that is what it is, and the input ceiling is recorded beside it for
+#: anything that needs to state what the model can actually be given.
+CATALOGUE_INPUT_LIMITS = {
+    "qwen3.8-max": 991808,
+    "qwen3.7-max": 991808,
+}
 CATALOGUE_LIMITS = {
     "qwen3.8-max": (1000000, 131072),
     "qwen3.7-max": (1000000, 131072),
@@ -58,6 +67,7 @@ def catalogue():
         "id": identifier, "canonical_id": identifier, "display_name": name,
         "aliases": [identifier], "context": CATALOGUE_LIMITS.get(identifier, (None, None))[0],
         "max_output": CATALOGUE_LIMITS.get(identifier, (None, None))[1],
+        "max_input": CATALOGUE_INPUT_LIMITS.get(identifier),
         "context_kind": "catalogue_snapshot" if identifier in CATALOGUE_LIMITS else "unknown",
         "limit_evidence": copy.deepcopy(LIMIT_EVIDENCE) if identifier in CATALOGUE_LIMITS else None,
         "tools": True, "vision": vision,

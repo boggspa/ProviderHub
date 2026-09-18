@@ -383,6 +383,35 @@ class DiscoveryTests(unittest.TestCase):
         self.assertEqual(coder["context"], 1048576)
         self.assertTrue(any("embed-model" in warning and "omitted" in warning for warning in result["warnings"]))
 
+    def test_a_publishers_window_supersedes_an_ollama_declared_maximum(self):
+        # An Ollama tag reports the GGUF's rope ceiling, which is what the
+        # weights can address rather than what the publisher serves. Ollama's
+        # own pages show the split: the cloud tag of Devstral Small 2 reads
+        # 256K while the local tag of the same model claims 384K.
+        from providers import _published_ollama_context
+        self.assertEqual(_published_ollama_context("devstral-small-2:24b", 393216),
+                         (262144, "https://docs.mistral.ai/models/devstral-small-2-25-12"))
+        self.assertEqual(_published_ollama_context("north-mini-code-1.0:q4_K_M", 500000)[0], 262144)
+        # A tag already at the published window is unchanged in value.
+        self.assertEqual(_published_ollama_context("devstral-small-2:24b-cloud", 262144)[0], 262144)
+        # 512000 was Ollama's "512K" mis-transcribed, and collides with
+        # MiniMax's documented maximum output.
+        self.assertEqual(_published_ollama_context("minimax-m3:cloud", 512000)[0], 524288)
+        # A family with no published window keeps whatever it declared.
+        self.assertEqual(_published_ollama_context("gemma4:31b-cloud", 131072), (131072, None))
+        self.assertEqual(_published_ollama_context("unknown-model:7b", None), (None, None))
+
+    def test_direct_and_ollama_routes_agree_on_deepseek_windows(self):
+        # The same weights reached two ways answered two different windows:
+        # the Ollama route asserted 1M while the direct route asserted nothing.
+        from providers import _DEEPSEEK_MODEL_METADATA, _MUSE_MODEL_METADATA
+        for identifier in ("deepseek-flash", "deepseek-v4-pro"):
+            with self.subTest(model=identifier):
+                self.assertEqual(_DEEPSEEK_MODEL_METADATA[identifier]["context"], 1048576)
+        # Same model, different entitlement, same documented window.
+        self.assertEqual(_MUSE_MODEL_METADATA["muse-spark-1.3-contributor"]["context"],
+                         _MUSE_MODEL_METADATA["muse-spark-1.3"]["context"])
+
     def test_cerebras_discovery_marks_reasoning_replay_gap_per_exact_model(self):
         result = discover(
             "cerebras",
@@ -395,8 +424,8 @@ class DiscoveryTests(unittest.TestCase):
         )
         by_id = {model["id"]: model for model in result["models"]}
         self.assertEqual(by_id["gpt-oss-120b"]["effort_modes"], ["low", "medium", "high"])
-        self.assertEqual(by_id["gpt-oss-120b"]["context"], 131000)
-        self.assertEqual(by_id["gpt-oss-120b"]["max_output"], 40000)
+        self.assertEqual(by_id["gpt-oss-120b"]["context"], 131072)
+        self.assertEqual(by_id["gpt-oss-120b"]["max_output"], 40960)
         self.assertEqual(by_id["gpt-oss-120b"]["context_kind"], "verified_documentation")
         self.assertEqual(by_id["gpt-oss-120b"]["reasoning_history"], "gateway_signed_replay")
         self.assertTrue(by_id["gpt-oss-120b"]["complete_tool_cycles"])
