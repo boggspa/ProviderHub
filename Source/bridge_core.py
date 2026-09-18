@@ -360,7 +360,7 @@ class ClaudeProfile:
 
     def prepare(self, settings: dict, token: str) -> dict:
         features = settings.get("claude_features") or {}
-        return {
+        profile = {
             "inferenceProvider": "gateway", "inferenceCredentialKind": "static",
             "inferenceGatewayBaseUrl": f"http://127.0.0.1:{settings['port']}",
             "inferenceGatewayApiKey": token, "inferenceGatewayAuthScheme": "bearer",
@@ -375,15 +375,23 @@ class ClaudeProfile:
             # Chat Completions has no hosted WebSearch tool; local WebFetch and
             # all normal coding tools retain the desktop's permission handling.
             "disabledBuiltinTools": ["WebSearch"],
-            # Opt-in profile features (all default off in Claude's schema).
-            # Each is a local capability whose inference still runs through
-            # this gateway; field names follow the third-party profile schema.
-            "dictationEnabled": features.get("dictation") is True,
-            "builtinBrowserEnabled": features.get("builtin_browser") is True,
-            "claudeInChromeEnabled": features.get("claude_in_chrome") is True,
-            "scheduledTasksEnabled": features.get("scheduled_tasks") is True,
-            "coworkTabEnabled": features.get("cowork_tab") is True,
         }
+        # Opt-in profile features. Each is a local capability whose inference
+        # still runs through this gateway. Keys are added only when enabled:
+        # Claude's config health check flags any key its build does not
+        # recognise, even an explicit false (2.110.x does not recognise
+        # builtinBrowserEnabled), and all of these default off in its schema.
+        for setting, field in (("dictation", "dictationEnabled"),
+                               ("builtin_browser", "builtinBrowserEnabled"),
+                               ("scheduled_tasks", "scheduledTasksEnabled"),
+                               ("cowork_tab", "coworkTabEnabled")):
+            if features.get(setting) is True:
+                profile[field] = True
+        # claudeInChromeEnabled is deliberately never written: Claude reports
+        # it is delivered only by the Anthropic-hosted control plane and
+        # cannot be set from a local profile, so its presence alone triggers
+        # the "configuration may need attention" banner.
+        return profile
 
     @staticmethod
     def hub_row(row) -> bool:

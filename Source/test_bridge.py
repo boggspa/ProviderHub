@@ -701,9 +701,13 @@ class ProfileTests(unittest.TestCase):
         self.assertEqual(read_json(self.profile.normal)["mcpServers"], {"keep": {}})
         self.assertEqual(read_json(self.profile.profile)["inferenceCredentialKind"], "static")
         self.assertIs(read_json(self.profile.profile)["modelPrefer1mContext"], True)
-        # Profile features default off and are written explicitly.
+        # Profile features default off: Claude's config check flags any key
+        # its build does not recognise, even an explicit false, so disabled
+        # features are omitted entirely (claudeInChromeEnabled is never
+        # written at all — it is control-plane-only).
+        written = read_json(self.profile.profile)
         for field in ("dictationEnabled", "builtinBrowserEnabled", "claudeInChromeEnabled", "scheduledTasksEnabled", "coworkTabEnabled"):
-            self.assertIs(read_json(self.profile.profile)[field], False)
+            self.assertNotIn(field, written)
         result = self.profile.restore(require_closed=False)
         self.assertTrue(result["restored"])
         self.assertEqual(read_json(self.profile.meta), self.previous)
@@ -715,12 +719,14 @@ class ProfileTests(unittest.TestCase):
 
     def test_enabled_claude_features_reach_the_profile(self):
         settings = config()
-        settings["claude_features"] = {**settings["claude_features"], "dictation": True, "cowork_tab": True}
+        settings["claude_features"] = {**settings["claude_features"], "dictation": True, "cowork_tab": True,
+                                       "builtin_browser": True, "claude_in_chrome": True}
         self.profile.activate(settings, "local-token", require_closed=False)
         written = read_json(self.profile.profile)
         self.assertIs(written["dictationEnabled"], True)
         self.assertIs(written["coworkTabEnabled"], True)
-        self.assertIs(written["builtinBrowserEnabled"], False)
+        self.assertIs(written["builtinBrowserEnabled"], True)
+        self.assertNotIn("claudeInChromeEnabled", written)
         self.profile.restore(require_closed=False)
         self.assertFalse(self.profile.profile.exists())
 
@@ -966,9 +972,26 @@ class GatewayTests(unittest.TestCase):
 
     def test_auth_origin_and_host_rejections(self):
         self.assertEqual(self.request("GET", "/v1/models", headers={"Authorization": "Bearer bad"})[0], 401)
-        self.assertEqual(self.request("GET", "/v1/models", headers={"Origin": "https://untrusted.example"})[0], 403)
         self.assertEqual(self.request("GET", "/v1/models", headers={"Host": "untrusted.example"})[0], 403)
         self.assertEqual(self.request("GET", "/v1/models")[0], 200)
+
+    def test_browser_origin_requests_are_cors_enabled(self):
+        # The desktop webview sends Origin on its model-discovery fetch; the
+        # gateway must answer the preflight and echo ACAO or the picker
+        # spins forever. Cross-site pages still hit the token check.
+        status, _, headers = self.request("OPTIONS", "/v1/models", headers={
+            "Origin": "https://claude.ai", "Access-Control-Request-Method": "GET",
+            "Access-Control-Request-Headers": "authorization"})
+        self.assertEqual(status, 204)
+        self.assertEqual(headers.get("Access-Control-Allow-Origin"), "https://claude.ai")
+        self.assertEqual(headers.get("Access-Control-Allow-Methods"), "GET, POST, OPTIONS")
+        self.assertEqual(headers.get("Access-Control-Allow-Headers"), "authorization")
+        status, _, headers = self.request("GET", "/v1/models", headers={"Origin": "https://claude.ai"})
+        self.assertEqual(status, 200)
+        self.assertEqual(headers.get("Access-Control-Allow-Origin"), "https://claude.ai")
+        status, data, _ = self.request("GET", "/v1/models", headers={"Origin": "https://untrusted.example",
+                                                                      "Authorization": "Bearer bad"})
+        self.assertEqual(status, 401)
 
     def test_text_roundtrip_and_private_logs(self):
         status, data, _ = self.request("POST", "/v1/messages", prompt())

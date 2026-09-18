@@ -375,6 +375,33 @@ class Handler(BaseHTTPRequestHandler):
         self.json_response(status, {"type": "error", "error": {"type": error_type(status), "message": message}},
                            headers=headers)
 
+    def end_headers(self):
+        # Claude Desktop's webview-originated requests (model discovery,
+        # config checks) carry an Origin and must pass CORS. Every non-health
+        # route still requires the local bearer token, so cross-site pages
+        # gain nothing from the echoed origin.
+        origin = self.headers.get("Origin")
+        if origin and self.headers.get("Host", "").split(":")[0] in {"127.0.0.1", "localhost"}:
+            self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Vary", "Origin")
+        super().end_headers()
+
+    def do_OPTIONS(self):
+        # Preflight for the desktop webview's cross-origin fetches. The base
+        # handler would answer 501, which strands the desktop's model picker
+        # mid-load; the token check in allowed() still guards real routes.
+        host = self.headers.get("Host", "").split(":")[0]
+        if host not in {"127.0.0.1", "localhost"}:
+            self.error(403, "This gateway accepts local desktop requests only.")
+            return
+        self.send_response(204)
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        requested = self.headers.get("Access-Control-Request-Headers")
+        self.send_header("Access-Control-Allow-Headers", requested or "authorization, content-type, x-api-key")
+        self.send_header("Access-Control-Max-Age", "600")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
     # ------------------------------------------------------------------
     # Devin agent-session endpoints. Devin is a session-based agent
     # (protocol "agent_session"), not a chat-completions provider, so these
@@ -530,7 +557,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def allowed(self, *, health=False):
         host = self.headers.get("Host", "").split(":")[0]
-        if host not in {"127.0.0.1", "localhost"} or self.headers.get("Origin"):
+        if host not in {"127.0.0.1", "localhost"}:
             self.error(403, "This gateway accepts local desktop requests only.")
             return False
         if health:
