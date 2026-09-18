@@ -186,18 +186,43 @@ above-range ranks that a model does not support natively (xhigh, max, ultra)
 are capped to its top advertised rank with a `normalized_to_` compatibility
 note rather than rejected. Below-range requests still fail closed.
 
-For reasoning-capable models, the catalogue also advertises
-`multi_agent_version: "v2"` and `multi_agent_reasoning_effort: "xhigh"`. On
-activation, Provider Hub writes `default_subagent_model` and
-`default_subagent_reasoning_effort` to point the Codex multi-agent runtime at
-the selected hub catalogue route, and enables `features.multi_agent_v2` in
-the Codex `config.toml`. This lets the Ultra slider position opt into
-autonomous sub-agent orchestration using the configured provider connection.
-The `multi_agent_mode` hint is left at its default so selecting Ultra enables
-the capability without forcing proactive delegation. Non-reasoning routes
-receive no subagent keys or feature flag. `model_reasoning_effort` is cleared
-on activation so the catalogue's `default_reasoning_level` governs the
-starting slider position; the user's prior value is saved in the journal and
+Any route that publishes a reasoning ladder advertises
+`multi_agent_version: "v2"`, together with a `multi_agent_reasoning_effort`
+taken from that model's own top advertised rank rather than a fixed value.
+This used to require a reasoning flag as well, which withheld the runtime
+from every plain instruct route for no gain: the collaboration tools and the
+multi-agent briefing arrive from the desktop's own `features.multi_agent_v2`
+either way. On activation, Provider Hub enables that feature flag in the
+Codex `config.toml`. It deliberately does **not** write
+`default_subagent_model` or `default_subagent_reasoning_effort`, and clears
+them when an older journal left them behind: both resolve once at
+activation, but the model is switched in the app and an in-app switch never
+re-runs activation, so a pinned sub-agent target goes stale the moment the
+user changes route. Codex's own `spawn_agent` contract prefers the inherited
+parent model, so with no default the children of a Mistral thread are
+Mistral and the children of a DeepSeek thread are DeepSeek; the model can
+still name a different route per sub-agent through `spawn_agent`'s `model`
+argument. Together these let the Ultra slider position opt into autonomous
+sub-agent orchestration using the configured provider connection.
+
+The `multi_agent_mode` hint is left at its default, so Ultra never forces
+delegation on every turn. Advertising the runtime is not the same as asking
+for it, though, and a slider position that changes nothing a model does is
+the same as no slider. So when Ultra is the rank the user selected **and**
+the request still carries the collaboration spawn tool, the gateway appends
+a short note to the request `instructions` asking the model to run
+investigation, implementation and verification as sub-agents, and to answer
+solo on conversational or trivial turns. This is the Codex counterpart of
+the Claude tab's Ultracode orchestration note. The note names the spawn tool
+by the name it actually travels under, not the name Codex declares it with,
+because instructions pointing at an uncallable name produce no delegation at
+all. It is withheld whenever the spawn tool is absent, so a sub-agent
+forbidden to spawn again, and any provider whose `spawn_depth_limit` is `0`,
+is never told to call a tool it was not handed. A route with no published
+ladder receives no multi-agent keys or feature flag.
+
+`model_reasoning_effort` is cleared on activation so the catalogue's
+`default_reasoning_level` governs the starting slider position; the user's prior value is saved in the journal and
 restored on quit. The installed app-server verified that `multiAgentVersion`
 is echoed back by the runtime in `model/list`.
 

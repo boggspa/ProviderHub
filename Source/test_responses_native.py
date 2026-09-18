@@ -1378,5 +1378,112 @@ class MultiAgentNormalizationTests(unittest.TestCase):
             self.assertNotIn(secret, blob)
 
 
+class UltraDelegationNoteTests(unittest.TestCase):
+    """Ultra must ask for delegation, and only where delegation is possible."""
+
+    COLLABORATION = {"type": "namespace", "name": "collaboration",
+                     "tools": [{"type": "function", "name": "spawn_agent"}]}
+
+    def _plan(self, *, effort="ultra", tools=None, instructions=None,
+              route="grok/grok-4.6", root=None):
+        from types import SimpleNamespace
+        import responses_native
+        provider_id = route.split("/", 1)[0]
+        runtime = SimpleNamespace(
+            settings={"providers": {provider_id: {"base_url": "https://x.invalid"}},
+                      "_model_specs": {route: {"context": 500000, "max_output": 16384,
+                                               "reasoning": True,
+                                               "effort_modes": ["low", "high"]}}},
+            replay_key="replay", token="token", upstream_url=None, root=root,
+            provider_key=lambda pid: "provider-key")
+        payload = {"model": route, "store": False, "stream": False,
+                   "tools": copy.deepcopy(self.COLLABORATION_DEFAULT if tools is None else tools),
+                   "input": [{"role": "user", "content": "ship the refactor"}]}
+        if effort is not None:
+            payload["reasoning"] = {"effort": effort}
+        if instructions is not None:
+            payload["instructions"] = instructions
+        with patch.object(responses_native, "validate_connection",
+                          return_value={"base_url": "https://x.invalid"}), \
+                patch.object(responses_native, "_auth_headers", return_value={}), \
+                patch.object(responses_native, "connection_signature", return_value="sig"):
+            return responses_native.prepare_native(runtime, payload)
+
+    COLLABORATION_DEFAULT = [COLLABORATION, {"type": "function", "name": "read_file"}]
+
+    def test_ultra_asks_for_delegation_and_names_the_spawn_tool(self):
+        from responses_native import ULTRA_DELEGATION_NOTE
+        plan = self._plan()
+        self.assertEqual(plan["body"]["instructions"],
+                         ULTRA_DELEGATION_NOTE.format(spawn="spawn_agent"))
+        self.assertIn("spawn_agent", plan["body"]["instructions"])
+        self.assertNotIn("{spawn}", plan["body"]["instructions"])
+
+    def test_note_is_appended_after_the_harness_instructions(self):
+        from responses_native import ULTRA_DELEGATION_NOTE
+        plan = self._plan(instructions="You are a coding assistant.")
+        self.assertEqual(
+            plan["body"]["instructions"],
+            "You are a coding assistant.\n\n" + ULTRA_DELEGATION_NOTE.format(spawn="spawn_agent"))
+
+    def test_lower_ranks_are_left_alone(self):
+        # "max" is included deliberately: it caps to this spec's top rank, so
+        # the request reaching the provider looks identical to an ultra one.
+        # Only the rank the user actually picked may earn the note.
+        for effort in ("low", "high", "max", None):
+            with self.subTest(effort=effort):
+                plan = self._plan(effort=effort, instructions="Base.")
+                self.assertEqual(plan["body"]["instructions"], "Base.")
+
+    def test_no_note_when_the_spawn_tool_was_withheld(self):
+        """A stripped spawn tool is the depth limit talking; never ask for a tool
+        the request does not carry."""
+        plan = self._plan(tools=[{"type": "function", "name": "read_file"}],
+                          instructions="Base.")
+        self.assertEqual(plan["body"]["instructions"], "Base.")
+
+    def test_no_note_and_no_instructions_key_invented_when_withheld(self):
+        plan = self._plan(tools=[{"type": "function", "name": "read_file"}])
+        self.assertNotIn("instructions", plan["body"])
+
+    def test_note_names_the_flattened_name_after_a_collision(self):
+        """A bare spawn_agent claims the leaf, so the collaboration tool travels
+        qualified. The note has to name what the model can actually call."""
+        from responses_native import ULTRA_DELEGATION_NOTE
+        from spawn_depth import QUALIFIED_SPAWN_TOOL
+        plan = self._plan(tools=[{"type": "function", "name": "spawn_agent"}, self.COLLABORATION])
+        self.assertEqual(plan["body"]["instructions"],
+                         ULTRA_DELEGATION_NOTE.format(spawn=QUALIFIED_SPAWN_TOOL))
+        self.assertIn(QUALIFIED_SPAWN_TOOL, [tool["name"] for tool in plan["body"]["tools"]])
+
+    def test_note_reaches_the_bridged_messages_path(self):
+        """Non-native providers leave through to_messages, which copies
+        instructions into `system`. The note has to survive that exit too."""
+        import tempfile
+        from pathlib import Path
+        from responses_native import ULTRA_DELEGATION_NOTE
+        with tempfile.TemporaryDirectory() as tmp:
+            plan = self._plan(route="mistral/mistral-medium-2508", root=Path(tmp))
+        self.assertEqual(plan["protocol"], "messages_bridge")
+        self.assertEqual(plan["body"]["system"],
+                         ULTRA_DELEGATION_NOTE.format(spawn="spawn_agent"))
+
+    def test_with_ultra_note_leaves_non_text_instructions_alone(self):
+        from responses_native import with_ultra_note
+        self.assertEqual(with_ultra_note(None, "NOTE"), "NOTE")
+        self.assertEqual(with_ultra_note("", "NOTE"), "NOTE")
+        self.assertEqual(with_ultra_note("a", "NOTE"), "a\n\nNOTE")
+        self.assertEqual(with_ultra_note(["a"], "NOTE"), ["a"])
+
+    def test_spawn_tool_lookup_prefers_the_collaboration_identity(self):
+        from responses_native import _spawn_tool_name
+        self.assertIsNone(_spawn_tool_name({}))
+        self.assertIsNone(_spawn_tool_name(None))
+        self.assertIsNone(_spawn_tool_name({"read_file": {"namespace": None, "name": "read_file"}}))
+        mixed = {"spawn_agent": {"namespace": None, "name": "spawn_agent"},
+                 "ph_collab": {"namespace": "collaboration", "name": "spawn_agent"}}
+        self.assertEqual(_spawn_tool_name(mixed), "ph_collab")
+
+
 if __name__ == "__main__":
     unittest.main()

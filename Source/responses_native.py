@@ -37,6 +37,93 @@ REQUEST_FIELDS = frozenset({
 LOCAL_FIELDS = frozenset({"client_metadata"})
 TERMINAL_EVENTS = frozenset({"response.completed", "response.incomplete", "response.failed", "error"})
 
+# Ultra is the Codex effort rank that opts a route into multi_agent_v2, and
+# advertising the runtime was all that ever happened: the catalogue publishes
+# `multi_agent_version`, the desktop hands over the collaboration tools, and
+# nothing then told the model to reach for them. Selecting Ultra and getting
+# an ordinary solo turn is the slider quietly doing nothing. Claude's side of
+# the hub already says this out loud through protocol.ULTRACODE_NOTE; this is
+# the same intent on the Codex side. It stays a note on `instructions` rather
+# than a `multi_agent_mode` setting so a turn that does not warrant fan-out
+# can still answer solo, which is the balance README.md describes.
+#
+# `{spawn}` is filled with the name the spawn tool actually travels under,
+# never the name Codex declares it with. The two differ when another tool in
+# the same request already claimed the bare leaf, and a note naming a tool
+# the model was not handed is exactly the failure written up in
+# responses_tools.tool_name: instructions pointing at an uncallable name
+# produce no delegation at all, which is the bug this note exists to fix.
+ULTRA_DELEGATION_NOTE = (
+    "The user selected Ultra for this turn. Ultra is this route's delegation rank: it is the position that "
+    "opts the turn into multi-agent orchestration, so read it as a request to orchestrate and not only to "
+    "think harder. On a substantive task, call `{spawn}` to run investigation, implementation and "
+    "verification as sub-agents, give each one a self-contained brief, and review and integrate what they "
+    "return rather than redoing their work yourself. Answer solo when the turn is conversational, or small "
+    "enough that splitting it would cost more than it saves."
+)
+
+
+def _spawn_tool_name(tool_map):
+    """The wire name the collaboration spawn tool travels under, or None.
+
+    Resolved through the flattening map rather than by reading names off the
+    tool list, so both ends are exact: the identity is matched pre-flatten,
+    where the tool is unambiguously (collaboration, spawn_agent), and the
+    name returned is the post-flatten one the model can actually call.
+
+    Absence is the whole safety interlock. filter_spawn_tools has already run
+    as gateway middleware by the time a request arrives here, so a sub-agent
+    that may not spawn again, and every route on a provider whose
+    spawn_depth_limit is 0, reaches this point with no spawn tool in the map
+    and is told nothing about delegating.
+
+    An exact collaboration identity wins over a bare `spawn_agent` declared
+    outside the namespace. Both satisfy is_spawn_tool_reference, and when a
+    request carries both it is the namespaced one that drives multi_agent_v2;
+    naming the other would point the note at an unrelated tool.
+    """
+    if not isinstance(tool_map, dict):
+        return None
+    bare = None
+    for mapped, identity in tool_map.items():
+        if not isinstance(identity, dict) or identity.get("custom"):
+            continue
+        namespace, name = identity.get("namespace"), identity.get("name")
+        if namespace == SPAWN_NAMESPACE and name == SPAWN_TOOL:
+            return mapped
+        if bare is None and is_spawn_tool_reference(namespace, name):
+            bare = mapped
+    return bare
+
+
+def ultra_delegation_note(body, tool_map):
+    """The delegation note this request should carry, or None for no note.
+
+    The effort is read as the desktop sent it. Every provider branch below
+    rewrites `reasoning.effort` to a rank the route actually serves, so
+    "ultra" survives only this far, and only here does the request still
+    record which slider position the user chose.
+    """
+    reasoning = body.get("reasoning")
+    if not isinstance(reasoning, dict) or reasoning.get("effort") != "ultra":
+        return None
+    spawn = _spawn_tool_name(tool_map)
+    return None if spawn is None else ULTRA_DELEGATION_NOTE.format(spawn=spawn)
+
+
+def with_ultra_note(instructions, note):
+    """Append the note to a request's `instructions`, keeping what is there.
+
+    Anything that is not text is returned unchanged: the Responses field is
+    documented as a string, an odd value is the provider's to reject, and
+    replacing it here would lose whatever the harness meant to send.
+    """
+    if instructions is None or instructions == "":
+        return note
+    if isinstance(instructions, str):
+        return instructions + "\n\n" + note
+    return instructions
+
 
 class ResponseOwnership:
     """Only ID/account ownership for explicitly stored xAI responses; no content."""
@@ -525,6 +612,14 @@ def prepare_native(runtime, payload):
         raise BridgeError("This route's provider does not run web search of its own, so the hosted web_search tool "
                           "cannot be honoured. Turn Codex web search off for this route, or choose a route on a "
                           "provider that searches.")
+    # Ultra means orchestrate, and this is the last point at which the request
+    # still says so: the provider branches below rewrite reasoning.effort to a
+    # rank the route can serve. Both exits read `instructions` after this line
+    # - to_messages copies it into `system` for the bridged path and the native
+    # path forwards it verbatim - so one edit here reaches every provider.
+    note = ultra_delegation_note(body, tool_map)
+    if note is not None:
+        body["instructions"] = with_ultra_note(body.get("instructions"), note)
     if isinstance(body["input"], list):
         body["input"] = _normalize_multi_agent_items(body["input"])
         normalize_custom_calls(body["input"], tool_map)
