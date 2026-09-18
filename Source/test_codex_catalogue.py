@@ -206,6 +206,27 @@ class CuratedCatalogueProjectionTests(unittest.TestCase):
         self.assertNotEqual(catalogue_digest({**base, "codex_apply_patch_all": True}, stock),
                             catalogue_digest(base, stock))
 
+    def test_goal_budget_switch_refreshes_the_snapshot_it_cannot_be_seen_in(self):
+        """A flag the picker cannot show still has to invalidate the snapshot.
+
+        codex_goal_budget decides whether the gateway strips token_budget from
+        Codex's goal tools, and the gateway reads it once when it starts. It
+        leaves the projected catalogue byte-identical, so without its own entry
+        in the digest a flip would look like no change at all: ensureGatewaySnapshot
+        would keep a gateway that still serves the old answer, and the switch
+        would sit inert until something else restarted it.
+        """
+        stock = inventory(model("mistral/a-model"))
+        base = settings(codex_model="mistral/a-model", codex_catalogue=["mistral/a-model"])
+        budgeted = {**base, "codex_goal_budget": True}
+        # The catalogue itself is untouched - that is the whole difficulty.
+        self.assertEqual(project_codex(budgeted, stock), project_codex(base, stock))
+        self.assertNotEqual(catalogue_digest(budgeted, stock), catalogue_digest(base, stock))
+        # Absent and explicitly off are the same snapshot, so adding the entry
+        # does not invalidate every gateway already running without the key.
+        self.assertEqual(catalogue_digest({**base, "codex_goal_budget": False}, stock),
+                         catalogue_digest(base, stock))
+
     def test_digest_tracks_selection_and_the_default(self):
         stock = inventory(
             model("mistral/a-model"), model("mistral/b-model"),

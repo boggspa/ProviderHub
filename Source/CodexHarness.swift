@@ -371,6 +371,14 @@ struct CodexPage: View {
                      ? "The same watcher hides Codex’s “You’re out of Codex and Work usage” banner, and its per-model “out of usage” variant, above the composer. The banner appears only with your ChatGPT sign-in shown, reports that account’s plan usage, and hub traffic does not spend it. It is recognised by its gauge icon, so an app update that redraws the icon brings the banner back and changes nothing else; the account and usage pages, and the rate-limit prompt Codex may open on submit, are untouched. Save, then launch."
                      : "Off: with your ChatGPT account shown, Codex keeps its usage banner above the composer even though hub traffic does not spend that plan. Needs the power-slider watcher above; save, then launch.")
                     .font(.caption).foregroundStyle(.secondary)
+                Toggle(isOn: $model.settings.codex_goal_budget) {
+                    Text("Let models cap a goal's token budget").font(.system(size: 13, weight: .medium))
+                }
+                .toggleStyle(.switch).disabled(model.busy)
+                Text(model.settings.codex_goal_budget
+                     ? "Codex’s create_goal and update_goal tools keep their optional token_budget field, so a model may cap its own goal at a number of tokens. A capped goal stops at that number as budget_limited with the objective unfinished, and Codex asks models to set one only when you request it — an instruction the weaker routes in this catalogue ignore. Save, then launch."
+                     : "Off: Provider Hub removes token_budget from those two tools, so a goal starts unlimited on every route and runs until it is complete, blocked or stopped. This is Codex’s own “omit unless explicitly requested” default, stated where a model cannot decline it; your plan’s usage limits still apply. Turn on to let models cap a goal again; save, then launch.")
+                    .font(.caption).foregroundStyle(.secondary)
                 HStack {
                     Button(model.codexProfileActive && model.codexRunning ? "Show Codex / ChatGPT" : "Launch Codex / ChatGPT") { Task { await model.launchCodex() } }
                         .buttonStyle(.borderedProminent).controlSize(.large)

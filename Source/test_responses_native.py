@@ -83,6 +83,76 @@ class CustomApplyPatchUnitTests(unittest.TestCase):
         self.assertEqual(json.loads(call["arguments"]), {"patch": self.PATCH})
         self.assertEqual(plan["tool_map"]["apply_patch"]["custom"], "apply_patch")
 
+    GOAL_TOOLS = [
+        {"type": "function", "name": "create_goal",
+         "description": "Start pursuing a goal.",
+         "parameters": {"type": "object", "properties": {
+             "objective": {"type": "string", "description": "Required. The concrete objective to start pursuing."},
+             "token_budget": {"type": "integer",
+                              "description": "Positive token budget for the new goal. Omit unless explicitly requested."}},
+             "required": ["objective"]}},
+        {"type": "function", "name": "update_goal",
+         "parameters": {"type": "object", "properties": {
+             "status": {"type": "string"},
+             "token_budget": {"type": "integer"}}, "required": ["status", "token_budget"]}},
+        {"type": "function", "name": "get_goal",
+         "parameters": {"type": "object", "properties": {}}},
+    ]
+
+    def _goal_plan(self, *, allow_budget):
+        from types import SimpleNamespace
+        import responses_native
+        route = "grok/grok-4.6"
+        runtime = SimpleNamespace(
+            settings={"providers": {"grok": {"base_url": "https://x.invalid"}},
+                      "codex_goal_budget": allow_budget,
+                      "_model_specs": {route: {"context": 500000, "effort_modes": ["low", "high"]}}},
+            replay_key="replay", token="token", upstream_url=None,
+            provider_key=lambda provider_id: "provider-key")
+        payload = {"model": route, "store": False, "stream": False,
+                   "tools": copy.deepcopy(self.GOAL_TOOLS),
+                   "input": [{"role": "user", "content": "ship it"}]}
+        with patch.object(responses_native, "validate_connection",
+                          return_value={"base_url": "https://x.invalid"}), \
+                patch.object(responses_native, "_auth_headers", return_value={}), \
+                patch.object(responses_native, "connection_signature", return_value="sig"):
+            plan = responses_native.prepare_native(runtime, payload)
+        return {tool["name"]: tool for tool in plan["body"]["tools"]}, payload
+
+    def test_goal_tools_lose_their_token_budget_by_default(self):
+        """A goal the model cannot budget is a goal that runs to its objective."""
+        tools, payload = self._goal_plan(allow_budget=False)
+        self.assertNotIn("token_budget", tools["create_goal"]["parameters"]["properties"])
+        self.assertEqual(tools["create_goal"]["parameters"]["required"], ["objective"])
+        # The objective and the rest of the schema are untouched.
+        self.assertIn("objective", tools["create_goal"]["parameters"]["properties"])
+        self.assertEqual(tools["create_goal"]["description"], "Start pursuing a goal.")
+        # update_goal loses it too, and a required listing goes with the property:
+        # a required name with no property is a schema some providers reject.
+        self.assertNotIn("token_budget", tools["update_goal"]["parameters"]["properties"])
+        self.assertEqual(tools["update_goal"]["parameters"]["required"], ["status"])
+        # A goal tool that never carried a budget is left alone.
+        self.assertEqual(tools["get_goal"]["parameters"]["properties"], {})
+        # The caller's payload is not edited underneath it.
+        self.assertIn("token_budget", payload["tools"][0]["parameters"]["properties"])
+
+    def test_goal_tools_keep_their_token_budget_when_the_switch_is_on(self):
+        tools, _ = self._goal_plan(allow_budget=True)
+        self.assertIn("token_budget", tools["create_goal"]["parameters"]["properties"])
+        self.assertIn("token_budget", tools["update_goal"]["parameters"]["properties"])
+
+    def test_strip_goal_budget_tolerates_shapes_it_did_not_expect(self):
+        from responses_tools import strip_goal_budget
+        self.assertEqual(strip_goal_budget(None), 0)
+        self.assertEqual(strip_goal_budget([None, "tool", {}]), 0)
+        self.assertEqual(strip_goal_budget([{"name": "create_goal"}]), 0)
+        self.assertEqual(strip_goal_budget([{"name": "create_goal", "parameters": {}}]), 0)
+        self.assertEqual(strip_goal_budget([{"name": "exec_command", "parameters": {
+            "properties": {"token_budget": {"type": "integer"}}}}]), 0)
+        tools = [{"name": "create_goal", "parameters": {"properties": {"token_budget": {}}}}]
+        self.assertEqual(strip_goal_budget(tools), 1)
+        self.assertEqual(strip_goal_budget(tools), 0)
+
 
 def response_object(body, second=False):
     output = ([{"type": "message", "id": "message-final", "role": "assistant", "status": "completed",

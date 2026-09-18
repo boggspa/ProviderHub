@@ -152,6 +152,55 @@ def describe_tool(tool, namespace=None) -> str:
 
 SEARCH_TOOL_TYPE = "web_search"
 SEARCH_CONTEXT_SIZES = ("low", "medium", "high")
+GOAL_TOOLS = ("create_goal", "update_goal")
+GOAL_BUDGET_FIELD = "token_budget"
+
+
+def strip_goal_budget(tools):
+    """Remove the optional goal token budget from Codex's goal tools.
+
+    A Codex goal carries an optional token budget, and `thread_goals`
+    stores it NULL when none is given - an unlimited goal is the
+    supported state, not a workaround. Codex already asks for that:
+    its own schema calls the field "Positive token budget for the new
+    goal. Omit unless explicitly requested."
+
+    That instruction is prose, so it holds only as well as the model
+    reading it does, and across this catalogue it does not hold evenly.
+    A weaker route fills the optional field because it is there, the
+    goal starts budgeted, and the run stops at `budget_limited` with
+    the objective unfinished - a cap nobody asked for. Deleting the
+    property instead is the same intent expressed where it cannot be
+    declined: the model has no field to fill, so every provider
+    behaves the way the description asked for.
+
+    Only the property is dropped; the tool, its objective and the rest
+    of its schema travel untouched, and a route that should still be
+    able to set a budget keeps the field by leaving codex_goal_budget
+    on. Returns how many tools were changed.
+    """
+    if not isinstance(tools, list):
+        return 0
+    changed = 0
+    for tool in tools:
+        if not isinstance(tool, dict) or tool.get("name") not in GOAL_TOOLS:
+            continue
+        parameters = tool.get("parameters")
+        if not isinstance(parameters, dict):
+            continue
+        properties = parameters.get("properties")
+        if not isinstance(properties, dict) or GOAL_BUDGET_FIELD not in properties:
+            continue
+        del properties[GOAL_BUDGET_FIELD]
+        # Codex declares the budget optional, so this should never fire.
+        # Honour it anyway: a required name with no property is a schema
+        # some providers reject outright, which would cost the tool call
+        # rather than just the field.
+        required = parameters.get("required")
+        if isinstance(required, list) and GOAL_BUDGET_FIELD in required:
+            parameters["required"] = [name for name in required if name != GOAL_BUDGET_FIELD]
+        changed += 1
+    return changed
 
 
 def split_hosted_search(tools):

@@ -117,6 +117,10 @@ struct RouteSettings: Codable, Equatable {
     // With that helper on, also hide the app's ChatGPT usage banner
     // ("You're out of Codex and Work usage") in its windows.
     var codex_hide_usage_banner = false
+    // Leave the optional token budget on Codex's create_goal / update_goal
+    // tools. Off - the default - deletes the property so a goal starts
+    // unlimited on every route (see responses_tools.strip_goal_budget).
+    var codex_goal_budget = false
     // Codex tab apply_patch switch plus the hand-edited per-route lists it
     // preserves across saves (see codex_catalogue.apply_patch_qualified).
     var codex_apply_patch_all = false

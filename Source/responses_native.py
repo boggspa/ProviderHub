@@ -16,7 +16,7 @@ from hub_config import connection_signature, qualify, split_route
 from protocol import mask_effort_rejection
 from providers import PROVIDERS, ProviderError, _auth_headers, _chat_effort, validate_connection
 from responses_tools import (flatten_tools, input_names, normalize_custom_calls, output_names, register,
-                             restore_custom_call, split_hosted_search)
+                             restore_custom_call, split_hosted_search, strip_goal_budget)
 from responses_bridge import ENVELOPE_PREFIX, MessagesResponsesAdapter, ReasoningEnvelope, to_messages
 from openrouter_provider import OpenRouterError, finalize as openrouter_finalize, app_headers as openrouter_app_headers
 from effort_map import cap_high_end, map_effort, nearest_effort, ollama_effort_aliases
@@ -512,6 +512,12 @@ def prepare_native(runtime, payload):
     # because a model told it can search and then handed no search answers from
     # memory and presents it as fresh.
     tools, search = split_hosted_search(tools)
+    # Codex marks a goal's token budget optional and asks the model to omit
+    # it. Taking the property away is the same instruction stated where a
+    # weaker route cannot decline it, so goals start unlimited everywhere
+    # rather than only where the description happened to land.
+    if runtime.settings.get("codex_goal_budget") is not True:
+        strip_goal_budget(tools)
     body["tools"], tool_map = flatten_tools(tools)
     if tools and spec.get("tools") is False:
         raise BridgeError("The selected model does not support tool calls.")

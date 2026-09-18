@@ -75,6 +75,10 @@ class SettingsMigrationTests(unittest.TestCase):
         self.assertIs(normalize({"codex_hide_usage_banner": True}, SLOTS, "mistral-test")["codex_hide_usage_banner"], True)
         with self.assertRaises(ValueError):
             normalize({"codex_hide_usage_banner": "yes"}, SLOTS, "mistral-test")
+        self.assertIs(base["codex_goal_budget"], False)
+        self.assertIs(normalize({"codex_goal_budget": True}, SLOTS, "mistral-test")["codex_goal_budget"], True)
+        with self.assertRaises(ValueError):
+            normalize({"codex_goal_budget": "unlimited"}, SLOTS, "mistral-test")
 
     def test_claude_row_ids_carry_the_ladder_prefix_and_stay_unique(self):
         self.assertEqual(claude_row_id("mistral/mistral-vibe-cli-latest", "sonnet"), "claude-fable-5-mis-tral-vibe-cli-latest")

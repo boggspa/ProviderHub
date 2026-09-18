@@ -422,6 +422,13 @@ def catalogue_digest(settings, inventory):
     }, "accounts": {
         provider: connection_signature(provider, settings["providers"][provider])
         for provider in sorted(PROVIDERS)
+    }, "gateway": {
+        # Settings the gateway snapshots at startup that change what it serves
+        # without changing the catalogue. codex_apply_patch_all needs no entry
+        # here because project_codex already reads it, so the projection above
+        # moves with it; these leave the picker byte-identical and would
+        # otherwise let a flip reuse a snapshot still serving the old answer.
+        "codex_goal_budget": settings.get("codex_goal_budget") is True,
     }}
     return hashlib.sha256(json.dumps(material, sort_keys=True).encode()).hexdigest()
 
