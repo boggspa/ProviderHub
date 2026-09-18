@@ -322,12 +322,46 @@ def _normalize_claude_catalogue(value) -> list[dict]:
     return rows
 
 
+#: Every catalogue row id starts with this, whatever tier the row declares.
+#: Desktop hands each picker row an effort descriptor from `rPt` (app.asar
+#: @9878575), a compiled table keyed on the normalized id: eight literal
+#: Anthropic ids, plus one wildcard `GNt` @9875965 =
+#: /^(?:claude-)?(?:fable|mythos)(?:-|$)/ granting the full low..max ladder.
+#: GNt is a PREFIX test, so it is the only key that tolerates a readable
+#: suffix - which is why the ladder survives here and would not under an
+#: opus/sonnet/haiku prefix.  A row whose id misses both loses the slider
+#: entirely (the control is dropped, not disabled), silently, with config
+#: health still green: that is how it was lost on 16 Sep.
+#:
+#: The cost is on the other side: the CLI's own prefix test collapses every
+#: such id to `claude-fable-5`, so all rows inherit Fable's baked
+#: capabilities - a leaner system-prompt bundle, no disabling of thinking,
+#: and a 1M assumed window even for a smaller route.  The gateway's own
+#: window check still enforces the real limit.  The row's true tier lives in
+#: `anthropic_family_tier`, which is what drives picker grouping,
+#: is_family_default and routing.
+#:
+#: One place still reads the id as a family and now reads every row as fable:
+#: `protocol._family_slot`, the fallback that recovers a route for an id no
+#: longer in the catalogue.  A stale id therefore lands on the fable tier
+#: default and its mapping options rather than its own tier's.  That is a
+#: degradation of an already-approximate rescue path, not a routing rule -
+#: every live id is an exact key - but it is the reason this prefix is not
+#: simply an opaque token.
+CLAUDE_LADDER_PREFIX = "claude-fable-5"
+
+#: The CLI resolves the longer id first, so a slug beginning "1" would read
+#: as Fable 5.1 rather than Fable 5 and take a different capability set.
+_LADDER_PREFIX_COLLISION = CLAUDE_LADDER_PREFIX + "-1"
+
+
 def claude_row_id(route: str, tier: str) -> str:
     """The model id Claude Desktop and Claude Code see for a catalogue row.
 
-    It starts with the tier's Claude model id so Claude Code's family checks
-    read the right family, then names the provider and model. The provider
-    prefix is dropped when the model id already starts with it.
+    It starts with CLAUDE_LADDER_PREFIX so Desktop grants the row an effort
+    ladder, then names the provider and model. The provider prefix is dropped
+    when the model id already starts with it. The tier is not in the id; it
+    travels in the row's `anthropic_family_tier` field.
 
     The name the provider uses cannot survive intact: Desktop refuses a picker
     row whose id spells a third-party family, so the slug is hyphenated until
@@ -339,11 +373,15 @@ def claude_row_id(route: str, tier: str) -> str:
     model_slug = _ROW_SLUG_UNSAFE.sub("-", model_id.casefold()).strip("-")
     slug = model_slug if model_slug.startswith(provider_slug + "-") else f"{provider_slug}-{model_slug}"
     defused = _defuse_row_slug(slug)
-    identifier = f"{CLAUDE_TIER_MODELS[tier]}-{defused}" if defused else None
-    # The tier prefix cannot contribute a family name on its own, but the join
-    # is checked rather than trusted: a miss here empties the whole picker.
+    identifier = f"{CLAUDE_LADDER_PREFIX}-{defused}" if defused else None
+    # The ladder prefix cannot contribute a family name on its own, but the
+    # join is checked rather than trusted: a miss here empties the whole picker.
     if identifier is None or _FOREIGN_FAMILY.search(identifier):
-        identifier = f"{CLAUDE_TIER_MODELS[tier]}-{_row_slug_digest(route)}"
+        identifier = f"{CLAUDE_LADDER_PREFIX}-{_row_slug_digest(route)}"
+    if identifier.startswith(_LADDER_PREFIX_COLLISION):
+        # Push the slug off the collision without disturbing the prefix the
+        # ladder test reads.
+        identifier = f"{CLAUDE_LADDER_PREFIX}-r{identifier[len(CLAUDE_LADDER_PREFIX) + 1:]}"
     return identifier
 
 

@@ -13,6 +13,7 @@ import time
 
 from bridge_core import BridgeError, atomic_json, read_json
 from hub_config import connection_signature, qualify, split_route
+from protocol import mask_effort_rejection
 from providers import PROVIDERS, ProviderError, _auth_headers, _chat_effort, validate_connection
 from responses_tools import (flatten_tools, input_names, normalize_custom_calls, output_names, register,
                              restore_custom_call, split_hosted_search)
@@ -872,6 +873,13 @@ def handle_responses(handler):
                 message = detail
             else:
                 message = plan["provider_name"] + f" returned HTTP {response.status}. " + detail
+            if status == 400:
+                # Same reasoning as the Messages relay: a 400 that reads as
+                # the provider refusing the effort parameter costs the client
+                # its effort control for the whole session, so the trigger
+                # words are renamed. Which endpoint a request arrived on is
+                # no reason for it to be protected or not.
+                message = mask_effort_rejection(message)
             handler.error(status, message, headers=terminal_headers)
             return
         if not plan["body"]["stream"]:

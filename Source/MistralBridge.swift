@@ -224,8 +224,14 @@ final class BridgeModel: ObservableObject {
         )
     }
 
-    /// The id Claude sees for a row (mirrors hub_config.claude_row_id; the
-    /// worker adds a numeric suffix only when two routes collide).
+    /// An approximation of the id Claude sees for a row, for the technical-ID
+    /// display only. It is NOT a mirror of hub_config.claude_row_id and has
+    /// not been one since the worker began defusing third-party family names
+    /// out of the slug: this builds the tier's model id as the prefix, where
+    /// the worker builds one ladder prefix for every row, and it splits any
+    /// "a/b" as provider/model where the worker only splits known providers.
+    /// Routing never reads this value. Port the worker's rules here before
+    /// trusting it for anything but a rough label.
     func claudeRowID(_ entry: ClaudeCatalogueEntry) -> String {
         func slug(_ text: String) -> String {
             var out = ""; var dash = false

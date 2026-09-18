@@ -475,16 +475,49 @@ ULTRACODE_NOTE = (
 )
 
 
+def _last_typed_user_index(messages: list) -> int:
+    """Index of the last user turn the person actually typed into.
+
+    A tool-using turn ends with a user message carrying only tool_result
+    blocks, so "the final message" is the wrong anchor for a per-turn
+    reminder: the keyword sits in the typed turn that opened the cycle, and
+    Claude Code folds it into that prompt rather than repeating it.
+    """
+    latest = -1
+    for index, message in enumerate(messages):
+        if not isinstance(message, dict) or message.get("role") != "user":
+            continue
+        if not any(isinstance(block, dict) and block.get("type") == "text"
+                   for block in blocks(message.get("content", ""))):
+            continue
+        # A user message that lands straight after a tool result is the
+        # harness talking, not the person: a skill body, a compaction
+        # continuation. Treating it as a new turn is how this went wrong -
+        # the note tells the model to load the workflow-authoring skill, the
+        # Skill tool delivers that skill as its own user message, and the
+        # note switched itself off one tool cycle after it first appeared.
+        previous = messages[index - 1] if index else None
+        if (isinstance(previous, dict) and previous.get("role") == "user"
+                and any(isinstance(block, dict) and block.get("type") == "tool_result"
+                        for block in blocks(previous.get("content", "")))):
+            continue
+        latest = index
+    return latest if latest >= 0 else len(messages) - 1
+
+
 def ultracode_active(payload: dict) -> bool:
     """True when Claude Code's own reminders show Ultracode is on for this turn.
 
     The newest standing reminder wins; the per-turn keyword reminder counts
-    only when it sits in the final user message.
+    only when it sits in the last turn the person typed - not the last
+    message, which on a tool cycle is a tool_result the keyword never
+    reaches.
     """
     state = False
     messages = payload.get("messages") if isinstance(payload, dict) else None
     if not isinstance(messages, list):
         return False
+    last_typed = _last_typed_user_index(messages)
     for index, message in enumerate(messages):
         if not isinstance(message, dict) or message.get("role") != "user":
             continue
@@ -498,9 +531,88 @@ def ultracode_active(payload: dict) -> bool:
                 state = True
             elif _ULTRACODE_OFF in text:
                 state = False
-            if _ULTRACODE_KEYWORD in text and index == len(messages) - 1:
+            if _ULTRACODE_KEYWORD in text and index == last_typed:
                 state = True
     return state
+
+
+#: Claude Code reads the text of a relayed 400 and, on one that names the
+#: effort parameter as the thing refused, latches the model as
+#: effort-unsupported for the rest of the session - the control goes dead and
+#: does not come back until the session does.
+#:
+#: So the trigger words are renamed rather than the sentence replaced. The
+#: activity ledger deliberately stores no error text (Runtime.record), and
+#: last_error points back at this same message, so a message that says "see
+#: the log" would be sending a person somewhere the wording has never been:
+#: whatever diagnosis survives has to survive here, in the relayed sentence.
+_EFFORT_TERMS = re.compile(r"output_config\.effort|output_config|reasoning effort|effort", re.I)
+_EFFORT_TERM_NAMES = {
+    "output_config.effort": "the reasoning-depth setting",
+    "output_config": "the reasoning-depth field",
+    "reasoning effort": "reasoning depth",
+    "effort": "depth",
+}
+
+
+def mask_effort_rejection(detail: str) -> str:
+    """Reword a relayed rejection so it cannot be read as "effort unsupported".
+
+    Applied to every 400 the hub relays, whatever its shape: a message that
+    only mentions the parameter in passing loses nothing by being reworded,
+    while one that would have latched costs the user the control for a whole
+    session.
+    """
+    if not detail:
+        return detail
+    return _EFFORT_TERMS.sub(lambda hit: _EFFORT_TERM_NAMES[hit.group(0).lower()], detail)
+
+
+def without_reasoning_controls(payload: dict):
+    """Strip effort and thinking from a request bound for a route without them.
+
+    Desktop grants a picker row its effort ladder from one compiled key, not
+    one per model, so every hub row now offers the full ladder whatever its
+    provider can actually do. A route with no reasoning axis will therefore
+    be asked for an effort it cannot take. Refusing is the worse answer:
+    Claude Code reads one such rejection as the model not supporting effort
+    at all and latches that for the rest of the session, so the control would
+    die on the first request and stay dead until the app restarts. Dropping
+    the controls costs the request nothing it could have had.
+    """
+    dropped = []
+    if payload.get("thinking") is not None:
+        dropped.append("thinking")
+    output = payload.get("output_config")
+    effort = output.get("effort") if isinstance(output, dict) else None
+    if effort is not None and effort != "none":
+        dropped.append("effort")
+    if not dropped:
+        return payload, []
+    payload = {key: value for key, value in payload.items() if key != "thinking"}
+    if "effort" in dropped:
+        remaining = {key: value for key, value in output.items() if key != "effort"}
+        if remaining:
+            payload["output_config"] = remaining
+        else:
+            payload.pop("output_config", None)
+    return payload, dropped
+
+
+def with_ultracode_note(system):
+    """Append the Ultracode note to a request's top-level system field.
+
+    Claude Desktop sends `system` as a string or as a list of content blocks,
+    and omits it entirely on a bare request; all three arrive here.
+    """
+    note = {"type": "text", "text": ULTRACODE_NOTE}
+    if system is None or system == "":
+        return [note]
+    if isinstance(system, str):
+        return [{"type": "text", "text": system}, note]
+    if isinstance(system, list):
+        return [*system, note]
+    return system
 
 
 def translate_request(payload: dict, settings: dict):

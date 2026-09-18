@@ -17,7 +17,7 @@ from gateway import Runtime, Server, rejection_details
 from protocol import (StreamTranslator, TokenCalibration, ULTRACODE_NOTE, apply_mapping_options, compact_conversation, compact_threshold, conversation_units,
                       estimated_tokens, function_name, reported_input_tokens,
                       mapping_options_for, model_catalog, rewrite_context_reminders, tool_id,
-                      translate_request, translate_response, resolve_model, resolve_mapping_slot, ultracode_active)
+                      translate_request, translate_response, resolve_model, resolve_mapping_slot, ultracode_active, with_ultracode_note, mask_effort_rejection)
 from hub_config import claude_routes
 from catalogue import build_catalogue, read_observations, route_specs
 
@@ -154,7 +154,7 @@ class ProtocolTests(unittest.TestCase):
     def test_catalogue_mode_serves_tier_rows_under_generated_ids(self):
         settings = self.catalogue_settings()
         rows = model_catalog(settings)["data"]
-        self.assertEqual([row["id"] for row in rows], ["claude-fable-5-mis-tral-test-model", "claude-sonnet-5-mis-tral-big-model[1m]"])
+        self.assertEqual([row["id"] for row in rows], ["claude-fable-5-mis-tral-test-model", "claude-fable-5-mis-tral-big-model[1m]"])
         self.assertEqual([row["anthropic_family_tier"] for row in rows], ["fable", "sonnet"])
         self.assertTrue(all(row["is_family_default"] for row in rows))
         self.assertIn("fable tier", rows[0]["description"])
@@ -168,7 +168,7 @@ class ProtocolTests(unittest.TestCase):
     def test_catalogue_mode_resolves_rows_aliases_and_family_stand_ins(self):
         settings = self.catalogue_settings()
         routes = claude_routes(settings)
-        self.assertEqual(resolve_model("claude-sonnet-5-mis-tral-big-model[1m]", routes), "big-model")
+        self.assertEqual(resolve_model("claude-fable-5-mis-tral-big-model[1m]", routes), "big-model")
         self.assertEqual(resolve_model("claude-fable-5-mis-tral-test-model", routes), "test-model")
         self.assertEqual(resolve_model("sonnet", routes), "big-model")
         self.assertEqual(resolve_model("fable", routes), "test-model")
@@ -178,7 +178,7 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(resolve_model("claude-sonnet-4-6", routes), "big-model")
         with self.assertRaises(BridgeError):
             resolve_model("gpt-5", routes)
-        options = mapping_options_for("claude-sonnet-5-mis-tral-big-model[1m]", settings)
+        options = mapping_options_for("claude-fable-5-mis-tral-big-model[1m]", settings)
         self.assertEqual(options["compact_limit"], 900000)
         self.assertFalse(options["omit_system"])
         self.assertEqual(mapping_options_for("haiku", settings)["compact_limit"], 900000)
@@ -186,7 +186,7 @@ class ProtocolTests(unittest.TestCase):
         self.assertIsNone(mapping_options_for("gpt-5", settings)["compact_limit"])
         result, _ = translate_request(prompt(model="claude-fable-5-mis-tral-test-model"), settings)
         self.assertEqual(result["model"], "test-model")
-        result, _ = translate_request(prompt(model="claude-sonnet-5-mis-tral-big-model[1m]"), settings)
+        result, _ = translate_request(prompt(model="claude-fable-5-mis-tral-big-model[1m]"), settings)
         self.assertEqual(result["model"], "big-model")
 
     def test_ultracode_reminders_add_an_orchestration_note_for_the_provider(self):
@@ -212,6 +212,38 @@ class ProtocolTests(unittest.TestCase):
         self.assertFalse(ultracode_active(stale))
         self.assertFalse(ultracode_active(prompt()))
         self.assertFalse(ultracode_active({"messages": "nope"}))
+        # A tool cycle ends on a user message carrying only tool_result blocks,
+        # so the keyword's own turn is no longer last. Anchoring to the final
+        # message dropped Ultracode the moment the model called a tool.
+        cycle = prompt(messages=[
+            {"role": "user", "content": [
+                {"type": "text", "text": 'The user included the keyword "ultracode", opting this turn into multi-agent orchestration.'},
+                {"type": "text", "text": "Audit the parser"}]},
+            {"role": "assistant", "content": [{"type": "tool_use", "id": "t1", "name": "Bash", "input": {}}]},
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "ok"}]}])
+        self.assertTrue(ultracode_active(cycle))
+        # The note tells the model to load the workflow-authoring skill, and
+        # the Skill tool delivers that skill body as its own user message
+        # right after the tool result. Reading that as a new typed turn made
+        # the note switch itself off one cycle after it first appeared.
+        skill = prompt(messages=cycle["messages"] + [
+            {"role": "user", "content": [{"type": "text", "text": "# Workflow authoring reference\n\nA workflow structures work..."}]}])
+        self.assertTrue(ultracode_active(skill))
+        # A turn the person actually typed still ends it: that message
+        # follows an assistant turn, not a tool result.
+        typed_again = prompt(messages=skill["messages"] + [
+            {"role": "assistant", "content": "done"}, {"role": "user", "content": "thanks"}])
+        self.assertFalse(ultracode_active(typed_again))
+
+    def test_ultracode_note_appends_to_either_system_spelling(self):
+        self.assertEqual(with_ultracode_note(None), [{"type": "text", "text": ULTRACODE_NOTE}])
+        self.assertEqual(with_ultracode_note(""), [{"type": "text", "text": ULTRACODE_NOTE}])
+        self.assertEqual(with_ultracode_note("Base rules"),
+                         [{"type": "text", "text": "Base rules"}, {"type": "text", "text": ULTRACODE_NOTE}])
+        blocks_in = [{"type": "text", "text": "Base rules", "cache_control": {"type": "ephemeral"}}]
+        self.assertEqual(with_ultracode_note(blocks_in), blocks_in + [{"type": "text", "text": ULTRACODE_NOTE}])
+        # Anything else is left exactly as it arrived rather than guessed at.
+        self.assertEqual(with_ultracode_note(7), 7)
 
     def test_compact_conversation_drops_oldest_and_keeps_chronological_order(self):
         body = sized_conversation(5, 1500)
@@ -752,7 +784,7 @@ class ProfileTests(unittest.TestCase):
         self.assertEqual(result["claude_code_settings"], "written")
         written = read_json(code)
         self.assertEqual(written["modelPicker"]["options"], [
-            {"model": "claude-opus-5-mis-tral-test-model", "label": "Test Model",
+            {"model": "claude-fable-5-mis-tral-test-model", "label": "Test Model",
              "description": "Provider Hub \u00b7 test-model \u00b7 behaves as claude-opus-5", "behavesAs": "claude-opus-5"}])
         self.assertNotIn("enableWorkflows", written)
         self.assertTrue(self.profile.restore(require_closed=False)["restored"])
@@ -767,7 +799,7 @@ class ProfileTests(unittest.TestCase):
         settings["claude_workflows"] = True
         self.profile.activate(settings, "local-token", require_closed=False)
         written = read_json(code)
-        self.assertEqual([row["model"] for row in written["modelPicker"]["options"]], ["my-model", "claude-opus-5-mis-tral-test-model"])
+        self.assertEqual([row["model"] for row in written["modelPicker"]["options"]], ["my-model", "claude-fable-5-mis-tral-test-model"])
         self.assertIs(written["modelPicker"]["replaceBuiltInOptions"], False)
         self.assertIs(written["enableWorkflows"], True)
         self.assertEqual(written["theme"], "dark")
@@ -875,6 +907,9 @@ class MockMistral(BaseHTTPRequestHandler):
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         type(self).requests.append(body)
+        if self.mode == "reject_effort":
+            raw = b'{"message":"output_config.effort: Extra inputs are not permitted"}'
+            self.send_response(400); self.send_header("Content-Length", str(len(raw))); self.end_headers(); self.wfile.write(raw); return
         if self.mode == "rate_limit":
             raw = b'{"message":"Test quota exceeded"}'
             self.send_response(429); self.send_header("Content-Length", str(len(raw))); self.end_headers(); self.wfile.write(raw); return
@@ -919,6 +954,79 @@ class CompactionPlanTests(unittest.TestCase):
         # Full requested output survives: no headroom clamp was needed.
         self.assertEqual(plan["body"]["max_tokens"], 32000)
         self.assertNotIn("output_headroom_clamped", plan.get("compatibility", {}))
+
+    def test_plan_carries_the_ultracode_note_into_the_system_field(self):
+        # The note only ever existed in translate_request, which nothing in the
+        # serving path calls, so Ultracode had never reached a model.
+        base = prompt(system="Base rules")
+        base["messages"] = [
+            {"role": "user", "content": [
+                {"type": "text", "text": "<system-reminder>Ultracode is on: optimize for the most exhaustive, correct answer.</system-reminder>"},
+                {"type": "text", "text": "Fix the bug"}]},
+            {"role": "assistant", "content": [{"type": "tool_use", "id": "t1", "name": "Bash", "input": {}}]},
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "ok"}]}]
+        body = self.runtime.plan(copy.deepcopy(base))["body"]
+        # It rides the system field into whatever the provider spells that as -
+        # here a leading system message - and never the transcript, so it
+        # survives compaction of the conversation.
+        self.assertEqual(body["messages"][0]["role"], "system")
+        self.assertTrue(body["messages"][0]["content"].startswith("Base rules"))
+        self.assertIn(ULTRACODE_NOTE, body["messages"][0]["content"])
+        self.assertNotIn(ULTRACODE_NOTE, json.dumps(body["messages"][1:]))
+        off = copy.deepcopy(base)
+        off["messages"].append({"role": "user", "content": "<system-reminder>Ultracode is off \u2014 the Workflow tool's standard opt-in rule applies again.</system-reminder>"})
+        self.assertNotIn(ULTRACODE_NOTE, json.dumps(self.runtime.plan(off)["body"]))
+
+    def test_plan_drops_reasoning_controls_a_route_cannot_take(self):
+        # Every row advertises the full ladder now, so a route with no
+        # reasoning axis will be asked for an effort it cannot take. Refusing
+        # would cost the whole session's effort control, so the request is
+        # degraded instead.
+        for spec in self.runtime.settings["_model_specs"].values():
+            spec["reasoning"] = False
+        body = prompt(output_config={"effort": "max"}, thinking={"type": "enabled", "budget_tokens": 8000})
+        plan = self.runtime.plan(copy.deepcopy(body))
+        self.assertEqual(plan["compatibility"]["reasoning_controls_dropped"], ["thinking", "effort"])
+        self.assertNotIn("reasoning_effort", json.dumps(plan["body"]))
+        # A route that does have the axis is left exactly as it arrived.
+        for spec in self.runtime.settings["_model_specs"].values():
+            spec["reasoning"] = True
+        kept = self.runtime.plan(copy.deepcopy(body))
+        self.assertNotIn("reasoning_controls_dropped", kept.get("compatibility", {}))
+
+    def test_ultracode_note_is_skipped_when_the_route_omits_system(self):
+        base = prompt(system="Base rules")
+        base["messages"] = [{"role": "user", "content": [
+            {"type": "text", "text": "<system-reminder>Ultracode is on: optimize for the most exhaustive, correct answer.</system-reminder>"},
+            {"type": "text", "text": "Fix the bug"}]}]
+        self.assertIn(ULTRACODE_NOTE, json.dumps(self.runtime.plan(copy.deepcopy(base))["body"]))
+        for options in self.runtime.settings.setdefault("mapping_options", {}).values():
+            options["omit_system"] = True
+        self.runtime.settings["mapping_options"].setdefault(base["model"], {})["omit_system"] = True
+        self.assertNotIn(ULTRACODE_NOTE, json.dumps(self.runtime.plan(copy.deepcopy(base))["body"]))
+
+    def test_relayed_400_never_names_the_effort_parameter(self):
+        # Claude Code latches a model as effort-unsupported for the whole
+        # session on one relayed 400 that reads like the provider refusing the
+        # parameter - the slider dies and stays dead until the session does.
+        # Each case pairs the rejection with the part of it a person needs:
+        # rewording, not replacing, because nothing else stores the wording -
+        # record() keeps no error text and last_error points back at this
+        # same message.
+        for detail, survives in [
+                ("output_config: Extra inputs are not permitted", "extra inputs are not permitted"),
+                ("This model does not support the effort parameter", "this model does not support"),
+                ("Unrecognized request argument supplied: output_config.effort", "unrecognized request argument"),
+                # The hub's own capability refusals carry this wording far
+                # more often than a provider's.
+                ("The selected model is documented as not supporting reasoning effort.", "documented as not supporting"),
+                ("Muse model does not support reasoning effort 'xhigh'.", "'xhigh'")]:
+            masked = mask_effort_rejection(detail)
+            self.assertNotIn("effort", masked.lower(), detail)
+            self.assertNotIn("output_config", masked.lower(), detail)
+            self.assertIn(survives, masked.lower(), detail)
+        for detail in ["messages: at least one message is required", ""]:
+            self.assertEqual(mask_effort_rejection(detail), detail)
 
     def test_plan_records_output_headroom_clamp(self):
         for spec in self.runtime.settings["_model_specs"].values():
@@ -1046,6 +1154,38 @@ class GatewayTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(headers["X-Mistral-Bridge-Token-Count"], "estimate")
         self.assertGreater(json.loads(data)["input_tokens"], 0)
+
+    def test_relayed_provider_400_cannot_read_as_effort_unsupported(self):
+        # One 400 whose text reads like the provider refusing the effort
+        # parameter and Claude Code stops offering effort on this model for
+        # the rest of the session - the control dies and does not return
+        # until the app does.
+        MockMistral.mode = "reject_effort"
+        try:
+            status, data, _ = self.request("POST", "/v1/messages", prompt())
+        finally:
+            MockMistral.mode = "normal"
+        self.assertEqual(status, 400)
+        body = data.decode().lower()
+        self.assertNotIn("effort", body)
+        self.assertNotIn("output_config", body)
+        # Reworded, not swallowed: the provider's own diagnosis survives.
+        self.assertIn("extra inputs are not permitted", body)
+
+    def test_hub_capability_rejection_is_reworded_on_the_planning_relay(self):
+        # The hub's own capability refusals carry this wording far more often
+        # than a provider's, and they leave by a different door.
+        def refuse(*_args, **_kwargs):
+            raise ValueError("The selected model is documented as not supporting reasoning effort.")
+        self.runtime.request_planner = refuse
+        try:
+            status, data, _ = self.request("POST", "/v1/messages", prompt())
+        finally:
+            self.runtime.request_planner = None
+        self.assertEqual(status, 400)
+        body = data.decode().lower()
+        self.assertNotIn("effort", body)
+        self.assertIn("reasoning depth", body)
 
     def test_unknown_route_rejection_is_logged_without_counting_failure(self):
         status, data, _ = self.request("POST", "/v1/messages", prompt(model="no/such-model"))

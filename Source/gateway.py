@@ -11,6 +11,7 @@ import ipaddress
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
+import re
 from pathlib import Path
 import select
 import signal
@@ -47,6 +48,7 @@ from cerebras_replay import CerebrasReplayError, CerebrasStreamAdapter, sanitize
 from gemini_provider import GeminiError, GeminiStreamAdapter, translate_response as translate_gemini_response, _estimated_input_tokens as estimated_gemini_tokens
 from protocol import (StreamTranslator, apply_mapping_options, apply_mistral_prefix, compact_conversation, compact_threshold, estimated_tokens, mapping_options_for, reported_input_tokens, TokenCalibration, validate_mistral_roles,
                       model_catalog, normalize_native_message, resolve_model, response_shape, rewrite_context_reminders, translate_request,
+                      ultracode_active, with_ultracode_note, without_reasoning_controls, mask_effort_rejection,
                       translate_response, _effective_context)
 from responses_native import ResponseOwnership, handle_responses, NATIVE_PROVIDERS
 from codex_accent import bridge_command as codex_accent_bridge
@@ -120,6 +122,22 @@ class Runtime:
         context = _effective_context(spec)
         options = mapping_options_for(payload.get("model"), self.settings)
         payload = apply_mapping_options(payload, self.settings)
+        # Ultracode announces itself only through reminders Claude Code writes
+        # into user turns, which a non-Claude model has no reason to read as
+        # standing orchestration instructions. One system note carries the
+        # intent across the translation. It rides the top-level system field
+        # rather than a message so it survives compaction, and it is skipped
+        # for a route the user has asked to run without a system prompt.
+        if ultracode_active(payload) and not options.get("omit_system"):
+            payload = {**payload, "system": with_ultracode_note(payload.get("system"))}
+        # Every hub row now advertises the full effort ladder, because Desktop
+        # grants that from one compiled key rather than per model. A route
+        # with no reasoning axis will therefore be asked for an effort it
+        # cannot take, and refusing costs more than ignoring: one such
+        # rejection and Claude Code stops offering effort on that model for
+        # the rest of the session.
+        payload, reasoning_dropped = (without_reasoning_controls(payload)
+                                      if spec.get("reasoning") is False else (payload, []))
         raw_estimate_fn = estimated_gemini_tokens if provider_id == "gemini" else estimated_tokens
         # Scale the pessimistic byte estimate by what this route's provider
         # has actually reported for earlier requests (never upwards), so a
@@ -206,6 +224,8 @@ class Runtime:
             plan.setdefault("compatibility", {})["estimate_calibration"] = round(calibration_factor, 3)
         if reminders_rewritten:
             plan.setdefault("compatibility", {})["context_reminders"] = "catalogue_remaining"
+        if reasoning_dropped:
+            plan.setdefault("compatibility", {})["reasoning_controls_dropped"] = reasoning_dropped
         dropped = [name for name, on in (("system", options["omit_system"]), ("tools", options["omit_tools"])) if on]
         if dropped:
             plan.setdefault("compatibility", {})["omitted_mapping_fields"] = dropped
@@ -632,6 +652,13 @@ class Handler(BaseHTTPRequestHandler):
             settings = self.runtime.settings
             if path == "/v1/messages/count_tokens":
                 self.runtime.resolve_route(payload.get("model", ""))
+                # This path deliberately does not go through plan(), so a
+                # count taken while Ultracode is on excludes the note plan()
+                # would add - roughly seventy tokens the client is never told
+                # about. Counting it here would mean a second copy of the
+                # injection rule, and the client uses this only to decide when
+                # to compact; the divergence is smaller than the estimate's
+                # own error.
                 counted = apply_mapping_options(payload, settings)
                 self.json_response(200, {"input_tokens": estimated_tokens(counted)}, {"X-Mistral-Bridge-Token-Count": "estimate"})
                 return
@@ -655,7 +682,10 @@ class Handler(BaseHTTPRequestHandler):
                 self.runtime.record("rejected", model, 400, usage)
             # The Responses relay reads this header so a gateway-side
             # rejection is never reworded as a provider error.
-            self.error(400, str(exc), headers={"X-Provider-Hub-Origin": "gateway"})
+            # The hub's own capability rejections are the ones most likely to
+            # name the effort parameter, so they are reworded on the same
+            # terms as a provider's - see _mask_effort_rejection.
+            self.error(400, mask_effort_rejection(str(exc)), headers={"X-Provider-Hub-Origin": "gateway"})
             return
         # Queue for a worker slot instead of failing fast: subagent bursts
         # briefly exceed the worker count by design, and every instant 429
@@ -733,6 +763,14 @@ class Handler(BaseHTTPRequestHandler):
                     data = json.loads(raw)
                     error = data.get("error", data)
                     detail = error.get("message", data.get("detail", "")) if isinstance(error, dict) else str(error)
+                    # An OpenAI-shaped envelope names the offending field in
+                    # `param` rather than in the message, so the message alone
+                    # says "Extra inputs are not permitted" about nothing in
+                    # particular. Carry it, so the person reading the error
+                    # learns which field and the rewording below can reach it.
+                    param = error.get("param") if isinstance(error, dict) else None
+                    if isinstance(param, str) and param and param not in str(detail):
+                        detail = f"{detail} ({param})" if detail else param
                 except (ValueError, AttributeError):
                     detail = ""
                 detail = str(detail)
@@ -757,7 +795,8 @@ class Handler(BaseHTTPRequestHandler):
                     response = None
                     upstream_socket = None
                     continue
-                message = f"{plan['provider_name']} returned HTTP {response.status}" + (": " + detail if detail else ".")
+                relayed = mask_effort_rejection(detail) if response.status == 400 else detail
+                message = f"{plan['provider_name']} returned HTTP {response.status}" + (": " + relayed if relayed else ".")
                 unavailable = response.status in {400, 404, 410} and any(term in detail.lower() for term in ("invalid model", "model not found", "model has been deprecated", "model is no longer"))
                 self.runtime.record("error", plan["route"], response.status, model_unavailable=unavailable)
                 terminal_headers = None
