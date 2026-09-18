@@ -218,8 +218,9 @@ class ResponsesBridgeTests(unittest.TestCase):
                  "reasoning": {"effort": "max"}},
                 "muse/muse-spark-1.3", omitted, envelope, "scope",
             )
-            with self.assertRaisesRegex(ProviderError, "does not support"):
-                prepare_request("muse", {}, "key", translated, "muse-spark-1.3", omitted)
+            squeezed = prepare_request("muse", {}, "key", translated, "muse-spark-1.3", omitted)
+            self.assertEqual(squeezed["body"]["output_config"]["effort"], "high")
+            self.assertEqual(squeezed["compatibility"]["reasoning_effort"], "max_normalized_to_high")
 
     def test_anthropic_cache_usage_is_included_in_codex_context_accounting(self):
         self.assertEqual(response_usage({"input_tokens": 10, "cache_creation_input_tokens": 20,

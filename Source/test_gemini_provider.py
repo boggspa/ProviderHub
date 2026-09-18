@@ -324,11 +324,15 @@ class RequestAndReplayTests(unittest.TestCase):
         self.assertEqual(plan["tool_name_map"][function["name"]], "workspace.read_file")
 
     def test_model_specific_effort_and_fast_controls_fail_closed(self):
-        with self.assertRaisesRegex(GeminiError, "does not support"):
-            prepare_request(
-                {}, KEY, request_payload(output_config={"effort": "minimal"}),
-                "gemini-3.8-flash", model_spec("gemini-3.8-flash"), SCOPE, REPLAY_KEY,
-            )
+        # A rank between two the model serves takes the nearer one rather
+        # than refusing: one refused effort and the client stops offering the
+        # control on this model for the whole session.
+        nearer = prepare_request(
+            {}, KEY, request_payload(output_config={"effort": "minimal"}),
+            "gemini-3.8-flash", model_spec("gemini-3.8-flash"), SCOPE, REPLAY_KEY,
+        )
+        self.assertEqual(nearer["body"]["reasoning_effort"], "low")
+        self.assertEqual(nearer["compatibility"]["reasoning_effort"], "minimal_normalized_to_low")
         with self.assertRaisesRegex(GeminiError, "cannot be disabled"):
             prepare_request(
                 {}, KEY, request_payload(thinking={"type": "disabled"}),

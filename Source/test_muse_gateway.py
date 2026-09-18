@@ -95,7 +95,7 @@ class MuseGatewayTests(unittest.TestCase):
         self.assertEqual(status, 200, raw)
         self.assertEqual(MockProvider.requests[0]["output_config"]["effort"], "xhigh")
 
-    def test_gateway_rejects_max_when_account_omits_it(self):
+    def test_gateway_squeezes_max_onto_the_top_rank_the_account_lists(self):
         self.start_gateway("muse", "muse-spark-1.3-contributor", {
             "context": 524288, "max_output": 65536,
             "effort_modes": ["low", "high"],
@@ -107,8 +107,12 @@ class MuseGatewayTests(unittest.TestCase):
             "thinking": {"type": "adaptive", "display": "omitted"},
             "output_config": {"effort": "max"},
         })
-        self.assertEqual(status, 400, raw)
-        self.assertIn(b"does not support", raw)
+        # The slider offers five rungs on every row whatever the account
+        # lists, so a rank above the top one takes the top one rather than
+        # failing the request - a refusal here would cost the client its
+        # effort control for the whole session.
+        self.assertEqual(status, 200, raw)
+        self.assertEqual(MockProvider.requests[0]["output_config"]["effort"], "high")
 
 
 if __name__ == "__main__":

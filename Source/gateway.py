@@ -130,12 +130,10 @@ class Runtime:
         # for a route the user has asked to run without a system prompt.
         if ultracode_active(payload) and not options.get("omit_system"):
             payload = {**payload, "system": with_ultracode_note(payload.get("system"))}
-        # Every hub row now advertises the full effort ladder, because Desktop
-        # grants that from one compiled key rather than per model. A route
-        # with no reasoning axis will therefore be asked for an effort it
-        # cannot take, and refusing costs more than ignoring: one such
-        # rejection and Claude Code stops offering effort on that model for
-        # the rest of the session.
+        # A route with no reasoning axis is still shown the slider, so it will
+        # be asked for an effort. The shared control block in providers
+        # ignores that too, but several builders refuse on their own before
+        # reaching it, so the controls come off here as well.
         payload, reasoning_dropped = (without_reasoning_controls(payload)
                                       if spec.get("reasoning") is False else (payload, []))
         raw_estimate_fn = estimated_gemini_tokens if provider_id == "gemini" else estimated_tokens

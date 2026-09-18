@@ -9,6 +9,7 @@ from effort_map import (
     MISTRAL_NARROW_EFFORTS,
     MISTRAL_REASONING_EFFORTS,
     cap_high_end,
+    nearest_effort,
     map_effort,
     mistral_effort_modes,
     mistral_ladder_for_model,
@@ -247,6 +248,36 @@ class CapHighEndTests(unittest.TestCase):
         for requested in ("xhigh", "max", "ultra"):
             normalized = CEREBRAS_EFFORT_ALIASES.get(requested, requested)
             self.assertEqual(cap_high_end(normalized, ["low", "medium", "high"]), "high")
+
+
+class NearestEffortTests(unittest.TestCase):
+    """The rank a model actually serves for one it does not."""
+
+    def test_a_rank_between_two_the_model_has_rounds_up(self):
+        # Ties round up, which is what the provider alias tables already do.
+        self.assertEqual(nearest_effort("medium", ["low", "high", "max"]), "high")
+        self.assertEqual(nearest_effort("xhigh", ["low", "high", "max"]), "max")
+        self.assertEqual(nearest_effort("high", ["none", "low", "medium", "xhigh"]), "xhigh")
+
+    def test_a_rank_past_either_end_takes_the_nearest_end(self):
+        self.assertEqual(nearest_effort("max", ["low", "medium", "high"]), "high")
+        self.assertEqual(nearest_effort("minimal", ["medium", "high"]), "medium")
+        self.assertEqual(nearest_effort("low", ["high"]), "high")
+
+    def test_none_is_never_substituted_for_and_never_substituted(self):
+        # "none" asks for thinking off rather than for less of it, and on some
+        # routes it selects a different model, so it is answered exactly or
+        # not at all - the caller decides what a refusal means.
+        self.assertIsNone(nearest_effort("none", ["low", "high"]))
+        self.assertEqual(nearest_effort("none", ["none", "low"]), "none")
+        self.assertEqual(nearest_effort("low", ["none", "high"]), "high")
+        self.assertIsNone(nearest_effort("low", ["none"]))
+
+    def test_what_is_not_a_rank_gets_no_answer(self):
+        self.assertIsNone(nearest_effort("bogus", ["low", "high"]))
+        self.assertIsNone(nearest_effort(None, ["low", "high"]))
+        self.assertIsNone(nearest_effort("high", []))
+        self.assertIsNone(nearest_effort("high", ["nonsense"]))
 
 
 if __name__ == "__main__":

@@ -294,20 +294,24 @@ class MusePlanningTests(unittest.TestCase):
                     "future-muse-model", {"reasoning": None, "effort_modes": [], "context": None},
                 )
                 self.assertEqual(forwarded["body"]["output_config"]["effort"], requested)
-        with self.assertRaisesRegex(ProviderError, "does not support"):
-            prepare_request(
-                "muse", {}, "key", claude_payload(), "limited-muse-model",
-                {"reasoning": True, "effort_modes": ["low"]},
-            )
+        narrowed = prepare_request(
+            "muse", {}, "key", claude_payload(), "limited-muse-model",
+            {"reasoning": True, "effort_modes": ["low"]},
+        )
+        self.assertEqual(narrowed["body"]["output_config"]["effort"], "low")
+        self.assertEqual(narrowed["compatibility"]["reasoning_effort"], "high_normalized_to_low")
 
     def test_account_listed_modes_constrain_or_reject_standard_tier_max(self):
         contributor = {"reasoning": True, "effort_modes": ["low", "high"]}
         for requested in ("xhigh", "max"):
-            with self.subTest(requested=requested), self.assertRaisesRegex(ProviderError, "does not support"):
-                prepare_request(
+            with self.subTest(requested=requested):
+                squeezed = prepare_request(
                     "muse", {}, "key", claude_payload(output_config={"effort": requested}),
                     "muse-spark-1.3-contributor", contributor,
                 )
+                self.assertEqual(squeezed["body"]["output_config"]["effort"], "high")
+                self.assertEqual(squeezed["compatibility"]["reasoning_effort"],
+                                 f"{requested}_normalized_to_high")
         ultra = prepare_request(
             "muse", {}, "key", claude_payload(output_config={"effort": "ultra"}),
             "muse-spark-1.3-contributor", contributor,

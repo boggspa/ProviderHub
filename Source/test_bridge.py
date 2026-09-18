@@ -978,17 +978,16 @@ class CompactionPlanTests(unittest.TestCase):
         self.assertNotIn(ULTRACODE_NOTE, json.dumps(self.runtime.plan(off)["body"]))
 
     def test_plan_drops_reasoning_controls_a_route_cannot_take(self):
-        # Every row advertises the full ladder now, so a route with no
-        # reasoning axis will be asked for an effort it cannot take. Refusing
-        # would cost the whole session's effort control, so the request is
-        # degraded instead.
+        # Removing this in favour of the shared provider block was a mistake:
+        # Grok, Gemini and every adaptive-thinking path refuse in their own
+        # builders before reaching that block, so eleven live Ollama rows
+        # hard-refused adaptive thinking until it came back.
         for spec in self.runtime.settings["_model_specs"].values():
             spec["reasoning"] = False
-        body = prompt(output_config={"effort": "max"}, thinking={"type": "enabled", "budget_tokens": 8000})
+        body = prompt(output_config={"effort": "max"},
+                      thinking={"type": "enabled", "budget_tokens": 8000})
         plan = self.runtime.plan(copy.deepcopy(body))
         self.assertEqual(plan["compatibility"]["reasoning_controls_dropped"], ["thinking", "effort"])
-        self.assertNotIn("reasoning_effort", json.dumps(plan["body"]))
-        # A route that does have the axis is left exactly as it arrived.
         for spec in self.runtime.settings["_model_specs"].values():
             spec["reasoning"] = True
         kept = self.runtime.plan(copy.deepcopy(body))

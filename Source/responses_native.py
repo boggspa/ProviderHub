@@ -19,7 +19,7 @@ from responses_tools import (flatten_tools, input_names, normalize_custom_calls,
                              restore_custom_call, split_hosted_search)
 from responses_bridge import ENVELOPE_PREFIX, MessagesResponsesAdapter, ReasoningEnvelope, to_messages
 from openrouter_provider import OpenRouterError, finalize as openrouter_finalize, app_headers as openrouter_app_headers
-from effort_map import cap_high_end, map_effort, ollama_effort_aliases
+from effort_map import cap_high_end, map_effort, nearest_effort, ollama_effort_aliases
 from spawn_depth import (SPAWN_NAMESPACE, SPAWN_TOOL, apply_subagent_model,
                          is_spawn_tool_reference)
 from rate_limit import (MAX_UPSTREAM_ATTEMPTS, RETRYABLE_STATUSES, SLOT_RETRY_AFTER, SLOT_WAIT_TIMEOUT,
@@ -591,9 +591,19 @@ def prepare_native(runtime, payload):
             if mapped is None and supported:
                 mapped = cap_high_end(aliases.get(requested_effort), supported)
             if mapped is None and supported:
-                raise BridgeError(f"Ollama model does not support reasoning effort {requested_effort!r}.")
+                # The closest rank this model does serve, rather than a
+                # refusal: Codex and Claude both read one refusal as the
+                # model having no effort control at all.
+                mapped = nearest_effort(requested_effort, supported)
             if mapped is not None:
                 reasoning["effort"] = mapped
+            elif supported:
+                # nearest_effort answers every real rank but "none", so what
+                # is left here asks to switch reasoning off on a model that
+                # cannot, or is not a rank at all. Forwarding it verbatim
+                # would hand the provider an unvalidated desktop string.
+                raise BridgeError(
+                    f"Ollama model does not support reasoning effort {requested_effort!r}.")
         url = connection["base_url"] + "/v1/responses"
     else:
         reasoning = body.get("reasoning")

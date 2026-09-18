@@ -579,6 +579,13 @@ def without_reasoning_controls(payload: dict):
     at all and latches that for the rest of the session, so the control would
     die on the first request and stay dead until the app restarts. Dropping
     the controls costs the request nothing it could have had.
+
+    This overlaps the shared control block in providers, which ignores the
+    same controls for the same reason, and the overlap is deliberate. That
+    block is not the only gate: Grok, Gemini and every adaptive-thinking path
+    refuse in their own builders before reaching it, so removing this left
+    eleven live Ollama rows hard-refusing adaptive thinking. Stripping here
+    covers the ones the shared block never sees.
     """
     dropped = []
     if payload.get("thinking") is not None:

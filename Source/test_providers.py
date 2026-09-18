@@ -731,11 +731,17 @@ class NativePlanTests(unittest.TestCase):
             adaptive_plan["compatibility"]["adaptive_thinking"],
             "normalized_to_enabled",
         )
-        with self.assertRaises(ProviderError):
-            prepare_request(
-                "ollama", {}, None, enabled, "plain-model",
-                {"reasoning": False, "effort_modes": [], "fast_mode": False},
-            )
+        # A model with no reasoning axis is still offered the slider, because
+        # Desktop shows the same five rungs on every row. It ignores the
+        # request and says so, rather than refusing and costing the client
+        # its effort control for the rest of the session.
+        no_axis = prepare_request(
+            "ollama", {}, None, enabled, "plain-model",
+            {"reasoning": False, "effort_modes": [], "fast_mode": False},
+        )
+        self.assertNotIn("thinking", no_axis["body"])
+        self.assertEqual(no_axis["compatibility"]["reasoning_effort"],
+                         "thinking_ignored_no_reasoning_axis")
 
     def test_adaptive_thinking_normalizes_to_provider_coarse_switch(self):
         payload = text_prompt(
@@ -873,6 +879,30 @@ class ChatPlanTests(unittest.TestCase):
                     "effort_modes": ["low", "medium", "high"],
                     "reasoning_history": "adapter_required",
                 },
+            )
+
+    def test_an_ignored_rank_is_actually_taken_off_the_wire(self):
+        # Saying a rank was ignored while leaving it on the body sends the
+        # provider an unvalidated desktop string and tells the client the
+        # opposite.
+        for provider, model in (("kimi", "kimi-k3"), ("deepseek", "deepseek-chat")):
+            with self.subTest(provider=provider):
+                plan = prepare_request(
+                    provider, {}, "key", text_prompt(output_config={"effort": "ultra"}),
+                    model, {"reasoning": True, "effort_modes": []},
+                )
+                self.assertNotIn("effort", plan["body"].get("output_config", {}))
+                self.assertEqual(plan["compatibility"]["reasoning_effort"],
+                                 "ultra_ignored_no_known_ranks")
+
+    def test_switching_reasoning_off_is_never_manufactured_from_a_ladder(self):
+        # "none" asks for thinking off rather than for less of it. A ladder
+        # without it cannot answer, and inventing the answer would disable
+        # thinking on a model documented as unable to.
+        with self.assertRaisesRegex(ProviderError, "does not support"):
+            prepare_request(
+                "ollama", {}, None, text_prompt(output_config={"effort": "none"}),
+                "gpt-oss:20b", {"reasoning": True, "effort_modes": ["low", "medium", "high"]},
             )
 
     def test_cerebras_high_end_effort_caps_to_top_advertised_rank(self):

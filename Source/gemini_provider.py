@@ -22,7 +22,7 @@ import re
 import secrets
 import urllib.parse
 
-from effort_map import cap_high_end
+from effort_map import cap_high_end, nearest_effort
 
 
 class GeminiError(ValueError):
@@ -552,7 +552,10 @@ def _normalize_effort(payload: dict, model_spec: dict, upstream_model: str) -> t
     if requested is None:
         return None, {}
     if requested != "none" and reasoning is False:
-        raise GeminiError("The selected Gemini model does not support reasoning effort.")
+        # No reasoning axis, but Desktop offers the slider anyway. Let the
+        # model use its own default rather than refuse: one refusal and the
+        # client stops offering effort on this model for the whole session.
+        return None, {"reasoning_effort": f"{requested}_ignored_no_reasoning_axis"}
     supported = model_spec.get("effort_modes")
     if not isinstance(supported, list) or not all(isinstance(value, str) for value in supported):
         raise GeminiError("Gemini effort metadata is malformed; refresh the model catalogue.")
@@ -564,6 +567,10 @@ def _normalize_effort(payload: dict, model_spec: dict, upstream_model: str) -> t
             raise GeminiError("Thinking cannot be disabled on this Gemini model.")
         capped = cap_high_end(normalized, supported)
         if capped is None:
+            capped = nearest_effort(normalized, supported)
+        if capped is None:
+            # nearest_effort answers every real rank against a published
+            # ladder, so reaching here means this is not a rank at all.
             raise GeminiError(f"Gemini model does not support reasoning effort {requested!r}.")
         normalized = capped
     controls = {}

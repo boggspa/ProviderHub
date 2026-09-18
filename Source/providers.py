@@ -210,7 +210,7 @@ from qwen_provider import DESCRIPTOR as QWEN_DESCRIPTOR, OFFICIAL_PATHS as QWEN_
 from openrouter_provider import DESCRIPTOR as OPENROUTER_DESCRIPTOR, OFFICIAL_PATHS as OPENROUTER_PATHS, OpenRouterError, discover as openrouter_discover, finalize as openrouter_finalize, normalize_messages as openrouter_controls, app_headers as openrouter_app_headers
 from gemini_provider import DESCRIPTOR as GEMINI_DESCRIPTOR, OFFICIAL_PATHS as GEMINI_PATHS, GeminiError, discover as gemini_discover, prepare_request as gemini_prepare_request, validate_connection as gemini_validate_connection
 from devin_agent import DESCRIPTOR as DEVIN_DESCRIPTOR, OFFICIAL_PATHS as DEVIN_PATHS, DevinAgentError, catalogue as devin_catalogue, validate_connection as devin_validate_connection
-from effort_map import CEREBRAS_EFFORT_ALIASES, DEEPSEEK_EFFORT_ALIASES, MISTRAL_EFFORT_ALIASES, MISTRAL_REASONING_EFFORTS, cap_high_end, map_effort, mistral_effort_modes, ollama_effort_aliases, ollama_effort_modes
+from effort_map import EFFORT_ORDER, CEREBRAS_EFFORT_ALIASES, DEEPSEEK_EFFORT_ALIASES, MISTRAL_EFFORT_ALIASES, MISTRAL_REASONING_EFFORTS, cap_high_end, map_effort, mistral_effort_modes, nearest_effort, ollama_effort_aliases, ollama_effort_modes
 
 PROVIDERS[QWEN_DESCRIPTOR["id"]] = QWEN_DESCRIPTOR
 PROVIDERS[OPENROUTER_DESCRIPTOR["id"]] = OPENROUTER_DESCRIPTOR
@@ -1426,10 +1426,14 @@ def _muse_effort(requested: str, supported: set[str]) -> str:
         if not ranked:
             raise ProviderError(f"Muse model does not support reasoning effort {requested!r}.")
         return ranked[-1]
-    if requested in _MUSE_EFFORT_RANKS:
-        if supported and requested not in supported:
-            raise ProviderError(f"Muse model does not support reasoning effort {requested!r}.")
+    if requested in _MUSE_EFFORT_RANKS and (not supported or requested in supported):
         return requested
+    # A rank Muse does not publish takes the closest one it does, rather than
+    # refusing and costing the client its effort control for the session.
+    nearest = nearest_effort(requested, [rank for rank in _MUSE_EFFORT_RANKS
+                                         if not supported or rank in supported])
+    if nearest is not None:
+        return nearest
     raise ProviderError(f"Muse model does not support reasoning effort {requested!r}.")
 
 
@@ -1475,11 +1479,18 @@ def _normalize_native_controls(
         body["thinking"]["type"] = "enabled"
         thinking_type = "enabled"
         compatibility["adaptive_thinking"] = "normalized_to_enabled"
-    if model_spec.get("reasoning") is False and thinking_type not in (None, "disabled"):
-        raise ProviderError("The selected model is documented as not supporting thinking.")
     if (model_spec.get("reasoning") is False
-            and requested not in (None, "none")):
-        raise ProviderError("The selected model is documented as not supporting reasoning effort.")
+            and (thinking_type not in (None, "disabled") or requested not in (None, "none"))):
+        # Desktop shows the same five-rung slider on every row whatever the
+        # route behind it can do, so a model with no reasoning axis will be
+        # asked for one. Ignoring that costs the request nothing it could
+        # have had; refusing costs the client its effort control for the
+        # whole session, because Claude Code reads one refusal as the model
+        # not supporting effort at all.
+        body.pop("thinking", None)
+        _write_output_effort(body, None)
+        compatibility["reasoning_effort"] = f"{requested or 'thinking'}_ignored_no_reasoning_axis"
+        requested, thinking_type = None, None
 
     if provider_id == "qwen-token-plan":
         try:
@@ -1504,8 +1515,11 @@ def _normalize_native_controls(
             # Missing per-model metadata is not evidence of incompatibility.
             # Forward a documented Meta API effort for the provider to validate;
             # constrain it locally only when an explicit supported set exists.
-            # Do not collapse Standard-tier xhigh/max to high, and do not send
-            # max on a narrower account-listed set.
+            # A rank above an account-listed set now takes that set's top rank
+            # rather than failing: Desktop offers all five rungs on every row,
+            # and one refusal costs the client its effort control for the whole
+            # session. The squeeze is recorded in compatibility, so a narrower
+            # account is visible rather than silent.
             normalized = _muse_effort(requested, supported)
             _write_output_effort(body, normalized)
             if normalized != requested:
@@ -1551,12 +1565,21 @@ def _normalize_native_controls(
             if normalized is not None and normalized not in supported:
                 normalized = cap_high_end(normalized, supported)
             if normalized is None or normalized not in supported:
+                normalized = nearest_effort(requested, supported)
+            if normalized is None and (requested == "none" or requested not in EFFORT_ORDER):
                 raise ProviderError(
                     f"Kimi model does not support reasoning effort {requested!r}.")
-            _write_thinking_type(body, "enabled", descriptor["name"])
-            _write_output_effort(body, normalized)
-            if normalized != requested:
-                compatibility["reasoning_effort"] = f"{requested}_normalized_to_{normalized}"
+            if normalized is None:
+                # "Ignored" has to mean it: leave the rank on the body and the
+                # provider receives an unvalidated desktop string while the
+                # client is told it was dropped.
+                _write_output_effort(body, None)
+                compatibility["reasoning_effort"] = f"{requested}_ignored_no_known_ranks"
+            else:
+                _write_thinking_type(body, "enabled", descriptor["name"])
+                _write_output_effort(body, normalized)
+                if normalized != requested:
+                    compatibility["reasoning_effort"] = f"{requested}_normalized_to_{normalized}"
         if thinking_type == "disabled" and upstream_model != "kimi-for-coding":
             raise ProviderError(
                 "Disabling thinking is not an exact-model control for this Kimi route.")
@@ -1568,8 +1591,11 @@ def _normalize_native_controls(
         if requested is not None:
             if requested == "none":
                 target = "disabled"
-            elif requested in {"minimal", "low", "medium", "high", "xhigh", "max", "ultra"}:
+            elif requested in EFFORT_ORDER:
+                # Every rank above "none" means the same thing to MiMo: on.
                 target = "enabled"
+                if requested not in {"minimal", "low", "medium", "high", "xhigh", "max", "ultra"}:
+                    compatibility["reasoning_effort"] = f"{requested}_normalized_to_enabled"
             else:
                 raise ProviderError(f"MiMo does not support reasoning effort {requested!r}.")
             _write_thinking_type(body, target, descriptor["name"])
@@ -1585,13 +1611,19 @@ def _normalize_native_controls(
             if normalized is None:
                 normalized = cap_high_end(DEEPSEEK_EFFORT_ALIASES.get(requested), supported)
             if normalized is None:
+                normalized = nearest_effort(requested, supported)
+            if normalized is None and (requested == "none" or requested not in EFFORT_ORDER):
                 raise ProviderError(
                     f"DeepSeek model does not support reasoning effort {requested!r}.")
-            _write_thinking_type(
-                body, "disabled" if normalized == "none" else "enabled", descriptor["name"])
-            _write_output_effort(body, normalized)
-            if normalized != requested:
-                compatibility["reasoning_effort"] = f"{requested}_normalized_to_{normalized}"
+            if normalized is None:
+                _write_output_effort(body, None)
+                compatibility["reasoning_effort"] = f"{requested}_ignored_no_known_ranks"
+            else:
+                _write_thinking_type(
+                    body, "disabled" if normalized == "none" else "enabled", descriptor["name"])
+                _write_output_effort(body, normalized)
+                if normalized != requested:
+                    compatibility["reasoning_effort"] = f"{requested}_normalized_to_{normalized}"
         return compatibility
 
     if provider_id == "ollama":
@@ -1607,8 +1639,13 @@ def _normalize_native_controls(
                 if normalized is None:
                     normalized = cap_high_end(aliases.get(requested), supported)
                 if normalized is None:
+                    normalized = nearest_effort(requested, supported)
+                if normalized is None and (requested == "none" or requested not in EFFORT_ORDER):
                     raise ProviderError(
                         f"Ollama model does not support reasoning effort {requested!r}.")
+                if normalized is None:
+                    normalized = supported[-1]
+                    compatibility["reasoning_effort"] = f"{requested}_normalized_to_{normalized}"
                 if normalized == "none":
                     _write_thinking_type(body, "disabled", descriptor["name"])
                     _write_output_effort(body, None)
@@ -1628,7 +1665,12 @@ def _normalize_native_controls(
                 _write_thinking_type(body, "enabled", descriptor["name"])
                 _write_output_effort(body, None)
             else:
-                raise ProviderError(f"Ollama does not support reasoning effort {requested!r}.")
+                # No published ranks: any rank above "none" just means on.
+                if model_spec.get("reasoning") is not True:
+                    raise ProviderError("The Ollama model does not advertise thinking support.")
+                _write_thinking_type(body, "enabled", descriptor["name"])
+                _write_output_effort(body, None)
+                compatibility["reasoning_effort"] = f"{requested}_normalized_to_enabled"
         return compatibility
     return compatibility
 
@@ -1895,7 +1937,11 @@ def _chat_effort(provider_id: str, payload: dict, model_spec: dict, upstream_mod
         if normalized is None:
             normalized = cap_high_end(MISTRAL_EFFORT_ALIASES.get(requested), supported)
         if normalized is None:
+            normalized = nearest_effort(requested, supported)
+        if normalized is None and (requested == "none" or requested not in EFFORT_ORDER):
             raise ProviderError("Unsupported Mistral reasoning effort.")
+        if normalized is None:
+            return "high" if "high" in supported else (supported[-1] if supported else None)
         return normalized
     if provider_id == "cerebras":
         supported = model_spec.get("effort_modes") or []
@@ -1907,9 +1953,15 @@ def _chat_effort(provider_id: str, payload: dict, model_spec: dict, upstream_mod
         if normalized not in supported:
             normalized = cap_high_end(normalized, supported)
         if normalized is None or normalized not in supported:
-            if not supported:
-                raise ProviderError("Cerebras reasoning effort controls are not known for this model.")
+            normalized = nearest_effort(requested, supported)
+        if normalized is None and (requested == "none" or requested not in EFFORT_ORDER):
+            # Not a rank at all, or a request to switch reasoning off that
+            # this model cannot honour. Neither is a near-miss to round.
             raise ProviderError(f"Cerebras model does not support reasoning effort {requested!r}.")
+        if normalized is None:
+            # A known rank with no published ranks to compare it against:
+            # leave the field off and let the model use its own default.
+            return None
         return normalized
     return None
 

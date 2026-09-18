@@ -148,6 +148,38 @@ def cap_high_end(normalized: str | None, supported) -> str | None:
     return None
 
 
+def nearest_effort(requested: str | None, supported) -> str | None:
+    """The closest rank this model actually serves, for a rank it does not.
+
+    cap_high_end deliberately only catches requests at or above the model's
+    top rank, leaving an in-range rank the model happens to skip to fail
+    closed. That refusal is expensive in a way it was not when it was
+    written: Claude Desktop now shows the same five-rung slider on every
+    route whatever its provider can do, and one refused effort makes Claude
+    Code stop offering effort on that model for the rest of the session. A
+    rung that lands between two the model has should pick one, not end the
+    conversation.
+
+    Ties round up, which matches what the provider alias tables already do
+    (xhigh -> max on a low/high/max ladder). "none" is excluded from the
+    candidates and never substituted for: it asks for thinking to be off
+    rather than for less of it, and on some routes it selects a different
+    model entirely. A caller asking for "none" on a model that cannot
+    disable thinking gets None back and decides for itself.
+    """
+    if requested is None or requested not in EFFORT_ORDER:
+        return None
+    allowed = [rank for rank in (supported or [])
+               if rank in EFFORT_ORDER and rank != "none"]
+    if not allowed:
+        return None
+    if requested == "none":
+        return "none" if "none" in (supported or []) else None
+    target = EFFORT_ORDER.index(requested)
+    return min(allowed, key=lambda rank: (abs(EFFORT_ORDER.index(rank) - target),
+                                          -EFFORT_ORDER.index(rank)))
+
+
 def ollama_effort_modes(identifier: str, reasoning: bool | None) -> list[str]:
     if reasoning is not True:
         return []
