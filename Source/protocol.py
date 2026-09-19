@@ -14,7 +14,7 @@ import re
 import secrets
 
 from bridge_core import BridgeError, SLOTS
-from hub_config import claude_catalogue_rows, claude_routes
+from hub_config import claude_catalogue_rows, claude_picker_rows, claude_routes
 from model_names import friendly_model_name
 from catalogue import fits_desktop_baseline, status_label
 from claude_context import claude_context_spec
@@ -267,7 +267,7 @@ def stated_context(spec: dict):
 
 def model_catalog(settings: dict):
     rows, seen = [], set()
-    catalogue = claude_catalogue_rows(settings)
+    catalogue = claude_picker_rows(settings)
     # Catalogue mode serves one tier-tagged row per curated route under its
     # generated id; mapping mode serves the five family slots.
     plan = ([(row["id"], row["route"], row["tier"], row["tier_default"]) for row in catalogue] if catalogue

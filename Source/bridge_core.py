@@ -22,7 +22,7 @@ import uuid
 from model_names import friendly_model_name, label_catalog
 from catalogue import build_catalogue, read_observations, route_specs
 from cli_routes import cli_credential_mode, discover_via_cli
-from hub_config import (CLAUDE_TIER_MODELS, SLOTS, claude_catalogue_rows, claude_routes, connection_signature,
+from hub_config import (CLAUDE_TIER_MODELS, SLOTS, claude_picker_rows, claude_routes, connection_signature,
                         defaults as hub_defaults, normalize as normalize_hub_settings,
                         project_catalogue, provider_presentations, qualify, split_route)
 from providers import PROVIDERS, discover
@@ -417,7 +417,7 @@ class ClaudeProfile:
         from claude_context import claude_context_spec
         from protocol import _effective_context
 
-        rows = claude_catalogue_rows(settings) if settings.get("claude_code_settings", True) else []
+        rows = claude_picker_rows(settings) if settings.get("claude_code_settings", True) else []
         workflows = settings.get("claude_workflows") is True
         if not rows and not workflows:
             return None, None

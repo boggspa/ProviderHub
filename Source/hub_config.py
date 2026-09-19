@@ -438,6 +438,19 @@ def claude_catalogue_rows(settings: dict) -> list[dict]:
     return rows
 
 
+def claude_picker_rows(settings: dict) -> list[dict]:
+    """Group picker rows by account provider, retaining each provider's order.
+
+    Allocate IDs in saved order before sorting so slug collisions keep their
+    existing IDs. Routing and tier defaults still use claude_catalogue_rows;
+    this order is only for Desktop discovery and managed Code picker options.
+    Use the route provider, not the model maker's display branding, so models
+    reached through a shared connection such as Ollama stay together.
+    """
+    return sorted(claude_catalogue_rows(settings),
+                  key=lambda row: split_route(row["route"])[0].casefold())
+
+
 def claude_routes(settings: dict) -> dict:
     """Model id -> provider route for whichever Claude mode is active.
 
