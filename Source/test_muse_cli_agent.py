@@ -1,0 +1,476 @@
+"""Tests for the Muse Code CLI model route (Source/muse_cli_agent.py).
+
+unittest only (pytest is not part of the uv environment). No real CLI is ever
+spawned and no network is touched: read-only probes are driven by injected
+``capture`` callables and turns are driven through a fake ``StdioSession``
+injected via ``spawner``/``mock``.
+"""
+from __future__ import annotations
+
+import json
+import os
+import unittest
+from unittest import mock
+
+import muse_cli_agent as m
+
+
+class _FakeStdin:
+    def write(self, data):
+        pass
+
+    def flush(self):
+        pass
+
+    def close(self):
+        pass
+
+
+class FakeSession:
+    """Minimal stand-in for cli_session.StdioSession."""
+
+    def __init__(self, argv, env=None, timeout=None, spawner=None, stderr=None):
+        self.argv = list(argv)
+        self.env = env
+        self.timeout = timeout
+        self.spawner = spawner
+        self.stderr = stderr
+        self.lines = []
+        self.returncode = 0
+        self.process = None
+        self.stdin = _FakeStdin()
+        self._events_exc = None
+        self.request_script = {}
+        self.requests = []
+        self.notifications = []
+        self._request_exc = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def events(self, timeout=None):
+        if self._events_exc is not None:
+            raise self._events_exc
+        for line in self.lines:
+            yield line
+
+    def close(self):
+        pass
+
+    def send(self, *args, **kwargs):
+        pass
+
+    def request(self, method, params=None, timeout=None):
+        self.requests.append((method, params))
+        if self._request_exc is not None:
+            raise self._request_exc
+        return self.request_script.get(method, {})
+
+    def notify(self, method, params=None):
+        self.notifications.append((method, params))
+
+
+class _Ev:
+    def __init__(self, items):
+        self.items = items
+
+    def events(self, timeout=None):
+        yield from self.items
+
+
+def _delta(text):
+    return {"payload_type": "run.output.delta",
+            "payload": {"kind": "run_output_delta", "text": text}}
+
+
+def _terminal(terminal, text=None, reason=None):
+    return {"payload_type": f"run.terminal.{terminal}",
+            "payload": {"kind": "run_terminal", "terminal": terminal,
+                        "text": text, "reason": reason}}
+
+
+class BuildArgvTests(unittest.TestCase):
+    def test_structure(self):
+        argv = m.build_argv("mistral-medium", effort="high")
+        self.assertEqual(argv[0], "muse")
+        self.assertEqual(argv[1], "exec")
+        self.assertIn("--json", argv)
+        for flag in ("--disable-shell", "--disable-write", "--disable-web-tools",
+                     "--no-foreign-personal-context", "--no-session-log"):
+            self.assertIn(flag, argv)
+        self.assertIn("--model", argv)
+        self.assertEqual(argv[argv.index("--model") + 1], "mistral-medium")
+        self.assertIn("--reasoning-effort", argv)
+        self.assertEqual(argv[argv.index("--reasoning-effort") + 1], "high")
+        # Safety invariants hold by construction.
+        for flag in m._FORBIDDEN_FLAGS:
+            self.assertNotIn(flag, argv)
+        for flag in m._VARIADIC_TOOL_FLAGS:
+            self.assertNotIn(flag, argv)
+
+    def test_effort_optional(self):
+        self.assertNotIn("--reasoning-effort", m.build_argv("m", effort=None))
+
+    def test_system_is_not_in_argv(self):
+        # SYSTEM_PROMPT_TRANSPORT == "prompt": the system text must never reach
+        # argv, or it would leak into the process listing and double-charge.
+        argv = m.build_argv("m", system="SECRET SYSTEM TEXT")
+        self.assertNotIn("SECRET SYSTEM TEXT", argv)
+
+    def test_assert_safe_rejects_forbidden(self):
+        for bad in (["muse", "--yolo"],
+                    ["muse", "--disable-approval"],
+                    ["muse", "--disable-sandbox"],
+                    ["muse", "--approval-mode", "never"],
+                    ["muse", "--approval-mode=never"]):
+            with self.assertRaises(m.MuseCliAgentError):
+                m._assert_safe(bad)
+        self.assertEqual(m._assert_safe(["muse", "--disable-shell"]),
+                         ["muse", "--disable-shell"])
+
+    def test_validation_is_enforced(self):
+        with self.assertRaises(m.MuseCliAgentError):
+            m.build_argv("", effort=None)
+        with self.assertRaises(m.MuseCliAgentError):
+            m.build_argv("mistral", effort="bogus")
+
+
+class ValidationTests(unittest.TestCase):
+    def test_model(self):
+        self.assertEqual(m._validate_model("mistral-medium"), "mistral-medium")
+        for bad in ("", "   ", "has a space"):
+            with self.assertRaises(m.MuseCliAgentError):
+                m._validate_model(bad)
+
+    def test_effort_full_ladder_is_identity(self):
+        self.assertEqual(m.MUSE_EFFORTS,
+                         ["none", "minimal", "low", "medium", "high", "xhigh",
+                          "max", "ultra"])
+        for rank in m.MUSE_EFFORTS:
+            self.assertEqual(m._validate_effort(rank), rank)
+        self.assertIsNone(m._validate_effort(None))
+        with self.assertRaises(m.MuseCliAgentError):
+            m._validate_effort("bogus")
+        with self.assertRaises(m.MuseCliAgentError):
+            m._validate_effort(123)
+
+    def test_coerce_messages(self):
+        self.assertEqual(
+            m._coerce_messages([{"role": "user", "content": "hi"}]),
+            [{"role": "user", "content": "hi"}],
+        )
+        with self.assertRaises(m.MuseCliAgentError):
+            m._coerce_messages("not a list")
+        with self.assertRaises(m.MuseCliAgentError):
+            m._coerce_messages([{"role": "system", "content": "x"}])
+        with self.assertRaises(m.MuseCliAgentError):
+            m._coerce_messages([{"role": "assistant", "content": "x"}])
+
+
+class RenderPromptTests(unittest.TestCase):
+    def test_single_user_passthrough(self):
+        self.assertEqual(
+            m.render_prompt([{"role": "user", "content": "hi"}]),
+            "hi",
+        )
+
+    def test_system_and_history_are_framed(self):
+        prompt = m.render_prompt(
+            [{"role": "user", "content": "hi"},
+             {"role": "assistant", "content": "hello"}],
+            system="SYS",
+        )
+        self.assertIn(m._TRANSCRIPT_HEADER, prompt)
+        self.assertIn("<system>", prompt)
+        self.assertIn("SYS", prompt)
+        self.assertIn("hi", prompt)
+        self.assertIn(m._TRANSCRIPT_FOOTER, prompt)
+
+
+class TranslateTests(unittest.TestCase):
+    def test_text_delta(self):
+        state = m._TurnState()
+        events = m._translate(_delta("hello"), state)
+        self.assertEqual(events, [{"type": "text_delta", "text": "hello"}])
+        self.assertTrue(state.emitted_text)
+
+    def test_terminal_completed(self):
+        state = m._TurnState()
+        events = m._translate(_terminal("completed", text="full"), state)
+        self.assertEqual(events, [])
+        self.assertEqual(state.stop_reason, "completed")
+        self.assertEqual(state.result_text, "full")
+        self.assertIsNone(state.failure)
+
+    def test_terminal_failed(self):
+        state = m._TurnState()
+        m._translate(_terminal("failed", reason="kaboom"), state)
+        self.assertIsNotNone(state.failure)
+        self.assertIn("kaboom", state.failure)
+
+    def test_background_task_failure_is_ignored(self):
+        state = m._TurnState()
+        payload = {"payload_type": "task.lifecycle.failed",
+                   "payload": {"kind": "task_lifecycle",
+                               "event": {"kind": "failed",
+                                         "reason": "sub-task noise"}}}
+        self.assertEqual(m._translate(payload, state), [])
+        self.assertIsNone(state.failure)
+
+    def test_bookkeeping_is_ignored(self):
+        state = m._TurnState()
+        for payload in (
+            {"payload_type": "turn.input.user",
+             "payload": {"kind": "turn_input_user", "prompt": "x"}},
+            {"payload_type": "session.workspace_branch.observed",
+             "payload": {"kind": "workspace_branch_observed"}},
+        ):
+            self.assertEqual(m._translate(payload, state), [])
+
+
+class IterEventsTests(unittest.TestCase):
+    def test_parses_dicts_strings_and_raw(self):
+        self.assertEqual(list(m._iter_events(_Ev([{"a": 1}]), timeout=1)),
+                         [("json", {"a": 1})])
+        self.assertEqual(list(m._iter_events(_Ev(['{"a": 2}']), timeout=1)),
+                         [("json", {"a": 2})])
+        self.assertEqual(list(m._iter_events(_Ev(["plain diagnostic"]),
+                                             timeout=1)),
+                         [("raw", "plain diagnostic")])
+
+
+class DiscoverTests(unittest.TestCase):
+    @mock.patch.object(m, "_resolve_binary", return_value="/fake/muse")
+    def test_installed_with_version(self, _rb):
+        out = "Muse Code 1.3.0 (1.3.0-R3401.1)"
+        d = m.discover(capture=lambda argv, **k: (0, out, ""))
+        self.assertTrue(d["installed"])
+        self.assertEqual(d["binary"], "/fake/muse")
+        self.assertEqual(d["version"], "1.3.0")
+
+    @mock.patch.object(m, "_resolve_binary", return_value="/fake/muse")
+    def test_installed_but_versionless(self, _rb):
+        d = m.discover(capture=lambda argv, **k: (2, "", "bad flag"))
+        self.assertTrue(d["installed"])
+        self.assertIsNone(d["version"])
+
+    @mock.patch.object(m, "_resolve_binary", return_value=None)
+    def test_not_installed(self, _rb):
+        d = m.discover()
+        self.assertFalse(d["installed"])
+        self.assertIsNone(d["binary"])
+
+
+class AuthStateTests(unittest.TestCase):
+    @mock.patch.object(m, "_resolve_binary", return_value="/fake/muse")
+    def test_unsupported_without_spawning(self, _rb):
+        # muse exposes no read-only auth-status subcommand; this must not spawn.
+        self.assertEqual(m.auth_state()["state"], "unsupported")
+
+    @mock.patch.object(m, "_resolve_binary", return_value=None)
+    def test_missing(self, _rb):
+        self.assertEqual(m.auth_state()["state"], "missing")
+
+
+class CatalogueTests(unittest.TestCase):
+    def _session(self, models, *, init_result=None, error=None, request_exc=None):
+        fake = FakeSession([])
+        fake.request_script = {
+            "initialize": init_result if init_result is not None else {
+                "result": {"serverInfo": {"name": "muse", "version": "1.3.0"}}},
+            "model/list": {"error": error} if error is not None else {
+                "result": {"models": models, "providerId": "meta",
+                           "profileId": "tbh", "source": "providerCatalog"}},
+        }
+        fake._request_exc = request_exc
+        return fake
+
+    def _run(self, fake, *, spawner="spawner-stub"):
+        sessions = []
+
+        def factory(argv, **kwargs):
+            fake.argv = list(argv)
+            fake.env = kwargs.get("env")
+            fake.timeout = kwargs.get("timeout")
+            fake.spawner = kwargs.get("spawner")
+            sessions.append(fake)
+            return fake
+
+        with mock.patch.object(m, "StdioSession", side_effect=factory), \
+                mock.patch.object(m, "_resolve_binary", return_value="/fake/muse"):
+            rows, notes = m.catalogue(spawner=spawner, timeout=10)
+        return rows, notes, fake, sessions
+
+    def test_live_rows_are_normalized(self):
+        raw = [
+            {"modelId": "muse-spark-1.3", "displayLabel": "muse-spark-1.3",
+             "contextLimit": 1007997, "outputLimit": 128000, "description": None,
+             "isDefault": False, "isActive": False},
+            {"modelId": "muse-spark-1.3-contributor",
+             "displayLabel": "muse-spark-1.3-contributor",
+             "contextLimit": 1007997, "outputLimit": 128000,
+             "description": "Your content, including inter-session messages, "
+                             "may be used for product improvement.",
+             "isDefault": True, "isActive": False},
+        ]
+        rows, notes, session, _ = self._run(self._session(raw))
+        self.assertEqual(notes, [])
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]["id"], "muse-spark-1.3")
+        self.assertEqual(rows[0]["display_name"], "muse-spark-1.3")
+        self.assertEqual(rows[0]["context"], 1007997)
+        self.assertEqual(rows[0]["max_output"], 128000)
+        self.assertEqual(rows[0]["reasoning_levels"], m.MUSE_EFFORTS)
+        self.assertEqual(rows[0]["default_effort"], "high")
+        self.assertIn("Your content", rows[1]["description"])
+        # The handshake drove initialize -> initialized -> model/list.
+        self.assertEqual([call[0] for call in session.requests],
+                         ["initialize", "model/list"])
+        self.assertEqual([call[0] for call in session.notifications],
+                         ["initialized"])
+
+    def test_empty_models_yields_note(self):
+        rows, notes, _, _ = self._run(self._session([]))
+        self.assertEqual(rows, [])
+        self.assertEqual(len(notes), 1)
+
+    def test_missing_binary_degrades(self):
+        with mock.patch.object(m, "_resolve_binary", return_value=None):
+            rows, notes = m.catalogue()
+        self.assertEqual(rows, [])
+        self.assertTrue(notes)
+
+    def test_error_result_degrades(self):
+        rows, notes, _, _ = self._run(
+            self._session([], error={"code": -32603, "message": "boom"}))
+        self.assertEqual(rows, [])
+        self.assertTrue(any("boom" in note for note in notes))
+
+    def test_session_break_degrades(self):
+        rows, notes, _, _ = self._run(
+            self._session([], request_exc=RuntimeError("wedged")))
+        self.assertEqual(rows, [])
+        self.assertTrue(any("wedged" in note for note in notes))
+
+    def test_malformed_rows_are_dropped(self):
+        raw = [
+            {"modelId": "muse-spark-1.3", "displayLabel": "muse-spark-1.3"},
+            {"displayLabel": "no id"},
+            "not a dict",
+            {"modelId": "", "displayLabel": "empty id"},
+        ]
+        rows, notes, _, _ = self._run(self._session(raw))
+        self.assertEqual([row["id"] for row in rows], ["muse-spark-1.3"])
+
+    def test_row_normalization_unit(self):
+        row = m._row({"modelId": "muse-spark-1.3", "displayLabel": None,
+                      "contextLimit": 1007997, "outputLimit": 128000,
+                      "description": None})
+        self.assertEqual(row["id"], "muse-spark-1.3")
+        self.assertEqual(row["display_name"], "muse-spark-1.3")
+        self.assertEqual(row["context"], 1007997)
+        self.assertEqual(row["max_output"], 128000)
+        self.assertIsNone(m._row({"displayLabel": "no id"}))
+        self.assertIsNone(m._row("not a dict"))
+
+
+class RunTurnTests(unittest.TestCase):
+    def _stream(self, lines, returncode=0, events_exc=None):
+        fake = FakeSession([])
+        fake.lines = lines
+        fake.returncode = returncode
+        fake._events_exc = events_exc
+        return fake
+
+    def _run(self, request, fake, *, spawner="spawner-stub"):
+        sessions = []
+
+        def factory(argv, **kwargs):
+            fake.argv = list(argv)
+            fake.env = kwargs.get("env")
+            fake.timeout = kwargs.get("timeout")
+            fake.spawner = kwargs.get("spawner")
+            sessions.append(fake)
+            return fake
+
+        with mock.patch.object(m, "StdioSession", side_effect=factory), \
+                mock.patch.object(m, "_resolve_binary", return_value="/fake/muse"):
+            events = list(m.run_turn(request, spawner=spawner))
+        return events, fake, sessions
+
+    def test_bad_request_degrades(self):
+        with mock.patch.object(m, "_resolve_binary", return_value="/fake/muse"):
+            events = list(m.run_turn("not an object"))
+        self.assertEqual([e["type"] for e in events], ["error"])
+
+    def test_missing_binary_degrades(self):
+        with mock.patch.object(m, "_resolve_binary", return_value=None):
+            events = list(m.run_turn(
+                {"model": "m", "messages": [{"role": "user", "content": "hi"}]}))
+        self.assertEqual([e["type"] for e in events], ["error"])
+        self.assertIn("not found", events[0]["message"])
+
+    def test_streams_text_and_stop(self):
+        fake = self._stream([json.dumps(_delta("hello")),
+                             json.dumps(_terminal("completed", text="hello"))])
+        events, session, _ = self._run(
+            {"model": "mistral",
+             "messages": [{"role": "user", "content": "hi"}]}, fake)
+        self.assertEqual([e["type"] for e in events],
+                         ["text_delta", "message_stop"])
+        self.assertEqual(events[0]["text"], "hello")
+        self.assertEqual(events[1]["stop_reason"], "completed")
+        # Prompt is never positional and never in argv: it travels by file.
+        self.assertIn("--prompt-file", session.argv)
+        self.assertNotIn("hi", session.argv)
+        idx = session.argv.index("--prompt-file")
+        self.assertFalse(os.path.exists(session.argv[idx + 1]))
+        self.assertEqual(session.spawner, "spawner-stub")
+
+    def test_terminal_only_falls_back_to_full_text(self):
+        fake = self._stream([json.dumps(_terminal("completed", text="full answer"))])
+        events, _, _ = self._run(
+            {"model": "m", "messages": [{"role": "user", "content": "hi"}]},
+            fake)
+        self.assertEqual([e["type"] for e in events],
+                         ["text_delta", "message_stop"])
+        self.assertEqual(events[0]["text"], "full answer")
+
+    def test_failed_terminal_is_error(self):
+        fake = self._stream([json.dumps(_terminal("failed", reason="kaboom"))])
+        events, _, _ = self._run(
+            {"model": "m", "messages": [{"role": "user", "content": "hi"}]},
+            fake)
+        self.assertEqual([e["type"] for e in events], ["error"])
+        self.assertIn("kaboom", events[0]["message"])
+
+    def test_nonzero_exit_without_text_is_error(self):
+        fake = self._stream([], returncode=2)
+        events, _, _ = self._run(
+            {"model": "m", "messages": [{"role": "user", "content": "hi"}]},
+            fake)
+        self.assertEqual([e["type"] for e in events], ["error"])
+        self.assertIn("2", events[0]["message"])
+
+    def test_unparsable_stream_degrades_to_stop(self):
+        fake = self._stream(["plain diagnostic"])
+        events, _, _ = self._run(
+            {"model": "m", "messages": [{"role": "user", "content": "hi"}]},
+            fake)
+        self.assertEqual([e["type"] for e in events], ["message_stop"])
+        self.assertEqual(events[0]["stop_reason"], "end_turn")
+
+    def test_session_break_is_error(self):
+        fake = self._stream([], events_exc=RuntimeError("boom"))
+        events, _, _ = self._run(
+            {"model": "m", "messages": [{"role": "user", "content": "hi"}]},
+            fake)
+        self.assertEqual([e["type"] for e in events], ["error"])
+        self.assertIn("boom", events[0]["message"])
+
+
+if __name__ == "__main__":
+    unittest.main()

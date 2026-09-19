@@ -1,0 +1,1219 @@
+"""Codex as a hub model route: ChatGPT-subscription turns over the app-server.
+
+This is the LOCAL-ONLY, opt-in-per-provider ``(CLI | API)`` experiment's CLI
+side for Codex. It fronts an installed ``codex`` binary as an ordinary hub
+model route, so a desktop harness thread can select ``codex/gpt-5.6-sol`` and
+get a normal streaming turn backed by the user's ChatGPT subscription rather
+than an API key.
+
+Route 2: CLI-as-transport
+-------------------------
+We spawn the vendor's own runtime and let *it* own and refresh its login. This
+module never reads, copies, refreshes, stats or parses a credential: not
+``~/.codex/auth.json``, not the macOS Keychain, not ``CODEX_ACCESS_TOKEN``.
+:func:`auth_state` asks ``codex login status`` and reports what it prints.
+
+For Codex that is not merely tidy, it is the only viable design. The ChatGPT
+OAuth refresh token *rotates on use*, so a second process holding a copy
+revokes the first - AGBench's ``CodexOAuthCredentialLease`` calls copying
+``auth.json`` "actively harmful" for exactly this reason. The decoded access
+token also carries no inference scope (``openid, profile, email,
+offline_access, api.connectors.read, api.connectors.invoke``), so a copied
+token could not run a turn even if holding it were safe. Letting the Codex
+runtime hold its own credential sidesteps both problems entirely.
+
+Transport: ``thread/start`` -> ``turn/start`` -> delta notifications
+-------------------------------------------------------------------
+``codex exec --json`` was measured and rejected as the primary transport: a
+trivial turn emits only five coarse NDJSON events (``thread.started``,
+``item.completed``, ``turn.started``, ``item.completed``, ``turn.completed``),
+so it cannot give token-level deltas. The app-server JSON-RPC protocol can, and
+it is what this module uses. The methods and payload shapes below were
+verified two ways against ``codex-cli 0.153.0``:
+
+* against the runtime's own authoritative schema, via
+  ``codex app-server generate-json-schema --out <dir>`` (definitions
+  ``ThreadStartParams``, ``TurnStartParams``, ``AgentMessageDeltaNotification``,
+  ``ReasoningTextDeltaNotification``, ``TurnCompletedNotification``); and
+* live, by driving a real ``codex app-server`` over stdio under an isolated
+  ``CODEX_HOME`` - handshake, ``model/list`` cursor paging, ``thread/start``,
+  ``turn/start`` and the whole failure path were all observed on the wire.
+
+Requests: ``initialize`` -> ``initialized`` -> ``thread/start`` -> ``turn/start``.
+Notifications consumed:
+
+``item/agentMessage/delta``    ``{"delta","itemId","threadId","turnId"}`` -> text_delta
+``item/reasoning/textDelta``   ``{"delta","contentIndex",...}``          -> thinking_delta
+``item/reasoning/summaryTextDelta`` ``{"delta","summaryIndex",...}``     -> thinking_delta
+``item/completed``             ``{"item":{"type":"agentMessage","text"}}``-> fallback text
+``turn/completed``             ``{"turn":{"id","status","error"}}``       -> terminal
+``error``                      ``{"error":{...},"willRetry",...}``        -> diagnostics
+
+There is no ``turn/failed`` notification in 0.153.0: a failed turn arrives as
+``turn/completed`` with ``turn.status == "failed"`` and a populated
+``turn.error`` (``TurnStatus`` is ``completed|interrupted|failed|inProgress``).
+``turn/failed`` is still tolerated because AGBench's older client handles it,
+so a runtime upgrade cannot silently hang a thread.
+
+The app-server runs against the user's real default ``CODEX_HOME``
+(``~/.codex``): the child is spawned with no ``CODEX_HOME`` override, so the
+CLI reads and refreshes the ChatGPT login it already owns at
+``~/.codex/auth.json``. This module never opens that file. Safety still holds
+because the real config is overridden on argv (see "The hub-loop hazard" and
+"Read-only by construction") and the turn is a fresh, ephemeral, read-only
+thread. The observed upstream URL is ``https://api.openai.com/v1/responses`` -
+direct, never via the hub, and never a copied credential.
+
+The coarse ``exec --json`` fallback
+----------------------------------
+:func:`run_turn_fallback` implements the documented coarse-grained fallback for
+a runtime whose app-server turn streaming is unavailable: one ``text_delta``
+per completed item rather than per token. It is opt-in and is not on the
+default path.
+
+The hub-loop hazard
+-------------------
+The hub writes a ``provider_hub`` ``model_provider`` into Codex configuration
+pointing at ``http://127.0.0.1:<port>/v1``, and Codex Desktop points back at the
+hub. A spawned runtime configured the same way would route its turn into the
+hub, which would route it back into a spawned runtime - an unbounded recursion
+burning the user's ChatGPT plan. The app-server argv therefore pins
+``-c model_provider="openai"`` - the built-in ChatGPT provider - so the turn is
+routed to ``https://api.openai.com/v1/responses`` even when the user's real
+``~/.codex/config.toml`` has been pointed at the hub. The same override is
+applied to the coarse ``exec`` fallback. When the real config's
+``model_catalog_json`` has been pointed at the hub's catalog, the argv also
+points it back at the CLI's own fetched OpenAI catalog so :func:`catalogue`
+advertises models this route can actually run.
+
+Read-only by construction
+-------------------------
+:data:`_FORBIDDEN_FLAGS` is asserted inside every argv builder, so a future
+edit cannot introduce an approval bypass or a write-capable sandbox. Threads are
+started ``sandbox="read-only"`` / ``approvalPolicy="never"`` / ``ephemeral``,
+turns repeat ``approvalPolicy="never"`` and ``sandboxPolicy={"type":
+"readOnly"}``, and the argv carries ``-c sandbox_mode="read-only"``,
+``-c approval_policy="never"`` and ``-c model_provider="openai"``. A prompt
+injected through message history therefore cannot make the runtime write or
+route the turn back through the hub.
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+from collections.abc import Iterator
+from pathlib import Path
+import re
+import select
+import shutil
+import subprocess
+import tempfile
+import time
+
+from cli_session import CliSessionError, StdioSession, minimal_env, resolve_binary
+
+
+PROVIDER_ID = "codex"
+PROVIDER_NAME = "Codex (ChatGPT subscription)"
+TRANSPORT = "app_server"
+BINARY_NAMES = ("codex",)
+
+#: Where the harness system prompt is delivered. "prompt" here because
+#: render_prompt folds the system text into the input text; there is no
+#: Codex app-server system-prompt flag for a single turn.
+SYSTEM_PROMPT_TRANSPORT = "prompt"
+
+#: The coarse transport :func:`run_turn_fallback` uses. Never the default.
+FALLBACK_TRANSPORT = "exec_json"
+
+CLIENT_NAME = "provider-hub-codex-cli"
+CLIENT_VERSION = "0.5.3"
+
+#: Asserted by every argv builder. An approval bypass or a write-capable
+#: sandbox must not be expressible in this module, even by accident in a later
+#: edit. ``--dangerously-bypass-hook-trust`` is included beyond the four the
+#: experiment names: it is the same class of escape hatch and exists in
+#: 0.153.0's ``codex exec --help``.
+_FORBIDDEN_FLAGS = frozenset({
+    "--dangerously-bypass-approvals-and-sandbox",
+    "--approve-for-me",
+    "--dangerously-bypass-hook-trust",
+    "danger-full-access",
+    "workspace-write",
+})
+
+#: What "read-only" looks like on each transport's argv. The app-server takes
+#: its sandbox per thread, so the argv expresses it as a TOML override; the
+#: exec fallback takes it as ``-s read-only``.
+READ_ONLY_ARGV_MARKERS = ("-s", "read-only")
+READ_ONLY_CONFIG_OVERRIDES = ('sandbox_mode="read-only"', 'approval_policy="never"')
+
+#: A route id must be a plain model slug. Validating it before it is embedded
+#: in a ``-c key="value"`` override is what makes TOML injection - and with it
+#: a smuggled ``sandbox_mode="danger-full-access"`` - unexpressible, rather
+#: than relying on the forbidden-flag assert to notice afterwards.
+_MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:+/-]{0,127}$")
+_EFFORT_RE = re.compile(r"^[A-Za-z0-9._-]{1,32}$")
+
+#: Pin the built-in ChatGPT provider. The user's real ``~/.codex/config.toml``
+#: may name a hub provider (``provider_hub`` -> ``http://127.0.0.1:<port>/v1``,
+#: written by this repo's other product); inheriting that would route the turn
+#: back into the hub and recurse. This is the argv-side guard that keeps the
+#: turn direct to ``https://api.openai.com/v1/responses``.
+_MODEL_PROVIDER_OVERRIDE = 'model_provider="openai"'
+
+#: ``cli_auth_credentials_store="file"`` tells the CLI to read and refresh its
+#: credentials from ``auth.json`` under its own ``CODEX_HOME``. Because the
+#: child is spawned with no ``CODEX_HOME`` override, that is the user's real
+#: ``~/.codex`` - exactly the login ``codex login`` wrote. The hub never opens
+#: that file.
+_CREDENTIALS_STORE_OVERRIDE = 'cli_auth_credentials_store="file"'
+
+#: ``TurnStatus`` -> hub ``stop_reason``. ``interrupted`` is reported as itself
+#: rather than folded into ``end_turn``: a cancelled turn is not a finished one
+#: and the harness should be able to tell them apart.
+_STOP_REASONS = {"completed": "end_turn", "interrupted": "interrupted"}
+
+#: A turn's whole budget is split across its phases so no single phase can eat
+#: it and leave nothing for the stream. Proportions, not absolutes.
+_HANDSHAKE_SHARE = 0.15
+_START_SHARE = 0.15
+
+#: Cap on outer stream iterations. ``events()`` blocks for up to its timeout, so
+#: this is a guard against an implementation that returns instantly and empty,
+#: not a limit on turn length - the deadline does that.
+_MAX_STREAM_LOOPS = 20000
+
+#: Cursor pages tolerated from ``model/list`` before we call it a runaway.
+_MAX_CATALOGUE_PAGES = 12
+
+#: Env var that captures runtime stderr to a file in the disposable scratch dir
+#: for a developer debugging a failed turn. Off by default: stderr goes to
+#: DEVNULL and the scratch dir is deleted.
+_DIAGNOSTICS_ENV = "PROVIDER_HUB_CODEX_CLI_DIAGNOSTICS"
+
+#: Never parsed as protocol. Codex writes noisy WARN/ERROR lines here -
+#: ``codex_skills::interface: ignoring interface.icon_...``, websocket 401s -
+#: and a protocol parser that read stderr would mis-frame on them.
+_DEVNULL = subprocess.DEVNULL
+
+
+class CodexCliAgentError(RuntimeError):
+    """The Codex CLI route could not be resolved, started or completed."""
+
+
+# --------------------------------------------------------------------------
+# argv construction
+# --------------------------------------------------------------------------
+
+def _assert_safe_argv(argv, *, context):
+    """Refuse any argv carrying an approval bypass or a write-capable sandbox.
+
+    Run on the *final* argv, after every interpolation, so it checks what will
+    actually be executed rather than the template it was built from.
+    """
+    parts = [str(part) for part in argv]
+    joined = " ".join(parts).lower()
+    hits = sorted({flag for flag in _FORBIDDEN_FLAGS if flag.lower() in joined})
+    if hits:
+        raise CodexCliAgentError(
+            f"Refusing to build a {context} argv containing {', '.join(hits)}. "
+            "This route is read-only by construction.")
+    return parts
+
+
+def _toml_string(value):
+    """Encode ``value`` as a TOML basic string.
+
+    JSON's string grammar is a subset of TOML's basic strings, so ``json.dumps``
+    is a correct encoder and quotes/backslashes/newlines cannot terminate the
+    literal early.
+    """
+    return json.dumps(str(value))
+
+
+def _checked_model(model):
+    text = str(model or "").strip()
+    if not _MODEL_RE.match(text):
+        raise CodexCliAgentError(
+            f"'{text[:80]}' is not a usable Codex model id. Expected a plain slug "
+            "such as 'gpt-5.6-sol'.")
+    return text
+
+
+def _checked_effort(effort):
+    """A validated reasoning effort, or None.
+
+    The protocol types ``ReasoningEffort`` as any non-empty string, and the
+    installed catalogue advertises ``low|medium|high|xhigh|max|ultra``, so the
+    set is not hardcoded here: an unknown-but-well-formed effort is passed
+    through and the runtime rejects it with a readable error instead of this
+    module silently dropping the user's choice.
+    """
+    if effort is None:
+        return None
+    text = str(effort).strip()
+    if not text:
+        return None
+    if not _EFFORT_RE.match(text):
+        raise CodexCliAgentError(f"'{text[:40]}' is not a usable reasoning effort.")
+    return text
+
+
+def runtime_binary(binary=None):
+    """The runtime to spawn: an explicit path, ``codex`` on PATH, or the app's.
+
+    Mirrors ``codex_runtime.runtime_binary``'s desktop-app resolution
+    (``<app>/Contents/Resources/codex``) as the fallback, but prefers PATH
+    first: this route is CLI-backed, so the binary the user actually invokes is
+    the one whose login they manage.
+    """
+    if binary is not None:
+        path = Path(binary)
+        if not path.is_file() or not os.access(path, os.X_OK):
+            raise CodexCliAgentError(f"'{path}' is not an executable Codex runtime.")
+        return str(path)
+    resolved = resolve_binary(BINARY_NAMES)
+    if resolved:
+        return str(resolved)
+    for candidate in _desktop_runtime_candidates():
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+    raise CodexCliAgentError(
+        "No Codex runtime was found. Install the Codex CLI, or the ChatGPT / "
+        "Codex desktop app whose bundled runtime this route can use.")
+
+
+def _desktop_runtime_candidates():
+    """The desktop apps' bundled runtimes, in preference order."""
+    roots = (Path("/Applications"), Path.home() / "Applications")
+    return tuple(root / f"{name}.app/Contents/Resources/codex"
+                 for root in roots for name in ("ChatGPT", "Codex"))
+
+
+def runtime_signature(binary=None):
+    """Stable hash of the runtime's identity.
+
+    Same recipe as ``codex_runtime.runtime_signature`` - sha256 over
+    ``[path, st_dev, st_ino, st_size, st_mtime_ns]`` - so the two modules agree
+    on what "the same runtime" means. Any of those changing (an in-place
+    upgrade, a replaced file) changes the signature.
+    """
+    path = Path(binary) if binary is not None else Path(runtime_binary())
+    try:
+        stat = path.stat()
+    except OSError as exc:
+        raise CodexCliAgentError(f"'{path}' could not be stat'd: {exc}") from exc
+    payload = json.dumps([str(path), stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns])
+    return hashlib.sha256(payload.encode()).hexdigest()
+
+
+def _pinned_binary():
+    """An env-pinned runtime path, for tests and for a non-standard install."""
+    return os.environ.get("PROVIDER_HUB_CODEX_BINARY") or None
+
+
+def _openai_catalog_override():
+    """Neutralize a hub ``model_catalog_json`` with the CLI's own fetched catalog.
+
+    The hub preview points ``model_catalog_json`` in ``~/.codex/config.toml`` at
+    its own catalog; that would make :func:`catalogue` advertise hub models that
+    the OpenAI provider cannot run. The CLI's own fetched catalog cache
+    (``~/.codex/models_cache.json``) is the closest stable stand-in for the
+    built-in catalog and lives in the real home the child already reads from.
+    We only point at it when it parses as a non-empty catalog, so a missing or
+    half-written cache cannot brick the app-server; in that case we leave the
+    catalog alone (a machine that has never listed models has no hub override to
+    fight).
+
+    Returns ``("model_catalog_json", <path>)`` when the cache exists, else None.
+    """
+    cache = Path.home() / ".codex" / "models_cache.json"
+    try:
+        if not cache.is_file():
+            return None
+        payload = json.loads(cache.read_text(encoding="utf-8"))
+        if isinstance(payload, dict) and isinstance(payload.get("models"), list) and payload["models"]:
+            return ("model_catalog_json", str(cache))
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+def _app_server_argv(*, model=None, effort=None, binary=None):
+    """The app-server argv, with model/effort as optional TOML overrides.
+
+    Read-only is expressed three times over - as ``-c`` overrides here, as
+    ``thread/start`` params, and as ``turn/start`` params - because each is
+    enforced at a different layer and none of them trusts the others. The
+    provider is also pinned to the built-in ChatGPT ``openai`` provider here so
+    a hub-written ``model_provider`` in the real config cannot loop the turn
+    back through the hub.
+    """
+    checked_model = _checked_model(model) if model is not None else None
+    checked_effort = _checked_effort(effort)
+    argv = [runtime_binary(binary or _pinned_binary()),
+            "-c", _CREDENTIALS_STORE_OVERRIDE,
+            "-c", _MODEL_PROVIDER_OVERRIDE,
+            "-c", 'sandbox_mode="read-only"',
+            "-c", 'approval_policy="never"']
+    catalog = _openai_catalog_override()
+    if catalog is not None:
+        argv += ["-c", f"{catalog[0]}={_toml_string(catalog[1])}"]
+    if checked_model is not None:
+        argv += ["-c", f"model={_toml_string(checked_model)}"]
+    if checked_effort is not None:
+        argv += ["-c", f"model_reasoning_effort={_toml_string(checked_effort)}"]
+    argv.append("app-server")
+    return _assert_safe_argv(argv, context="app-server")
+
+
+def build_argv(model, *, effort=None, system=None, stream=True):
+    """The app-server argv: the primary, delta-streaming transport.
+
+    ``system`` and ``stream`` are accepted so the hub can call every CLI
+    adapter with the same signature. They are ignored here because the
+    system prompt travels inside the rendered prompt text, and the Codex
+    app-server streams by design.
+    """
+    return _app_server_argv(model=model, effort=effort, binary=_pinned_binary())
+
+
+def build_exec_argv(model, *, effort=None):
+    """The ``exec --json`` argv: the documented coarse fallback transport.
+
+    Carries ``-s read-only`` literally, plus ``--skip-git-repo-check`` (the
+    scratch cwd is not a repository) and ``--ephemeral`` (no thread persisted
+    into the real home). It also carries the same auth-store, provider and
+    approval overrides as the app-server so the fallback stays read-only and
+    never loops back through the hub. The prompt is appended by the caller and
+    the finished argv is re-asserted, so the forbidden-flag check always sees
+    what will actually be executed.
+    """
+    checked_model = _checked_model(model)
+    checked_effort = _checked_effort(effort)
+    argv = [runtime_binary(_pinned_binary()), "exec",
+            "-c", _CREDENTIALS_STORE_OVERRIDE,
+            "-c", _MODEL_PROVIDER_OVERRIDE,
+            "-c", 'approval_policy="never"',
+            "-s", "read-only",
+            "--skip-git-repo-check",
+            "--ephemeral",
+            "--json",
+            "-m", checked_model]
+    if checked_effort is not None:
+        argv += ["-c", f"model_reasoning_effort={_toml_string(checked_effort)}"]
+    return _assert_safe_argv(argv, context="exec")
+
+
+# --------------------------------------------------------------------------
+# read-only capability probes
+# --------------------------------------------------------------------------
+
+def default_capture(argv, *, timeout=25):
+    """The production capture: run one argv, bounded, no stdin, scrubbed env.
+
+    Same contract as ``cli_auth_probe.default_capture`` - ``capture(argv, *,
+    timeout) -> (returncode, stdout, stderr)`` - so one capture can be wired
+    across every CLI adapter. ``stdin=DEVNULL`` is load-bearing: an inherited
+    terminal is the difference between a probe and a session. ``check=False``
+    because a non-zero status is an answer (a signed-out CLI says so by exiting
+    1), not an exception.
+    """
+    binary = resolve_binary((str(argv[0]),)) or str(argv[0])
+    completed = subprocess.run([binary, *[str(part) for part in argv[1:]]],
+                               capture_output=True, text=True, timeout=timeout,
+                               env=minimal_env(), stdin=_DEVNULL, check=False)
+    return completed.returncode, completed.stdout, completed.stderr
+
+
+def discover(*, capture=None) -> dict:
+    """Whether a Codex runtime is installed, where, and what version.
+
+    Never raises: a missing or wedged CLI is one row in a settings pane, and
+    ``installed: False`` is the honest answer rather than an exception that
+    takes the whole pane down.
+    """
+    runner = default_capture if capture is None else capture
+    injected = capture is not None
+    if injected:
+        # An injected capture means the caller has taken responsibility for
+        # running things; walking the real PATH would report the host's binary
+        # instead of the facts we were handed.
+        binary: str | None = BINARY_NAMES[0]
+    else:
+        try:
+            binary = runtime_binary(_pinned_binary())
+        except (CodexCliAgentError, OSError, ValueError):
+            binary = None
+    if binary is None:
+        return {"installed": False, "binary": None, "version": None}
+    version = None
+    answered = False
+    try:
+        rc, stdout, _stderr = runner([binary, "--version"], timeout=25)
+        answered = int(rc) == 0
+        if answered:
+            version = _parse_version(stdout)
+    except subprocess.TimeoutExpired:
+        answered = False
+    except Exception:  # noqa: BLE001 - discovery must never raise at the hub
+        answered = False
+    if not answered:
+        return {"installed": False, "binary": None, "version": None}
+    return {"installed": True, "binary": str(binary), "version": version}
+
+
+def _parse_version(stdout):
+    """``codex-cli 0.153.0`` -> ``0.153.0``, tolerating other phrasings."""
+    text = str(stdout or "").strip()
+    if not text:
+        return None
+    match = re.search(r"(\d+\.\d+(?:\.\d+)?(?:[-+][0-9A-Za-z.-]+)?)", text)
+    return match.group(1) if match else text.splitlines()[0][:60]
+
+
+#: ``codex login status`` phrasings observed on 0.153.0.
+_AUTHENTICATED_MARKERS = ("logged in", "signed in")
+_MISSING_MARKERS = ("not logged in", "logged out", "not signed in", "signed out")
+
+
+def auth_state(*, capture=None) -> dict:
+    """Sign-in state, from ``codex login status`` and nothing else.
+
+    Deliberately runs against the user's *real* ``~/.codex`` (via ``HOME`` in
+    :func:`minimal_env`) with no ``CODEX_HOME`` override, so it reports the
+    login the turn will actually use. Running it is a read: the CLI prints its
+    state and exits 0 or 1.
+
+    Following the repo's doctrine on markers, a status we cannot parse is
+    *absence of evidence*, not evidence of absence: it is reported ``unknown``.
+    Only a non-zero exit paired with a recognised signed-out phrasing - or a
+    recognised signed-in line - is treated as an answer.
+    """
+    runner = default_capture if capture is None else capture
+    try:
+        binary = BINARY_NAMES[0] if capture is not None else runtime_binary()
+    except (CodexCliAgentError, OSError, ValueError):
+        return {"state": "unknown", "detail": "No Codex runtime was found to ask."}
+    try:
+        rc, stdout, stderr = runner([binary, "login", "status"], timeout=25)
+    except subprocess.TimeoutExpired:
+        return {"state": "unknown", "detail": "`codex login status` did not answer within 25s."}
+    except Exception as exc:  # noqa: BLE001 - a probe must never raise at the hub
+        return {"state": "unknown",
+                "detail": f"`codex login status` could not be run: {exc.__class__.__name__}: {exc}"}
+    detail = str(stdout or "").strip() or str(stderr or "").strip()
+    lowered = detail.lower()
+    if not lowered:
+        return {"state": "unknown", "detail": f"`codex login status` printed nothing (rc={rc})."}
+    # Order matters: "Not logged in" contains "logged in" as a substring, so
+    # the negative markers are tested first.
+    if any(marker in lowered for marker in _MISSING_MARKERS):
+        return {"state": "missing", "detail": detail.splitlines()[0][:200]}
+    if any(marker in lowered for marker in _AUTHENTICATED_MARKERS) and rc == 0:
+        return {"state": "authenticated", "detail": detail.splitlines()[0][:200]}
+    return {"state": "unknown",
+            "detail": f"`codex login status` answered unrecognised text (rc={rc}): "
+                      f"{detail.splitlines()[0][:160]}"}
+
+
+# --------------------------------------------------------------------------
+# catalogue
+# --------------------------------------------------------------------------
+
+def _row(raw):
+    """One ``model/list`` row, normalised so the documented fields always exist.
+
+    Field names are the runtime's own camelCase - the same ones
+    ``codex_runtime.py:102-121`` compares against - so the hub's generic wiring
+    and the catalogue qualifier agree on the shape. ``project_codex`` is
+    deliberately *not* used: it projects the hub's outbound catalogue and needs
+    a full settings object plus provider inventory, whereas a CLI-backed route
+    should advertise what the user's own Codex actually offers.
+    """
+    if not isinstance(raw, dict):
+        return None
+    model = raw.get("model") or raw.get("id")
+    if not isinstance(model, str) or not model:
+        return None
+    efforts = []
+    for entry in raw.get("supportedReasoningEfforts") or []:
+        if isinstance(entry, dict) and entry.get("reasoningEffort"):
+            efforts.append({"reasoningEffort": str(entry["reasoningEffort"]),
+                            "description": str(entry.get("description") or "")})
+        elif isinstance(entry, str) and entry:
+            efforts.append({"reasoningEffort": entry, "description": ""})
+    tiers = []
+    for entry in raw.get("serviceTiers") or []:
+        if isinstance(entry, dict) and entry.get("id"):
+            tiers.append({"id": str(entry["id"]), "name": str(entry.get("name") or ""),
+                          "description": str(entry.get("description") or "")})
+    return {"model": model,
+            "id": str(raw.get("id") or model),
+            "displayName": str(raw.get("displayName") or model),
+            "description": str(raw.get("description") or ""),
+            "hidden": raw.get("hidden") is True,
+            "isDefault": raw.get("isDefault") is True,
+            "defaultReasoningEffort": raw.get("defaultReasoningEffort"),
+            "supportedReasoningEfforts": efforts,
+            "serviceTiers": tiers,
+            "multiAgentVersion": raw.get("multiAgentVersion"),
+            "inputModalities": [str(m) for m in (raw.get("inputModalities") or []) if isinstance(m, str)]}
+
+
+def parse_model_list(rows):
+    """Normalise raw ``model/list`` rows into catalogue rows, dropping junk."""
+    parsed = []
+    for raw in rows or []:
+        entry = _row(raw)
+        if entry is not None:
+            parsed.append(entry)
+    return parsed
+
+
+def _bounded_timeout(value, *, default, minimum=1.0):
+    try:
+        budget = float(value)
+    except (TypeError, ValueError):
+        return float(default)
+    if budget != budget or budget in (float("inf"), float("-inf")):  # NaN / inf
+        return float(default)
+    return max(minimum, budget)
+
+
+def _result(response, *, context):
+    """Unwrap a JSON-RPC response, or raise with the server's own message.
+
+    Tolerant of both conventions a ``request()`` implementation might use -
+    returning the bare ``result`` payload, or the whole envelope - because the
+    session host is a sibling module written in parallel.
+    """
+    if isinstance(response, dict):
+        error = response.get("error")
+        if isinstance(error, dict) and error:
+            message = error.get("message") or json.dumps(error, sort_keys=True)[:300]
+            code = error.get("code")
+            suffix = f" (code {code})" if code is not None else ""
+            raise CodexCliAgentError(f"{context}: the Codex runtime reported an error{suffix}: {message}")
+        if "result" in response:
+            result = response["result"]
+            return result if isinstance(result, dict) else {}
+        return response
+    raise CodexCliAgentError(f"{context}: the Codex runtime returned a malformed response.")
+
+
+def fetch_models(*, binary=None, spawner=None, timeout=30):
+    """Drive ``model/list`` over the app-server, paging cursors to exhaustion.
+
+    Cursor paging is real and was observed live: with ``limit=1`` the runtime
+    returned ``nextCursor`` ``'1'``, ``'2'``, ... and finally ``null``.
+    """
+    budget = _bounded_timeout(timeout, default=30)
+    workspace = CodexTurnWorkspace()
+    session = None
+    try:
+        workspace.open()
+        argv = _app_server_argv(binary=binary)
+        session = _open_session(argv, workspace, spawner=spawner, timeout=budget)
+        _handshake(session, timeout=budget * _HANDSHAKE_SHARE)
+        rows, cursor = [], None
+        for page in range(_MAX_CATALOGUE_PAGES):
+            response = session.request("model/list",
+                                       {"includeHidden": True, "limit": 1000, "cursor": cursor},
+                                       timeout=max(1.0, budget * 0.5))
+            result = _result(response, context="model/list")
+            data = result.get("data")
+            if not isinstance(data, list):
+                raise CodexCliAgentError("The Codex runtime returned an invalid model catalogue.")
+            rows.extend(data)
+            cursor = result.get("nextCursor")
+            if not cursor:
+                break
+        else:
+            raise CodexCliAgentError("Codex returned too many catalogue pages.")
+        return parse_model_list(rows)
+    finally:
+        _teardown(session, workspace)
+
+
+def catalogue(*, capture=None, spawner=None, timeout=30) -> tuple[list[dict], list[str]]:
+    """The installed runtime's own model rows, plus human-readable notes.
+
+    ``spawner`` is accepted in addition to the specified ``capture``/``timeout``
+    because ``model/list`` is a JSON-RPC call over a long-lived stdio session,
+    which the short-lived ``capture(argv, *, timeout) -> (rc, out, err)``
+    contract cannot express. ``capture`` is still honoured for the binary
+    label, mirroring ``cli_auth_probe._binary_label``: an injected capture
+    means the caller owns execution, so the real PATH is not walked.
+
+    Degrades rather than raising: an absent runtime or a wedged session returns
+    ``([], [reason])`` so the hub's settings pane can say why the row is empty.
+    """
+    notes: list[str] = []
+    if capture is None and spawner is None:
+        try:
+            runtime_binary()
+        except (CodexCliAgentError, OSError, ValueError) as exc:
+            return [], [f"No Codex runtime is available: {exc}"]
+    try:
+        rows = fetch_models(spawner=spawner, timeout=timeout)
+    except CodexCliAgentError as exc:
+        return [], [str(exc)]
+    except CliSessionError as exc:
+        return [], [f"The Codex app-server session failed: {exc}"]
+    except Exception as exc:  # noqa: BLE001 - a catalogue probe must never raise
+        return [], [f"The Codex catalogue could not be read: {exc.__class__.__name__}: {exc}"]
+    if not rows:
+        notes.append("The Codex runtime advertised no models.")
+    visible = [row for row in rows if not row["hidden"]]
+    if visible and len(visible) != len(rows):
+        notes.append(f"{len(rows) - len(visible)} model(s) are hidden from the default picker.")
+    return rows, notes
+
+
+# --------------------------------------------------------------------------
+# the disposable scratch cwd (the real CODEX_HOME is left untouched)
+# --------------------------------------------------------------------------
+
+class CodexTurnWorkspace:
+    """A disposable scratch dir (cwd + optional diagnostics), created per turn.
+
+    This is *not* a ``CODEX_HOME`` and it writes nothing into the user's real
+    ``~/.codex``. The child is spawned with no ``CODEX_HOME`` override, so the
+    CLI resolves its own real home and reads the ChatGPT login it owns there;
+    this class supplies only the two things a turn genuinely needs per-process:
+    a scratch working directory for the read-only thread, and - when
+    diagnostics are on - a stderr log in the temp tree rather than in the real
+    home. Cleanup is idempotent so it can be called from a ``finally`` and from
+    a context-manager exit without racing.
+    """
+
+    def __init__(self, *, prefix="provider-hub-codex-cli-", diagnostics=None):
+        self.prefix = prefix
+        self.diagnostics = diagnostics
+        self.base: Path | None = None
+        self.cwd: Path | None = None
+        self.diagnostics_path: Path | None = None
+        self._diagnostics_handle = None
+
+    def open(self) -> "CodexTurnWorkspace":
+        base = Path(tempfile.mkdtemp(prefix=self.prefix))
+        try:
+            base.chmod(0o700)
+            self.base = base
+            self.cwd = base / "work"
+            self.cwd.mkdir(mode=0o700)
+            if self.diagnostics:
+                self.diagnostics_path = base / "diagnostics.log"
+            return self
+        except BaseException:
+            self.close()
+            raise
+
+    def env(self):
+        """The child's environment: the shared minimal allowlist, no CODEX_HOME.
+
+        Leaving ``CODEX_HOME`` unset is the point: the CLI then uses its real
+        default ``~/.codex`` and reads the login it owns there.
+        """
+        if self.base is None:
+            raise CodexCliAgentError("The Codex turn workspace was never created.")
+        return minimal_env()
+
+    def close(self):
+        """Release the diagnostics handle, then delete the whole tree.
+
+        Idempotent, and safe to call from both a ``finally`` and a
+        context-manager exit. The handle must outlive the session because
+        ``StdioSession`` may hold the file object rather than a dup'd descriptor.
+        """
+        handle, self._diagnostics_handle = self._diagnostics_handle, None
+        if handle is not None:
+            try:
+                handle.close()
+            except OSError:
+                pass
+        base, self.base = self.base, None
+        self.cwd = self.diagnostics_path = None
+        if base is None:
+            return
+        shutil.rmtree(base, ignore_errors=True)
+
+    def __enter__(self):
+        return self.open()
+
+    def __exit__(self, exc_type, exc, traceback):
+        self.close()
+        return False
+
+
+def _diagnostics_enabled():
+    return bool(os.environ.get(_DIAGNOSTICS_ENV))
+
+
+def _open_session(argv, workspace, *, spawner=None, timeout=120.0):
+    """Start the app-server, with stderr kept out of the protocol channel."""
+    stderr = _DEVNULL
+    if workspace.diagnostics_path is not None:
+        # Owned by the workspace, not by this function: it has to stay open for
+        # as long as the session may write to it, and workspace.close() reaps it.
+        workspace._diagnostics_handle = workspace.diagnostics_path.open("w", encoding="utf-8")
+        stderr = workspace._diagnostics_handle
+    try:
+        return StdioSession(list(argv), env=workspace.env(), cwd=str(workspace.cwd),
+                            timeout=timeout, spawner=spawner, stderr=stderr)
+    except BaseException:
+        workspace.close()
+        raise
+
+
+# --------------------------------------------------------------------------
+# turn phases
+# --------------------------------------------------------------------------
+
+def _handshake(session, *, timeout):
+    """``initialize`` then ``initialized``, exactly as ``codex_runtime.py`` does.
+
+    ``experimentalApi`` is what unlocks the v2 thread/turn surface; without it
+    the runtime advertises only the legacy methods.
+    """
+    response = session.request("initialize",
+                              {"clientInfo": {"name": CLIENT_NAME, "version": CLIENT_VERSION},
+                               "capabilities": {"experimentalApi": True}},
+                              timeout=max(1.0, timeout))
+    _result(response, context="initialize")
+    session.notify("initialized", {})
+
+
+def _thread_params(payload, workspace):
+    params = {
+        "cwd": str(workspace.cwd),
+        "model": payload["model"],
+        "sandbox": "read-only",
+        "approvalPolicy": "never",
+        "ephemeral": True,
+    }
+    if payload["effort"] is not None:
+        params["config"] = {"model_reasoning_effort": payload["effort"]}
+    return params
+
+
+def _start_thread(session, payload, workspace, *, timeout):
+    response = session.request("thread/start", _thread_params(payload, workspace),
+                               timeout=max(1.0, timeout))
+    result = _result(response, context="thread/start")
+    thread = result.get("thread")
+    thread_id = thread.get("id") if isinstance(thread, dict) else None
+    if not isinstance(thread_id, str) or not thread_id:
+        raise CodexCliAgentError("thread/start returned no thread id.")
+    return thread_id
+
+
+def _turn_params(payload, thread_id):
+    """The ``turn/start`` request.
+
+    The whole conversation is rendered into one text input because the route is
+    stateless per turn: no ``thread/resume``, no reliance on a session the
+    desktop app might have moved. ``sandboxPolicy`` uses the protocol's
+    ``readOnly`` variant and ``networkAccess: false`` so the turn repeats the
+    read-only posture the thread was started with.
+
+    ``max_tokens`` has no counterpart in ``TurnStartParams`` (its fields are
+    ``approvalPolicy, approvalsReviewer, clientUserMessageId, cwd, effort,
+    input, model, outputSchema, personality, sandboxPolicy, serviceTier,
+    serviceTierForTurn, summary, threadId, toolOutput, turnTrigger``), so it is
+    accepted and deliberately not forwarded - the runtime owns its own budget.
+    """
+    params = {
+        "threadId": thread_id,
+        "input": [{"type": "text", "text": payload["prompt"], "text_elements": []}],
+        "approvalPolicy": "never",
+        "sandboxPolicy": {"type": "readOnly", "networkAccess": False},
+    }
+    if payload["model"] is not None:
+        params["model"] = payload["model"]
+    if payload["effort"] is not None:
+        params["effort"] = payload["effort"]
+    return params
+
+
+def _start_turn(session, payload, thread_id, *, timeout):
+    response = session.request("turn/start", _turn_params(payload, thread_id),
+                               timeout=max(1.0, timeout))
+    result = _result(response, context="turn/start")
+    turn = result.get("turn")
+    turn_id = turn.get("id") if isinstance(turn, dict) else None
+    return turn_id if isinstance(turn_id, str) and turn_id else None
+
+
+_ROLE_RE = re.compile(r"[^a-z]")
+
+
+def render_prompt(request):
+    """Render a whole conversation into one deterministic text prompt.
+
+    The app-server takes a flat ``input`` list, not an OpenAI-style messages
+    array, and this route is stateless per turn - so the history is folded into
+    a single transcript with role tags. Only the trailing user turn is the
+    instruction; everything before it is context.
+    """
+    blocks = []
+    system = request.get("system")
+    if isinstance(system, str) and system.strip():
+        blocks.append(f"<system>\n{system.strip()}\n</system>")
+    messages = request.get("messages")
+    if not isinstance(messages, list):
+        messages = []
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        role = _ROLE_RE.sub("", str(message.get("role") or "user").lower()) or "user"
+        content = message.get("content")
+        if isinstance(content, list):
+            content = "\n".join(str(part.get("text", "")) if isinstance(part, dict) else str(part)
+                                for part in content)
+        text = str(content or "").strip()
+        if not text:
+            continue
+        blocks.append(f"<{role}>\n{text}\n</{role}>")
+    if not blocks:
+        raise CodexCliAgentError("The request carried no message to send.")
+    return "\n\n".join(blocks)
+
+
+def _normalise_request(request):
+    """Validate and freeze one turn request into what the phases need."""
+    if not isinstance(request, dict):
+        raise CodexCliAgentError("A turn request must be a dict.")
+    model = request.get("model")
+    if not isinstance(model, str) or not model.strip():
+        raise CodexCliAgentError("A turn request must name a model.")
+    prompt = render_prompt(request)
+    return {"model": _checked_model(model),
+            "effort": _checked_effort(request.get("effort")),
+            "prompt": prompt}
+
+
+def _delta(event):
+    """The text of a delta notification, or None. Tolerates a bare string."""
+    params = event.get("params")
+    if isinstance(params, str):
+        return params
+    if not isinstance(params, dict):
+        return None
+    value = params.get("delta")
+    if isinstance(value, str) and value:
+        return value
+    return None
+
+
+def _same_turn(event, turn_id):
+    """Whether a notification belongs to our turn.
+
+    ``turn_id`` is None when ``turn/start`` answered without one, in which case
+    correlation is impossible and every turn event is accepted - a single-turn,
+    single-thread process has nothing else to confuse it with.
+    """
+    if turn_id is None:
+        return True
+    params = event.get("params")
+    if not isinstance(params, dict):
+        return True
+    observed = params.get("turnId")
+    if isinstance(observed, str) and observed:
+        return observed == turn_id
+    turn = params.get("turn")
+    if isinstance(turn, dict) and isinstance(turn.get("id"), str) and turn["id"]:
+        return turn["id"] == turn_id
+    return True
+
+
+def _failure_message(turn):
+    error = turn.get("error") if isinstance(turn, dict) else None
+    if isinstance(error, dict):
+        message = error.get("message")
+        if isinstance(message, str) and message.strip():
+            return message.strip()
+        return json.dumps(error, sort_keys=True)[:400]
+    if isinstance(error, str) and error.strip():
+        return error.strip()
+    return None
+
+
+def _stream_turn(session, *, turn_id, deadline):
+    """Consume notifications until the turn terminates.
+
+    Yields ``text_delta`` / ``thinking_delta`` as they arrive and always ends
+    with exactly one terminal event: ``message_stop`` or ``error``.
+    """
+    streamed_text = False
+    streamed_thinking = False
+    last_error = None
+    for _ in range(_MAX_STREAM_LOOPS):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            yield {"type": "error",
+                   "message": "The Codex turn did not complete within its time budget."}
+            return
+        exited = getattr(session, "returncode", None)
+        if exited is not None:
+            yield {"type": "error",
+                   "message": f"The Codex app-server exited (rc={exited}) mid-turn."}
+            return
+        try:
+            events = session.events(timeout=min(remaining, 5.0))
+        except CliSessionError as exc:
+            yield {"type": "error", "message": f"The Codex session broke mid-turn: {exc}"}
+            return
+        saw_any = False
+        try:
+            for event in events:
+                if not isinstance(event, dict):
+                    continue
+                saw_any = True
+                method = event.get("method")
+                if method == "item/agentMessage/delta":
+                    text = _delta(event)
+                    if text:
+                        streamed_text = True
+                        yield {"type": "text_delta", "text": text}
+                elif method in ("item/reasoning/textDelta",
+                                "item/reasoning/summaryTextDelta",
+                                "item/reasoning/summaryPartAdded"):
+                    text = _delta(event)
+                    if text:
+                        streamed_thinking = True
+                        yield {"type": "thinking_delta", "text": text}
+                elif method == "item/completed":
+                    # The fallback for a runtime that completes an item without
+                    # having streamed it: emit its text once, never twice.
+                    params = event.get("params") or {}
+                    item = params.get("item") if isinstance(params, dict) else None
+                    if not isinstance(item, dict) or not _same_turn(event, turn_id):
+                        continue
+                    kind = item.get("type")
+                    if kind == "agentMessage" and not streamed_text:
+                        text = item.get("text")
+                        if isinstance(text, str) and text.strip():
+                            streamed_text = True
+                            yield {"type": "text_delta", "text": text}
+                    elif kind == "reasoning" and not streamed_thinking:
+                        chunks = [str(part) for part in (item.get("content") or [])
+                                  if isinstance(part, str) and part.strip()]
+                        if chunks:
+                            streamed_thinking = True
+                            yield {"type": "thinking_delta", "text": "\n".join(chunks)}
+                elif method == "error":
+                    params = event.get("params") if isinstance(event.get("params"), dict) else {}
+                    # ``willRetry: true`` errors are the runtime's own reconnect
+                    # attempts - five were observed before the terminal one.
+                    # Reporting each as a failure would abort a turn Codex was
+                    # still trying to finish, so only the last is kept, and the
+                    # terminal ``turn/completed`` decides the outcome.
+                    if not params.get("willRetry"):
+                        error = params.get("error")
+                        if isinstance(error, dict) and error.get("message"):
+                            last_error = str(error["message"])
+                elif method in ("turn/completed", "turn/failed"):
+                    if not _same_turn(event, turn_id):
+                        continue
+                    params = event.get("params") if isinstance(event.get("params"), dict) else {}
+                    turn = params.get("turn") if isinstance(params.get("turn"), dict) else {}
+                    status = str(turn.get("status") or ("failed" if method == "turn/failed" else "completed"))
+                    if method == "turn/failed" or status == "failed":
+                        message = _failure_message(turn) or last_error or "The Codex turn failed."
+                        yield {"type": "error", "message": message}
+                        return
+                    if status == "interrupted":
+                        yield {"type": "error",
+                               "message": last_error or "The Codex turn was interrupted."}
+                        return
+                    yield {"type": "message_stop",
+                           "stop_reason": _STOP_REASONS.get(status, "end_turn")}
+                    return
+        except CliSessionError as exc:
+            yield {"type": "error", "message": f"The Codex session broke mid-turn: {exc}"}
+            return
+        if not saw_any and getattr(session, "returncode", None) is not None:
+            yield {"type": "error",
+                   "message": f"The Codex app-server exited (rc={session.returncode}) mid-turn."}
+            return
+    yield {"type": "error",
+           "message": "The Codex turn stream did not terminate within its iteration budget."}
+
+
+def _teardown(session, workspace):
+    """The ``codex_runtime.py:125-140`` ladder, delegated then escalated.
+
+    Runs on every exit path - normal completion, error, and a consumer that
+    abandons the generator (``GeneratorExit``). Nothing here yields and nothing
+    here raises: teardown failure must not mask the turn's own outcome, and a
+    raise from ``finally`` during ``GeneratorExit`` is a RuntimeError.
+    """
+    if session is not None:
+        try:
+            session.close()
+        except Exception:  # noqa: BLE001 - teardown must never mask the outcome
+            pass
+        # ``close()`` should have reaped the child. If a spawner implementation
+        # left it running, escalate rather than orphan a runtime holding the
+        # user's ChatGPT login.
+        process = getattr(session, "process", None)
+        if process is not None:
+            for action in ("terminate", "kill"):
+                try:
+                    if process.poll() is None:
+                        getattr(process, action)()
+                        process.wait(timeout=3)
+                except Exception:  # noqa: BLE001
+                    pass
+    if workspace is not None:
+        try:
+            workspace.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def run_turn(request, *, spawner=None, timeout=300) -> Iterator[dict]:
+    """One streaming turn on the user's ChatGPT subscription.
+
+    Yields only ``text_delta``, ``thinking_delta``, ``message_stop`` and
+    ``error``, and always terminates with ``message_stop`` or ``error``: every
+    failure - absent runtime, refused argv, handshake timeout, JSON-RPC error,
+    host exit, malformed NDJSON, deadline - is converted into an ``error`` event
+    rather than escaping, because the caller is a harness thread drawing a
+    transcript, not something that can recover from an exception mid-stream.
+    """
+    workspace = None
+    session = None
+    try:
+        budget = _bounded_timeout(timeout, default=300)
+        deadline = time.monotonic() + budget
+        payload = _normalise_request(request)
+        argv = build_argv(payload["model"], effort=payload["effort"])
+        workspace = CodexTurnWorkspace(diagnostics=_diagnostics_enabled()).open()
+        session = _open_session(argv, workspace, spawner=spawner, timeout=budget)
+        _handshake(session, timeout=budget * _HANDSHAKE_SHARE)
+        thread_id = _start_thread(session, payload, workspace, timeout=budget * _START_SHARE)
+        turn_id = _start_turn(session, payload, thread_id,
+                              timeout=max(1.0, deadline - time.monotonic()))
+        yield from _stream_turn(session, turn_id=turn_id, deadline=deadline)
+    except CodexCliAgentError as exc:
+        yield {"type": "error", "message": str(exc)}
+    except CliSessionError as exc:
+        yield {"type": "error", "message": f"The Codex app-server session failed: {exc}"}
+    except subprocess.TimeoutExpired:
+        yield {"type": "error",
+               "message": "The Codex app-server did not answer within its time budget."}
+    except Exception as exc:  # noqa: BLE001 - a turn must never raise at the harness
+        yield {"type": "error",
+               "message": f"The Codex turn could not be run: {exc.__class__.__name__}: {exc}"}
+    finally:
+        _teardown(session, workspace)
+
+
+# --------------------------------------------------------------------------
+# the coarse exec --json fallback (opt-in, not the default path)
+# --------------------------------------------------------------------------
+
+def _exec_events(process, *, deadline):
+    """Parse ``codex exec --json`` NDJSON, tolerating malformed lines.
+
+    Measured on 0.153.0: a trivial turn emits exactly five events -
+    ``thread.started``, ``item.completed``, ``turn.started``,
+    ``item.completed``, ``turn.completed``. There is no token-level channel, so
+    this transport yields one ``text_delta`` per completed item.
+
+    The deadline is enforced while waiting for stdout as well as between
+    lines, so a silent or wedged child cannot block the harness past its
+    budget.
+    """
+    stdout = process.stdout
+    while True:
+        remaining = max(0.0, deadline - time.monotonic())
+        if remaining <= 0.0:
+            yield {"type": "error",
+                   "message": "The Codex exec turn did not complete within its time budget."}
+            return
+        readable, _, _ = select.select([stdout], [], [], remaining)
+        if not readable:
+            yield {"type": "error",
+                   "message": "The Codex exec turn did not complete within its time budget."}
+            return
+        line = stdout.readline()
+        if not line:
+            break
+        if time.monotonic() > deadline:
+            yield {"type": "error",
+                   "message": "The Codex exec turn did not complete within its time budget."}
+            return
+        text = line.strip() if isinstance(line, str) else str(line).strip()
+        if not text:
+            continue
+        try:
+            event = json.loads(text)
+        except ValueError:
+            # Codex mixes human-readable progress into the same stream; a line
+            # that is not JSON is skipped, never fatal.
+            continue
+        if not isinstance(event, dict):
+            continue
+        kind = event.get("type") or event.get("msg")
+        item = event.get("item") if isinstance(event.get("item"), dict) else {}
+        if kind in ("item.completed", "item_completed"):
+            if item.get("item_type") in ("agent_message", "assistant") or item.get("type") == "agentMessage":
+                text_value = item.get("text") or item.get("content")
+                if isinstance(text_value, str) and text_value.strip():
+                    yield {"type": "text_delta", "text": text_value}
+        elif kind in ("turn.completed", "turn_completed", "task_complete"):
+            yield {"type": "message_stop", "stop_reason": "end_turn"}
+            return
+        elif kind in ("error", "turn.failed"):
+            message = event.get("message") or event.get("error") or "The Codex exec turn failed."
+            yield {"type": "error", "message": str(message)}
+            return
+    yield {"type": "error", "message": "The Codex exec stream ended before the turn completed."}
+
+
+def run_turn_fallback(request, *, spawner=None, timeout=300) -> Iterator[dict]:
+    """The documented coarse fallback: ``codex exec --json``, one delta per item.
+
+    Use only when app-server turn streaming is unavailable on the installed
+    runtime. It cannot stream tokens - see :func:`_exec_events` - so a long
+    answer appears all at once.
+    """
+    workspace = None
+    process = None
+    try:
+        budget = _bounded_timeout(timeout, default=300)
+        deadline = time.monotonic() + budget
+        payload = _normalise_request(request)
+        # stdin is DEVNULL, so the prompt travels as the positional argument
+        # rather than as piped input. The forbidden-flag assert is re-run on the
+        # constructed flags only; the user prompt must not be able to trip the
+        # substring scan (e.g. a prompt containing "workspace-write").
+        flag_argv = build_exec_argv(payload["model"], effort=payload["effort"])
+        _assert_safe_argv(flag_argv, context="exec")
+        argv = [*flag_argv, payload["prompt"]]
+        workspace = CodexTurnWorkspace(diagnostics=_diagnostics_enabled()).open()
+        spawn = spawner or subprocess.Popen
+        process = spawn(list(argv), stdin=_DEVNULL, stdout=subprocess.PIPE,
+                        stderr=_DEVNULL, text=True, env=workspace.env(), cwd=str(workspace.cwd))
+        yield from _exec_events(process, deadline=deadline)
+    except CodexCliAgentError as exc:
+        yield {"type": "error", "message": str(exc)}
+    except Exception as exc:  # noqa: BLE001 - a turn must never raise at the harness
+        yield {"type": "error",
+               "message": f"The Codex exec turn could not be run: {exc.__class__.__name__}: {exc}"}
+    finally:
+        if process is not None:
+            for action in ("terminate", "kill"):
+                try:
+                    if process.poll() is None:
+                        getattr(process, action)()
+                        process.wait(timeout=3)
+                except Exception:  # noqa: BLE001
+                    pass
+        _teardown(None, workspace)
