@@ -39,13 +39,15 @@
     "sakana": "#EA0C2D",
     "stealth": "#9E6C00",
     "gemini": "#346EEC",
-    "antigravity": "#308713"
+    "antigravity": "#308713",
+    "claude": "#B16105"
   },
   "accentAliases": {
     "mimo": "xiaomi",
     "qwen": "alibaba",
     "openai": "codex",
-    "google": "antigravity"
+    "google": "antigravity",
+    "anthropic": "claude"
   },
   "providers": {
     "qwen-token-plan": {
@@ -232,6 +234,21 @@
       "displayProvider": "Devin",
       "hueKey": "ensemble",
       "shortCode": "DEV"
+    },
+    "claude": {
+      "displayProvider": "Claude",
+      "hueKey": "claude",
+      "shortCode": "CLD"
+    },
+    "codex": {
+      "displayProvider": "Codex",
+      "hueKey": "codex",
+      "shortCode": "CDX"
+    },
+    "antigravity": {
+      "displayProvider": "AntiGravity",
+      "hueKey": "antigravity",
+      "shortCode": "AGY"
     }
   },
   "modelLabels": {

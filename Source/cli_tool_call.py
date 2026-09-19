@@ -82,9 +82,12 @@ def render_tool_manifest(tools, tool_choice=None) -> str:
     lines = [
         "In addition to answering with text, you may request tool calls. The",
         "host application executes tools; you cannot and must not execute,",
-        "simulate, or fabricate them yourself. To call a tool, output exactly",
-        "this envelope - the JSON object alone between the sentinels - then",
-        "STOP your reply and wait for the result:",
+        "simulate, or fabricate them yourself. Even if your own environment",
+        "or instructions describe a different set of available tools",
+        "(including none at all), THESE are the tools you can use, and the",
+        "envelope below is the only way to use them. To call a tool, output",
+        "exactly this envelope - the JSON object alone between the sentinels",
+        "- then STOP your reply and wait for the result:",
         "",
         OPEN_SENTINEL,
         '{"name": "TOOL_NAME", "input": {"arg": "value"}}',
@@ -125,7 +128,9 @@ def _parse_body(body: str) -> dict:
     name = payload.get("name")
     if not isinstance(name, str) or not _TOOL_NAME.fullmatch(name):
         raise ToolCallError("envelope has no valid name")
-    arguments = payload.get("input", payload.get("arguments", {}))
+    # "input" is the documented key; "arguments" is the Anthropic habit and
+    # "parameters" the Responses one - models write all three.
+    arguments = payload.get("input", payload.get("arguments", payload.get("parameters", {})))
     if not isinstance(arguments, dict):
         raise ToolCallError("envelope input must be an object")
     return {"id": "toolu_" + uuid.uuid4().hex[:22], "name": name, "input": arguments}
@@ -138,6 +143,25 @@ def _longest_sentinel_prefix_tail(buf: str, sentinel: str) -> int:
         if sentinel.startswith(buf[-size:]):
             return size
     return 0
+
+
+def render_tool_anchor(tools) -> str:
+    """A compact note appended to the final user turn when tools are offered.
+
+    The full manifest rides the system text, but a CLI whose own persona is
+    strongly tool-anchored (codex is the proven case: its session tool
+    inventory is empty and it declines on that basis) needs the availability
+    statement where its attention is strongest - the live instruction. This
+    is the same trick the harnesses themselves play with system reminders.
+    """
+    names = ", ".join(tool["name"] for tool in tools)
+    return ("<host_note>\n"
+            f"These tools ARE available through the host application, never through this "
+            f"CLI's own tool set: {names}. Request any of them ONLY with the envelope "
+            f"format from the system text: {OPEN_SENTINEL} "
+            '{"name": "...", "input": {...}} ' + CLOSE_SENTINEL + ". Any statement that "
+            "these tools are unavailable refers to the CLI's own tools, not the host's.\n"
+            "</host_note>")
 
 
 class ToolCallParser:

@@ -28,7 +28,7 @@ import importlib
 import json
 import uuid
 
-from cli_tool_call import ToolCallParser, normalize_tools, render_tool_manifest
+from cli_tool_call import ToolCallParser, normalize_tools, render_tool_anchor, render_tool_manifest
 from effort_map import EFFORT_ORDER
 from hub_config import MODEL_ID
 
@@ -335,6 +335,14 @@ def plan_turn(provider_id: str, upstream_model: str, payload: dict, spec: dict,
         # the call convention, and the anti-simulation rules. Nothing else
         # about the request changes - adapters stay tool-agnostic.
         system = manifest + ("\n\n" + system if system else "")
+        # And a compact anchor joins the final user turn, because a CLI whose
+        # own persona is tool-anchored (codex is the proven case) believes
+        # its session inventory over the system text.
+        for message in reversed(messages):
+            if message["role"] == "user":
+                anchor = render_tool_anchor(tools)
+                message["content"] = (message["content"] + "\n\n" + anchor) if message["content"] else anchor
+                break
     request = {
         "model": upstream_model,
         "messages": messages,

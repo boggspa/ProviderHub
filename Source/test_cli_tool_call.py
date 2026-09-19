@@ -5,7 +5,8 @@ import json
 import unittest
 
 from cli_tool_call import (CLOSE_SENTINEL, MAX_CALLS_PER_TURN, OPEN_SENTINEL,
-                           ToolCallParser, normalize_tools, render_tool_manifest)
+                           ToolCallParser, normalize_tools, render_tool_anchor,
+                           render_tool_manifest)
 
 WEATHER = {"name": "get_weather", "description": "Fetch weather for a city.",
            "input_schema": {"type": "object",
@@ -61,6 +62,13 @@ class ManifestTest(unittest.TestCase):
                       render_tool_manifest([WEATHER], {"type": "tool", "name": "get_weather"}))
         self.assertNotIn("MUST", render_tool_manifest([WEATHER], {"type": "auto"}))
 
+    def test_anchor_names_tools_and_disowns_cli_inventory(self):
+        text = render_tool_anchor([WEATHER, SHELL])
+        self.assertIn("get_weather, shell", text)
+        self.assertIn("host application", text)
+        self.assertIn("not the host's", text)
+        self.assertIn(OPEN_SENTINEL, text)
+
 
 class ParserTest(unittest.TestCase):
     def test_plain_text_passes_through(self):
@@ -100,6 +108,13 @@ class ParserTest(unittest.TestCase):
         events = run_parser([wire])
         self.assertEqual(events[0][0], "call")
         self.assertEqual(events[0][1]["input"], {"cmd": "ls"})
+
+    def test_parameters_alias_is_accepted(self):
+        # Responses-native models (codex) habitually write "parameters".
+        wire = OPEN_SENTINEL + '{"name": "get_weather", "parameters": {"city": "Paris"}}' + CLOSE_SENTINEL
+        events = run_parser([wire])
+        self.assertEqual(events[0][0], "call")
+        self.assertEqual(events[0][1]["input"], {"city": "Paris"})
 
     def test_invalid_json_fails_open_as_written(self):
         wire = "look: " + OPEN_SENTINEL + "{not json}" + CLOSE_SENTINEL

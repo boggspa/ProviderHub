@@ -227,6 +227,10 @@ class CliRoutesTest(unittest.TestCase):
         self.assertIn("get_weather", plan["body"]["system"])
         self.assertEqual(plan["compatibility"]["cli_tools"], 1)
 
+        # The availability anchor also joins the final user turn (and only it).
+        self.assertIn("<host_note>", plan["body"]["messages"][-1]["content"])
+        self.assertIn("get_weather", plan["body"]["messages"][-1]["content"])
+
     def test_plan_turn_tool_choice_none_suppresses_tools(self):
         payload = {"messages": [{"role": "user", "content": "hi"}],
                    "tools": [{"name": "get_weather"}],
@@ -234,6 +238,7 @@ class CliRoutesTest(unittest.TestCase):
         plan = plan_turn("claude", "sonnet", payload, {}, wanted_output=64)
         self.assertFalse(plan["cli_tool_calls"])
         self.assertNotIn(OPEN_SENTINEL, plan["body"]["system"] or "")
+        self.assertNotIn("<host_note>", plan["body"]["messages"][-1]["content"])
 
     def test_tool_history_round_trips_with_correlation_ids(self):
         payload = {"messages": [
