@@ -601,6 +601,23 @@ class RunTurnTests(unittest.TestCase):
         self.assertEqual(namespace["tools"][0]["name"], codex._tool_alias("exec_command"))
         self.assertIn("Host tool: exec_command", namespace["tools"][0]["description"])
         self.assertIn('features.shell_tool=false', session.argv)
+        for control in ('agents.enabled=false', 'features.multi_agent=false', 'features.multi_agent_v2=false'):
+            self.assertIn(control, session.argv)
+
+    def test_cross_provider_spawn_uses_host_alias_and_preserves_arguments(self):
+        name = "spawn_agent"
+        arguments = {"task_name": "review", "message": "Review the patch.",
+                     "model": "gemini/gemini-3.8-flash", "fork_turns": "none", "reasoning_effort": "high"}
+        fake = FakeCodexSession([])
+        fake.script = [{"id": 9, "method": "item/tool/call", "params": {
+            "namespace": "host", "tool": codex._tool_alias(name), "arguments": arguments, "callId": "spawn1"}}]
+        events, session, _ = self._run(self._request(tools=[{
+            "name": name, "description": "Host delegation catalogue", "input_schema": {"type": "object"}}]), fake)
+        self.assertEqual(events, [{"type": "tool_call", "id": "spawn1", "name": name, "input": arguments},
+                                  {"type": "message_stop", "stop_reason": "tool_use"}])
+        params = dict((method, params) for method, params, _ in session.requests)
+        dynamic = params["thread/start"]["dynamicTools"][0]["tools"][0]
+        self.assertIn("Host delegation catalogue", dynamic["description"])
 
     def test_reserved_tool_names_round_trip_through_registration_history_and_calls(self):
         name = "mcp__ccd_directory__change_directory"

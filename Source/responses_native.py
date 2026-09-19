@@ -22,6 +22,7 @@ from openrouter_provider import OpenRouterError, finalize as openrouter_finalize
 from effort_map import cap_high_end, map_effort, nearest_effort, ollama_effort_aliases
 from spawn_depth import (SPAWN_NAMESPACE, SPAWN_TOOL, apply_subagent_model,
                          is_spawn_tool_reference)
+from subagent_catalogue import advertise_subagent_models
 from rate_limit import (MAX_UPSTREAM_ATTEMPTS, RETRYABLE_STATUSES, SLOT_RETRY_AFTER, SLOT_WAIT_TIMEOUT,
                         THROTTLE_CAP, parse_retry_after, wait_for_slot)
 
@@ -605,6 +606,7 @@ def prepare_native(runtime, payload):
     # rather than only where the description happened to land.
     if runtime.settings.get("codex_goal_budget") is not True:
         strip_goal_budget(tools)
+    advertise_subagent_models(tools, runtime.settings, getattr(runtime, "catalogue", None))
     body["tools"], tool_map = flatten_tools(tools)
     if tools and spec.get("tools") is False:
         raise BridgeError("The selected model does not support tool calls.")

@@ -34,13 +34,11 @@ MODEL_VARIANT_FIELDS = (
     "multi_agent_version", "multi_agent_reasoning_effort",
 )
 
-#: How many catalogue rows Codex offers as sub-agent model overrides. It reads
-#: one `priority` per row and takes this many from the top - measured against
-#: the installed 26.908 runtime by reordering priority and watching the offered
-#: set follow, not documented anywhere. The pool is therefore one global
-#: ordering: nothing in the wire format can say "Mistral may delegate here but
-#: Kimi may not". Lives here rather than in codex_catalogue because settings
-#: validation needs it and the import runs the other way.
+#: Number of preferred model ranks exposed by the Hub UI. Codex's native
+#: spawn description lists this many priority rows, but the runtime accepts
+#: every catalogue route (measured on 0.155.0-alpha.9.2). subagent_catalogue
+#: advertises the rest too. Priority is one global ordering, not a per-parent
+#: permission. Lives here because settings validation also needs it.
 SUBAGENT_POOL_SIZE = 5
 
 
@@ -557,12 +555,10 @@ def normalize(value: dict, slots, vibe_model: str, port: int = 11436) -> dict:
         result["codex_catalogue"] = selected
         if result["codex_model"] is not None and result["codex_model"] not in selected:
             raise ValueError("Choose the Codex default model from the catalogue selection.")
-    # codex_subagent_rank picks which routes Codex offers as sub-agent model
-    # overrides. Codex reads one `priority` per catalogue row and offers the
-    # top SUBAGENT_POOL_SIZE of them, so the pool is necessarily one global
-    # ordering - there is no per-parent dimension to express, and a rank here
-    # is a position in that single list rather than an independent allocation.
-    # Rank 1 is the first seat offered; absent means the route is not offered.
+    # codex_subagent_rank orders preferred routes first in the global
+    # delegation catalogue. The native description lists five recommendations;
+    # subagent_catalogue adds the remaining eligible routes. An absent rank
+    # follows the ranked routes; it does not make the model unavailable.
     ranks = value.get("codex_subagent_rank")
     if ranks is not None:
         if not isinstance(ranks, dict):

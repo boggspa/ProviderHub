@@ -330,7 +330,7 @@ struct CodexModelsPane: View {
                         .font(.caption).foregroundStyle(.secondary)
                     DisclosureGroup("Model priorities") {
                         VStack(alignment: .leading, spacing: 8) {
-                            Text("Rank models in the catalogue below to put them first in Codex’s \(Self.subagentPoolSize)-model delegation list on Ultra. Unranked models fill any remaining places. Ties prefer the starting model, then model name.")
+                            Text("Every model in this catalogue is available to subagents. Assign priorities 1–\(Self.subagentPoolSize) to put preferred models first. Unranked models follow. Ties prefer the starting model, then model name.")
                         }.font(.caption).foregroundStyle(.secondary).padding(.top, 6)
                     }.font(.caption)
                 }

@@ -1,0 +1,82 @@
+# Provider models and Codex host subagents
+
+Investigated on 2026-09-19 with the installed ChatGPT Desktop runtime,
+`codex-cli 0.155.0-alpha.9.2`. The reproducible probes use a loopback fake
+Responses provider and a disposable Codex home; they do not call real models,
+read credentials, change user configuration, or run workspace tools.
+
+## Findings
+
+There is no five-model execution limit in the tested runtime. Its native
+`collaboration.spawn_agent` description lists the first five catalogue rows
+by priority. A seventh model, qualified with another provider's name, is
+accepted and receives the child request through the configured provider.
+The five rows are recommendations in the description, not an enum on the
+`model` argument. Treating omission from that list as unavailability explains
+the reported failure to choose Gemini from a larger Hub catalogue.
+
+CLI-backed Codex had a separate ownership problem. Its nested runtime is
+pinned to the OpenAI provider and its native model catalogue, while the
+desktop owns the Hub provider routes and the actual subagent sessions.
+The bridge passed the desktop tools under `host.bridge_*` aliases but only
+disabled `features.multi_agent`. The nested runtime still advertised its own
+`collaboration` tools and native model list alongside those host aliases.
+A model choosing that local tool could not route the child through the Hub.
+
+In this runtime, setting all three of `agents.enabled=false`,
+`features.multi_agent=false`, and `features.multi_agent_v2=false` removes the
+nested collaboration tools. The host dynamic tool remains callable: the
+installed runtime emitted `item/tool/call` with the host alias and preserved
+the requested cross-provider model and `fork_turns` arguments.
+
+## Changes
+
+- The CLI transport applies all three controls. Actual delegation remains
+  owned by the desktop and is returned through the existing host tool bridge.
+- Before translating a Responses request, the Hub replaces the host spawn
+  tool's abbreviated model list with the full tool-capable Codex catalogue.
+  Curated selections and model priority order are preserved. This applies
+  to native Responses, translated API, and CLI routes.
+- The description retains the host's task guidance. It changes no tool
+  schema or permissions, never restores a withheld spawn tool, and respects
+  an explicit model enum if a future host supplies one.
+- The Hub UI describes priorities as ordering preferences rather than a
+  five-model availability limit. The build includes the new helper module.
+
+## Reproducing the runtime checks
+
+From the repository root, with CPython 3.13:
+
+```sh
+uv run --python 3.13 python scripts/probe_codex_subagents.py
+uv run --python 3.13 python scripts/probe_codex_subagents.py --control features.multi_agent=false
+uv run --python 3.13 python scripts/probe_codex_subagents.py --transport-controls --forward-host
+```
+
+The first check should request `gemini/probe-flash` even though that route is
+absent from the native spawn description. The second demonstrates the old
+flag leaving native spawn exposed. The last uses the adapter's actual
+configuration: `spawn_tools` should be empty and `host_calls` should contain
+the preserved Gemini target under the host alias.
+
+Unit and integration regressions cover catalogue curation, more than five
+models, priority order, absent spawn tools, host enums, namespace collisions,
+native/CLI translation, and cross-provider host argument preservation.
+
+## Limits and activation
+
+These checks verify desktop routing and the CLI handoff, not a paid Gemini,
+Claude, or other vendor inference call. Provider login, account availability,
+tool support, concurrency and depth controls still apply. The host's own
+instructions determine when delegation is appropriate; prefer a
+self-contained task with `fork_turns="none"` when requesting another model.
+
+The gateway holds its imported code and catalogue for its lifetime. Rebuild
+the Hub and restart its gateway to activate these changes; reconnect or
+relaunch the desktop through the Hub if its catalogue was also changed.
+Existing running sessions were not restarted by this investigation.
+
+Official configuration documentation describes custom provider catalogues,
+agent enablement and default subagent model settings, but does not document
+the five-description-row behavior or the combined controls observed here:
+<https://learn.chatgpt.com/docs/config-file/config-reference>.

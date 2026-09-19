@@ -167,7 +167,13 @@ _RESUME_PROMPT = (
 
 _TRANSPORT_CONFIG = (
     'features.shell_tool=false',
+    # Current runtimes expose collaboration if any of these controls enables
+    # it. The nested CLI must forward the host's tools, whose catalogue and
+    # provider routing belong to the desktop, rather than spawn locally on
+    # its pinned OpenAI provider. All three are needed on 0.155.0-alpha.9.2.
+    'agents.enabled=false',
     'features.multi_agent=false',
+    'features.multi_agent_v2=false',
     'features.apps=false',
     'features.plugins=false',
     'features.hooks=false',
