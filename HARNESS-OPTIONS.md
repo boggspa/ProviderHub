@@ -396,7 +396,7 @@ it, the hue falls back to `currentColor` so a marked word can never
 vanish, and `prefers-reduced-motion` gets a still fill in the plain hue.
 Max, which shares the title attribute, keeps the app's purple, as do
 tokens and marks the watcher did not set; all of it is removed again when
-the level changes. The activity shimmer ("Thinking", "Listing files…") is
+the level changes. The app's loading shimmer is
 tinted through the app's own knobs: its shimmer text derives every tone
 from `--loading-shimmer-foreground` (the base gray, falling back to
 `--color-codex-description`, which in the desktop windows is the text
@@ -413,19 +413,82 @@ chroma in the provider's hue, so the text reads as a slightly cooler gray
 and its legibility does not move, while the sweep stays the app's own.
 Being later in the cascade the rule beats the reset, while any component
 that sets its own foreground still wins, and with no hue the value is
-invalid and the app's fallback returns. The icon that leads such a row
-("Reading …", "Thinking") takes the accent flat, so the row reads as a
-tinted grey label behind a coloured mark. That row is an inline-flex box
-holding the icon and the shimmer label as siblings, and it paints every
-non-button descendant with its muted grey through an `!important` utility
-(`[&_*:not(button)]:!text-text/60`, specificity 0-1-1), so the watcher's
-rule matches `svg:has(~ .loading-shimmer-pure-text)` (and the same icon
-one wrapper deep), scopes it to the root's theme attribute for a
-specificity of 0-2-1, and carries `!important` of its own. Keying on the
-shimmer sibling rather than on the row's utility classes reuses the class
-the shimmer tint already depends on, and the icons themselves draw with
-`currentColor`; a trailing icon keeps the row's grey, and with no accent
-the `var()` falls back to `currentColor`, which is that grey.
+invalid and the app's fallback returns. What that reaches is narrower than
+the knob's name suggests. The labels a running turn draws — "Thinking",
+"Reading …", "Listing files…", "Editing files" — are not that shimmer at
+all: they go through one component (`gya` in `app-initial`, imported into
+`conversation-blocks` as `G`), which renders a hashed CSS-module shimmer
+while the row is active (`_cadencedShimmer_py5xu_2`, with a
+`_cadencedShimmerSweep_py5xu_35` child holding a duplicate of the text) and
+a plain `<span>` when it is not. The string `loading-shimmer` does not occur
+once in `app-initial`, and occurs exactly once in `conversation-blocks` — at
+byte 68842, as `_activeCommentary_r9zcq_5 loading-shimmer`, the assistant's
+own message body while it streams. The rule therefore leaves the transcript
+largely alone and does its work on the Codex chrome around it, where the app
+takes the class bare: a task row's meta cell in the sidebar while it loads, a
+subagent row's status while it is active, the pull-request hover card's
+"Loading pull request…", the composer's permissions pill while its options
+arrive, the artifact tab's status line. The cadenced shimmer reads the same
+knobs behind a reset of the same shape, so the same value would tint it — but
+that reset is a declaration on the element itself rather than something
+inherited, so the foreground has to be set there, and the only name on that
+element is hashed; the authored triple it also carries,
+`relative inline-block align-top`, occurs once in the whole bundle and is the
+hook if this is ever worth taking.
+
+No rule keys on that shimmer to find an icon. One did —
+`svg:has(~ .loading-shimmer-pure-text)`, and the same icon one wrapper deep —
+on the understanding that an activity row is an inline-flex box holding its
+icon and its shimmer label as siblings; that understanding no longer holds
+anywhere it mattered. Walked over all fifteen chunks that carry the class,
+the pattern matches exactly one element in the build, and it is not an
+activity row: the shield leading the ChatGPT safety-review notice
+(`viewer-…js` @75344), whose `<svg>` and shimmering body span really are
+siblings inside `div.flex.min-w-0.flex-1.items-start.gap-2`. Everywhere else
+the shimmer sits on the icon's own ancestor (the composer's permissions pill,
+the memory-summary spinner), or one level deeper than the icon's sibling (the
+automation plan's step list, the Work-home catch-up row, the artifact comment
+thread), or the mark that leads the row is an `<img>` identicon rather than an
+`<svg>` (the background-agents row, the subagent row). So the rule is gone: a
+per-model accent on a safety notice is the wrong reading, and a running row
+needed no hook of its own anyway.
+The glyph that leads a tool-call row — "Reading …" while it runs, "Ran
+commands", "Read files, ran commands", "Edited a file, read files, ran a
+command" once it lands — takes a flat accent. One rule serves both states
+because it is one element in both: the header picks its glyph inside the
+running/settled branch but builds the slot after it, from the same variable,
+and the running branch calls the very same icon switch the settled branch
+does, so the two draw identical markup and differ only in the label. The row
+carries no shimmer to key on in either state, so the glyph is found by the two
+names the app wrote by hand and leans on itself: the header is a Tailwind
+named group (`group/activity-header`, which its own stylesheet references
+in fourteen rules for the row's hover and focus states), and inside it the
+glyph is handed to a single `display:contents` slot — a class pair that
+occurs twice in the whole bundle, and both are that slot. The rule is
+`[class~="group/activity-header"] span[class~="contents"] > svg[class~=
+"text-text/60"]`, scoped to the root's theme attribute for a specificity of
+0-5-2 and carrying `!important`. The grey it replaces is a plain utility in
+the app's `utilities` layer, which an `!important` declaration outranks
+whatever its specificity; the row's own `!important` grey sits on the label
+span, a *sibling* of the slot, so it never reaches the glyph at all, and
+`!important` is kept only because the icon component can merge an inline
+`style` onto the `svg`. Matching the app's grey on the glyph itself is what
+does the excluding, with no list to maintain: the disclosure chevron sits
+outside the slot, a remote MCP logo is an `<img>` that `> svg` skips, and
+the two glyphs that name a colour of their own — a denied approval's
+warning mark and the subagent identicon — carry no grey to match, so they
+keep their meaning. Every other activity row that draws a muted glyph
+(a stream or system error, a compaction, a worktree init) is tinted along
+with the tool calls; those glyphs are already the same grey, so no semantic
+colour is lost. The individual rows revealed by expanding a group put their
+glyph outside the slot and stay grey, and the plain "Thinking" placeholder a
+turn can show before any tool is in flight takes its mark from a prop threaded
+in from outside the component rather than from that icon switch, so it is the
+one row whose colour this does not decide. Nothing here is localised and nothing
+is hashed, so a build that renames either hook loses the colour and nothing
+else; the watcher's status reports the live match count as `glyphs`.
+The accent is whichever model the composer currently names, not the model
+that produced the row, so switching models re-tints the scrollback.
 The watcher observes the document node rather
 than its root element (a document-start script runs before the root exists,
 and the evaluate sent at attach time is queued until the window's first real

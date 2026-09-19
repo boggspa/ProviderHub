@@ -13,7 +13,8 @@ from unittest import mock
 
 from bridge_core import SLOTS
 import codex_accent
-from codex_accent import (ACCENT_PROPERTY, PROPERTY, THEME_ATTRIBUTE, ULTRA_ACCENT_PROPERTY, ULTRA_MARK, ULTRA_PROPERTY, AccentBridge, usage_banner_css, usage_banner_selector, HUE_PROPERTY, hue_map, activity_icon_css, activity_icon_selector,
+from codex_accent import (ACCENT_PROPERTY, PROPERTY, THEME_ATTRIBUTE, ULTRA_ACCENT_PROPERTY, ULTRA_MARK, ULTRA_PROPERTY, AccentBridge, usage_banner_css, usage_banner_selector, HUE_PROPERTY, hue_map,
+                          activity_glyph_css, activity_glyph_selector,
                           DevToolsPipe, accent_map, already_running, bridge_command, child_environment, executable_path, launch, run,
                           shimmer_css, ultra_accents, ultra_css, ultra_map, watcher_script)
 from hub_config import defaults
@@ -91,21 +92,40 @@ class AccentMapTests(unittest.TestCase):
         self.assertIn("document.querySelectorAll(USAGE_SELECTOR).length", hiding)  # the status reports matches
         self.assertNotIn("__HUB_", hiding)
 
-    def test_activity_icon_takes_the_flat_accent_over_the_rows_important_grey(self):
-        selector = activity_icon_selector()
-        self.assertEqual(selector, "svg:has(~ :is(.loading-shimmer-pure-text,.loading-shimmer)),"
-                                   ":is(span,div):has(> svg):has(~ :is(.loading-shimmer-pure-text,.loading-shimmer)) > svg")
-        css = activity_icon_css()
-        # Two rules, each scoped to the theme attribute the watcher only sets with an accent.
-        self.assertEqual(css.count(f"[{THEME_ATTRIBUTE}] "), 2)
-        self.assertEqual(css.count(f"{{color:var({ACCENT_PROPERTY},currentColor)!important}}"), 2)
-        self.assertIn(f"[{THEME_ATTRIBUTE}] svg:has(~ :is(.loading-shimmer-pure-text,.loading-shimmer))"
-                      f"{{color:var({ACCENT_PROPERTY},currentColor)!important}}", css)
-        self.assertNotIn("~ svg", css)  # a trailing chevron or spinner keeps the row's grey
+    def test_no_rule_finds_an_icon_by_its_shimmer_sibling(self):
+        # The sibling rule was walked over every chunk carrying the class and
+        # matched one element in the build: the shield leading the ChatGPT
+        # safety-review notice, whose svg and shimmering body really are
+        # siblings. A safety mark is the wrong thing to give a model's hue,
+        # and a running row needs no hook of its own — its glyph is the same
+        # element the settled one draws, so the slot rule already has it.
         script = watcher_script({"Kimi for Coding": "#0073E6"})
-        self.assertIn(f'const ICON_SELECTOR = "{selector}";', script)
-        self.assertIn("document.querySelectorAll(ICON_SELECTOR).length", script)  # the status reports matches
-        self.assertIn("svg:has(~ :is(.loading-shimmer-pure-text,.loading-shimmer))", script)
+        for gone in ("svg:has(~", ":has(> svg)", "ICON_SELECTOR"):
+            self.assertNotIn(gone, script)
+        self.assertNotIn("~ svg", activity_glyph_css())
+
+    def test_tool_call_glyph_takes_the_accent_from_the_rows_icon_slot(self):
+        selector = activity_glyph_selector()
+        self.assertEqual(selector, '[class~="group/activity-header"] span[class~="contents"] > svg[class~="text-text/60"]')
+        css = activity_glyph_css()
+        self.assertEqual(css, f"[{THEME_ATTRIBUTE}] {selector}"
+                              f"{{color:var({ACCENT_PROPERTY},currentColor)!important}}")
+        # The glyph is taken by the slot's own child, so nothing else in the row is:
+        # the disclosure chevron sits outside the slot, and a glyph that names a
+        # colour of its own (a denied approval, the subagent identicon) has no grey here.
+        self.assertIn("> svg", css)
+        self.assertNotIn("~ svg", css)
+        self.assertNotIn("text-warning", css)
+        # Nothing localised and nothing hashed: an app build that renames either
+        # hook loses the colour and the glyph falls back to the row's own grey.
+        self.assertNotIn("Ran commands", css)
+        self.assertNotIn("_Icon_", css)
+        script = watcher_script({"Kimi for Coding": "#0073E6"})
+        # The selector carries double quotes, so it is quoted by the substitution
+        # rather than in the script; spelled inline it would end the string early.
+        self.assertIn(f"const GLYPH_SELECTOR = {json.dumps(selector)};", script)
+        self.assertIn("document.querySelectorAll(GLYPH_SELECTOR).length", script)  # the status reports matches
+        self.assertNotIn('const GLYPH_SELECTOR = "[class~="', script)
         self.assertNotIn("__HUB_", script)
 
     def test_shimmer_gray_takes_the_accent_hue_and_the_sweep_stays_the_apps(self):
@@ -165,7 +185,7 @@ class UltraTests(unittest.TestCase):
         self.assertEqual(ULTRA_PROPERTY, "--color-chart-purple")
         script = watcher_script({"Kimi for Coding": "#0073E6"})
         self.assertIn("provider-hub-ultra-sweep", script)
-        self.assertIn(json.dumps(shimmer_css() + activity_icon_css() + ultra_css()), script)  # the stylesheets travel together
+        self.assertIn(json.dumps(shimmer_css() + activity_glyph_css() + ultra_css()), script)  # the stylesheets travel together
 
 
 class EnvironmentTests(unittest.TestCase):

@@ -47,12 +47,26 @@ ACCENT_PROPERTY = "--provider-hub-accent"
 HUE_PROPERTY = "--provider-hub-hue"
 SHIMMER_CHROMA = "0.07"
 SHIMMER_HUE_FLOOR = 0.03
-# The icon that leads an activity row ("Reading …", "Thinking") takes the
-# accent flat. The row is an inline-flex box holding the icon and the
-# shimmer label as siblings, and it paints every non-button descendant with
-# its muted grey using !important, so the rule matches an icon by that
-# shimmer sibling and has to carry !important of its own.
+# The app's loading shimmer. This is the Codex chrome around the transcript
+# — a task row's meta cell while it loads, a subagent row's status, the
+# composer's permissions pill while its options arrive — and not the running
+# turn's own labels, which shimmer through a hashed CSS module instead.
 ACTIVITY_SHIMMER = ":is(.loading-shimmer-pure-text,.loading-shimmer)"
+# The glyph that leads a settled tool-call row ("Ran commands", "Read files,
+# ran commands") takes the accent too. That row keeps no shimmer once the
+# call lands, so it is found by the two names the app wrote by hand: the
+# header is a Tailwind *named group*, which the app's own stylesheet leans on
+# for its hover and focus states, and the glyph inside it is handed to a
+# lone display:contents slot. That slot's class pair occurs twice in the
+# whole bundle, and both are this slot.
+ACTIVITY_HEADER = '[class~="group/activity-header"]'
+ACTIVITY_SLOT = 'span[class~="contents"]'
+# Every monochrome glyph the row draws is stamped with the app's muted grey,
+# and matching that grey is what does the excluding: the disclosure chevron
+# sits outside the slot, a remote app logo is an <img>, and the two glyphs
+# that name a colour of their own — a denied approval's warning mark and the
+# subagent identicon — carry no grey to match, so they keep their meaning.
+ACTIVITY_GLYPH_GREY = "text-text/60"
 # Ultra: the app paints its top level (the popover's title, the slider's
 # fill gradient, the pill's Ultra layer) with one purple token. On the
 # picker and the pill that token is given the model's Ultra hue instead,
@@ -195,37 +209,43 @@ def ultra_css() -> str:
             f"@media (prefers-reduced-motion:reduce){{{marked}{{animation:none;background-image:none;-webkit-text-fill-color:{hue}}}}}")
 
 
-def activity_icon_selectors() -> tuple[str, ...]:
-    """Icons that lead an activity row: an ``svg`` whose later sibling is a
-    shimmer label, or one sitting alone in a wrapper in that position.
+def activity_glyph_selector() -> str:
+    """The glyph a tool-call row leads with: the ``svg`` the activity header
+    handed to its display:contents icon slot, wearing the app's grey.
 
-    Keying on the shimmer sibling rather than on the row's own utility
-    classes keeps the hook to the same class the shimmer tint already
-    depends on. A trailing icon (a chevron, a spinner) is left alone.
+    One selector serves a running row and a settled one because it is one
+    element in both: the header picks its glyph inside the running/settled
+    branch but builds the slot after it, from the same variable, and the
+    running branch calls the very same icon switch. The row carries no
+    shimmer to key on in either state, so these two names are used instead,
+    and both are the app's own and load-bearing — the named group carries the
+    row's hover and focus rules, and the slot's ``display:contents`` is what
+    keeps the glyph a flex item of the row's gap. The grey is matched on the
+    glyph itself so that anything colouring itself is skipped.
     """
-    return (f"svg:has(~ {ACTIVITY_SHIMMER})",
-            f":is(span,div):has(> svg):has(~ {ACTIVITY_SHIMMER}) > svg")
+    return f'{ACTIVITY_HEADER} {ACTIVITY_SLOT} > svg[class~="{ACTIVITY_GLYPH_GREY}"]'
 
 
-def activity_icon_selector() -> str:
-    """The same selectors as one list, for the watcher's own status count."""
-    return ",".join(activity_icon_selectors())
+def activity_glyph_css() -> str:
+    """Paint that glyph with the accent, so a tool-call row reads as a grey
+    label behind a coloured mark, running and finished alike.
 
-
-def activity_icon_css() -> str:
-    """Paint those icons with the accent. The row's own rule is an
-    ``!important`` colour on every non-button descendant, so this one is
-    ``!important`` too and outranks it on specificity; the theme attribute
-    is only on the root while the watcher holds an accent, and the fallback
-    keeps the row's own grey if it is ever missing.
+    The grey it replaces is a plain utility in the app's ``utilities`` layer,
+    which an ``!important`` declaration outranks whatever its specificity; the
+    row's own ``!important`` grey sits on the label span, a *sibling* of the
+    slot, so it never reaches the glyph at all. ``!important`` is kept anyway,
+    because the icon component can merge an inline ``style`` onto the ``svg``.
+    The theme attribute is only on the root while the watcher holds an accent,
+    and the fallback keeps the app's grey if it is ever missing, so a build
+    that renames either hook loses the colour and nothing else.
     """
-    return "".join(f'[{THEME_ATTRIBUTE}] {selector}{{color:var({ACCENT_PROPERTY},currentColor)!important}}'
-                   for selector in activity_icon_selectors())
+    return (f"[{THEME_ATTRIBUTE}] {activity_glyph_selector()}"
+            f"{{color:var({ACCENT_PROPERTY},currentColor)!important}}")
 
 
 def shimmer_css() -> str:
-    """The stylesheet the watcher adopts: the activity shimmer ("Thinking",
-    "Editing files") keeps the app's sweep, but its gray takes the model's hue.
+    """The stylesheet the watcher adopts: the app's loading shimmer keeps its
+    own sweep, but its gray takes the model's hue.
 
     The shimmer text derives every tone from ``--loading-shimmer-foreground``
     and falls back to the app's description gray; the app resets that knob on
@@ -235,8 +255,12 @@ def shimmer_css() -> str:
     gray at its own lightness and alpha with a fixed chroma in the accent's
     hue, so legibility does not move; without a hue the ``var()`` is invalid
     and the app's fallback returns.
+
+    What this reaches is narrower than the knob's name suggests: the labels a
+    running turn draws are a hashed CSS module, not this class, so the rule
+    does its work on the Codex chrome around the transcript rather than in it.
     """
-    shimmer = f"[{THEME_ATTRIBUTE}] :is(.loading-shimmer-pure-text,.loading-shimmer)"
+    shimmer = f"[{THEME_ATTRIBUTE}] {ACTIVITY_SHIMMER}"
     return (f":where({shimmer}){{--loading-shimmer-foreground:"
             f"oklch(from var(--color-codex-description) l {SHIMMER_CHROMA} var({HUE_PROPERTY}))}}")
 
@@ -282,7 +306,9 @@ _WATCHER = r"""
     const USAGE_SELECTOR = __HUB_USAGE_SELECTOR__;
     const HUES = __HUB_HUES__;
     const HUE_PROPERTY = "__HUB_HUE_PROPERTY__";
-    const ICON_SELECTOR = "__HUB_ICON_SELECTOR__";
+    // Quoted by the substitution, not here: this selector carries its own
+    // double quotes, and a quoted slot would end the string on the first one.
+    const GLYPH_SELECTOR = __HUB_GLYPH_SELECTOR__;
     const state = { targets: [], label: "", colour: "", ultra: "", title: null, words: [], pills: [], marks: [], sheet: null, accent: "", theme: "", hue: "" };
     const norm = (text) => (text || "").replace(/\s+/g, " ").trim().toLowerCase();
     // Labels may carry a leading glyph (a bullet, a tier mark); match the words.
@@ -514,13 +540,13 @@ _WATCHER = r"""
     observer.observe(document, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ["data-explicit-model", "data-accent", "data-maximum", "data-selected-reasoning-effort"] });
     if (document.readyState === "loading") { document.addEventListener("DOMContentLoaded", schedule, { once: true }); }
     window.__providerHubAccent = {
-      version: 9,
+      version: 11,
       accents: Object.keys(ACCENTS).length,
       check: () => ({ container: !!document.querySelector('[data-explicit-model="true"]'), label: state.label, colour: state.colour, ultra: state.ultra, targets: state.targets.length,
                       pills: state.words.map((entry) => entry.colour), ultraPills: state.pills.map((entry) => entry.colour), marks: state.marks.length,
                       shimmer: state.accent ? state.accent + ":" + state.theme : "", hue: state.hue,
                       banners: USAGE_SELECTOR ? document.querySelectorAll(USAGE_SELECTOR).length : null,
-                      icons: document.querySelectorAll(ICON_SELECTOR).length }),
+                      glyphs: document.querySelectorAll(GLYPH_SELECTOR).length }),
     };
     schedule();
     return { installed: true, accents: Object.keys(ACCENTS).length, usageBanner: !!USAGE_SELECTOR, ready: document.readyState };
@@ -537,14 +563,14 @@ def _label_key(label: str) -> str:
 
 def watcher_script(accents: dict, property_name: str = PROPERTY, hide_usage_banner: bool = False) -> str:
     table = {_label_key(label): colour for label, colour in accents.items()}
-    css = shimmer_css() + activity_icon_css() + ultra_css() + (usage_banner_css() if hide_usage_banner else "")
+    css = shimmer_css() + activity_glyph_css() + ultra_css() + (usage_banner_css() if hide_usage_banner else "")
     return (_WATCHER.replace("__HUB_ACCENTS__", json.dumps(table, ensure_ascii=False))
             .replace("__HUB_ULTRA__", json.dumps(ultra_map(table), ensure_ascii=False))
             .replace("__HUB_STYLE_CSS__", json.dumps(css))
             .replace("__HUB_USAGE_SELECTOR__", json.dumps(usage_banner_selector() if hide_usage_banner else ""))
             .replace("__HUB_HUES__", json.dumps(hue_map(table)))
             .replace("__HUB_HUE_PROPERTY__", HUE_PROPERTY)
-            .replace("__HUB_ICON_SELECTOR__", activity_icon_selector())
+            .replace("__HUB_GLYPH_SELECTOR__", json.dumps(activity_glyph_selector()))
             .replace("__HUB_THEME_ATTRIBUTE__", THEME_ATTRIBUTE)
             .replace("__HUB_ACCENT_PROPERTY__", ACCENT_PROPERTY)
             .replace("__HUB_ULTRA_ACCENT_PROPERTY__", ULTRA_ACCENT_PROPERTY)
