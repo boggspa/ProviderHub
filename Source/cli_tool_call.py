@@ -53,7 +53,9 @@ HOST_EXECUTION_NOTE = (
     "process, not the host workspace or the permissions of host tools. Use the "
     "provided host tools to read or change the host workspace and wait for their "
     "actual results. Never simulate tool results or execute an alternative "
-    "local tool. If no host tool is provided for an action, explain that limit."
+    "local tool. When the user requests an action supported by host tools, "
+    "request the tool call before ending your reply; a promise to act is not "
+    "completion. If no host tool is provided for an action, explain that limit."
 )
 
 TRANSCRIPT_HEADER = (

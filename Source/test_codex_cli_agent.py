@@ -490,6 +490,42 @@ class RunTurnTests(unittest.TestCase):
                          ["text_delta", "message_stop"])
         self.assertEqual(events[0]["text"], "full answer")
 
+    def test_distinct_final_item_is_not_dropped_after_commentary(self):
+        fake = FakeCodexSession([])
+        fake.script = [_delta_ev("Progress."), _ev("item/completed", {"item": {
+            "type": "agentMessage", "id": "final", "text": "Final answer."}}), _completed_turn()]
+        events, _, _ = self._run(self._request(), fake)
+        self.assertEqual([e["text"] for e in events if e["type"] == "text_delta"],
+                         ["Progress.", "Final answer."])
+
+    def test_completed_item_emits_only_missing_suffix_and_deduplicates_snapshot(self):
+        fake = FakeCodexSession([])
+        complete = _ev("item/completed", {"item": {"type": "agentMessage", "id": "i", "text": "Hello world"}})
+        fake.script = [_delta_ev("Hello"), complete, complete, _completed_turn()]
+        events, _, _ = self._run(self._request(), fake)
+        self.assertEqual([e["text"] for e in events if e["type"] == "text_delta"], ["Hello", " world"])
+
+    def test_reasoning_summary_fallback_stays_separate_from_answer_and_raw_reasoning(self):
+        fake = FakeCodexSession([])
+        fake.script = [_ev("item/reasoning/summaryTextDelta", {"itemId": "r", "summaryIndex": 0, "delta": "Summary"}),
+                       _ev("item/completed", {"item": {"type": "reasoning", "id": "r", "summary": ["Summary done"],
+                                                      "content": ["Provider reasoning"]}}), _completed_turn()]
+        events, _, _ = self._run(self._request(), fake)
+        thoughts = [e for e in events if e["type"] == "thinking_delta"]
+        self.assertEqual([e["text"] for e in thoughts], ["Summary", " done", "Provider reasoning"])
+        self.assertEqual([e["thinking_kind"] for e in thoughts], ["summary", "summary", "reasoning"])
+        self.assertFalse(any(e["type"] == "text_delta" for e in events))
+
+    def test_summary_mode_requests_and_emits_only_published_summaries(self):
+        fake = FakeCodexSession([])
+        fake.script = [_reasoning_ev("Raw provider reasoning"),
+                       _reasoning_ev("Published summary", method="item/reasoning/summaryTextDelta"),
+                       _completed_turn()]
+        events, session, _ = self._run(self._request(reasoning_summary="concise"), fake)
+        self.assertEqual([e["text"] for e in events if e["type"] == "thinking_delta"], ["Published summary"])
+        turn = next(params for method, params, _ in session.requests if method == "turn/start")
+        self.assertEqual(turn["summary"], "concise")
+
     def test_error_will_retry_ignored_then_completed(self):
         fake = FakeCodexSession([])
         fake.script = [_ev("error", {"willRetry": True,
@@ -562,8 +598,62 @@ class RunTurnTests(unittest.TestCase):
         self.assertNotIn("Host policy", params["turn/start"]["input"][0]["text"])
         namespace = params["thread/start"]["dynamicTools"][0]
         self.assertEqual(namespace["name"], "host")
-        self.assertEqual(namespace["tools"][0]["name"], "exec_command")
+        self.assertEqual(namespace["tools"][0]["name"], codex._tool_alias("exec_command"))
+        self.assertIn("Host tool: exec_command", namespace["tools"][0]["description"])
         self.assertIn('features.shell_tool=false', session.argv)
+
+    def test_reserved_tool_names_round_trip_through_registration_history_and_calls(self):
+        name = "mcp__ccd_directory__change_directory"
+        alias = codex._tool_alias(name)
+        fake = FakeCodexSession([])
+        fake.script = [{"id": 9, "method": "item/tool/call", "params": {
+            "namespace": "host", "tool": alias, "arguments": {"path": "/tmp"}, "callId": "c2"}}]
+        history = [{"role": "assistant", "content": [{"type": "tool_use", "id": "c1", "name": name,
+                    "input": {"path": "/previous"}}]},
+                   {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "c1", "content": "done"}]}]
+        events, session, _ = self._run(self._request(tools=[{"name": name}], history=history,
+                                                   tool_choice={"type": "tool", "name": name}), fake)
+        params = dict((method, params) for method, params, _ in session.requests)
+        spec = params["thread/start"]["dynamicTools"][0]["tools"][0]
+        self.assertEqual(spec["name"], alias)
+        self.assertFalse(alias.startswith("mcp__"))
+        self.assertLessEqual(len(alias), 64)
+        self.assertIn(name, spec["description"])
+        self.assertIn("host." + alias, params["thread/start"]["developerInstructions"])
+        self.assertEqual(params["thread/inject_items"]["items"][0]["name"], alias)
+        self.assertEqual(params["thread/inject_items"]["items"][1]["call_id"], "c1")
+        self.assertEqual(events, [{"type": "tool_call", "id": "c2", "name": name, "input": {"path": "/tmp"}},
+                                  {"type": "message_stop", "stop_reason": "tool_use"}])
+
+    def test_tool_aliases_are_stable_and_do_not_collide_with_host_alias_like_names(self):
+        name = "mcp__ccd_directory__change_directory"
+        alias = codex._tool_alias(name)
+        self.assertEqual(alias, codex._tool_alias(name))
+        names = [name, alias, "mcp__another__change_directory", "exec_command"]
+        self.assertEqual(len(set(map(codex._tool_alias, names))), len(names))
+        for order in (names, list(reversed(names))):
+            request = self._request(tools=[{"name": item} for item in order])
+            payload = codex._normalise_request(request)
+            params = codex._thread_params(payload, mock.Mock(cwd="/tmp"))
+            self.assertEqual([item["name"] for item in params["dynamicTools"][0]["tools"]],
+                             [codex._tool_alias(item) for item in order])
+
+    def test_unoffered_alias_cannot_escape_the_host_allowlist(self):
+        fake = FakeCodexSession([])
+        fake.script = [{"id": 9, "method": "item/tool/call", "params": {
+            "namespace": "host", "tool": codex._tool_alias("mcp__unoffered__write"),
+            "arguments": {}, "callId": "c"}}]
+        events, _, _ = self._run(self._request(tools=[{"name": "read_file"}]), fake)
+        self.assertEqual([item["type"] for item in events], ["error"])
+
+    def test_invalid_runtime_request_is_non_retryable_and_never_starts_a_turn(self):
+        for code in (-32600, -32601, -32602):
+            fake = FakeCodexSession([])
+            fake.responses["thread/start"] = {"error": {"code": code, "message": "invalid tool schema"}}
+            events, session, _ = self._run(self._request(), fake)
+            self.assertEqual(events[0]["http_status"], 400)
+            self.assertEqual([item["type"] for item in events], ["error"])
+            self.assertNotIn("turn/start", [method for method, _, _ in session.requests])
 
     def test_inherited_mcp_servers_are_explicitly_disabled(self):
         fake = FakeCodexSession([])

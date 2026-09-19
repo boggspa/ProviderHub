@@ -386,6 +386,14 @@ def plan_turn(provider_id: str, upstream_model: str, payload: dict, spec: dict,
         "tools": tools,
         "tool_choice": tool_choice,
     }
+    thinking = payload.get("thinking")
+    if isinstance(thinking, dict):
+        request["thinking"] = {key: thinking[key] for key in ("type", "display") if key in thinking}
+    summary = payload.get("reasoning_summary")
+    if summary is not None:
+        if provider_id != "codex" or summary not in {"auto", "concise", "detailed"}:
+            raise CliRouteError("This CLI route does not support the requested published reasoning summary mode.")
+        request["reasoning_summary"] = summary
     if images:
         request["images"] = images
     if dynamic_tools:
@@ -416,9 +424,29 @@ def plan_turn(provider_id: str, upstream_model: str, payload: dict, spec: dict,
 def run_turn(provider_id: str, request: dict, *, parse_tool_calls: bool = False, timeout: int = 600):
     """Start the adapter's turn generator (text_delta/thinking_delta/stop)."""
     adapter = adapter_for(provider_id)
-    if not parse_tool_calls:
-        return adapter.run_turn(request, timeout=timeout)
-    return _tool_turn(adapter, request, timeout=timeout)
+    events = (_tool_turn(adapter, request, timeout=timeout) if parse_tool_calls
+              else adapter.run_turn(request, timeout=timeout))
+    thinking = request.get("thinking") or {}
+    if isinstance(thinking, dict) and (thinking.get("type") == "disabled" or thinking.get("display") == "omitted"):
+        return _without_thinking(events)
+    return events
+
+
+def _without_thinking(events):
+    """Honor display suppression without turning reasoning into answer text."""
+    try:
+        pinged = False
+        for event in events:
+            if event.get("type") == "thinking_delta":
+                if not pinged:
+                    yield {"type": "ping"}
+                    pinged = True
+            else:
+                yield event
+    finally:
+        close = getattr(events, "close", None)
+        if callable(close):
+            close()
 
 
 def _tool_turn(adapter, request, *, timeout):
@@ -430,12 +458,32 @@ def _tool_turn(adapter, request, *, timeout):
         events = _parse_tool_stream(adapter.run_turn(current, timeout=max(0.01, deadline - time.monotonic())),
                                     tools=request.get("tools"), tool_choice=request.get("tool_choice"))
         retry = False
+        pending_text = []
+        pending_bytes = 0
         try:
             for event in events:
                 if event.get("code") == "invalid_cli_tool_call" and attempt + 1 < attempts \
                         and time.monotonic() < deadline:
                     retry = True
                     break
+                kind = event.get("type")
+                if kind == "text_delta":
+                    # An invalid attempt has not done any host work. Keep its
+                    # narration private until the handoff/reply is validated,
+                    # so retrying cannot print the same promises twice.
+                    pending_bytes += len((event.get("text") or "").encode("utf-8"))
+                    if pending_bytes > 1024 * 1024:
+                        yield {"type": "error", "message": "The CLI reply exceeded the buffered text limit."}
+                        return
+                    pending_text.append(event)
+                    if len(pending_text) == 1:
+                        # Start the gateway's heartbeat without exposing a
+                        # provisional reply while this attempt is validated.
+                        yield {"type": "ping"}
+                    continue
+                if kind in {"tool_call", "message_stop"}:
+                    yield from pending_text
+                    pending_text.clear()
                 yield event
         finally:
             events.close()
@@ -553,9 +601,11 @@ def relay_cli_turn(events, emit, *, model, input_tokens=0) -> dict:
     message_id = "msg_" + uuid.uuid4().hex[:24]
     started = False
     open_block = None
+    open_source = None
     index = 0
     stop_reason = "end_turn"
     error = None
+    error_status = 502
 
     def start_message():
         nonlocal started
@@ -566,9 +616,9 @@ def relay_cli_turn(events, emit, *, model, input_tokens=0) -> dict:
             "usage": {"input_tokens": int(input_tokens or 0), "output_tokens": 0}}})
         started = True
 
-    def open(kind):
-        nonlocal open_block, index
-        if open_block == kind:
+    def open(kind, source=None):
+        nonlocal open_block, open_source, index
+        if open_block == kind and open_source == source:
             return
         if open_block is not None:
             emit({"type": "content_block_stop", "index": index})
@@ -577,12 +627,18 @@ def relay_cli_turn(events, emit, *, model, input_tokens=0) -> dict:
               "content_block": ({"type": "thinking", "thinking": ""} if kind == "thinking"
                                 else {"type": "text", "text": ""})})
         open_block = kind
+        open_source = source
 
     try:
         for event in events:
             kind = event.get("type") if isinstance(event, dict) else None
+            if kind == "ping":
+                emit({"type": "ping"})
+                continue
             if kind == "error":
                 error = str(event.get("message") or "The CLI turn failed.")
+                if event.get("http_status") == 400:
+                    error_status = 400
                 break
             if kind == "message_stop":
                 stop_reason = _stop_reason(event.get("stop_reason"))
@@ -595,7 +651,7 @@ def relay_cli_turn(events, emit, *, model, input_tokens=0) -> dict:
                     continue
                 if not started:
                     start_message()
-                open("thinking")
+                open("thinking", (event.get("source_id"), event.get("thinking_kind"), event.get("part_index")))
                 emit({"type": "content_block_delta", "index": index,
                       "delta": {"type": "thinking_delta", "thinking": text}})
             elif kind == "text_delta":
@@ -604,7 +660,7 @@ def relay_cli_turn(events, emit, *, model, input_tokens=0) -> dict:
                     continue
                 if not started:
                     start_message()
-                open("text")
+                open("text", event.get("source_id"))
                 emit({"type": "content_block_delta", "index": index,
                       "delta": {"type": "text_delta", "text": text}})
             elif kind == "tool_call":
@@ -631,7 +687,8 @@ def relay_cli_turn(events, emit, *, model, input_tokens=0) -> dict:
             close()
     usage = {"input_tokens": int(input_tokens or 0), "output_tokens": 0}
     if error is not None:
-        return {"error": error, "started": started, "stop_reason": None, "usage": usage}
+        return {"error": error, "started": started, "stop_reason": None, "usage": usage,
+                "http_status": error_status}
     if not started:
         start_message()
     if open_block is not None:

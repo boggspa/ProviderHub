@@ -761,9 +761,9 @@ class Handler(BaseHTTPRequestHandler):
                 # No upstream connection exists for a CLI route: the adapter's
                 # subprocess is the transport, relayed by _serve_cli_turn. The
                 # shared finally still runs (worker count, semaphore, lease).
-                self._serve_cli_turn(plan, payload, disconnected, closed, write_lock, usage)
-                self.runtime.calibration.observe(plan["route"], plan.get("estimate_raw"), reported_input_tokens(usage))
-                self.runtime.record("completed", plan["route"], 200, usage)
+                if self._serve_cli_turn(plan, payload, disconnected, closed, write_lock, usage):
+                    self.runtime.calibration.observe(plan["route"], plan.get("estimate_raw"), reported_input_tokens(usage))
+                    self.runtime.record("completed", plan["route"], 200, usage)
                 return
             encoded = json.dumps(upstream, ensure_ascii=False).encode()
             headers = {**plan["headers"], "Accept": "text/event-stream" if upstream.get("stream") else "application/json"}
@@ -1010,7 +1010,7 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as exc:
             self.runtime.record("error", route, 502)
             self.error(502, f"{plan['provider_name']} CLI route could not start: {exc}")
-            return
+            return False
 
         collected = []
         streaming = False
@@ -1085,19 +1085,21 @@ class Handler(BaseHTTPRequestHandler):
         usage.update(result.get("usage") or {})
         if result.get("error"):
             message = f"{plan['provider_name']} CLI route failed: {result['error']}"
-            self.runtime.record("error", route, 502)
+            status = 400 if result.get("http_status") == 400 else 502
+            self.runtime.record("error", route, status)
             if streaming:
                 try:
-                    emit({"type": "error", "error": {"type": "api_error", "message": message}})
+                    emit({"type": "error", "error": {
+                        "type": "invalid_request_error" if status == 400 else "api_error", "message": message}})
                     finish_stream()
                 except OSError:
                     pass
             else:
-                self.error(502, message)
-            return
+                self.error(status, message)
+            return False
         if stream:
             finish_stream()
-            return
+            return True
         content = []
         current = None
         for event in collected:
@@ -1142,6 +1144,7 @@ class Handler(BaseHTTPRequestHandler):
             "stop_sequence": None,
             "usage": result.get("usage") or {"input_tokens": 0, "output_tokens": 0},
         })
+        return True
 
 
 class Server(ThreadingHTTPServer):

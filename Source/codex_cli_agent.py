@@ -144,8 +144,10 @@ _NATIVE_TOOL_ITEMS = frozenset({
 # cannot collide with a built-in tool of the nested runtime.
 _HOST_TOOL_NAMESPACE = "host"
 _HOST_INSTRUCTIONS = HOST_EXECUTION_NOTE + (
-    " Host tools are registered in the host namespace. Request them directly; "
-    "the bridge returns each call to the host and supplies its result in the "
+    " Host tools are registered in the host namespace with bridge_ aliases. "
+    "Each tool description identifies its original host name. Use the registered "
+    "alias when calling it; the host still receives its original tool name. "
+    "The bridge returns each call to the host and supplies its result in the "
     "next request's transcript. Use those results to continue the task."
 )
 
@@ -235,6 +237,19 @@ _DEVNULL = subprocess.DEVNULL
 
 class CodexCliAgentError(RuntimeError):
     """The Codex CLI route could not be resolved, started or completed."""
+
+    def __init__(self, message, *, http_status=502):
+        super().__init__(message)
+        self.http_status = http_status
+
+
+def _tool_alias(name):
+    """Stable wire name, independent of tool order and Codex's reserved names.
+
+    All tools are mapped so a host tool named like one of our aliases cannot
+    collide with another tool. History uses the same mapping on every turn.
+    """
+    return "bridge_" + hashlib.sha256(name.encode("utf-8")).hexdigest()[:48]
 
 
 # --------------------------------------------------------------------------
@@ -634,7 +649,8 @@ def _result(response, *, context):
             message = error.get("message") or json.dumps(error, sort_keys=True)[:300]
             code = error.get("code")
             suffix = f" (code {code})" if code is not None else ""
-            raise CodexCliAgentError(f"{context}: the Codex runtime reported an error{suffix}: {message}")
+            raise CodexCliAgentError(f"{context}: the Codex runtime reported an error{suffix}: {message}",
+                                    http_status=400 if code in {-32600, -32601, -32602} else 502)
         if "result" in response:
             result = response["result"]
             return result if isinstance(result, dict) else {}
@@ -838,8 +854,8 @@ def _thread_params(payload, workspace):
         params["dynamicTools"] = [{
             "type": "namespace", "name": _HOST_TOOL_NAMESPACE,
             "description": "Tools executed by the host application under its permissions.",
-            "tools": [{"type": "function", "name": tool["name"],
-                       "description": tool["description"],
+            "tools": [{"type": "function", "name": _tool_alias(tool["name"]),
+                       "description": f"Host tool: {tool['name']}.\n{tool['description']}",
                        "inputSchema": tool["input_schema"]}
                       for tool in payload["tools"]],
         }]
@@ -902,6 +918,8 @@ def _turn_params(payload, thread_id):
         params["model"] = payload["model"]
     if payload["effort"] is not None:
         params["effort"] = payload["effort"]
+    if payload.get("reasoning_summary") is not None:
+        params["summary"] = payload["reasoning_summary"]
     return params
 
 
@@ -961,16 +979,25 @@ def _normalise_request(request):
     instructions = _HOST_INSTRUCTIONS + ("\n\n" + system.strip() if system else "")
     choice = request.get("tool_choice") or {}
     tools = normalize_tools(request.get("tools"))
+    summary = request.get("reasoning_summary")
+    thinking = request.get("thinking") or {}
+    if summary is None and isinstance(thinking, dict) and thinking.get("display") == "summarized":
+        summary = "auto"
+    if summary is not None and summary not in {"auto", "concise", "detailed"}:
+        raise CodexCliAgentError("Unsupported Codex reasoning summary mode.", http_status=400)
     if choice.get("type") == "none":
         tools = []
     elif choice.get("type") in {"any", "required"}:
         instructions += "\nCall at least one host tool in this reply."
     elif choice.get("type") == "tool":
-        instructions += f"\nCall the host tool {choice.get('name')} in this reply."
+        name = choice.get("name")
+        if name not in {tool["name"] for tool in tools}:
+            raise CodexCliAgentError("The required host tool was not offered.", http_status=400)
+        instructions += f"\nCall host.{_tool_alias(name)} (host tool {name}) in this reply."
     return {"model": _checked_model(model),
             "effort": _checked_effort(request.get("effort")),
             "prompt": prompt, "system": instructions, "tools": tools,
-            "history": request.get("history"), "images": images}
+            "history": request.get("history"), "images": images, "reasoning_summary": summary}
 
 
 def _history_items(messages):
@@ -992,7 +1019,7 @@ def _history_items(messages):
                      "text": block["text"]}]})
             elif kind == "tool_use":
                 items.append({"type": "function_call", "call_id": block["id"],
-                              "name": block["name"], "namespace": _HOST_TOOL_NAMESPACE,
+                              "name": _tool_alias(block["name"]), "namespace": _HOST_TOOL_NAMESPACE,
                               "arguments": json.dumps(block.get("input") or {})})
             elif kind == "tool_result":
                 result = block.get("content", "")
@@ -1055,15 +1082,39 @@ def _failure_message(turn):
     return None
 
 
-def _stream_turn(session, *, turn_id, deadline, tools=None, thread_id=None):
+def _stream_turn(session, *, turn_id, deadline, tools=None, thread_id=None, summary_only=False):
     """Consume notifications until the turn terminates.
 
     Yields ``text_delta`` / ``thinking_delta`` as they arrive and always ends
     with exactly one terminal event: ``message_stop`` or ``error``.
     """
-    streamed_text = False
-    streamed_thinking = False
+    fragments = {}
     last_error = None
+    host_names = {_tool_alias(tool["name"]): tool["name"] for tool in tools or []}
+
+    def fragment(item_id, kind, index, text, *, complete=False):
+        if summary_only and kind == "reasoning":
+            return []
+        key = (item_id, kind, index)
+        previous = fragments.get(key, "")
+        if complete:
+            if text.startswith(previous):
+                delta = text[len(previous):]
+            elif item_id is None:
+                # Legacy events without ids cannot identify a previous item.
+                delta = text
+            else:
+                raise CodexCliAgentError("Codex completed an item with text inconsistent with its stream.")
+            fragments[key] = text
+        else:
+            delta = text
+            fragments[key] = previous + text
+        if not delta:
+            return []
+        if kind == "text":
+            return [{"type": "text_delta", "text": delta, "source_id": item_id}]
+        return [{"type": "thinking_delta", "text": delta, "thinking_kind": kind,
+                 "source_id": item_id, "part_index": index}]
     for _ in range(_MAX_STREAM_LOOPS):
         remaining = deadline - time.monotonic()
         if remaining <= 0:
@@ -1099,7 +1150,7 @@ def _stream_turn(session, *, turn_id, deadline, tools=None, thread_id=None):
                         yield {"type": "error", "message": "Codex requested an unregistered native tool."}
                         return
                     call = validate_host_call({"id": params.get("callId"),
-                                               "name": params.get("tool"),
+                                               "name": host_names.get(params.get("tool")),
                                                "input": params.get("arguments")}, tools or [])
                     # This route is stateless: the next host request includes
                     # the tool result. End the nested session without replying
@@ -1120,15 +1171,15 @@ def _stream_turn(session, *, turn_id, deadline, tools=None, thread_id=None):
                 if method == "item/agentMessage/delta":
                     text = _delta(event)
                     if text:
-                        streamed_text = True
-                        yield {"type": "text_delta", "text": text}
+                        yield from fragment(params.get("itemId"), "text", 0, text)
                 elif method in ("item/reasoning/textDelta",
                                 "item/reasoning/summaryTextDelta",
                                 "item/reasoning/summaryPartAdded"):
                     text = _delta(event)
                     if text:
-                        streamed_thinking = True
-                        yield {"type": "thinking_delta", "text": text}
+                        is_summary = method != "item/reasoning/textDelta"
+                        index = params.get("summaryIndex" if is_summary else "contentIndex", 0)
+                        yield from fragment(params.get("itemId"), "summary" if is_summary else "reasoning", index, text)
                 elif method == "item/completed":
                     # The fallback for a runtime that completes an item without
                     # having streamed it: emit its text once, never twice.
@@ -1137,17 +1188,16 @@ def _stream_turn(session, *, turn_id, deadline, tools=None, thread_id=None):
                     if not isinstance(item, dict) or not _same_turn(event, turn_id):
                         continue
                     kind = item.get("type")
-                    if kind == "agentMessage" and not streamed_text:
+                    item_id = item.get("id") or params.get("itemId")
+                    if kind == "agentMessage":
                         text = item.get("text")
                         if isinstance(text, str) and text.strip():
-                            streamed_text = True
-                            yield {"type": "text_delta", "text": text}
-                    elif kind == "reasoning" and not streamed_thinking:
-                        chunks = [str(part) for part in (item.get("content") or [])
-                                  if isinstance(part, str) and part.strip()]
-                        if chunks:
-                            streamed_thinking = True
-                            yield {"type": "thinking_delta", "text": "\n".join(chunks)}
+                            yield from fragment(item_id, "text", 0, text, complete=True)
+                    elif kind == "reasoning":
+                        for field, thought_kind in (("summary", "summary"), ("content", "reasoning")):
+                            for index, text in enumerate(item.get(field) or []):
+                                if isinstance(text, str) and text:
+                                    yield from fragment(item_id, thought_kind, index, text, complete=True)
                 elif method == "error":
                     params = event.get("params") if isinstance(event.get("params"), dict) else {}
                     # ``willRetry: true`` errors are the runtime's own reconnect
@@ -1256,9 +1306,10 @@ def run_turn(request, *, spawner=None, timeout=300) -> Iterator[dict]:
         turn_id = _start_turn(session, payload, thread_id,
                               timeout=max(1.0, deadline - time.monotonic()))
         yield from _stream_turn(session, turn_id=turn_id, deadline=deadline,
-                                tools=payload["tools"], thread_id=thread_id)
+                                tools=payload["tools"], thread_id=thread_id,
+                                summary_only=payload["reasoning_summary"] is not None)
     except CodexCliAgentError as exc:
-        yield {"type": "error", "message": str(exc)}
+        yield {"type": "error", "message": str(exc), "http_status": exc.http_status}
     except CliSessionError as exc:
         yield {"type": "error", "message": f"The Codex app-server session failed: {exc}"}
     except subprocess.TimeoutExpired:

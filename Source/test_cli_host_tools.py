@@ -68,9 +68,10 @@ class Session:
 def vendor_events(provider, name, arguments):
     wire = envelope(name, arguments)
     if provider == "codex":
+        from codex_cli_agent import _tool_alias
         return [{"id": 9, "method": "item/tool/call", "params": {
             "threadId": "thread", "turnId": "turn", "callId": "host_call",
-            "namespace": "host", "tool": name, "arguments": arguments}}]
+            "namespace": "host", "tool": _tool_alias(name), "arguments": arguments}}]
     if provider == "grok":
         return [{"type": "assistant", "message": {"content": [{"type": "text", "text": wire}]}},
                 {"type": "end", "stopReason": "end_turn"}]
@@ -206,6 +207,7 @@ class FailedHandoffTests(unittest.TestCase):
         def run(request, **kwargs):
             requests.append(request)
             try:
+                yield {"type": "text_delta", "text": "I'll list the files first.\n"}
                 wire = envelope() + OPEN_SENTINEL + "{broken}" + CLOSE_SENTINEL if len(requests) == 1 else envelope()
                 yield {"type": "text_delta", "text": wire}
                 yield {"type": "message_stop", "stop_reason": "end_turn"}
@@ -213,7 +215,10 @@ class FailedHandoffTests(unittest.TestCase):
                 closed.append(True)
         request = {"tools": TOOLS, "messages": [{"role": "user", "content": "Read file"}]}
         events = list(cli_routes._tool_turn(SimpleNamespace(run_turn=run), request, timeout=10))
-        self.assertEqual([event["type"] for event in events], ["tool_call", "message_stop"])
+        self.assertEqual([event["type"] for event in events if event["type"] != "ping"],
+                         ["text_delta", "tool_call", "message_stop"])
+        self.assertEqual([event["text"] for event in events if event["type"] == "text_delta"],
+                         ["I'll list the files first.\n"])
         self.assertEqual(len(requests), 2)
         self.assertEqual(len(closed), 2)
         self.assertEqual(len(request["messages"]), 1)

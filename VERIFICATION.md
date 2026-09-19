@@ -1,3 +1,78 @@
+**CLI harness correctness — 19 September 2026 (follow-up audit)**
+
+The Claude Desktop → Codex CLI startup failure was reproduced on codex-cli
+0.153.0 with `mcp__ccd_directory__change_directory`: `thread/start` returned
+JSON-RPC -32600 because that dynamic tool name is reserved. No model turn was
+started in the reproduction. Namespacing alone did not protect MCP-prefixed
+host names.
+
+Codex now registers every host tool under a deterministic `bridge_` alias,
+identifies the original name in the tool description, aliases historical
+function calls identically, and translates requested calls back to the exact
+host name before allowlist validation and dispatch. Tool arguments and call IDs
+are preserved. Aliases are independent of tool ordering and do not collide with
+host names that happen to resemble generated aliases. A real two-turn
+`gpt-5.6-sol` check changed a disposable host working directory through the exact
+previously rejected tool name, then correctly read that directory from the host
+result. This used two model turns; registration checks and the remaining audit
+used mocks, schemas, or offline echo instead of repeated inference.
+
+Invalid-request/method/parameter JSON-RPC rejections now propagate as HTTP 400
+(or an invalid-request SSE error after streaming begins), rather than a
+retryable 502. Genuine transport failures remain errors. CLI errors no longer
+also create false `completed`/200 activity records.
+
+Two additional Astra Max agents audited native output handling and implemented
+bounded adapter repairs, integrated with the parent changes:
+
+| Area | Reproduced defect and repair |
+| --- | --- |
+| Shared formatting retry | First-attempt prose could be shown and then repeated by the correction attempt. Assistant text is now held until a valid reply/handoff; rejected-attempt prose is discarded. Pings preserve connection liveness, and genuine thinking stays on its own channel. |
+| Grok | Repeated snapshots could duplicate text; one streamed block could suppress another unstreamed block. Reconciliation is now by message ID, block index, and type; distinct messages are retained even when their prose matches. |
+| Claude | Early progress could hide a final message or snapshot-only thinking. Per-message/block reconciliation restores missing material and avoids replaying the CLI's last-block result projection. Missing terminal results and nonzero exits are failures. |
+| Muse | An earlier delta could suppress terminal text containing the actual host tool call. Missing cumulative suffixes and separate final text are recovered without replaying tool envelopes. Output/completion is correlated to the foreground `payload.run_stream`; empty success is an error. |
+| AntiGravity | Clean EOF without SUCCESS, interrupted/cancelled statuses, and nonzero exits could look complete. Successful results are now required and a missing final response suffix is retained. Scoped image reading is preserved. |
+| Codex | Turn-wide fallback flags could drop a distinct final item or published reasoning summary. Reconciliation is per item/section, with separate wire blocks for distinct items and reasoning sections. |
+
+The Muse event identity contract was checked with installed Muse Code 1.3.0
+(1.3.0-R3401.1) using the offline echo provider. `payload.run_stream` identifies
+the run; the enclosing stream identifies the session. The observed echo delta
+has text but no phase field. This is not proof that the real Meta provider always
+uses the same final-text convention. Final-only prose is preserved conservatively;
+conflicting already-streamed tool envelopes fail rather than execute alternatives.
+
+Host-facing `thinking.type: disabled` and `thinking.display: omitted` now suppress
+readable thinking without turning it into assistant text. Display suppression is
+not a promise that the CLI model performs no internal reasoning or consumes no
+reasoning budget. Legitimate assistant commentary is not heuristically relabelled
+as hidden thinking.
+
+Codex CLI published summaries are exposed through Responses only when explicitly
+requested with `reasoning.summary` = auto, concise, or detailed. The preference
+reaches `turn/start.summary`; raw reasoning text is excluded from that summary
+path. The Responses adapter emits summary part/text events and a final summary
+array, preserving encrypted replay. Redacted blocks and signatures remain hidden.
+The Codex model catalogue advertises this opt-in capability only for reasoning
+models on the Codex CLI route. Other providers' thinking is not automatically
+relabelled as a published summary. These boundaries follow the
+[Codex event contract](https://learn.chatgpt.com/docs/app-server#item-deltas),
+[Responses summary event schema](https://developers.openai.com/api/reference/resources/responses/streaming-events#response.reasoning_summary_part.added),
+and [Anthropic thinking/display contract](https://platform.claude.com/docs/en/build-with-claude/thinking).
+
+Evidence limits: the user's stopped Grok/Muse runs have no retained native event
+trace here. The failures above were independently reproduced, but cannot be
+assigned to every sentence in those screenshots. A genuinely completed intro-only
+model reply can still occur; stronger host-action instructions are not a guarantee
+of model behavior. No stopped user run was resumed.
+
+Final validation: 1,142 tests passed on uv CPython 3.13, including
+adapter, host-tool, image, HTTP error-status, catalogue, and Responses regressions.
+The GPT-5.6-Sol reserved-name call/result smoke passed. The patched Muse adapter
+also passed an installed-runtime offline echo smoke. Source changes require a
+new app build/relaunch; summary capability metadata also requires a catalogue refresh.
+
+---
+
 **CLI screenshot forwarding — 19 September 2026**
 
 The bridge now preserves embedded screenshot images from Messages and Responses

@@ -458,6 +458,94 @@ class TestTranslate(unittest.TestCase):
         events = [event for payload in stream for event in module._translate(payload, state)]
         self.assertEqual(events, [{"type": "text_delta", "text": "Hello"}])
 
+    def test_repeated_snapshot_is_deduplicated_by_message_id(self):
+        state = module._TurnState()
+        snapshot = {"type": "assistant", "message": {"id": "m1", "content": [
+            {"type": "thinking", "thinking": "Published thinking."},
+            {"type": "text", "text": "I'll list the files."}]}}
+        events = [event for payload in [snapshot, snapshot]
+                  for event in module._translate(payload, state)]
+        self.assertEqual(events, [{"type": "thinking_delta", "text": "Published thinking."},
+                                  {"type": "text_delta", "text": "I'll list the files."}])
+
+    def test_snapshot_recovers_suffix_and_unstreamed_blocks(self):
+        state = module._TurnState()
+        stream = [
+            {"type": "stream_event", "event": {"type": "message_start", "message": {"id": "m1"}}},
+            {"type": "stream_event", "event": {"type": "content_block_delta", "index": 0,
+             "delta": {"type": "thinking_delta", "thinking": "Think"}}},
+            {"type": "stream_event", "event": {"type": "content_block_delta", "index": 1,
+             "delta": {"type": "text_delta", "text": "First"}}},
+            {"type": "assistant", "message": {"id": "m1", "content": [
+                {"type": "thinking", "thinking": "Thinking."},
+                {"type": "text", "text": "First block."},
+                {"type": "text", "text": "Second block."},
+                {"type": "thinking", "thinking": "More published thinking."}]}},
+        ]
+        events = [event for payload in stream for event in module._translate(payload, state)]
+        self.assertEqual(events, [
+            {"type": "thinking_delta", "text": "Think"},
+            {"type": "text_delta", "text": "First"},
+            {"type": "thinking_delta", "text": "ing."},
+            {"type": "text_delta", "text": " block."},
+            {"type": "text_delta", "text": "Second block."},
+            {"type": "thinking_delta", "text": "More published thinking."},
+        ])
+
+    def test_identical_text_in_distinct_messages_is_preserved(self):
+        for identifiers in [("m1", "m2"), (None, None)]:
+            with self.subTest(identifiers=identifiers):
+                state = module._TurnState()
+                events = []
+                for identifier in identifiers:
+                    events.extend(module._translate({"type": "assistant", "message": {
+                        "id": identifier, "content": [{"type": "text", "text": "Again."}]}}, state))
+                self.assertEqual(events, [{"type": "text_delta", "text": "Again."}] * 2)
+
+    def test_late_snapshot_does_not_reassign_active_stream(self):
+        state = module._TurnState()
+        stream = [
+            {"type": "stream_event", "event": {"type": "message_start", "message": {"id": "m1"}}},
+            {"type": "stream_event", "event": {"type": "content_block_delta", "index": 0,
+             "delta": {"type": "text_delta", "text": "First."}}},
+            {"type": "stream_event", "event": {"type": "message_start", "message": {"id": "m2"}}},
+            {"type": "assistant", "message": {"id": "m1", "content": [
+                {"type": "text", "text": "First."}]}},
+            {"type": "stream_event", "event": {"type": "content_block_delta", "index": 0,
+             "delta": {"type": "text_delta", "text": "Second."}}},
+            {"type": "assistant", "message": {"id": "m2", "content": [
+                {"type": "text", "text": "Second."}]}},
+        ]
+        events = [event for payload in stream for event in module._translate(payload, state)]
+        self.assertEqual(events, [{"type": "text_delta", "text": "First."},
+                                  {"type": "text_delta", "text": "Second."}])
+
+    def test_initial_block_text_and_stale_snapshots_do_not_repeat(self):
+        state = module._TurnState()
+        stream = [
+            {"type": "stream_event", "event": {"type": "message_start", "message": {"id": "m1"}}},
+            {"type": "stream_event", "event": {"type": "content_block_start", "index": 0,
+             "content_block": {"type": "text", "text": "Hello"}}},
+            {"type": "stream_event", "event": {"type": "content_block_delta", "index": 0,
+             "delta": {"type": "text_delta", "text": " world"}}},
+            {"type": "assistant", "message": {"id": "m1", "content": [{"type": "text", "text": "Hello"}]}},
+            {"type": "assistant", "message": {"id": "m1", "content": [{"type": "text", "text": "Hello world"}]}},
+        ]
+        events = [event for payload in stream for event in module._translate(payload, state)]
+        self.assertEqual(events, [{"type": "text_delta", "text": "Hello"},
+                                  {"type": "text_delta", "text": " world"}])
+
+    def test_conflicting_snapshot_is_reported_instead_of_appended(self):
+        state = module._TurnState()
+        list(module._translate({"type": "stream_event", "event": {
+            "type": "message_start", "message": {"id": "m1"}}}, state))
+        list(module._translate({"type": "stream_event", "event": {
+            "type": "content_block_delta", "delta": {"type": "text_delta", "text": "First."}}}, state))
+        events = list(module._translate({"type": "assistant", "message": {"id": "m1", "content": [
+            {"type": "text", "text": "Unrelated replacement."}]}}, state))
+        self.assertEqual(events, [])
+        self.assertIn("conflicted", state.failure)
+
     def test_thinking_never_becomes_answer_fallback(self):
         state = module._TurnState()
         list(module._translate({"type": "assistant", "message": {"content": [

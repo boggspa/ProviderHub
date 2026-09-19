@@ -44,6 +44,10 @@ Live evidence (Muse Code 1.3.0, ``1.3.0-R3401.1``, binary at ``~/.local/bin/muse
   ``payload.text`` carrying the full answer and ``payload.reason`` null.
   Streaming text arrives as ``payload_type: "run.output.delta"``
   (``payload.kind == "run_output_delta"``, ``payload.text``).
+  The enclosing ``stream`` identifies the session; ``payload.run_stream``
+  (``{kind: "run", id: <command UUID>}``) identifies the owning run. The
+  first ``session.run.linked`` announces it, before ``run.lifecycle.started``,
+  deltas, and the terminal. The echo delta carries no phase/channel field.
 * TMPDIR/workspace invariant (reproduced live on the real binary): ``muse exec
   --help`` also exposes ``--workspace <PATH>`` ("Root policy-gated workspace
   tools at PATH"). muse defaults its workspace root to cwd and derives a
@@ -88,11 +92,12 @@ Live evidence (Muse Code 1.3.0, ``1.3.0-R3401.1``, binary at ``~/.local/bin/muse
   "verbatim encrypted".
 
 Inferred (NOT verified live): the real ``meta`` provider's streaming text also
-uses ``run.output.delta`` (confirmed only with ``echo``), and thinking/reasoning
-is encrypted at rest, so there is no plaintext thinking-delta vocabulary — the
-route therefore emits only ``text_delta`` and a terminal event. Stop reasons are
-the ``run.terminal.*`` suffix: ``completed``/``failed``/``cancelled`` (matching
-the schema's ``TurnTerminal`` enum).
+uses ``run.output.delta`` (confirmed only with ``echo``). The offline echo run
+does not establish Meta's phase/channel or plaintext reasoning vocabulary;
+encrypted reasoning in an export does not establish what a live stream may
+contain. Stop reasons come from the terminal body's ``terminal`` field, with
+the ``run.terminal.*`` suffix as a fallback: ``completed``/``failed``/``cancelled``
+(matching the schema's ``TurnTerminal`` enum).
 """
 from __future__ import annotations
 
@@ -106,7 +111,7 @@ from pathlib import Path
 from typing import Any, Iterable, Iterator
 
 from cli_session import CliSessionError, StdioSession, minimal_env, resolve_binary
-from cli_tool_call import TRANSCRIPT_HEADER
+from cli_tool_call import OPEN_SENTINEL, TRANSCRIPT_HEADER
 from cli_images import write_images
 
 try:  # Repo-native effort ladder; degrade to a local copy if unavailable.
@@ -679,16 +684,46 @@ class _TurnState:
     def __init__(self) -> None:
         self.emitted_text = False
         self.assistant_text: list[str] = []
+        self.run_id: str | None = None
         self.result_text: str | None = None
         self.stop_reason: str | None = None
         self.failure: str | None = None
         self.raw_lines: list[str] = []
         self.stderr_handle = None
 
-    def fallback_text(self) -> str:
-        if self.assistant_text:
-            return "".join(self.assistant_text)
-        return self.result_text or ""
+    def accepts_run(self, body: dict) -> bool:
+        """Correlate the body run stream, never the enclosing session stream.
+
+        Older/minimal records without correlation remain usable until an
+        explicit run is observed. After that, unscoped or other-run records
+        cannot contribute output or settle this turn.
+        """
+        stream = body.get("run_stream")
+        run_id = stream.get("id") if isinstance(stream, dict) \
+            and stream.get("kind") == "run" else None
+        if not isinstance(run_id, str) or not run_id:
+            run_id = None
+        if self.run_id is None:
+            self.run_id = run_id
+            return True
+        return run_id == self.run_id
+
+    def remaining_terminal_text(self) -> str:
+        """Recover terminal-only text without replaying streamed text/calls."""
+        streamed = "".join(self.assistant_text)
+        result = self.result_text or ""
+        if result.startswith(streamed):
+            return result[len(streamed):]
+        if not result or streamed.endswith(result):
+            return ""
+        # Echo's terminal is cumulative. Meta's terminal may instead contain
+        # only its final message, so preserve a different final after prose.
+        # A conflicting snapshot after a host handoff cannot safely be
+        # appended: the route must not execute two alternative tool calls.
+        if OPEN_SENTINEL in streamed:
+            raise MuseCliAgentError(
+                "terminal text conflicts with a streamed host tool call")
+        return result
 
     def stderr_tail(self) -> str:
         handle = self.stderr_handle
@@ -723,8 +758,17 @@ def _translate(payload: Any, state: _TurnState) -> list[dict]:
         body = {}
     kind = str(body.get("kind") or "")
 
+    # Exec announces the foreground run before its output. Keep the first
+    # identity even if later records announce another (for example a child).
+    if kind in {"session_run_linked", "run_started"} or payload_type in {
+            "session.run.linked", "run.lifecycle.started"}:
+        state.accepts_run(body)
+        return []
+
     # Terminal run event: run.terminal.completed / .failed / .cancelled.
     if kind == "run_terminal" or payload_type.startswith("run.terminal."):
+        if not state.accepts_run(body):
+            return []
         terminal = str(body.get("terminal") or payload_type.removeprefix("run.terminal."))
         if terminal:
             state.stop_reason = terminal
@@ -738,16 +782,20 @@ def _translate(payload: Any, state: _TurnState) -> list[dict]:
 
     # Streaming text: run.output.delta (payload.text is the appended fragment).
     if kind == "run_output_delta" or payload_type == "run.output.delta":
+        if not state.accepts_run(body):
+            return []
         text = body.get("text")
         if isinstance(text, str) and text:
+            state.assistant_text.append(text)
             state.emitted_text = True
             return [{"type": "text_delta", "text": text}]
         return []
 
-    # Defensive only: muse encrypts reasoning at rest (`muse export --help`),
-    # so no plaintext thinking vocabulary was observed. Should one appear, map
-    # it rather than dropping it.
+    # Defensive only: no plaintext thinking vocabulary was observed with the
+    # offline echo provider. This is not a verified Meta reasoning mapping.
     if "think" in payload_type.casefold():
+        if not state.accepts_run(body):
+            return []
         text = body.get("text") or body.get("thinking") or body.get("delta")
         if isinstance(text, str) and text:
             return [{"type": "thinking_delta", "text": text}]
@@ -941,7 +989,6 @@ def run_turn(request, *, spawner=None, timeout=300) -> Iterator[dict]:
         yield {"type": "error", "message": _describe(exc, state, timeout)}
         return
 
-    stop_reason = state.stop_reason or "end_turn"
     try:
         with session:
             _close_raw_stdin(session)
@@ -957,8 +1004,13 @@ def run_turn(request, *, spawner=None, timeout=300) -> Iterator[dict]:
                 if state.stop_reason == "completed":
                     # The terminal event is authoritative. Waiting for stdout
                     # EOF keeps the host spinner alive during Muse shutdown.
-                    if not state.emitted_text and state.fallback_text():
-                        yield {"type": "text_delta", "text": state.fallback_text()}
+                    remainder = state.remaining_terminal_text()
+                    if remainder:
+                        state.emitted_text = True
+                        yield {"type": "text_delta", "text": remainder}
+                    if not state.emitted_text:
+                        yield {"type": "error", "message": "the muse CLI produced no output"}
+                        return
                     yield {"type": "message_stop", "stop_reason": "completed"}
                     return
 
@@ -967,22 +1019,8 @@ def run_turn(request, *, spawner=None, timeout=300) -> Iterator[dict]:
             detail = f"the muse CLI exited with code {returncode}"
             yield {"type": "error", "message": detail + state.diagnostics() + state.stderr_tail()}
             return
-        elif state.failure:
-            yield {"type": "error", "message": state.failure}
-            return
-        elif state.stop_reason is None:
-            yield {"type": "error", "message": "the muse CLI stream ended before completing the turn"}
-            return
-        else:
-            if not state.emitted_text:
-                fallback = state.fallback_text()
-                if fallback:
-                    state.emitted_text = True
-                    yield {"type": "text_delta", "text": fallback}
-                elif not state.raw_lines:
-                    yield {"type": "error", "message": "the muse CLI produced no output"}
-                    return
-            stop_reason = state.stop_reason or "end_turn"
+        yield {"type": "error", "message": "the muse CLI stream ended before completing the turn"}
+        return
     except Exception as exc:
         yield {"type": "error", "message": _describe(exc, state, timeout)}
         return
@@ -995,5 +1033,3 @@ def run_turn(request, *, spawner=None, timeout=300) -> Iterator[dict]:
                 handle.close()
             except Exception:
                 pass
-
-    yield {"type": "message_stop", "stop_reason": stop_reason}

@@ -224,9 +224,13 @@ def response_usage(value):
 
 
 class MessagesResponsesAdapter:
-    def __init__(self, requested, envelope, scope, tool_map=None):
+    def __init__(self, requested, envelope, scope, tool_map=None, *,
+                 expose_reasoning_summaries=False):
         self.requested, self.envelope, self.scope = requested, envelope, scope
         self.tool_map = tool_map or {}
+        # Enabled only by the Codex CLI planner after requesting the native
+        # published-summary lane. Other providers' thinking is not a summary.
+        self.expose_reasoning_summaries = expose_reasoning_summaries is True
         self.identifier = "resp_" + uuid.uuid4().hex
         self.created = int(time.time())
         self.output = []
@@ -234,6 +238,9 @@ class MessagesResponsesAdapter:
         self.usage = {}
         self.stop_reason = None
         self.sequence = 0
+
+    def has_published_summary(self, block):
+        return self.expose_reasoning_summaries and block.get("type") == "thinking"
 
     def event(self, kind, **fields):
         value = {"type": kind, "sequence_number": self.sequence, **fields}
@@ -265,7 +272,9 @@ class MessagesResponsesAdapter:
             return {"id": "fc_" + uuid.uuid4().hex, "type": "function_call", "call_id": block["id"],
                     "name": block["name"], "arguments": json.dumps(block["input"], separators=(",", ":")), "status": "completed"}
         if kind in {"thinking", "redacted_thinking"}:
-            return {"id": "rs_" + uuid.uuid4().hex, "type": "reasoning", "summary": [],
+            summary = [{"type": "summary_text", "text": block.get("thinking", "")}] \
+                if self.has_published_summary(block) else []
+            return {"id": "rs_" + uuid.uuid4().hex, "type": "reasoning", "summary": summary,
                     "encrypted_content": self.envelope.seal([block], self.scope)}
         raise BridgeError("The provider returned a content type that this Responses adapter cannot represent.")
 
@@ -304,6 +313,15 @@ class MessagesResponsesAdapter:
             if item["type"] == "message":
                 events.append(self.event("response.content_part.added", item_id=item["id"], output_index=index,
                                          content_index=0, part=copy.deepcopy(item["content"][0])))
+            elif self.has_published_summary(block):
+                part = {"type": "summary_text", "text": ""}
+                events.append(self.event("response.reasoning_summary_part.added", item_id=item["id"],
+                                         output_index=index, summary_index=0, part=copy.deepcopy(part)))
+                part["text"] = block.get("thinking", "")
+                item["summary"] = [part]
+                if part["text"]:
+                    events.append(self.event("response.reasoning_summary_text.delta", item_id=item["id"],
+                                             output_index=index, summary_index=0, delta=part["text"]))
             return events
         if kind == "content_block_delta":
             state = self.blocks.get(value.get("index"))
@@ -329,6 +347,10 @@ class MessagesResponsesAdapter:
                                    delta=delta["partial_json"])]
             if dtype == "thinking_delta":
                 block["thinking"] = block.get("thinking", "") + delta["thinking"]
+                if self.has_published_summary(block):
+                    item["summary"][0]["text"] = block["thinking"]
+                    return [self.event("response.reasoning_summary_text.delta", item_id=item["id"],
+                                       output_index=index, summary_index=0, delta=delta["thinking"])]
             elif dtype == "signature_delta":
                 block["signature"] = block.get("signature", "") + delta["signature"]
             else:
@@ -354,6 +376,12 @@ class MessagesResponsesAdapter:
             elif final["type"] == "message":
                 events.append(self.event("response.output_text.done", item_id=final["id"], output_index=index, content_index=0, text=final["content"][0]["text"]))
                 events.append(self.event("response.content_part.done", item_id=final["id"], output_index=index, content_index=0, part=copy.deepcopy(final["content"][0])))
+            elif self.has_published_summary(block):
+                part = final["summary"][0]
+                events.append(self.event("response.reasoning_summary_text.done", item_id=final["id"],
+                                         output_index=index, summary_index=0, text=part["text"]))
+                events.append(self.event("response.reasoning_summary_part.done", item_id=final["id"],
+                                         output_index=index, summary_index=0, part=copy.deepcopy(part)))
             events.append(self.event("response.output_item.done", output_index=index, item=copy.deepcopy(final)))
             return events
         if kind == "message_delta":

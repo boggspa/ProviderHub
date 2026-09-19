@@ -320,7 +320,10 @@ def project_codex(settings, inventory):
             "include_skills_usage_instructions": True,
             "include_plugin_usage_instructions": True,
             "include_apps_usage_instructions": True,
-            "supports_reasoning_summaries": False,
+            "supports_reasoning_summaries": (
+                provider_id == "codex" and entry.get("reasoning") is True
+                and (settings.get("providers", {}).get(provider_id) or {}).get("credential_mode") == "cli"
+            ),
             "default_reasoning_summary": "none",
             "support_verbosity": False,
             "default_verbosity": None,

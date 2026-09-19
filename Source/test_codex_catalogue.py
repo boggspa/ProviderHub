@@ -44,6 +44,17 @@ def inventory(*models):
 
 
 class CuratedCatalogueProjectionTests(unittest.TestCase):
+    def test_summary_capability_is_only_advertised_for_reasoning_codex_cli_routes(self):
+        for provider, mode, reasoning, supported in (
+                ("codex", "cli", True, True), ("codex", "keychain", True, False),
+                ("codex", "cli", False, False), ("grok", "cli", True, False)):
+            with self.subTest(provider=provider, mode=mode, reasoning=reasoning):
+                config = settings()
+                config["providers"][provider]["credential_mode"] = mode
+                result = project_codex(config, inventory(model(provider + "/test-model", reasoning=reasoning)))
+                self.assertEqual(result["models"][0]["supports_reasoning_summaries"], supported)
+                self.assertEqual(result["models"][0]["default_reasoning_summary"], "none")
+
     def test_curated_selection_filters_and_sorts_by_name(self):
         selected = settings(
             codex_model="mistral/b-model",

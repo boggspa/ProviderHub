@@ -451,13 +451,73 @@ class _TurnState:
         self.raw_lines: list[str] = []
         self.stderr_handle = None
         self.terminal = False
-        self.streamed_text = False
-        self.streamed_thinking = False
+        self.messages = {}
+        self.current_message = None
         self.native_tools_disabled = False
         self.host_tools = []
         self.host_handoff = False
         self.pending_calls = {}
         self.backend_calls = set()
+
+    def start_message(self, message):
+        identifier = message.get("id") if isinstance(message, dict) else None
+        current = {"id": identifier, "blocks": {}, "snapshot": False}
+        if isinstance(identifier, str) and identifier:
+            current = self.messages.setdefault(identifier, current)
+        self.current_message = current
+        return current
+
+    def snapshot_message(self, message):
+        identifier = message.get("id")
+        current = self.messages.get(identifier) if isinstance(identifier, str) else None
+        if current is None:
+            active = self.current_message
+            compatible = True
+            if active is not None:
+                content = message.get("content") or []
+                for (index, kind), previous in active["blocks"].items():
+                    block = content[index] if isinstance(index, int) and 0 <= index < len(content) else {}
+                    text = block.get(kind) if isinstance(block, dict) else None
+                    if isinstance(text, str) and not (previous.startswith(text) or text.startswith(previous)):
+                        compatible = False
+            # Older runtimes omit IDs. Associate only the first snapshot with
+            # the active stream, never deduplicate prose across distinct turns.
+            if active is not None and not active["snapshot"] and (
+                    (identifier and active["id"] == identifier)
+                    or (compatible and (not identifier or not active["id"]))):
+                current = active
+                if identifier:
+                    current["id"] = identifier
+            else:
+                current = {"id": identifier, "blocks": {}, "snapshot": False}
+            if isinstance(identifier, str) and identifier:
+                self.messages[identifier] = current
+        current["snapshot"] = True
+        return current
+
+    def content_event(self, index, kind, text, *, message=None, snapshot=False):
+        if not isinstance(text, str) or not text:
+            return None
+        if message is None:
+            message = self.current_message
+            if message is None:
+                message = self.start_message({})
+        key = (index, kind)
+        previous = message["blocks"].get(key, "")
+        if snapshot:
+            if previous.startswith(text):
+                return None
+            if not text.startswith(previous):
+                self.failure = "grok assistant snapshot conflicted with its streamed content."
+                return None
+            fragment = text[len(previous):]
+            message["blocks"][key] = text
+        else:
+            fragment = text
+            message["blocks"][key] = previous + text
+        if kind == "text":
+            self.emitted_text = True
+        return {"type": kind + "_delta", "text": fragment}
 
     def host_call(self, call):
         arguments = call.get("input")
@@ -558,9 +618,17 @@ def _translate(payload: Any, state: _TurnState) -> list[dict]:
             return []
         event_type = event.get("type")
         if event_type == "message_start":
-            state.streamed_text = state.streamed_thinking = False
+            state.start_message(event.get("message"))
         elif event_type == "content_block_start":
             block = event.get("content_block") or {}
+            if not isinstance(block, dict):
+                return []
+            block_type = block.get("type")
+            if block_type in {"text", "thinking"}:
+                translated = state.content_event(event.get("index", 0), block_type,
+                                                 block.get(block_type), snapshot=True)
+                if translated:
+                    yield translated
             if block.get("type") in {"tool_use", "server_tool_use"}:
                 if not state.native_tools_disabled:
                     state.failure = "grok attempted a native CLI tool; workspace actions must use host tools."
@@ -570,12 +638,12 @@ def _translate(payload: Any, state: _TurnState) -> list[dict]:
                     "input": block.get("input") or {}, "json": ""}
         elif event_type == "content_block_delta":
             delta = event.get("delta") or {}
-            if delta.get("type") == "text_delta" and delta.get("text"):
-                state.emitted_text = state.streamed_text = True
-                yield {"type": "text_delta", "text": delta["text"]}
-            elif delta.get("type") == "thinking_delta" and delta.get("thinking"):
-                state.streamed_thinking = True
-                yield {"type": "thinking_delta", "text": delta["thinking"]}
+            if delta.get("type") in {"text_delta", "thinking_delta"}:
+                content_type = delta["type"].removesuffix("_delta")
+                translated = state.content_event(event.get("index", 0), content_type,
+                                                 delta.get(content_type))
+                if translated:
+                    yield translated
             elif delta.get("type") == "input_json_delta":
                 call = state.pending_calls.get(event.get("index", 0))
                 if call is None:
@@ -609,7 +677,8 @@ def _translate(payload: Any, state: _TurnState) -> list[dict]:
         content = message.get("content")
         if not isinstance(content, list):
             return []
-        for block in content:
+        current = state.snapshot_message(message)
+        for index, block in enumerate(content):
             if not isinstance(block, dict):
                 continue
             block_type = block.get("type")
@@ -622,17 +691,11 @@ def _translate(payload: Any, state: _TurnState) -> list[dict]:
                 if event:
                     yield event
                 continue
-            if block_type == "thinking":
-                thinking = block.get("thinking")
-                if isinstance(thinking, str) and thinking and not state.streamed_thinking:
-                    yield {"type": "thinking_delta", "text": thinking}
-            elif block_type == "text":
-                text = block.get("text")
-                if isinstance(text, str) and text and not state.streamed_text:
-                    state.assistant_text.append(text)
-                    state.emitted_text = True
-                    yield {"type": "text_delta", "text": text}
-        state.streamed_text = state.streamed_thinking = False
+            if block_type in {"text", "thinking"}:
+                translated = state.content_event(index, block_type, block.get(block_type),
+                                                 message=current, snapshot=True)
+                if translated:
+                    yield translated
 
     elif kind == "end":
         state.terminal = True

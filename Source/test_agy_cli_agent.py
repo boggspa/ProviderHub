@@ -407,5 +407,77 @@ class TestRunTurnEmptyStream(unittest.TestCase):
         # The actual integration test would need a real subprocess mock
 
 
+class TestRunTurnStreams(unittest.TestCase):
+    def _run(self, payloads, *, returncode=0):
+        import agy_cli_agent as module
+        session = mock.MagicMock()
+        session.returncode = returncode
+        session.__enter__.return_value = session
+        session.__exit__.return_value = False
+        session.events.side_effect = lambda **kwargs: iter(payloads)
+        with mock.patch.object(module, "StdioSession", return_value=session), \
+                mock.patch.object(module, "_resolve_binary", return_value="/fake/agy"):
+            events = list(module.run_turn({"model": "gemini-3.1-pro", "messages": [
+                {"role": "user", "content": "Synthetic test"}]}))
+        session.__exit__.assert_called_once()
+        return events
+
+    def _delta(self, text, **fields):
+        return {"event": "step_update", "step_update": {
+            "step_type": "agent_response", "text_delta": text, **fields}}
+
+    def _result(self, text, status="SUCCESS", **fields):
+        return {"event": "result", "result": {"status": status, "response": text, **fields}}
+
+    def test_empty_clean_exit_is_an_error(self):
+        events = self._run([])
+        self.assertEqual([event["type"] for event in events], ["error"])
+        self.assertIn("produced no output", events[0]["message"])
+
+    def test_clean_eof_after_progress_without_result_is_an_error(self):
+        events = self._run([self._delta("I will inspect first.")])
+        self.assertEqual([event["type"] for event in events], ["text_delta", "error"])
+        self.assertIn("before completing", events[-1]["message"])
+
+    def test_unsuccessful_or_missing_status_is_an_error(self):
+        for status in ("CANCELLED", "INTERRUPTED", "FAILED", "", "UNRECOGNIZED"):
+            with self.subTest(status=status):
+                events = self._run([self._delta("Progress."), self._result("Progress.", status)])
+                self.assertEqual([event["type"] for event in events], ["text_delta", "error"])
+
+    def test_nonzero_exit_is_not_masked_by_success_status(self):
+        events = self._run([self._delta("Partial."), self._result("Partial.")], returncode=2)
+        self.assertEqual([event["type"] for event in events], ["text_delta", "error"])
+        self.assertIn("exited with code 2", events[-1]["message"])
+
+    def test_result_recovers_missing_final_suffix(self):
+        events = self._run([self._delta("Progress."), self._result("Progress. Final answer.")])
+        self.assertEqual(events, [{"type": "text_delta", "text": "Progress."},
+                                  {"type": "text_delta", "text": " Final answer."},
+                                  {"type": "message_stop", "stop_reason": "end_turn"}])
+
+    def test_active_and_done_deltas_are_not_replayed_by_result(self):
+        events = self._run([self._delta("First", state="ACTIVE"),
+                            self._delta(" second", state="DONE"), self._result("First second")])
+        self.assertEqual([event.get("text") for event in events[:-1]], ["First", " second"])
+        self.assertEqual(events[-1]["type"], "message_stop")
+
+    def test_thinking_stays_separate_from_result_text(self):
+        events = self._run([self._delta("", thinking_delta="Published thinking."), self._result("Answer.")])
+        self.assertEqual(events, [{"type": "thinking_delta", "text": "Published thinking."},
+                                  {"type": "text_delta", "text": "Answer."},
+                                  {"type": "message_stop", "stop_reason": "end_turn"}])
+
+    def test_conflicting_result_is_an_error(self):
+        events = self._run([self._delta("Original."), self._result("Replacement.")])
+        self.assertEqual([event["type"] for event in events], ["text_delta", "error"])
+        self.assertIn("did not match", events[-1]["message"])
+
+    def test_denied_native_tool_still_reports_an_error(self):
+        events = self._run([self._result("", denied_actions=[{"display_name": "run_command"}])])
+        self.assertEqual([event["type"] for event in events], ["error"])
+        self.assertIn("denied", events[0]["message"])
+
+
 if __name__ == '__main__':
     unittest.main()

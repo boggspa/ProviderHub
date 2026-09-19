@@ -299,11 +299,28 @@ class ParseToolStreamTest(unittest.TestCase):
         self.assertEqual([e["type"] for e in events], ["text_delta", "message_stop"])
         self.assertEqual(events[0]["text"], wire)
 
+    def test_explicit_hidden_thinking_never_becomes_answer_text(self):
+        def adapter_turn(request, **kwargs):
+            yield {"type": "thinking_delta", "text": "Provider thinking"}
+            yield {"type": "text_delta", "text": "Answer"}
+            yield {"type": "message_stop", "stop_reason": "end_turn"}
+        cli_routes._cache["claude"] = types.SimpleNamespace(run_turn=adapter_turn)
+        for thinking in ({"type": "disabled"}, {"type": "adaptive", "display": "omitted"}):
+            for parse in (False, True):
+                events = list(run_turn("claude", {"thinking": thinking}, parse_tool_calls=parse))
+                visible = [event for event in events if event["type"] != "ping"]
+                self.assertEqual([e["type"] for e in visible], ["text_delta", "message_stop"])
+                self.assertEqual(visible[0]["text"], "Answer")
+                self.assertEqual(events[0]["type"], "ping")
+        events = list(run_turn("claude", {"thinking": {"type": "adaptive"}}))
+        self.assertEqual(events[0]["type"], "thinking_delta")
+
     def test_wrapper_close_kills_inner_generator(self):
         closed = []
 
         def adapter_turn(request, *, timeout=300):
             try:
+                yield {"type": "thinking_delta", "text": "planning"}
                 yield {"type": "text_delta", "text": "partial " + OPEN_SENTINEL}
                 yield {"type": "text_delta", "text": "more"}
             finally:
@@ -394,6 +411,19 @@ class ParseToolStreamTest(unittest.TestCase):
         self.assertIsNone(result["stop_reason"])
         self.assertIn("cancelled", result["error"])
         self.assertEqual(emitted, [])
+
+    def test_relay_preserves_reasoning_sections_and_distinct_assistant_items(self):
+        emitted = []
+        relay_cli_turn(iter([
+            {"type": "thinking_delta", "text": "First summary", "thinking_kind": "summary", "source_id": "r", "part_index": 0},
+            {"type": "thinking_delta", "text": "Second summary", "thinking_kind": "summary", "source_id": "r", "part_index": 1},
+            {"type": "text_delta", "text": "Progress", "source_id": "commentary"},
+            {"type": "text_delta", "text": "Answer", "source_id": "final"},
+            {"type": "message_stop", "stop_reason": "end_turn"}]), emitted.append, model="m")
+        blocks = [event for event in emitted if event["type"] == "content_block_start"]
+        self.assertEqual([event["content_block"]["type"] for event in blocks],
+                         ["thinking", "thinking", "text", "text"])
+        self.assertNotIn("source_id", json.dumps(emitted))
 
 
 class RegistrationTest(unittest.TestCase):
@@ -620,6 +650,17 @@ class GatewayCliTurnTest(unittest.TestCase):
                                     "messages": [{"role": "user", "content": "hi"}]})
         self.assertEqual(status, 502)
         self.assertIn(b"not found on PATH", raw)
+        self.assertEqual(self.runtime.status()["completed"], 0)
+
+    def test_non_retryable_cli_protocol_error_returns_400_in_both_modes(self):
+        self.events = [{"type": "error", "message": "thread/start: invalid dynamic tool schema", "http_status": 400}]
+        for stream in (False, True):
+            status, raw = self.request({"model": "claude/claude-sonnet-5", "max_tokens": 64,
+                                       "stream": stream, "messages": [{"role": "user", "content": "hi"}]})
+            self.assertEqual(status, 400, raw)
+            self.assertIn(b"invalid dynamic tool schema", raw)
+            self.assertEqual(json.loads(raw)["error"]["type"], "invalid_request_error")
+        self.assertEqual(self.runtime.status()["completed"], 0)
 
     def test_prepare_request_is_never_called_for_cli_routes(self):
         with patch.object(gateway_module, "prepare_request",

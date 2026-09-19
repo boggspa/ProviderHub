@@ -658,12 +658,23 @@ def prepare_native(runtime, payload):
         # descriptors without the field keep full fidelity.
         envelope = ReasoningEnvelope(runtime.root, PROVIDERS[provider_id].get("reasoning_store_cap") or 0)
         translated = to_messages(body, route, spec, envelope, scope)
+        published_summary = None
+        if cli_mode and provider_id == "codex":
+            published_summary = (body.get("reasoning") or {}).get("summary")
+            if published_summary not in (None, "none", "auto", "concise", "detailed"):
+                raise BridgeError("reasoning.summary must be auto, concise, detailed, none, or null for Codex CLI.")
+            if published_summary in ("auto", "concise", "detailed"):
+                # Internal Messages preference; only Codex's CLI understands
+                # this as published summaries and excludes its raw reasoning.
+                translated["reasoning_summary"] = published_summary
+        expose_summaries = published_summary in ("auto", "concise", "detailed")
         return {"body": translated, "headers": {"Content-Type": "application/json", "Authorization": "Bearer " + runtime.token},
                 "url": None, "route": route, "requested": requested, "provider_id": provider_id,
                 "scope": scope, "tool_map": tool_map, "private_key": key,
                 "subagent_route": runtime.settings.get("codex_subagent_route"),
                 "provider_name": PROVIDERS[provider_id]["name"], "protocol": "messages_bridge",
-                "adapter": MessagesResponsesAdapter(requested, envelope, scope, tool_map)}
+                "adapter": MessagesResponsesAdapter(requested, envelope, scope, tool_map,
+                                                    expose_reasoning_summaries=expose_summaries)}
     if isinstance(body["input"], list) and any(isinstance(item, dict) and str(item.get("encrypted_content", "")).startswith(ENVELOPE_PREFIX) for item in body["input"]):
         raise BridgeError("This reasoning history belongs to a different provider connection. Start a new task when changing providers.")
     if provider_id == "openrouter":

@@ -282,6 +282,135 @@ class CustomApplyPatchBridgeTests(unittest.TestCase):
         self.assertEqual(done["input"], "x")
 
 
+class PublishedReasoningSummaryTests(unittest.TestCase):
+    """Only an opted-in, source-filtered summary lane becomes visible."""
+
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.envelope = ReasoningEnvelope(Path(directory.name))
+
+    def adapter(self, *, enabled=True):
+        return MessagesResponsesAdapter(
+            "codex/gpt-6-astra", self.envelope, "scope",
+            expose_reasoning_summaries=enabled)
+
+    def test_streaming_summary_events_and_final_item_share_identity(self):
+        adapter = self.adapter()
+        events = []
+        for value in (
+            {"type": "message_start", "message": {}},
+            {"type": "content_block_start", "index": 0,
+             "content_block": {"type": "thinking", "thinking": "Checking "}},
+            {"type": "content_block_delta", "index": 0,
+             "delta": {"type": "thinking_delta", "thinking": "the data."}},
+            {"type": "content_block_delta", "index": 0,
+             "delta": {"type": "signature_delta", "signature": "private-signature"}},
+            {"type": "content_block_stop", "index": 0},
+            {"type": "message_delta", "delta": {"stop_reason": "end_turn"}},
+            {"type": "message_stop"},
+        ):
+            events.extend(adapter.feed(value))
+        self.assertEqual([event["type"] for event in events], [
+            "response.created", "response.output_item.added",
+            "response.reasoning_summary_part.added",
+            "response.reasoning_summary_text.delta",
+            "response.reasoning_summary_text.delta",
+            "response.reasoning_summary_text.done",
+            "response.reasoning_summary_part.done",
+            "response.output_item.done", "response.completed",
+        ])
+        self.assertEqual([event["sequence_number"] for event in events],
+                         list(range(len(events))))
+        final = events[-1]["response"]["output"][0]
+        part = {"type": "summary_text", "text": "Checking the data."}
+        self.assertEqual(final["summary"], [part])
+        self.assertEqual(events[1]["item"]["summary"], [])
+        self.assertEqual(events[2]["part"], {"type": "summary_text", "text": ""})
+        for event in events[2:7]:
+            self.assertEqual((event["item_id"], event["output_index"], event["summary_index"]),
+                             (final["id"], 0, 0))
+        self.assertEqual(events[5]["text"], part["text"])
+        self.assertEqual(events[6]["part"], part)
+        self.assertEqual(events[7]["item"], final)
+        self.assertNotIn("private-signature", json.dumps(events))
+        self.assertEqual(self.envelope.open(final["encrypted_content"], "scope"), [{
+            "type": "thinking", "thinking": part["text"], "signature": "private-signature"}])
+
+    def test_buffered_summary_and_redacted_blocks_keep_encrypted_replay(self):
+        blocks = [
+            {"type": "thinking", "thinking": "Published summary", "signature": "signed"},
+            {"type": "redacted_thinking", "data": "REDACTED SECRET", "thinking": "HIDDEN EXTRA"},
+            {"type": "text", "text": "Answer"},
+        ]
+        response = self.adapter().from_message({
+            "type": "message", "content": blocks, "stop_reason": "end_turn"})
+        self.assertEqual(response["output"][0]["summary"],
+                         [{"type": "summary_text", "text": "Published summary"}])
+        self.assertEqual(response["output"][1]["summary"], [])
+        self.assertNotIn("REDACTED SECRET", json.dumps(response))
+        self.assertNotIn("HIDDEN EXTRA", json.dumps(response))
+        translated = to_messages({
+            "input": [{"role": "user", "content": "start"}] + response["output"]
+                     + [{"role": "user", "content": "continue"}],
+            "stream": False, "store": False,
+        }, "codex/gpt-6-astra", {}, self.envelope, "scope")
+        self.assertEqual(translated["messages"][1]["content"], blocks)
+
+    def test_default_and_disabled_adapters_keep_thinking_hidden(self):
+        for adapter in (
+            MessagesResponsesAdapter("codex/gpt-6-astra", self.envelope, "scope"),
+            self.adapter(enabled=False),
+        ):
+            events = []
+            for value in (
+                {"type": "content_block_start", "index": 0,
+                 "content_block": {"type": "thinking", "thinking": "PRIVATE "}},
+                {"type": "content_block_delta", "index": 0,
+                 "delta": {"type": "thinking_delta", "thinking": "THINKING"}},
+                {"type": "content_block_stop", "index": 0},
+            ):
+                events.extend(adapter.feed(value))
+            self.assertFalse(any("reasoning_summary" in event["type"] for event in events))
+            self.assertNotIn("PRIVATE", json.dumps(events))
+            self.assertEqual(events[-1]["item"]["summary"], [])
+            self.assertEqual(self.envelope.open(events[-1]["item"]["encrypted_content"], "scope"),
+                             [{"type": "thinking", "thinking": "PRIVATE THINKING"}])
+            buffered = adapter.from_message({
+                "type": "message", "content": [{"type": "thinking", "thinking": "PRIVATE"}]})
+            self.assertEqual(buffered["output"][0]["summary"], [])
+            self.assertNotIn("PRIVATE", json.dumps(buffered))
+
+    def test_redacted_stream_never_becomes_a_summary(self):
+        adapter = self.adapter()
+        events = []
+        for value in (
+            {"type": "content_block_start", "index": 0,
+             "content_block": {"type": "redacted_thinking", "data": "REDACTED SECRET"}},
+            {"type": "content_block_delta", "index": 0,
+             "delta": {"type": "thinking_delta", "thinking": "HIDDEN EXTRA"}},
+            {"type": "content_block_stop", "index": 0},
+        ):
+            events.extend(adapter.feed(value))
+        self.assertFalse(any("reasoning_summary" in event["type"] for event in events))
+        self.assertEqual(events[-1]["item"]["summary"], [])
+        self.assertNotIn("REDACTED SECRET", json.dumps(events))
+        self.assertNotIn("HIDDEN EXTRA", json.dumps(events))
+
+    def test_error_never_completes_an_open_summary(self):
+        for enabled in (False, True):
+            with self.subTest(enabled=enabled):
+                adapter = self.adapter(enabled=enabled)
+                adapter.feed({"type": "content_block_start", "index": 0,
+                              "content_block": {"type": "thinking", "thinking": "Partial summary"}})
+                events = adapter.feed({"type": "error", "error": {"message": "backend failed"}})
+                self.assertEqual([event["type"] for event in events], ["response.failed"])
+                response = events[0]["response"]
+                self.assertEqual(response["status"], "failed")
+                self.assertEqual(response["error"]["message"], "backend failed")
+                self.assertEqual("Partial summary" in json.dumps(response), enabled)
+
+
 class ReasoningStoreCapTests(unittest.TestCase):
     """Bounded storage of sealed provider thinking traces."""
 

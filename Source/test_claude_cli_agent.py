@@ -353,7 +353,7 @@ class RunTurnTests(unittest.TestCase):
 
     def test_streams_text_delta_and_stop(self):
         fake = self._stream([json.dumps(_se("text_delta", "text", "hello")),
-                             json.dumps(_result_event())])
+                             json.dumps(_result_event(result="hello"))])
         events, session, _ = self._run(
             {"model": "sonnet",
              "messages": [{"role": "user", "content": "hi"}]}, fake)
@@ -382,7 +382,7 @@ class RunTurnTests(unittest.TestCase):
         fake = self._stream([json.dumps(_se("text_delta", "text", "a")),
                              json.dumps(_se("thinking_delta", "thinking", "t")),
                              json.dumps(_se("text_delta", "text", "b")),
-                             json.dumps(_result_event())])
+                             json.dumps(_result_event(result="ab"))])
         events, _, _ = self._run(
             {"model": "sonnet",
              "messages": [{"role": "user", "content": "hi"}]}, fake)
@@ -400,9 +400,9 @@ class RunTurnTests(unittest.TestCase):
             {"model": "sonnet",
              "messages": [{"role": "user", "content": "hi"}]}, fake)
         self.assertEqual([e["type"] for e in events],
-                         ["text_delta", "message_stop"])
+                         ["text_delta", "error"])
         self.assertEqual(events[0]["text"], "partial")
-        self.assertEqual(events[1]["stop_reason"], "error")
+        self.assertIn("exited with code 2", events[1]["message"])
 
     def test_nonzero_exit_without_text_is_error(self):
         fake = self._stream([], returncode=2)
@@ -420,13 +420,80 @@ class RunTurnTests(unittest.TestCase):
         self.assertEqual([e["type"] for e in events], ["error"])
         self.assertIn("produced no output", events[0]["message"])
 
-    def test_unparsable_stream_degrades_to_stop(self):
+    def test_unparsable_stream_is_not_a_successful_turn(self):
         fake = self._stream(["plain diagnostic"])
         events, _, _ = self._run(
             {"model": "sonnet",
              "messages": [{"role": "user", "content": "hi"}]}, fake)
-        self.assertEqual([e["type"] for e in events], ["message_stop"])
-        self.assertEqual(events[0]["stop_reason"], "end_turn")
+        self.assertEqual([e["type"] for e in events], ["error"])
+        self.assertIn("before completing", events[0]["message"])
+
+    def test_clean_eof_after_progress_without_result_is_an_error(self):
+        fake = self._stream([_se("text_delta", "text", "I will inspect first.")])
+        events, _, _ = self._run({"model": "sonnet", "messages": [
+            {"role": "user", "content": "Inspect the file"}]}, fake)
+        self.assertEqual([e["type"] for e in events], ["text_delta", "error"])
+        self.assertIn("before completing", events[-1]["message"])
+
+    def test_message_stop_alone_does_not_complete_the_cli_turn(self):
+        fake = self._stream([_se("text_delta", "text", "Progress."),
+                             {"type": "stream_event", "event": {"type": "message_delta",
+                              "delta": {"stop_reason": "end_turn"}}},
+                             {"type": "stream_event", "event": {"type": "message_stop"}}])
+        events, _, _ = self._run({"model": "sonnet", "messages": [
+            {"role": "user", "content": "Inspect the file"}]}, fake)
+        self.assertEqual([e["type"] for e in events], ["text_delta", "error"])
+
+    def test_cancelled_result_is_an_error(self):
+        fake = self._stream([_result_event(subtype="cancelled", stop_reason=None, result="")])
+        events, _, _ = self._run({"model": "sonnet", "messages": [
+            {"role": "user", "content": "Inspect the file"}]}, fake)
+        self.assertEqual([e["type"] for e in events], ["error"])
+        self.assertIn("cancelled", events[0]["message"])
+
+    def test_completed_snapshots_preserve_thinking_and_distinct_final_message(self):
+        progress = {"type": "assistant", "message": {"id": "progress", "content": [
+            {"type": "text", "text": "Progress."}]}}
+        final = {"type": "assistant", "message": {"id": "final", "content": [
+            {"type": "thinking", "thinking": "Published summary."},
+            {"type": "text", "text": "Final answer."}]}}
+        fake = self._stream([progress, progress, final, final, _result_event(result="Final answer.")])
+        events, _, _ = self._run({"model": "sonnet", "messages": [
+            {"role": "user", "content": "Inspect the file"}]}, fake)
+        self.assertEqual(events, [{"type": "text_delta", "text": "Progress."},
+                                  {"type": "thinking_delta", "text": "Published summary."},
+                                  {"type": "text_delta", "text": "Final answer."},
+                                  {"type": "message_stop", "stop_reason": "end_turn"}])
+
+    def test_snapshot_recovers_missing_block_suffixes_once(self):
+        fake = self._stream([
+            {"type": "stream_event", "event": {"type": "message_start", "message": {"id": "m1"}}},
+            {"type": "stream_event", "event": {"type": "content_block_delta", "index": 0,
+             "delta": {"type": "thinking_delta", "thinking": "Think"}}},
+            {"type": "stream_event", "event": {"type": "content_block_delta", "index": 1,
+             "delta": {"type": "text_delta", "text": "Hello"}}},
+            {"type": "assistant", "message": {"id": "m1", "content": [
+                {"type": "thinking", "thinking": "Thinking."},
+                {"type": "text", "text": "Hello world."},
+                {"type": "text", "text": " Final."}]}},
+            _result_event(result=" Final."),
+        ])
+        events, _, _ = self._run({"model": "sonnet", "messages": [
+            {"role": "user", "content": "Hi"}]}, fake)
+        self.assertEqual([e.get("text") for e in events[:-1]],
+                         ["Think", "Hello", "ing.", " world.", " Final."])
+        self.assertEqual([e["type"] for e in events[:-1]],
+                         ["thinking_delta", "text_delta", "thinking_delta", "text_delta", "text_delta"])
+
+    def test_result_restores_a_final_answer_after_earlier_text(self):
+        for final in ("Progress. Final answer.", "A separate final answer."):
+            with self.subTest(final=final):
+                fake = self._stream([_se("text_delta", "text", "Progress."), _result_event(result=final)])
+                events, _, _ = self._run({"model": "sonnet", "messages": [
+                    {"role": "user", "content": "Inspect the file"}]}, fake)
+                self.assertEqual(events[0], {"type": "text_delta", "text": "Progress."})
+                self.assertEqual(events[1]["text"], final.removeprefix("Progress."))
+                self.assertEqual(events[-1]["type"], "message_stop")
 
     def test_session_break_is_error(self):
         fake = self._stream([], events_exc=RuntimeError("boom"))

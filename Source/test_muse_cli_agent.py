@@ -95,6 +95,19 @@ def _terminal(terminal, text=None, reason=None):
                         "text": text, "reason": reason}}
 
 
+def _scoped(event, run_id):
+    # Exact exec JSONL shape from the offline Muse 1.3.0 echo provider: the
+    # envelope is a session stream; the payload identifies the owning run.
+    return {**event, "stream": {"kind": "session", "id": "session"},
+            "payload": {**event["payload"], "command_id": run_id,
+                        "run_stream": {"kind": "run", "id": run_id}}}
+
+
+def _linked(run_id):
+    return _scoped({"payload_type": "session.run.linked",
+                    "payload": {"kind": "session_run_linked"}}, run_id)
+
+
 class BuildArgvTests(unittest.TestCase):
     def test_structure(self):
         argv = m.build_argv("mistral-medium", effort="high")
@@ -486,6 +499,133 @@ class RunTurnTests(unittest.TestCase):
             fake)
         self.assertEqual([e["type"] for e in events], ["error"])
         self.assertIn("kaboom", events[0]["message"])
+
+    def test_terminal_recovers_missing_suffix_and_host_tool_call(self):
+        from cli_tool_call import ToolCallParser
+
+        intro = "I'll find the test files.\n"
+        call = ('<<<tool_call>>>\n'
+                '{"name":"find_files","input":{"pattern":"test_*.py"}}'
+                '\n<<</tool_call>>>')
+        # Ephemeral deltas can be incomplete; the terminal's complete text
+        # must restore the rest, including a host tool handoff after an intro.
+        fake = self._stream([_linked("root"),
+                             _scoped(_delta(intro), "root"),
+                             _scoped(_terminal("completed", intro + call), "root")])
+        events, _, _ = self._run(
+            {"model": "m", "messages": [{"role": "user", "content": "hi"}]},
+            fake)
+        self.assertEqual([e["type"] for e in events],
+                         ["text_delta", "text_delta", "message_stop"])
+        self.assertEqual("".join(e["text"] for e in events if "text" in e),
+                         intro + call)
+        parser = ToolCallParser()
+        parsed = []
+        for event in events:
+            if event["type"] == "text_delta":
+                parsed.extend(parser.feed(event["text"]))
+        parsed.extend(parser.finish())
+        calls = [event for kind, event in parsed if kind == "call"]
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["name"], "find_files")
+
+    def test_terminal_does_not_duplicate_multiple_streamed_fragments(self):
+        fake = self._stream([_delta("hello"), _delta(" world"),
+                             _terminal("completed", text="hello world")])
+        events, _, _ = self._run(
+            {"model": "m", "messages": [{"role": "user", "content": "hi"}]},
+            fake)
+        self.assertEqual([e["type"] for e in events],
+                         ["text_delta", "text_delta", "message_stop"])
+        self.assertEqual("".join(e["text"] for e in events if "text" in e),
+                         "hello world")
+
+    def test_terminal_preserves_a_separate_final_after_commentary(self):
+        fake = self._stream([_delta("I'll check.\n"),
+                             _terminal("completed", text="Here is the answer.")])
+        events, _, _ = self._run(
+            {"model": "m", "messages": [{"role": "user", "content": "hi"}]},
+            fake)
+        self.assertEqual([e["type"] for e in events],
+                         ["text_delta", "text_delta", "message_stop"])
+        self.assertEqual("".join(e["text"] for e in events if "text" in e),
+                         "I'll check.\nHere is the answer.")
+
+    def test_terminal_final_message_already_streamed_is_not_replayed(self):
+        fake = self._stream([_delta("I'll check.\n"),
+                             _delta("Here is the answer."),
+                             _terminal("completed", text="Here is the answer.")])
+        events, _, _ = self._run(
+            {"model": "m", "messages": [{"role": "user", "content": "hi"}]},
+            fake)
+        self.assertEqual([e["type"] for e in events],
+                         ["text_delta", "text_delta", "message_stop"])
+        self.assertEqual("".join(e["text"] for e in events if "text" in e),
+                         "I'll check.\nHere is the answer.")
+
+    def test_conflicting_terminal_after_host_tool_call_is_error(self):
+        first = ('<<<tool_call>>>\n{"name":"first","input":{}}'
+                 '\n<<</tool_call>>>')
+        second = ('<<<tool_call>>>\n{"name":"second","input":{}}'
+                  '\n<<</tool_call>>>')
+        fake = self._stream([_delta(first), _terminal("completed", text=second)])
+        events, _, _ = self._run(
+            {"model": "m", "messages": [{"role": "user", "content": "hi"}]},
+            fake)
+        self.assertEqual([e["type"] for e in events], ["text_delta", "error"])
+        self.assertIn("conflicts", events[-1]["message"])
+        self.assertNotIn(second, "".join(e.get("text", "") for e in events))
+
+    def test_empty_completed_terminal_is_error(self):
+        fake = self._stream([_terminal("completed")])
+        events, _, _ = self._run(
+            {"model": "m", "messages": [{"role": "user", "content": "hi"}]},
+            fake)
+        self.assertEqual([e["type"] for e in events], ["error"])
+        self.assertIn("no output", events[0]["message"])
+
+    def test_unrelated_run_cannot_emit_text_or_finish_the_root_run(self):
+        for terminal in ("completed", "failed", "cancelled"):
+            with self.subTest(terminal=terminal):
+                fake = self._stream([
+                    _linked("root"),
+                    _linked("child"),
+                    _scoped(_delta("child text"), "child"),
+                    _scoped(_terminal(terminal, "child final"), "child"),
+                    _scoped(_delta("root answer"), "root"),
+                    _scoped(_terminal("completed", "root answer"), "root"),
+                ])
+                events, _, _ = self._run(
+                    {"model": "m", "messages": [{"role": "user", "content": "hi"}]},
+                    fake)
+                self.assertEqual(events, [
+                    {"type": "text_delta", "text": "root answer"},
+                    {"type": "message_stop", "stop_reason": "completed"},
+                ])
+
+    def test_unscoped_terminal_cannot_finish_a_scoped_run(self):
+        fake = self._stream([
+            _linked("root"),
+            _terminal("completed", text="unscoped answer"),
+            _scoped(_terminal("completed", text="root answer"), "root"),
+        ])
+        events, _, _ = self._run(
+            {"model": "m", "messages": [{"role": "user", "content": "hi"}]},
+            fake)
+        self.assertEqual(events, [
+            {"type": "text_delta", "text": "root answer"},
+            {"type": "message_stop", "stop_reason": "completed"},
+        ])
+
+    def test_body_terminal_failure_is_not_overridden_by_completed_envelope(self):
+        terminal = _terminal("failed", reason="body failure")
+        terminal["payload_type"] = "run.terminal.completed"
+        fake = self._stream([terminal])
+        events, _, _ = self._run(
+            {"model": "m", "messages": [{"role": "user", "content": "hi"}]},
+            fake)
+        self.assertEqual([e["type"] for e in events], ["error"])
+        self.assertIn("body failure", events[0]["message"])
 
     def test_nonzero_exit_without_text_is_error(self):
         fake = self._stream([], returncode=2)

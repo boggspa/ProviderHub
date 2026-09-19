@@ -711,7 +711,9 @@ class _TurnState:
 
     def __init__(self) -> None:
         self.emitted_text = False
+        self.text_parts: list[str] = []
         self.result_text: str | None = None
+        self.terminal = False
         self.stop_reason: str | None = None
         self.failure: str | None = None
         self.saw_tool_step = False
@@ -723,6 +725,15 @@ class _TurnState:
 
     def fallback_text(self) -> str:
         return self.result_text or ""
+
+    def result_suffix(self) -> str:
+        text = self.result_text or ""
+        previous = "".join(self.text_parts)
+        if not text or previous.startswith(text):
+            return ""
+        if not text.startswith(previous):
+            raise AgyCliAgentError("agy result did not match its streamed response")
+        return text[len(previous):]
 
     def stderr_tail(self) -> str:
         handle = self.stderr_handle
@@ -811,6 +822,7 @@ def _translate(payload: Any, state: _TurnState) -> list[dict]:
         text = step.get("text_delta")
         if isinstance(text, str) and text:
             state.emitted_text = True
+            state.text_parts.append(text)
             events.append({"type": "text_delta", "text": text})
         thinking = step.get("thinking_delta")
         if isinstance(thinking, str) and thinking:
@@ -833,10 +845,11 @@ def _translate(payload: Any, state: _TurnState) -> list[dict]:
             state.failure = ("agy reported "
                              f"{status or 'an error'}: "
                              f"{error or response or 'no detail'}")
-        elif status and status != "SUCCESS":
-            state.stop_reason = status.casefold()
-        else:
+        elif status == "SUCCESS":
+            state.terminal = True
             state.stop_reason = "end_turn"
+        else:
+            state.failure = f"agy reported an unsuccessful terminal status: {status or 'missing'}"
         return []
 
     # "init" and anything unrecognized: informational, never route output.
@@ -1006,6 +1019,10 @@ def run_turn(request, *, spawner=None, timeout=300) -> Iterator[dict]:
         if state.failure:
             yield {"type": "error", "message": state.failure}
             return
+        if isinstance(returncode, int) and returncode != 0:
+            detail = f"the agy CLI exited with code {returncode}"
+            yield {"type": "error", "message": detail + state.diagnostics() + state.stderr_tail()}
+            return
         if not state.emitted_text and not state.fallback_text():
             # Empty stream with clean exit and no tool activity -> no output
             if not state.denied_actions and not state.tool_error and not state.saw_tool_step:
@@ -1017,21 +1034,14 @@ def run_turn(request, *, spawner=None, timeout=300) -> Iterator[dict]:
             if state.denied_actions or state.tool_error or state.saw_tool_step:
                 yield {"type": "error", "message": state.denial_detail()}
                 return
-        if isinstance(returncode, int) and returncode != 0:
-            detail = f"the agy CLI exited with code {returncode}"
-            if not state.emitted_text and not state.fallback_text():
-                yield {"type": "error",
-                       "message": detail + state.diagnostics()
-                                  + state.stderr_tail()}
-                return
-            stop_reason = state.stop_reason or "error"
-        else:
-            if not state.emitted_text:
-                fallback = state.fallback_text()
-                if fallback:
-                    state.emitted_text = True
-                    yield {"type": "text_delta", "text": fallback}
-            stop_reason = state.stop_reason or "end_turn"
+        if not state.terminal:
+            yield {"type": "error", "message": "the agy CLI stream ended before completing the turn"}
+            return
+        fallback = state.result_suffix()
+        if fallback:
+            state.emitted_text = True
+            yield {"type": "text_delta", "text": fallback}
+        stop_reason = state.stop_reason or "end_turn"
     except Exception as exc:
         yield {"type": "error", "message": _describe(exc, state, timeout)}
         return

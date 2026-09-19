@@ -1378,6 +1378,66 @@ class MultiAgentNormalizationTests(unittest.TestCase):
             self.assertNotIn(secret, blob)
 
 
+class CodexCliReasoningSummaryPlanTests(unittest.TestCase):
+    """Published-summary opt-in is restricted to Codex's CLI transport."""
+
+    def setUp(self):
+        import tempfile
+        from pathlib import Path
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+
+    def plan(self, *, provider="codex", mode="cli", reasoning=None):
+        from types import SimpleNamespace
+        import responses_native
+        route = provider + "/test-model"
+        runtime = SimpleNamespace(
+            settings={"providers": {provider: {"credential_mode": mode, "base_url": "https://x.invalid"}},
+                      "_model_specs": {route: {"context": 100000, "max_output": 16384,
+                                               "effort_modes": ["low", "high"]}}},
+            replay_key="replay", token="token", upstream_url=None, root=self.root,
+            provider_key=lambda provider_id: "" if mode == "cli" else "provider-key")
+        payload = {"model": route, "input": "hello", "stream": True, "store": False}
+        if reasoning is not None:
+            payload["reasoning"] = reasoning
+        with patch.object(responses_native, "validate_connection", return_value={"base_url": "https://x.invalid"}), \
+                patch.object(responses_native, "_auth_headers", return_value={}), \
+                patch.object(responses_native, "connection_signature", return_value="sig"):
+            return responses_native.prepare_native(runtime, payload)
+
+    def test_explicit_codex_cli_summary_preference_reaches_messages_and_adapter(self):
+        for summary in ("auto", "concise", "detailed"):
+            with self.subTest(summary=summary):
+                plan = self.plan(reasoning={"effort": "high", "summary": summary})
+                self.assertEqual(plan["protocol"], "messages_bridge")
+                self.assertEqual(plan["body"]["reasoning_summary"], summary)
+                self.assertEqual(plan["body"]["output_config"], {"effort": "high"})
+                self.assertTrue(plan["adapter"].expose_reasoning_summaries)
+
+    def test_omitted_null_and_disabled_summaries_stay_hidden(self):
+        for reasoning in (None, {}, {"effort": "high"}, {"summary": None}, {"summary": "none"}):
+            with self.subTest(reasoning=reasoning):
+                plan = self.plan(reasoning=reasoning)
+                self.assertNotIn("reasoning_summary", plan["body"])
+                self.assertFalse(plan["adapter"].expose_reasoning_summaries)
+
+    def test_other_cli_and_api_routes_do_not_opt_in(self):
+        for provider, mode in (("muse", "cli"), ("grok", "cli"), ("claude", "cli"),
+                               ("antigravity", "cli"), ("codex", "api_key"), ("kimi", "api_key")):
+            with self.subTest(provider=provider, mode=mode):
+                plan = self.plan(provider=provider, mode=mode, reasoning={"summary": "detailed"})
+                self.assertEqual(plan["protocol"], "messages_bridge")
+                self.assertNotIn("reasoning_summary", plan["body"])
+                self.assertFalse(plan["adapter"].expose_reasoning_summaries)
+
+    def test_invalid_codex_cli_summary_is_rejected(self):
+        from bridge_core import BridgeError
+        for summary in ("raw", True, ["auto"], {"type": "detailed"}):
+            with self.subTest(summary=summary), self.assertRaisesRegex(BridgeError, "reasoning.summary"):
+                self.plan(reasoning={"summary": summary})
+
+
 class UltraDelegationNoteTests(unittest.TestCase):
     """Ultra must ask for delegation, and only where delegation is possible."""
 

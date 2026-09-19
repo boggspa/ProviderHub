@@ -475,17 +475,92 @@ class _TurnState:
 
     def __init__(self) -> None:
         self.emitted_text = False
-        self.assistant_text: list[str] = []
         self.result_text: str | None = None
         self.stop_reason: str | None = None
         self.failure: str | None = None
         self.raw_lines: list[str] = []
         self.stderr_handle = None
+        self.terminal = False
+        self.messages = {}
+        self.current_message = None
+        self.last_text_message = None
 
-    def fallback_text(self) -> str:
-        if self.assistant_text:
-            return "".join(self.assistant_text)
-        return self.result_text or ""
+    def start_message(self, message):
+        identifier = message.get("id") if isinstance(message, dict) else None
+        current = {"id": identifier, "blocks": {}, "snapshot": False}
+        if isinstance(identifier, str) and identifier:
+            current = self.messages.setdefault(identifier, current)
+        self.current_message = current
+        return current
+
+    def snapshot_message(self, message):
+        identifier = message.get("id")
+        current = self.messages.get(identifier) if isinstance(identifier, str) else None
+        if current is None:
+            active = self.current_message
+            compatible = True
+            if active is not None:
+                content = message.get("content") or []
+                if isinstance(content, str):
+                    content = [{"type": "text", "text": content}]
+                for (index, kind), previous in active["blocks"].items():
+                    block = content[index] if isinstance(index, int) and 0 <= index < len(content) else {}
+                    text = block.get(kind) if isinstance(block, dict) else None
+                    if isinstance(text, str) and not (previous.startswith(text) or text.startswith(previous)):
+                        compatible = False
+            if active is not None and not active["snapshot"] and (
+                    (identifier and active["id"] == identifier)
+                    or (compatible and (not identifier or not active["id"]))):
+                current = active
+                if identifier:
+                    current["id"] = identifier
+            else:
+                current = {"id": identifier, "blocks": {}, "snapshot": False}
+            if isinstance(identifier, str) and identifier:
+                self.messages[identifier] = current
+        current["snapshot"] = True
+        return current
+
+    def content_event(self, index, kind, text, *, message=None, snapshot=False):
+        if not isinstance(text, str) or not text:
+            return None
+        if message is None:
+            message = self.current_message
+            if message is None:
+                message = self.start_message({})
+        key = (index, kind)
+        previous = message["blocks"].get(key, "")
+        if snapshot:
+            if previous.startswith(text):
+                return None
+            if not text.startswith(previous):
+                self.failure = "claude assistant snapshot conflicted with its streamed content."
+                return None
+            fragment = text[len(previous):]
+            message["blocks"][key] = text
+        else:
+            fragment = text
+            message["blocks"][key] = previous + text
+        if kind == "text":
+            self.emitted_text = True
+            self.last_text_message = message
+        return {"type": kind + "_delta", "text": fragment}
+
+    def result_suffix(self):
+        """The result is the final answer, potentially missing from snapshots."""
+        text = self.result_text or ""
+        message = self.last_text_message
+        if not text or message is None:
+            return text
+        parts = [value for (index, kind), value in sorted(message["blocks"].items()) if kind == "text"]
+        # Claude Code 2.1.276 projects the last text block into result.result;
+        # it need not equal the concatenation of every block in the message.
+        if text in parts:
+            return ""
+        previous = "".join(parts)
+        if previous.startswith(text):
+            return ""
+        return text[len(previous):] if text.startswith(previous) else text
 
     def stderr_tail(self) -> str:
         handle = self.stderr_handle
@@ -510,21 +585,6 @@ class _TurnState:
         return ""
 
 
-def _text_from_content(content: Any) -> str:
-    """Extract text from an Anthropic message content field."""
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts = []
-        for block in content:
-            if isinstance(block, dict) and block.get("type") == "text":
-                text = block.get("text")
-                if isinstance(text, str):
-                    parts.append(text)
-        return "".join(parts)
-    return ""
-
-
 def _translate(payload: Any, state: _TurnState) -> list[dict]:
     """Convert one NDJSON object from claude into zero or more route events."""
     if not isinstance(payload, dict):
@@ -534,6 +594,17 @@ def _translate(payload: Any, state: _TurnState) -> list[dict]:
     if kind == "stream_event":
         event = payload.get("event")
         if not isinstance(event, dict):
+            return []
+        if event.get("type") == "message_start":
+            state.start_message(event.get("message"))
+            return []
+        if event.get("type") == "content_block_start":
+            block = event.get("content_block") or {}
+            if isinstance(block, dict) and block.get("type") in {"text", "thinking"}:
+                block_type = block["type"]
+                translated = state.content_event(event.get("index", 0), block_type,
+                                                 block.get(block_type), snapshot=True)
+                return [translated] if translated else []
             return []
         if event.get("type") != "content_block_delta":
             # message_delta carries a stop reason too; record it as a fallback
@@ -552,19 +623,16 @@ def _translate(payload: Any, state: _TurnState) -> list[dict]:
         delta_type = delta.get("type")
         if delta_type == "text_delta":
             text = delta.get("text")
-            if isinstance(text, str) and text:
-                state.emitted_text = True
-                return [{"type": "text_delta", "text": text}]
-            return []
+            translated = state.content_event(event.get("index", 0), "text", text)
+            return [translated] if translated else []
         if delta_type == "thinking_delta":
             # Anthropic streams reasoning under delta.thinking; accept .text too
             # so a future field rename degrades instead of dropping reasoning.
             text = delta.get("thinking")
             if not isinstance(text, str):
                 text = delta.get("text")
-            if isinstance(text, str) and text:
-                return [{"type": "thinking_delta", "text": text}]
-            return []
+            translated = state.content_event(event.get("index", 0), "thinking", text)
+            return [translated] if translated else []
         # input_json_delta and friends are tool traffic; tools are stripped, so
         # anything arriving here is ignored rather than surfaced as text.
         return []
@@ -572,9 +640,19 @@ def _translate(payload: Any, state: _TurnState) -> list[dict]:
     if kind == "assistant":
         message = payload.get("message")
         if isinstance(message, dict):
-            text = _text_from_content(message.get("content"))
-            if text:
-                state.assistant_text.append(text)
+            current = state.snapshot_message(message)
+            content = message.get("content") or []
+            if isinstance(content, str):
+                content = [{"type": "text", "text": content}]
+            events = []
+            for index, block in enumerate(content):
+                if isinstance(block, dict) and block.get("type") in {"text", "thinking"}:
+                    block_type = block["type"]
+                    translated = state.content_event(index, block_type, block.get(block_type),
+                                                     message=current, snapshot=True)
+                    if translated:
+                        events.append(translated)
+            return events
         return []
 
     if kind == "result":
@@ -588,6 +666,10 @@ def _translate(payload: Any, state: _TurnState) -> list[dict]:
         if payload.get("is_error") is True or subtype.startswith("error"):
             detail = result_text or subtype or "unknown error"
             state.failure = f"claude reported {subtype or 'an error'}: {detail}"
+        elif subtype == "success":
+            state.terminal = True
+        else:
+            state.failure = f"claude reported an unsuccessful terminal status: {subtype or 'missing'}"
         return []
 
     if kind == "error":
@@ -776,28 +858,25 @@ def run_turn(request, *, spawner=None, timeout=300) -> Iterator[dict]:
 
         returncode = getattr(session, "returncode", None)
         if isinstance(returncode, int) and returncode != 0:
-            yielded = state.emitted_text or bool(state.fallback_text())
             detail = f"the claude CLI exited with code {returncode}"
-            if not yielded:
-                yield {"type": "error",
-                       "message": detail + state.diagnostics()
-                                  + state.stderr_tail()}
-                return
-            # Text did arrive before the failure; report it as a stopped turn
-            # rather than discarding a usable completion.
-            stop_reason = state.stop_reason or "error"
+            yield {"type": "error", "message": detail + state.diagnostics() + state.stderr_tail()}
+            return
         elif state.failure:
             yield {"type": "error", "message": state.failure}
             return
+        elif not state.terminal:
+            detail = ("the claude CLI stream ended before completing the turn"
+                      if state.emitted_text or state.raw_lines else "the claude CLI produced no output")
+            yield {"type": "error", "message": detail}
+            return
         else:
+            fallback = state.result_suffix()
+            if fallback:
+                state.emitted_text = True
+                yield {"type": "text_delta", "text": fallback}
             if not state.emitted_text:
-                fallback = state.fallback_text()
-                if fallback:
-                    state.emitted_text = True
-                    yield {"type": "text_delta", "text": fallback}
-                elif not state.raw_lines:
-                    yield {"type": "error", "message": "the claude CLI produced no output"}
-                    return
+                yield {"type": "error", "message": "the claude CLI produced no output"}
+                return
             stop_reason = state.stop_reason or "end_turn"
     except Exception as exc:
         yield {"type": "error", "message": _describe(exc, state, timeout)}
