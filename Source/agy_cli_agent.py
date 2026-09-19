@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 import subprocess
 import tempfile
 from pathlib import Path
@@ -50,6 +51,7 @@ from typing import Any, Iterable, Iterator
 
 from cli_session import CliSessionError, StdioSession, minimal_env, resolve_binary
 from cli_tool_call import TRANSCRIPT_HEADER
+from cli_images import write_images
 
 try:  # Repo-native effort ladder; degrade to a local copy if unavailable.
     from effort_map import map_effort as _map_effort
@@ -73,6 +75,10 @@ BINARY_NAMES = ("agy", "antigravity")
 # agy exposes no system-prompt flag, so the harness system text is rendered
 # into the stdin prompt instead of being passed on the command line.
 SYSTEM_PROMPT_TRANSPORT = "prompt"
+# Headless JSON accepts text only, but view_file can decode explicitly scoped
+# image attachments. Keep that native operation limited to our own copies.
+IMAGE_TRANSPORT = "scoped_image_files"
+VERIFIED_IMAGE_MODELS = frozenset({"gemini-3.1-pro", "gemini-3.1-pro-low", "gemini-3.1-pro-high"})
 
 _EXTRA_BIN_DIRS = ("~/.local/bin", "/opt/homebrew/bin", "/usr/local/bin")
 
@@ -713,6 +719,7 @@ class _TurnState:
         self.denied_actions: list = []
         self.raw_lines: list[str] = []
         self.stderr_handle = None
+        self.image_paths: list[str] = []
 
     def fallback_text(self) -> str:
         return self.result_text or ""
@@ -768,6 +775,22 @@ def _translate(payload: Any, state: _TurnState) -> list[dict]:
             return []
         step_type = step.get("step_type")
         if step_type == "tool":
+            if state.image_paths:
+                info = step.get("tool_info") or {}
+                parameters = info.get("parameters") or {}
+                name = info.get("name") or step.get("tool_name")
+                path = parameters.get("AbsolutePath")
+                if name != "view_file" or not isinstance(path, str) \
+                        or str(Path(path).resolve()) not in state.image_paths:
+                    state.failure = "agy attempted a native action outside the supplied image attachments; use host tools."
+                    return []
+                if str(step.get("state") or "").upper() == "ERROR":
+                    state.failure = "agy could not read the scoped image attachment."
+                    return []
+                if str(step.get("state") or "").upper() == "DONE":
+                    index = state.image_paths.index(str(Path(path).resolve())) + 1
+                    return [{"type": "thinking_delta", "text": f"Inspected attached image {index}.\n"}]
+                return []
             # Tools are stripped by policy, so tool steps never become route
             # text. They are recorded because a denied tool call that leaves
             # the turn empty must be reported as a failure, not a blank reply.
@@ -900,6 +923,7 @@ def run_turn(request, *, spawner=None, timeout=300) -> Iterator[dict]:
     unparsable stream) degrades to an error event.
     """
     state = _TurnState()
+    workspace_path = None
     try:
         if not isinstance(request, dict):
             raise AgyCliAgentError("request must be an object")
@@ -931,6 +955,18 @@ def run_turn(request, *, spawner=None, timeout=300) -> Iterator[dict]:
                 "switch this route to API-key credentials"
             )
         argv[0] = binary
+        if request.get("images"):
+            workspace_path = str(Path(tempfile.mkdtemp(prefix="agy_images_")).resolve())
+            state.image_paths = write_images(request["images"], workspace_path)
+            # --add-dir establishes a scoped workspace read grant. No global
+            # settings or approval-bypass flags are changed. All host actions
+            # still use the host tool protocol.
+            argv += ["--add-dir", workspace_path]
+            prompt += "\n\nImage attachment transport: use native view_file only to decode " \
+                      "the exact image copies listed below. This is the sole exception to " \
+                      "the native-tool restriction; it supplies the screenshot pixels. " \
+                      "Use the host tool protocol for every computer or workspace action.\n"
+            prompt += "\n".join(f"Image {index}: {path}" for index, path in enumerate(state.image_paths, 1))
 
         # stderr goes to a temp file, not a pipe: a pipe nobody drains can fill
         # and deadlock the child, and agy's diagnostics there are worth keeping.
@@ -938,12 +974,18 @@ def run_turn(request, *, spawner=None, timeout=300) -> Iterator[dict]:
         session = StdioSession(
             argv,
             env=minimal_env(),
+            cwd=workspace_path,
             timeout=float(timeout),
             spawner=spawner,
             stderr=state.stderr_handle,
         )
     except Exception as exc:
-        yield {"type": "error", "message": _describe(exc, state, timeout)}
+        message = _describe(exc, state, timeout)
+        if workspace_path:
+            shutil.rmtree(workspace_path, ignore_errors=True)
+        if state.stderr_handle is not None:
+            state.stderr_handle.close()
+        yield {"type": "error", "message": message}
         return
 
     stop_reason = state.stop_reason or "end_turn"
@@ -994,6 +1036,8 @@ def run_turn(request, *, spawner=None, timeout=300) -> Iterator[dict]:
         yield {"type": "error", "message": _describe(exc, state, timeout)}
         return
     finally:
+        if workspace_path:
+            shutil.rmtree(workspace_path, ignore_errors=True)
         handle = state.stderr_handle
         if handle is not None:
             try:

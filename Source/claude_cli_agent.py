@@ -48,6 +48,7 @@ from typing import Any, Callable, Iterable, Iterator
 
 from cli_session import CliSessionError, StdioSession, minimal_env, resolve_binary
 from cli_tool_call import TRANSCRIPT_HEADER
+from cli_images import prompt_content
 
 try:  # Repo-native effort ladder; degrade to a local copy if unavailable.
     from effort_map import map_effort as _map_effort
@@ -71,6 +72,8 @@ BINARY_NAMES = ("claude",)
 # Where the harness system prompt is delivered. "flag" => build_argv emits it;
 # "prompt" => the CLI has no such flag and it is folded into the stdin prompt.
 SYSTEM_PROMPT_TRANSPORT = "flag"
+IMAGE_TRANSPORT = "stream_json"
+VERIFIED_IMAGE_MODELS = frozenset({"sonnet"})
 
 # Real installs live outside the default PATH on this machine (~/.local/bin).
 _EXTRA_BIN_DIRS = ("~/.local/bin", "/opt/homebrew/bin", "/usr/local/bin")
@@ -730,6 +733,10 @@ def run_turn(request, *, spawner=None, timeout=300) -> Iterator[dict]:
         # the prompt; duplicating it would double-charge and could conflict.
         prompt = render_prompt(messages)
         argv = build_argv(model, effort=effort, system=system, stream=True)
+        if request.get("images"):
+            argv[1:1] = ["--input-format", "stream-json"]
+            prompt = json.dumps({"type": "user", "message": {"role": "user",
+                "content": prompt_content(prompt, request["images"])}}, ensure_ascii=False)
 
         binary = _resolve_binary()
         if not binary:

@@ -122,6 +122,7 @@ import time
 
 from cli_session import CliSessionError, StdioSession, minimal_env, resolve_binary
 from cli_tool_call import HOST_EXECUTION_NOTE, normalize_tools, validate_host_call
+from cli_images import normalize_images, responses_content
 
 
 PROVIDER_ID = "codex"
@@ -132,6 +133,7 @@ BINARY_NAMES = ("codex",)
 #: The host policy uses a native instruction field, above user history.
 SYSTEM_PROMPT_TRANSPORT = "developerInstructions"
 HOST_TOOL_TRANSPORT = "dynamic"
+IMAGE_TRANSPORT = "native_history"
 
 _NATIVE_TOOL_ITEMS = frozenset({
     "commandExecution", "fileChange", "mcpToolCall", "collabToolCall",
@@ -892,6 +894,10 @@ def _turn_params(payload, thread_id):
         "approvalPolicy": "never",
         "sandboxPolicy": {"type": "readOnly", "networkAccess": False},
     }
+    if payload.get("images") and not payload.get("history"):
+        for part in responses_content(payload["images"]):
+            params["input"].append({"type": "image", "url": part["image_url"],
+                                    **({"detail": part["detail"]} if "detail" in part else {})})
     if payload["model"] is not None:
         params["model"] = payload["model"]
     if payload["effort"] is not None:
@@ -948,6 +954,7 @@ def _normalise_request(request):
     if not isinstance(model, str) or not model.strip():
         raise CodexCliAgentError("A turn request must name a model.")
     prompt = render_prompt(request)
+    images = normalize_images(request.get("images", []))
     system = request.get("system")
     if system is not None and not isinstance(system, str):
         raise CodexCliAgentError("system must be a string or None")
@@ -963,7 +970,7 @@ def _normalise_request(request):
     return {"model": _checked_model(model),
             "effort": _checked_effort(request.get("effort")),
             "prompt": prompt, "system": instructions, "tools": tools,
-            "history": request.get("history")}
+            "history": request.get("history"), "images": images}
 
 
 def _history_items(messages):
@@ -990,11 +997,15 @@ def _history_items(messages):
             elif kind == "tool_result":
                 result = block.get("content", "")
                 if not isinstance(result, str):
-                    result = json.dumps(result, ensure_ascii=False)
+                    result = responses_content(result)
                 if block.get("is_error"):
-                    result = "Host tool error: " + result
+                    result = ("Host tool error: " + result if isinstance(result, str) else
+                              [{"type": "input_text", "text": "Host tool error:"}, *result])
                 items.append({"type": "function_call_output", "call_id": block["tool_use_id"],
                               "output": result})
+            elif kind in {"image", "input_image"}:
+                items.append({"type": "message", "role": "user",
+                              "content": responses_content([block])})
     return items
 
 
@@ -1347,6 +1358,8 @@ def run_turn_fallback(request, *, spawner=None, timeout=300) -> Iterator[dict]:
         payload = _normalise_request(request)
         if payload["tools"]:
             raise CodexCliAgentError("Codex host tools require the app-server transport; exec cannot forward them.")
+        if payload["images"]:
+            raise CodexCliAgentError("Codex image inputs require the app-server transport.")
         workspace = CodexTurnWorkspace(diagnostics=_diagnostics_enabled()).open()
         # exec has no per-thread config request. Read config without starting
         # a model turn, then explicitly disable inherited MCP servers on argv.

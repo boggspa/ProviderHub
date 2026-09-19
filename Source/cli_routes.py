@@ -33,6 +33,8 @@ from cli_tool_call import (HOST_EXECUTION_NOTE, MAX_CALLS_PER_TURN, ToolCallErro
                            ToolCallParser, normalize_tools, render_tool_anchor,
                            render_tool_manifest, validate_host_call)
 from effort_map import EFFORT_ORDER
+from cli_images import (IMAGE_COORDINATE_NOTE, CliImageError, image_label,
+                        normalize_image, normalize_images)
 from hub_config import MODEL_ID
 
 #: provider id -> (adapter module name, binary label). Every adapter exposes
@@ -142,6 +144,11 @@ def _hub_row(provider_id: str, row):
     if not isinstance(vision, bool):
         modalities = row.get("inputModalities")
         vision = ("image" in modalities) if isinstance(modalities, list) else None
+    adapter = adapter_for(provider_id)
+    if not getattr(adapter, "IMAGE_TRANSPORT", None):
+        vision = False
+    elif vision is None and identifier in getattr(adapter, "VERIFIED_IMAGE_MODELS", ()):
+        vision = True
     result = {
         "id": identifier,
         "canonical_id": row.get("canonical_id") or identifier,
@@ -239,13 +246,13 @@ def discover_via_cli(provider_id: str, *, timeout: int = 45) -> dict:
 # Turns
 # ---------------------------------------------------------------------------
 
-def _flatten_blocks(content) -> str:
+def _flatten_blocks(content, *, images=None) -> str:
     """Render Messages block-list content as plain transcript text.
 
-    The Responses bridge spells every message as typed blocks, and the
-    adapters deliberately accept plain text only. Tool cycles are harness-run
-    on these routes, so results stay as context text; prior reasoning is
-    provider state, not transcript; binary parts degrade to an honest marker.
+    The Responses bridge spells every message as typed blocks. Text
+    transports receive numbered image references plus separate binary
+    attachments. Codex additionally keeps typed call/result history. Prior
+    reasoning remains provider state rather than transcript text.
     """
     if isinstance(content, str):
         return content
@@ -260,7 +267,7 @@ def _flatten_blocks(content) -> str:
         elif kind == "thinking":
             continue
         elif kind == "tool_result":
-            inner = _flatten_blocks(block.get("content"))
+            inner = _flatten_blocks(block.get("content"), images=images)
             if inner.strip():
                 parts.append(f"[tool result for {block.get('tool_use_id') or 'call'}]\n{inner}")
         elif kind == "tool_use":
@@ -271,7 +278,10 @@ def _flatten_blocks(content) -> str:
                 args = "{}"
             parts.append(f"[tool call: {name} ({block.get('id') or 'call'}) with {args[:200]}]")
         elif kind in {"input_image", "image"}:
-            parts.append("[image omitted: CLI routes are text-only]")
+            if images is None:
+                raise CliImageError("Images must be delivered through a CLI image transport")
+            images.append(normalize_image(block))
+            parts.append("[" + image_label(images[-1], len(images)) + "]")
         elif kind in {"input_document", "document"}:
             parts.append("[document omitted: CLI routes are text-only]")
         else:
@@ -280,12 +290,13 @@ def _flatten_blocks(content) -> str:
     return "\n".join(part for part in parts if part)
 
 
-def _messages_for_cli(messages, system):
+def _messages_for_cli(messages, system, *, images=None):
     """Fold developer/system messages into system; flatten block content.
 
     The Responses bridge (Codex desktop) delivers developer-role messages in
-    the array and block-spelled content everywhere; the adapters accept only
-    plain user/assistant text. Developer text follows the system field in
+    the array and block-spelled content everywhere. Text and image references
+    form the transcript while screenshot bytes travel through image inputs.
+    Developer text follows the system field in
     encounter order, so harness instructions stay at the head of the prompt,
     and a developer message that merely repeats the system text is dropped
     rather than doubled.
@@ -296,7 +307,7 @@ def _messages_for_cli(messages, system):
         if not isinstance(message, dict):
             continue
         role = message.get("role")
-        text = _flatten_blocks(message.get("content"))
+        text = _flatten_blocks(message.get("content"), images=images)
         if role in {"developer", "system"}:
             if text.strip() and all(text.strip() not in part for part in parts):
                 parts.append(text.strip())
@@ -323,10 +334,24 @@ def plan_turn(provider_id: str, upstream_model: str, payload: dict, spec: dict,
     if isinstance(system, list):
         # Anthropic's block spelling, which is how the gateway's identity note
         # arrives. The adapters take one plain string.
-        system = _flatten_blocks(system).strip() or None
+        try:
+            system = _flatten_blocks(system).strip() or None
+        except CliImageError as exc:
+            raise CliRouteError("CLI images must be in user messages or tool results, not system instructions") from exc
     if system is not None and not isinstance(system, str):
         system = None
-    messages, system = _messages_for_cli(payload.get("messages"), system)
+    images = []
+    try:
+        messages, system = _messages_for_cli(payload.get("messages"), system, images=images)
+        if images:
+            if not getattr(adapter, "IMAGE_TRANSPORT", None):
+                raise CliImageError(f"The {provider_id} CLI does not support screenshot/image input. "
+                                    "Choose an image-capable CLI route or use text/accessibility results.")
+            if spec.get("vision") is False:
+                raise CliImageError("The selected CLI model does not support image input")
+            images = normalize_images(images)
+    except CliImageError as exc:
+        raise CliRouteError(str(exc)) from exc
     raw_tools = payload.get("tools")
     tools = normalize_tools(raw_tools)
     tool_choice = payload.get("tool_choice")
@@ -349,6 +374,8 @@ def plan_turn(provider_id: str, upstream_model: str, payload: dict, spec: dict,
                 break
     if dynamic_tools:
         system = HOST_EXECUTION_NOTE + ("\n\n" + system if system else "")
+    if images:
+        system = (system + "\n\n" if system else "") + IMAGE_COORDINATE_NOTE
     request = {
         "model": upstream_model,
         "messages": messages,
@@ -359,6 +386,8 @@ def plan_turn(provider_id: str, upstream_model: str, payload: dict, spec: dict,
         "tools": tools,
         "tool_choice": tool_choice,
     }
+    if images:
+        request["images"] = images
     if dynamic_tools:
         # Keep typed tool calls/results for Codex's native history injection.
         # Flattening these into a new user transcript loses the tool loop.
@@ -374,6 +403,8 @@ def plan_turn(provider_id: str, upstream_model: str, payload: dict, spec: dict,
         "compatibility": {
             "cli_transport": getattr(adapter, "TRANSPORT", "unknown"),
             "system_prompt_transport": getattr(adapter, "SYSTEM_PROMPT_TRANSPORT", "prompt"),
+            "cli_image_transport": getattr(adapter, "IMAGE_TRANSPORT", None),
+            "cli_images": len(images),
             **({"cli_tools": len(tools),
                 "cli_tools_dropped": len(raw_tools) - len(tools)}
                if tools and isinstance(raw_tools, list) and len(raw_tools) != len(tools)

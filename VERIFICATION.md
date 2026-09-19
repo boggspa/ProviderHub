@@ -1,3 +1,64 @@
+**CLI screenshot forwarding — 19 September 2026**
+
+The bridge now preserves embedded screenshot images from Messages and Responses
+tool results. Codex receives native `input_image` content in call-correlated
+history; Claude receives a structured stdin message; Grok receives ACP image
+blocks in a private `.json` prompt file; Muse receives private image attachments.
+AntiGravity receives temporary image paths and a scoped `--add-dir` workspace;
+its native `view_file` reader decodes only those declared image copies.
+Text transports number images in transcript order and retain the originating
+tool-result id. PNG/JPEG screenshot dimensions are included for coordinate work.
+The bridge does not resize screenshots or put their base64 bytes on argv.
+
+| CLI route tested | Installed runtime | Visual evidence | Qualification |
+| --- | --- | --- | --- |
+| Codex `gpt-6-astra` | codex-cli 0.153.0 | Selected the purple triangle at (650, 300); after a real host browser click, read `K9P7` from the returned screenshot | Screenshot → click → screenshot verified |
+| Claude `sonnet` alias | Claude Code 2.1.276 | Selected (649, 290); read the verification code after the host click | Screenshot → click → screenshot verified |
+| Grok `grok-4.6` | Grok 1.0.34 | Selected (640, 250); read `K9P7` after the host click | Screenshot → click → screenshot verified; one earlier run stopped at the existing native-tool isolation check |
+| Muse `muse-spark-1.3` | Muse Code 1.3.0 (1.3.0-R3401.1) | Read `K9P7` from an image-only screenshot result | Image recognition verified; coordinate-control trial missed the target, and a later trial timed out. Do not claim a verified click loop for Muse |
+| AntiGravity `gemini-3.1-pro` | agy 1.2.7 | Native `view_file` read the image through a scoped temporary directory; selected the triangle at (650, 285) after coordinate-unit guidance | Screenshot → click → screenshot verified; read `K9P7` from the returned image |
+
+The browser check used a disposable local canvas with three coloured shapes.
+The model was given only the screenshot, host tool definitions, and the task;
+it did not receive DOM text, page source, target coordinates, or the verification
+code. Model-selected coordinates were executed through the actual Computer Use
+browser tool, and a second screenshot was returned to the model. This qualifies
+the tested browser task, not arbitrary applications, permissions, or models.
+
+The catalogue advertises image input for runtime-advertised Codex models and
+the specifically verified Claude, Grok, Muse, and Gemini identifiers above. Unknown
+models are not assumed to support vision. AntiGravity still rejects structured
+image blocks as documented in its [official headless input reference](https://www.antigravity.google/docs/cli/headless/#send-a-prompt). A filepath
+is a distinct route: plain paths and `@path` both invoked `view_file`, but reads
+were denied until the disposable directory was added explicitly with `--add-dir`.
+No global settings or approval-bypass flags were changed. The adapter accepts
+only `view_file` events for its declared image paths and reports other native
+actions as errors during image turns. The scoped files are removed on exit.
+Codex content shapes were checked against its installed experimental JSON schema
+and the [app-server protocol](https://learn.chatgpt.com/docs/app-server).
+Grok's `.json` prompt-file handling was checked against its
+[official implementation](https://github.com/xai-org/grok-build/blob/main/crates/codegen/xai-grok-pager/src/headless/cli.rs)
+and the installed runtime.
+
+Input limits are explicit: embedded PNG, JPEG, WebP, or GIF; at most 8 MiB per
+image, 20 images and 32 MiB total per request. Remote image URLs are not fetched.
+Invalid, oversized, and unsupported inputs return errors instead of being
+silently flattened. Private media files are removed on completion, error, or
+consumer cancellation. The old Codex `exec` fallback rejects image requests.
+
+Validation: 1,089 tests passed with `uv run --python 3.13 python -m unittest
+discover -s Source -p 'test_*.py'`; the new image suite covers byte preservation,
+Responses ingress, native tool-result identity, image transport framing,
+catalogue projection, size/format failures, and cancellation cleanup.
+`bash -n Source/build.sh` passed; the build list includes `cli_images.py`.
+
+GUI rollout requires rebuilding Provider Hub Preview, refreshing the enabled CLI
+provider catalogues, and relaunching the desktop harness so its model catalogue
+includes the new image capabilities. No notarized distribution was replaced in
+this source change.
+
+---
+
 **Provider Hub Preview 0.3.2 — verification record**
 
 Verified locally on 12 September 2026 on Apple Silicon macOS.

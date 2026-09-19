@@ -107,6 +107,7 @@ from typing import Any, Iterable, Iterator
 
 from cli_session import CliSessionError, StdioSession, minimal_env, resolve_binary
 from cli_tool_call import TRANSCRIPT_HEADER
+from cli_images import write_images
 
 try:  # Repo-native effort ladder; degrade to a local copy if unavailable.
     from effort_map import map_effort as _map_effort
@@ -131,6 +132,8 @@ BINARY_NAMES = ("muse",)
 # "prompt" => the CLI has no such flag and it is folded into the stdin/prompt
 # text. muse exec has no system-prompt flag, so the prompt is the only channel.
 SYSTEM_PROMPT_TRANSPORT = "prompt"
+IMAGE_TRANSPORT = "image_files"
+VERIFIED_IMAGE_MODELS = frozenset({"muse-spark-1.3"})
 
 # Real installs live outside the default PATH on this machine (~/.local/bin).
 _EXTRA_BIN_DIRS = ("~/.local/bin", "/opt/homebrew/bin", "/usr/local/bin")
@@ -918,6 +921,10 @@ def run_turn(request, *, spawner=None, timeout=300) -> Iterator[dict]:
         # stdin); stderr goes to a temp file too, not a pipe nobody drains.
         prompt_path = _write_prompt_file(prompt)
         argv += ["--prompt-file", prompt_path]
+        # Image switches come last; their bytes live only in the private
+        # workspace, which is removed on success, failure, and cancellation.
+        for image_path in write_images(request.get("images", []), workspace_path):
+            argv += ["--image", image_path]
 
         state.stderr_handle = tempfile.TemporaryFile(mode="w+", encoding="utf-8")
         session = StdioSession(

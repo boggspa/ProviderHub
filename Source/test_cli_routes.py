@@ -201,20 +201,22 @@ class CliRoutesTest(unittest.TestCase):
         self.assertEqual(plan["body"]["system"], "Be terse.\n\nidentity note")
 
     def test_plan_turn_flattens_tool_and_binary_blocks(self):
+        from test_cli_images import IMAGE
         payload = {"messages": [
             {"role": "assistant", "content": [{"type": "thinking", "thinking": "secret"},
                                               {"type": "tool_use", "name": "shell", "input": {}},
                                               {"type": "text", "text": "checking"}]},
             {"role": "user", "content": [{"type": "tool_result",
                                           "content": [{"type": "text", "text": "on main"}]},
-                                         {"type": "input_image"}]},
+                                         IMAGE]},
         ]}
         plan = plan_turn("claude", "sonnet", payload, {}, wanted_output=64)
         assistant, user = plan["body"]["messages"]
         # Prior reasoning is provider state, not transcript text.
         self.assertEqual(assistant["content"], "[tool call: shell (call) with {}]\nchecking")
         self.assertEqual(user["content"],
-                         "[tool result for call]\non main\n[image omitted: CLI routes are text-only]")
+                         "[tool result for call]\non main\n[Image 1 attached; original screenshot pixels; width 1, height 1 pixels]")
+        self.assertEqual(plan["body"]["images"], [IMAGE])
 
     def test_plan_turn_renders_tool_manifest(self):
         payload = {"messages": [{"role": "user", "content": "hi"}],

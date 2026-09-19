@@ -45,11 +45,13 @@ import json
 import shutil
 import subprocess
 import tempfile
+from pathlib import Path
 from typing import Any, Iterator
 
 from cli_session import CliSessionError, StdioSession, minimal_env, resolve_binary
 from cli_tool_call import (MAX_ENVELOPE_BYTES, TRANSCRIPT_HEADER, ToolCallError,
                            normalize_tools, validate_host_call)
+from cli_images import prompt_content
 
 try:
     from effort_map import map_effort as _map_effort
@@ -74,6 +76,8 @@ BINARY_NAMES = ("grok",)
 # "flag" => build_argv emits it via --system-prompt-override
 # "prompt" => the CLI has no such flag and it is folded into the stdin prompt.
 SYSTEM_PROMPT_TRANSPORT = "flag"
+IMAGE_TRANSPORT = "acp_json_file"
+VERIFIED_IMAGE_MODELS = frozenset({"grok-4.6"})
 
 # Real installs live in ~/.grok/bin on this machine.
 _EXTRA_BIN_DIRS = ("~/.grok/bin", "~/.local/bin", "/opt/homebrew/bin", "/usr/local/bin")
@@ -705,7 +709,7 @@ def run_turn(request, *, spawner=None, timeout=300) -> Iterator[dict]:
         # Render the prompt
         prompt = render_prompt(messages)
         prompt_bytes = prompt.encode("utf-8")
-        if len(prompt_bytes) > _MAX_PROMPT_ARGV_BYTES:
+        if not request.get("images") and len(prompt_bytes) > _MAX_PROMPT_ARGV_BYTES:
             raise GrokCliAgentError(
                 f"prompt is too large for the grok CLI positional argument "
                 f"({len(prompt_bytes)} bytes; maximum {_MAX_PROMPT_ARGV_BYTES} bytes)"
@@ -750,6 +754,15 @@ def run_turn(request, *, spawner=None, timeout=300) -> Iterator[dict]:
         # stderr goes to a temp file, not a pipe
         state.stderr_handle = tempfile.TemporaryFile(mode="w+", encoding="utf-8")
         workspace_path = tempfile.mkdtemp(prefix="grok_ws_")
+        if request.get("images"):
+            # Grok parses .json prompt files as ACP blocks. Keep screenshot
+            # bytes out of argv and avoid the OS command-line size limit.
+            prompt_path = Path(workspace_path) / "prompt.json"
+            with prompt_path.open("x", encoding="utf-8") as handle:
+                prompt_path.chmod(0o600)
+                json.dump(prompt_content(prompt, request["images"], acp=True), handle, ensure_ascii=False)
+            index = argv.index("--single")
+            argv[index:index + 2] = ["--prompt-file", str(prompt_path)]
         session = StdioSession(
             argv,
             env=minimal_env(),
