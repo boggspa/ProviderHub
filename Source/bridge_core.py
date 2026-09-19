@@ -21,6 +21,7 @@ import uuid
 
 from model_names import friendly_model_name, label_catalog
 from catalogue import build_catalogue, read_observations, route_specs
+from cli_routes import cli_credential_mode, discover_via_cli
 from hub_config import (CLAUDE_TIER_MODELS, SLOTS, claude_catalogue_rows, claude_routes, connection_signature,
                         defaults as hub_defaults, normalize as normalize_hub_settings,
                         project_catalogue, provider_presentations, qualify, split_route)
@@ -606,10 +607,15 @@ def discover_provider(settings, provider_id, root=None):
         if PROVIDERS[provider_id].get("capabilities", {}).get("model_discovery") != "documentation":
             raise
         key, source = "", "Public provider documentation; credential not configured"
-    try:
-        inventory = discover(provider_id, settings["providers"][provider_id], key)
-    except ValueError as exc:
-        raise BridgeError(str(exc).replace(key, "[redacted]") if key else str(exc)) from exc
+    if cli_credential_mode(settings, provider_id):
+        # The CLI owns this login. Its own catalogue report is the inventory:
+        # no HTTP endpoint is contacted and no key is resolved for this mode.
+        inventory = discover_via_cli(provider_id)
+    else:
+        try:
+            inventory = discover(provider_id, settings["providers"][provider_id], key)
+        except ValueError as exc:
+            raise BridgeError(str(exc).replace(key, "[redacted]") if key else str(exc)) from exc
     inventory["connection_signature"] = connection_signature(provider_id, settings["providers"][provider_id])
     inventory["fetched_at"] = time_now_iso()
     atomic_json(root / "catalogues" / (provider_id + ".json"), inventory)

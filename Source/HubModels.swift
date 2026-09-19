@@ -48,10 +48,14 @@ struct ProviderDefinition: Decodable, Identifiable {
     var regions: [String: String]
     var credential_account: String?
     var credential_env: String?
+    /// Credential sources this provider offers, picker order, from Python's
+    /// hub_config.credential_modes. Optional so an older worker's payload
+    /// still decodes; the picker falls back to its hardcoded set then.
+    var credential_modes: [String]?
     var setup_url: String
     var presentation: ProviderPresentation
     enum CodingKeys: String, CodingKey {
-        case id, name, regions, credential_account, credential_env, setup_url, presentation
+        case id, name, regions, credential_account, credential_env, credential_modes, setup_url, presentation
         case protocolName = "protocol"
     }
 }

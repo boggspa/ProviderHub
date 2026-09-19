@@ -1,0 +1,375 @@
+"""Route-2 CLI-backed providers: catalogue normalization and turn planning.
+
+"Route 2" means the installed coding-agent CLI owns and refreshes its own
+login: the hub spawns the vendor's own binary and never reads, copies, or
+refreshes a credential file. This module is the glue between the per-provider
+CLI adapters (claude_cli_agent, codex_cli_agent, muse_cli_agent,
+grok_cli_agent, agy_cli_agent) and the hub's catalogue and gateway machinery.
+
+Two jobs:
+
+* Discovery. An adapter's ``catalogue()`` speaks its own dialect (codex's
+  app-server camelCase, claude/agy's ``reasoning_levels`` dicts, grok's bare
+  seed ids). :func:`discover_via_cli` normalizes those into the hub catalogue
+  row shape that ``hub_config.project_catalogue`` consumes, and folds in the
+  CLI's own read-only auth report, so a signed-out binary is visible at
+  refresh time instead of failing the first turn.
+
+* Turns. :func:`plan_turn` translates a planned Anthropic Messages payload
+  into an adapter ``run_turn`` request, :func:`run_turn` starts the generator,
+  and :func:`relay_cli_turn` translates the yielded events into Anthropic
+  Messages wire events (one code path for SSE and buffered JSON). No adapter
+  event executes anything: the adapters were built with every tool surface
+  stripped, so the desktop harness alone owns the tool loop.
+"""
+from __future__ import annotations
+
+import importlib
+import uuid
+
+from effort_map import EFFORT_ORDER
+from hub_config import MODEL_ID
+
+#: provider id -> (adapter module name, binary label). Every adapter exposes
+#: the same surface: PROVIDER_ID, TRANSPORT, SYSTEM_PROMPT_TRANSPORT,
+#: discover, auth_state, catalogue, build_argv, run_turn.
+ADAPTERS = {
+    "codex": ("codex_cli_agent", "codex"),
+    "claude": ("claude_cli_agent", "claude"),
+    "muse": ("muse_cli_agent", "muse"),
+    "grok": ("grok_cli_agent", "grok"),
+    "antigravity": ("agy_cli_agent", "agy"),
+}
+
+#: Effort ladders for providers whose KNOWN_MODELS are bare ids, cited from
+#: live evidence rather than claimed: `grok --help` documents
+#: --reasoning-effort low/medium/high/xhigh and a streaming turn at each rung
+#: completed in verification (grok 1.0.34).
+_SEED_EFFORTS = {
+    "grok": ["low", "medium", "high", "xhigh"],
+}
+
+
+class CliRouteError(ValueError):
+    """A CLI-backed route could not be planned or discovered.
+
+    Subclasses ValueError so the gateway's planning-rejection handling treats
+    it like any other not-sent request.
+    """
+
+
+_cache = {}
+
+
+def adapter_for(provider_id: str):
+    """The imported adapter module for a CLI-backed provider, cached."""
+    if provider_id in _cache:
+        return _cache[provider_id]
+    entry = ADAPTERS.get(provider_id)
+    if entry is None:
+        raise CliRouteError(f"Provider '{provider_id}' has no CLI-backed route.")
+    module_name, binary = entry
+    try:
+        module = importlib.import_module(module_name)
+    except ImportError as exc:
+        raise CliRouteError(
+            f"The {binary} CLI route is unavailable in this install ({exc}); "
+            "rebuild the app bundle or switch this provider to API-key credentials."
+        ) from exc
+    _cache[provider_id] = module
+    return module
+
+
+def cli_credential_mode(settings: dict, provider_id: str) -> bool:
+    """Whether this provider is switched to its installed-CLI credential source."""
+    if provider_id not in ADAPTERS:
+        return False
+    connection = (settings.get("providers") or {}).get(provider_id) or {}
+    return connection.get("credential_mode") == "cli"
+
+
+# ---------------------------------------------------------------------------
+# Discovery
+# ---------------------------------------------------------------------------
+
+def _effort_axis(levels) -> list[str]:
+    """Keep only canonical desktop ladder ranks, in ladder order."""
+    found = {str(level) for level in (levels or [])}
+    return [rank for rank in EFFORT_ORDER if rank in found]
+
+
+def _hub_row(provider_id: str, row):
+    """One adapter-dialect catalogue row, normalized for project_catalogue.
+
+    Tolerates the dialects the adapters emit - codex's camelCase model/list
+    rows, claude/agy's reasoning_levels dicts, agy's already hub-shaped
+    family cards (richer fields pass through) - and returns None for anything
+    without a routable id.
+
+    ``tools`` is True on purpose: the route never executes a tool (the CLI
+    runs with its tool surface stripped), but the desktop harness owns the
+    tool loop, and a card advertising tools: False would make the Responses
+    planner reject the harness's own tool catalogue outright. The route
+    answers with text and thinking only; tool cycles simply never begin.
+    """
+    if not isinstance(row, dict):
+        return None
+    identifier = row.get("id") or row.get("model")
+    if not isinstance(identifier, str) or not MODEL_ID.fullmatch(identifier):
+        return None
+    if row.get("hidden") is True:
+        return None
+    levels = row.get("effort_modes")
+    if levels is None:
+        levels = row.get("reasoning_levels")
+    if levels is None:
+        levels = [entry.get("reasoningEffort")
+                  for entry in row.get("supportedReasoningEfforts") or []
+                  if isinstance(entry, dict)]
+    effort = _effort_axis(levels)
+    reasoning = row.get("reasoning")
+    if not isinstance(reasoning, bool):
+        reasoning = bool(effort)
+    display = row.get("display_name") or row.get("displayName")
+    if not isinstance(display, str) or not display.strip():
+        display = identifier
+    vision = row.get("vision")
+    if not isinstance(vision, bool):
+        modalities = row.get("inputModalities")
+        vision = ("image" in modalities) if isinstance(modalities, list) else None
+    result = {
+        "id": identifier,
+        "canonical_id": row.get("canonical_id") or identifier,
+        "display_name": display,
+        "aliases": [identifier],
+        "context": row.get("context") if type(row.get("context")) is int else None,
+        "max_output": row.get("max_output") if type(row.get("max_output")) is int else None,
+        "tools": True,
+        "vision": vision,
+        "reasoning": reasoning,
+        "effort_modes": effort,
+        "fast_mode": False,
+        "inference_status": "advertised",
+        "source": "cli",
+        "evidence": row.get("evidence") or f"the installed {ADAPTERS[provider_id][1]} CLI",
+    }
+    default_effort = row.get("default_effort") or row.get("defaultReasoningEffort")
+    if isinstance(default_effort, str) and default_effort in effort:
+        result["default_effort"] = default_effort
+    provider_modes = row.get("provider_effort_modes")
+    if isinstance(provider_modes, list) and provider_modes:
+        result["provider_effort_modes"] = [str(mode) for mode in provider_modes]
+    description = row.get("description")
+    if isinstance(description, str) and description.strip():
+        result["description"] = description
+    return result
+
+
+def _seed_rows(provider_id: str, known_models) -> list[dict]:
+    """Rows from an adapter's KNOWN_MODELS when no live discovery exists.
+
+    Seeds are explicitly unverified hints (claude) or live-verified ids whose
+    exact limits the CLI does not report (grok); either way context stays
+    provider-managed and the row says where it came from.
+    """
+    models = []
+    for entry in known_models or ():
+        row = {"id": entry} if isinstance(entry, str) else entry
+        normalized = _hub_row(provider_id, row)
+        if normalized is None:
+            continue
+        if not normalized["effort_modes"] and provider_id in _SEED_EFFORTS:
+            normalized["effort_modes"] = list(_SEED_EFFORTS[provider_id])
+            normalized["reasoning"] = True
+        models.append(normalized)
+    return models
+
+
+def discover_via_cli(provider_id: str, *, timeout: int = 45) -> dict:
+    """A CLI-backed provider's model inventory, in the cached-catalogue shape.
+
+    Never raises for a wedged or signed-out CLI: the adapters already degrade
+    to notes, and this folds their auth report into warnings so the settings
+    pane can say why a row is empty instead of failing the whole refresh.
+    """
+    adapter = adapter_for(provider_id)
+    warnings = []
+    auth = {}
+    try:
+        auth = adapter.auth_state() or {}
+    except Exception as exc:  # an auth probe must never take discovery down
+        auth = {"state": "unknown", "detail": f"auth probe failed: {exc}"}
+    state = auth.get("state")
+    if state == "missing":
+        warnings.append(f"Not signed in: {auth.get('detail', 'sign in through the CLI itself')}.")
+    elif state in {"unknown", "unsupported"} and auth.get("detail"):
+        warnings.append(f"Auth state {state}: {auth['detail']}")
+    rows, notes = [], []
+    try:
+        rows, notes = adapter.catalogue(timeout=timeout)
+    except Exception as exc:
+        notes = [f"catalogue probe failed: {exc}"]
+    warnings.extend(str(note) for note in (notes or []) if note)
+    models = [model for model in (_hub_row(provider_id, row) for row in rows or []) if model]
+    if not models:
+        models = _seed_rows(provider_id, getattr(adapter, "KNOWN_MODELS", ()))
+        if models:
+            warnings.append(
+                "No live model list exists for this CLI; routes are seeded from "
+                "verified or documented ids and remain provider-managed."
+            )
+    inventory = {
+        "provider_id": provider_id,
+        "models": models,
+        "source": "cli",
+        "evidence": f"the installed {ADAPTERS[provider_id][1]} CLI's own reports",
+        "warnings": warnings,
+    }
+    if state:
+        inventory["auth_state"] = state
+    return inventory
+
+
+# ---------------------------------------------------------------------------
+# Turns
+# ---------------------------------------------------------------------------
+
+def plan_turn(provider_id: str, upstream_model: str, payload: dict, spec: dict,
+              *, wanted_output) -> dict:
+    """Translate a planned Messages payload into an adapter run_turn request.
+
+    The gateway's universal pre-processing (identity note, compaction, window
+    enforcement) has already run on ``payload``; what remains is dialect: the
+    effort axis arrives as output_config.effort, the system prompt may be
+    None, and max_tokens is already clamped to the model's output cap.
+    """
+    adapter = adapter_for(provider_id)
+    effort = (payload.get("output_config") or {}).get("effort")
+    system = payload.get("system")
+    if isinstance(system, list):
+        # Anthropic's block spelling, which is how the gateway's identity note
+        # arrives. The adapters take one plain string.
+        system = "\n\n".join(
+            str(block.get("text") or "") for block in system
+            if isinstance(block, dict) and block.get("type") == "text").strip() or None
+    if system is not None and not isinstance(system, str):
+        system = None
+    request = {
+        "model": upstream_model,
+        "messages": payload.get("messages") or [],
+        "system": system,
+        "effort": effort if isinstance(effort, str) else None,
+        "max_tokens": wanted_output if type(wanted_output) is int and wanted_output > 0 else None,
+        "stream": bool(payload.get("stream")),
+    }
+    return {
+        "cli": True,
+        "protocol": "cli",
+        "url": None,
+        "headers": {},
+        "body": request,
+        "compatibility": {
+            "cli_transport": getattr(adapter, "TRANSPORT", "unknown"),
+            "system_prompt_transport": getattr(adapter, "SYSTEM_PROMPT_TRANSPORT", "prompt"),
+        },
+    }
+
+
+def run_turn(provider_id: str, request: dict, *, timeout: int = 600):
+    """Start the adapter's turn generator (text_delta/thinking_delta/stop)."""
+    adapter = adapter_for(provider_id)
+    return adapter.run_turn(request, timeout=timeout)
+
+
+# ---------------------------------------------------------------------------
+# Wire translation
+# ---------------------------------------------------------------------------
+
+_STOP_REASONS = {"end_turn", "max_tokens", "stop_sequence", "tool_use"}
+
+
+def _stop_reason(value):
+    return value if value in _STOP_REASONS else "end_turn"
+
+
+def relay_cli_turn(events, emit, *, model, input_tokens=0) -> dict:
+    """Translate adapter turn events into Anthropic Messages wire events.
+
+    ``emit`` receives ready wire dicts (the gateway writes them as SSE chunks
+    for a streaming client or collects them for a buffered reply). Token
+    counts are the gateway's own request estimate on the input side and an
+    honest zero on the output side: none of these CLIs report usage, and an
+    invented number would poison the calibration loop.
+
+    Returns a summary: ``error`` (None on success), ``started`` (whether any
+    content reached the wire), ``stop_reason`` and ``usage``. Exactly one
+    terminal envelope (message_delta + message_stop) is emitted on success;
+    on error none is, so the caller can map the failure to its transport's
+    own error shape without a half-open message.
+    """
+    message_id = "msg_" + uuid.uuid4().hex[:24]
+    started = False
+    open_block = None
+    index = 0
+    stop_reason = "end_turn"
+    error = None
+
+    def start_message():
+        nonlocal started
+        emit({"type": "message_start", "message": {
+            "id": message_id, "type": "message", "role": "assistant",
+            "model": model, "content": [], "stop_reason": None,
+            "stop_sequence": None,
+            "usage": {"input_tokens": int(input_tokens or 0), "output_tokens": 0}}})
+        started = True
+
+    def open(kind):
+        nonlocal open_block, index
+        if open_block == kind:
+            return
+        if open_block is not None:
+            emit({"type": "content_block_stop", "index": index})
+            index += 1
+        emit({"type": "content_block_start", "index": index,
+              "content_block": ({"type": "thinking", "thinking": ""} if kind == "thinking"
+                                else {"type": "text", "text": ""})})
+        open_block = kind
+
+    for event in events:
+        kind = event.get("type") if isinstance(event, dict) else None
+        if kind == "error":
+            error = str(event.get("message") or "The CLI turn failed.")
+            break
+        if kind == "message_stop":
+            stop_reason = _stop_reason(event.get("stop_reason"))
+            break
+        if kind == "thinking_delta":
+            text = event.get("text")
+            if not text:
+                continue
+            if not started:
+                start_message()
+            open("thinking")
+            emit({"type": "content_block_delta", "index": index,
+                  "delta": {"type": "thinking_delta", "thinking": text}})
+        elif kind == "text_delta":
+            text = event.get("text")
+            if not text:
+                continue
+            if not started:
+                start_message()
+            open("text")
+            emit({"type": "content_block_delta", "index": index,
+                  "delta": {"type": "text_delta", "text": text}})
+    usage = {"input_tokens": int(input_tokens or 0), "output_tokens": 0}
+    if error is not None:
+        return {"error": error, "started": started, "stop_reason": None, "usage": usage}
+    if not started:
+        start_message()
+    if open_block is not None:
+        emit({"type": "content_block_stop", "index": index})
+    emit({"type": "message_delta",
+          "delta": {"stop_reason": stop_reason, "stop_sequence": None},
+          "usage": {"output_tokens": 0}})
+    emit({"type": "message_stop"})
+    return {"error": None, "started": True, "stop_reason": stop_reason, "usage": usage}

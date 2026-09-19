@@ -80,10 +80,16 @@ struct ProviderPage: View {
                         }.help("Ollama keeps a model loaded for five minutes after a turn; the hub sets this lease on the daemon after each turn it runs.")
                     } else {
                         Picker("Credential source", selection: connectionField(\.credential_mode)) {
-                            if provider.id == "mistral" { Text("Vibe saved API key").tag("vibe") }
-                            Text("macOS Keychain").tag("keychain")
-                            Text("Environment").tag("environment")
-                            if cliAuthProviders.contains(provider.id) { Text("Installed CLI").tag("cli") }
+                            // Python's hub_config.credential_modes is
+                            // authoritative; the hardcoded fallback covers a
+                            // worker too old to send it.
+                            let modes = provider.credential_modes
+                                ?? ((provider.id == "mistral" ? ["vibe"] : []) + ["keychain", "environment"]
+                                    + (cliAuthProviders.contains(provider.id) ? ["cli"] : []))
+                            if modes.contains("vibe") { Text("Vibe saved API key").tag("vibe") }
+                            if modes.contains("keychain") { Text("macOS Keychain").tag("keychain") }
+                            if modes.contains("environment") { Text("Environment").tag("environment") }
+                            if modes.contains("cli") { Text("Installed CLI").tag("cli") }
                         }.pickerStyle(.segmented)
                         if connection.credential_mode == "keychain" {
                             HStack {

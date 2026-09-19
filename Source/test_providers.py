@@ -27,7 +27,8 @@ class RegistryTests(unittest.TestCase):
     def test_registry_is_plain_json_data_with_expected_contract(self):
         self.assertEqual(
             set(PROVIDERS),
-            {"mistral", "kimi", "mimo", "ollama", "deepseek", "cerebras", "muse", "grok", "qwen-token-plan", "openrouter", "gemini", "devin"},
+            {"mistral", "kimi", "mimo", "ollama", "deepseek", "cerebras", "muse", "grok", "qwen-token-plan", "openrouter", "gemini", "devin",
+             "claude", "codex", "antigravity"},
         )
         json.loads(json.dumps(PROVIDERS))
         for provider_id, descriptor in PROVIDERS.items():
@@ -39,7 +40,9 @@ class RegistryTests(unittest.TestCase):
                 self.assertIn(key, descriptor)
             self.assertIsInstance(descriptor["regions"], dict)
             self.assertIn(descriptor["default_region"], descriptor["regions"])
-            if provider_id == "ollama":
+            if provider_id in {"ollama", "antigravity"}:
+                # No API key exists for these routes: the daemon / the CLI
+                # owns the login by design.
                 self.assertIsNone(descriptor["credential_env"])
             else:
                 self.assertIsInstance(descriptor["credential_env"], str)

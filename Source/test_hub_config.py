@@ -347,15 +347,10 @@ class SettingsMigrationTests(unittest.TestCase):
                           SLOTS, "mistral-test")
 
     def test_cli_auth_is_only_offered_for_registered_providers(self):
-        for provider_id in ("muse", "grok"):
+        for provider_id in ("muse", "grok", "codex", "claude", "antigravity"):
             with self.subTest(provider=provider_id):
                 self.assertIn(provider_id, CLI_AUTH_PROVIDERS)
                 self.assertTrue(cli_auth_available(provider_id))
-        # Named in CLI_AUTH_PROVIDERS but not yet a registered provider: the
-        # gate must not offer a mode nothing can serve.
-        for provider_id in ("codex", "claude", "antigravity"):
-            with self.subTest(provider=provider_id):
-                self.assertFalse(cli_auth_available(provider_id))
         self.assertFalse(cli_auth_available("mistral"))
         self.assertFalse(cli_auth_available("not-a-provider"))
 

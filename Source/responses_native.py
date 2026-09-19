@@ -647,10 +647,13 @@ def prepare_native(runtime, payload):
     scope = hmac.new(runtime.replay_key.encode(), json.dumps([
         route, connection_signature(provider_id, runtime.settings["providers"][provider_id]), key,
     ]).encode(), hashlib.sha256).hexdigest()
-    headers = _auth_headers(provider_id, key, content_type=True)
+    # A CLI-backed provider holds no key and serves no HTTP endpoint: its turn
+    # runs through the local Messages bridge, whatever the native table says.
+    cli_mode = (runtime.settings["providers"][provider_id] or {}).get("credential_mode") == "cli"
+    headers = {} if cli_mode else _auth_headers(provider_id, key, content_type=True)
     if provider_id == "openrouter":
         headers.update(openrouter_app_headers())
-    if provider_id not in NATIVE_PROVIDERS:
+    if cli_mode or provider_id not in NATIVE_PROVIDERS:
         # Bound stored thinking traces for verbose reasoning providers;
         # descriptors without the field keep full fidelity.
         envelope = ReasoningEnvelope(runtime.root, PROVIDERS[provider_id].get("reasoning_store_cap") or 0)

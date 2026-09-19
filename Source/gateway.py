@@ -23,6 +23,7 @@ import time
 import urllib.parse
 import urllib.request
 
+import cli_routes
 from bridge_core import (BridgeError, ClaudeProfile, atomic_json, attach_model_specs, bootstrap_metadata, cached_catalogue, credentials, discover_provider, gateway_token,
                          inspect_state, load_settings, model_labels, private_directory, private_token, read_json, ssl_context, state_root, validate_settings)
 from catalogue_lifecycle import (CataloguePreparationError, catalogue_fingerprint,
@@ -225,7 +226,13 @@ class Runtime:
                 # The provider builder repeats the window check on its own
                 # byte estimate; hand it the same learned factor.
                 request_options["estimate_factor"] = calibration_factor
-            plan = (self.request_planner or prepare_request)(provider_id, self.settings["providers"][provider_id], key, payload, upstream_model, spec, **request_options)
+            if cli_routes.cli_credential_mode(self.settings, provider_id):
+                # The CLI owns this login: skip HTTP request building entirely.
+                # The adapter turns the payload into a prompt-in/text-out turn.
+                plan = cli_routes.plan_turn(provider_id, upstream_model, payload, spec,
+                                            wanted_output=wanted_output)
+            else:
+                plan = (self.request_planner or prepare_request)(provider_id, self.settings["providers"][provider_id], key, payload, upstream_model, spec, **request_options)
         except (ProviderError, CerebrasReplayError) as exc:
             raise BridgeError(str(exc).replace(key, "[redacted]") if key else str(exc)) from exc
         plan.update(route=route, provider_id=provider_id, provider_name=PROVIDERS[provider_id]["name"],
@@ -255,7 +262,7 @@ class Runtime:
                     "requested": wanted_output, "allowed": allowed_output}
         # The only override is an explicit in-process test-harness argument,
         # never a client request field or persisted provider setting.
-        if self.upstream_url is not None:
+        if self.upstream_url is not None and not plan.get("cli"):
             endpoint = "/v1/messages" if plan["protocol"] == "anthropic" else "/chat/completions"
             plan["url"] = self.upstream_url.rstrip("/") + endpoint
         return plan
@@ -750,6 +757,14 @@ class Handler(BaseHTTPRequestHandler):
 
             monitor = threading.Thread(target=cancel_monitor, daemon=True)
             monitor.start()
+            if plan.get("cli"):
+                # No upstream connection exists for a CLI route: the adapter's
+                # subprocess is the transport, relayed by _serve_cli_turn. The
+                # shared finally still runs (worker count, semaphore, lease).
+                self._serve_cli_turn(plan, payload, disconnected, closed, write_lock, usage)
+                self.runtime.calibration.observe(plan["route"], plan.get("estimate_raw"), reported_input_tokens(usage))
+                self.runtime.record("completed", plan["route"], 200, usage)
+                return
             encoded = json.dumps(upstream, ensure_ascii=False).encode()
             headers = {**plan["headers"], "Accept": "text/event-stream" if upstream.get("stream") else "application/json"}
             attempts = 0
@@ -976,6 +991,130 @@ class Handler(BaseHTTPRequestHandler):
             self.runtime.semaphore.release()
             self.close_connection = True
             self.runtime.release_local_model(plan)
+
+    def _serve_cli_turn(self, plan, payload, disconnected, closed, write_lock, usage):
+        """Serve one CLI-backed turn: stream Anthropic SSE or return one JSON message.
+
+        Never raises for the adapter's own failure modes: run_turn degrades
+        them to error events, translated here into the same client-visible
+        shapes the HTTP upstream path would have produced. A client disconnect
+        still propagates as BrokenPipeError so the turn records as cancelled,
+        and the generator is always closed, which is what kills the child CLI.
+        """
+        route = plan["route"]
+        request = plan["body"]
+        stream = bool(request.get("stream"))
+        try:
+            events = cli_routes.run_turn(plan["provider_id"], request)
+        except Exception as exc:
+            self.runtime.record("error", route, 502)
+            self.error(502, f"{plan['provider_name']} CLI route could not start: {exc}")
+            return
+
+        collected = []
+        streaming = False
+
+        def write_chunk(data):
+            if disconnected.is_set():
+                raise BrokenPipeError()
+            with write_lock:
+                self.wfile.write(f"{len(data):x}\r\n".encode() + data + b"\r\n")
+                self.wfile.flush()
+
+        def emit(event):
+            if streaming:
+                write_chunk(("event: " + event["type"] + "\ndata: " + json.dumps(event, ensure_ascii=False) + "\n\n").encode())
+            else:
+                collected.append(event)
+
+        def begin_stream():
+            nonlocal streaming
+            if streaming or not stream:
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Transfer-Encoding", "chunked")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            streaming = True
+
+            def ping_loop():
+                while not closed.wait(10):
+                    try:
+                        emit({"type": "ping"})
+                    except (OSError, ValueError):
+                        disconnected.set()
+                        return
+
+            threading.Thread(target=ping_loop, daemon=True).start()
+
+        def finish_stream():
+            closed.set()
+            with write_lock:
+                self.wfile.write(b"0\r\n\r\n")
+                self.wfile.flush()
+            self.close_connection = True
+
+        try:
+            if stream:
+                # The first content event commits the reply to SSE; an error
+                # that arrives before any content is still a clean HTTP error,
+                # matching what an upstream failure would have produced.
+                def committing_emit(event):
+                    begin_stream()
+                    emit(event)
+                result = cli_routes.relay_cli_turn(events, committing_emit, model=payload["model"],
+                                                   input_tokens=plan.get("estimate_raw") or 0)
+            else:
+                result = cli_routes.relay_cli_turn(events, emit, model=payload["model"],
+                                                   input_tokens=plan.get("estimate_raw") or 0)
+        except (BrokenPipeError, ConnectionResetError):
+            raise
+        except Exception as exc:
+            result = {"error": str(exc), "started": streaming, "stop_reason": None,
+                    "usage": {"input_tokens": 0, "output_tokens": 0}}
+        finally:
+            close_events = getattr(events, "close", None)
+            if callable(close_events):
+                try:
+                    close_events()
+                except Exception:
+                    pass
+        usage.update(result.get("usage") or {})
+        if result.get("error"):
+            message = f"{plan['provider_name']} CLI route failed: {result['error']}"
+            self.runtime.record("error", route, 502)
+            if streaming:
+                try:
+                    emit({"type": "error", "error": {"type": "api_error", "message": message}})
+                    finish_stream()
+                except OSError:
+                    pass
+            else:
+                self.error(502, message)
+            return
+        if stream:
+            finish_stream()
+            return
+        thinking = "".join(
+            event["delta"]["thinking"] for event in collected
+            if event.get("type") == "content_block_delta" and event.get("delta", {}).get("type") == "thinking_delta")
+        text = "".join(
+            event["delta"]["text"] for event in collected
+            if event.get("type") == "content_block_delta" and event.get("delta", {}).get("type") == "text_delta")
+        content = ([{"type": "thinking", "thinking": thinking}] if thinking else []) + [{"type": "text", "text": text}]
+        message_start = next((event["message"] for event in collected if event.get("type") == "message_start"), {})
+        self.json_response(200, {
+            "id": message_start.get("id", "msg_cli"),
+            "type": "message",
+            "role": "assistant",
+            "model": payload["model"],
+            "content": content,
+            "stop_reason": result.get("stop_reason") or "end_turn",
+            "stop_sequence": None,
+            "usage": result.get("usage") or {"input_tokens": 0, "output_tokens": 0},
+        })
 
 
 class Server(ThreadingHTTPServer):

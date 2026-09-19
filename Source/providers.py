@@ -201,6 +201,74 @@ PROVIDERS = {
             "reasoning_history": "not_required",
         },
     },
+    # Ordinary Anthropic API access. The Claude Code CLI login belongs to the
+    # separate "cli" credential mode and is never read here.
+    "claude": {
+        "id": "claude",
+        "name": "Claude (Anthropic API)",
+        "protocol": "anthropic",
+        "default_base_url": "https://api.anthropic.com",
+        "default_region": "global",
+        "regions": {"global": "https://api.anthropic.com"},
+        "auth_header": {"name": "x-api-key", "prefix": ""},
+        "credential_account": "ANTHROPIC_API_KEY",
+        "credential_env": "ANTHROPIC_API_KEY",
+        "setup_url": "https://console.anthropic.com/settings/keys",
+        "capabilities": {
+            "streaming": True,
+            "tools": True,
+            "thinking": True,
+            "vision": True,
+            "model_discovery": "api",
+            "reasoning_history": "native",
+        },
+    },
+    # Ordinary OpenAI API access. The ChatGPT subscription login the Codex CLI
+    # holds belongs to the separate "cli" credential mode and is never read here.
+    "codex": {
+        "id": "codex",
+        "name": "Codex (OpenAI API)",
+        "protocol": "chat_completions",
+        "default_base_url": "https://api.openai.com/v1",
+        "default_region": "global",
+        "regions": {"global": "https://api.openai.com/v1"},
+        "auth_header": {"name": "Authorization", "prefix": "Bearer "},
+        "credential_account": "OPENAI_API_KEY",
+        "credential_env": "OPENAI_API_KEY",
+        "setup_url": "https://platform.openai.com/api-keys",
+        "capabilities": {
+            "streaming": True,
+            "tools": True,
+            "thinking": True,
+            "vision": "model_dependent",
+            "model_discovery": "api",
+            "reasoning_history": "not_required",
+        },
+    },
+    # AntiGravity has no hosted model API of its own: the installed `agy`
+    # binary fronting its own login is the whole transport. The descriptor
+    # exists to carry that CLI credential mode; routing fields are inert
+    # placeholders, and validate_connection special-cases the id.
+    "antigravity": {
+        "id": "antigravity",
+        "name": "AntiGravity",
+        "protocol": "cli",
+        "default_base_url": "",
+        "default_region": "local",
+        "regions": {"local": ""},
+        "auth_header": {"name": "", "prefix": ""},
+        "credential_account": None,
+        "credential_env": None,
+        "setup_url": "https://antigravity.google/",
+        "capabilities": {
+            "streaming": True,
+            "tools": False,
+            "thinking": True,
+            "vision": False,
+            "model_discovery": "cli",
+            "reasoning_history": "not_applicable",
+        },
+    },
 }
 
 
@@ -225,6 +293,8 @@ _OFFICIAL_PATHS = {
     "cerebras": {"", "/v1", "/v1/models", "/v1/chat/completions"},
     "muse": {"", "/v1", "/v1/models", "/v1/messages"},
     "grok": {"", "/v1", "/v1/models", "/v1/language-models", "/v1/chat/completions"},
+    "claude": {"", "/v1", "/v1/models", "/v1/messages"},
+    "codex": {"", "/v1", "/v1/models", "/v1/chat/completions", "/v1/responses"},
     "qwen-token-plan": QWEN_PATHS,
     "openrouter": OPENROUTER_PATHS,
     "gemini": GEMINI_PATHS,
@@ -580,6 +650,12 @@ def validate_connection(provider_id: str, connection: dict | None) -> dict:
     if any(str(key).lower() in _LOCAL_CREDENTIAL_FIELDS for key in connection):
         raise ProviderError("Provider credentials cannot be stored in connection settings.")
 
+    if provider_id == "antigravity":
+        # CLI-only provider: there is no hosted endpoint to validate. The
+        # routing fields exist so settings round-trip and the connection
+        # signature stays stable; the installed `agy` binary is the transport.
+        return {"region": "local", "base_url": ""}
+
     requested_region = connection.get("region")
     if requested_region is not None and not isinstance(requested_region, str):
         raise ProviderError("Provider region must be a string.")
@@ -785,6 +861,10 @@ def _discovery_plan(provider_id: str, connection: dict, api_key: str | None) -> 
         url = base + "/v1/models"
     elif provider_id == "grok":
         url = base + "/language-models"
+    elif provider_id == "claude":
+        url = base + "/v1/models"
+    elif provider_id == "codex":
+        url = base + "/models"
     elif provider_id == "deepseek":
         url = "https://api.deepseek.com/models"
     elif provider_id == "ollama":
@@ -1283,9 +1363,36 @@ def _models_from_api(provider_id: str, raw: dict, evidence: str, *, enriched=Non
             )):
                 continue
             models.append(_muse_entry(card, evidence))
+        elif provider_id == "claude":
+            # Anthropic's list route returns id/display_name/created_at only;
+            # capabilities stay provider-managed until verified per model.
+            if card.get("type") not in (None, "model"):
+                continue
+            models.append(_catalogue_entry(
+                identifier,
+                display_name=card.get("display_name") if isinstance(card.get("display_name"), str) else identifier,
+                source="provider_api",
+                evidence=evidence,
+            ))
+        elif provider_id == "codex":
+            # OpenAI's list route mixes chat models with audio, image,
+            # realtime and embedding families; keep only chat-capable ids.
+            if not _CODEX_CHAT_MODEL.fullmatch(identifier):
+                continue
+            models.append(_catalogue_entry(
+                identifier,
+                source="provider_api",
+                evidence=evidence,
+            ))
     if provider_id == "mistral":
         return _coalesce_mistral_models(models)
     return sorted(models, key=lambda model: (model["display_name"].casefold(), model["id"]))
+
+
+# OpenAI's /v1/models mixes chat ids with audio, image, realtime, embedding
+# and legacy-completion families. Chat routes accept only these shapes.
+_CODEX_CHAT_MODEL = re.compile(
+ r"(?!(?:.*(?:realtime|audio|image|tts|whisper|embedding|moderation|transcribe|instruct)))(?:gpt-(?:3\.5|4|5)|o[1-9]|chatgpt-)[A-Za-z0-9.:-]*\Z")
 
 
 def discover(provider_id: str, connection: dict | None, api_key: str | None, *, transport=None) -> dict:
@@ -1388,6 +1495,10 @@ def discover(provider_id: str, connection: dict | None, api_key: str | None, *, 
         warnings.append("Grok uses xAI API billing. Fast requests Priority processing at a premium token price; the actual tier is recorded when returned.")
         if any(model.get("context") is None for model in models):
             warnings.append("At least one Grok model has no exact reported context limit; it remains provider-managed.")
+    if provider_id in {"claude", "codex"}:
+        warnings.append(
+            "This list route reports model identifiers only; context sizes and capabilities remain provider-managed."
+        )
     if provider_id == "mistral":
         removed = sorted({
             alias for model in models for alias in model.get("ambiguous_aliases_removed", [])

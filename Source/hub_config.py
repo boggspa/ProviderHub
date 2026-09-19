@@ -64,6 +64,9 @@ def cli_auth_available(provider_id: str) -> bool:
 
 
 def _default_credential_mode(provider_id: str) -> str:
+    if provider_id == "antigravity":
+        # CLI-only provider: its installed `agy` binary is the whole transport.
+        return "cli"
     if provider_id == "mistral":
         return "vibe"
     if provider_id == "ollama":
@@ -71,13 +74,27 @@ def _default_credential_mode(provider_id: str) -> str:
     return "keychain"
 
 
-def _credential_mode(provider_id: str, value) -> str:
-    allowed = {"none"} if provider_id == "ollama" else {"keychain", "environment"}
-    if provider_id == "mistral":
-        allowed.add("vibe")
+def credential_modes(provider_id: str) -> list[str]:
+    """The credential sources a provider offers, in picker order.
+
+    AntiGravity has no hosted API of its own, so its installed CLI is the only
+    source. The other CLI-capable providers keep their API-key sources beside
+    it, and the API key stays the default everywhere: the per-provider choice
+    is the whole gate, so an existing install changes nothing until a provider
+    is switched by hand.
+    """
+    if provider_id == "antigravity":
+        return ["cli"]
+    if provider_id == "ollama":
+        return ["none"]
+    modes = (["vibe"] if provider_id == "mistral" else []) + ["keychain", "environment"]
     if provider_id in CLI_AUTH_PROVIDERS:
-        allowed.add("cli")
-    if value not in allowed:
+        modes.append("cli")
+    return modes
+
+
+def _credential_mode(provider_id: str, value) -> str:
+    if value not in credential_modes(provider_id):
         raise ValueError(f"Unsupported credential source for {PROVIDERS[provider_id]['name']}.")
     return value
 
@@ -775,5 +792,6 @@ def project_catalogue(provider_id: str, inventory: dict, settings: dict, observa
 
 def provider_presentations(settings: dict) -> list[dict]:
     return [{**descriptor, "id": provider_id,
+             "credential_modes": credential_modes(provider_id),
              "presentation": resolve_presentation(provider_id, overrides=settings.get("branding_overrides"))}
             for provider_id, descriptor in PROVIDERS.items()]
