@@ -107,6 +107,29 @@ def content_blocks(content):
     return result
 
 
+def tool_output_blocks(item):
+    """Keep standalone tool notifications out of paired tool-result history."""
+    blocks = content_blocks(item.get("output", ""))
+    call_id = item.get("call_id")
+    if call_id:
+        return [{"type": "tool_result", "tool_use_id": call_id,
+                 # Empty content is valid; an empty text block is not.
+                 "content": blocks if blocks else ""}]
+    name = item.get("name")
+    namespace = item.get("namespace")
+    if not isinstance(name, str) or not name.strip():
+        raise BridgeError("A standalone tool output needs a tool name when call_id is absent.")
+    if namespace is not None and (not isinstance(namespace, str) or not namespace.strip()):
+        raise BridgeError("A standalone tool output namespace must be a non-empty string.")
+    # Cross-task messages arrive as named outputs with no preceding call.
+    # Messages APIs require a call for tool_result, and Codex rejects the
+    # nameless output that replaying tool_use_id=None would produce. Keep
+    # the notification as attributed tool data, including any image blocks,
+    # without inventing a tool invocation or elevating it to system text.
+    identity = f"{namespace}.{name}" if namespace else name
+    return [{"type": "text", "text": f"[Standalone tool output from {identity}]"}, *blocks]
+
+
 def to_messages(body, route, spec, envelope, scope):
     if body.get("store") or body.get("previous_response_id"):
         raise BridgeError("This translated Responses connection requires full input history and store:false.")
@@ -151,11 +174,7 @@ def to_messages(body, route, spec, envelope, scope):
                 raise BridgeError("Function arguments must be an object.")
             add("assistant", [{"type": "tool_use", "id": item.get("call_id"), "name": item.get("name"), "input": arguments}])
         elif kind == "function_call_output":
-            blocks = content_blocks(item.get("output", ""))
-            add("user", [{"type": "tool_result", "tool_use_id": item.get("call_id"),
-                          # An empty string is valid tool_result content; an empty
-                          # text block is not (see content_blocks above).
-                          "content": blocks if blocks else ""}])
+            add("user", tool_output_blocks(item))
         elif kind == "reasoning":
             token = item.get("encrypted_content")
             if token:
@@ -173,9 +192,7 @@ def to_messages(body, route, spec, envelope, scope):
             add("assistant", [{"type": "tool_use", "id": item.get("call_id"), "name": item.get("name"),
                                "input": {APPLY_PATCH_PARAM: patch}}])
         elif kind == "custom_tool_call_output":
-            blocks = content_blocks(item.get("output", ""))
-            add("user", [{"type": "tool_result", "tool_use_id": item.get("call_id"),
-                          "content": blocks if blocks else ""}])
+            add("user", tool_output_blocks(item))
         else:
             raise BridgeError("Unsupported Responses history item.")
     flush()
