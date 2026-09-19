@@ -408,17 +408,23 @@ class TestRunTurnEmptyStream(unittest.TestCase):
 
 
 class TestRunTurnStreams(unittest.TestCase):
-    def _run(self, payloads, *, returncode=0):
+    def _run(self, payloads, *, returncode=0, schema=None):
         import agy_cli_agent as module
         session = mock.MagicMock()
         session.returncode = returncode
         session.__enter__.return_value = session
         session.__exit__.return_value = False
         session.events.side_effect = lambda **kwargs: iter(payloads)
-        with mock.patch.object(module, "StdioSession", return_value=session), \
+        with mock.patch.object(module, "StdioSession", return_value=session) as spawn, \
                 mock.patch.object(module, "_resolve_binary", return_value="/fake/agy"):
-            events = list(module.run_turn({"model": "gemini-3.1-pro", "messages": [
-                {"role": "user", "content": "Synthetic test"}]}))
+            events = list(module.run_turn({"model": "gemini-3.1-pro", "host_tool_schema": schema,
+                "messages": [{"role": "user", "content": "Synthetic test"}]}))
+        if schema:
+            import json
+            argv = spawn.call_args.args[0]
+            self.assertEqual(json.loads(argv[argv.index("--json-schema") + 1]), schema)
+            self.assertIn("--sandbox", argv)
+            self.assertEqual(argv[argv.index("--mode") + 1], "plan")
         session.__exit__.assert_called_once()
         return events
 
@@ -472,6 +478,42 @@ class TestRunTurnStreams(unittest.TestCase):
         events = self._run([self._delta("Original."), self._result("Replacement.")])
         self.assertEqual([event["type"] for event in events], ["text_delta", "error"])
         self.assertIn("did not match", events[-1]["message"])
+
+    def test_structured_reply_uses_only_schema_enforced_final_result(self):
+        reply = '{"text":"Done","tool_calls":[]}'
+        events = self._run([self._delta("I will inspect the files."),
+                            self._result(reply)], schema={"type": "object"})
+        self.assertEqual(events, [{"type": "text_delta", "text": reply},
+                                  {"type": "message_stop", "stop_reason": "end_turn"}])
+
+    def test_structured_native_tool_attempt_stops_before_final_response(self):
+        events = self._run([
+            {"event": "step_update", "step_update": {
+                "step_type": "tool", "state": "ACTIVE"}},
+            self._result('{"text":"Done","tool_calls":[]}')],
+            schema={"type": "object"})
+        self.assertEqual([event["type"] for event in events], ["error"])
+        self.assertIn("native tool", events[0]["message"])
+        self.assertEqual(events[0]["http_status"], 400)
+
+    def test_structured_denial_without_tool_steps_is_non_retryable(self):
+        events = self._run([self._result("", denied_actions=[{"display_name": "run_command"}])],
+                           schema={"type": "object"})
+        self.assertEqual([event["type"] for event in events], ["error"])
+        self.assertEqual(events[0]["http_status"], 400)
+
+    def test_structured_denial_discards_even_a_valid_final_response(self):
+        events = self._run([self._result('{"text":"Done","tool_calls":[]}',
+                            denied_actions=[{"display_name": "run_command"}])],
+                            schema={"type": "object"})
+        self.assertEqual([event["type"] for event in events], ["error"])
+        self.assertEqual(events[0]["http_status"], 400)
+
+    def test_structured_failed_result_never_releases_a_handoff(self):
+        events = self._run([self._delta('{"text":"Done","tool_calls":[]}'),
+                            self._result("", status="ERROR", error="schema failed")],
+                            schema={"type": "object"})
+        self.assertEqual([event["type"] for event in events], ["error"])
 
     def test_denied_native_tool_still_reports_an_error(self):
         events = self._run([self._result("", denied_actions=[{"display_name": "run_command"}])])

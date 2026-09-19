@@ -349,7 +349,8 @@ def plan_turn(provider_id: str, upstream_model: str, payload: dict, spec: dict,
     if system is not None and not isinstance(system, str):
         system = None
     images = []
-    structured_surface = provider_id in {"muse", "grok"} and payload.get("_provider_hub_surface") != "responses"
+    structured_surface = (provider_id == "antigravity" or
+                          provider_id in {"muse", "grok"} and payload.get("_provider_hub_surface") != "responses")
     try:
         messages, system = _messages_for_cli(payload.get("messages"), system, images=images,
                                             full_tool_history=structured_surface)
@@ -368,10 +369,9 @@ def plan_turn(provider_id: str, upstream_model: str, payload: dict, spec: dict,
     if isinstance(tool_choice, dict) and tool_choice.get("type") == "none":
         tools, tool_choice = [], None
     dynamic_tools = getattr(adapter, "HOST_TOOL_TRANSPORT", None) == "dynamic"
-    # Claude's native tool names collide with the nested CLI's own inventory.
-    # Its prompt-only handoff can finish as prose or enter a native search loop.
-    # Use the CLI's enforced output schema on Messages; preserve the qualified
-    # Responses/Codex path using an explicit marker from our Responses bridge.
+    # AntiGravity enforces its response schema on both desktop surfaces.
+    # Muse/Grok retain their existing Responses handoff; their Messages
+    # transport needs a schema to avoid native-tool name collisions.
     structured_tools = bool(tools) and structured_surface
     manifest = (cli_structured_reply.render_manifest(tools, tool_choice) if structured_tools
                 else render_tool_manifest(tools, tool_choice) if tools and not dynamic_tools else "")

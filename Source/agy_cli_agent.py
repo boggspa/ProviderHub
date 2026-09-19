@@ -722,6 +722,8 @@ class _TurnState:
         self.raw_lines: list[str] = []
         self.stderr_handle = None
         self.image_paths: list[str] = []
+        self.structured = False
+        self.failure_status = None
 
     def fallback_text(self) -> str:
         return self.result_text or ""
@@ -794,6 +796,7 @@ def _translate(payload: Any, state: _TurnState) -> list[dict]:
                 if name != "view_file" or not isinstance(path, str) \
                         or str(Path(path).resolve()) not in state.image_paths:
                     state.failure = "agy attempted a native action outside the supplied image attachments; use host tools."
+                    state.failure_status = 400
                     return []
                 if str(step.get("state") or "").upper() == "ERROR":
                     state.failure = "agy could not read the scoped image attachment."
@@ -801,6 +804,10 @@ def _translate(payload: Any, state: _TurnState) -> list[dict]:
                 if str(step.get("state") or "").upper() == "DONE":
                     index = state.image_paths.index(str(Path(path).resolve())) + 1
                     return [{"type": "thinking_delta", "text": f"Inspected attached image {index}.\n"}]
+                return []
+            if state.structured:
+                state.failure = "agy attempted a native tool instead of returning a host tool request."
+                state.failure_status = 400
                 return []
             # Tools are stripped by policy, so tool steps never become route
             # text. They are recorded because a denied tool call that leaves
@@ -820,7 +827,9 @@ def _translate(payload: Any, state: _TurnState) -> list[dict]:
         # not filtered on; concatenating every text_delta reproduces
         # result.response exactly (verified live).
         text = step.get("text_delta")
-        if isinstance(text, str) and text:
+        # agy enforces --json-schema only on result.response; intermediate
+        # agent responses may be prose rather than the structured answer.
+        if isinstance(text, str) and text and not state.structured:
             state.emitted_text = True
             state.text_parts.append(text)
             events.append({"type": "text_delta", "text": text})
@@ -840,6 +849,10 @@ def _translate(payload: Any, state: _TurnState) -> list[dict]:
         denied = result.get("denied_actions")
         if isinstance(denied, list) and denied:
             state.denied_actions = denied
+            if state.structured:
+                state.failure = "agy attempted a denied native action instead of returning a host tool request."
+                state.failure_status = 400
+                return []
         error = result.get("error")
         if status == "ERROR" or (isinstance(error, str) and error):
             state.failure = ("agy reported "
@@ -968,6 +981,9 @@ def run_turn(request, *, spawner=None, timeout=300) -> Iterator[dict]:
                 "switch this route to API-key credentials"
             )
         argv[0] = binary
+        if request.get("host_tool_schema"):
+            state.structured = True
+            argv += ["--json-schema", json.dumps(request["host_tool_schema"], ensure_ascii=False)]
         if request.get("images"):
             workspace_path = str(Path(tempfile.mkdtemp(prefix="agy_images_")).resolve())
             state.image_paths = write_images(request["images"], workspace_path)
@@ -1012,7 +1028,8 @@ def run_turn(request, *, spawner=None, timeout=300) -> Iterator[dict]:
                 for event in _translate(payload, state):
                     yield event
                 if state.failure:
-                    yield {"type": "error", "message": state.failure}
+                    yield {"type": "error", "message": state.failure,
+                           **({"http_status": state.failure_status} if state.failure_status else {})}
                     return
 
         returncode = getattr(session, "returncode", None)
@@ -1032,7 +1049,8 @@ def run_turn(request, *, spawner=None, timeout=300) -> Iterator[dict]:
             # headless tool call is auto-denied. Nothing executed, which is the
             # posture working, but an empty turn is not a usable completion.
             if state.denied_actions or state.tool_error or state.saw_tool_step:
-                yield {"type": "error", "message": state.denial_detail()}
+                yield {"type": "error", "message": state.denial_detail(),
+                       **({"http_status": 400} if state.structured else {})}
                 return
         if not state.terminal:
             yield {"type": "error", "message": "the agy CLI stream ended before completing the turn"}

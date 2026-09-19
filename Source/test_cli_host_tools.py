@@ -67,7 +67,7 @@ class Session:
 
 def vendor_events(provider, name, arguments):
     wire = envelope(name, arguments)
-    if provider in {"muse", "grok"}:
+    if provider in {"muse", "grok", "antigravity"}:
         wire = json.dumps({"text": "", "tool_calls": [
             {"name": name, "arguments": json.dumps(arguments)}]})
     if provider == "codex":
@@ -83,7 +83,7 @@ def vendor_events(provider, name, arguments):
                 {"payload_type": "run.terminal.completed", "payload": {"terminal": "completed"}}]
     if provider == "antigravity":
         return [{"event": "step_update", "step_update": {"step_type": "agent_response", "text_delta": wire}},
-                {"event": "result", "result": {"status": "SUCCESS"}}]
+                {"event": "result", "result": {"status": "SUCCESS", "response": wire}}]
     return [{"type": "stream_event", "event": {"type": "content_block_delta",
              "delta": {"type": "text_delta", "text": wire}}},
             {"type": "result", "subtype": "success", "stop_reason": "end_turn"}]
@@ -137,6 +137,29 @@ class HostCycleTests(unittest.TestCase):
                                   "tool_use_id": call["id"], "content": result}]}]
                 self.assertEqual(results, ["before", "write completed", "after"])
                 self.assertEqual(path.read_text(), "after")
+
+    def test_antigravity_replays_complete_host_history_on_both_surfaces(self):
+        arguments = {"path": "sample.txt", "text": "preserve this edit\n" * 100}
+        for surface in ("messages", "responses"):
+            with self.subTest(surface=surface):
+                plan = cli_routes.plan_turn("antigravity", "gemini-3.1-pro", {
+                    "_provider_hub_surface": surface, "tools": TOOLS,
+                    "messages": [
+                        {"role": "user", "content": "Edit sample.txt"},
+                        {"role": "assistant", "content": [{"type": "tool_use",
+                            "id": "edit_1", "name": "write_file", "input": arguments}]},
+                        {"role": "user", "content": [{"type": "tool_result",
+                            "tool_use_id": "edit_1", "is_error": True,
+                            "content": "Write failed: the file changed."}]}]},
+                    {}, wanted_output=128)
+                request = plan["body"]
+                self.assertIn("host_tool_schema", request)
+                call = json.loads(request["messages"][1]["content"])
+                self.assertEqual(call["input"], arguments)
+                result = json.loads(request["messages"][2]["content"].split("\n\n<host_note>")[0])
+                self.assertEqual(result["tool_use_id"], call["id"])
+                self.assertTrue(result["is_error"])
+                self.assertEqual(result["content"], "Write failed: the file changed.")
 
     def test_transcript_headers_allow_host_actions(self):
         for provider in MODELS:
