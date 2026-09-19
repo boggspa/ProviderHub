@@ -1,6 +1,7 @@
 *.app/
 *.zip
 .DS_Store
+.venv/
 Source/.build/
 __pycache__/
 *.pyc

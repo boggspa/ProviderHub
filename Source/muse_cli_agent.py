@@ -44,6 +44,22 @@ Live evidence (Muse Code 1.3.0, ``1.3.0-R3401.1``, binary at ``~/.local/bin/muse
   ``payload.text`` carrying the full answer and ``payload.reason`` null.
   Streaming text arrives as ``payload_type: "run.output.delta"``
   (``payload.kind == "run_output_delta"``, ``payload.text``).
+* TMPDIR/workspace invariant (reproduced live on the real binary): ``muse exec
+  --help`` also exposes ``--workspace <PATH>`` ("Root policy-gated workspace
+  tools at PATH"). muse defaults its workspace root to cwd and derives a
+  process-lifetime tool-output root from ``$TMPDIR``
+  (``$TMPDIR/tbh-process-lifetime-memory-<random>``). With cwd == TMPDIR root
+  (``/var/folders/ps/xkcdv54x39q36bbkvsbhwtvr0000gn/T``) a turn fails rc 1 with
+  exactly ``runtime host failed to start: TMPDIR '...' produced process-lifetime
+  tool-output root '.../tbh-process-lifetime-memory-LW4UHV' inside the
+  configured workspace or repository``, because the output root is a child of
+  the TMPDIR workspace. The same argv with cwd set to a fresh subdirectory of
+  TMPDIR completes rc 0 (``muse: workspace root: ... (cwd default)``), and
+  adding ``--workspace <subdir>`` while cwd stays TMPDIR root also completes
+  rc 0 (``muse: workspace root: ... (explicit)``). :func:`run_turn` therefore
+  pins both ``cwd`` and ``--workspace`` to a private per-turn ``mkdtemp``
+  directory, so the TMPDIR-derived output root is always a sibling of the
+  workspace, never a child, for any inherited cwd.
 * ``printf 'hi' | muse exec --json`` (no positional) prints ``missing prompt``
   and exits 2, and ``--prompt-file -`` errors ("failed to read --prompt-file -"):
   the prompt is neither stdin nor positional; ``--prompt-file <real file>`` is
@@ -83,6 +99,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 from pathlib import Path
@@ -563,14 +580,14 @@ def build_argv(model, *, effort=None, system=None, stream=True) -> list[str]:
     """Full argv for one ``muse exec --json`` turn. argv[0] is the bare binary.
 
     ``run_turn`` replaces argv[0] with the resolved absolute path and appends
-    ``--prompt-file <temp file>`` after this output; keeping the name here makes
-    this function pure and testable on a machine with no CLI installed. The
-    prompt is NOT part of argv — it travels via ``--prompt-file`` (muse exec
-    reads no prompt from stdin, and its ``--image`` flag is repeatable, so a
-    positional prompt would be swallowable). ``system`` is deliberately unused:
-    with SYSTEM_PROMPT_TRANSPORT == "prompt" it is folded into the prompt text
-    by run_turn, never into argv. ``stream`` is always effectively True — the
-    only machine-readable mode is ``--json``.
+    ``--workspace <private dir>`` and ``--prompt-file <temp file>`` after this
+    output; keeping the name here makes this function pure and testable on a
+    machine with no CLI installed. The prompt is NOT part of argv — it travels
+    via ``--prompt-file`` (muse exec reads no prompt from stdin, and its
+    ``--image`` flag is repeatable, so a positional prompt would be swallowable).
+    ``system`` is deliberately unused: with SYSTEM_PROMPT_TRANSPORT == "prompt"
+    it is folded into the prompt text by run_turn, never into argv. ``stream``
+    is always effectively True — the only machine-readable mode is ``--json``.
     """
     validated_model = _validate_model(model)
     validated_effort = _validate_effort(effort)
@@ -819,6 +836,19 @@ def _cleanup_prompt(path: str | None) -> None:
         pass
 
 
+def _cleanup_workspace(path: str | None) -> None:
+    """Best-effort removal of the private per-turn workspace directory.
+
+    The directory exists only to keep muse's TMPDIR-derived tool-output root
+    outside the workspace (see :func:`run_turn`), so nothing in it must survive
+    the turn. ``ignore_errors=True`` keeps teardown from masking the turn's
+    outcome when the CLI left a read-only file or a live handle behind.
+    """
+    if not path:
+        return
+    shutil.rmtree(path, ignore_errors=True)
+
+
 def _describe(exc: BaseException, state: _TurnState | None = None,
               timeout=None) -> str:
     text = str(exc).strip() or exc.__class__.__name__
@@ -846,6 +876,7 @@ def run_turn(request, *, spawner=None, timeout=300) -> Iterator[dict]:
     """
     state = _TurnState()
     prompt_path: str | None = None
+    workspace_path: str | None = None
     try:
         if not isinstance(request, dict):
             raise MuseCliAgentError("request must be an object")
@@ -874,6 +905,19 @@ def run_turn(request, *, spawner=None, timeout=300) -> Iterator[dict]:
             )
         argv[0] = binary
 
+        # muse derives a process-lifetime tool-output root from TMPDIR
+        # ($TMPDIR/tbh-process-lifetime-memory-<random>) and defaults its
+        # workspace root to cwd. When the inherited cwd is TMPDIR itself — or
+        # any ancestor of TMPDIR — that output root lands INSIDE the workspace
+        # and the runtime host refuses to start ("runtime host failed to
+        # start: TMPDIR ... produced ... tool-output root ... inside the
+        # configured workspace or repository"). Pin both the workspace and the
+        # child cwd to a fresh private directory so muse's TMPDIR-derived
+        # output root is always a sibling of the workspace, never a child,
+        # for ANY inherited cwd. The directory is removed after the turn.
+        workspace_path = tempfile.mkdtemp(prefix="muse_ws_")
+        argv += ["--workspace", workspace_path]
+
         # The prompt goes into a temp file (muse exec reads no prompt from
         # stdin); stderr goes to a temp file too, not a pipe nobody drains.
         prompt_path = _write_prompt_file(prompt)
@@ -883,11 +927,13 @@ def run_turn(request, *, spawner=None, timeout=300) -> Iterator[dict]:
         session = StdioSession(
             argv,
             env=minimal_env(),
+            cwd=workspace_path,
             timeout=float(timeout),
             spawner=spawner,
             stderr=state.stderr_handle,
         )
     except Exception as exc:
+        _cleanup_workspace(workspace_path)
         _cleanup_prompt(prompt_path)
         yield {"type": "error", "message": _describe(exc, state, timeout)}
         return
@@ -935,6 +981,7 @@ def run_turn(request, *, spawner=None, timeout=300) -> Iterator[dict]:
         yield {"type": "error", "message": _describe(exc, state, timeout)}
         return
     finally:
+        _cleanup_workspace(workspace_path)
         _cleanup_prompt(prompt_path)
         handle = state.stderr_handle
         if handle is not None:

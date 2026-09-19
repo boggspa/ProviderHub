@@ -882,7 +882,9 @@ def handle_responses(handler):
                 apply_subagent_model(item, plan.get("subagent_route"))
         if value.get("error"):
             value["error"] = clean_error(value["error"])
-        if plan["provider_id"] == "grok" and plan["body"]["store"] and value["status"] != "failed":
+        # plan["body"] is the Responses body for native routes but the
+        # translated Messages body on the bridge path, which has no "store".
+        if plan["provider_id"] == "grok" and plan["body"].get("store") and value["status"] != "failed":
             # Commit the ID before exposing it to a client that can immediately
             # send a continuation on another connection.
             runtime.response_ownership.remember(value["id"], plan["scope"])

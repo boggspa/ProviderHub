@@ -86,7 +86,7 @@ class BuildArgvTests(unittest.TestCase):
         self.assertEqual(argv[1], "-p")
         self.assertIn("--output-format", argv)
         self.assertIn("stream-json", argv)
-        for flag in ("--permission-mode", "plan", "--permission-prompts", "none",
+        for flag in ("--permission-mode", "default", "--permission-prompts", "none",
                      "--strict-mcp-config", "--disable-slash-commands",
                      "--no-session-persistence"):
             self.assertIn(flag, argv)
@@ -107,6 +107,30 @@ class BuildArgvTests(unittest.TestCase):
             with self.assertRaises(m.ClaudeCliAgentError):
                 m._assert_safe(bad)
         self.assertEqual(m._assert_safe(["claude", "-p"]), ["claude", "-p"])
+
+
+    def test_permission_mode_default_no_persona(self):
+        """Verify that --permission-mode default does NOT inject plan-mode persona.
+        
+        This test asserts the fix for the bug where plan mode's persona
+        ("I'm in plan mode...") was leaking through to users despite tools
+        being disabled via --tools "". The chosen mode is "default" which keeps
+        tools: [] and maintains fail-closed posture via --permission-prompts none.
+        """
+        argv = m.build_argv("sonnet")
+        # Must use default, not plan
+        mode_idx = argv.index("--permission-mode")
+        self.assertEqual(argv[mode_idx + 1], "default")
+        # Must still have fail-closed posture
+        self.assertIn("--permission-prompts", argv)
+        self.assertIn("none", argv)
+        # Must still disable tools
+        self.assertIn("--tools", argv)
+        self.assertEqual(argv[argv.index("--tools") + 1], "")
+        # Must still have other read-only flags
+        for flag in ("--strict-mcp-config", "--disable-slash-commands",
+                      "--no-session-persistence"):
+            self.assertIn(flag, argv)
 
     def test_effort_accepted_mapped_rejected(self):
         for rank in m.CLAUDE_EFFORTS:

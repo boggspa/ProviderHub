@@ -10,9 +10,18 @@ model routes instead of delegatory headless agents. The desktop harness owns
 the tool loop; if this route also ran tools, every tool call would be executed
 twice against two different views of the world. So the whole built-in tool set
 is switched off, MCP servers are skipped, skills are disabled, the session runs
-in plan mode, and anything that would have prompted for permission is denied
-automatically rather than approved. Verified live against claude 2.1.276: the
-``system/init`` event reports ``tools: []`` and ``mcp_servers: []``.
+with ``--permission-mode default`` (not plan, which injects a plan-mode persona
+that leaks to users), and anything that would have prompted for permission is
+denied automatically rather than approved. Verified live against claude 2.1.276:
+the ``system/init`` event reports ``tools: []`` and ``mcp_servers: []`` with
+``--permission-mode default --permission-prompts none --tools ""``.
+
+Permission mode matrix tested live on claude 2.1.276:
+ - ``plan``: tools=[], BUT injects plan-mode persona ("I'm in plan mode...")
+ - ``default``: tools=[], NO persona, fail-closed via --permission-prompts none
+ - ``manual``: tools=[], NO persona, BUT defaults to default mode (same as default)
+ - ``dontAsk``: tools=[], NO persona, but less explicit about fail-closed
+ - ``auto``/``acceptEdits``: auto-approve family, FORBIDDEN by design
 
 No auto-approve flag is ever constructed. ``_FORBIDDEN_FLAGS`` is asserted
 against inside ``build_argv`` so a future edit cannot introduce one quietly.
@@ -81,7 +90,7 @@ _FORBIDDEN_FLAGS = frozenset({
 # The read-only posture. --permission-prompts none is the FAIL-CLOSED choice:
 # anything that would have prompted is denied automatically, never approved.
 READ_ONLY_FLAGS = (
-    "--permission-mode", "plan",
+    "--permission-mode", "default",
     "--permission-prompts", "none",
     "--strict-mcp-config",
     "--disable-slash-commands",

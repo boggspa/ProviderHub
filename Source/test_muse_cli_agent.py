@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 import unittest
 from unittest import mock
 
@@ -29,12 +30,14 @@ class _FakeStdin:
 class FakeSession:
     """Minimal stand-in for cli_session.StdioSession."""
 
-    def __init__(self, argv, env=None, timeout=None, spawner=None, stderr=None):
+    def __init__(self, argv, env=None, timeout=None, spawner=None, stderr=None,
+                 cwd=None):
         self.argv = list(argv)
         self.env = env
         self.timeout = timeout
         self.spawner = spawner
         self.stderr = stderr
+        self.cwd = cwd
         self.lines = []
         self.returncode = 0
         self.process = None
@@ -296,6 +299,7 @@ class CatalogueTests(unittest.TestCase):
             fake.env = kwargs.get("env")
             fake.timeout = kwargs.get("timeout")
             fake.spawner = kwargs.get("spawner")
+            fake.cwd = kwargs.get("cwd")
             sessions.append(fake)
             return fake
 
@@ -393,6 +397,7 @@ class RunTurnTests(unittest.TestCase):
             fake.env = kwargs.get("env")
             fake.timeout = kwargs.get("timeout")
             fake.spawner = kwargs.get("spawner")
+            fake.cwd = kwargs.get("cwd")
             sessions.append(fake)
             return fake
 
@@ -429,6 +434,41 @@ class RunTurnTests(unittest.TestCase):
         idx = session.argv.index("--prompt-file")
         self.assertFalse(os.path.exists(session.argv[idx + 1]))
         self.assertEqual(session.spawner, "spawner-stub")
+
+    def test_workspace_pinned_and_cleaned_up(self):
+        # The TMPDIR/workspace invariant: muse derives its tool-output root
+        # from TMPDIR and defaults its workspace to cwd, so a turn whose
+        # inherited cwd is TMPDIR (or an ancestor of it) fails before any
+        # output. run_turn must pin both --workspace and the child cwd to a
+        # fresh private directory and remove it when the turn ends.
+        fake = self._stream([json.dumps(_terminal("completed", text="ok"))])
+        events, session, _ = self._run(
+            {"model": "m", "messages": [{"role": "user", "content": "hi"}]},
+            fake)
+        self.assertEqual([e["type"] for e in events],
+                         ["text_delta", "message_stop"])
+        self.assertIn("--workspace", session.argv)
+        ws = session.argv[session.argv.index("--workspace") + 1]
+        self.assertTrue(os.path.isabs(ws))
+        self.assertEqual(session.cwd, ws)
+        # The workspace is a strict child of TMPDIR, never TMPDIR itself and
+        # never an ancestor of TMPDIR, so the TMPDIR-derived tool-output root
+        # is a sibling of the workspace rather than a child of it.
+        tmp = os.path.realpath(tempfile.gettempdir())
+        wsr = os.path.realpath(ws)
+        self.assertNotEqual(wsr, tmp)
+        self.assertEqual(os.path.commonpath([wsr, tmp]), tmp)
+        # And the private workspace directory has been removed after the turn.
+        self.assertFalse(os.path.exists(ws))
+
+    def test_workspace_cleaned_up_on_session_break(self):
+        fake = self._stream([], events_exc=RuntimeError("boom"))
+        events, session, _ = self._run(
+            {"model": "m", "messages": [{"role": "user", "content": "hi"}]},
+            fake)
+        self.assertEqual([e["type"] for e in events], ["error"])
+        ws = session.argv[session.argv.index("--workspace") + 1]
+        self.assertFalse(os.path.exists(ws))
 
     def test_terminal_only_falls_back_to_full_text(self):
         fake = self._stream([json.dumps(_terminal("completed", text="full answer"))])

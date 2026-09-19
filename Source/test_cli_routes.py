@@ -601,5 +601,79 @@ class ResponsesBridgeTest(unittest.TestCase):
         self.assertEqual(cli_plan["body"]["system"], "Be the Codex harness.\n\nenv: macOS")
 
 
+class ResponsesEndToEndTest(unittest.TestCase):
+    """A full /v1/responses turn for a CLI-mode provider: the regression that
+    replayed grok's first answer under Codex Reconnect retries.
+
+    finish_response special-cased grok with plan["body"]["store"], but on the
+    messages-bridge path plan["body"] is the translated Messages body, which
+    has no "store" key - the KeyError was swallowed into a terminal provider
+    error after the answer had streamed, so Codex retried a successful turn.
+    """
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        self._saved_cache = dict(cli_routes._cache)
+        cli_routes._cache.clear()
+
+        def run_turn(request, *, timeout=300):
+            yield {"type": "thinking_delta", "text": "thinking"}
+            yield {"type": "text_delta", "text": "ROUTE2 OK"}
+            yield {"type": "message_stop", "stop_reason": "end_turn"}
+
+        cli_routes._cache["grok"] = types.SimpleNamespace(
+            PROVIDER_ID="grok", TRANSPORT="print", SYSTEM_PROMPT_TRANSPORT="flag",
+            KNOWN_MODELS=(), run_turn=run_turn)
+        vibe = {"active_model": "unused", "active_display_name": "Unused",
+                "key_name": "MISTRAL_API_KEY", "vibe_home": str(self.root / "vibe"),
+                "configured_models": []}
+        with patch("bridge_core.vibe_settings", return_value=vibe):
+            settings = default_settings()
+        settings["providers"]["grok"]["credential_mode"] = "cli"
+        settings["mappings"] = {slot[0]: "grok/grok-4.6" for slot in SLOTS}
+        atomic_json(self.root / "settings.json", settings)
+        atomic_json(self.root / "catalogues" / "grok.json", {
+            "provider_id": "grok",
+            "source": "cli",
+            "connection_signature": connection_signature("grok", settings["providers"]["grok"]),
+            "models": [{
+                "id": "grok-4.6", "canonical_id": "grok-4.6", "display_name": "Grok 4.6",
+                "context": 131072, "aliases": ["grok-4.6"], "tools": True, "vision": False,
+                "reasoning": True, "effort_modes": ["low", "high"], "fast_mode": False,
+                "inference_status": "advertised", "source": "cli", "evidence": "test"}],
+        })
+        with patch("bridge_core.vibe_settings", return_value=vibe):
+            self.runtime = Runtime(self.root)
+        self.gateway = Server(self.runtime, 0)
+        threading.Thread(target=self.gateway.serve_forever, daemon=True).start()
+
+    def tearDown(self):
+        self.gateway.shutdown()
+        self.gateway.server_close()
+        self.temp.cleanup()
+        cli_routes._cache.clear()
+        cli_routes._cache.update(self._saved_cache)
+
+    def test_bridged_cli_turn_completes_with_no_terminal_error(self):
+        connection = http.client.HTTPConnection("127.0.0.1", self.gateway.server_port, timeout=30)
+        connection.request("POST", "/v1/responses", json.dumps({
+            "model": "grok/grok-4.6", "stream": True, "store": False,
+            "instructions": "You are a terse assistant.",
+            "input": [{"type": "message", "role": "user",
+                       "content": [{"type": "input_text", "text": "hi"}]}]}),
+            {"Authorization": "Bearer " + self.runtime.token,
+             "Content-Type": "application/json"})
+        response = connection.getresponse()
+        raw = response.read().decode()
+        connection.close()
+        kinds = [line[7:] for block in raw.split("\n\n") for line in [block.split("\n")[0]]
+                 if line.startswith("event: ")]
+        self.assertEqual(response.status, 200)
+        self.assertIn("response.completed", kinds)
+        self.assertNotIn("error", kinds)
+        self.assertIn("ROUTE2 OK", raw)
+
+
 if __name__ == "__main__":
     unittest.main()
