@@ -964,6 +964,15 @@ def run_turn(request, *, spawner=None, timeout=300) -> Iterator[dict]:
         # for ANY inherited cwd. The directory is removed after the turn.
         workspace_path = tempfile.mkdtemp(prefix="muse_ws_")
         argv += ["--workspace", workspace_path]
+        if request.get("host_tool_schema"):
+            schema_path = Path(workspace_path) / "host-response-schema.json"
+            with schema_path.open("x", encoding="utf-8") as handle:
+                schema_path.chmod(0o600)
+                json.dump(request["host_tool_schema"], handle)
+            # Muse can emit an intermediate answer before its final structured
+            # result. A one-step cap rejects otherwise valid handoffs during
+            # that finalization; allow a small, bounded completion budget.
+            argv += ["--output-schema", str(schema_path), "--max-model-steps", "4"]
 
         # The prompt goes into a temp file (muse exec reads no prompt from
         # stdin); stderr goes to a temp file too, not a pipe nobody drains.

@@ -789,6 +789,10 @@ def run_turn(request, *, spawner=None, timeout=300) -> Iterator[dict]:
         except ValueError:
             raise GrokCliAgentError("internal error: --single not found in argv")
         argv.insert(single_idx + 1, prompt)
+        if request.get("host_tool_schema"):
+            tools_idx = argv.index("--tools")
+            argv[tools_idx:tools_idx] = ["--json-schema", json.dumps(request["host_tool_schema"]),
+                                      "--max-turns", "1"]
 
         # Handle system prompt separately (we passed None to build_argv to avoid
         # duplication, but need to add it back if provided)

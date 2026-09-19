@@ -658,6 +658,8 @@ def prepare_native(runtime, payload):
         # descriptors without the field keep full fidelity.
         envelope = ReasoningEnvelope(runtime.root, PROVIDERS[provider_id].get("reasoning_store_cap") or 0)
         translated = to_messages(body, route, spec, envelope, scope)
+        if cli_mode:
+            translated["_provider_hub_surface"] = "responses"
         published_summary = None
         if cli_mode and provider_id == "codex":
             published_summary = (body.get("reasoning") or {}).get("summary")

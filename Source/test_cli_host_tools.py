@@ -67,6 +67,9 @@ class Session:
 
 def vendor_events(provider, name, arguments):
     wire = envelope(name, arguments)
+    if provider in {"muse", "grok"}:
+        wire = json.dumps({"text": "", "tool_calls": [
+            {"name": name, "arguments": json.dumps(arguments)}]})
     if provider == "codex":
         from codex_cli_agent import _tool_alias
         return [{"id": 9, "method": "item/tool/call", "params": {

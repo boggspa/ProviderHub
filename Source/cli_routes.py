@@ -29,6 +29,7 @@ import json
 import time
 import uuid
 
+import cli_structured_reply
 from cli_tool_call import (HOST_EXECUTION_NOTE, MAX_CALLS_PER_TURN, ToolCallError,
                            ToolCallParser, normalize_tools, render_tool_anchor,
                            render_tool_manifest, validate_host_call)
@@ -246,7 +247,7 @@ def discover_via_cli(provider_id: str, *, timeout: int = 45) -> dict:
 # Turns
 # ---------------------------------------------------------------------------
 
-def _flatten_blocks(content, *, images=None) -> str:
+def _flatten_blocks(content, *, images=None, full_tool_history=False) -> str:
     """Render Messages block-list content as plain transcript text.
 
     The Responses bridge spells every message as typed blocks. Text
@@ -267,8 +268,11 @@ def _flatten_blocks(content, *, images=None) -> str:
         elif kind == "thinking":
             continue
         elif kind == "tool_result":
-            inner = _flatten_blocks(block.get("content"), images=images)
-            if inner.strip():
+            inner = _flatten_blocks(block.get("content"), images=images, full_tool_history=full_tool_history)
+            if full_tool_history:
+                parts.append(json.dumps({"type": "tool_result", "tool_use_id": block.get("tool_use_id"),
+                                         "is_error": bool(block.get("is_error")), "content": inner}, ensure_ascii=False))
+            elif inner.strip():
                 parts.append(f"[tool result for {block.get('tool_use_id') or 'call'}]\n{inner}")
         elif kind == "tool_use":
             name = block.get("name") or "tool"
@@ -276,7 +280,11 @@ def _flatten_blocks(content, *, images=None) -> str:
                 args = json.dumps(block.get("input") or {}, ensure_ascii=False)
             except (TypeError, ValueError):
                 args = "{}"
-            parts.append(f"[tool call: {name} ({block.get('id') or 'call'}) with {args[:200]}]")
+            if full_tool_history:
+                parts.append(json.dumps({"type": "tool_use", "id": block.get("id"),
+                                         "name": name, "input": block.get("input") or {}}, ensure_ascii=False))
+            else:
+                parts.append(f"[tool call: {name} ({block.get('id') or 'call'}) with {args[:200]}]")
         elif kind in {"input_image", "image"}:
             if images is None:
                 raise CliImageError("Images must be delivered through a CLI image transport")
@@ -290,7 +298,7 @@ def _flatten_blocks(content, *, images=None) -> str:
     return "\n".join(part for part in parts if part)
 
 
-def _messages_for_cli(messages, system, *, images=None):
+def _messages_for_cli(messages, system, *, images=None, full_tool_history=False):
     """Fold developer/system messages into system; flatten block content.
 
     The Responses bridge (Codex desktop) delivers developer-role messages in
@@ -307,7 +315,7 @@ def _messages_for_cli(messages, system, *, images=None):
         if not isinstance(message, dict):
             continue
         role = message.get("role")
-        text = _flatten_blocks(message.get("content"), images=images)
+        text = _flatten_blocks(message.get("content"), images=images, full_tool_history=full_tool_history)
         if role in {"developer", "system"}:
             if text.strip() and all(text.strip() not in part for part in parts):
                 parts.append(text.strip())
@@ -341,8 +349,10 @@ def plan_turn(provider_id: str, upstream_model: str, payload: dict, spec: dict,
     if system is not None and not isinstance(system, str):
         system = None
     images = []
+    structured_surface = provider_id in {"muse", "grok"} and payload.get("_provider_hub_surface") != "responses"
     try:
-        messages, system = _messages_for_cli(payload.get("messages"), system, images=images)
+        messages, system = _messages_for_cli(payload.get("messages"), system, images=images,
+                                            full_tool_history=structured_surface)
         if images:
             if not getattr(adapter, "IMAGE_TRANSPORT", None):
                 raise CliImageError(f"The {provider_id} CLI does not support screenshot/image input. "
@@ -358,7 +368,13 @@ def plan_turn(provider_id: str, upstream_model: str, payload: dict, spec: dict,
     if isinstance(tool_choice, dict) and tool_choice.get("type") == "none":
         tools, tool_choice = [], None
     dynamic_tools = getattr(adapter, "HOST_TOOL_TRANSPORT", None) == "dynamic"
-    manifest = render_tool_manifest(tools, tool_choice) if tools and not dynamic_tools else ""
+    # Claude's native tool names collide with the nested CLI's own inventory.
+    # Its prompt-only handoff can finish as prose or enter a native search loop.
+    # Use the CLI's enforced output schema on Messages; preserve the qualified
+    # Responses/Codex path using an explicit marker from our Responses bridge.
+    structured_tools = bool(tools) and structured_surface
+    manifest = (cli_structured_reply.render_manifest(tools, tool_choice) if structured_tools
+                else render_tool_manifest(tools, tool_choice) if tools and not dynamic_tools else "")
     if manifest:
         # The tool surface rides the system text: the harness's definitions,
         # the call convention, and the anti-simulation rules. Nothing else
@@ -369,7 +385,7 @@ def plan_turn(provider_id: str, upstream_model: str, payload: dict, spec: dict,
         # its session inventory over the system text.
         for message in reversed(messages):
             if message["role"] == "user":
-                anchor = render_tool_anchor(tools)
+                anchor = cli_structured_reply.render_anchor() if structured_tools else render_tool_anchor(tools)
                 message["content"] = (message["content"] + "\n\n" + anchor) if message["content"] else anchor
                 break
     if dynamic_tools:
@@ -386,6 +402,8 @@ def plan_turn(provider_id: str, upstream_model: str, payload: dict, spec: dict,
         "tools": tools,
         "tool_choice": tool_choice,
     }
+    if structured_tools:
+        request["host_tool_schema"] = cli_structured_reply.reply_schema(tools, tool_choice)
     thinking = payload.get("thinking")
     if isinstance(thinking, dict):
         request["thinking"] = {key: thinking[key] for key in ("type", "display") if key in thinking}
@@ -413,6 +431,7 @@ def plan_turn(provider_id: str, upstream_model: str, payload: dict, spec: dict,
             "system_prompt_transport": getattr(adapter, "SYSTEM_PROMPT_TRANSPORT", "prompt"),
             "cli_image_transport": getattr(adapter, "IMAGE_TRANSPORT", None),
             "cli_images": len(images),
+            **({"cli_host_tools": "structured"} if structured_tools else {}),
             **({"cli_tools": len(tools),
                 "cli_tools_dropped": len(raw_tools) - len(tools)}
                if tools and isinstance(raw_tools, list) and len(raw_tools) != len(tools)
@@ -455,8 +474,9 @@ def _tool_turn(adapter, request, *, timeout):
     attempts = 1 if getattr(adapter, "HOST_TOOL_TRANSPORT", None) == "dynamic" else 2
     current = request
     for attempt in range(attempts):
-        events = _parse_tool_stream(adapter.run_turn(current, timeout=max(0.01, deadline - time.monotonic())),
-                                    tools=request.get("tools"), tool_choice=request.get("tool_choice"))
+        parser = cli_structured_reply.parse_stream if request.get("host_tool_schema") else _parse_tool_stream
+        events = parser(adapter.run_turn(current, timeout=max(0.01, deadline - time.monotonic())),
+                        tools=request.get("tools"), tool_choice=request.get("tool_choice"))
         retry = False
         pending_text = []
         pending_bytes = 0
@@ -494,8 +514,10 @@ def _tool_turn(adapter, request, *, timeout):
             "content": "Your previous response had invalid host tool-call formatting. "
                        "No tool from that response was executed. Continue the original task "
                        "from the host results already provided and reissue the intended call "
-                       "using a complete JSON object and the exact tool-call delimiters from "
-                       "the tool instructions. Do not simulate results or repeat completed actions.",
+                       + ("using the structured response with text and tool_calls, whose arguments are JSON-encoded objects. "
+                          if request.get("host_tool_schema") else
+                          "using a complete JSON object and the exact tool-call delimiters from the tool instructions. ")
+                       + "Do not simulate results or repeat completed actions.",
         }]}
 
 
