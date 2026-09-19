@@ -625,6 +625,88 @@ class RunTurnTests(unittest.TestCase):
         self.assertEqual(events, [{"type": "tool_call", "id": "c2", "name": name, "input": {"path": "/tmp"}},
                                   {"type": "message_stop", "stop_reason": "tool_use"}])
 
+    def test_reasoning_survives_the_tool_handoff(self):
+        """The turn resumes with its own reasoning, in order, before the call.
+
+        Every host-tool handoff is a fresh process, thread and prompt. Without
+        this the model rejoins its own turn with no record of why it called the
+        tool and re-derives the plan from the standing instructions each leg -
+        observed as dozens of repeated inspection commands before a first edit.
+        """
+        fake = FakeCodexSession([])
+        fake.script = [_completed_turn()]
+        history = [
+            {"role": "user", "content": "Fix the renderer"},
+            {"role": "assistant", "content": [
+                {"type": "thinking", "thinking": "Scheduler defers the commit; check the tree first."},
+                {"type": "tool_use", "id": "c1", "name": "shell", "input": {"cmd": "git status"}}]},
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "c1", "content": "clean"}]},
+        ]
+        _, session, _ = self._run(self._request(tools=[{"name": "shell"}], history=history), fake)
+        params = dict((method, params) for method, params, _ in session.requests)
+        items = params["thread/inject_items"]["items"]
+        self.assertEqual([item["type"] for item in items],
+                         ["message", "reasoning", "function_call", "function_call_output"])
+        self.assertEqual(items[1], {"type": "reasoning", "summary": [
+            {"type": "summary_text", "text": "Scheduler defers the commit; check the tree first."}]})
+
+    def test_reasoning_items_carry_the_summary_the_runtime_requires(self):
+        """``summary`` is mandatory: a content-only item fails the whole turn.
+
+        Probed against the installed runtime - ``{"type": "reasoning",
+        "content": [...]}`` is refused with "items[0] is not a valid response
+        item: missing field `summary`", which would break the handoff outright.
+        """
+        items = codex._history_items([
+            {"role": "assistant", "content": [{"type": "thinking", "thinking": "why"}]}])
+        self.assertEqual(len(items), 1)
+        self.assertIn("summary", items[0])
+        self.assertNotIn("content", items[0])
+        self.assertEqual(items[0]["summary"][0]["type"], "summary_text")
+
+    def test_unusable_reasoning_is_dropped_rather_than_invented(self):
+        items = codex._history_items([
+            {"role": "assistant", "content": [
+                {"type": "redacted_thinking", "data": "opaque"},
+                {"type": "thinking", "thinking": "   "},
+                {"type": "thinking"}]},
+            # A user turn never carries the assistant's reasoning.
+            {"role": "user", "content": [{"type": "thinking", "thinking": "not mine"}]}])
+        self.assertEqual(items, [])
+
+    def test_signed_reasoning_from_another_provider_is_not_replayed(self):
+        """Signed thinking came from a real Anthropic turn, not from this route.
+
+        The bridge never signs the reasoning it emits for a CLI route, so a
+        signature means a model switch mid-conversation put another vendor's
+        reasoning in the transcript. Forwarding it to OpenAI would replay it as
+        Codex's own - the replay ``protocol.py`` already refuses inbound.
+        """
+        items = codex._history_items([
+            {"role": "assistant", "content": [
+                {"type": "thinking", "thinking": "Anthropic reasoning", "signature": "sig"},
+                {"type": "thinking", "thinking": "this route's own reasoning"},
+                {"type": "tool_use", "id": "c1", "name": "shell", "input": {}}]}])
+        self.assertEqual([item["type"] for item in items], ["reasoning", "function_call"])
+        self.assertEqual(items[0]["summary"][0]["text"], "this route's own reasoning")
+
+    def test_resumed_turn_is_not_prompted_as_a_fresh_task(self):
+        fake = FakeCodexSession([])
+        fake.script = [_completed_turn()]
+        history = [{"role": "assistant", "content": [{"type": "tool_use", "id": "c1",
+                                                      "name": "shell", "input": {}}]},
+                   {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "c1",
+                                                 "content": "clean"}]}]
+        _, session, _ = self._run(self._request(tools=[{"name": "shell"}], history=history), fake)
+        params = dict((method, params) for method, params, _ in session.requests)
+        prompt = params["turn/start"]["input"][0]["text"]
+        self.assertEqual(prompt, codex._RESUME_PROMPT)
+        self.assertNotIn("Continue the user's task", prompt)
+        # The instruction has to name the failure it prevents, not just "continue".
+        self.assertIn("Resume the turn already in progress", prompt)
+        for forbidden in ("do not repeat a command", "do not restate a plan"):
+            self.assertIn(forbidden, prompt)
+
     def test_tool_aliases_are_stable_and_do_not_collide_with_host_alias_like_names(self):
         name = "mcp__ccd_directory__change_directory"
         alias = codex._tool_alias(name)

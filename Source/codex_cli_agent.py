@@ -151,6 +151,20 @@ _HOST_INSTRUCTIONS = HOST_EXECUTION_NOTE + (
     "next request's transcript. Use those results to continue the task."
 )
 
+#: The prompt that rejoins a turn after the host executed a tool call.
+#: The transport is stateless per leg - a fresh process, thread and prompt for
+#: every handoff - so this text is the only thing telling the model whether it
+#: is starting work or resuming it. "Continue the user's task" read as the
+#: former: the model re-oriented from scratch each leg, re-ran the checks its
+#: own instructions open with, and re-announced the plan it had already given.
+_RESUME_PROMPT = (
+    "Resume the turn already in progress above. The host executed your tool call and "
+    "its result is the last item in the conversation. You are mid-task, not starting: "
+    "do not re-read context already shown above, do not repeat a command whose output "
+    "is already above, and do not restate a plan or intention you have already given. "
+    "Continue from where your own reasoning left off and take the next real step."
+)
+
 _TRANSPORT_CONFIG = (
     'features.shell_tool=false',
     'features.multi_agent=false',
@@ -1001,7 +1015,7 @@ def _normalise_request(request):
 
 
 def _history_items(messages):
-    """Preserve role and call/result identity in a stateless Codex session."""
+    """Preserve role, reasoning and call/result identity in a stateless session."""
     items = []
     for message in messages:
         role = message.get("role")
@@ -1017,6 +1031,36 @@ def _history_items(messages):
                 items.append({"type": "message", "role": role, "content": [
                     {"type": "output_text" if role == "assistant" else "input_text",
                      "text": block["text"]}]})
+            elif kind in {"thinking", "redacted_thinking"} and role == "assistant":
+                # Reasoning is the continuity this transport otherwise drops. A
+                # fresh process per handoff means the model rejoins its own turn
+                # with no record of why it called the tool, so it re-derives the
+                # plan from the standing instructions every leg - which is how a
+                # repo whose doctrine opens with "git status first" collects
+                # dozens of git status calls before a first edit.
+                #
+                # Shape is not a guess: the runtime takes a Responses reasoning
+                # item and *requires* ``summary``. A ``content``-only item is
+                # refused outright ("items[0] is not a valid response item:
+                # missing field `summary`"), which would fail the whole turn.
+                # ``redacted_thinking`` carries no readable text, so it is
+                # dropped rather than injected as an empty or invented thought.
+                #
+                # A ``signature`` marks reasoning a real Anthropic model signed;
+                # this bridge never signs the thinking it emits for a CLI route
+                # (``cli_routes`` opens the block with text only). So a signed
+                # block reached us from another provider's turn - after a model
+                # switch mid-conversation - and forwarding it to OpenAI would
+                # replay one vendor's reasoning as another's, which
+                # ``protocol.py`` refuses on the way in for the same reason.
+                # Unsigned reasoning from a third CLI route is not separable
+                # here and is accepted; the signed case is the one that matters.
+                if block.get("signature"):
+                    continue
+                thought = block.get("thinking")
+                if isinstance(thought, str) and thought.strip():
+                    items.append({"type": "reasoning",
+                                  "summary": [{"type": "summary_text", "text": thought}]})
             elif kind == "tool_use":
                 items.append({"type": "function_call", "call_id": block["id"],
                               "name": _tool_alias(block["name"]), "namespace": _HOST_TOOL_NAMESPACE,
@@ -1295,14 +1339,16 @@ def run_turn(request, *, spawner=None, timeout=300) -> Iterator[dict]:
         thread_id = _start_thread(session, payload, workspace, timeout=budget * _START_SHARE)
         if payload.get("history"):
             history = payload["history"]
-            # Historical calls and results must be actual protocol items. A
-            # tool result in user-message text makes some models repeat the
-            # original call forever while waiting for its native result.
+            # Historical calls, results and reasoning must be actual protocol
+            # items. A tool result in user-message text makes some models repeat
+            # the original call forever while waiting for its native result, and
+            # reasoning dropped on the floor makes them re-plan from scratch on
+            # every leg instead of resuming the turn they are already in.
             items = _history_items(history)
             response = session.request("thread/inject_items", {"threadId": thread_id, "items": items},
                                        timeout=max(1.0, deadline - time.monotonic()))
             _result(response, context="thread/inject_items")
-            payload["prompt"] = "Continue the user's task using the conversation and host tool results above."
+            payload["prompt"] = _RESUME_PROMPT
         turn_id = _start_turn(session, payload, thread_id,
                               timeout=max(1.0, deadline - time.monotonic()))
         yield from _stream_turn(session, turn_id=turn_id, deadline=deadline,
