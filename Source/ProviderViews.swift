@@ -104,7 +104,7 @@ struct ProviderPage: View {
                                 Button("Open Vibe") { model.openVibe() }
                             }
                         } else if connection.credential_mode == "cli" {
-                            Text("Local-only experiment. Runs this provider’s own installed CLI and lets it keep the subscription login it already has: the hub never reads, copies, or refreshes a credential, because these tokens rotate and a second holder revokes the first. Tools are withheld on this route, so it answers as a model and never executes against your workspace. Sign in through the CLI itself, then save.").font(.caption).foregroundStyle(.secondary)
+                            Text("Local-only experiment. Runs this provider’s own installed CLI and lets it keep the subscription login it already has: the hub never reads, copies, or refreshes a credential, because these tokens rotate and a second holder revokes the first. Tools are answered by your desktop app and never executed by the CLI itself. Sign in through the CLI itself, then save.").font(.caption).foregroundStyle(.secondary)
                         } else {
                             Text("Reads " + (provider.credential_env ?? "the provider key") + " from the app’s launch environment; a Finder launch may not inherit shell variables.").font(.caption).foregroundStyle(.secondary)
                         }

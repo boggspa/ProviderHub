@@ -24,6 +24,7 @@ import providers
 from bridge_core import atomic_json, connection_signature, default_settings, discover_provider
 from cli_routes import (CliRouteError, cli_credential_mode, discover_via_cli,
                         plan_turn, relay_cli_turn, run_turn)
+from cli_tool_call import CLOSE_SENTINEL, OPEN_SENTINEL
 from gateway import Runtime, Server
 from hub_config import (CLI_AUTH_PROVIDERS, SLOTS, cli_auth_available,
                         credential_modes)
@@ -211,8 +212,123 @@ class CliRoutesTest(unittest.TestCase):
         plan = plan_turn("claude", "sonnet", payload, {}, wanted_output=64)
         assistant, user = plan["body"]["messages"]
         # Prior reasoning is provider state, not transcript text.
-        self.assertEqual(assistant["content"], "[ran tool: shell]\nchecking")
-        self.assertEqual(user["content"], "[tool result]\non main\n[image omitted: CLI routes are text-only]")
+        self.assertEqual(assistant["content"], "[tool call: shell (call) with {}]\nchecking")
+        self.assertEqual(user["content"],
+                         "[tool result for call]\non main\n[image omitted: CLI routes are text-only]")
+
+    def test_plan_turn_renders_tool_manifest(self):
+        payload = {"messages": [{"role": "user", "content": "hi"}],
+                   "tools": [{"name": "get_weather", "description": "Fetch weather.",
+                              "input_schema": {"type": "object",
+                                               "properties": {"city": {"type": "string"}}}}]}
+        plan = plan_turn("claude", "sonnet", payload, {}, wanted_output=64)
+        self.assertTrue(plan["cli_tool_calls"])
+        self.assertIn(OPEN_SENTINEL, plan["body"]["system"])
+        self.assertIn("get_weather", plan["body"]["system"])
+        self.assertEqual(plan["compatibility"]["cli_tools"], 1)
+
+    def test_plan_turn_tool_choice_none_suppresses_tools(self):
+        payload = {"messages": [{"role": "user", "content": "hi"}],
+                   "tools": [{"name": "get_weather"}],
+                   "tool_choice": {"type": "none"}}
+        plan = plan_turn("claude", "sonnet", payload, {}, wanted_output=64)
+        self.assertFalse(plan["cli_tool_calls"])
+        self.assertNotIn(OPEN_SENTINEL, plan["body"]["system"] or "")
+
+    def test_tool_history_round_trips_with_correlation_ids(self):
+        payload = {"messages": [
+            {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "toolu_1", "name": "get_weather",
+                 "input": {"city": "Paris"}}]},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "toolu_1",
+                 "content": [{"type": "text", "text": "sunny"}]}]},
+        ]}
+        plan = plan_turn("claude", "sonnet", payload, {}, wanted_output=64)
+        assistant, user = plan["body"]["messages"]
+        self.assertIn("get_weather (toolu_1)", assistant["content"])
+        self.assertIn('"city": "Paris"', assistant["content"])
+        self.assertIn("toolu_1", user["content"])
+        self.assertIn("sunny", user["content"])
+
+
+class ParseToolStreamTest(unittest.TestCase):
+    def setUp(self):
+        self._saved_cache = dict(cli_routes._cache)
+        cli_routes._cache.clear()
+
+    def tearDown(self):
+        cli_routes._cache.clear()
+        cli_routes._cache.update(self._saved_cache)
+
+    def test_envelope_text_becomes_tool_call_events(self):
+        wire = ("sure, checking " + OPEN_SENTINEL
+                + '{"name": "get_weather", "input": {"city": "Paris"}}' + CLOSE_SENTINEL)
+
+        def adapter_turn(request, *, timeout=300):
+            for piece in (wire[:13], wire[13:40], wire[40:]):
+                yield {"type": "text_delta", "text": piece}
+            yield {"type": "message_stop", "stop_reason": "end_turn"}
+
+        cli_routes._cache["claude"] = types.SimpleNamespace(run_turn=adapter_turn)
+        events = list(run_turn("claude", {}, parse_tool_calls=True))
+        calls = [event for event in events if event["type"] == "tool_call"]
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["name"], "get_weather")
+        self.assertEqual(calls[0]["input"], {"city": "Paris"})
+        self.assertEqual(events[-1], {"type": "message_stop", "stop_reason": "tool_use"})
+        self.assertEqual("".join(e.get("text", "") for e in events if e["type"] == "text_delta"),
+                         "sure, checking ")
+
+    def test_passthrough_when_parse_disabled(self):
+        wire = OPEN_SENTINEL + '{"name": "x"}' + CLOSE_SENTINEL
+
+        def adapter_turn(request, *, timeout=300):
+            yield {"type": "text_delta", "text": wire}
+            yield {"type": "message_stop", "stop_reason": "end_turn"}
+
+        cli_routes._cache["claude"] = types.SimpleNamespace(run_turn=adapter_turn)
+        events = list(run_turn("claude", {}, parse_tool_calls=False))
+        self.assertEqual([e["type"] for e in events], ["text_delta", "message_stop"])
+        self.assertEqual(events[0]["text"], wire)
+
+    def test_wrapper_close_kills_inner_generator(self):
+        closed = []
+
+        def adapter_turn(request, *, timeout=300):
+            try:
+                yield {"type": "text_delta", "text": "partial " + OPEN_SENTINEL}
+                yield {"type": "text_delta", "text": "more"}
+            finally:
+                closed.append(True)
+
+        cli_routes._cache["claude"] = types.SimpleNamespace(run_turn=adapter_turn)
+        events = run_turn("claude", {}, parse_tool_calls=True)
+        next(events)
+        events.close()
+        self.assertEqual(closed, [True])
+
+    def test_relay_emits_tool_use_wire_blocks(self):
+        emitted = []
+        result = relay_cli_turn(
+            iter([{"type": "text_delta", "text": "checking"},
+                  {"type": "tool_call", "id": "toolu_1", "name": "get_weather",
+                   "input": {"city": "Paris"}},
+                  {"type": "message_stop", "stop_reason": "tool_use"}]),
+            emitted.append, model="m", input_tokens=0)
+        kinds = [(event["type"], event.get("index")) for event in emitted]
+        self.assertEqual(kinds, [("message_start", None),
+                                 ("content_block_start", 0), ("content_block_delta", 0),
+                                 ("content_block_stop", 0),
+                                 ("content_block_start", 1), ("content_block_delta", 1),
+                                 ("content_block_stop", 1),
+                                 ("message_delta", None), ("message_stop", None)])
+        tool_block = emitted[4]["content_block"]
+        self.assertEqual(tool_block, {"type": "tool_use", "id": "toolu_1",
+                                      "name": "get_weather", "input": {}})
+        self.assertEqual(emitted[5]["delta"]["type"], "input_json_delta")
+        self.assertEqual(json.loads(emitted[5]["delta"]["partial_json"]), {"city": "Paris"})
+        self.assertEqual(result["stop_reason"], "tool_use")
 
     # -- wire translation ------------------------------------------------------
 
@@ -520,6 +636,44 @@ class GatewayCliTurnTest(unittest.TestCase):
         self.assertIn("top-level system", request["system"])
         self.assertIn("harness context", request["system"])
 
+    def test_tool_call_round_trip_on_the_wire(self):
+        self.events = [
+            {"type": "text_delta", "text": "checking " + OPEN_SENTINEL
+             + '{"name": "get_weather", "input": {"city": "Paris"}}' + CLOSE_SENTINEL},
+            {"type": "message_stop", "stop_reason": "end_turn"},
+        ]
+        status, raw = self.request({"model": "claude/claude-sonnet-5", "max_tokens": 64,
+                                    "messages": [{"role": "user", "content": "weather?"}],
+                                    "tools": [{"name": "get_weather",
+                                               "description": "Fetch weather.",
+                                               "input_schema": {"type": "object",
+                                                                "properties": {"city": {"type": "string"}}}}]})
+        self.assertEqual(status, 200, raw[:300])
+        message = json.loads(raw)
+        self.assertEqual(message["stop_reason"], "tool_use")
+        kinds = [block.get("type") for block in message["content"]]
+        self.assertEqual(kinds, ["text", "tool_use"])
+        self.assertEqual(message["content"][1]["name"], "get_weather")
+        self.assertEqual(message["content"][1]["input"], {"city": "Paris"})
+        # The manifest rode the system text; the envelope never did.
+        self.assertIn(OPEN_SENTINEL, self.requests[0]["system"])
+
+    def test_tool_call_streams_as_sse_blocks(self):
+        self.events = [
+            {"type": "text_delta", "text": OPEN_SENTINEL
+             + '{"name": "shell", "input": {"cmd": "pwd"}}' + CLOSE_SENTINEL},
+            {"type": "message_stop", "stop_reason": "end_turn"},
+        ]
+        status, raw = self.request({"model": "claude/claude-sonnet-5", "max_tokens": 64,
+                                    "stream": True,
+                                    "messages": [{"role": "user", "content": "where am i"}],
+                                    "tools": [{"name": "shell"}]})
+        self.assertEqual(status, 200, raw[:300])
+        text = raw.decode()
+        self.assertIn('"type": "tool_use"', text)
+        self.assertIn('"stop_reason": "tool_use"', text)
+        self.assertIn("input_json_delta", text)
+
 
 class ResponsesBridgeTest(unittest.TestCase):
     """CLI-mode providers take the messages bridge on the Codex surface too."""
@@ -673,6 +827,41 @@ class ResponsesEndToEndTest(unittest.TestCase):
         self.assertIn("response.completed", kinds)
         self.assertNotIn("error", kinds)
         self.assertIn("ROUTE2 OK", raw)
+
+    def test_bridged_tool_call_becomes_a_function_call(self):
+        def tool_turn(request, *, timeout=300):
+            yield {"type": "text_delta", "text": OPEN_SENTINEL
+                   + '{"name": "get_weather", "input": {"city": "Paris"}}' + CLOSE_SENTINEL}
+            yield {"type": "message_stop", "stop_reason": "end_turn"}
+
+        cli_routes._cache["grok"] = types.SimpleNamespace(
+            PROVIDER_ID="grok", TRANSPORT="print", SYSTEM_PROMPT_TRANSPORT="flag",
+            KNOWN_MODELS=(), run_turn=tool_turn)
+        connection = http.client.HTTPConnection("127.0.0.1", self.gateway.server_port, timeout=30)
+        connection.request("POST", "/v1/responses", json.dumps({
+            "model": "grok/grok-4.6", "stream": True, "store": False,
+            "input": [{"type": "message", "role": "user",
+                       "content": [{"type": "input_text", "text": "weather in Paris?"}]}],
+            "tools": [{"type": "function", "name": "get_weather",
+                       "description": "Fetch weather.",
+                       "parameters": {"type": "object",
+                                      "properties": {"city": {"type": "string"}}}}]}),
+            {"Authorization": "Bearer " + self.runtime.token,
+             "Content-Type": "application/json"})
+        response = connection.getresponse()
+        raw = response.read().decode()
+        connection.close()
+        self.assertEqual(response.status, 200, raw[:300])
+        self.assertIn("response.completed", raw)
+        completed = [json.loads(line[5:]) for block in raw.split("\n\n")
+                     for line in [block.split("\n")[-1]]
+                     if line.startswith("data:")
+                     and json.loads(line[5:]).get("type") == "response.completed"]
+        output = completed[0]["response"]["output"]
+        calls = [item for item in output if item.get("type") == "function_call"]
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["name"], "get_weather")
+        self.assertEqual(json.loads(calls[0]["arguments"]), {"city": "Paris"})
 
 
 if __name__ == "__main__":

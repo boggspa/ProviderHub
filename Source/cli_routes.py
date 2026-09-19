@@ -25,8 +25,10 @@ Two jobs:
 from __future__ import annotations
 
 import importlib
+import json
 import uuid
 
+from cli_tool_call import ToolCallParser, normalize_tools, render_tool_manifest
 from effort_map import EFFORT_ORDER
 from hub_config import MODEL_ID
 
@@ -257,9 +259,14 @@ def _flatten_blocks(content) -> str:
         elif kind == "tool_result":
             inner = _flatten_blocks(block.get("content"))
             if inner.strip():
-                parts.append(f"[tool result]\n{inner}")
+                parts.append(f"[tool result for {block.get('tool_use_id') or 'call'}]\n{inner}")
         elif kind == "tool_use":
-            parts.append(f"[ran tool: {block.get('name') or 'tool'}]")
+            name = block.get("name") or "tool"
+            try:
+                args = json.dumps(block.get("input") or {}, ensure_ascii=False)
+            except (TypeError, ValueError):
+                args = "{}"
+            parts.append(f"[tool call: {name} ({block.get('id') or 'call'}) with {args[:200]}]")
         elif kind in {"input_image", "image"}:
             parts.append("[image omitted: CLI routes are text-only]")
         elif kind in {"input_document", "document"}:
@@ -317,6 +324,17 @@ def plan_turn(provider_id: str, upstream_model: str, payload: dict, spec: dict,
     if system is not None and not isinstance(system, str):
         system = None
     messages, system = _messages_for_cli(payload.get("messages"), system)
+    raw_tools = payload.get("tools")
+    tools = normalize_tools(raw_tools)
+    tool_choice = payload.get("tool_choice")
+    if isinstance(tool_choice, dict) and tool_choice.get("type") == "none":
+        tools, tool_choice = [], None
+    manifest = render_tool_manifest(tools, tool_choice) if tools else ""
+    if manifest:
+        # The tool surface rides the system text: the harness's definitions,
+        # the call convention, and the anti-simulation rules. Nothing else
+        # about the request changes - adapters stay tool-agnostic.
+        system = manifest + ("\n\n" + system if system else "")
     request = {
         "model": upstream_model,
         "messages": messages,
@@ -327,6 +345,7 @@ def plan_turn(provider_id: str, upstream_model: str, payload: dict, spec: dict,
     }
     return {
         "cli": True,
+        "cli_tool_calls": bool(tools),
         "protocol": "cli",
         "url": None,
         "headers": {},
@@ -334,14 +353,65 @@ def plan_turn(provider_id: str, upstream_model: str, payload: dict, spec: dict,
         "compatibility": {
             "cli_transport": getattr(adapter, "TRANSPORT", "unknown"),
             "system_prompt_transport": getattr(adapter, "SYSTEM_PROMPT_TRANSPORT", "prompt"),
+            **({"cli_tools": len(tools),
+                "cli_tools_dropped": len(raw_tools) - len(tools)}
+               if tools and isinstance(raw_tools, list) and len(raw_tools) != len(tools)
+               else {"cli_tools": len(tools)} if tools else {}),
         },
     }
 
 
-def run_turn(provider_id: str, request: dict, *, timeout: int = 600):
+def run_turn(provider_id: str, request: dict, *, parse_tool_calls: bool = False, timeout: int = 600):
     """Start the adapter's turn generator (text_delta/thinking_delta/stop)."""
     adapter = adapter_for(provider_id)
-    return adapter.run_turn(request, timeout=timeout)
+    events = adapter.run_turn(request, timeout=timeout)
+    if not parse_tool_calls:
+        return events
+    return _parse_tool_stream(events)
+
+
+def _parse_tool_stream(events):
+    """Rewrite one adapter event stream, cutting call envelopes out of text.
+
+    Text passes through unless the parser is mid-envelope; each complete,
+    valid envelope becomes a {"type": "tool_call"} event, and a turn that
+    produced any call stops with stop_reason "tool_use" so the harness runs
+    its loop. Malformed envelopes fail open as ordinary text. The inner
+    generator is always closed with the wrapper - that is what kills the
+    child CLI when a turn is abandoned.
+    """
+    parser = ToolCallParser()
+    calls = 0
+
+    def flush(chunks):
+        nonlocal calls
+        for ptype, payload in chunks:
+            if ptype == "text":
+                if payload:
+                    yield {"type": "text_delta", "text": payload}
+            else:
+                calls += 1
+                yield {"type": "tool_call", **payload}
+
+    try:
+        for event in events:
+            kind = event.get("type") if isinstance(event, dict) else None
+            if kind == "text_delta":
+                yield from flush(parser.feed(event.get("text") or ""))
+            elif kind == "message_stop":
+                yield from flush(parser.finish())
+                stop_reason = "tool_use" if calls else event.get("stop_reason")
+                yield {"type": "message_stop", "stop_reason": stop_reason}
+            elif kind == "error":
+                # A failure mid-envelope must not swallow the partial text.
+                yield from flush(parser.finish())
+                yield event
+            else:
+                yield event
+    finally:
+        close = getattr(events, "close", None)
+        if callable(close):
+            close()
 
 
 # ---------------------------------------------------------------------------
@@ -424,6 +494,22 @@ def relay_cli_turn(events, emit, *, model, input_tokens=0) -> dict:
             open("text")
             emit({"type": "content_block_delta", "index": index,
                   "delta": {"type": "text_delta", "text": text}})
+        elif kind == "tool_call":
+            if not started:
+                start_message()
+            if open_block is not None:
+                emit({"type": "content_block_stop", "index": index})
+                index += 1
+                open_block = None
+            emit({"type": "content_block_start", "index": index,
+                  "content_block": {"type": "tool_use", "id": event["id"],
+                                    "name": event["name"], "input": {}}})
+            emit({"type": "content_block_delta", "index": index,
+                  "delta": {"type": "input_json_delta",
+                            "partial_json": json.dumps(event["input"], ensure_ascii=False,
+                                                       separators=(",", ":"))}})
+            emit({"type": "content_block_stop", "index": index})
+            index += 1
     usage = {"input_tokens": int(input_tokens or 0), "output_tokens": 0}
     if error is not None:
         return {"error": error, "started": started, "stop_reason": None, "usage": usage}

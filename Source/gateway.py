@@ -1005,7 +1005,8 @@ class Handler(BaseHTTPRequestHandler):
         request = plan["body"]
         stream = bool(request.get("stream"))
         try:
-            events = cli_routes.run_turn(plan["provider_id"], request)
+            events = cli_routes.run_turn(plan["provider_id"], request,
+                                         parse_tool_calls=bool(plan.get("cli_tool_calls")))
         except Exception as exc:
             self.runtime.record("error", route, 502)
             self.error(502, f"{plan['provider_name']} CLI route could not start: {exc}")
@@ -1097,13 +1098,39 @@ class Handler(BaseHTTPRequestHandler):
         if stream:
             finish_stream()
             return
-        thinking = "".join(
-            event["delta"]["thinking"] for event in collected
-            if event.get("type") == "content_block_delta" and event.get("delta", {}).get("type") == "thinking_delta")
-        text = "".join(
-            event["delta"]["text"] for event in collected
-            if event.get("type") == "content_block_delta" and event.get("delta", {}).get("type") == "text_delta")
-        content = ([{"type": "thinking", "thinking": thinking}] if thinking else []) + [{"type": "text", "text": text}]
+        content = []
+        current = None
+        for event in collected:
+            kind = event.get("type")
+            if kind == "content_block_start":
+                current = dict(event["content_block"])
+                if current.get("type") == "tool_use":
+                    current["_partial"] = ""
+            elif kind == "content_block_delta" and current is not None:
+                delta = event.get("delta", {})
+                if delta.get("type") == "text_delta":
+                    current["text"] = current.get("text", "") + delta.get("text", "")
+                elif delta.get("type") == "thinking_delta":
+                    current["thinking"] = current.get("thinking", "") + delta.get("thinking", "")
+                elif delta.get("type") == "input_json_delta":
+                    current["_partial"] = current.get("_partial", "") + delta.get("partial_json", "")
+            elif kind == "content_block_stop" and current is not None:
+                if current.get("type") == "tool_use":
+                    try:
+                        current["input"] = json.loads(current.get("_partial") or "{}")
+                    except ValueError:
+                        current["input"] = {}
+                current = {key: value for key, value in current.items() if not key.startswith("_")}
+                content.append(current)
+                current = None
+        if current is not None:
+            if current.get("type") == "tool_use":
+                try:
+                    current["input"] = json.loads(current.get("_partial") or "{}")
+                except ValueError:
+                    current["input"] = {}
+            current = {key: value for key, value in current.items() if not key.startswith("_")}
+            content.append(current)
         message_start = next((event["message"] for event in collected if event.get("type") == "message_start"), {})
         self.json_response(200, {
             "id": message_start.get("id", "msg_cli"),
