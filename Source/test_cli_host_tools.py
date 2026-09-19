@@ -172,6 +172,162 @@ class HostCycleTests(unittest.TestCase):
             self.assertIn("host application", text)
 
 
+class AgyNativeHandoffTests(unittest.TestCase):
+    def test_hook_explicitly_allows_finish_and_only_scoped_images(self):
+        import subprocess
+        import sys
+        import agy_cli_agent as adapter
+
+        with tempfile.TemporaryDirectory() as directory:
+            image = str((Path(directory) / "image.png").resolve())
+            hook_root = adapter._install_host_hook(directory, [image])
+            for index, (name, args, expected) in enumerate([
+                ("finish", {"text": "Ready", "tool_calls": []}, "allow"),
+                ("view_file", {"AbsolutePath": image}, "allow"),
+                ("view_file", {"AbsolutePath": "/workspace/private.txt"}, "deny"),
+                ("run_command", {"CommandLine": "pwd"}, "deny"),
+            ]):
+                with self.subTest(name=name, args=args):
+                    payload = {"conversationId": "c1", "stepIdx": index,
+                               "toolCall": {"name": name, "args": args}}
+                    result = subprocess.run([sys.executable, str(hook_root / "host_handoff.py")],
+                                            input=json.dumps(payload), text=True, capture_output=True, check=True)
+                    self.assertEqual(json.loads(result.stdout)["decision"], expected)
+                    self.assertEqual((hook_root / f"blocked-{index}.json").exists(), expected == "deny")
+
+    def handoff(self, native_name, parameters, host_tools, *, receipt=True, terminal="ERROR",
+                tool_choice=None, stale_receipt=False):
+        import subprocess
+        import sys
+        import agy_cli_agent as adapter
+
+        plan = cli_routes.plan_turn("antigravity", "gemini-3.1-pro", {
+            "tools": host_tools, "tool_choice": tool_choice,
+            "messages": [{"role": "user", "content": "Inspect the repository."}]}, {}, wanted_output=128)
+        sessions = []
+        directories = []
+        def factory(argv, **kwargs):
+            directory = Path(kwargs["cwd"])
+            directories.append(directory)
+            session = Session([])
+            sessions.append(session)
+            step = {"conversation_id": "native-c1", "step_index": 2, "step_type": "tool",
+                    "state": "ACTIVE", "tool_info": {"name": native_name, "parameters": parameters}}
+            def script():
+                yield {"event": "step_update", "step_update": step}
+                if receipt:
+                    payload = {"conversationId": "other" if stale_receipt else "native-c1", "stepIdx": 2,
+                               "toolCall": {"name": native_name, "args": parameters}}
+                    result = subprocess.run([sys.executable, str(directory / ".agents/host_handoff.py")],
+                                            input=json.dumps(payload), text=True, capture_output=True, check=True)
+                    self.assertEqual(json.loads(result.stdout)["decision"], "deny")
+                    # The receipt may exist while the hook is still running.
+                    # No host call may escape until agy confirms the denial.
+                    yield {"event": "step_update", "step_update": step}
+                session.confirmation_sent = True
+                yield {"event": "step_update", "step_update": {**step, "state": terminal,
+                    "tool_info": {**step["tool_info"], "error": {
+                        "message": "tool call denied by pre-tool hook: Provider Hub captured this request."}}}}
+                self.fail("The adapter continued consuming the native loop after a handoff or failure")
+            session.script = script()
+            return session
+
+        with patch.object(adapter, "StdioSession", side_effect=factory), \
+                patch.object(adapter, "_resolve_binary", return_value="/fake/agy"):
+            events = list(cli_routes._tool_turn(adapter, plan["body"], timeout=10))
+        self.assertTrue(all(session.closed for session in sessions))
+        self.assertTrue(all(not directory.exists() for directory in directories))
+        return [event for event in events if event["type"] != "ping"], sessions
+
+    def test_native_command_maps_to_each_desktop_tool(self):
+        for name, expected in (("exec_command", {"cmd": "git status --short", "workdir": "/workspace"}),
+                               ("Bash", {"command": "cd /workspace && git status --short"})):
+            with self.subTest(host=name):
+                events, sessions = self.handoff("run_command", {
+                    "CommandLine": "git status --short", "Cwd": "/workspace", "toolAction": "Checking status"},
+                    [{"name": name, "input_schema": {"type": "object"}}])
+                self.assertEqual([event["type"] for event in events], ["tool_call", "message_stop"])
+                self.assertEqual(events[0]["name"], name)
+                self.assertEqual(events[0]["input"], expected)
+                self.assertEqual(len(sessions), 1)
+                self.assertTrue(sessions[0].confirmation_sent)
+
+    def test_claude_send_message_wrapper_becomes_one_real_host_call(self):
+        arguments = {"file_path": "/workspace/AGENTS.md"}
+        message = json.dumps({"text": "Reading the repository guidance.", "tool_calls": [
+            {"name": "Read", "arguments": json.dumps(arguments)}]})
+        events, sessions = self.handoff("send_message", {"Recipient": "user", "Message": message},
+                                      [{"name": "Read", "input_schema": {"type": "object"}}])
+        self.assertEqual([event["type"] for event in events], ["text_delta", "tool_call", "message_stop"])
+        self.assertEqual(events[1]["name"], "Read")
+        self.assertEqual(events[1]["input"], arguments)
+        self.assertEqual(len(sessions), 1)
+
+    def test_completed_native_action_without_receipt_is_never_reissued(self):
+        events, sessions = self.handoff("run_command", {"CommandLine": "touch completed"},
+                                      [{"name": "Bash", "input_schema": {"type": "object"}}],
+                                      receipt=False, terminal="DONE")
+        self.assertEqual([event["type"] for event in events], ["error"])
+        self.assertEqual(len(sessions), 1)
+
+    def test_completed_native_action_with_receipt_is_never_reissued(self):
+        events, sessions = self.handoff("run_command", {"CommandLine": "touch completed"},
+                                      [{"name": "Bash", "input_schema": {"type": "object"}}],
+                                      terminal="DONE")
+        self.assertEqual([event["type"] for event in events], ["error"])
+        self.assertIn("did not confirm", events[0]["message"])
+        self.assertEqual(len(sessions), 1)
+
+    def test_mismatched_capture_cannot_authorize_a_handoff(self):
+        events, sessions = self.handoff("run_command", {"CommandLine": "pwd"},
+                                      [{"name": "Bash", "input_schema": {"type": "object"}}], stale_receipt=True)
+        self.assertEqual([event["type"] for event in events], ["error"])
+        self.assertIn("receipt did not match", events[0]["message"])
+        self.assertEqual(len(sessions), 1)
+
+    def test_unmapped_captured_action_gets_only_one_correction(self):
+        events, sessions = self.handoff("unknown_operation", {}, TOOLS)
+        self.assertEqual([event["type"] for event in events], ["error"])
+        self.assertEqual(len(sessions), 2)
+
+    def test_captured_action_respects_required_host_tool(self):
+        events, sessions = self.handoff("read_file", {"path": "README.md"}, TOOLS,
+                                      tool_choice={"type": "tool", "name": "write_file"})
+        self.assertEqual([event["type"] for event in events], ["error"])
+        self.assertEqual(len(sessions), 2)
+
+    def test_unknown_host_tool_rejection_is_translated_without_reexecution(self):
+        import agy_cli_agent as adapter
+        with tempfile.TemporaryDirectory() as directory:
+            state = adapter._TurnState()
+            state.structured = True
+            state.hook_root = Path(directory)
+            state.tools = [{"name": "exec_command", "input_schema": {"type": "object"}}]
+            step = {"conversation_id": "c1", "step_index": 2, "state": "ERROR",
+                    "tool_info": {"name": "exec_command", "parameters": {"cmd": "cat README.md"},
+                                  "error": {"message": 'unknown tool: "exec_command" — check spelling'}}}
+            adapter._capture_native_handoff(step, state)
+            self.assertIsNone(state.failure)
+            reply = json.loads(state.handoff_reply)
+            self.assertEqual(reply["tool_calls"], [
+                {"name": "exec_command", "arguments": json.dumps({"cmd": "cat README.md"})}])
+
+    def test_native_file_range_preserves_host_read_semantics_and_shell_quoting(self):
+        import agy_cli_agent as adapter
+        import shlex
+        parameters = {"AbsolutePath": "/workspace/it's a file.md", "StartLine": 3, "EndLine": 8}
+        for name in ("Read", "exec_command"):
+            reply = json.loads(adapter._host_reply_for_native("view_file", parameters,
+                               [{"name": name, "input_schema": {"type": "object"}}]))
+            call = reply["tool_calls"][0]
+            self.assertEqual(call["name"], name)
+            arguments = json.loads(call["arguments"])
+            if name == "Read":
+                self.assertEqual(arguments, {"file_path": parameters["AbsolutePath"], "offset": 3, "limit": 6})
+            else:
+                self.assertEqual(shlex.split(arguments["cmd"]), ["sed", "-n", "3,8p", parameters["AbsolutePath"]])
+
+
 class FailedHandoffTests(unittest.TestCase):
     def parse(self, events, **kwargs):
         return list(cli_routes._parse_tool_stream(iter(events), tools=TOOLS, **kwargs))

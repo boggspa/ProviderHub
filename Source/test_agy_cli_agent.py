@@ -515,6 +515,42 @@ class TestRunTurnStreams(unittest.TestCase):
                             schema={"type": "object"})
         self.assertEqual([event["type"] for event in events], ["error"])
 
+    def test_structured_output_excludes_agy_display_metadata(self):
+        import json
+        clean = {"text": "Ready", "tool_calls": []}
+        decorated = {**clean, "toolAction": "Finishing task", "toolSummary": "Finish"}
+        events = self._run([self._result(json.dumps(decorated), structured_output=clean)],
+                           schema={"type": "object"})
+        self.assertEqual(json.loads(events[0]["text"]), clean)
+        self.assertEqual(events[-1]["type"], "message_stop")
+
+    def test_native_finish_waits_for_schema_result(self):
+        import json
+        reply = {"text": "Ready", "tool_calls": []}
+        events = self._run([
+            {"event": "step_update", "step_update": {"step_type": "tool", "state": "ACTIVE",
+                "tool_info": {"name": "finish", "parameters": reply}}},
+            self._result("decorated provider response", structured_output=reply)],
+            schema={"type": "object"})
+        self.assertEqual(json.loads(events[0]["text"]), reply)
+        self.assertEqual(events[-1]["type"], "message_stop")
+
+    def test_unresolved_native_call_cannot_be_hidden_by_a_final_answer(self):
+        events = self._run([
+            {"event": "step_update", "step_update": {"conversation_id": "c1", "step_index": 2,
+                "step_type": "tool", "state": "ACTIVE",
+                "tool_info": {"name": "run_command", "parameters": {"CommandLine": "pwd"}}}},
+            self._result('{"text":"Done","tool_calls":[]}')], schema={"type": "object"})
+        self.assertEqual([event["type"] for event in events], ["error"])
+        self.assertEqual(events[0]["http_status"], 400)
+
+    def test_finish_without_success_never_releases_output(self):
+        events = self._run([
+            {"event": "step_update", "step_update": {"step_type": "tool", "state": "DONE",
+                "tool_info": {"name": "finish", "parameters": {"text": "Done", "tool_calls": []}}}},
+            self._result("", status="CANCELLED")], schema={"type": "object"})
+        self.assertEqual([event["type"] for event in events], ["error"])
+
     def test_denied_native_tool_still_reports_an_error(self):
         events = self._run([self._result("", denied_actions=[{"display_name": "run_command"}])])
         self.assertEqual([event["type"] for event in events], ["error"])

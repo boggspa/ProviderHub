@@ -7,9 +7,10 @@ touches the Keychain. agy exposes no non-interactive auth verb at all
 ``auth_state()`` reports ``"unknown"`` and spawns nothing rather than inventing
 a probe.
 
-These routes are deliberately **pure text-in/text-out** so they behave like
-model routes rather than delegatory headless agents; the desktop harness owns
-the tool loop and a second tool loop would double-execute. The posture is
+The desktop harness owns the tool loop. Structured turns accept either agy's
+schema response or a native request intercepted by a temporary PreToolUse
+hook. The hook denies actions locally; after agy confirms that denial, the hub
+translates the captured request into an offered desktop tool. The posture is
 ``--sandbox`` plus ``--mode plan`` plus ``--disable-slash-commands``, and no
 auto-approve flag is ever constructed.
 
@@ -43,14 +44,17 @@ from __future__ import annotations
 
 import json
 import re
+import shlex
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from typing import Any, Iterable, Iterator
 
 from cli_session import CliSessionError, StdioSession, minimal_env, resolve_binary
-from cli_tool_call import TRANSCRIPT_HEADER
+from cli_tool_call import TRANSCRIPT_HEADER, ToolCallError
+from cli_structured_reply import parse_reply
 from cli_images import write_images
 
 try:  # Repo-native effort ladder; degrade to a local copy if unavailable.
@@ -706,6 +710,171 @@ def render_prompt(messages, *, system=None) -> str:
 # Turn execution
 # ---------------------------------------------------------------------------
 
+# This hook only captures and denies actions; it never runs a host tool. agy
+# discovers it in a private per-turn workspace, without changing user config.
+# A receipt plus agy's denial event proves execution was stopped before a
+# native request is translated.
+_HOST_HOOK = '''import json, sys
+from pathlib import Path
+
+root = Path(__file__).resolve().parent
+try:
+    payload = json.loads(sys.stdin.buffer.read(1024 * 1024 + 1))
+    call = payload["toolCall"]
+    name, args = call["name"], call.get("args", {})
+    images = json.loads((root / "images.json").read_text())
+    path = args.get("AbsolutePath") if isinstance(args, dict) else None
+    if name == "finish" or (name == "view_file" and isinstance(path, str)
+                            and str(Path(path).resolve()) in images):
+        print(json.dumps({"decision": "allow"}))
+    else:
+        index = payload["stepIdx"]
+        if type(index) is not int or index < 0:
+            raise ValueError("invalid step index")
+        target = root / ("blocked-" + str(index) + ".json")
+        staging = target.with_suffix(".tmp")
+        staging.write_text(json.dumps(payload, allow_nan=False))
+        staging.replace(target)
+        print(json.dumps({"decision": "deny", "reason":
+            "Provider Hub captured this request for the desktop host. Do not execute it here; return the structured host reply."}))
+except Exception:
+    print(json.dumps({"decision": "deny", "reason": "Provider Hub could not capture this native request."}))
+'''
+
+
+def _install_host_hook(workspace, image_paths):
+    root = Path(workspace) / ".agents"
+    root.mkdir()
+    script = root / "host_handoff.py"
+    script.write_text(_HOST_HOOK, encoding="utf-8")
+    (root / "images.json").write_text(json.dumps(image_paths), encoding="utf-8")
+    command = shlex.join([sys.executable, str(script)])
+    (root / "hooks.json").write_text(json.dumps({"provider-hub-handoff": {
+        "PreToolUse": [{"matcher": ".*", "hooks": [
+            {"type": "command", "command": command, "timeout": 5}]}]}}), encoding="utf-8")
+    return root
+
+
+def _host_reply_for_native(name, parameters, tools, tool_choice=None):
+    """Translate a captured request using only the tools this host offered.
+
+    Unmapped operations get the route's one format-correction attempt. Never
+    guess an external tool name, or treat an already-executed event as a call.
+    """
+    if not isinstance(parameters, dict):
+        raise ToolCallError("native tool parameters must be an object")
+    parameters = dict(parameters)
+    offered = {tool["name"]: tool for tool in tools}
+    properties = (offered.get(name, {}).get("input_schema") or {}).get("properties", {})
+    for key in ("toolAction", "toolSummary"):
+        if key not in properties:
+            parameters.pop(key, None)
+    if name == "send_message" and parameters.get("Recipient") == "user":
+        # agy sometimes sends the entire host envelope as a message to its
+        # nonexistent local 'user' agent. This is output, never a host message.
+        reply = parameters.get("Message")
+        if not isinstance(reply, str):
+            raise ToolCallError("native message did not contain a host reply")
+    else:
+        target, arguments = name, parameters
+        if name not in offered:
+            command = None
+            cwd = None
+            if name == "run_command" and isinstance(parameters.get("CommandLine"), str):
+                command = parameters["CommandLine"]
+                cwd = parameters.get("Cwd")
+            elif name == "view_file" and isinstance(parameters.get("AbsolutePath"), str):
+                path = parameters["AbsolutePath"]
+                start, end = parameters.get("StartLine"), parameters.get("EndLine")
+                if start is not None and (type(start) is not int or start < 1) \
+                        or end is not None and (type(end) is not int or end < (start or 1)):
+                    raise ToolCallError("native file range is invalid")
+                if "Read" in offered:
+                    target, arguments = "Read", {"file_path": path}
+                    if start is not None or end is not None:
+                        arguments["offset"] = start or 1
+                    if end is not None:
+                        arguments["limit"] = end - (start or 1) + 1
+                elif "read_file" in offered and start is None and end is None:
+                    target, arguments = "read_file", {"path": path}
+                else:
+                    command = ("sed -n " + shlex.quote(f"{start or 1},{end if end is not None else '$'}p")
+                               + " " + shlex.quote(path) if start is not None or end is not None
+                               else "cat -- " + shlex.quote(path))
+            elif name in {"list_dir", "list_directory"} and isinstance(parameters.get("DirectoryPath"), str):
+                if "list_directory" in offered:
+                    target, arguments = "list_directory", {"path": parameters["DirectoryPath"]}
+                else:
+                    command = "ls -la -- " + shlex.quote(parameters["DirectoryPath"])
+            if command is not None:
+                if "exec_command" in offered:
+                    target, arguments = "exec_command", {"cmd": command}
+                    if isinstance(cwd, str) and cwd:
+                        arguments["workdir"] = cwd
+                elif "Bash" in offered:
+                    target, arguments = "Bash", {"command":
+                        "cd " + shlex.quote(cwd) + " && " + command if isinstance(cwd, str) and cwd else command}
+                elif "run_shell_command" in offered:
+                    target, arguments = "run_shell_command", {"command":
+                        "cd " + shlex.quote(cwd) + " && " + command if isinstance(cwd, str) and cwd else command}
+            if target not in offered:
+                raise ToolCallError("the native request has no supported host tool mapping")
+        reply = json.dumps({"text": "", "tool_calls": [
+            {"name": target, "arguments": json.dumps(arguments, allow_nan=False)}]}, allow_nan=False)
+    # Preserve tool-choice constraints, offered names, batch and argument limits.
+    parse_reply(reply, tools, tool_choice)
+    return reply
+
+
+def _capture_native_handoff(step, state):
+    """Require a pre-execution receipt (or an unknown-tool rejection)."""
+    state.saw_tool_step = True
+    info = step.get("tool_info") or {}
+    name = info.get("name") or step.get("tool_name")
+    phase = str(step.get("state") or "").upper()
+    index = step.get("step_index")
+    error = info.get("error") or {}
+    detail = error.get("message", "") if isinstance(error, dict) else ""
+    receipt = None
+    if state.hook_root is not None and type(index) is int and index >= 0:
+        path = state.hook_root / f"blocked-{index}.json"
+        if path.is_file():
+            receipt = json.loads(path.read_text(encoding="utf-8"))
+    if receipt is not None:
+        call = receipt.get("toolCall") or {}
+        if receipt.get("conversationId") != step.get("conversation_id") \
+                or receipt.get("stepIdx") != index or call.get("name") != name:
+            raise AgyCliAgentError("agy native handoff receipt did not match the streamed request")
+        if phase in {"ACTIVE", "PENDING", "RUNNING"}:
+            return
+        if phase != "ERROR" or not isinstance(detail, str) \
+                or not detail.startswith("tool call denied by pre-tool hook: Provider Hub captured this request"):
+            state.failure = "agy did not confirm the captured native action was blocked; no host action was dispatched."
+            state.failure_status = 400
+            return
+        parameters = call.get("args")
+    else:
+        # Host tool names used as agy calls are rejected before dispatch. This
+        # exact failure is safe to translate even when no hook could be called.
+        unknown = isinstance(name, str) and phase in {"ERROR", "INVALID"} \
+            and isinstance(detail, str) and detail.startswith(f'unknown tool: "{name}"')
+        if not unknown:
+            if state.hook_root is not None and phase in {"ACTIVE", "PENDING", "RUNNING"} \
+                    and isinstance(name, str) and name and type(index) is int and index >= 0 \
+                    and isinstance(step.get("conversation_id"), str) and step["conversation_id"]:
+                return
+            state.failure = "agy attempted a native tool without a captured host handoff; no host action was dispatched."
+            state.failure_status = 400
+            return
+        parameters = info.get("parameters")
+    try:
+        state.handoff_reply = _host_reply_for_native(name, parameters, state.tools, state.tool_choice)
+    except (ToolCallError, ValueError, TypeError) as exc:
+        state.failure = f"agy native request was stopped before execution but needs a structured host reply: {exc}."
+        state.failure_status = 400
+        state.failure_code = "invalid_cli_tool_call"
+
+
 class _TurnState:
     """Mutable accumulation for one streamed turn."""
 
@@ -724,6 +893,11 @@ class _TurnState:
         self.image_paths: list[str] = []
         self.structured = False
         self.failure_status = None
+        self.failure_code = None
+        self.hook_root = None
+        self.handoff_reply = None
+        self.tools = []
+        self.tool_choice = None
 
     def fallback_text(self) -> str:
         return self.result_text or ""
@@ -788,6 +962,20 @@ def _translate(payload: Any, state: _TurnState) -> list[dict]:
             return []
         step_type = step.get("step_type")
         if step_type == "tool":
+            info = step.get("tool_info") or {}
+            name = info.get("name") or step.get("tool_name")
+            if state.structured and name == "finish":
+                # --json-schema is implemented by agy's own finish tool.
+                # Wait for SUCCESS and consume result.structured_output.
+                return []
+            if state.structured and state.hook_root is not None:
+                parameters = info.get("parameters") or {}
+                path = parameters.get("AbsolutePath")
+                image_read = name == "view_file" and isinstance(path, str) \
+                    and str(Path(path).resolve()) in state.image_paths
+                if not image_read:
+                    _capture_native_handoff(step, state)
+                    return []
             if state.image_paths:
                 info = step.get("tool_info") or {}
                 parameters = info.get("parameters") or {}
@@ -842,8 +1030,16 @@ def _translate(payload: Any, state: _TurnState) -> list[dict]:
         result = payload.get("result")
         if not isinstance(result, dict):
             return []
+        if state.structured and state.saw_tool_step:
+            state.failure = "agy ended with an unresolved native tool request; no host action was dispatched."
+            state.failure_status = 400
+            return []
         status = str(result.get("status") or "").upper()
         response = result.get("response")
+        if state.structured and "structured_output" in result:
+            # response contains agy's toolAction/toolSummary metadata on 1.2.7;
+            # structured_output is the actual schema-shaped host response.
+            response = json.dumps(result["structured_output"], ensure_ascii=False, allow_nan=False)
         if isinstance(response, str) and response:
             state.result_text = response
         denied = result.get("denied_actions")
@@ -983,19 +1179,28 @@ def run_turn(request, *, spawner=None, timeout=300) -> Iterator[dict]:
         argv[0] = binary
         if request.get("host_tool_schema"):
             state.structured = True
+            state.tools = request.get("tools") or []
+            state.tool_choice = request.get("tool_choice")
             argv += ["--json-schema", json.dumps(request["host_tool_schema"], ensure_ascii=False)]
+        if state.structured or request.get("images"):
+            workspace_path = str(Path(tempfile.mkdtemp(prefix="agy_host_")).resolve())
+            argv += ["--add-dir", workspace_path]
         if request.get("images"):
-            workspace_path = str(Path(tempfile.mkdtemp(prefix="agy_images_")).resolve())
             state.image_paths = write_images(request["images"], workspace_path)
             # --add-dir establishes a scoped workspace read grant. No global
             # settings or approval-bypass flags are changed. All host actions
             # still use the host tool protocol.
-            argv += ["--add-dir", workspace_path]
             prompt += "\n\nImage attachment transport: use native view_file only to decode " \
                       "the exact image copies listed below. This is the sole exception to " \
                       "the native-tool restriction; it supplies the screenshot pixels. " \
                       "Use the host tool protocol for every computer or workspace action.\n"
             prompt += "\n".join(f"Image {index}: {path}" for index, path in enumerate(state.image_paths, 1))
+        if state.structured:
+            state.hook_root = _install_host_hook(workspace_path, state.image_paths)
+            prompt += ("\n\nReturn the final structured host reply using your finish response. "
+                       "Do not send it with send_message: the desktop user is not an agy agent. "
+                       "Native action requests are captured for the desktop; host results arrive "
+                       "in the next turn. Never invent their results.\n")
 
         # stderr goes to a temp file, not a pipe: a pipe nobody drains can fill
         # and deadlock the child, and agy's diagnostics there are worth keeping.
@@ -1027,11 +1232,20 @@ def run_turn(request, *, spawner=None, timeout=300) -> Iterator[dict]:
                     continue
                 for event in _translate(payload, state):
                     yield event
+                if state.handoff_reply is not None:
+                    # Tear down the native loop before exposing a call to the
+                    # desktop. Only a pre-execution capture can take this path.
+                    break
                 if state.failure:
                     yield {"type": "error", "message": state.failure,
-                           **({"http_status": state.failure_status} if state.failure_status else {})}
+                           **({"http_status": state.failure_status} if state.failure_status else {}),
+                           **({"code": state.failure_code} if state.failure_code else {})}
                     return
 
+        if state.handoff_reply is not None:
+            yield {"type": "text_delta", "text": state.handoff_reply}
+            yield {"type": "message_stop", "stop_reason": "end_turn"}
+            return
         returncode = getattr(session, "returncode", None)
         if state.failure:
             yield {"type": "error", "message": state.failure}
