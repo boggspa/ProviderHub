@@ -243,6 +243,11 @@ _MAX_CATALOGUE_PAGES = 12
 #: DEVNULL and the scratch dir is deleted.
 _DIAGNOSTICS_ENV = "PROVIDER_HUB_CODEX_CLI_DIAGNOSTICS"
 
+#: Opt-in JSONL sink for per-handoff telemetry, set to a path. The workspace
+#: diagnostics log is deleted with its workspace, so it cannot answer a
+#: question asked across a whole task; this one outlives the turn on purpose.
+_TURN_LOG_ENV = "PROVIDER_HUB_CODEX_CLI_TURN_LOG"
+
 #: Never parsed as protocol. Codex writes noisy WARN/ERROR lines here -
 #: ``codex_skills::interface: ignoring interface.icon_...``, websocket 401s -
 #: and a protocol parser that read stderr would mis-frame on them.
@@ -1080,6 +1085,71 @@ def _history_items(messages):
     return items
 
 
+def _call_fingerprint(name, arguments):
+    """A tool call's identity, without its payload.
+
+    Arguments can carry file contents, paths and user text, and this record
+    outlives the turn - so identity travels as a short digest and the raw
+    input is never written. Key order is normalised so the same call made
+    twice fingerprints the same both times.
+    """
+    try:
+        rendered = json.dumps(arguments or {}, sort_keys=True, default=str)
+    except (TypeError, ValueError):
+        rendered = repr(arguments)
+    return name, hashlib.sha256(rendered.encode("utf-8", "replace")).hexdigest()[:12]
+
+
+def handoff_telemetry(messages, items=None):
+    """What one rebuilt handoff looks like, for answering "is it still looping?".
+
+    ``repeats`` is the loop signal: a host call whose name *and* arguments
+    already appear earlier in the same conversation is work the model has
+    already done and is doing again. ``reasoning`` is the control - it counts
+    the reasoning items actually carried across, so a field log can tell a
+    working fix from an inert one. If a client never echoes thinking back,
+    reasoning stays 0 and the continuity fix is doing nothing, which is not
+    something the tests can observe.
+    """
+    seen, repeats, calls, answered = {}, 0, 0, 0
+    for message in messages or []:
+        content = message.get("content") if isinstance(message, dict) else None
+        for block in (content if isinstance(content, list) else []):
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "tool_use":
+                calls += 1
+                key = _call_fingerprint(block.get("name"), block.get("input"))
+                seen[key] = seen.get(key, 0) + 1
+                repeats += seen[key] > 1
+            elif block.get("type") == "tool_result":
+                answered += 1
+    worst = max(seen.items(), key=lambda pair: pair[1], default=None)
+    return {
+        "legs": answered,
+        "calls": calls,
+        "distinct_calls": len(seen),
+        "repeats": repeats,
+        "worst_call": ({"name": worst[0][0], "count": worst[1]}
+                       if worst and worst[1] > 1 else None),
+        "reasoning": sum(1 for item in items or [] if item.get("type") == "reasoning"),
+    }
+
+
+def _record_handoff(model, stats):
+    """Append one telemetry line. Best effort: never fails a turn over a log."""
+    path = os.environ.get(_TURN_LOG_ENV)
+    if not path:
+        return
+    try:
+        line = json.dumps({"at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                           "model": model, **stats}, sort_keys=True)
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(line + "\n")
+    except Exception:  # noqa: BLE001 - telemetry must never break the transport
+        pass
+
+
 def _delta(event):
     """The text of a delta notification, or None. Tolerates a bare string."""
     params = event.get("params")
@@ -1345,6 +1415,7 @@ def run_turn(request, *, spawner=None, timeout=300) -> Iterator[dict]:
             # reasoning dropped on the floor makes them re-plan from scratch on
             # every leg instead of resuming the turn they are already in.
             items = _history_items(history)
+            _record_handoff(payload["model"], handoff_telemetry(history, items))
             response = session.request("thread/inject_items", {"threadId": thread_id, "items": items},
                                        timeout=max(1.0, deadline - time.monotonic()))
             _result(response, context="thread/inject_items")

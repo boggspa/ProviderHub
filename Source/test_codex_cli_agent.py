@@ -840,5 +840,100 @@ class RunTurnFallbackTests(unittest.TestCase):
                 "messages": [{"role": "user", "content": "hi"}]}
 
 
+class HandoffTelemetryTests(unittest.TestCase):
+    """Measurement for the question the fix raises: is it still looping?"""
+
+    def _call(self, name, inp, cid):
+        return {"role": "assistant", "content": [{"type": "tool_use", "id": cid,
+                                                  "name": name, "input": inp}]}
+
+    def _result(self, cid):
+        return {"role": "user", "content": [{"type": "tool_result", "tool_use_id": cid,
+                                             "content": "clean"}]}
+
+    def test_identical_repeated_call_is_the_loop_signal(self):
+        history = []
+        for n in range(4):
+            history += [self._call("shell", {"cmd": "git status"}, f"c{n}"), self._result(f"c{n}")]
+        stats = codex.handoff_telemetry(history)
+        self.assertEqual(stats["calls"], 4)
+        self.assertEqual(stats["legs"], 4)
+        self.assertEqual(stats["distinct_calls"], 1)
+        self.assertEqual(stats["repeats"], 3)
+        self.assertEqual(stats["worst_call"], {"name": "shell", "count": 4})
+
+    def test_same_tool_with_different_arguments_is_progress_not_a_repeat(self):
+        history = [self._call("shell", {"cmd": "git status"}, "c1"), self._result("c1"),
+                   self._call("shell", {"cmd": "sed -i s/a/b/ x"}, "c2"), self._result("c2")]
+        stats = codex.handoff_telemetry(history)
+        self.assertEqual((stats["repeats"], stats["distinct_calls"]), (0, 2))
+        self.assertIsNone(stats["worst_call"])
+
+    def test_argument_key_order_does_not_disguise_a_repeat(self):
+        history = [self._call("shell", {"cmd": "ls", "cwd": "/tmp"}, "c1"), self._result("c1"),
+                   self._call("shell", {"cwd": "/tmp", "cmd": "ls"}, "c2"), self._result("c2")]
+        self.assertEqual(codex.handoff_telemetry(history)["repeats"], 1)
+
+    def test_reasoning_count_distinguishes_a_working_fix_from_an_inert_one(self):
+        """0 here means the client never echoed thinking back - the tests cannot see that."""
+        history = [{"role": "assistant", "content": [{"type": "thinking", "thinking": "why"}]}]
+        self.assertEqual(codex.handoff_telemetry(history, codex._history_items(history))["reasoning"], 1)
+        self.assertEqual(codex.handoff_telemetry(history, [])["reasoning"], 0)
+
+    def test_telemetry_tolerates_malformed_history(self):
+        for junk in ([], None, ["not a dict"], [{"role": "user"}],
+                     [{"role": "user", "content": "plain string"}],
+                     [{"role": "assistant", "content": [None, {"type": "tool_use"}]}]):
+            self.assertIsInstance(codex.handoff_telemetry(junk), dict)
+
+    def test_record_writes_jsonl_only_when_asked_and_never_leaks_arguments(self):
+        history = [self._call("shell", {"cmd": "git status", "token": "s3cr3t"}, "c1"),
+                   self._result("c1")]
+        stats = codex.handoff_telemetry(history)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "turns.jsonl")
+            with mock.patch.dict(os.environ, {}, clear=False):
+                os.environ.pop(codex._TURN_LOG_ENV, None)
+                codex._record_handoff("gpt-5.6-sol", stats)
+                self.assertFalse(os.path.exists(path))
+                os.environ[codex._TURN_LOG_ENV] = path
+                codex._record_handoff("gpt-5.6-sol", stats)
+                codex._record_handoff("gpt-5.6-sol", stats)
+            with open(path, encoding="utf-8") as handle:
+                lines = handle.read().strip().splitlines()
+        self.assertEqual(len(lines), 2)
+        record = json.loads(lines[0])
+        self.assertEqual(record["model"], "gpt-5.6-sol")
+        self.assertEqual(record["calls"], 1)
+        # Arguments can carry secrets and this file outlives the turn.
+        self.assertNotIn("s3cr3t", lines[0])
+        self.assertNotIn("git status", lines[0])
+
+    def test_record_never_fails_a_turn_over_a_bad_sink(self):
+        with mock.patch.dict(os.environ, {codex._TURN_LOG_ENV: "/nonexistent-dir/x/turns.jsonl"}):
+            codex._record_handoff("gpt-5.6-sol", codex.handoff_telemetry([]))
+
+    def test_run_turn_records_one_line_per_handoff(self):
+        fake = FakeCodexSession([])
+        fake.script = [_completed_turn()]
+        history = [{"role": "assistant", "content": [
+                        {"type": "thinking", "thinking": "tree is clean"},
+                        {"type": "tool_use", "id": "c1", "name": "shell", "input": {"cmd": "git status"}}]},
+                   {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "c1",
+                                                 "content": "clean"}]}]
+        request = {"model": "gpt-5.6-sol", "messages": [{"role": "user", "content": "hi"}],
+                   "tools": [{"name": "shell"}], "history": history}
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "turns.jsonl")
+            with mock.patch.dict(os.environ, {codex._TURN_LOG_ENV: path}):
+                with mock.patch.object(codex, "StdioSession", side_effect=lambda argv, **kw: fake):
+                    list(codex.run_turn(request, spawner="stub"))
+            with open(path, encoding="utf-8") as handle:
+                record = json.loads(handle.read().strip())
+        self.assertEqual(record["calls"], 1)
+        self.assertEqual(record["legs"], 1)
+        self.assertEqual(record["reasoning"], 1)
+
+
 if __name__ == "__main__":
     unittest.main()
