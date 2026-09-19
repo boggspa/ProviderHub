@@ -1,3 +1,65 @@
+**Muse and Grok host tool handoffs on the Messages surface — 19 September 2026**
+
+Claude Desktop drove the CLI-backed Muse route into narration with no host tool
+action. The Messages surface now renders host tools as the nested CLI's own
+enforced output schema rather than the prompt-only sentinel envelope, because
+Claude's native tool names (`Read`, `Edit`) collide with the nested CLI's own
+inventory and a prompt-only handoff could finish as prose or turn into a native
+search loop. The Responses/Codex surface keeps the sentinel protocol, selected
+by an explicit marker set by the Responses bridge.
+
+That schema path then failed for a second, separate reason, reproduced live on
+Muse Code 1.3.0 (1.3.0-R3401.1): `muse exec --output-schema` can concatenate
+more than one schema-shaped answer onto one output stream with no separator
+between the values. Replaying one captured request four times per setting, this
+appeared in 1 of 4 runs at `--max-model-steps` 2, 4, and unset alike. Decoding
+the buffer as a single JSON value rejected the whole turn, which spent the
+one-shot formatting correction; that correction asked the model to "reissue the
+intended call", and the model re-ran an `Edit` the host had already applied,
+which then failed against the file it had itself changed. Two live end-to-end
+runs reached no result inside the harness's 180s budget.
+
+The later values are written as though the host had already executed the first
+one, so they describe work that never happened: one observed tail "verified" an
+edit the host was never asked to make, another simply repeated the same `Read`.
+Only the first value was generated from the real host transcript, so the first
+complete JSON value in the stream is now the authoritative reply and the
+remainder is discarded unparsed. A tail can neither be executed nor rescue a
+first value that fails validation. The correction message now says that only the
+rejected reply was undone, that every host result already in the transcript is
+real and complete, and asks for the call that comes next instead of a reissue of
+the last one.
+
+A one-step cap was tested as the alternative and rejected. `--max-model-steps 1`
+never concatenated, but made muse report "model did not reach a terminal state
+within 1 step(s)" and fail a run whose handoff had already been generated
+correctly (1 of 4 replays). The budget stays at 4 as headroom for muse to
+settle; it is not what bounds host work, and no budget prevents the extra
+answers. The first-value rule, not the budget, is the correctness boundary.
+
+Live qualification used `Source/verify_claude_cli_tools.py` against Desktop's
+Claude runtime (claude 2.1.276, `claude-fable-5`, `--tools Read,Edit`), which
+spends real inference on the selected vendor CLI's own login. `muse-spark-1.3`
+and `grok-4.6` each passed 3 of 3 runs, completing the full
+Read → Edit → read-back cycle against a disposable fixture with the edit
+verified on disk and `VALUE = 7` preserved. Three of the 11 muse model turns
+across those runs arrived as concatenated replies and were absorbed by the
+first-value rule: the defect still occurs at roughly the measured rate, and no
+longer reaches the harness. Before the repair the same harness ended two runs
+with no result at all.
+
+One `grok` run, before these repeats, tripped the pre-existing native-tool
+guard ("grok did not disable its native CLI tools") on its first request, with
+no output. It did not recur in 3 live runs or in 14 direct replays of that same
+request, Claude Desktop's own retry absorbed it, and it is not diagnosed here.
+
+These are observed CLI behaviours on one installed version each, not documented
+contracts. The first-value rule is inferred from those traces: it is the only
+value a vendor can generate from the real host transcript, but no vendor
+promises that the extra answers exist, or that they will keep arriving in this
+order. The offline suite (1184 tests) covers the parsing, limit, tool_choice and
+cleanup boundaries without inference.
+
 **CLI harness correctness — 19 September 2026 (follow-up audit)**
 
 The Claude Desktop → Codex CLI startup failure was reproduced on codex-cli

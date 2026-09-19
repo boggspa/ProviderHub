@@ -225,7 +225,10 @@ class FailedHandoffTests(unittest.TestCase):
         self.assertEqual(len(requests), 2)
         self.assertEqual(len(closed), 2)
         self.assertEqual(len(request["messages"]), 1)
-        self.assertIn("No tool from that response was executed", requests[1]["messages"][-1]["content"])
+        correction = requests[1]["messages"][-1]["content"]
+        self.assertIn("nothing in it was executed", correction)
+        self.assertIn("do not perform that work again", correction)
+        self.assertIn("tool-call delimiters", correction)
 
     def test_repeated_invalid_calls_stop_after_one_retry_and_cancellation_never_retries(self):
         for cancelled in (False, True):

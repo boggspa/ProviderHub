@@ -38,6 +38,30 @@ class StructuredReplyTests(unittest.TestCase):
         self.assertEqual(events[-2], {"type": "text_delta", "text": text})
         self.assertEqual(events[-1]["stop_reason"], "end_turn")
 
+    def test_only_the_grounded_first_answer_is_executed(self):
+        """Muse appends further schema-shaped answers about unexecuted work.
+
+        The observed shape: one value asking for the edit, then a second that
+        "verifies" it although the host has run nothing. Executing the tail,
+        or rejecting the whole buffer over it, is what stalled these turns.
+        """
+        first = reply("write_file", {"path": "sample.txt", "text": "after"}, "Applying the edit.")
+        speculative = reply("read_file", {"path": "sample.txt"}, "Edit applied; verifying it now.")
+        for tail in (speculative, speculative + speculative, "  \n" + speculative, "{not json at all"):
+            with self.subTest(tail=tail):
+                events = [e for e in self.parse(list(first + tail)) if e["type"] != "ping"]
+                self.assertEqual([e["type"] for e in events], ["text_delta", "tool_call", "message_stop"])
+                self.assertEqual(events[0]["text"], "Applying the edit.")
+                self.assertEqual(events[1]["name"], "write_file")
+                self.assertEqual(events[1]["input"], {"path": "sample.txt", "text": "after"})
+
+    def test_a_trailing_answer_cannot_revive_a_rejected_first_answer(self):
+        """The tail is dropped, never promoted: value one decides the turn."""
+        for head in ('{"text": "", "tool_calls": []}', '{"text": "x", "tool_calls": [{}]}'):
+            with self.subTest(head=head):
+                events = self.parse([head + reply()])
+                self.assertEqual([e["type"] for e in events if e["type"] != "ping"], ["error"])
+
     def test_invalid_batch_releases_neither_prose_nor_partial_calls(self):
         valid = json.loads(reply())
         cases = ["I'll inspect that now.", reply()[:-1],
@@ -92,7 +116,10 @@ class StructuredReplyTests(unittest.TestCase):
         self.assertEqual(len(requests), 2)
         self.assertEqual(len(closed), 2)
         self.assertEqual([e["text"] for e in events if e["type"] == "text_delta"], ["Inspecting the file."])
-        self.assertIn("JSON-encoded objects", requests[-1]["messages"][-1]["content"])
+        correction = requests[-1]["messages"][-1]["content"]
+        self.assertIn("JSON-encoded objects", correction)
+        self.assertIn("do not perform that work again", correction)
+        self.assertNotIn("reissue the intended call", correction)
 
 
 class StructuredRouteTests(unittest.TestCase):

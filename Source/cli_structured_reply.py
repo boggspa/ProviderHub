@@ -82,8 +82,36 @@ def _decode(text):
         raise ToolCallError("structured reply contains invalid JSON") from exc
 
 
+def _decode_reply(text):
+    """The first complete JSON value in the stream; the rest is discarded.
+
+    A CLI under an output schema is meant to be a model transport: one
+    request, one answer, one host handoff. Muse instead keeps its own agent
+    loop running after that answer and appends another schema-shaped value to
+    the same output stream, with no separator between them (measured: about
+    one turn in four, at every ``--max-model-steps`` budget that reliably
+    terminates). Those later values are written as though the host had
+    already executed the first one, so they narrate work that never happened
+    - the second value "verifies" an edit the host was never asked to make.
+
+    Only the first value was generated from the real host transcript, so it
+    is the authoritative reply. Decoding the buffer whole instead would fail
+    on the concatenation and reject a perfectly good handoff, which is what
+    turned these turns into a retry, a repeated host action, or a stall.
+    """
+    decoder = json.JSONDecoder(parse_constant=_invalid_constant)
+    start = 0
+    while start < len(text) and text[start].isspace():
+        start += 1
+    try:
+        reply, _ = decoder.raw_decode(text, start)
+    except (ValueError, TypeError, RecursionError) as exc:
+        raise ToolCallError("structured reply contains invalid JSON") from exc
+    return reply
+
+
 def parse_reply(text, tools, tool_choice=None):
-    reply = _decode(text)
+    reply = _decode_reply(text)
     if not isinstance(reply, dict) or set(reply) != {"text", "tool_calls"} \
             or not isinstance(reply["text"], str) or not isinstance(reply["tool_calls"], list):
         raise ToolCallError("structured reply must contain text and tool_calls")

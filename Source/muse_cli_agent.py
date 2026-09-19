@@ -969,9 +969,13 @@ def run_turn(request, *, spawner=None, timeout=300) -> Iterator[dict]:
             with schema_path.open("x", encoding="utf-8") as handle:
                 schema_path.chmod(0o600)
                 json.dump(request["host_tool_schema"], handle)
-            # Muse can emit an intermediate answer before its final structured
-            # result. A one-step cap rejects otherwise valid handoffs during
-            # that finalization; allow a small, bounded completion budget.
+            # The budget is headroom for muse to settle, not permission to
+            # work: a one-step cap makes it report "model did not reach a
+            # terminal state within 1 step(s)" and fail runs whose handoff was
+            # already generated correctly (measured on muse 1.3.0: roughly one
+            # run in four). No budget stops muse from appending extra
+            # schema-shaped answers about work the host has not done, so the
+            # first answer is what counts - see cli_structured_reply.
             argv += ["--output-schema", str(schema_path), "--max-model-steps", "4"]
 
         # The prompt goes into a temp file (muse exec reads no prompt from

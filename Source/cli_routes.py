@@ -509,15 +509,22 @@ def _tool_turn(adapter, request, *, timeout):
             events.close()
         if not retry:
             return
+        # Only the rejected reply is undone. Every host result already in the
+        # transcript really happened, so this must not read as "do that last
+        # call again": a model told to "reissue the intended call" re-ran a
+        # completed edit, which then failed on a file it had already changed.
         current = {**request, "messages": [*request.get("messages", []), {
             "role": "user",
-            "content": "Your previous response had invalid host tool-call formatting. "
-                       "No tool from that response was executed. Continue the original task "
-                       "from the host results already provided and reissue the intended call "
-                       + ("using the structured response with text and tool_calls, whose arguments are JSON-encoded objects. "
-                          if request.get("host_tool_schema") else
-                          "using a complete JSON object and the exact tool-call delimiters from the tool instructions. ")
-                       + "Do not simulate results or repeat completed actions.",
+            "content": "Your previous response was rejected for its formatting alone, and nothing in it "
+                       "was executed. Every host tool result already in this conversation is real and "
+                       "complete: do not perform that work again or restate its outcome as new. Continue "
+                       "from those results and issue only the call that comes next - or the final answer "
+                       "if no call remains - "
+                       + ("as the structured response, with text and tool_calls whose arguments are "
+                          "JSON-encoded objects. " if request.get("host_tool_schema") else
+                          "using a complete JSON object between the exact tool-call delimiters from the "
+                          "tool instructions. ")
+                       + "Never simulate a result.",
         }]}
 
 
