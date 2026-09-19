@@ -646,23 +646,34 @@ class RunTurnTests(unittest.TestCase):
         params = dict((method, params) for method, params, _ in session.requests)
         items = params["thread/inject_items"]["items"]
         self.assertEqual([item["type"] for item in items],
-                         ["message", "reasoning", "function_call", "function_call_output"])
-        self.assertEqual(items[1], {"type": "reasoning", "summary": [
-            {"type": "summary_text", "text": "Scheduler defers the commit; check the tree first."}]})
+                         ["message", "message", "function_call", "function_call_output"])
+        self.assertEqual(items[1], {"type": "message", "role": "assistant",
+            "phase": "commentary", "content": [{"type": "output_text",
+            "text": "[Prior reasoning context]\nScheduler defers the commit; check the tree first."}]})
 
-    def test_reasoning_items_carry_the_summary_the_runtime_requires(self):
-        """``summary`` is mandatory: a content-only item fails the whole turn.
-
-        Probed against the installed runtime - ``{"type": "reasoning",
-        "content": [...]}`` is refused with "items[0] is not a valid response
-        item: missing field `summary`", which would break the handoff outright.
-        """
+    def test_plain_thinking_never_becomes_an_unresolvable_reasoning_item(self):
         items = codex._history_items([
             {"role": "assistant", "content": [{"type": "thinking", "thinking": "why"}]}])
         self.assertEqual(len(items), 1)
-        self.assertIn("summary", items[0])
-        self.assertNotIn("content", items[0])
-        self.assertEqual(items[0]["summary"][0]["type"], "summary_text")
+        self.assertEqual(items[0]["type"], "message")
+        self.assertEqual(items[0]["phase"], "commentary")
+        self.assertNotIn("id", items[0])
+        self.assertNotIn("encrypted_content", items[0])
+        self.assertIn("why", items[0]["content"][0]["text"])
+
+    def test_assistant_phases_survive_and_legacy_tool_preambles_are_commentary(self):
+        items = codex._history_items([
+            {"role": "assistant", "content": [
+                {"type": "text", "text": "Checking"},
+                {"type": "tool_use", "id": "c1", "name": "shell", "input": {}}]},
+            {"role": "assistant", "phase": "commentary", "content": "Still working"},
+            {"role": "assistant", "content": [
+                {"type": "text", "text": "Progress", "phase": "commentary"},
+                {"type": "text", "text": "Answer", "phase": "final_answer"}]},
+            {"role": "assistant", "content": "Legacy answer"}])
+        messages = [item for item in items if item["type"] == "message"]
+        self.assertEqual([item["phase"] for item in messages],
+                         ["commentary", "commentary", "commentary", "final_answer", "final_answer"])
 
     def test_unusable_reasoning_is_dropped_rather_than_invented(self):
         items = codex._history_items([
@@ -687,8 +698,9 @@ class RunTurnTests(unittest.TestCase):
                 {"type": "thinking", "thinking": "Anthropic reasoning", "signature": "sig"},
                 {"type": "thinking", "thinking": "this route's own reasoning"},
                 {"type": "tool_use", "id": "c1", "name": "shell", "input": {}}]}])
-        self.assertEqual([item["type"] for item in items], ["reasoning", "function_call"])
-        self.assertEqual(items[0]["summary"][0]["text"], "this route's own reasoning")
+        self.assertEqual([item["type"] for item in items], ["message", "function_call"])
+        self.assertEqual(items[0]["content"][0]["text"],
+                         "[Prior reasoning context]\nthis route's own reasoning")
 
     def test_resumed_turn_is_not_prompted_as_a_fresh_task(self):
         fake = FakeCodexSession([])

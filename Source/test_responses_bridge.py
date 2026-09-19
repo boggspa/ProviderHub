@@ -102,6 +102,44 @@ class ResponsesBridgeTests(unittest.TestCase):
             with self.assertRaises(BridgeError): first.open("foreign-token", "account-one")
             self.assertNotIn("PRIVATE THINKING", ''.join(path.read_text() for path in root.iterdir() if path.is_file()))
 
+    def test_codex_legacy_reasoning_and_phases_replay_without_native_references(self):
+        from codex_cli_agent import _history_items
+
+        with tempfile.TemporaryDirectory() as directory:
+            envelope = ReasoningEnvelope(Path(directory))
+            adapter = MessagesResponsesAdapter("codex/gpt-6-astra", envelope, "scope", {})
+            saved = adapter.from_message({
+                "type": "message", "content": [
+                    {"type": "thinking", "thinking": "Already checked the workspace."},
+                    {"type": "tool_use", "id": "c1", "name": "shell", "input": {}}],
+                "stop_reason": "tool_use"})
+            body = {"input": [
+                {"type": "message", "role": "user", "content": "Fix it"},
+                {"type": "message", "role": "assistant", "phase": "commentary",
+                 "content": "Checking"},
+                *saved["output"],
+                {"type": "function_call_output", "call_id": "c1", "output": "clean"},
+                {"type": "message", "role": "assistant", "phase": "final_answer",
+                 "content": "Done"}], "stream": False, "store": False}
+            translated = to_messages(body, "codex/gpt-6-astra", {}, envelope, "scope")
+            items = _history_items(translated["messages"])
+            self.assertFalse(any(item["type"] in {"reasoning", "item_reference"} for item in items))
+            messages = [item for item in items if item.get("role") == "assistant"]
+            self.assertEqual([item["phase"] for item in messages],
+                             ["commentary", "commentary", "final_answer"])
+            self.assertIn("Already checked", messages[1]["content"][0]["text"])
+            call = next(item for item in items if item["type"] == "function_call")
+            output = next(item for item in items if item["type"] == "function_call_output")
+            self.assertEqual(call["call_id"], output["call_id"])
+            self.assertEqual(output["output"], [{"type": "input_text", "text": "clean"}])
+
+    def test_phase_metadata_is_not_forwarded_to_other_messages_providers(self):
+        body = {"input": [{"role": "assistant", "phase": "commentary",
+                          "content": "Checking"}], "stream": False}
+        translated = to_messages(body, "kimi/k3", {}, None, "scope")
+        self.assertEqual(translated["messages"][0]["content"],
+                         [{"type": "text", "text": "Checking"}])
+
     def test_unknown_context_does_not_prevent_request_translation(self):
         with tempfile.TemporaryDirectory() as directory:
             envelope = ReasoningEnvelope(Path(directory))

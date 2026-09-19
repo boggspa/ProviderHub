@@ -1033,39 +1033,28 @@ def _history_items(messages):
                 continue
             kind = block.get("type")
             if kind == "text" and block.get("text"):
-                items.append({"type": "message", "role": role, "content": [
+                item = {"type": "message", "role": role, "content": [
                     {"type": "output_text" if role == "assistant" else "input_text",
-                     "text": block["text"]}]})
+                     "text": block["text"]}]}
+                if role == "assistant":
+                    phase = block.get("phase") or message.get("phase")
+                    if phase not in {"commentary", "final_answer"}:
+                        phase = ("commentary" if any(b.get("type") == "tool_use"
+                                 for b in blocks if isinstance(b, dict)) else "final_answer")
+                    item["phase"] = phase
+                items.append(item)
             elif kind in {"thinking", "redacted_thinking"} and role == "assistant":
-                # Reasoning is the continuity this transport otherwise drops. A
-                # fresh process per handoff means the model rejoins its own turn
-                # with no record of why it called the tool, so it re-derives the
-                # plan from the standing instructions every leg - which is how a
-                # repo whose doctrine opens with "git status first" collects
-                # dozens of git status calls before a first edit.
-                #
-                # Shape is not a guess: the runtime takes a Responses reasoning
-                # item and *requires* ``summary``. A ``content``-only item is
-                # refused outright ("items[0] is not a valid response item:
-                # missing field `summary`"), which would fail the whole turn.
-                # ``redacted_thinking`` carries no readable text, so it is
-                # dropped rather than injected as an empty or invented thought.
-                #
-                # A ``signature`` marks reasoning a real Anthropic model signed;
-                # this bridge never signs the thinking it emits for a CLI route
-                # (``cli_routes`` opens the block with text only). So a signed
-                # block reached us from another provider's turn - after a model
-                # switch mid-conversation - and forwarding it to OpenAI would
-                # replay one vendor's reasoning as another's, which
-                # ``protocol.py`` refuses on the way in for the same reason.
-                # Unsigned reasoning from a third CLI route is not separable
-                # here and is accepted; the signed case is the one that matters.
+                # Summary-only reasoning acquires a local rs_ id in Codex, but
+                # store:false cannot resolve it upstream. The Messages surface
+                # carries readable text, not OpenAI's encrypted reasoning state.
                 if block.get("signature"):
                     continue
                 thought = block.get("thinking")
                 if isinstance(thought, str) and thought.strip():
-                    items.append({"type": "reasoning",
-                                  "summary": [{"type": "summary_text", "text": thought}]})
+                    items.append({"type": "message", "role": "assistant",
+                                  "phase": "commentary", "content": [{
+                                      "type": "output_text",
+                                      "text": "[Prior reasoning context]\n" + thought}]})
             elif kind == "tool_use":
                 items.append({"type": "function_call", "call_id": block["id"],
                               "name": _tool_alias(block["name"]), "namespace": _HOST_TOOL_NAMESPACE,
@@ -1106,7 +1095,7 @@ def handoff_telemetry(messages, items=None):
     ``repeats`` is the loop signal: a host call whose name *and* arguments
     already appear earlier in the same conversation is work the model has
     already done and is doing again. ``reasoning`` is the control - it counts
-    the reasoning items actually carried across, so a field log can tell a
+    the reasoning context messages carried across, so a field log can tell a
     working fix from an inert one. If a client never echoes thinking back,
     reasoning stays 0 and the continuity fix is doing nothing, which is not
     something the tests can observe.
@@ -1132,7 +1121,11 @@ def handoff_telemetry(messages, items=None):
         "repeats": repeats,
         "worst_call": ({"name": worst[0][0], "count": worst[1]}
                        if worst and worst[1] > 1 else None),
-        "reasoning": sum(1 for item in items or [] if item.get("type") == "reasoning"),
+        "reasoning": sum(1 for item in items or []
+                         if item.get("type") == "message" and item.get("role") == "assistant"
+                         and item.get("phase") == "commentary"
+                         and any(part.get("text", "").startswith("[Prior reasoning context]\n")
+                                 for part in item.get("content", []) if isinstance(part, dict))),
     }
 
 

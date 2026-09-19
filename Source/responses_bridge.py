@@ -163,6 +163,10 @@ def to_messages(body, route, spec, envelope, scope):
             if target not in {"user", "assistant", "system", "developer"}:
                 raise BridgeError("Unsupported message role.")
             blocks = content_blocks(item.get("content", ""))
+            if route.startswith("codex/") and target == "assistant" and item.get("phase") in {"commentary", "final_answer"}:
+                for block in blocks:
+                    if block.get("type") == "text":
+                        block["phase"] = item["phase"]
             if blocks:
                 add(target, blocks)
         elif kind == "function_call":
