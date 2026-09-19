@@ -22,6 +22,8 @@ struct BrandLogo: Codable, Equatable {
     var light: String
     var dark: String?
     var scale: Double?
+    var leadingMarkAspectRatio: Double?
+    var template: Bool?
 }
 struct BrandOverride: Codable, Equatable {
     var displayProvider: String?
@@ -175,11 +177,27 @@ struct ProviderMark: View {
             if let logo = presentation.logo,
                let url = Bundle.main.resourceURL?.appendingPathComponent("worker").appendingPathComponent(logo.dark ?? logo.light),
                let image = NSImage(contentsOf: url) {
-                Image(nsImage: image).resizable().scaledToFit().scaleEffect(logo.scale ?? 1)
+                artwork(image, logo: logo).foregroundStyle(.primary).scaleEffect(logo.scale ?? 1)
             } else {
                 Text(presentation.shortCode).font(.system(size: size * 0.31, weight: .bold, design: .rounded)).foregroundStyle(presentation.color)
             }
         }.frame(width: size, height: size).accessibilityLabel(presentation.displayProvider)
+    }
+
+    @ViewBuilder
+    private func artwork(_ image: NSImage, logo: BrandLogo) -> some View {
+        let artwork = Image(nsImage: image).resizable()
+            .renderingMode(logo.template == true ? .template : .original)
+        if let markRatio = logo.leadingMarkAspectRatio {
+            // Keep the source wordmark intact and show its complete leading
+            // glyph, fitting wide marks such as Meta's loop inside the slot.
+            let height = size / max(markRatio, 1)
+            artwork.frame(width: height * image.size.width / image.size.height, height: height)
+                .frame(width: height * markRatio, height: height, alignment: .leading)
+                .clipped()
+        } else {
+            artwork.scaledToFit()
+        }
     }
 }
 

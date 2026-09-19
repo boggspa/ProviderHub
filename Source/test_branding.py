@@ -235,6 +235,41 @@ class BrandingTests(unittest.TestCase):
             "modelLabel": "owner/model-v1",
         })
 
+    def test_logo_display_options_round_trip_without_changing_routing(self):
+        logo = {
+            "light": "provider-logos/wordmark.png",
+            "leadingMarkAspectRatio": 1.5,
+            "template": True,
+        }
+        overrides = {"muse": {"logo": logo}}
+        before = copy.deepcopy(overrides)
+        normalized = validate_overrides(overrides, self.catalogue)
+        presentation = resolve_presentation(
+            "muse", "muse-spark-1.3", normalized, catalogue=self.catalogue)
+        self.assertEqual(presentation["runtimeProvider"], "muse")
+        self.assertEqual(presentation["model"], "muse-spark-1.3")
+        self.assertEqual(presentation["logo"], {**logo, "dark": logo["light"]})
+        self.assertEqual(overrides, before)
+
+        # Replacing a default cropped/template logo with plain artwork must
+        # not retain the old asset's display settings.
+        for provider in ("muse", "qwen-token-plan", "devin"):
+            with self.subTest(provider=provider):
+                plain = resolve_presentation(
+                    provider, overrides={provider: {"logo": {"light": "custom.png"}}},
+                    catalogue=self.catalogue)
+                self.assertEqual(plain["logo"], {"light": "custom.png", "dark": "custom.png"})
+
+    def test_invalid_logo_display_options_fail_closed(self):
+        invalid = [
+            {"leadingMarkAspectRatio": value}
+            for value in (True, "1.5", 0, -1, 0.49, 2.01, float("nan"), float("inf"))
+        ] + [{"template": value} for value in (0, 1, "true", None)]
+        for options in invalid:
+            with self.subTest(options=options), self.assertRaises(BrandingError):
+                validate_overrides(
+                    {"muse": {"logo": {"light": "logo.png", **options}}}, self.catalogue)
+
     def test_overrides_are_normalized_without_mutating_settings(self):
         value = {"grok": {"accent": "#abcdef"}}
         before = copy.deepcopy(value)

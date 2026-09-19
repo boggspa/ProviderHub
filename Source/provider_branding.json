@@ -53,7 +53,11 @@
     "qwen-token-plan": {
       "displayProvider": "Qwen Token Plan",
       "hueKey": "qwen",
-      "shortCode": "QWN"
+      "shortCode": "QWN",
+      "logo": {
+        "light": "provider-logos/provider-logo-qwen.png",
+        "leadingMarkAspectRatio": 1.0170212765957447
+      }
     },
     "mistral": {
       "displayProvider": "Mistral",
@@ -115,7 +119,11 @@
     "muse": {
       "displayProvider": "Muse",
       "hueKey": "muse",
-      "shortCode": "MUS"
+      "shortCode": "MUS",
+      "logo": {
+        "light": "provider-logos/provider-logo-meta.png",
+        "leadingMarkAspectRatio": 1.4345991561181435
+      }
     },
     "alibaba": {
       "displayProvider": "Alibaba",
@@ -160,7 +168,11 @@
     "meta": {
       "displayProvider": "Meta",
       "hueKey": "meta",
-      "shortCode": "MTA"
+      "shortCode": "MTA",
+      "logo": {
+        "light": "provider-logos/provider-logo-meta.png",
+        "leadingMarkAspectRatio": 1.4345991561181435
+      }
     },
     "zai": {
       "displayProvider": "Z.ai",
@@ -170,7 +182,10 @@
     "openrouter": {
       "displayProvider": "OpenRouter",
       "hueKey": "openrouter",
-      "shortCode": "ORT"
+      "shortCode": "ORT",
+      "logo": {
+        "light": "provider-logos/provider-logo-openrouter.png"
+      }
     },
     "poolside": {
       "displayProvider": "Poolside",
@@ -233,22 +248,35 @@
     "devin": {
       "displayProvider": "Devin",
       "hueKey": "ensemble",
-      "shortCode": "DEV"
+      "shortCode": "DEV",
+      "logo": {
+        "light": "provider-logos/provider-logo-devin.png",
+        "template": true
+      }
     },
     "claude": {
       "displayProvider": "Claude",
       "hueKey": "claude",
-      "shortCode": "CLD"
+      "shortCode": "CLD",
+      "logo": {
+        "light": "provider-logos/provider-logo-claude.png"
+      }
     },
     "codex": {
       "displayProvider": "Codex",
       "hueKey": "codex",
-      "shortCode": "CDX"
+      "shortCode": "CDX",
+      "logo": {
+        "light": "provider-logos/provider-logo-codex.png"
+      }
     },
     "antigravity": {
       "displayProvider": "AntiGravity",
       "hueKey": "antigravity",
-      "shortCode": "AGY"
+      "shortCode": "AGY",
+      "logo": {
+        "light": "provider-logos/provider-logo-antigravity.png"
+      }
     }
   },
   "modelLabels": {
