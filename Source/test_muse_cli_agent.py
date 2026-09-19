@@ -495,13 +495,13 @@ class RunTurnTests(unittest.TestCase):
         self.assertEqual([e["type"] for e in events], ["error"])
         self.assertIn("2", events[0]["message"])
 
-    def test_unparsable_stream_degrades_to_stop(self):
+    def test_unparsable_stream_is_an_error(self):
         fake = self._stream(["plain diagnostic"])
         events, _, _ = self._run(
             {"model": "m", "messages": [{"role": "user", "content": "hi"}]},
             fake)
-        self.assertEqual([e["type"] for e in events], ["message_stop"])
-        self.assertEqual(events[0]["stop_reason"], "end_turn")
+        self.assertEqual([e["type"] for e in events], ["error"])
+        self.assertIn("before completing", events[0]["message"])
 
     def test_session_break_is_error(self):
         fake = self._stream([], events_exc=RuntimeError("boom"))
@@ -510,6 +510,15 @@ class RunTurnTests(unittest.TestCase):
             fake)
         self.assertEqual([e["type"] for e in events], ["error"])
         self.assertIn("boom", events[0]["message"])
+
+    def test_terminal_event_finishes_without_waiting_for_eof(self):
+        fake = self._stream([])
+        def events(**kwargs):
+            yield _terminal("completed", text="done")
+            self.fail("Must not wait for the process after its terminal event")
+        fake.events = events
+        result, _, _ = self._run({"model": "m", "messages": [{"role": "user", "content": "hi"}]}, fake)
+        self.assertEqual(result[-1], {"type": "message_stop", "stop_reason": "completed"})
 
 
 if __name__ == "__main__":

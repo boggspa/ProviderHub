@@ -5,7 +5,7 @@ import json
 import unittest
 
 from cli_tool_call import (CLOSE_SENTINEL, MAX_CALLS_PER_TURN, OPEN_SENTINEL,
-                           ToolCallParser, normalize_tools, render_tool_anchor,
+                           ToolCallError, ToolCallParser, normalize_tools, render_tool_anchor,
                            render_tool_manifest)
 
 WEATHER = {"name": "get_weather", "description": "Fetch weather for a city.",
@@ -116,42 +116,61 @@ class ParserTest(unittest.TestCase):
         self.assertEqual(events[0][0], "call")
         self.assertEqual(events[0][1]["input"], {"city": "Paris"})
 
-    def test_invalid_json_fails_open_as_written(self):
+    def test_invalid_json_is_an_explicit_error(self):
         wire = "look: " + OPEN_SENTINEL + "{not json}" + CLOSE_SENTINEL
-        events = run_parser([wire])
-        self.assertEqual("".join(payload for kind, payload in events),
-                         "look: " + OPEN_SENTINEL + "{not json}" + CLOSE_SENTINEL)
-        self.assertEqual([kind for kind, _ in events if kind == "call"], [])
+        with self.assertRaisesRegex(ToolCallError, "not valid JSON"):
+            run_parser([wire])
 
-    def test_non_object_and_bad_name_fail_open(self):
-        for body in ('[1, 2]', '{"name": "has space"}', '{"name": 42}', '{"name": "ok", "input": [1]}'):
-            with self.subTest(body=body):
-                events = run_parser([OPEN_SENTINEL + body + CLOSE_SENTINEL])
-                self.assertEqual([kind for kind, _ in events], ["text"])
+    def test_non_object_bad_name_and_nonfinite_numbers_are_errors(self):
+        for body in ('[1, 2]', '{"name": "has space"}', '{"name": 42}',
+                     '{"name": "ok", "input": [1]}',
+                     '{"name": "ok", "input": {"x": NaN}}'):
+            with self.subTest(body=body), self.assertRaises(ToolCallError):
+                run_parser([OPEN_SENTINEL + body + CLOSE_SENTINEL])
 
-    def test_unclosed_envelope_flushes_as_text_on_finish(self):
-        events = run_parser(["start " + OPEN_SENTINEL + '{"name": "shell"'])
-        self.assertEqual("".join(payload for kind, payload in events),
-                         "start " + OPEN_SENTINEL + '{"name": "shell"')
+    def test_unclosed_envelope_is_an_error(self):
+        with self.assertRaisesRegex(ToolCallError, "not closed"):
+            run_parser(["start " + OPEN_SENTINEL + '{"name": "shell"'])
+
+    def test_bounded_closing_marker_repair_keeps_json_validation(self):
+        for close in ("</tool_call>", "<</tool_call>>", "<<</tool_call>>"):
+            with self.subTest(close=close):
+                wire = OPEN_SENTINEL + '{"name":"shell","input":{"cmd":"pwd"}}' + close
+                events = run_parser(list(wire))
+                self.assertEqual([kind for kind, _ in events], ["call"])
+                self.assertEqual(events[0][1]["input"], {"cmd": "pwd"})
+                with self.assertRaises(ToolCallError):
+                    run_parser([OPEN_SENTINEL + '{broken}' + close])
+
+    def test_closing_delimiters_inside_arguments_are_not_framing(self):
+        argument = 'print("</tool_call> and <<</tool_call>>>")'
+        wire = envelope("shell", {"cmd": argument})
+        events = run_parser(list(wire))
+        self.assertEqual([kind for kind, _ in events], ["call"])
+        self.assertEqual(events[0][1]["input"], {"cmd": argument})
+
+    def test_multiple_shortened_closing_markers_parse_without_argument_leakage(self):
+        wire = (envelope("shell", {"cmd": "pwd"}) + envelope("shell", {"cmd": "ls"}))
+        wire = wire.replace(CLOSE_SENTINEL, "<</tool_call>>")
+        events = run_parser(list(wire))
+        self.assertEqual([kind for kind, _ in events], ["call", "call"])
 
     def test_partial_sentinel_at_finish_is_text(self):
         events = run_parser(["almost <<<tool_ca"])
         self.assertEqual("".join(payload for kind, payload in events), "almost <<<tool_ca")
 
-    def test_oversized_envelope_fails_open(self):
-        body = "x" * 70000
-        events = run_parser([OPEN_SENTINEL + body])
-        texts = "".join(payload for kind, payload in events if kind == "text")
-        self.assertIn("x" * 100, texts)
-        self.assertEqual([kind for kind, _ in events if kind == "call"], [])
+    def test_size_limit_applies_to_closed_unclosed_and_unicode_envelopes(self):
+        for value in ("x" * 70000, "😀" * 17000):
+            wire = envelope("shell", {"cmd": value})
+            for chunks in ([wire], [wire[:-len(CLOSE_SENTINEL)]],
+                           [wire[i:i + 100] for i in range(0, len(wire), 100)]):
+                with self.subTest(length=len(value)), self.assertRaises(ToolCallError):
+                    run_parser(chunks)
 
-    def test_call_cap_passes_further_envelopes_as_text(self):
-        wire = "".join(envelope("shell", {"cmd": f"cmd{i}"}) for i in range(MAX_CALLS_PER_TURN + 2))
-        events = run_parser([wire])
-        calls = [payload for kind, payload in events if kind == "call"]
-        self.assertEqual(len(calls), MAX_CALLS_PER_TURN)
-        texts = "".join(payload for kind, payload in events if kind == "text")
-        self.assertIn(OPEN_SENTINEL, texts)  # the overflow envelopes survive as text
+    def test_call_cap_is_an_error(self):
+        wire = "".join(envelope("shell", {"cmd": f"cmd{i}"}) for i in range(MAX_CALLS_PER_TURN + 1))
+        with self.assertRaisesRegex(ToolCallError, "too many"):
+            run_parser([wire])
 
     def test_empty_feed_and_double_finish(self):
         parser = ToolCallParser()

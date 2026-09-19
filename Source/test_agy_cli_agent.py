@@ -305,6 +305,16 @@ gemini-3.1-pro-low	Gemini 3.1 Pro (Low)
         for flag in ["--dangerously-skip-permissions", "--always-approve"]:
             self.assertNotIn(flag, argv)
 
+    def test_family_effort_and_explicit_row_cannot_conflict(self):
+        from agy_cli_agent import build_argv
+        for model, effort, row, rung in [
+                ("gemini-3.1-pro", "low", "gemini-3.1-pro-low", "low"),
+                ("gemini-3.1-pro", "medium", "gemini-3.1-pro-high", "high"),
+                ("gemini-3.8-flash-high", "low", "gemini-3.8-flash-high", "high")]:
+            argv = build_argv(model, effort=effort)
+            self.assertEqual(argv[argv.index("--model") + 1], row)
+            self.assertEqual(argv[argv.index("--effort") + 1], rung)
+
     def test_catalogue_collapse(self):
         """Test catalogue returns collapsed models."""
         from agy_cli_agent import catalogue

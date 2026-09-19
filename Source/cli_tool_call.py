@@ -18,9 +18,8 @@ Two pieces:
 * :class:`ToolCallParser` - an incremental splitter fed the model's text
   stream: ordinary text passes through with low latency, envelope bodies
   are buffered until they close, and a complete, valid envelope becomes one
-  structured call event. Anything malformed fails OPEN to plain text, so a
-  model that misuses the convention degrades to a weird paragraph, never to
-  a dropped turn.
+  structured call event. Malformed envelopes raise an explicit protocol
+  error; tool arguments must never leak into the assistant's visible reply.
 """
 from __future__ import annotations
 
@@ -30,14 +29,14 @@ import uuid
 
 OPEN_SENTINEL = "<<<tool_call>>>"
 CLOSE_SENTINEL = "<<</tool_call>>>"
+# Bounded framing correction for models that shorten the closing delimiter.
+# A match ending at a chunk boundary waits for the remaining brackets.
+_CLOSE_PATTERN = re.compile(r"<{1,3}/tool_call>{1,3}")
 
-#: One envelope's maximum body. Past this the buffer fails open to text:
-#: a runaway envelope is a model misreading the convention, not a big call.
+#: Maximum UTF-8 body size, including when the entire envelope is one chunk.
 MAX_ENVELOPE_BYTES = 65536
 
-#: Parallel calls accepted from one turn. Past this, further envelopes pass
-#: through as text: an eighth-plus envelope is almost always the model
-#: looping on the convention rather than a real plan.
+#: Parallel calls accepted from one turn. Overflow is a protocol error.
 MAX_CALLS_PER_TURN = 8
 
 _TOOL_NAME = re.compile(r"[A-Za-z0-9_-]{1,64}\Z")
@@ -45,6 +44,24 @@ _TOOL_NAME = re.compile(r"[A-Za-z0-9_-]{1,64}\Z")
 
 class ToolCallError(ValueError):
     """A tool definition or envelope body is not usable."""
+
+
+HOST_EXECUTION_NOTE = (
+    "The host application owns tool execution, the working directory, and all "
+    "permission and approval decisions. This nested CLI is only the model "
+    "transport. Its scratch directory and local sandbox describe the nested "
+    "process, not the host workspace or the permissions of host tools. Use the "
+    "provided host tools to read or change the host workspace and wait for their "
+    "actual results. Never simulate tool results or execute an alternative "
+    "local tool. If no host tool is provided for an action, explain that limit."
+)
+
+TRANSCRIPT_HEADER = (
+    "You are answering through an external host application. "
+    + HOST_EXECUTION_NOTE + " The transcript below is conversation history. "
+    "Respond to its final user turn using text or the host tool-call protocol "
+    "when host tools are provided."
+)
 
 
 def normalize_tools(tools) -> list[dict]:
@@ -80,6 +97,8 @@ def render_tool_manifest(tools, tool_choice=None) -> str:
     suppress the manifest before reaching here).
     """
     lines = [
+        HOST_EXECUTION_NOTE,
+        "",
         "In addition to answering with text, you may request tool calls. The",
         "host application executes tools; you cannot and must not execute,",
         "simulate, or fabricate them yourself. Even if your own environment",
@@ -120,9 +139,9 @@ def render_tool_manifest(tools, tool_choice=None) -> str:
 def _parse_body(body: str) -> dict:
     """One closed envelope body -> a structured call, or ToolCallError."""
     try:
-        payload = json.loads(body.strip())
+        payload = json.loads(body.strip(), parse_constant=_invalid_constant)
     except (ValueError, TypeError) as exc:
-        raise ToolCallError(f"envelope body is not JSON: {exc}") from exc
+        raise ToolCallError("envelope body is not valid JSON") from exc
     if not isinstance(payload, dict):
         raise ToolCallError("envelope body is not an object")
     name = payload.get("name")
@@ -136,6 +155,28 @@ def _parse_body(body: str) -> dict:
     return {"id": "toolu_" + uuid.uuid4().hex[:22], "name": name, "input": arguments}
 
 
+def _invalid_constant(value):
+    raise ValueError("Non-finite JSON number")
+
+
+def validate_host_call(call, tools=None):
+    """Validate a call before releasing it to the host's execution loop."""
+    if not isinstance(call, dict) or not isinstance(call.get("name"), str) \
+            or not _TOOL_NAME.fullmatch(call["name"]):
+        raise ToolCallError("tool call has no valid name")
+    if not isinstance(call.get("input"), dict):
+        raise ToolCallError("tool call input must be an object")
+    if not isinstance(call.get("id"), str) or not call["id"]:
+        raise ToolCallError("tool call has no id")
+    if tools is not None and call["name"] not in {tool["name"] for tool in tools}:
+        raise ToolCallError("tool call names a tool that the host did not offer")
+    try:
+        json.dumps(call["input"], allow_nan=False)
+    except (TypeError, ValueError) as exc:
+        raise ToolCallError("tool call input is not valid JSON") from exc
+    return call
+
+
 def _longest_sentinel_prefix_tail(buf: str, sentinel: str) -> int:
     """Length of the longest buffer suffix that could start a sentinel."""
     limit = min(len(buf), len(sentinel) - 1)
@@ -143,6 +184,24 @@ def _longest_sentinel_prefix_tail(buf: str, sentinel: str) -> int:
         if sentinel.startswith(buf[-size:]):
             return size
     return 0
+
+
+def _closing_marker(text):
+    """Find a closing delimiter outside JSON strings, including escaped quotes."""
+    quoted = escaped = False
+    cursor = 0
+    for match in _CLOSE_PATTERN.finditer(text):
+        for char in text[cursor:match.start()]:
+            if escaped:
+                escaped = False
+            elif quoted and char == "\\":
+                escaped = True
+            elif char == '"':
+                quoted = not quoted
+        if not quoted:
+            return match
+        cursor = match.end()
+    return None
 
 
 def render_tool_anchor(tools) -> str:
@@ -170,7 +229,7 @@ class ToolCallParser:
     Feed text in arbitrary chunkings; events come back as ("text", str) or
     ("call", {"id", "name", "input"}). Buffering is minimal: plain text is
     held back only by the few bytes that could yet become a sentinel, and an
-    envelope body only until its close sentinel (or the fail-open cap).
+    envelope body only until its close sentinel (or the size cap).
     """
 
     def __init__(self):
@@ -181,36 +240,40 @@ class ToolCallParser:
     def _text_events(self, text, *, final=False):
         """("text", str) events for ordinary text, preserving partial sentinels."""
         events = []
-        while text:
+        while text or (final and self._in_envelope):
             if self._in_envelope:
                 # The close sentinel may span chunks, so it is searched in the
                 # joined buffer, never in the new chunk alone.
                 haystack = self._buf + text
-                close = haystack.find(CLOSE_SENTINEL)
-                if close < 0:
+                match = _closing_marker(haystack)
+                if match is not None and match.end() == len(haystack) \
+                        and not haystack.endswith(">>>") and not final:
+                    if len(haystack[:match.start()].encode("utf-8")) > MAX_ENVELOPE_BYTES:
+                        raise ToolCallError("tool envelope exceeds the size limit")
                     self._buf = haystack
-                    if len(self._buf) > MAX_ENVELOPE_BYTES:
-                        events.append(("text", self._buf))
-                        self._buf = ""
-                        self._in_envelope = False
+                    text = ""
+                    continue
+                if match is None:
+                    self._buf = haystack
+                    if final:
+                        raise ToolCallError("tool envelope was not closed before the turn ended")
+                    pending_close = _longest_sentinel_prefix_tail(self._buf, CLOSE_SENTINEL)
+                    body = self._buf[:-pending_close] if pending_close else self._buf
+                    if len(body.encode("utf-8")) > MAX_ENVELOPE_BYTES:
+                        raise ToolCallError("tool envelope exceeds the size limit")
                     text = ""
                 else:
-                    body = haystack[:close]
+                    body = haystack[:match.start()]
+                    if len(body.encode("utf-8")) > MAX_ENVELOPE_BYTES:
+                        raise ToolCallError("tool envelope exceeds the size limit")
                     self._buf = ""
                     self._in_envelope = False
-                    text = haystack[close + len(CLOSE_SENTINEL):]
+                    text = haystack[match.end():]
                     if self.calls >= MAX_CALLS_PER_TURN:
-                        events.append(("text", OPEN_SENTINEL + body + CLOSE_SENTINEL))
-                        continue
-                    try:
-                        call = _parse_body(body)
-                    except ToolCallError:
-                        # Fail open: the convention was misread, so the text
-                        # stands as written rather than vanishing.
-                        events.append(("text", OPEN_SENTINEL + body + CLOSE_SENTINEL))
-                    else:
-                        self.calls += 1
-                        events.append(("call", call))
+                        raise ToolCallError("too many tool calls in one turn")
+                    call = _parse_body(body)
+                    self.calls += 1
+                    events.append(("call", call))
             else:
                 open_at = text.find(OPEN_SENTINEL)
                 if open_at < 0:
@@ -242,10 +305,5 @@ class ToolCallParser:
         return self._text_events(text)
 
     def finish(self):
-        """Flush at stream end; an unclosed envelope fails open as written."""
-        if self._in_envelope:
-            buffered = OPEN_SENTINEL + self._buf
-            self._buf = ""
-            self._in_envelope = False
-            return [("text", buffered)]
+        """Flush ordinary text; an unclosed envelope is a protocol error."""
         return self._text_events("", final=True)

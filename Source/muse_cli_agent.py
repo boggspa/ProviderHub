@@ -106,6 +106,7 @@ from pathlib import Path
 from typing import Any, Iterable, Iterator
 
 from cli_session import CliSessionError, StdioSession, minimal_env, resolve_binary
+from cli_tool_call import TRANSCRIPT_HEADER
 
 try:  # Repo-native effort ladder; degrade to a local copy if unavailable.
     from effort_map import map_effort as _map_effort
@@ -612,12 +613,7 @@ def build_argv(model, *, effort=None, system=None, stream=True) -> list[str]:
 # Prompt rendering
 # ---------------------------------------------------------------------------
 
-_TRANSCRIPT_HEADER = (
-    "You are being driven as a plain text completion model by an external "
-    "harness. The transcript below is context only. You have no tools and "
-    "cannot take actions; do not attempt to and do not describe attempting to. "
-    "Reply with assistant text for the FINAL user turn only."
-)
+_TRANSCRIPT_HEADER = TRANSCRIPT_HEADER
 _TRANSCRIPT_FOOTER = 'Respond now to the final <turn role="user"> above.'
 
 
@@ -726,13 +722,13 @@ def _translate(payload: Any, state: _TurnState) -> list[dict]:
 
     # Terminal run event: run.terminal.completed / .failed / .cancelled.
     if kind == "run_terminal" or payload_type.startswith("run.terminal."):
-        terminal = str(body.get("terminal") or "")
+        terminal = str(body.get("terminal") or payload_type.removeprefix("run.terminal."))
         if terminal:
             state.stop_reason = terminal
         text = body.get("text")
         if isinstance(text, str) and text:
             state.result_text = text
-        if terminal in ("failed", "cancelled"):
+        if terminal != "completed":
             detail = body.get("reason") or text or terminal
             state.failure = f"muse reported {terminal}: {detail}"
         return []
@@ -951,21 +947,24 @@ def run_turn(request, *, spawner=None, timeout=300) -> Iterator[dict]:
                 if state.failure:
                     yield {"type": "error", "message": state.failure}
                     return
+                if state.stop_reason == "completed":
+                    # The terminal event is authoritative. Waiting for stdout
+                    # EOF keeps the host spinner alive during Muse shutdown.
+                    if not state.emitted_text and state.fallback_text():
+                        yield {"type": "text_delta", "text": state.fallback_text()}
+                    yield {"type": "message_stop", "stop_reason": "completed"}
+                    return
 
         returncode = getattr(session, "returncode", None)
         if isinstance(returncode, int) and returncode != 0:
-            yielded = state.emitted_text or bool(state.fallback_text())
             detail = f"the muse CLI exited with code {returncode}"
-            if not yielded:
-                yield {"type": "error",
-                       "message": detail + state.diagnostics()
-                                  + state.stderr_tail()}
-                return
-            # Text did arrive before the failure; report it as a stopped turn
-            # rather than discarding a usable completion.
-            stop_reason = state.stop_reason or "error"
+            yield {"type": "error", "message": detail + state.diagnostics() + state.stderr_tail()}
+            return
         elif state.failure:
             yield {"type": "error", "message": state.failure}
+            return
+        elif state.stop_reason is None:
+            yield {"type": "error", "message": "the muse CLI stream ended before completing the turn"}
             return
         else:
             if not state.emitted_text:

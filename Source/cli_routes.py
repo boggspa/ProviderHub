@@ -26,9 +26,12 @@ from __future__ import annotations
 
 import importlib
 import json
+import time
 import uuid
 
-from cli_tool_call import ToolCallParser, normalize_tools, render_tool_anchor, render_tool_manifest
+from cli_tool_call import (HOST_EXECUTION_NOTE, MAX_CALLS_PER_TURN, ToolCallError,
+                           ToolCallParser, normalize_tools, render_tool_anchor,
+                           render_tool_manifest, validate_host_call)
 from effort_map import EFFORT_ORDER
 from hub_config import MODEL_ID
 
@@ -329,7 +332,8 @@ def plan_turn(provider_id: str, upstream_model: str, payload: dict, spec: dict,
     tool_choice = payload.get("tool_choice")
     if isinstance(tool_choice, dict) and tool_choice.get("type") == "none":
         tools, tool_choice = [], None
-    manifest = render_tool_manifest(tools, tool_choice) if tools else ""
+    dynamic_tools = getattr(adapter, "HOST_TOOL_TRANSPORT", None) == "dynamic"
+    manifest = render_tool_manifest(tools, tool_choice) if tools and not dynamic_tools else ""
     if manifest:
         # The tool surface rides the system text: the harness's definitions,
         # the call convention, and the anti-simulation rules. Nothing else
@@ -343,6 +347,8 @@ def plan_turn(provider_id: str, upstream_model: str, payload: dict, spec: dict,
                 anchor = render_tool_anchor(tools)
                 message["content"] = (message["content"] + "\n\n" + anchor) if message["content"] else anchor
                 break
+    if dynamic_tools:
+        system = HOST_EXECUTION_NOTE + ("\n\n" + system if system else "")
     request = {
         "model": upstream_model,
         "messages": messages,
@@ -350,7 +356,14 @@ def plan_turn(provider_id: str, upstream_model: str, payload: dict, spec: dict,
         "effort": effort if isinstance(effort, str) else None,
         "max_tokens": wanted_output if type(wanted_output) is int and wanted_output > 0 else None,
         "stream": bool(payload.get("stream")),
+        "tools": tools,
+        "tool_choice": tool_choice,
     }
+    if dynamic_tools:
+        # Keep typed tool calls/results for Codex's native history injection.
+        # Flattening these into a new user transcript loses the tool loop.
+        request["history"] = [message for message in payload.get("messages", [])
+                              if isinstance(message, dict) and message.get("role") in {"user", "assistant"}]
     return {
         "cli": True,
         "cli_tool_calls": bool(tools),
@@ -372,50 +385,106 @@ def plan_turn(provider_id: str, upstream_model: str, payload: dict, spec: dict,
 def run_turn(provider_id: str, request: dict, *, parse_tool_calls: bool = False, timeout: int = 600):
     """Start the adapter's turn generator (text_delta/thinking_delta/stop)."""
     adapter = adapter_for(provider_id)
-    events = adapter.run_turn(request, timeout=timeout)
     if not parse_tool_calls:
-        return events
-    return _parse_tool_stream(events)
+        return adapter.run_turn(request, timeout=timeout)
+    return _tool_turn(adapter, request, timeout=timeout)
 
 
-def _parse_tool_stream(events):
+def _tool_turn(adapter, request, *, timeout):
+    """Allow one protocol correction, with no replay of executed host calls."""
+    deadline = time.monotonic() + timeout
+    attempts = 1 if getattr(adapter, "HOST_TOOL_TRANSPORT", None) == "dynamic" else 2
+    current = request
+    for attempt in range(attempts):
+        events = _parse_tool_stream(adapter.run_turn(current, timeout=max(0.01, deadline - time.monotonic())),
+                                    tools=request.get("tools"), tool_choice=request.get("tool_choice"))
+        retry = False
+        try:
+            for event in events:
+                if event.get("code") == "invalid_cli_tool_call" and attempt + 1 < attempts \
+                        and time.monotonic() < deadline:
+                    retry = True
+                    break
+                yield event
+        finally:
+            events.close()
+        if not retry:
+            return
+        current = {**request, "messages": [*request.get("messages", []), {
+            "role": "user",
+            "content": "Your previous response had invalid host tool-call formatting. "
+                       "No tool from that response was executed. Continue the original task "
+                       "from the host results already provided and reissue the intended call "
+                       "using a complete JSON object and the exact tool-call delimiters from "
+                       "the tool instructions. Do not simulate results or repeat completed actions.",
+        }]}
+
+
+def _parse_tool_stream(events, *, tools=None, tool_choice=None):
     """Rewrite one adapter event stream, cutting call envelopes out of text.
 
     Text passes through unless the parser is mid-envelope; each complete,
     valid envelope becomes a {"type": "tool_call"} event, and a turn that
     produced any call stops with stop_reason "tool_use" so the harness runs
-    its loop. Malformed envelopes fail open as ordinary text. The inner
+    its loop. Calls are released only after a successful terminal event, so a
+    later malformed envelope or cancellation cannot execute a partial batch.
+    Malformed envelopes become explicit errors without leaking arguments. The inner
     generator is always closed with the wrapper - that is what kills the
     child CLI when a turn is abandoned.
     """
     parser = ToolCallParser()
-    calls = 0
+    calls = []
 
     def flush(chunks):
-        nonlocal calls
         for ptype, payload in chunks:
             if ptype == "text":
                 if payload:
                     yield {"type": "text_delta", "text": payload}
             else:
-                calls += 1
-                yield {"type": "tool_call", **payload}
+                add_call(payload)
+
+    def add_call(call):
+        if len(calls) >= MAX_CALLS_PER_TURN:
+            raise ToolCallError("too many tool calls in one turn")
+        validated = validate_host_call(call, tools)
+        if any(prior["id"] == validated["id"] for prior in calls):
+            raise ToolCallError("duplicate tool call id")
+        calls.append(validated)
 
     try:
         for event in events:
             kind = event.get("type") if isinstance(event, dict) else None
             if kind == "text_delta":
                 yield from flush(parser.feed(event.get("text") or ""))
+            elif kind == "tool_call":
+                add_call(event)
             elif kind == "message_stop":
+                if _stop_reason(event.get("stop_reason")) is None:
+                    yield {"type": "error", "message": "The CLI turn did not complete successfully "
+                           f"({event.get('stop_reason')!s})."}
+                    return
                 yield from flush(parser.finish())
+                choice = tool_choice if isinstance(tool_choice, dict) else {}
+                if choice.get("type") in {"any", "required", "tool"} and not calls:
+                    raise ToolCallError("the model did not make the required host tool call")
+                if choice.get("type") == "tool" and any(
+                        call["name"] != choice.get("name") for call in calls):
+                    raise ToolCallError("the model did not call the requested host tool")
+                for call in calls:
+                    yield {**call, "type": "tool_call"}
                 stop_reason = "tool_use" if calls else event.get("stop_reason")
                 yield {"type": "message_stop", "stop_reason": stop_reason}
+                return
             elif kind == "error":
-                # A failure mid-envelope must not swallow the partial text.
-                yield from flush(parser.finish())
                 yield event
+                return
             else:
                 yield event
+        parser.finish()
+        yield {"type": "error", "message": "The CLI stream ended before completing the turn."}
+    except ToolCallError as exc:
+        yield {"type": "error", "code": "invalid_cli_tool_call",
+               "message": f"Invalid CLI host tool call: {exc}."}
     finally:
         close = getattr(events, "close", None)
         if callable(close):
@@ -430,7 +499,9 @@ _STOP_REASONS = {"end_turn", "max_tokens", "stop_sequence", "tool_use"}
 
 
 def _stop_reason(value):
-    return value if value in _STOP_REASONS else "end_turn"
+    if value in {"completed", "success", "stop"}:
+        return "end_turn"
+    return value if value in _STOP_REASONS else None
 
 
 def relay_cli_turn(events, emit, *, model, input_tokens=0) -> dict:
@@ -476,48 +547,57 @@ def relay_cli_turn(events, emit, *, model, input_tokens=0) -> dict:
                                 else {"type": "text", "text": ""})})
         open_block = kind
 
-    for event in events:
-        kind = event.get("type") if isinstance(event, dict) else None
-        if kind == "error":
-            error = str(event.get("message") or "The CLI turn failed.")
-            break
-        if kind == "message_stop":
-            stop_reason = _stop_reason(event.get("stop_reason"))
-            break
-        if kind == "thinking_delta":
-            text = event.get("text")
-            if not text:
-                continue
-            if not started:
-                start_message()
-            open("thinking")
-            emit({"type": "content_block_delta", "index": index,
-                  "delta": {"type": "thinking_delta", "thinking": text}})
-        elif kind == "text_delta":
-            text = event.get("text")
-            if not text:
-                continue
-            if not started:
-                start_message()
-            open("text")
-            emit({"type": "content_block_delta", "index": index,
-                  "delta": {"type": "text_delta", "text": text}})
-        elif kind == "tool_call":
-            if not started:
-                start_message()
-            if open_block is not None:
+    try:
+        for event in events:
+            kind = event.get("type") if isinstance(event, dict) else None
+            if kind == "error":
+                error = str(event.get("message") or "The CLI turn failed.")
+                break
+            if kind == "message_stop":
+                stop_reason = _stop_reason(event.get("stop_reason"))
+                if stop_reason is None:
+                    error = f"The CLI turn did not complete successfully ({event.get('stop_reason')!s})."
+                break
+            if kind == "thinking_delta":
+                text = event.get("text")
+                if not text:
+                    continue
+                if not started:
+                    start_message()
+                open("thinking")
+                emit({"type": "content_block_delta", "index": index,
+                      "delta": {"type": "thinking_delta", "thinking": text}})
+            elif kind == "text_delta":
+                text = event.get("text")
+                if not text:
+                    continue
+                if not started:
+                    start_message()
+                open("text")
+                emit({"type": "content_block_delta", "index": index,
+                      "delta": {"type": "text_delta", "text": text}})
+            elif kind == "tool_call":
+                if not started:
+                    start_message()
+                if open_block is not None:
+                    emit({"type": "content_block_stop", "index": index})
+                    index += 1
+                    open_block = None
+                emit({"type": "content_block_start", "index": index,
+                      "content_block": {"type": "tool_use", "id": event["id"],
+                                        "name": event["name"], "input": {}}})
+                emit({"type": "content_block_delta", "index": index,
+                      "delta": {"type": "input_json_delta",
+                                "partial_json": json.dumps(event["input"], ensure_ascii=False,
+                                                           separators=(",", ":"))}})
                 emit({"type": "content_block_stop", "index": index})
                 index += 1
-                open_block = None
-            emit({"type": "content_block_start", "index": index,
-                  "content_block": {"type": "tool_use", "id": event["id"],
-                                    "name": event["name"], "input": {}}})
-            emit({"type": "content_block_delta", "index": index,
-                  "delta": {"type": "input_json_delta",
-                            "partial_json": json.dumps(event["input"], ensure_ascii=False,
-                                                       separators=(",", ":"))}})
-            emit({"type": "content_block_stop", "index": index})
-            index += 1
+        else:
+            error = "The CLI stream ended before completing the turn."
+    finally:
+        close = getattr(events, "close", None)
+        if callable(close):
+            close()
     usage = {"input_tokens": int(input_tokens or 0), "output_tokens": 0}
     if error is not None:
         return {"error": error, "started": started, "stop_reason": None, "usage": usage}

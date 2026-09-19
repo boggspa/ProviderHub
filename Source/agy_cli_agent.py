@@ -49,6 +49,7 @@ from pathlib import Path
 from typing import Any, Iterable, Iterator
 
 from cli_session import CliSessionError, StdioSession, minimal_env, resolve_binary
+from cli_tool_call import TRANSCRIPT_HEADER
 
 try:  # Repo-native effort ladder; degrade to a local copy if unavailable.
     from effort_map import map_effort as _map_effort
@@ -629,7 +630,11 @@ def build_argv(model, *, effort=None, system=None, stream=True) -> list[str]:
     argv += list(READ_ONLY_FLAGS)
     argv += ["--model", validated_model]
     if validated_effort:
-        argv += ["--effort", validated_effort]
+        # Known rows encode their effort. For example Gemini Pro's medium
+        # request maps to its high row, so --effort must agree with that row.
+        native_effort = _AGY_ROW_MAP.get(validated_model, (None, None, None))[2]
+        argv += ["--effort", native_effort if native_effort in {"low", "medium", "high"}
+                 else validated_effort]
     return _assert_safe(argv)
 
 
@@ -637,12 +642,7 @@ def build_argv(model, *, effort=None, system=None, stream=True) -> list[str]:
 # Prompt rendering
 # ---------------------------------------------------------------------------
 
-_TRANSCRIPT_HEADER = (
-    "You are being driven as a plain text completion model by an external "
-    "harness. The transcript below is context only. You have no tools and "
-    "cannot take actions; do not attempt to and do not describe attempting to. "
-    "Reply with assistant text for the FINAL user turn only."
-)
+_TRANSCRIPT_HEADER = TRANSCRIPT_HEADER
 _TRANSCRIPT_FOOTER = 'Respond now to the final <turn role="user"> above.'
 
 
@@ -903,7 +903,11 @@ def run_turn(request, *, spawner=None, timeout=300) -> Iterator[dict]:
     try:
         if not isinstance(request, dict):
             raise AgyCliAgentError("request must be an object")
-        model = _validate_model(request.get("model"))
+        # Validate without prematurely resolving a family to its default
+        # effort row; build_argv resolves the family and effort together.
+        model = request.get("model")
+        _validate_model(model)
+        model = model.strip()
         messages = _coerce_messages(request.get("messages"))
         effort = _validate_effort(request.get("effort"))
         system = request.get("system")

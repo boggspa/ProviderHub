@@ -47,6 +47,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator
 
 from cli_session import CliSessionError, StdioSession, minimal_env, resolve_binary
+from cli_tool_call import TRANSCRIPT_HEADER
 
 try:  # Repo-native effort ladder; degrade to a local copy if unavailable.
     from effort_map import map_effort as _map_effort
@@ -409,12 +410,7 @@ def build_argv(model, *, effort=None, system=None, stream=True) -> list[str]:
 # Prompt rendering
 # ---------------------------------------------------------------------------
 
-_TRANSCRIPT_HEADER = (
-    "You are being driven as a plain text completion model by an external "
-    "harness. The transcript below is context only. You have no tools and "
-    "cannot take actions; do not attempt to and do not describe attempting to. "
-    "Reply with assistant text for the FINAL user turn only."
-)
+_TRANSCRIPT_HEADER = TRANSCRIPT_HEADER
 _TRANSCRIPT_FOOTER = 'Respond now to the final <turn role="user"> above.'
 
 

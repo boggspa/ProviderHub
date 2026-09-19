@@ -74,7 +74,7 @@ def _ev(method, params):
 
 def _delta_ev(text):
     return _ev("item/agentMessage/delta",
-               {"delta": text, "itemId": "i", "threadId": "t", "turnId": "t1"})
+               {"delta": text, "itemId": "i", "threadId": "t1", "turnId": "t1"})
 
 
 def _reasoning_ev(text, method="item/reasoning/textDelta"):
@@ -465,7 +465,7 @@ class RunTurnTests(unittest.TestCase):
         self.assertEqual(events[1]["stop_reason"], "end_turn")
         self.assertEqual(session.spawner, "spawner-stub")
         methods = [req[0] for req in session.requests]
-        self.assertEqual(methods, ["initialize", "thread/start", "turn/start"])
+        self.assertEqual(methods, ["initialize", "config/read", "thread/start", "turn/start"])
         self.assertIn("initialized", [n[0] for n in session.notifications])
 
     def test_thinking_delta(self):
@@ -552,8 +552,66 @@ class RunTurnTests(unittest.TestCase):
             events = list(codex.run_turn(request))
             self.assertEqual([e["type"] for e in events], ["error"])
 
+    def test_host_instructions_are_developer_instructions_and_tools_are_registered(self):
+        fake = FakeCodexSession([])
+        fake.script = [_completed_turn()]
+        tool = {"name": "exec_command", "input_schema": {"type": "object"}}
+        _, session, _ = self._run(self._request(system="Host policy", tools=[tool]), fake)
+        params = dict((method, params) for method, params, _ in session.requests)
+        self.assertIn("Host policy", params["thread/start"]["developerInstructions"])
+        self.assertNotIn("Host policy", params["turn/start"]["input"][0]["text"])
+        namespace = params["thread/start"]["dynamicTools"][0]
+        self.assertEqual(namespace["name"], "host")
+        self.assertEqual(namespace["tools"][0]["name"], "exec_command")
+        self.assertIn('features.shell_tool=false', session.argv)
+
+    def test_inherited_mcp_servers_are_explicitly_disabled(self):
+        fake = FakeCodexSession([])
+        fake.responses["config/read"] = {"result": {"config": {"mcp_servers": {
+            "local-tools": {"enabled": True, "command": "server"},
+            "remote-tools": {"enabled": True, "url": "https://example.test"}}}}}
+        fake.script = [_completed_turn()]
+        _, session, _ = self._run(self._request(), fake)
+        params = next(params for method, params, _ in session.requests if method == "thread/start")
+        self.assertEqual(params["config"]["mcp_servers"], {
+            "local-tools": {"enabled": False}, "remote-tools": {"enabled": False}})
+
+    def test_native_tools_and_interactive_requests_are_explicit_errors(self):
+        for event in [_ev("item/started", {"item": {"type": "commandExecution"}}),
+                      _ev("item/completed", {"item": {"type": "fileChange"}}),
+                      {"id": 7, "method": "item/commandExecution/requestApproval", "params": {}}]:
+            with self.subTest(event=event):
+                fake = FakeCodexSession([])
+                fake.script = [event, _completed_turn()]
+                events, _, _ = self._run(self._request(), fake)
+                self.assertEqual([e["type"] for e in events], ["error"])
+                self.assertTrue(fake.closed)
+
+    def test_unoffered_dynamic_tool_is_an_error(self):
+        fake = FakeCodexSession([])
+        fake.script = [{"id": 1, "method": "item/tool/call", "params": {
+            "namespace": "host", "tool": "unoffered", "arguments": {}, "callId": "c"}}]
+        events, _, _ = self._run(self._request(tools=[{"name": "read_file"}]), fake)
+        self.assertEqual([e["type"] for e in events], ["error"])
+
+    def test_deltas_for_other_turns_are_ignored(self):
+        fake = FakeCodexSession([])
+        foreign = _delta_ev("foreign")
+        foreign["params"]["turnId"] = "other"
+        fake.script = [foreign, _delta_ev("mine"), _completed_turn()]
+        events, _, _ = self._run(self._request(), fake)
+        self.assertEqual([e.get("text") for e in events if e["type"] == "text_delta"], ["mine"])
+
 
 class RunTurnFallbackTests(unittest.TestCase):
+    def setUp(self):
+        # The fallback's config-only app-server preflight never uses a real
+        # runtime in tests; spawner still represents just the exec process.
+        self.config_session = FakeCodexSession([])
+        patcher = mock.patch.object(codex, "StdioSession", return_value=self.config_session)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def _spawner_recording(self, captured):
         def spawner(argv, **kwargs):
             captured["argv"] = list(argv)

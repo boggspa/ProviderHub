@@ -39,7 +39,11 @@ verified two ways against ``codex-cli 0.153.0``:
   ``CODEX_HOME`` - handshake, ``model/list`` cursor paging, ``thread/start``,
   ``turn/start`` and the whole failure path were all observed on the wire.
 
-Requests: ``initialize`` -> ``initialized`` -> ``thread/start`` -> ``turn/start``.
+Requests: ``initialize`` -> ``initialized`` -> ``thread/start`` ->
+optional ``thread/inject_items`` -> ``turn/start``. Host instructions travel
+as ``developerInstructions`` and host tools as namespaced ``dynamicTools``.
+``item/tool/call`` ends the nested session with a host-visible tool handoff;
+the next request restores the call and result as typed history items.
 Notifications consumed:
 
 ``item/agentMessage/delta``    ``{"delta","itemId","threadId","turnId"}`` -> text_delta
@@ -86,8 +90,13 @@ applied to the coarse ``exec`` fallback. When the real config's
 points it back at the CLI's own fetched OpenAI catalog so :func:`catalogue`
 advertises models this route can actually run.
 
-Read-only by construction
--------------------------
+Nested process isolation and host permissions
+---------------------------------------------
+The nested sandbox does not describe host tool permissions. Workspace reads
+and writes are forwarded to the host, which enforces its own settings. Native
+shell, web, plugins, and multi-agent features are disabled; unexpected native
+tool activity is an error, never silently discarded.
+
 :data:`_FORBIDDEN_FLAGS` is asserted inside every argv builder, so a future
 edit cannot introduce an approval bypass or a write-capable sandbox. Threads are
 started ``sandbox="read-only"`` / ``approvalPolicy="never"`` / ``ephemeral``,
@@ -112,6 +121,7 @@ import tempfile
 import time
 
 from cli_session import CliSessionError, StdioSession, minimal_env, resolve_binary
+from cli_tool_call import HOST_EXECUTION_NOTE, normalize_tools, validate_host_call
 
 
 PROVIDER_ID = "codex"
@@ -119,10 +129,32 @@ PROVIDER_NAME = "Codex (ChatGPT subscription)"
 TRANSPORT = "app_server"
 BINARY_NAMES = ("codex",)
 
-#: Where the harness system prompt is delivered. "prompt" here because
-#: render_prompt folds the system text into the input text; there is no
-#: Codex app-server system-prompt flag for a single turn.
-SYSTEM_PROMPT_TRANSPORT = "prompt"
+#: The host policy uses a native instruction field, above user history.
+SYSTEM_PROMPT_TRANSPORT = "developerInstructions"
+HOST_TOOL_TRANSPORT = "dynamic"
+
+_NATIVE_TOOL_ITEMS = frozenset({
+    "commandExecution", "fileChange", "mcpToolCall", "collabToolCall",
+    "collabAgentToolCall", "webSearch", "imageView", "imageGeneration",
+})
+
+# Host tools live in their own namespace so a host's exec/apply_patch tool
+# cannot collide with a built-in tool of the nested runtime.
+_HOST_TOOL_NAMESPACE = "host"
+_HOST_INSTRUCTIONS = HOST_EXECUTION_NOTE + (
+    " Host tools are registered in the host namespace. Request them directly; "
+    "the bridge returns each call to the host and supplies its result in the "
+    "next request's transcript. Use those results to continue the task."
+)
+
+_TRANSPORT_CONFIG = (
+    'features.shell_tool=false',
+    'features.multi_agent=false',
+    'features.apps=false',
+    'features.plugins=false',
+    'features.hooks=false',
+    'web_search="disabled"',
+)
 
 #: The coarse transport :func:`run_turn_fallback` uses. Never the default.
 FALLBACK_TRANSPORT = "exec_json"
@@ -358,6 +390,8 @@ def _app_server_argv(*, model=None, effort=None, binary=None):
             "-c", _MODEL_PROVIDER_OVERRIDE,
             "-c", 'sandbox_mode="read-only"',
             "-c", 'approval_policy="never"']
+    for setting in _TRANSPORT_CONFIG:
+        argv += ["-c", setting]
     catalog = _openai_catalog_override()
     if catalog is not None:
         argv += ["-c", f"{catalog[0]}={_toml_string(catalog[1])}"]
@@ -374,8 +408,8 @@ def build_argv(model, *, effort=None, system=None, stream=True):
 
     ``system`` and ``stream`` are accepted so the hub can call every CLI
     adapter with the same signature. They are ignored here because the
-    system prompt travels inside the rendered prompt text, and the Codex
-    app-server streams by design.
+    system prompt travels in thread/start developerInstructions, and the
+    Codex app-server streams by design.
     """
     return _app_server_argv(model=model, effort=effort, binary=_pinned_binary())
 
@@ -402,6 +436,8 @@ def build_exec_argv(model, *, effort=None):
             "--ephemeral",
             "--json",
             "-m", checked_model]
+    for setting in _TRANSPORT_CONFIG:
+        argv += ["-c", setting]
     if checked_effort is not None:
         argv += ["-c", f"model_reasoning_effort={_toml_string(checked_effort)}"]
     return _assert_safe_argv(argv, context="exec")
@@ -794,14 +830,38 @@ def _thread_params(payload, workspace):
         "sandbox": "read-only",
         "approvalPolicy": "never",
         "ephemeral": True,
+        "developerInstructions": payload.get("system") or _HOST_INSTRUCTIONS,
     }
+    if payload.get("tools"):
+        params["dynamicTools"] = [{
+            "type": "namespace", "name": _HOST_TOOL_NAMESPACE,
+            "description": "Tools executed by the host application under its permissions.",
+            "tools": [{"type": "function", "name": tool["name"],
+                       "description": tool["description"],
+                       "inputSchema": tool["input_schema"]}
+                      for tool in payload["tools"]],
+        }]
     if payload["effort"] is not None:
         params["config"] = {"model_reasoning_effort": payload["effort"]}
     return params
 
 
+def _inherited_mcp_overrides(session, *, timeout):
+    # Config tables merge: mcp_servers={} does NOT clear inherited servers.
+    # Ask the runtime for names only and disable each at thread scope. Never
+    # copy credentials/configuration into the host request or diagnostics.
+    configured = _result(session.request("config/read", {"includeLayers": False},
+                                         timeout=max(1.0, timeout)), context="config/read")
+    servers = (configured.get("config") or {}).get("mcp_servers") or {}
+    return {name: {"enabled": False} for name in servers}
+
+
 def _start_thread(session, payload, workspace, *, timeout):
-    response = session.request("thread/start", _thread_params(payload, workspace),
+    params = _thread_params(payload, workspace)
+    servers = _inherited_mcp_overrides(session, timeout=timeout)
+    if servers:
+        params.setdefault("config", {})["mcp_servers"] = servers
+    response = session.request("thread/start", params,
                                timeout=max(1.0, timeout))
     result = _result(response, context="thread/start")
     thread = result.get("thread")
@@ -860,9 +920,6 @@ def render_prompt(request):
     instruction; everything before it is context.
     """
     blocks = []
-    system = request.get("system")
-    if isinstance(system, str) and system.strip():
-        blocks.append(f"<system>\n{system.strip()}\n</system>")
     messages = request.get("messages")
     if not isinstance(messages, list):
         messages = []
@@ -891,9 +948,54 @@ def _normalise_request(request):
     if not isinstance(model, str) or not model.strip():
         raise CodexCliAgentError("A turn request must name a model.")
     prompt = render_prompt(request)
+    system = request.get("system")
+    if system is not None and not isinstance(system, str):
+        raise CodexCliAgentError("system must be a string or None")
+    instructions = _HOST_INSTRUCTIONS + ("\n\n" + system.strip() if system else "")
+    choice = request.get("tool_choice") or {}
+    tools = normalize_tools(request.get("tools"))
+    if choice.get("type") == "none":
+        tools = []
+    elif choice.get("type") in {"any", "required"}:
+        instructions += "\nCall at least one host tool in this reply."
+    elif choice.get("type") == "tool":
+        instructions += f"\nCall the host tool {choice.get('name')} in this reply."
     return {"model": _checked_model(model),
             "effort": _checked_effort(request.get("effort")),
-            "prompt": prompt}
+            "prompt": prompt, "system": instructions, "tools": tools,
+            "history": request.get("history")}
+
+
+def _history_items(messages):
+    """Preserve role and call/result identity in a stateless Codex session."""
+    items = []
+    for message in messages:
+        role = message.get("role")
+        if role not in {"user", "assistant"}:
+            continue
+        content = message.get("content")
+        blocks = [{"type": "text", "text": content}] if isinstance(content, str) else content or []
+        for block in blocks:
+            if not isinstance(block, dict):
+                continue
+            kind = block.get("type")
+            if kind == "text" and block.get("text"):
+                items.append({"type": "message", "role": role, "content": [
+                    {"type": "output_text" if role == "assistant" else "input_text",
+                     "text": block["text"]}]})
+            elif kind == "tool_use":
+                items.append({"type": "function_call", "call_id": block["id"],
+                              "name": block["name"], "namespace": _HOST_TOOL_NAMESPACE,
+                              "arguments": json.dumps(block.get("input") or {})})
+            elif kind == "tool_result":
+                result = block.get("content", "")
+                if not isinstance(result, str):
+                    result = json.dumps(result, ensure_ascii=False)
+                if block.get("is_error"):
+                    result = "Host tool error: " + result
+                items.append({"type": "function_call_output", "call_id": block["tool_use_id"],
+                              "output": result})
+    return items
 
 
 def _delta(event):
@@ -942,7 +1044,7 @@ def _failure_message(turn):
     return None
 
 
-def _stream_turn(session, *, turn_id, deadline):
+def _stream_turn(session, *, turn_id, deadline, tools=None, thread_id=None):
     """Consume notifications until the turn terminates.
 
     Yields ``text_delta`` / ``thinking_delta`` as they arrive and always ends
@@ -974,6 +1076,36 @@ def _stream_turn(session, *, turn_id, deadline):
                     continue
                 saw_any = True
                 method = event.get("method")
+                if not _same_turn(event, turn_id):
+                    continue
+                params = event.get("params") or {}
+                if not isinstance(params, dict):
+                    params = {}
+                if thread_id and params.get("threadId", thread_id) != thread_id:
+                    continue
+                if method == "item/tool/call":
+                    if "id" not in event or params.get("namespace") != _HOST_TOOL_NAMESPACE:
+                        yield {"type": "error", "message": "Codex requested an unregistered native tool."}
+                        return
+                    call = validate_host_call({"id": params.get("callId"),
+                                               "name": params.get("tool"),
+                                               "input": params.get("arguments")}, tools or [])
+                    # This route is stateless: the next host request includes
+                    # the tool result. End the nested session without replying
+                    # with a fabricated result or executing the tool locally.
+                    yield {"type": "tool_call", **call}
+                    yield {"type": "message_stop", "stop_reason": "tool_use"}
+                    return
+                if method in {"item/started", "item/completed"}:
+                    item = params.get("item") or {}
+                    if isinstance(item, dict) and item.get("type") in _NATIVE_TOOL_ITEMS:
+                        yield {"type": "error", "message": "Codex attempted a native CLI tool "
+                               f"({item['type']}); workspace actions must use host tools."}
+                        return
+                if "id" in event and method:
+                    yield {"type": "error", "message": "Codex requested an unsupported "
+                           f"interactive action ({method}); the host must handle it."}
+                    return
                 if method == "item/agentMessage/delta":
                     text = _delta(event)
                     if text:
@@ -1026,9 +1158,12 @@ def _stream_turn(session, *, turn_id, deadline):
                         message = _failure_message(turn) or last_error or "The Codex turn failed."
                         yield {"type": "error", "message": message}
                         return
-                    if status == "interrupted":
+                    if status in {"interrupted", "cancelled", "canceled"}:
                         yield {"type": "error",
                                "message": last_error or "The Codex turn was interrupted."}
+                        return
+                    if status != "completed":
+                        yield {"type": "error", "message": f"Unexpected Codex terminal status: {status}."}
                         return
                     yield {"type": "message_stop",
                            "stop_reason": _STOP_REASONS.get(status, "end_turn")}
@@ -1097,9 +1232,20 @@ def run_turn(request, *, spawner=None, timeout=300) -> Iterator[dict]:
         session = _open_session(argv, workspace, spawner=spawner, timeout=budget)
         _handshake(session, timeout=budget * _HANDSHAKE_SHARE)
         thread_id = _start_thread(session, payload, workspace, timeout=budget * _START_SHARE)
+        if payload.get("history"):
+            history = payload["history"]
+            # Historical calls and results must be actual protocol items. A
+            # tool result in user-message text makes some models repeat the
+            # original call forever while waiting for its native result.
+            items = _history_items(history)
+            response = session.request("thread/inject_items", {"threadId": thread_id, "items": items},
+                                       timeout=max(1.0, deadline - time.monotonic()))
+            _result(response, context="thread/inject_items")
+            payload["prompt"] = "Continue the user's task using the conversation and host tool results above."
         turn_id = _start_turn(session, payload, thread_id,
                               timeout=max(1.0, deadline - time.monotonic()))
-        yield from _stream_turn(session, turn_id=turn_id, deadline=deadline)
+        yield from _stream_turn(session, turn_id=turn_id, deadline=deadline,
+                                tools=payload["tools"], thread_id=thread_id)
     except CodexCliAgentError as exc:
         yield {"type": "error", "message": str(exc)}
     except CliSessionError as exc:
@@ -1163,11 +1309,19 @@ def _exec_events(process, *, deadline):
         kind = event.get("type") or event.get("msg")
         item = event.get("item") if isinstance(event.get("item"), dict) else {}
         if kind in ("item.completed", "item_completed"):
-            if item.get("item_type") in ("agent_message", "assistant") or item.get("type") == "agentMessage":
+            item_kind = item.get("item_type") or item.get("type")
+            if item_kind in {"command_execution", "file_change", "mcp_tool_call", "web_search"} \
+                    or item_kind in _NATIVE_TOOL_ITEMS:
+                yield {"type": "error", "message": "Codex exec attempted a native tool; use the host tool transport."}
+                return
+            if item_kind in {"agent_message", "assistant", "agentMessage"}:
                 text_value = item.get("text") or item.get("content")
                 if isinstance(text_value, str) and text_value.strip():
                     yield {"type": "text_delta", "text": text_value}
         elif kind in ("turn.completed", "turn_completed", "task_complete"):
+            if event.get("status", "completed") != "completed":
+                yield {"type": "error", "message": "The Codex exec turn did not complete successfully."}
+                return
             yield {"type": "message_stop", "stop_reason": "end_turn"}
             return
         elif kind in ("error", "turn.failed"):
@@ -1186,18 +1340,32 @@ def run_turn_fallback(request, *, spawner=None, timeout=300) -> Iterator[dict]:
     """
     workspace = None
     process = None
+    config_session = None
     try:
         budget = _bounded_timeout(timeout, default=300)
         deadline = time.monotonic() + budget
         payload = _normalise_request(request)
+        if payload["tools"]:
+            raise CodexCliAgentError("Codex host tools require the app-server transport; exec cannot forward them.")
+        workspace = CodexTurnWorkspace(diagnostics=_diagnostics_enabled()).open()
+        # exec has no per-thread config request. Read config without starting
+        # a model turn, then explicitly disable inherited MCP servers on argv.
+        config_session = _open_session(_app_server_argv(), workspace, timeout=budget)
+        _handshake(config_session, timeout=budget * _HANDSHAKE_SHARE)
+        servers = _inherited_mcp_overrides(config_session, timeout=budget * _START_SHARE)
+        _teardown(config_session, None)
+        config_session = None
         # stdin is DEVNULL, so the prompt travels as the positional argument
         # rather than as piped input. The forbidden-flag assert is re-run on the
         # constructed flags only; the user prompt must not be able to trip the
         # substring scan (e.g. a prompt containing "workspace-write").
         flag_argv = build_exec_argv(payload["model"], effort=payload["effort"])
+        if servers:
+            disabled = ",".join(f"{_toml_string(name)}={{enabled=false}}" for name in servers)
+            flag_argv += ["-c", "mcp_servers={" + disabled + "}"]
         _assert_safe_argv(flag_argv, context="exec")
-        argv = [*flag_argv, payload["prompt"]]
-        workspace = CodexTurnWorkspace(diagnostics=_diagnostics_enabled()).open()
+        argv = [*flag_argv, "-c", f"developer_instructions={_toml_string(payload['system'])}",
+                payload["prompt"]]
         spawn = spawner or subprocess.Popen
         process = spawn(list(argv), stdin=_DEVNULL, stdout=subprocess.PIPE,
                         stderr=_DEVNULL, text=True, env=workspace.env(), cwd=str(workspace.cwd))
@@ -1216,4 +1384,4 @@ def run_turn_fallback(request, *, spawner=None, timeout=300) -> Iterator[dict]:
                         process.wait(timeout=3)
                 except Exception:  # noqa: BLE001
                     pass
-        _teardown(None, workspace)
+        _teardown(config_session, workspace)

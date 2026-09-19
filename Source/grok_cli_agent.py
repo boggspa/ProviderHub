@@ -9,8 +9,10 @@ These routes are deliberately **pure text-in/text-out** so they behave like
 model routes instead of delegatory headless agents. The desktop harness owns
 the tool loop; if this route also ran tools, every tool call would be executed
 twice against two different views of the world. So the whole built-in tool set
-is switched off: tools are explicitly disabled via ``--tools ""``, permission
-mode is set to ``plan``, and subagents are disabled via ``--no-subagents``.
+is switched off with an explicit internal-tool removal list, verified against
+``system/init.tools`` before host handoffs. An empty ``--tools ""`` alone is
+insufficient in 1.0.34. Native-shaped model calls may be forwarded only after
+that empty-registry check and only for tools actually offered by the host.
 
 Verified live against grok 1.0.34 (3736acbc8658):
   - Binary at ~/.grok/bin/grok (self-updates on launch)
@@ -19,7 +21,8 @@ Verified live against grok 1.0.34 (3736acbc8658):
     (aliases: --effort), --system-prompt-override (compat: --system-prompt)
   - ``grok models`` returns authenticated models list (2 models: grok-4.6, grok-4.5)
   - ``--reasoning-effort`` accepts: low, medium, high, xhigh (no none, no ultra)
-  - ``--tools ""`` disables all built-in tools
+  - ``--tools ""`` alone leaves native tools enabled; the removal list and
+    init.tools validation below are required
   - ``--output-format streaming-messages-json`` outputs NDJSON in Anthropic Messages API format
   - Prompt travels as positional argument to ``--single``, NOT on stdin
     (verified: ``--single`` with no positional aborts with "a value is required
@@ -39,11 +42,14 @@ SYSTEM_PROMPT_TRANSPORT is "flag" (``--system-prompt-override``).
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 import tempfile
 from typing import Any, Iterator
 
 from cli_session import CliSessionError, StdioSession, minimal_env, resolve_binary
+from cli_tool_call import (MAX_ENVELOPE_BYTES, TRANSCRIPT_HEADER, ToolCallError,
+                           normalize_tools, validate_host_call)
 
 try:
     from effort_map import map_effort as _map_effort
@@ -86,10 +92,29 @@ _FORBIDDEN_FLAGS = frozenset({
     "--always-approve",
 })
 
-# The read-only posture. plan mode + no subagents + empty tools list.
+# Internal IDs differ from the names shown in init.tools. Empty --tools alone
+# leaves the stock toolset enabled in Grok 1.0.34. Remove built-ins explicitly,
+# including MCP dispatch and task tools, then verify init.tools is empty.
+_DISALLOWED_TOOLS = (
+    "run_terminal_cmd", "run_terminal_command", "read_file", "search_replace",
+    "list_dir", "grep", "kill_task", "get_task_output", "task", "Agent",
+    "kill_command_or_subagent", "get_command_or_subagent_output", "spawn_subagent",
+    "todo_write", "scheduler_create", "scheduler_delete", "scheduler_list",
+    "monitor", "search_tool", "use_tool", "workflow", "enter_plan_mode",
+    "exit_plan_mode", "ask_user_question", "send_feedback", "image_gen",
+    "image_edit", "image_to_video", "reference_to_video", "write",
+    "web_search", "web_fetch", "memory_search", "memory_get", "lsp",
+)
+
+# dontAsk denies approval prompts. Explicit deny rules also cover tools
+# permitted by inherited config; the host owns all execution permissions.
 READ_ONLY_FLAGS = (
-    "--permission-mode", "plan",
+    "--permission-mode", "dontAsk",
     "--no-subagents",
+    "--disable-web-search",
+    "--deny", "Bash", "--deny", "Read", "--deny", "Edit",
+    "--deny", "Write", "--deny", "Grep", "--deny", "WebFetch", "--deny", "MCPTool",
+    "--disallowed-tools", ",".join(_DISALLOWED_TOOLS),
 )
 
 # Variadic: must stay last in argv or it swallows every following flag.
@@ -298,7 +323,7 @@ def build_argv(model, *, effort=None, system=None, stream=True) -> list[str]:
 
     # Output format: streaming-messages-json for NDJSON Anthropic Messages API format
     if stream:
-        argv += ["--output-format", "streaming-messages-json"]
+        argv += ["--output-format", "streaming-messages-json", "--include-partial-messages"]
     else:
         argv += ["--output-format", "json"]
 
@@ -349,12 +374,7 @@ def build_argv(model, *, effort=None, system=None, stream=True) -> list[str]:
 # Roles supported by the route
 _ROLES = frozenset({"user", "assistant"})
 
-_TRANSCRIPT_HEADER = (
-    "You are being driven as a plain text completion model by an external "
-    "harness. The transcript below is context only. You have no tools and "
-    "cannot take actions; do not attempt to and do not describe attempting to. "
-    "Reply with assistant text for the FINAL user turn only."
-)
+_TRANSCRIPT_HEADER = TRANSCRIPT_HEADER
 _TRANSCRIPT_FOOTER = 'Respond now to the final <turn role="user"> above.'
 
 _MAX_STDERR_CHARS = 200
@@ -426,6 +446,31 @@ class _TurnState:
         self.failure: str | None = None
         self.raw_lines: list[str] = []
         self.stderr_handle = None
+        self.terminal = False
+        self.streamed_text = False
+        self.streamed_thinking = False
+        self.native_tools_disabled = False
+        self.host_tools = []
+        self.host_handoff = False
+        self.pending_calls = {}
+        self.backend_calls = set()
+
+    def host_call(self, call):
+        arguments = call.get("input")
+        # Grok also reports provider-side searches in the tool_use channel.
+        # They are progress events, not executable host filesystem calls.
+        if isinstance(arguments, dict) and arguments.get("backend") is True \
+                and arguments.get("variant") in {"XSearch", "WebSearch"}:
+            identifier = call.get("id")
+            if identifier in self.backend_calls:
+                return None
+            self.backend_calls.add(identifier)
+            return {"type": "thinking_delta", "text": f"Grok backend activity: {arguments['variant']}.\n"}
+        if not self.native_tools_disabled:
+            raise ToolCallError("grok attempted a native CLI tool before confirming tool isolation")
+        validate_host_call(call, self.host_tools)
+        self.host_handoff = True
+        return {"type": "tool_call", **call}
 
     def fallback_text(self) -> str:
         if self.assistant_text:
@@ -496,6 +541,63 @@ def _translate(payload: Any, state: _TurnState) -> list[dict]:
 
     kind = payload.get("type")
 
+    if kind == "system" and payload.get("subtype") == "init":
+        if payload.get("tools") != []:
+            state.failure = "grok did not disable its native CLI tools; this runtime cannot safely forward host calls."
+        else:
+            state.native_tools_disabled = True
+        return []
+
+    if kind == "stream_event":
+        event = payload.get("event") or {}
+        if not isinstance(event, dict):
+            return []
+        event_type = event.get("type")
+        if event_type == "message_start":
+            state.streamed_text = state.streamed_thinking = False
+        elif event_type == "content_block_start":
+            block = event.get("content_block") or {}
+            if block.get("type") in {"tool_use", "server_tool_use"}:
+                if not state.native_tools_disabled:
+                    state.failure = "grok attempted a native CLI tool; workspace actions must use host tools."
+                    return []
+                state.pending_calls[event.get("index", 0)] = {
+                    "id": block.get("id"), "name": block.get("name"),
+                    "input": block.get("input") or {}, "json": ""}
+        elif event_type == "content_block_delta":
+            delta = event.get("delta") or {}
+            if delta.get("type") == "text_delta" and delta.get("text"):
+                state.emitted_text = state.streamed_text = True
+                yield {"type": "text_delta", "text": delta["text"]}
+            elif delta.get("type") == "thinking_delta" and delta.get("thinking"):
+                state.streamed_thinking = True
+                yield {"type": "thinking_delta", "text": delta["thinking"]}
+            elif delta.get("type") == "input_json_delta":
+                call = state.pending_calls.get(event.get("index", 0))
+                if call is None:
+                    raise ToolCallError("grok streamed arguments without a tool call")
+                call["json"] += delta.get("partial_json") or ""
+                if len(call["json"].encode("utf-8")) > MAX_ENVELOPE_BYTES:
+                    raise ToolCallError("grok tool call exceeds the size limit")
+        elif event_type == "content_block_stop":
+            call = state.pending_calls.pop(event.get("index", 0), None)
+            if call is not None:
+                raw = call.pop("json")
+                if raw:
+                    try:
+                        call["input"] = json.loads(raw)
+                    except ValueError as exc:
+                        raise ToolCallError("grok tool call has invalid JSON arguments") from exc
+                event = state.host_call(call)
+                if event:
+                    yield event
+        elif event_type == "message_delta":
+            reason = (event.get("delta") or {}).get("stop_reason")
+            if reason in {"cancelled", "canceled", "interrupted", "error", "failed"} \
+                    or (reason == "tool_use" and not state.backend_calls):
+                state.failure = f"grok reported {reason} before a host tool handoff."
+        return []
+
     if kind == "assistant":
         message = payload.get("message")
         if not isinstance(message, dict):
@@ -507,24 +609,44 @@ def _translate(payload: Any, state: _TurnState) -> list[dict]:
             if not isinstance(block, dict):
                 continue
             block_type = block.get("type")
+            if block_type in {"tool_use", "server_tool_use"}:
+                if not state.native_tools_disabled:
+                    state.failure = "grok attempted a native CLI tool; workspace actions must use host tools."
+                    return []
+                event = state.host_call({"id": block.get("id"), "name": block.get("name"),
+                                         "input": block.get("input")})
+                if event:
+                    yield event
+                continue
             if block_type == "thinking":
                 thinking = block.get("thinking")
-                if isinstance(thinking, str) and thinking:
-                    state.assistant_text.append(thinking)
+                if isinstance(thinking, str) and thinking and not state.streamed_thinking:
                     yield {"type": "thinking_delta", "text": thinking}
             elif block_type == "text":
                 text = block.get("text")
-                if isinstance(text, str) and text:
+                if isinstance(text, str) and text and not state.streamed_text:
                     state.assistant_text.append(text)
                     state.emitted_text = True
                     yield {"type": "text_delta", "text": text}
+        state.streamed_text = state.streamed_thinking = False
 
     elif kind == "end":
+        state.terminal = True
         stop_reason = payload.get("stopReason") or payload.get("stop_reason")
         if isinstance(stop_reason, str) and stop_reason:
             state.stop_reason = stop_reason
+        if stop_reason not in {"end_turn", "stop", "completed", "success", "max_tokens", "stop_sequence"}:
+            state.failure = f"grok reported an unsuccessful terminal status: {stop_reason}."
 
     elif kind == "result":
+        subtype = str(payload.get("subtype") or "")
+        if payload.get("is_error") or subtype in {"failed", "cancelled", "canceled", "interrupted"} \
+                or subtype.startswith("error"):
+            state.failure = f"grok CLI result failed ({subtype or 'error'})."
+            return []
+        if subtype == "success":
+            state.terminal = True
+            state.stop_reason = "end_turn"
         result = payload.get("result")
         if isinstance(result, str) and result:
             state.result_text = result
@@ -563,10 +685,12 @@ def run_turn(request, *, spawner=None, timeout=300) -> Iterator[dict]:
     non-zero exit, timeout, unparsable stream) degrades to an error event.
     """
     state = _TurnState()
+    workspace_path = None
     try:
         if not isinstance(request, dict):
             raise GrokCliAgentError("request must be an object")
         model = _validate_model(request.get("model"))
+        state.host_tools = normalize_tools(request.get("tools"))
         messages = _coerce_messages(request.get("messages"))
         effort = _validate_effort(request.get("effort"))
         system = request.get("system")
@@ -579,7 +703,7 @@ def run_turn(request, *, spawner=None, timeout=300) -> Iterator[dict]:
             raise GrokCliAgentError("max_tokens must be positive")
 
         # Render the prompt
-        prompt = render_prompt(messages, system=system)
+        prompt = render_prompt(messages)
         prompt_bytes = prompt.encode("utf-8")
         if len(prompt_bytes) > _MAX_PROMPT_ARGV_BYTES:
             raise GrokCliAgentError(
@@ -625,15 +749,22 @@ def run_turn(request, *, spawner=None, timeout=300) -> Iterator[dict]:
 
         # stderr goes to a temp file, not a pipe
         state.stderr_handle = tempfile.TemporaryFile(mode="w+", encoding="utf-8")
+        workspace_path = tempfile.mkdtemp(prefix="grok_ws_")
         session = StdioSession(
             argv,
             env=minimal_env(),
+            cwd=workspace_path,
             timeout=float(timeout),
             spawner=spawner,
             stderr=state.stderr_handle,
         )
     except Exception as exc:
-        yield {"type": "error", "message": _describe(exc, state, timeout)}
+        message = _describe(exc, state, timeout)
+        if state.stderr_handle is not None:
+            state.stderr_handle.close()
+        if workspace_path is not None:
+            shutil.rmtree(workspace_path, ignore_errors=True)
+        yield {"type": "error", "message": message}
         return
 
     stop_reason = state.stop_reason or "end_turn"
@@ -649,19 +780,22 @@ def run_turn(request, *, spawner=None, timeout=300) -> Iterator[dict]:
                 if state.failure:
                     yield {"type": "error", "message": state.failure}
                     return
+                if state.host_handoff:
+                    # With an empty native registry these are model requests
+                    # for host tools. Stop before the CLI's own tool loop.
+                    yield {"type": "message_stop", "stop_reason": "tool_use"}
+                    return
 
         returncode = getattr(session, "returncode", None)
         if isinstance(returncode, int) and returncode != 0:
-            yielded = state.emitted_text or bool(state.fallback_text())
             detail = f"the grok CLI exited with code {returncode}"
-            if not yielded:
-                yield {"type": "error",
-                       "message": detail + state.diagnostics()
-                                  + state.stderr_tail()}
-                return
-            stop_reason = state.stop_reason or "error"
+            yield {"type": "error", "message": detail + state.diagnostics() + state.stderr_tail()}
+            return
         elif state.failure:
             yield {"type": "error", "message": state.failure}
+            return
+        elif not state.terminal:
+            yield {"type": "error", "message": "the grok CLI stream ended before completing the turn"}
             return
         else:
             if not state.emitted_text:
@@ -677,6 +811,8 @@ def run_turn(request, *, spawner=None, timeout=300) -> Iterator[dict]:
         yield {"type": "error", "message": _describe(exc, state, timeout)}
         return
     finally:
+        if workspace_path is not None:
+            shutil.rmtree(workspace_path, ignore_errors=True)
         handle = state.stderr_handle
         if handle is not None:
             try:

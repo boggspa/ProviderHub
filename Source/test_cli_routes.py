@@ -75,7 +75,7 @@ class CliRoutesTest(unittest.TestCase):
         # A real adapter module imports cleanly through the same path.
         module = cli_routes.adapter_for("codex")
         self.assertEqual(module.PROVIDER_ID, "codex")
-        self.assertEqual(module.SYSTEM_PROMPT_TRANSPORT, "prompt")
+        self.assertEqual(module.SYSTEM_PROMPT_TRANSPORT, "developerInstructions")
         self.assertIs(cli_routes.adapter_for("codex"), module)
 
     # -- catalogue normalization --------------------------------------------
@@ -384,12 +384,14 @@ class ParseToolStreamTest(unittest.TestCase):
         self.assertNotIn("message_stop", [event["type"] for event in emitted])
         self.assertNotIn("message_delta", [event["type"] for event in emitted])
 
-    def test_relay_unknown_stop_reason_maps_to_end_turn(self):
+    def test_relay_cancelled_turn_is_an_error(self):
         emitted = []
         result = relay_cli_turn(
             self._events({"type": "message_stop", "stop_reason": "cancelled"}),
             emitted.append, model="m", input_tokens=0)
-        self.assertEqual(result["stop_reason"], "end_turn")
+        self.assertIsNone(result["stop_reason"])
+        self.assertIn("cancelled", result["error"])
+        self.assertEqual(emitted, [])
 
 
 class RegistrationTest(unittest.TestCase):

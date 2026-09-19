@@ -120,7 +120,7 @@ class TestBuildArgv(unittest.TestCase):
         self.assertIn("--output-format", argv)
         self.assertIn("streaming-messages-json", argv)
         self.assertIn("--permission-mode", argv)
-        self.assertIn("plan", argv)
+        self.assertIn("dontAsk", argv)
         self.assertIn("--no-subagents", argv)
         self.assertIn("--model", argv)
         self.assertIn("grok-4.6", argv)
@@ -432,6 +432,76 @@ class TestTranslate(unittest.TestCase):
         payload = {"type": "usage", "usage": {"input_tokens": 100}}
         events = list(module._translate(payload, state))
         self.assertEqual(events, [])
+
+    def test_cancelled_end_and_failed_result_are_errors(self):
+        for payload in ({"type": "end", "stopReason": "cancelled"},
+                        {"type": "result", "subtype": "error_max_turns", "is_error": True}):
+            state = module._TurnState()
+            list(module._translate(payload, state))
+            self.assertIsNotNone(state.failure)
+
+    def test_native_tools_are_reported_instead_of_discarded(self):
+        for payload in (
+                {"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "bash"}]}},
+                {"type": "stream_event", "event": {"type": "content_block_start",
+                 "content_block": {"type": "tool_use", "name": "bash"}}}):
+            state = module._TurnState()
+            self.assertEqual(list(module._translate(payload, state)), [])
+            self.assertIn("native CLI tool", state.failure)
+
+    def test_partial_messages_are_not_duplicated_by_whole_message(self):
+        state = module._TurnState()
+        stream = [{"type": "stream_event", "event": {"type": "message_start"}},
+                  {"type": "stream_event", "event": {"type": "content_block_delta",
+                   "delta": {"type": "text_delta", "text": "Hello"}}},
+                  {"type": "assistant", "message": {"content": [{"type": "text", "text": "Hello"}]}}]
+        events = [event for payload in stream for event in module._translate(payload, state)]
+        self.assertEqual(events, [{"type": "text_delta", "text": "Hello"}])
+
+    def test_thinking_never_becomes_answer_fallback(self):
+        state = module._TurnState()
+        list(module._translate({"type": "assistant", "message": {"content": [
+            {"type": "thinking", "thinking": "private reasoning"}]}}, state))
+        self.assertEqual(state.fallback_text(), "")
+
+    def test_init_must_confirm_native_tools_are_disabled(self):
+        state = module._TurnState()
+        list(module._translate({"type": "system", "subtype": "init", "tools": ["read_file"]}, state))
+        self.assertIn("did not disable", state.failure)
+
+    def test_isolated_native_request_is_forwarded_to_offered_host_tool(self):
+        state = module._TurnState()
+        state.host_tools = [{"name": "read_file"}]
+        payloads = [
+            {"type": "system", "subtype": "init", "tools": []},
+            {"type": "stream_event", "event": {"type": "content_block_start", "index": 0,
+             "content_block": {"type": "tool_use", "id": "call_1", "name": "read_file", "input": {}}}},
+            {"type": "stream_event", "event": {"type": "content_block_delta", "index": 0,
+             "delta": {"type": "input_json_delta", "partial_json": '{"path":"file"}'}}},
+            {"type": "stream_event", "event": {"type": "content_block_stop", "index": 0}},
+        ]
+        events = [event for payload in payloads for event in module._translate(payload, state)]
+        self.assertEqual(events, [{"type": "tool_call", "id": "call_1", "name": "read_file",
+                                   "input": {"path": "file"}}])
+        self.assertTrue(state.host_handoff)
+
+    def test_isolated_runtime_cannot_forward_an_unoffered_tool(self):
+        state = module._TurnState()
+        state.native_tools_disabled = True
+        with self.assertRaises(module.ToolCallError):
+            list(module._translate({"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "id": "call_1", "name": "unoffered", "input": {}}]}}, state))
+
+    def test_backend_search_is_visible_progress_and_never_a_host_call(self):
+        state = module._TurnState()
+        state.native_tools_disabled = True
+        payload = {"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "id": "backend_1", "name": "X search:",
+             "input": {"variant": "XSearch", "backend": True}}]}}
+        events = list(module._translate(payload, state))
+        self.assertEqual(events[0]["type"], "thinking_delta")
+        self.assertFalse(state.host_handoff)
+        self.assertEqual(list(module._translate(payload, state)), [])
 
 
 class TestDescribe(unittest.TestCase):
