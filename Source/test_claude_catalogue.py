@@ -119,7 +119,7 @@ class ClaudeCatalogueTests(unittest.TestCase):
         self.config["branding_overrides"] = {"claude": {"modelLabels": {"claude-fable-5-1": "My Fable"}}}
         specs = route_specs({"models": project_catalogue("claude", inventory, self.config)})
         self.assertEqual(specs["claude/fable"]["display_name"], "My Fable")
-        self.assertIsNone(specs["claude/fable"]["context"])
+        self.assertEqual(specs["claude/fable"]["context"], 1000000)
         self.assertEqual(specs["claude/claude-fable-5"]["context"], 200000)
         self.assertEqual(specs["claude/claude-future"]["context"], 333333)
 

@@ -72,6 +72,62 @@ class ClaudeContextTests(unittest.TestCase):
             self.assertEqual(row["max_tokens"], 256_000)
             self.assertFalse(row["id"].endswith("[1m]"))
 
+    def test_saved_catalogues_gain_documented_context_without_refresh(self):
+        self.settings["providers"]["claude"]["credential_mode"] = "cli"
+        cases = (
+            ("claude", "fable", 1_000_000),
+            ("claude", "opus", 1_000_000),
+            ("claude", "sonnet", 1_000_000),
+            ("claude", "claude-fable-5", 1_000_000),
+            ("claude", "claude-haiku-4-5", 200_000),
+            ("deepseek", "deepseek-v4-pro", 1_048_576),
+            ("deepseek", "deepseek-flash", 1_048_576),
+            ("grok", "grok-4.6", 500_000),
+            ("grok", "grok-4.5", 500_000),
+            ("qwen-token-plan", "qwen3.8-flash", 1_000_000),
+        )
+        for provider, model, expected in cases:
+            with self.subTest(provider=provider, model=model):
+                route = f"{provider}/{model}"
+                # Model an old saved snapshot directly: project_catalogue
+                # would already replace legacy Claude aliases with versions.
+                self.settings["claude_catalogue"] = [
+                    {"route": route, "tier": "opus", "tier_default": True}]
+                self.settings["_model_specs"] = {route: {
+                    "id": route, "provider_id": provider, "model_id": model,
+                    "display_name": model, "context": None,
+                    "inference_status": "advertised"}}
+                original = copy.deepcopy(self.settings)
+                rows = model_catalog(self.settings)["data"]
+                picker_id = next(item["id"] for item in claude_catalogue_rows(self.settings)
+                                 if item["route"] == f"{provider}/{model}")
+                row = next(row for row in rows if row["id"].removesuffix("[1m]") == picker_id)
+                self.assertEqual(row["max_tokens"], expected)
+                self.assertEqual(row["description"], f"{expected:,} token context")
+                self.assertEqual(row["id"].endswith("[1m]"), expected >= 1_000_000)
+                self.assertEqual(self.settings, original)
+
+    def test_published_context_fallback_does_not_guess_or_replace_reported_limits(self):
+        for provider, model in (("claude", "future-model"), ("grok", "grok-latest"),
+                                ("deepseek", "deepseek-future"), ("ollama", "grok-4.6")):
+            spec = {"provider_id": provider, "model_id": model, "context": None}
+            with self.subTest(provider=provider, model=model):
+                self.assertIs(claude_context_spec(spec, self.settings), spec)
+        for extra in ({"context": 123_456}, {"context_options": [200_000, 1_000_000]}):
+            spec = {"provider_id": "grok", "model_id": "grok-4.6", **extra}
+            self.assertIs(claude_context_spec(spec, self.settings), spec)
+
+    def test_picker_subtitles_contain_only_context_even_for_small_or_unknown_models(self):
+        for context, expected in ((32_768, "32,768 token context"),
+                                  (None, "Provider-managed context")):
+            self.catalogue("mistral", ("custom-model",), context)
+            spec = self.settings["_model_specs"]["mistral/custom-model"]
+            spec["inference_status"] = "responded"
+            row = model_catalog(self.settings)["data"][0]
+            self.assertEqual(row["description"], expected)
+            self.assertIn("anthropic_family_tier", row)
+            self.assertIn("fits_desktop_baseline", row)
+
     def test_invalid_missing_or_unreadable_toml_does_not_override_context(self):
         for text in ("", "broken = [", 'model_context_window = "1000000"',
                      "model_context_window = true", "model_context_window = 0",

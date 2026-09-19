@@ -111,8 +111,10 @@ class ClaudePickerOrderTests(unittest.TestCase):
 
         rows = model_catalog(self.settings)["data"]
 
-        self.assertEqual([row["description"].split(" account", 1)[0] for row in rows],
-                         ["kimi", "mistral", "mistral", "ollama", "ollama"])
+        expected_ids = {row["route"]: row["id"] for row in claude_catalogue_rows(self.settings)}
+        self.assertEqual([row["id"].removesuffix("[1m]") for row in rows],
+                         [expected_ids[route] for route in ("kimi/long-context", "mistral/zulu",
+                          "mistral/alpha", "ollama/local-z", "ollama/local-a")])
         self.assertEqual(rows[1]["display_name"], "zulu · Zebra")
         self.assertEqual(rows[3]["display_name"], "local-z · Aardvark")
 

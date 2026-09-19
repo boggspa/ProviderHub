@@ -16,7 +16,7 @@ import secrets
 from bridge_core import BridgeError, SLOTS
 from hub_config import claude_catalogue_rows, claude_picker_rows, claude_routes
 from model_names import friendly_model_name
-from catalogue import fits_desktop_baseline, status_label
+from catalogue import fits_desktop_baseline
 from claude_context import claude_context_spec
 from effort_map import MISTRAL_EFFORT_ALIASES, MISTRAL_REASONING_EFFORTS, cap_high_end, map_effort, mistral_effort_modes
 from chat_tool_order import repair_openai_tool_order
@@ -294,14 +294,10 @@ def model_catalog(settings: dict):
         if type(effective_context) is int and effective_context >= 1000000:
             row_slot = f"{slot}[1m]"
         row = {"id": row_slot, "type": "model", "display_name": title,
-               "description": f"{spec.get('provider_id', 'mistral')} account · {context_text} · {status_label(spec)}",
+               "description": context_text,
                "created_at": "2026-09-12T00:00:00Z",
                "anthropic_family_tier": family, "is_family_default": default,
                "fits_desktop_baseline": fits_desktop_baseline(effective_context)}
-        if catalogue:
-            row["description"] += f" · {family} tier"
-        if fits_desktop_baseline(effective_context) is False:
-            row["description"] += " · below desktop baseline"
         if type(effective_context) is int:
             # Use the per-model auto-compact threshold as max_input_tokens so
             # Claude Desktop compacts at the hub's catalogue boundary (typically

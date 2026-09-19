@@ -167,7 +167,7 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual([row["id"] for row in rows], ["claude-fable-5-mis-tral-test-model", "claude-fable-5-mis-tral-big-model[1m]"])
         self.assertEqual([row["anthropic_family_tier"] for row in rows], ["fable", "sonnet"])
         self.assertTrue(all(row["is_family_default"] for row in rows))
-        self.assertIn("fable tier", rows[0]["description"])
+        self.assertNotIn("tier", rows[0]["description"])
         self.assertEqual(rows[1]["max_tokens"], 1200000)
         self.assertIs(rows[1]["supports_1m"], False)
         self.assertEqual(rows[0]["display_name"], "Test Model")
@@ -522,7 +522,7 @@ class ProtocolTests(unittest.TestCase):
         settings["_model_specs"]["test-model"]["context"] = 32768
         small = model_catalog(settings)["data"][0]
         self.assertIs(small["fits_desktop_baseline"], False)
-        self.assertIn("below desktop baseline", small["description"])
+        self.assertRegex(small["description"], r"^[\d,]+ token context$")
         settings["_model_specs"]["test-model"]["context"] = 65536
         self.assertTrue(model_catalog(settings)["data"][0]["fits_desktop_baseline"])
         settings["_model_specs"]["test-model"].pop("context")

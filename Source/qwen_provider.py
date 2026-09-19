@@ -6,6 +6,7 @@ import copy
 PLAN_DOCS = "https://docs.modelstudio.console.alibabacloud.com/en/model-studio/token-plan-personal-overview"
 TEAM_DOCS = "https://docs.modelstudio.console.alibabacloud.com/en/model-studio/token-plan-team-overview"
 API_DOCS = "https://www.alibabacloud.com/help/en/model-studio/anthropic-api-messages"
+FLASH_DOCS = "https://docs.modelstudio.console.alibabacloud.com/en/model-studio/qwen3-8-flash"
 BASE_URL = "https://token-plan.ap-southeast-1.maas.aliyuncs.com/apps/anthropic"
 DESCRIPTOR = {
     "id": "qwen-token-plan", "name": "Qwen Token Plan", "protocol": "anthropic",
@@ -23,8 +24,8 @@ OFFICIAL_PATHS = {"", "/apps/anthropic", "/apps/anthropic/v1/messages",
 
 # Current native Qwen text models in the plan documentation, checked 2026-09-13.
 # No preview aliases, media-generation models, or PAYG-only model snapshots.
-# Exact limits below come from TaskWraith/Pi's matching Token Plan catalogue,
-# not another hosting provider or an interpretation of the label "1M".
+# Exact limits come from the matching Token Plan catalogue and Alibaba's
+# first-party model card for Qwen 3.8 Flash, which is in the Token Plan roster.
 MODEL_ROWS = (
     ("qwen3.8-max", "Qwen 3.8 Max", True, ["none", "low", "medium", "xhigh"]),
     ("qwen3.8-flash", "Qwen 3.8 Flash", True, ["none", "low", "medium", "xhigh"]),
@@ -44,6 +45,7 @@ CATALOGUE_INPUT_LIMITS = {
 }
 CATALOGUE_LIMITS = {
     "qwen3.8-max": (1000000, 131072),
+    "qwen3.8-flash": (1000000, 131072),
     "qwen3.7-max": (1000000, 131072),
     "qwen3.7-plus": (1000000, 65536),
     "qwen3.6-plus": (1000000, 65536),
@@ -68,8 +70,10 @@ def catalogue():
         "aliases": [identifier], "context": CATALOGUE_LIMITS.get(identifier, (None, None))[0],
         "max_output": CATALOGUE_LIMITS.get(identifier, (None, None))[1],
         "max_input": CATALOGUE_INPUT_LIMITS.get(identifier),
-        "context_kind": "catalogue_snapshot" if identifier in CATALOGUE_LIMITS else "unknown",
-        "limit_evidence": copy.deepcopy(LIMIT_EVIDENCE) if identifier in CATALOGUE_LIMITS else None,
+        "context_kind": "verified_documentation" if identifier == "qwen3.8-flash" else "catalogue_snapshot",
+        "limit_evidence": ({"source": FLASH_DOCS, "roster": PLAN_DOCS, "checked_at": "2026-09-19",
+                            "kind": "published_model_limits; not an account capacity test"}
+                           if identifier == "qwen3.8-flash" else copy.deepcopy(LIMIT_EVIDENCE)),
         "tools": True, "vision": vision,
         "reasoning": True, "streaming": True, "effort_modes": list(efforts),
         "default_effort": "xhigh" if "xhigh" in efforts else "high",
@@ -83,7 +87,7 @@ def catalogue():
         "Documented Qwen Token Plan roster; account access has not been inference-tested.",
         "Qwen 3.6 Plus is documented for Team Edition; model access depends on the plan attached to your key.",
         "Exact limits are imported from TaskWraith/Pi's matching Token Plan catalogue (Pi 0.84.2), not a new inference measurement.",
-        "Qwen 3.8 Flash has no exact limit in that snapshot; its context/output remain provider-managed.",
+        "Qwen 3.8 Flash's 1000000-token context and 131072-token output ceiling come from Alibaba's model card; account access is not inferred.",
     ], PLAN_DOCS
 
 

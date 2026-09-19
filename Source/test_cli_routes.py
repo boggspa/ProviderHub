@@ -120,6 +120,8 @@ class CliRoutesTest(unittest.TestCase):
         self.assertEqual([row["id"] for row in grok], ["grok-4.6", "grok-4.5"])
         self.assertEqual(grok[0]["effort_modes"], ["low", "medium", "high", "xhigh"])
         self.assertTrue(grok[0]["reasoning"])
+        self.assertEqual([row["context"] for row in grok], [500000, 500000])
+        self.assertTrue(all(row["context_kind"] == "verified_documentation" for row in grok))
         claude = cli_routes._seed_rows("claude", ({"id": "sonnet", "reasoning_levels": ["low", "max"]},))
         self.assertEqual(claude[0]["effort_modes"], ["low", "max"])
         self.assertEqual(cli_routes._seed_rows("muse", ()), [])

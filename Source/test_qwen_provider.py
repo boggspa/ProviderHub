@@ -50,7 +50,11 @@ class QwenProviderTests(unittest.TestCase):
         self.assertEqual(len(inventory["models"]), 6)
         limits = {row["id"]: row["context"] for row in inventory["models"]}
         self.assertEqual(limits["qwen3.8-max"], 1000000)
-        self.assertIsNone(limits["qwen3.8-flash"])
+        self.assertEqual(limits["qwen3.8-flash"], 1000000)
+        flash = next(row for row in inventory["models"] if row["id"] == "qwen3.8-flash")
+        self.assertEqual(flash["max_output"], 131072)
+        self.assertEqual(flash["context_kind"], "verified_documentation")
+        self.assertIn("qwen3-8-flash", flash["limit_evidence"]["source"])
         self.assertEqual(spec()["limit_evidence"]["kind"], "catalogue_snapshot; not a new inference test")
         self.assertTrue(all(row["inference_status"] == "advertised" for row in inventory["models"]))
         settings = defaults(SLOTS, "mistral-small-latest")

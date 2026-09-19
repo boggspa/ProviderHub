@@ -37,6 +37,7 @@ from effort_map import EFFORT_ORDER
 from cli_images import (IMAGE_COORDINATE_NOTE, CliImageError, image_label,
                         normalize_image, normalize_images)
 from hub_config import MODEL_ID
+from providers import documented_context
 
 #: provider id -> (adapter module name, binary label). Every adapter exposes
 #: the same surface: PROVIDER_ID, TRANSPORT, SYSTEM_PROMPT_TRANSPORT,
@@ -175,15 +176,19 @@ def _hub_row(provider_id: str, row):
     description = row.get("description")
     if isinstance(description, str) and description.strip():
         result["description"] = description
+    if not (type(result["context"]) is int and result["context"] > 0):
+        context, evidence = documented_context(provider_id, identifier)
+        if context is not None:
+            result.update(context=context, context_kind="verified_documentation",
+                          context_evidence=evidence)
     return result
 
 
 def _seed_rows(provider_id: str, known_models) -> list[dict]:
     """Rows from an adapter's KNOWN_MODELS when no live discovery exists.
 
-    Seeds are explicitly unverified hints (claude) or live-verified ids whose
-    exact limits the CLI does not report (grok); either way context stays
-    provider-managed and the row says where it came from.
+    Seeds remain unverified for account availability. Exact published context
+    ceilings are added separately, with their documentation provenance.
     """
     models = []
     for entry in known_models or ():

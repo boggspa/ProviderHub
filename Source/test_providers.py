@@ -288,7 +288,7 @@ class DiscoveryTests(unittest.TestCase):
         )
         self.assertTrue(any("shared-route" in warning for warning in first["warnings"]))
 
-    def test_deepseek_discovery_uses_bearer_list_route_but_keeps_limits_unknown(self):
+    def test_deepseek_discovery_uses_bearer_list_route_and_published_context(self):
         plans = []
         result = discover(
             "deepseek",
@@ -304,7 +304,9 @@ class DiscoveryTests(unittest.TestCase):
         self.assertNotIn("x-api-key", plans[0]["headers"])
         model = result["models"][0]
         self.assertEqual(model["id"], "deepseek-flash")
-        self.assertIsNone(model["context"])
+        self.assertEqual(model["context"], 1048576)
+        self.assertEqual(model["context_kind"], "verified_documentation")
+        self.assertIn("DeepSeek-V4.1-Flash", model["context_evidence"])
         self.assertTrue(model["vision"])
         self.assertTrue(model["tools"])
         self.assertEqual(model["effort_modes"], ["none", "low", "high", "max"])

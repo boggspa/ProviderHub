@@ -8,6 +8,10 @@ from pathlib import Path
 import re
 import tomllib
 
+from model_names import CLAUDE_CLI_ALIASES
+from providers import documented_context
+from qwen_provider import CATALOGUE_LIMITS, FLASH_DOCS
+
 
 _CODEX_MODELS = frozenset({
     "gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol", "gpt-6-astra",
@@ -52,7 +56,7 @@ def codex_context_window() -> int | None:
 
 
 def claude_context_spec(spec: dict, settings: dict) -> dict:
-    """A copy with Claude's effective CLI window, or the original other route."""
+    """Resolve Claude's window, including documented limits missing in old caches."""
     provider = spec.get("provider_id")
     model = spec.get("model_id") or spec.get("id", "").removeprefix(f"{provider}/")
     if provider == "codex":
@@ -73,7 +77,22 @@ def claude_context_spec(spec: dict, settings: dict) -> dict:
         # https://ai.google.dev/gemini-api/docs/gemini-3
         context = 1_000_000
     else:
-        return spec
+        # Preserve account-reported limits and ranges. Only fill absent
+        # metadata for exact known routes; another host's limits do not apply.
+        if type(spec.get("context")) is int and spec["context"] > 0:
+            return spec
+        if any(type(value) is int and value > 0 for value in spec.get("context_options") or []):
+            return spec
+        if provider == "claude" and ((settings.get("providers") or {}).get(provider) or {}).get("credential_mode") == "cli":
+            # These saved aliases are pinned by claude_cli_agent.build_argv.
+            model = CLAUDE_CLI_ALIASES.get(model, model)
+        context, evidence = documented_context(provider, model)
+        if provider == "qwen-token-plan" and model == "qwen3.8-flash":
+            context, evidence = CATALOGUE_LIMITS[model][0], FLASH_DOCS
+        if context is None:
+            return spec
+        return {**spec, "context": context, "context_kind": "verified_documentation",
+                "context_evidence": evidence}
     resolved = {**spec, "context": context}
     # A resolved window must not still advertise an older ambiguous range.
     resolved.pop("context_options", None)

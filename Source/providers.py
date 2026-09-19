@@ -446,6 +446,7 @@ _DEEPSEEK_MODEL_METADATA = {
         # route to the same weights already asserted this; the direct route
         # asserted nothing, so one model answered two different windows.
         "context": 1048576,
+        "context_evidence": "https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash/blob/dba1be0a40aa45a94ad051997016db3960a90277/config.json",
         "max_output": 393216,
         "tools": True,
         "vision": True,
@@ -454,6 +455,7 @@ _DEEPSEEK_MODEL_METADATA = {
     },
     "deepseek-v4-pro": {
         "context": 1048576,
+        "context_evidence": "https://huggingface.co/deepseek-ai/DeepSeek-V4-Pro/blob/b5968e9190ef611bbf34a7229255be88a0e937c1/config.json",
         "tools": True,
         "vision": False,
         "reasoning": True,
@@ -477,10 +479,42 @@ _GROK_MODEL_METADATA = {
         "metadata_evidence": _GROK_MODEL_DOCS,
     },
     "grok-4.5": {
+        "context": 500000,
         "reasoning": True, "effort_modes": ["low", "medium", "high"],
-        "metadata_evidence": _GROK_REASONING_DOCS,
+        "metadata_evidence": "https://docs.x.ai/developers/models/grok-4.5",
     },
 }
+
+
+_CLAUDE_CONTEXT_DOCS = "https://platform.claude.com/docs/en/build-with-claude/context-windows"
+# Exact published model ceilings, checked 2026-09-19. These are model
+# capacities, not a claim that a particular subscription grants access.
+_CLAUDE_CONTEXT_WINDOWS = {
+    "claude-fable-5-1": 1000000,
+    "claude-fable-5": 1000000,
+    "claude-opus-5": 1000000,
+    "claude-opus-4-8": 1000000,
+    "claude-opus-4-7": 1000000,
+    "claude-opus-4-6": 1000000,
+    "claude-sonnet-5": 1000000,
+    "claude-sonnet-4-6": 1000000,
+    "claude-haiku-4-5": 200000,
+    "claude-haiku-4-5-20251001": 200000,
+}
+
+
+def documented_context(provider_id: str, identifier: str) -> tuple[int | None, str | None]:
+    """Published ceiling for an exact first-party route; never guess aliases."""
+    if provider_id == "claude":
+        context = _CLAUDE_CONTEXT_WINDOWS.get(identifier)
+        return context, _CLAUDE_CONTEXT_DOCS if context else None
+    if provider_id == "deepseek":
+        metadata = _DEEPSEEK_MODEL_METADATA.get(identifier, {})
+        return metadata.get("context"), metadata.get("context_evidence")
+    if provider_id == "grok":
+        metadata = _GROK_MODEL_METADATA.get(identifier, {})
+        return metadata.get("context"), metadata.get("metadata_evidence")
+    return None, None
 
 
 _MUSE_MODEL_METADATA = {
@@ -1327,9 +1361,13 @@ def _models_from_api(provider_id: str, raw: dict, evidence: str, *, enriched=Non
             ))
         elif provider_id == "deepseek":
             metadata = _DEEPSEEK_MODEL_METADATA.get(identifier, {})
+            reported_context = _first_positive(card.get("context_length"), card.get("max_context_length"))
             models.append(_catalogue_entry(
                 identifier,
-                context=None,
+                context=reported_context or metadata.get("context"),
+                context_kind=("provider_reported" if reported_context else
+                              "verified_documentation" if metadata.get("context") else "unknown"),
+                context_evidence=metadata.get("context_evidence"),
                 tools=metadata.get("tools"),
                 vision=metadata.get("vision"),
                 reasoning=metadata.get("reasoning"),
@@ -1364,12 +1402,18 @@ def _models_from_api(provider_id: str, raw: dict, evidence: str, *, enriched=Non
                 continue
             models.append(_muse_entry(card, evidence))
         elif provider_id == "claude":
-            # Anthropic's list route returns id/display_name/created_at only;
-            # capabilities stay provider-managed until verified per model.
+            # Enrich exact IDs when the list omits context. Capabilities and
+            # account availability are still determined independently.
             if card.get("type") not in (None, "model"):
                 continue
+            context, context_evidence = documented_context(provider_id, identifier)
+            reported_context = _first_positive(card.get("context_window"), card.get("max_context_length"))
             models.append(_catalogue_entry(
                 identifier,
+                context=reported_context or context,
+                context_kind=("provider_reported" if reported_context else
+                              "verified_documentation" if context else "unknown"),
+                context_evidence=context_evidence,
                 display_name=card.get("display_name") if isinstance(card.get("display_name"), str) else identifier,
                 source="provider_api",
                 evidence=evidence,
