@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import plistlib
+import re
 import stat
 import subprocess
 import sys
@@ -16,7 +17,7 @@ import codex_accent
 from codex_accent import (ACCENT_PROPERTY, PROPERTY, THEME_ATTRIBUTE, ULTRA_ACCENT_PROPERTY, ULTRA_MARK, ULTRA_PROPERTY, AccentBridge, usage_banner_css, usage_banner_selector, HUE_PROPERTY, hue_map,
                           activity_glyph_css, activity_glyph_selector,
                           DevToolsPipe, accent_map, already_running, bridge_command, child_environment, executable_path, launch, run,
-                          shimmer_css, ultra_accents, ultra_css, ultra_map, watcher_script)
+                          native_codex_labels, shimmer_css, ultra_accents, ultra_css, ultra_map, watcher_script)
 from hub_config import defaults
 
 
@@ -52,6 +53,55 @@ def demo_bundle(directory: Path, body: str = "#!/bin/sh\nexit 0\n", environment:
 
 
 class AccentMapTests(unittest.TestCase):
+    def test_native_names_include_cached_models_outside_the_hub_catalogue(self):
+        _, inventory = fixture()
+        inventory["models"].extend([
+            {"id": "codex/gpt-6-astra", "display_name": "GPT-6 Astra", "advertised_name": "GPT-6-Astra"},
+            {"id": "ollama/gpt-oss", "display_name": "GPT OSS"},
+            None,
+        ])
+        with tempfile.TemporaryDirectory() as directory:
+            cache = Path(directory) / "models_cache.json"
+            cache.write_text(json.dumps({"models": [
+                {"slug": "gpt-5.6-sol", "display_name": "GPT-5.6-Sol"},
+                {"slug": "gpt-6-astra", "display_name": "GPT-6-Astra"},
+                {"slug": None, "display_name": 3}, None,
+            ]}))
+            self.assertEqual(set(native_codex_labels(inventory, cache)), {
+                "gpt-6-astra", "GPT-6 Astra", "GPT-6-Astra", "gpt-5.6-sol", "GPT-5.6-Sol",
+            })
+
+    def test_native_names_survive_missing_or_unfinished_cache(self):
+        inventory = {"models": [{"id": "codex/gpt-6-astra", "display_name": "GPT-6 Astra"}]}
+        expected = ["GPT-6 Astra", "gpt-6-astra"]
+        with tempfile.TemporaryDirectory() as directory:
+            cache = Path(directory) / "models_cache.json"
+            self.assertEqual(native_codex_labels(inventory, cache), expected)
+            for content in ("{", "null", "[]", '{"models": null}', '{"models": {}}'):
+                with self.subTest(content=content):
+                    cache.write_text(content)
+                    self.assertEqual(native_codex_labels(inventory, cache), expected)
+
+    def test_every_native_spelling_keeps_exact_violet_at_ultra(self):
+        script = watcher_script({"GPT-6 Astra": "#705AFF", "Kimi for Coding": "#0073E6"},
+                                native_labels=["GPT-6-Astra", "GPT-6 Astra", "gpt-6-astra", "GPT-5.6-Sol"])
+        tables = {name: json.loads(re.search(rf"const {name} = (.+);", script).group(1))
+                  for name in ("ACCENTS", "ULTRA", "NATIVE_LABELS")}
+        for label in ("gpt-6 astra", "gpt-6-astra", "gpt-5.6-sol"):
+            self.assertEqual(tables["ACCENTS"][label], "#705AFF")
+            self.assertEqual(tables["ULTRA"][label], {"dark": "#705AFF", "light": "#705AFF"})
+        self.assertIn("gpt 6 astra", tables["NATIVE_LABELS"])
+        self.assertEqual(tables["ULTRA"]["kimi for coding"], ultra_accents("#0073E6"))
+        self.assertNotIn("__HUB_", script)
+
+    def test_explicit_provider_colour_wins_over_native_label_alias(self):
+        script = watcher_script({"GPT-6 Astra": "#D44404", "GPT-6  Astra · Ollama": "#976C52"},
+                                native_labels=["GPT-6-Astra"])
+        accents = json.loads(re.search(r"const ACCENTS = (.+);", script).group(1))
+        self.assertEqual(accents["gpt-6 astra"], "#D44404")
+        self.assertEqual(accents["gpt-6 astra · ollama"], "#976C52")
+        self.assertEqual(accents["gpt-6-astra"], "#705AFF")
+
     def test_labels_map_to_presentation_accents_and_bad_colours_are_skipped(self):
         settings, inventory = fixture()
         accents = accent_map(settings, inventory)
@@ -433,11 +483,14 @@ class LaunchTests(unittest.TestCase):
             events.clear()
             scripts = []
             with mock.patch.object(codex_accent, "already_running", lambda path: False), \
+                    mock.patch.object(codex_accent, "native_codex_labels", return_value=["GPT-6-Astra"]) as native_names, \
                     mock.patch.object(codex_accent, "run", lambda binary, script, **options: scripts.append(script) or 0):
                 hiding = dict(settings, codex_hide_usage_banner=True)
                 self.assertEqual(bridge_command(str(app), hiding, inventory, emit=events.append, log_path=log), 0)
             self.assertEqual(events, [{"event": "accents", "count": 2, "usage_banner": "hidden"}])
             self.assertIn("aside:has(", scripts[0])
+            native_names.assert_called_once_with(inventory)
+            self.assertIn('"gpt-6-astra": "#705AFF"', scripts[0])
 
     def test_executable_path_reads_the_bundle_plist(self):
         with tempfile.TemporaryDirectory() as directory:

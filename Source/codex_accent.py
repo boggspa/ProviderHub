@@ -2,16 +2,17 @@
 
 The ChatGPT desktop app paints its model picker's power slider with one
 app-wide design token (``--color-chart-blue``); its model records carry no
-colour, and it offers no theming hook. This module gives each hub model its
-provider's accent anyway without touching the app bundle: the app is started
+colour, and it offers no per-model theming hook. This module gives Hub and
+native Codex models their accents without touching the app bundle: the app is started
 as a child of the worker with Chromium's ``--remote-debugging-pipe`` switch,
 and a small watcher script is injected into its windows over that pipe.
 
 The pipe is a pair of file descriptors only this helper holds, so nothing
 listens on a port. The watcher only reads the picker's own labels and sets
 CSS custom properties on the picker. Ultra, which the app paints with its
-purple token, takes a more saturated cut of the same provider hue instead,
-and its word gets a shimmer sweep. With the Codex tab's banner switch on,
+purple token, takes a more saturated cut of the same provider hue instead;
+native Codex keeps #705AFF. Its word gets a shimmer sweep in both cases.
+With the Codex tab's banner switch on,
 the same stylesheet also hides the app's ChatGPT usage banner.
 
 The pipe is also the app's lifeline: Electron quits when it closes. So the
@@ -37,6 +38,7 @@ from pathlib import Path
 from codex_catalogue import project_codex
 
 PROPERTY = "--color-chart-blue"
+NATIVE_CODEX_ACCENT = "#705AFF"
 _HEX = re.compile(r"^#[0-9A-Fa-f]{6}$")
 THEME_ATTRIBUTE = "data-provider-hub-theme"
 ACCENT_PROPERTY = "--provider-hub-accent"
@@ -115,6 +117,41 @@ def accent_map(settings: dict, inventory: dict) -> dict:
         if isinstance(colour, str) and _HEX.match(colour):
             accents[model["display_name"]] = colour.upper()
     return accents
+
+
+def native_codex_labels(inventory: dict, cache_path: Path | None = None) -> list[str]:
+    """Native picker names, including models omitted from the Hub catalogue.
+
+    The desktop can keep showing its first-party models beside Hub routes.
+    Its own metadata cache supplies those names without an API call. Keep
+    the Codex provider's inventory as a fallback when the cache is absent or
+    being rewritten. Matching punctuation is handled by the watcher, since
+    the UI renders e.g. ``GPT-6-Astra`` as ``GPT-6 Astra``.
+    """
+    labels = set()
+    for entry in inventory.get("models", []):
+        if not isinstance(entry, dict):
+            continue
+        route = entry.get("id")
+        if not isinstance(route, str) or not route.startswith("codex/"):
+            continue
+        for label in (route.removeprefix("codex/"), entry.get("display_name"), entry.get("advertised_name")):
+            if isinstance(label, str) and label.strip():
+                labels.add(label.strip())
+    try:
+        payload = json.loads((cache_path or Path.home() / ".codex" / "models_cache.json").read_text(encoding="utf-8"))
+        models = payload.get("models", []) if isinstance(payload, dict) else []
+        if isinstance(models, list):
+            for model in models:
+                if not isinstance(model, dict):
+                    continue
+                for field in ("slug", "display_name"):
+                    label = model.get(field)
+                    if isinstance(label, str) and label.strip():
+                        labels.add(label.strip())
+    except (OSError, ValueError):
+        pass
+    return sorted(labels)
 
 
 def _srgb_to_oklch(colour: str) -> tuple[float, float, float]:
@@ -294,6 +331,7 @@ _WATCHER = r"""
   if (window.__providerHubAccent) { return { skipped: "installed" }; }
   try {
     const ACCENTS = __HUB_ACCENTS__;
+    const NATIVE_LABELS = __HUB_NATIVE_LABELS__;
     const ULTRA = __HUB_ULTRA__;
     const STYLE_CSS = __HUB_STYLE_CSS__;
     const PROPERTY = "__HUB_PROPERTY__";
@@ -309,14 +347,19 @@ _WATCHER = r"""
     // Quoted by the substitution, not here: this selector carries its own
     // double quotes, and a quoted slot would end the string on the first one.
     const GLYPH_SELECTOR = __HUB_GLYPH_SELECTOR__;
-    const state = { targets: [], label: "", colour: "", ultra: "", title: null, words: [], pills: [], marks: [], sheet: null, accent: "", theme: "", hue: "" };
+    const state = { targets: [], label: "", colour: "", purple: "", ultra: "", title: null, words: [], pills: [], marks: [], sheet: null, accent: "", theme: "", hue: "" };
     const norm = (text) => (text || "").replace(/\s+/g, " ").trim().toLowerCase();
     // Labels may carry a leading glyph (a bullet, a tier mark); match the words.
     const lookup = (text) => {
       const key = norm(text).replace(/^[^a-z0-9]+/, "").replace(/[^a-z0-9)\]]+$/, "");
-      return key && Object.prototype.hasOwnProperty.call(ACCENTS, key) ? key : "";
+      if (key && Object.prototype.hasOwnProperty.call(ACCENTS, key)) { return key; }
+      // Exact Hub labels take precedence. Only names from the native
+      // catalogue get punctuation-insensitive matching, never a prefix.
+      const nativeKey = key.replace(/[-\s]+/g, " ");
+      return Object.prototype.hasOwnProperty.call(NATIVE_LABELS, nativeKey) ? NATIVE_LABELS[nativeKey] : "";
     };
     const effortLabel = (container) => container.querySelector("[data-effort-only],[data-accent],[data-maximum]");
+    const nativeModel = (key) => Object.prototype.hasOwnProperty.call(NATIVE_LABELS, key.replace(/[-\s]+/g, " "));
     // Light text means a dark surface, and the Ultra hue is cut per surface.
     const ultraColour = (key, surface) => (key && ULTRA[key] && ULTRA[key][surface]) || "";
     // The pill names the selected level by id; the popover's title is
@@ -384,12 +427,12 @@ _WATCHER = r"""
       for (const target of state.targets) {
         try {
           if (norm(target.style.getPropertyValue(PROPERTY)) === norm(state.colour)) { target.style.removeProperty(PROPERTY); }
-          if (state.ultra && norm(target.style.getPropertyValue(ULTRA_PROPERTY)) === norm(state.ultra)) { target.style.removeProperty(ULTRA_PROPERTY); }
+          if (state.purple && norm(target.style.getPropertyValue(ULTRA_PROPERTY)) === norm(state.purple)) { target.style.removeProperty(ULTRA_PROPERTY); }
           if (state.ultra && norm(target.style.getPropertyValue(ULTRA_ACCENT_PROPERTY)) === norm(state.ultra)) { target.style.removeProperty(ULTRA_ACCENT_PROPERTY); }
         } catch (error) {}
       }
       unmark(state.title);
-      state.targets = []; state.label = ""; state.colour = ""; state.ultra = ""; state.title = null;
+      state.targets = []; state.label = ""; state.colour = ""; state.purple = ""; state.ultra = ""; state.title = null;
     }
     function applyMenu() {
       const container = document.querySelector('[data-explicit-model="true"]');
@@ -401,22 +444,24 @@ _WATCHER = r"""
       if (!host || !colour) { clearMenu(); return; }
       // At Ultra the title, and the slider's fill gradient beneath it, read
       // the app's purple token: give them the model's Ultra hue instead,
-      // and the title its sweep. Max (the same title attribute) keeps the
-      // app's purple.
+      // and the title its sweep. Native Codex also overrides that token
+      // below Ultra, because Max can carry the same title attribute.
       const title = container.querySelector('[data-maximum="true"]');
       const ultra = title && ultraSelected(container) ? ultraColour(label, themeOf(textElement(found))) : "";
+      const purple = ultra || (nativeModel(label) ? colour : "");
       // Themed subtrees re-declare the token, so set it on those too.
       const targets = [host, ...host.querySelectorAll("[data-theme],[data-model-picker-power-slider]")];
-      const same = state.colour === colour && state.ultra === ultra && state.title === (ultra ? title : null)
+      const same = state.colour === colour && state.purple === purple && state.ultra === ultra && state.title === (ultra ? title : null)
         && targets.length === state.targets.length && targets.every((target, index) => target === state.targets[index]);
       if (!same) {
         clearMenu();
         for (const target of targets) {
           target.style.setProperty(PROPERTY, colour);
-          if (ultra) { target.style.setProperty(ULTRA_PROPERTY, ultra); target.style.setProperty(ULTRA_ACCENT_PROPERTY, ultra); }
+          if (purple) { target.style.setProperty(ULTRA_PROPERTY, purple); }
+          if (ultra) { target.style.setProperty(ULTRA_ACCENT_PROPERTY, ultra); }
         }
         if (ultra) { installStyles(); title.setAttribute(ULTRA_MARK, "1"); }
-        state.targets = targets; state.label = label; state.colour = colour; state.ultra = ultra; state.title = ultra ? title : null;
+        state.targets = targets; state.label = label; state.colour = colour; state.purple = purple; state.ultra = ultra; state.title = ultra ? title : null;
       }
     }
     // The composer pill: "<model> <effort>". The model picker trigger stacks
@@ -540,7 +585,7 @@ _WATCHER = r"""
     observer.observe(document, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ["data-explicit-model", "data-accent", "data-maximum", "data-selected-reasoning-effort"] });
     if (document.readyState === "loading") { document.addEventListener("DOMContentLoaded", schedule, { once: true }); }
     window.__providerHubAccent = {
-      version: 11,
+      version: 12,
       accents: Object.keys(ACCENTS).length,
       check: () => ({ container: !!document.querySelector('[data-explicit-model="true"]'), label: state.label, colour: state.colour, ultra: state.ultra, targets: state.targets.length,
                       pills: state.words.map((entry) => entry.colour), ultraPills: state.pills.map((entry) => entry.colour), marks: state.marks.length,
@@ -558,14 +603,28 @@ _WATCHER = r"""
 
 
 def _label_key(label: str) -> str:
-    return label.replace("\u00a0", " ").strip().lower()
+    return " ".join(label.split()).lower()
 
 
-def watcher_script(accents: dict, property_name: str = PROPERTY, hide_usage_banner: bool = False) -> str:
+def watcher_script(accents: dict, property_name: str = PROPERTY, hide_usage_banner: bool = False,
+                   native_labels=()) -> str:
     table = {_label_key(label): colour for label, colour in accents.items()}
+    native = {}
+    for label in native_labels:
+        key = _label_key(label)
+        if key:
+            native[re.sub(r"[-\s]+", " ", key)] = key
+            table.setdefault(key, NATIVE_CODEX_ACCENT)
+    ultras = ultra_map(table)
+    # Native Codex keeps the requested violet at every effort, including
+    # Ultra; its animated highlight supplies the distinction at the top.
+    for key in table:
+        if re.sub(r"[-\s]+", " ", key) in native and table[key].upper() == NATIVE_CODEX_ACCENT:
+            ultras[key] = {"dark": NATIVE_CODEX_ACCENT, "light": NATIVE_CODEX_ACCENT}
     css = shimmer_css() + activity_glyph_css() + ultra_css() + (usage_banner_css() if hide_usage_banner else "")
     return (_WATCHER.replace("__HUB_ACCENTS__", json.dumps(table, ensure_ascii=False))
-            .replace("__HUB_ULTRA__", json.dumps(ultra_map(table), ensure_ascii=False))
+            .replace("__HUB_NATIVE_LABELS__", json.dumps(native, ensure_ascii=False))
+            .replace("__HUB_ULTRA__", json.dumps(ultras, ensure_ascii=False))
             .replace("__HUB_STYLE_CSS__", json.dumps(css))
             .replace("__HUB_USAGE_SELECTOR__", json.dumps(usage_banner_selector() if hide_usage_banner else ""))
             .replace("__HUB_HUES__", json.dumps(hue_map(table)))
@@ -909,7 +968,8 @@ def bridge_command(app_path: str, settings: dict, inventory: dict, emit=None, lo
         hide_banner = settings.get("codex_hide_usage_banner") is True
         emit({"event": "accents", "count": len(accents), "usage_banner": "hidden" if hide_banner else "shown"})
         run_options.setdefault("environment", child_environment(bundle))
-        return run(binary, watcher_script(accents, hide_usage_banner=hide_banner), emit=emit, **run_options)
+        return run(binary, watcher_script(accents, hide_usage_banner=hide_banner,
+                                         native_labels=native_codex_labels(inventory)), emit=emit, **run_options)
     finally:
         if stream is not None:
             stream.close()

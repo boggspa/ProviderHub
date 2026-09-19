@@ -344,7 +344,14 @@ port), and installs a watcher with `Page.addScriptToEvaluateOnNewDocument`
 plus `Runtime.evaluate`. The watcher keys on the picker's data attributes,
 not its hashed class names: it reads the explicit-model row's display name,
 looks it up in the label-to-accent table the hub projected from the
-catalogue's presentation, and sets the token on the picker. The helper
+catalogue's presentation, and sets the token on the picker. Native Codex
+names also come from the local `~/.codex/models_cache.json` and the Codex
+provider's inventory, including models outside the Hub's curated catalogue.
+Exact Hub labels take precedence; native names additionally match across
+spaces and hyphens (`GPT-6-Astra` / `GPT-6 Astra`). Native models default to
+`#705AFF` for the effort word, picker title and slider, with the same exact
+violet beneath Ultra's shimmer. Missing or unfinished cache data falls back
+to the inventory. The helper
 ignores SIGTERM and lives until the app exits,
 because closing the pipe is the app's cue to quit (Electron's pipe handler
 calls `Browser::Quit()` on EOF); it also outlives Provider Hub, discarding
@@ -394,9 +401,20 @@ highlight, clipped to the text and slid across it every 3.2 s; only the
 text fill goes transparent, so `color` keeps drawing anything that uses
 it, the hue falls back to `currentColor` so a marked word can never
 vanish, and `prefers-reduced-motion` gets a still fill in the plain hue.
-Max, which shares the title attribute, keeps the app's purple, as do
-tokens and marks the watcher did not set; all of it is removed again when
-the level changes. The app's loading shimmer is
+For native Codex, Max also receives the accent when it shares the maximum
+title attribute; only Ultra receives the shimmer. Other providers retain
+their existing Max styling. The watcher removes its own tokens and marks
+when the model or level changes.
+
+The native-model change was verified with 24 accent tests and the full
+1,173-test Python suite. Chromium checks covered the older two-part pill
+and the current stacked effort layers in light and dark themes: High,
+Extra High, Max, Ultra shimmer, reduced motion, provider switching, and
+cleanup for an unknown model. This verifies the injected watcher in a
+picker fixture; the installed Hub must include the updated worker, then
+Codex / ChatGPT must be relaunched through it to install the new watcher.
+
+The app's loading shimmer is
 tinted through the app's own knobs: its shimmer text derives every tone
 from `--loading-shimmer-foreground` (the base gray, falling back to
 `--color-codex-description`, which in the desktop windows is the text
