@@ -414,6 +414,9 @@ class ClaudeProfile:
         its tier's Claude model. enableWorkflows is added on request because
         the Ultracode level needs dynamic workflows.
         """
+        from claude_context import claude_context_spec
+        from protocol import _effective_context
+
         rows = claude_catalogue_rows(settings) if settings.get("claude_code_settings", True) else []
         workflows = settings.get("claude_workflows") is True
         if not rows and not workflows:
@@ -432,8 +435,16 @@ class ClaudeProfile:
             added = []
             for row in rows:
                 target = CLAUDE_TIER_MODELS[row["tier"]]
-                hub_ids.append(row["id"])
-                added.append({"model": row["id"], "label": labels.get(row["route"], row["route"]),
+                model = row["id"]
+                spec = claude_context_spec((settings.get("_model_specs") or {}).get(row["route"], {}), settings)
+                context = _effective_context(spec)
+                if type(context) is int and context >= 1_000_000:
+                    # Match /v1/models so managed Code does not select the
+                    # bare, 200K spelling of an extended-context Desktop row.
+                    model += "[1m]"
+                    target += "[1m]"
+                hub_ids.append(model)
+                added.append({"model": model, "label": labels.get(row["route"], row["route"]),
                               "description": f"{HUB_ROW_PREFIX} · {row['route']} · behaves as {target}",
                               "behavesAs": target})
             picker["options"] = kept + added

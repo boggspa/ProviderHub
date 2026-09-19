@@ -10,7 +10,7 @@ xcrun swiftc -swift-version 5 -parse-as-library -O -target arm64-apple-macosx14.
   -framework AppKit -framework SwiftUI -framework Security \
   "$SOURCE_DIR/HubModels.swift" "$SOURCE_DIR/ProviderViews.swift" "$SOURCE_DIR/DevinAgentsView.swift" "$SOURCE_DIR/CodexHarness.swift" "$SOURCE_DIR/MistralBridge.swift" \
   -o "$APP_DIR/Contents/MacOS/MistralBridge"
-for module in bridge_core protocol gateway model_names catalogue hub_config providers devin_agent qwen_provider openrouter_provider gemini_provider branding cerebras_replay catalogue_lifecycle responses_native responses_tools responses_bridge codex_catalogue codex_profile codex_token codex_runtime codex_accent effort_map chat_tool_order rate_limit spawn_depth ollama_lifecycle cli_session cli_routes cli_auth_probe cli_tool_call cli_structured_reply cli_images claude_cli_agent codex_cli_agent agy_cli_agent muse_cli_agent grok_cli_agent; do
+for module in bridge_core protocol gateway model_names catalogue hub_config providers devin_agent qwen_provider openrouter_provider gemini_provider branding cerebras_replay catalogue_lifecycle responses_native responses_tools responses_bridge codex_catalogue codex_profile codex_token codex_runtime codex_accent effort_map chat_tool_order rate_limit spawn_depth ollama_lifecycle cli_session cli_routes cli_auth_probe cli_tool_call cli_structured_reply cli_images claude_cli_agent codex_cli_agent agy_cli_agent muse_cli_agent grok_cli_agent claude_context; do
   cp "$SOURCE_DIR/$module.py" "$APP_DIR/Contents/Resources/worker/"
 done
 cp "$SOURCE_DIR/provider_branding.json" "$APP_DIR/Contents/Resources/worker/"

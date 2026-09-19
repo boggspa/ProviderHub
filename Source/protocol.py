@@ -17,6 +17,7 @@ from bridge_core import BridgeError, SLOTS
 from hub_config import claude_catalogue_rows, claude_routes
 from model_names import friendly_model_name
 from catalogue import fits_desktop_baseline, status_label
+from claude_context import claude_context_spec
 from effort_map import MISTRAL_EFFORT_ALIASES, MISTRAL_REASONING_EFFORTS, cap_high_end, map_effort, mistral_effort_modes
 from chat_tool_order import repair_openai_tool_order
 
@@ -275,6 +276,7 @@ def model_catalog(settings: dict):
         spec = settings.get("_model_specs", {}).get(identifier)
         if not spec:
             continue
+        spec = claude_context_spec(spec, settings)
         key = (spec.get("provider_id", "mistral"), spec["id"])
         if key in seen:
             continue

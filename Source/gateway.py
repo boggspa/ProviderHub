@@ -56,6 +56,7 @@ from codex_accent import bridge_command as codex_accent_bridge
 from codex_catalogue import catalogue_digest, choices as codex_choices, launch_settings as codex_launch_settings
 from codex_profile import CodexProfile
 from codex_runtime import qualify_runtime, runtime_signature
+from claude_context import claude_context_spec
 
 MAX_BODY = 32 * 1024 * 1024
 
@@ -120,6 +121,8 @@ class Runtime:
         route = self.resolve_route(payload.get("model"))
         provider_id, upstream_model = split_route(route)
         spec = self.settings["_model_specs"][route]
+        if payload.get("_provider_hub_surface") != "responses":
+            spec = claude_context_spec(spec, self.settings)
         context = _effective_context(spec)
         options = mapping_options_for(payload.get("model"), self.settings)
         payload = apply_mapping_options(payload, self.settings)
