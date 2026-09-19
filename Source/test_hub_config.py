@@ -8,11 +8,13 @@ from effort_map import MISTRAL_NARROW_EFFORTS, MISTRAL_REASONING_EFFORTS
 from hub_config import (
     CLAUDE_LADDER_PREFIX,
     CLAUDE_TIERS,
+    CLI_AUTH_PROVIDERS,
     _FOREIGN_FAMILY,
     _row_slug_digest,
     claude_catalogue_rows,
     claude_row_id,
     claude_routes,
+    cli_auth_available,
     connection_signature,
     defaults,
     normalize,
@@ -323,6 +325,48 @@ class SettingsMigrationTests(unittest.TestCase):
         for value in ("bogus", "keychain", None, True):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 normalize({"credential_mode": value}, SLOTS, "mistral-test")
+
+    def test_cli_credential_source_is_opt_in_per_provider(self):
+        # The per-provider choice is the entire gate: there is no master flag,
+        # and every provider still defaults to its API-key source so an
+        # existing install behaves identically until one is switched by hand.
+        for provider_id in ("muse", "grok"):
+            with self.subTest(provider=provider_id):
+                self.assertNotEqual(
+                    defaults(SLOTS, "mistral-test")["providers"][provider_id]["credential_mode"],
+                    "cli")
+                chosen = normalize(
+                    {"providers": {provider_id: {"credential_mode": "cli"}}},
+                    SLOTS, "mistral-test")
+                self.assertEqual(chosen["providers"][provider_id]["credential_mode"], "cli")
+
+    def test_cli_credential_source_is_refused_where_no_cli_lane_exists(self):
+        for provider_id in ("mistral", "kimi", "mimo", "ollama", "deepseek", "cerebras"):
+            with self.subTest(provider=provider_id), self.assertRaises(ValueError):
+                normalize({"providers": {provider_id: {"credential_mode": "cli"}}},
+                          SLOTS, "mistral-test")
+
+    def test_cli_auth_is_only_offered_for_registered_providers(self):
+        for provider_id in ("muse", "grok"):
+            with self.subTest(provider=provider_id):
+                self.assertIn(provider_id, CLI_AUTH_PROVIDERS)
+                self.assertTrue(cli_auth_available(provider_id))
+        # Named in CLI_AUTH_PROVIDERS but not yet a registered provider: the
+        # gate must not offer a mode nothing can serve.
+        for provider_id in ("codex", "claude", "antigravity"):
+            with self.subTest(provider=provider_id):
+                self.assertFalse(cli_auth_available(provider_id))
+        self.assertFalse(cli_auth_available("mistral"))
+        self.assertFalse(cli_auth_available("not-a-provider"))
+
+    def test_switching_to_cli_changes_the_connection_signature(self):
+        for provider_id in ("muse", "grok"):
+            with self.subTest(provider=provider_id):
+                connection = defaults(SLOTS, "mistral-test")["providers"][provider_id]
+                switched = copy.deepcopy(connection)
+                switched["credential_mode"] = "cli"
+                self.assertNotEqual(connection_signature(provider_id, connection),
+                                    connection_signature(provider_id, switched))
 
     def test_region_only_mimo_setting_selects_its_matching_endpoint(self):
         settings = normalize(

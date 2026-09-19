@@ -179,6 +179,12 @@ def credentials(settings: dict, provider_id="mistral") -> tuple[str, str]:
     mode = connection["credential_mode"]
     if provider_id == "ollama":
         return "", "Local Ollama daemon"
+    if mode == "cli":
+        # No secret to resolve, and none may be.  The installed CLI owns this
+        # login and refreshes it; a second holder of the same rotating refresh
+        # token would revoke the first.  The label keeps the (key, source)
+        # contract the callers expect while the key stays empty.
+        return "", f"{provider['name']} CLI login"
     if provider_id == "mistral" and mode == "vibe":
         return vibe_credentials()
     if mode == "environment":

@@ -1,6 +1,15 @@
 import AppKit
 import SwiftUI
 
+/// Providers that may run on their own installed CLI's subscription login
+/// instead of an API key. Mirrors `hub_config.CLI_AUTH_PROVIDERS`; the Python
+/// side stays authoritative and rejects any mode it does not offer, so an entry
+/// here that is not registered there simply never appears.
+///
+/// Local-only and opt-in per provider — there is no master flag. Choosing
+/// "Installed CLI login" *is* turning the experiment on for that one provider.
+fileprivate let cliAuthProviders: Set<String> = ["codex", "claude", "muse", "grok", "antigravity"]
+
 struct ProviderPage: View {
     @ObservedObject var model: BridgeModel
     @State private var expandedBranding = false
@@ -74,6 +83,7 @@ struct ProviderPage: View {
                             if provider.id == "mistral" { Text("Vibe saved API key").tag("vibe") }
                             Text("macOS Keychain").tag("keychain")
                             Text("Environment").tag("environment")
+                            if cliAuthProviders.contains(provider.id) { Text("Installed CLI").tag("cli") }
                         }.pickerStyle(.segmented)
                         if connection.credential_mode == "keychain" {
                             HStack {
@@ -87,6 +97,8 @@ struct ProviderPage: View {
                                 Spacer()
                                 Button("Open Vibe") { model.openVibe() }
                             }
+                        } else if connection.credential_mode == "cli" {
+                            Text("Local-only experiment. Runs this provider’s own installed CLI and lets it keep the subscription login it already has: the hub never reads, copies, or refreshes a credential, because these tokens rotate and a second holder revokes the first. Tools are withheld on this route, so it answers as a model and never executes against your workspace. Sign in through the CLI itself, then save.").font(.caption).foregroundStyle(.secondary)
                         } else {
                             Text("Reads " + (provider.credential_env ?? "the provider key") + " from the app’s launch environment; a Finder launch may not inherit shell variables.").font(.caption).foregroundStyle(.secondary)
                         }

@@ -43,6 +43,26 @@ MODEL_VARIANT_FIELDS = (
 SUBAGENT_POOL_SIZE = 5
 
 
+#: Providers that can run on an installed coding-agent CLI's own login instead
+#: of an API key.  Opt-in per provider and local-only: the default stays the
+#: API-key mode, so an existing install changes nothing until that one
+#: provider's credential source is switched to "cli" by hand.  There is no
+#: master flag - the per-provider choice *is* the gate.
+#:
+#: This is deliberately the "let the CLI own its credential" route rather than
+#: resolving a token ourselves.  These are rotating OAuth grants, not the
+#: long-lived API key the Vibe route resolves: a second holder of the same
+#: refresh token revokes the first, and ChatGPT's rotates on every use.  So
+#: the hub spawns the vendor's own runtime and never reads, copies, or
+#: refreshes a credential file.
+CLI_AUTH_PROVIDERS = frozenset({"codex", "claude", "muse", "grok", "antigravity"})
+
+
+def cli_auth_available(provider_id: str) -> bool:
+    """Whether this provider offers a CLI-login credential source at all."""
+    return provider_id in CLI_AUTH_PROVIDERS and provider_id in PROVIDERS
+
+
 def _default_credential_mode(provider_id: str) -> str:
     if provider_id == "mistral":
         return "vibe"
@@ -55,6 +75,8 @@ def _credential_mode(provider_id: str, value) -> str:
     allowed = {"none"} if provider_id == "ollama" else {"keychain", "environment"}
     if provider_id == "mistral":
         allowed.add("vibe")
+    if provider_id in CLI_AUTH_PROVIDERS:
+        allowed.add("cli")
     if value not in allowed:
         raise ValueError(f"Unsupported credential source for {PROVIDERS[provider_id]['name']}.")
     return value
