@@ -177,7 +177,42 @@ class CliRoutesTest(unittest.TestCase):
                    "system": [{"type": "text", "text": "be brief"},
                               {"type": "text", "text": "you are Sonnet"}]}
         plan = plan_turn("claude", "sonnet", payload, {}, wanted_output=64)
-        self.assertEqual(plan["body"]["system"], "be brief\n\nyou are Sonnet")
+        self.assertEqual(plan["body"]["system"], "be brief\nyou are Sonnet")
+
+    def test_plan_turn_folds_developer_messages_into_system(self):
+        # The Codex desktop sends Responses developer items; to_messages keeps
+        # them in the array with block content. Adapters must never see them.
+        payload = {"messages": [
+            {"role": "developer", "content": [{"type": "text", "text": "You are Codex."}]},
+            {"role": "user", "content": [{"type": "text", "text": "hi"}]},
+        ], "system": "identity note"}
+        plan = plan_turn("claude", "sonnet", payload, {}, wanted_output=64)
+        body = plan["body"]
+        self.assertEqual(body["messages"], [{"role": "user", "content": "hi"}])
+        self.assertEqual(body["system"], "identity note\n\nYou are Codex.")
+
+    def test_plan_turn_drops_developer_text_already_in_system(self):
+        payload = {"messages": [
+            {"role": "developer", "content": [{"type": "text", "text": "Be terse."}]},
+            {"role": "user", "content": "hi"},
+        ], "system": "Be terse.\n\nidentity note"}
+        plan = plan_turn("claude", "sonnet", payload, {}, wanted_output=64)
+        self.assertEqual(plan["body"]["system"], "Be terse.\n\nidentity note")
+
+    def test_plan_turn_flattens_tool_and_binary_blocks(self):
+        payload = {"messages": [
+            {"role": "assistant", "content": [{"type": "thinking", "thinking": "secret"},
+                                              {"type": "tool_use", "name": "shell", "input": {}},
+                                              {"type": "text", "text": "checking"}]},
+            {"role": "user", "content": [{"type": "tool_result",
+                                          "content": [{"type": "text", "text": "on main"}]},
+                                         {"type": "input_image"}]},
+        ]}
+        plan = plan_turn("claude", "sonnet", payload, {}, wanted_output=64)
+        assistant, user = plan["body"]["messages"]
+        # Prior reasoning is provider state, not transcript text.
+        self.assertEqual(assistant["content"], "[ran tool: shell]\nchecking")
+        self.assertEqual(user["content"], "[tool result]\non main\n[image omitted: CLI routes are text-only]")
 
     # -- wire translation ------------------------------------------------------
 
@@ -468,6 +503,23 @@ class GatewayCliTurnTest(unittest.TestCase):
                                       "messages": [{"role": "user", "content": "hi"}]})
         self.assertEqual(status, 200)
 
+    def test_developer_role_and_block_content_never_reach_the_adapter(self):
+        # What the Codex desktop actually sends after the Responses bridge:
+        # a developer message with block content, then a user block message.
+        status, raw = self.request({"model": "claude/claude-sonnet-5", "max_tokens": 64,
+                                    "system": "top-level system",
+                                    "messages": [
+                                        {"role": "developer",
+                                         "content": [{"type": "text", "text": "harness context"}]},
+                                        {"role": "user",
+                                         "content": [{"type": "text", "text": "hi"}]}]})
+        self.assertEqual(status, 200, raw[:300])
+        request = self.requests[0]
+        self.assertEqual([message["role"] for message in request["messages"]], ["user"])
+        self.assertEqual(request["messages"][0]["content"], "hi")
+        self.assertIn("top-level system", request["system"])
+        self.assertIn("harness context", request["system"])
+
 
 class ResponsesBridgeTest(unittest.TestCase):
     """CLI-mode providers take the messages bridge on the Codex surface too."""
@@ -509,6 +561,44 @@ class ResponsesBridgeTest(unittest.TestCase):
                                             "stream": False, "store": False})
         self.assertEqual(plan["protocol"], "messages_bridge")
         self.assertEqual(plan["provider_id"], "grok")
+
+    def test_bridged_developer_items_normalize_for_cli(self):
+        from responses_native import prepare_native
+        vibe = {"active_model": "unused", "active_display_name": "Unused",
+                "key_name": "MISTRAL_API_KEY", "vibe_home": str(self.root / "vibe"),
+                "configured_models": []}
+        with patch("bridge_core.vibe_settings", return_value=vibe):
+            settings = default_settings()
+        settings["providers"]["grok"]["credential_mode"] = "cli"
+        atomic_json(self.root / "settings.json", settings)
+        atomic_json(self.root / "catalogues" / "grok.json", {
+            "provider_id": "grok",
+            "source": "cli",
+            "connection_signature": connection_signature("grok", settings["providers"]["grok"]),
+            "models": [{
+                "id": "grok-4.6", "canonical_id": "grok-4.6", "display_name": "Grok 4.6",
+                "context": 131072, "aliases": ["grok-4.6"], "tools": True, "vision": False,
+                "reasoning": True, "effort_modes": ["low", "high"], "fast_mode": False,
+                "inference_status": "advertised", "source": "cli", "evidence": "test"}],
+        })
+        with patch("bridge_core.vibe_settings", return_value=vibe):
+            runtime = Runtime(self.root)
+        with patch("responses_native.ReasoningEnvelope", return_value=types.SimpleNamespace()):
+            plan = prepare_native(runtime, {
+                "model": "grok/grok-4.6",
+                "instructions": "Be the Codex harness.",
+                "input": [
+                    {"type": "message", "role": "developer",
+                     "content": [{"type": "input_text", "text": "env: macOS"}]},
+                    {"type": "message", "role": "user",
+                     "content": [{"type": "input_text", "text": "hi"}]}],
+                "stream": False, "store": False})
+        self.assertEqual(plan["protocol"], "messages_bridge")
+        # The bridged Messages body is exactly what /v1/messages will plan on.
+        cli_plan = plan_turn("grok", "grok-4.6", plan["body"], {}, wanted_output=4096)
+        self.assertEqual([m["role"] for m in cli_plan["body"]["messages"]], ["user"])
+        self.assertEqual(cli_plan["body"]["messages"][0]["content"], "hi")
+        self.assertEqual(cli_plan["body"]["system"], "Be the Codex harness.\n\nenv: macOS")
 
 
 if __name__ == "__main__":

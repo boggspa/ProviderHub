@@ -234,6 +234,70 @@ def discover_via_cli(provider_id: str, *, timeout: int = 45) -> dict:
 # Turns
 # ---------------------------------------------------------------------------
 
+def _flatten_blocks(content) -> str:
+    """Render Messages block-list content as plain transcript text.
+
+    The Responses bridge spells every message as typed blocks, and the
+    adapters deliberately accept plain text only. Tool cycles are harness-run
+    on these routes, so results stay as context text; prior reasoning is
+    provider state, not transcript; binary parts degrade to an honest marker.
+    """
+    if isinstance(content, str):
+        return content
+    parts = []
+    for block in content or []:
+        if not isinstance(block, dict):
+            parts.append(str(block))
+            continue
+        kind = block.get("type")
+        if kind == "text":
+            parts.append(str(block.get("text") or ""))
+        elif kind == "thinking":
+            continue
+        elif kind == "tool_result":
+            inner = _flatten_blocks(block.get("content"))
+            if inner.strip():
+                parts.append(f"[tool result]\n{inner}")
+        elif kind == "tool_use":
+            parts.append(f"[ran tool: {block.get('name') or 'tool'}]")
+        elif kind in {"input_image", "image"}:
+            parts.append("[image omitted: CLI routes are text-only]")
+        elif kind in {"input_document", "document"}:
+            parts.append("[document omitted: CLI routes are text-only]")
+        else:
+            text = block.get("text")
+            parts.append(str(text) if isinstance(text, str) else "")
+    return "\n".join(part for part in parts if part)
+
+
+def _messages_for_cli(messages, system):
+    """Fold developer/system messages into system; flatten block content.
+
+    The Responses bridge (Codex desktop) delivers developer-role messages in
+    the array and block-spelled content everywhere; the adapters accept only
+    plain user/assistant text. Developer text follows the system field in
+    encounter order, so harness instructions stay at the head of the prompt,
+    and a developer message that merely repeats the system text is dropped
+    rather than doubled.
+    """
+    parts = [system] if isinstance(system, str) and system.strip() else []
+    cleaned = []
+    for message in messages or []:
+        if not isinstance(message, dict):
+            continue
+        role = message.get("role")
+        text = _flatten_blocks(message.get("content"))
+        if role in {"developer", "system"}:
+            if text.strip() and all(text.strip() not in part for part in parts):
+                parts.append(text.strip())
+            continue
+        if role not in {"user", "assistant"}:
+            continue
+        cleaned.append({"role": role, "content": text})
+    combined = "\n\n".join(parts) if parts else None
+    return cleaned, combined
+
+
 def plan_turn(provider_id: str, upstream_model: str, payload: dict, spec: dict,
               *, wanted_output) -> dict:
     """Translate a planned Messages payload into an adapter run_turn request.
@@ -249,14 +313,13 @@ def plan_turn(provider_id: str, upstream_model: str, payload: dict, spec: dict,
     if isinstance(system, list):
         # Anthropic's block spelling, which is how the gateway's identity note
         # arrives. The adapters take one plain string.
-        system = "\n\n".join(
-            str(block.get("text") or "") for block in system
-            if isinstance(block, dict) and block.get("type") == "text").strip() or None
+        system = _flatten_blocks(system).strip() or None
     if system is not None and not isinstance(system, str):
         system = None
+    messages, system = _messages_for_cli(payload.get("messages"), system)
     request = {
         "model": upstream_model,
-        "messages": payload.get("messages") or [],
+        "messages": messages,
         "system": system,
         "effort": effort if isinstance(effort, str) else None,
         "max_tokens": wanted_output if type(wanted_output) is int and wanted_output > 0 else None,
