@@ -211,7 +211,12 @@ def _composer_labels(rows):
         counts[key] = counts.get(key, 0) + 1
     qualified = []
     for route, provider_id, provider, base in rows:
-        if counts[base.casefold()] == 1:
+        if provider_id == "antigravity" and base.casefold().startswith("claude "):
+            # These are Claude models served by another account/transport;
+            # identify it even when a Legacy label prevents a name collision.
+            label = base if provider.casefold() in base.casefold() else base + _provider_suffix(provider_id, provider)
+            qualified.append((route, base, label))
+        elif counts[base.casefold()] == 1:
             qualified.append((route, base, base))
         else:
             qualified.append((route, base, base + _provider_suffix(provider_id, provider)))
@@ -246,6 +251,12 @@ def project_codex(settings, inventory):
     curated = settings.get("codex_catalogue")
     if curated is not None:
         by_route = {entry["id"]: entry for entry in entries}
+        # A saved short Claude ID can now share a single versioned row. The
+        # default's route stays stable; a duplicate alias must not add a row.
+        for entry in entries:
+            if entry.get("provider_id") == "claude":
+                for alias in entry.get("aliases") or []:
+                    by_route.setdefault(alias, entry)
         picked = set()
         selected = []
         for route in curated:

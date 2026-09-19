@@ -14,7 +14,8 @@ from providers import PROVIDERS, provider_defaults, validate_connection
 from branding import resolve_presentation, validate_overrides
 from ollama_lifecycle import DEFAULT_LEASE_SECONDS, KEEP_RESIDENT, MAX_LEASE_SECONDS
 from effort_map import mistral_ladder_for_model
-from model_names import PINNED_LABELS, friendly_model_name
+from model_names import (CLAUDE_CLI_ALIASES, CLAUDE_MODEL_LABELS, PINNED_LABELS,
+                         claude_model_label, friendly_model_name)
 
 MODEL_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:/+\-]{0,299}\Z")
 MAX_CREDENTIAL_REVISION = 9_007_199_254_740_991
@@ -724,11 +725,47 @@ def _catalogue_groups(provider_id: str, inventory: dict) -> list[dict]:
     return output
 
 
+def _claude_cli_inventory(inventory: dict) -> dict:
+    """Upgrade cached CLI seeds without changing their freshness or account.
+
+    Short aliases remain accepted route IDs but share one versioned picker
+    entry. Preserve exact-version metadata and any unknown/custom CLI models.
+    """
+    # Validate the original snapshot before replacing any of its seed rows.
+    _catalogue_groups("claude", inventory)
+    from claude_cli_agent import KNOWN_MODELS
+    from cli_routes import _hub_row
+
+    originals = {row["id"]: row for row in inventory.get("models", [])}
+    models = [copy.deepcopy(row) for row in inventory.get("models", [])
+              if row["id"] not in CLAUDE_MODEL_LABELS and row["id"] not in CLAUDE_CLI_ALIASES]
+    for seed in KNOWN_MODELS:
+        identifier = seed["id"]
+        aliases = [alias for alias, target in CLAUDE_CLI_ALIASES.items() if target == identifier]
+        row = _hub_row("claude", seed)
+        # Only exact-version records supply capability metadata. Moving alias
+        # metadata may have described an older model when it was captured.
+        row.update(copy.deepcopy(originals.get(identifier, {})))
+        row.update(id=identifier, canonical_id=identifier, display_name=seed["display_name"])
+        row["aliases"] = list(dict.fromkeys([identifier, *(row.get("aliases") or []), *aliases]))
+        models.append(row)
+    return {**inventory, "models": models}
+
+
 def project_catalogue(provider_id: str, inventory: dict, settings: dict, observations=None) -> list[dict]:
     """Qualify raw provider IDs once and attach validated presentation data."""
     observations = observations or {}
     output = []
+    claude_cli = provider_id == "claude" and inventory.get("source") == "cli"
+    if claude_cli:
+        inventory = _claude_cli_inventory(inventory)
     selected = [split_route(route)[1] for route in claude_routes(settings).values() if split_route(route)[0] == provider_id]
+    if claude_cli:
+        # Keep saved Codex defaults/curated routes usable as well as Claude
+        # selections. A fresh selection uses the versioned ID from the seed.
+        codex_routes = [settings.get("codex_model"), *(settings.get("codex_catalogue") or [])]
+        selected = [split_route(route)[1] for route in codex_routes
+                    if route and split_route(route)[0] == provider_id] + selected
     for group in _catalogue_groups(provider_id, inventory):
         canonical = group["key"][0]
         preferred = next((identifier for identifier in selected if identifier in group["kept"]), None)
@@ -757,6 +794,8 @@ def project_catalogue(provider_id: str, inventory: dict, settings: dict, observa
         override_label = labels.get(preferred) or labels.get(route)
         advertised = item.get("display_name")
         canonical = item.get("canonical_id") or preferred
+        if provider_id == "claude":
+            advertised = claude_model_label(canonical) or claude_model_label(preferred) or advertised
         # A moving Mistral alias can still advertise a resolved, versioned
         # billing-model identifier. Use it for presentation, never for routing.
         label_identifier = canonical

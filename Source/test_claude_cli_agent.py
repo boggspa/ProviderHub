@@ -91,7 +91,7 @@ class BuildArgvTests(unittest.TestCase):
                      "--no-session-persistence"):
             self.assertIn(flag, argv)
         self.assertIn("--model", argv)
-        self.assertEqual(argv[argv.index("--model") + 1], "sonnet")
+        self.assertEqual(argv[argv.index("--model") + 1], "claude-sonnet-5")
         # The variadic --tools flag must terminate argv.
         self.assertEqual(argv[-2], "--tools")
         self.assertEqual(argv[-1], "")

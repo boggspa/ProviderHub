@@ -49,6 +49,7 @@ from typing import Any, Callable, Iterable, Iterator
 from cli_session import CliSessionError, StdioSession, minimal_env, resolve_binary
 from cli_tool_call import TRANSCRIPT_HEADER
 from cli_images import prompt_content
+from model_names import CLAUDE_CLI_ALIASES, CLAUDE_MODEL_LABELS
 
 try:  # Repo-native effort ladder; degrade to a local copy if unavailable.
     from effort_map import map_effort as _map_effort
@@ -73,7 +74,7 @@ BINARY_NAMES = ("claude",)
 # "prompt" => the CLI has no such flag and it is folded into the stdin prompt.
 SYSTEM_PROMPT_TRANSPORT = "flag"
 IMAGE_TRANSPORT = "stream_json"
-VERIFIED_IMAGE_MODELS = frozenset({"sonnet"})
+VERIFIED_IMAGE_MODELS = frozenset({"sonnet", "claude-sonnet-5"})
 
 # Real installs live outside the default PATH on this machine (~/.local/bin).
 _EXTRA_BIN_DIRS = ("~/.local/bin", "/opt/homebrew/bin", "/usr/local/bin")
@@ -122,25 +123,14 @@ CLAUDE_EFFORT_ALIASES = {
     "ultra": "max",
 }
 
-# UNVERIFIED SEED, NOT DISCOVERY. Claude Code exposes no non-interactive model
-# list, so catalogue() returns nothing and this tuple is the only seed the hub
-# has. Entries come from `claude --help` (which names the aliases 'fable',
-# 'opus', 'sonnet' and the full name 'claude-fable-5') and from one live run
-# whose system/init event reported model "claude-sonnet-5". Nothing here was
-# enumerated by the CLI, so treat every id as a hint a user may type, not as a
-# promise that the account can serve it. An unusable id fails at turn time with
-# the CLI's own error, which is surfaced as an error event.
-KNOWN_MODELS = (
-    {"id": "sonnet", "display_name": "Claude Sonnet (alias)",
-     "reasoning_levels": list(CLAUDE_EFFORTS)},
-    {"id": "opus", "display_name": "Claude Opus (alias)",
-     "reasoning_levels": list(CLAUDE_EFFORTS)},
-    {"id": "fable", "display_name": "Claude Fable (alias)",
-     "reasoning_levels": list(CLAUDE_EFFORTS)},
-    {"id": "claude-sonnet-5", "display_name": "Claude Sonnet 5",
-     "reasoning_levels": list(CLAUDE_EFFORTS)},
-    {"id": "claude-fable-5", "display_name": "Claude Fable 5",
-     "reasoning_levels": list(CLAUDE_EFFORTS)},
+# CURATED SEED, NOT ACCOUNT DISCOVERY. Claude Code exposes no non-interactive
+# model list. Publish explicit versions so a picker selection stays on that
+# version and older releases can be labelled Legacy. Account availability and
+# limits remain provider-managed; the CLI's error is surfaced at turn time.
+KNOWN_MODELS = tuple(
+    {"id": identifier, "display_name": label,
+     "reasoning_levels": [] if identifier == "claude-haiku-4-5" else list(CLAUDE_EFFORTS)}
+    for identifier, label in CLAUDE_MODEL_LABELS.items()
 )
 
 _NO_MODEL_LIST_WARNING = (
@@ -377,6 +367,10 @@ def build_argv(model, *, effort=None, system=None, stream=True) -> list[str]:
     installed. The prompt is NOT part of argv — it always goes on stdin.
     """
     validated_model = _validate_model(model)
+    # Saved short routes display a specific version in the hub catalogue.
+    # Pin the CLI request to that same version instead of letting its moving
+    # alias select a different model behind the displayed name.
+    validated_model = CLAUDE_CLI_ALIASES.get(validated_model, validated_model)
     validated_effort = _validate_effort(effort)
 
     argv: list[str] = [BINARY_NAMES[0], "-p",
