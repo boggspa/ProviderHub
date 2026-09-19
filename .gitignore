@@ -3,6 +3,10 @@
 .DS_Store
 .venv/
 Source/.build/
+.build/
+dist/
+.pytest_cache/
+.uv-cache/
 __pycache__/
 *.pyc
 work/
