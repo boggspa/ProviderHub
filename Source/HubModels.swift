@@ -1,7 +1,7 @@
 import AppKit
 import SwiftUI
 
-let hubVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.5.3"
+let hubVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.5.4"
 let hubName = Bundle.main.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String ?? "Provider Hub Preview"
 let hubProfileID = Bundle.main.object(forInfoDictionaryKey: "BridgeProfileID") as? String ?? "14c58c94-d7e8-4a15-96b8-81668956e474"
 let hubKeychainService = Bundle.main.object(forInfoDictionaryKey: "BridgeKeychainService") as? String ?? "com.mistralbridge.providerhub"
@@ -73,11 +73,6 @@ struct ProviderSummary: Decodable {
     var warnings: [String]?
     var fetched_at: String?
 }
-struct MappingOptions: Codable, Equatable {
-    var omit_system = false
-    var omit_tools = false
-    var compact_limit: Int?
-}
 /// Opt-in Claude Desktop third-party profile features; each maps to a profile
 /// field written at launch (see bridge_core.ClaudeProfile.prepare).
 struct ClaudeFeatures: Codable, Equatable {
@@ -86,16 +81,6 @@ struct ClaudeFeatures: Codable, Equatable {
     var claude_in_chrome = false
     var scheduled_tasks = false
     var cowork_tab = false
-}
-
-/// One curated Claude catalogue row: a provider route served to Claude Desktop
-/// under a family tier (see hub_config.claude_catalogue_rows for the served id).
-struct ClaudeCatalogueEntry: Codable, Equatable, Identifiable {
-    var route: String
-    var tier: String
-    var tier_default: Bool? = false
-    var compact_limit: Int?
-    var id: String { route }
 }
 
 struct RouteSettings: Codable, Equatable {
@@ -151,6 +136,7 @@ struct ModelEntry: Decodable, Identifiable {
     var context: Int?
     var context_options: [Int]?
     var runtime_context: Int?
+    var max_input: Int?
     var max_output: Int?
     var tools: Bool?
     var vision: Bool?

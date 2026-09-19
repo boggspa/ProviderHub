@@ -28,7 +28,7 @@ extension BridgeModel {
 
     func launchCodex() async {
         guard !busy else { return }
-        page = .codex
+        page = .config
         updateCodexRunning()
         if codexRunning && codexProfileActive {
             NSWorkspace.shared.runningApplications.first { $0.bundleIdentifier == "com.openai.codex" }?.activate(options: [.activateAllWindows])
@@ -174,304 +174,239 @@ extension BridgeModel {
     }
 }
 
-struct CodexPage: View {
+/// Catalogue controls shared by the wide and narrow Models layouts.
+struct CodexModelsPane: View {
     @ObservedObject var model: BridgeModel
-    var curatedRoutes: [String] { model.settings.codex_catalogue ?? [] }
-    var isCustom: Bool { model.settings.codex_catalogue != nil }
-    var advertised: Set<String> { Set(model.availableModels.map(\.id)) }
-    var missingSelections: [String] { curatedRoutes.filter { !advertised.contains($0) } }
+    @State private var search = ""
+    @State private var expandedRoutes: Set<String> = []
 
-    // The default picker follows the unsaved selection so newly added models
-    // are pickable before the catalogue is saved.
+    // A legacy all-compatible catalogue stays intact until the first edit.
+    // Reading or switching tabs must never make unsaved configuration changes.
+    var curatedRoutes: [String] {
+        if let curated = model.settings.codex_catalogue { return curated }
+        var routes = model.codexModels.map(\.id)
+        if let starting = model.settings.codex_model, !routes.contains(starting) { routes.append(starting) }
+        return routes
+    }
+    var advertised: Set<String> { Set(model.availableModels.flatMap { [$0.id] + ($0.aliases ?? []) }) }
+    var missingSelections: [String] { curatedRoutes.filter { !advertised.contains($0) } }
     var defaultOptions: [CodexModelOption] {
-        guard let curated = model.settings.codex_catalogue else { return model.codexModels }
-        return curated.map { route in
+        curatedRoutes.map { route in
             model.codexModels.first { $0.id == route }
                 ?? CodexModelOption(id: route, name: model.modelLabel(route),
                                     context: model.modelEntry(route)?.context,
                                     description: model.modelFacts(route))
         }
     }
+    var filteredRoutes: [String] {
+        let query = search.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return curatedRoutes }
+        return curatedRoutes.filter { model.modelLabel($0).localizedCaseInsensitiveContains(query) || $0.localizedCaseInsensitiveContains(query) }
+    }
+    static let subagentPoolSize = 5
+    var subagentRanks: [String: Int] { model.settings.codex_subagent_rank ?? [:] }
 
-    var selected: CodexModelOption? { defaultOptions.first { $0.id == model.settings.codex_model } }
+    func materializeCatalogue() {
+        if model.settings.codex_catalogue == nil && !curatedRoutes.isEmpty {
+            model.settings.codex_catalogue = curatedRoutes
+        }
+    }
 
-    var catalogueMode: Binding<String> {
-        Binding(
-            get: { isCustom ? "custom" : "all" },
-            set: { value in
-                if value == "custom" {
-                    var seed: [String] = []
-                    if let route = model.settings.codex_model { seed.append(route) }
-                    if seed.isEmpty, let first = model.codexModels.first { seed = [first.id] }
-                    model.settings.codex_catalogue = seed.isEmpty ? nil : seed
-                } else {
-                    model.settings.codex_catalogue = nil
-                }
-            }
-        )
+    func pruneSelections(to routes: [String]) {
+        let kept = subagentRanks.filter { routes.contains($0.key) }
+        model.settings.codex_subagent_rank = kept.isEmpty ? nil : kept
+        if let route = model.settings.codex_subagent_route, !routes.contains(route) {
+            model.settings.codex_subagent_route = nil
+        }
     }
 
     func removeRoute(_ route: String) {
-        guard var list = model.settings.codex_catalogue, list.count > 1 else { return }
-        list.removeAll { $0 == route }
+        guard curatedRoutes.count > 1 else { return }
+        let list = curatedRoutes.filter { $0 != route }
         model.settings.codex_catalogue = list
         if model.settings.codex_model == route { model.settings.codex_model = list.first }
-        // A rank left behind on a route that is no longer in the catalogue is
-        // invisible here and would come back the moment the route is re-added.
-        pruneRanks(to: list)
+        pruneSelections(to: list)
     }
 
-    func pruneRanks(to routes: [String]) {
-        let kept = subagentRanks.filter { routes.contains($0.key) }
-        model.settings.codex_subagent_rank = kept.isEmpty ? nil : kept
+    func addRoute(_ route: String) {
+        guard !curatedRoutes.contains(route) else { return }
+        model.settings.codex_catalogue = curatedRoutes + [route]
+        if model.settings.codex_model == nil { model.settings.codex_model = route }
     }
 
-    var applyPatchExclusionNote: String {
-        let excluded = model.settings.codex_apply_patch_exclude?.count ?? 0
-        return excluded == 0 ? "" : " except \(excluded) excluded in the settings file"
+    func addAll() {
+        var routes = curatedRoutes
+        for entry in model.availableModels where (entry.tools ?? true) && !routes.contains(entry.id) {
+            routes.append(entry.id)
+        }
+        guard !routes.isEmpty else { return }
+        model.settings.codex_catalogue = routes
+        if model.settings.codex_model == nil { model.settings.codex_model = routes.first }
     }
 
-    var applyPatchListNote: String {
-        let listed = model.settings.codex_apply_patch?.count ?? 0
-        return listed == 0 ? "" : " \(listed) model\(listed == 1 ? " is" : "s are") qualified individually in the settings file."
-    }
-
-    func clearCatalogue() {
+    func keepStartingModel() {
         guard let keep = curatedRoutes.contains(model.settings.codex_model ?? "") ? model.settings.codex_model : curatedRoutes.first else { return }
         model.settings.codex_catalogue = [keep]
-        pruneRanks(to: [keep])
-    }
-
-    // Codex offers its top `subagentPoolSize` catalogue rows as sub-agent
-    // model overrides. That is one global ordering, not a per-model setting:
-    // nothing in the wire format can say a route may delegate to one peer but
-    // not another, so a rank here is a seat in the single list everything
-    // shares.
-    static let subagentPoolSize = 5
-
-    var subagentRanks: [String: Int] { model.settings.codex_subagent_rank ?? [:] }
-
-    /// Ranked routes in the order Codex will see them.
-    var rankedOrder: [String] {
-        curatedRoutes.enumerated()
-            .filter { subagentRanks[$0.element] != nil }
-            .sorted { left, right in
-                let lhs = subagentRanks[left.element] ?? Self.subagentPoolSize + 1
-                let rhs = subagentRanks[right.element] ?? Self.subagentPoolSize + 1
-                if lhs != rhs { return lhs < rhs }
-                return left.offset < right.offset
-            }.map(\.element)
-    }
-
-    /// The routes that actually reach Codex, so the UI never implies more
-    /// seats than exist when ranks are duplicated or spread past the cut.
-    var offeredRoutes: Set<String> { Set(rankedOrder.prefix(Self.subagentPoolSize)) }
-
-    var duplicatedRanks: Set<Int> {
-        var counts: [Int: Int] = [:]
-        for rank in subagentRanks.values { counts[rank, default: 0] += 1 }
-        return Set(counts.filter { $0.value > 1 }.keys)
+        model.settings.codex_model = keep
+        pruneSelections(to: [keep])
     }
 
     func setRank(_ route: String, _ rank: Int?) {
+        materializeCatalogue()
         var ranks = subagentRanks
         if let rank { ranks[route] = rank } else { ranks.removeValue(forKey: route) }
         model.settings.codex_subagent_rank = ranks.isEmpty ? nil : ranks
     }
 
-    func rankNote(_ route: String) -> String {
-        guard let rank = subagentRanks[route] else { return "" }
-        if !offeredRoutes.contains(route) {
-            return "past the \(Self.subagentPoolSize)-model cut — not offered"
+    func contextWindow(_ route: String) -> Int? {
+        if let entry = model.modelEntry(route) {
+            if let runtime = entry.runtime_context, runtime > 0 { return runtime }
+            if let context = entry.context, context > 0 { return context }
+            if let context = entry.context_options?.filter({ $0 > 0 }).max() { return context }
         }
-        return duplicatedRanks.contains(rank) ? "shares rank \(rank) — ordered by name" : ""
+        return model.codexModels.first { $0.id == route }?.context
+    }
+
+    func compactionDescription(_ route: String) -> String {
+        guard let context = contextWindow(route), context > 0 else { return "Automatic · context limit not reported" }
+        let maxInput = model.modelEntry(route)?.max_input ?? context
+        let effective = min(context, maxInput > 0 ? maxInput : context)
+        return "\(Int(Double(effective) * 0.85).formatted()) tokens · automatic (85% of input window)"
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            Panel {
-                Text("Codex / ChatGPT Desktop").font(.title2.bold())
-                Text("Choose a provider model directly. Your Claude mappings stay independent.").foregroundStyle(.secondary)
-                VStack(alignment: .leading, spacing: 10) {
-                    HStack {
-                        Text("Catalogue").font(.system(size: 13, weight: .medium))
-                        Spacer()
-                        Picker("Catalogue", selection: catalogueMode) {
-                            Text("All compatible models").tag("all")
-                            Text("Custom selection").tag("custom")
-                        }.pickerStyle(.segmented).fixedSize()
-                    }
-                    if isCustom {
-                        customCatalogue
-                    } else {
-                        Text("Codex’s picker lists every compatible model from your configured accounts; catalogues refresh in the background.")
-                            .font(.caption).foregroundStyle(.secondary)
-                    }
-                    if !missingSelections.isEmpty {
-                        Text("\(missingSelections.count) selected \(missingSelections.count == 1 ? "model is" : "models are") not currently advertised: \(missingSelections.map { model.modelLabel($0) }.joined(separator: ", ")). Refresh their providers or remove \(missingSelections.count == 1 ? "it" : "them") from the catalogue.")
-                            .font(.caption).foregroundStyle(.orange)
-                    }
-                }
+        Panel {
+            HubPaneHeading(title: "Codex / ChatGPT", subtitle: "Curated catalogue", icon: "terminal")
                 HStack {
-                    Text("Default model").font(.system(size: 13, weight: .medium))
-                    Menu {
-                        ForEach(model.providerDefinitions) { provider in
-                            let options = defaultOptions.filter { $0.id.hasPrefix(provider.id + "/") }
-                            if !options.isEmpty {
-                                Menu(provider.presentation.displayProvider) {
-                                    ForEach(options) { option in
-                                        Button { model.settings.codex_model = option.id } label: {
-                                            if model.settings.codex_model == option.id { Label(option.name, systemImage: "checkmark") }
-                                            else { Text(option.name) }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    } label: { Text(selected?.name ?? "Choose a model…").frame(minWidth: 260, alignment: .leading) }
-                }
-                if let selected {
-                    Text("\(selected.context.map { $0.formatted() + " tokens" } ?? "Provider-managed context") · \(selected.description)").font(.caption).foregroundStyle(.secondary)
-                }
-                Text("The default sets the starting model; the rest of the catalogue stays available in Codex’s picker.")
-                    .font(.caption).foregroundStyle(.secondary)
-                Text("Context limits follow each model’s metadata; unreported limits remain unknown.")
-                    .font(.caption).foregroundStyle(.secondary)
-                Text("File editing and terminal tools are available. Web search is off in this setup.")
-                    .font(.caption).foregroundStyle(.secondary)
-                Toggle(isOn: $model.settings.codex_chatgpt_account) {
-                    Text("Show your ChatGPT account in Codex").font(.system(size: 13, weight: .medium))
-                }
-                .toggleStyle(.switch).disabled(model.busy)
-                Text(model.settings.codex_chatgpt_account
-                     ? "Codex keeps your ChatGPT sign-in visible while Provider Hub is active: the composer uses the native model pill (white label, chevron, Ultra colour) and the account chrome and usage banners reflect your ChatGPT plan. A ChatGPT sign-in is required to launch. The gateway credential is written into the Codex config for the session and removed when the previous setup is restored. Save, then launch."
-                     : "Off: Codex runs as an accountless custom-provider session with a plain gray model pill. Turn on to present your ChatGPT sign-in and the native composer styling.")
-                    .font(.caption).foregroundStyle(.secondary)
-                Toggle(isOn: $model.settings.codex_apply_patch_all) {
-                    Text("Offer apply_patch to catalogue models").font(.system(size: 13, weight: .medium))
-                }
-                .toggleStyle(.switch).disabled(model.busy)
-                Text(model.settings.codex_apply_patch_all
-                     ? "Codex offers its apply_patch editing tool to every model in the catalogue\(applyPatchExclusionNote). Edits made with it feed the close-out diff card, its per-file rows, Undo and Review. A model that keeps failing the patch format falls back to shell edits, which the card does not show. Save, then relaunch Codex."
-                     : "Off: catalogue models edit through the shell, so Codex shows no close-out diff card, Undo or Review for their turns.\(applyPatchListNote) Turn on to offer apply_patch to every catalogue model.")
-                    .font(.caption).foregroundStyle(.secondary)
-                Toggle(isOn: $model.settings.codex_accent_slider) {
-                    Text("Colour the power slider by provider").font(.system(size: 13, weight: .medium))
-                }
-                .toggleStyle(.switch).disabled(model.busy)
-                Text(model.settings.codex_accent_slider
-                     ? "Provider Hub starts Codex / ChatGPT itself with a DevTools pipe and installs a small watcher that colours the power slider and the pill’s effort word with the selected model’s provider accent and turns the activity text’s gray slightly cooler with a hint of the same hue behind an accent-coloured row icon; at Ultra the slider, the picker’s title and the pill’s word take a deeper, more saturated cut of that hue and the word shimmers. Only Provider Hub holds the pipe; nothing listens on a port. Unsupported by OpenAI: an app update that changes the picker switches the colour off with no other effect, and a Codex self-relaunch after an update runs without it until the next launch from here. In this mode macOS attributes Codex’s privacy prompts (microphone, camera, calendars, reminders, location, folders, automation) to Provider Hub, and the pipe is a full control channel into Codex that only this helper holds. The helper stays until Codex quits and outlives Provider Hub; if the helper itself is killed, Codex treats the closed pipe as a request to quit. Save, then launch."
-                     : "Off: Codex / ChatGPT opens the usual way and the power slider keeps its standard blue. Turn on to tint it with each model’s provider accent, the same hues as the Providers page.")
-                    .font(.caption).foregroundStyle(.secondary)
-                Toggle(isOn: $model.settings.codex_hide_usage_banner) {
-                    Text("Hide the ChatGPT usage banner").font(.system(size: 13, weight: .medium))
-                }
-                .toggleStyle(.switch).disabled(model.busy || !model.settings.codex_accent_slider)
-                Text(model.settings.codex_hide_usage_banner
-                     ? "The same watcher hides Codex’s “You’re out of Codex and Work usage” banner, and its per-model “out of usage” variant, above the composer. The banner appears only with your ChatGPT sign-in shown, reports that account’s plan usage, and hub traffic does not spend it. It is recognised by its gauge icon, so an app update that redraws the icon brings the banner back and changes nothing else; the account and usage pages, and the rate-limit prompt Codex may open on submit, are untouched. Save, then launch."
-                     : "Off: with your ChatGPT account shown, Codex keeps its usage banner above the composer even though hub traffic does not spend that plan. Needs the power-slider watcher above; save, then launch.")
-                    .font(.caption).foregroundStyle(.secondary)
-                Toggle(isOn: $model.settings.codex_goal_budget) {
-                    Text("Let models cap a goal's token budget").font(.system(size: 13, weight: .medium))
-                }
-                .toggleStyle(.switch).disabled(model.busy)
-                Text(model.settings.codex_goal_budget
-                     ? "Codex’s create_goal and update_goal tools keep their optional token_budget field, so a model may cap its own goal at a number of tokens. A capped goal stops at that number as budget_limited with the objective unfinished, and Codex asks models to set one only when you request it — an instruction the weaker routes in this catalogue ignore. Save, then launch."
-                     : "Off: Provider Hub removes token_budget from those two tools, so a goal starts unlimited on every route and runs until it is complete, blocked or stopped. This is Codex’s own “omit unless explicitly requested” default, stated where a model cannot decline it; your plan’s usage limits still apply. Turn on to let models cap a goal again; save, then launch.")
-                    .font(.caption).foregroundStyle(.secondary)
-                HStack {
-                    Button(model.codexProfileActive && model.codexRunning ? "Show Codex / ChatGPT" : "Launch Codex / ChatGPT") { Task { await model.launchCodex() } }
-                        .buttonStyle(.borderedProminent).controlSize(.large)
-                        .disabled(model.busy || model.codexAppPath == nil || model.settings.codex_model == nil)
-                    Button("Restore previous setup") { Task { await model.restoreCodex() } }
-                        .disabled(model.busy || !model.codexRecoveryNeeded || model.codexRunning)
+                    Text("\(curatedRoutes.count) models in Codex’s picker").font(.caption).foregroundStyle(.secondary)
                     Spacer()
-                    Button("Save catalogue") { Task { await model.saveFromUI() } }
-                        .disabled(model.busy || !model.changed)
+                    addMenu
                 }
-                if model.claudeRunning && model.profileActive {
-                    Text("Claude is live on this gateway. Launching Codex shares it; changing the catalogue or default first briefly restarts the gateway, and Claude reconnects automatically.")
-                        .font(.caption).foregroundStyle(.secondary)
+                TextField("Find a model or provider", text: $search)
+                    .textFieldStyle(.roundedBorder)
+                    .accessibilityLabel("Search Codex catalogue")
+                if curatedRoutes.isEmpty {
+                    Text("Add a model from a connected provider to get started.")
+                        .font(.callout).foregroundStyle(.secondary)
+                } else if filteredRoutes.isEmpty {
+                    Text("No models match your search.").font(.callout).foregroundStyle(.secondary)
                 }
-                if model.codexRunning && !model.codexProfileActive {
-                    Text("The desktop app is open. Launching here will ask before restarting it.")
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 8) {
+                        ForEach(filteredRoutes, id: \.self) { route in catalogueRow(route) }
+                    }.padding(.trailing, 4)
+                }.frame(height: 360).accessibilityLabel("Codex model catalogue")
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 10) { catalogueActions }
+                    VStack(alignment: .leading, spacing: 10) { catalogueActions }
+                }
+                if !missingSelections.isEmpty {
+                    Text("\(missingSelections.count) selected \(missingSelections.count == 1 ? "model is" : "models are") not currently advertised. Refresh the provider catalogue or expand the model to remove it.")
                         .font(.caption).foregroundStyle(.orange)
                 }
-                if model.codexModels.isEmpty {
-                    Text("Configure a provider account or start your Ollama daemon, then refresh the catalogues.")
+                Text("Compaction follows each model’s effective input window automatically. Unknown limits stay unknown.")
+                    .font(.caption).foregroundStyle(.secondary)
+            Divider()
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Starting model").font(.headline)
+                    defaultMenu
+                    Text("The model new tasks start with. Every catalogue model remains available in the app’s picker.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
-                if model.codexAppPath == nil {
-                    Text("Install Codex / ChatGPT Desktop to enable launching here.").font(.caption).foregroundStyle(.secondary)
+                Divider()
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Subagents").font(.headline)
+                    Picker("Default model", selection: Binding(
+                        get: { model.settings.codex_subagent_route ?? "" },
+                        set: { materializeCatalogue(); model.settings.codex_subagent_route = $0.isEmpty ? nil : $0 }
+                    )) {
+                        Text("Use the parent task’s model").tag("")
+                        ForEach(curatedRoutes, id: \.self) { route in Text(model.modelLabel(route)).tag(route) }
+                        if let route = model.settings.codex_subagent_route, !curatedRoutes.contains(route) {
+                            Text(model.modelLabel(route) + " · outside catalogue").tag(route)
+                        }
+                    }.pickerStyle(.menu).disabled(model.busy)
+                    Text("Used when a parent does not choose a model for its subagent.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    DisclosureGroup("Model priorities") {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Rank models in the catalogue below to put them first in Codex’s \(Self.subagentPoolSize)-model delegation list on Ultra. Unranked models fill any remaining places. Ties prefer the starting model, then model name.")
+                        }.font(.caption).foregroundStyle(.secondary).padding(.top, 6)
+                    }.font(.caption)
                 }
-            }
-            Panel {
-                Text("Your existing setup is retained").font(.headline)
-                Text("Provider Hub switches the installed app’s model configuration and restores it after the app quits. Existing conversations, credentials, projects and unrelated settings are retained. It does not open a separate simultaneous desktop instance.")
-                    .font(.callout).foregroundStyle(.secondary)
-                Text("Grok uses xAI API billing; Fast requests premium Priority processing. Ollama uses your existing daemon and its configured local or cloud access.")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
         }
     }
 
-    var customCatalogue: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("\(curatedRoutes.count) model\(curatedRoutes.count == 1 ? "" : "s") will appear in Codex’s picker.")
-                .font(.caption).foregroundStyle(.secondary)
-            HStack(spacing: 8) {
-                Text("Sub-agents run on").font(.system(size: 12))
-                Picker("", selection: Binding(
-                    get: { model.settings.codex_subagent_route ?? "" },
-                    set: { model.settings.codex_subagent_route = $0.isEmpty ? nil : $0 }
-                )) {
-                    Text("the thread's own model").tag("")
-                    ForEach(curatedRoutes, id: \.self) { route in
-                        Text(model.modelLabel(route)).tag(route)
-                    }
-                }
-                .labelsHidden().pickerStyle(.menu).frame(maxWidth: 260)
-                .disabled(model.busy)
-                .help("The model a sub-agent is spawned on when the parent does not name one itself.")
-            }
-            Text("Sub-agent rank picks which models Codex offers when a thread on Ultra delegates. It takes the top \(Self.subagentPoolSize); an unranked route is left out, and a sub-agent with no override inherits its thread's model either way.")
-                .font(.caption).foregroundStyle(.secondary)
-            ForEach(curatedRoutes, id: \.self) { route in
-                HStack(spacing: 10) {
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text(model.modelLabel(route)).font(.system(size: 12, weight: .medium)).lineLimit(1)
-                        Text(model.modelFacts(route)).font(.system(size: 9)).foregroundStyle(.secondary)
-                        if !rankNote(route).isEmpty {
-                            Text(rankNote(route)).font(.system(size: 9)).foregroundStyle(.orange)
+    var defaultMenu: some View {
+        Menu {
+            ForEach(model.providerDefinitions) { provider in
+                let options = defaultOptions.filter { $0.id.hasPrefix(provider.id + "/") }
+                if !options.isEmpty {
+                    Menu(provider.presentation.displayProvider) {
+                        ForEach(options) { option in
+                            Button {
+                                materializeCatalogue()
+                                model.settings.codex_model = option.id
+                            } label: {
+                                if model.settings.codex_model == option.id { Label(option.name, systemImage: "checkmark") }
+                                else { Text(option.name) }
+                            }
                         }
                     }
-                    Spacer()
-                    Picker("", selection: Binding(
-                        get: { subagentRanks[route] ?? 0 },
-                        set: { setRank(route, $0 == 0 ? nil : $0) }
-                    )) {
-                        Text("—").tag(0)
-                        ForEach(1...Self.subagentPoolSize, id: \.self) { rank in Text("\(rank)").tag(rank) }
-                    }
-                    .labelsHidden().pickerStyle(.menu).frame(width: 62)
-                    .disabled(model.busy)
-                    .help("Sub-agent rank: 1 is offered first, — is not offered.")
-                    Button { removeRoute(route) } label: { Image(systemName: "minus.circle").foregroundStyle(.secondary) }
-                        .buttonStyle(.plain)
-                        .disabled(curatedRoutes.count <= 1 || model.busy)
-                        .help(curatedRoutes.count <= 1 ? "Keep at least one model in the catalogue" : "Remove from the Codex catalogue")
                 }
-                .padding(.horizontal, 10).padding(.vertical, 7)
-                .background(Color.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 7))
             }
-            HStack(spacing: 12) {
-                addMenu
-                Button("Add all") { model.settings.codex_catalogue = model.availableModels.filter { $0.tools ?? true }.map(\.id) }
-                    .disabled(model.busy || model.availableModels.isEmpty)
-                Button("Clear") { clearCatalogue() }
-                    .disabled(model.busy || curatedRoutes.count <= 1)
-            }
-        }
+        } label: {
+            Text(model.settings.codex_model.map { model.modelLabel($0) } ?? "Choose a model…")
+                .lineLimit(2).frame(maxWidth: .infinity, alignment: .leading)
+        }.disabled(model.busy || defaultOptions.isEmpty)
+            .accessibilityLabel("Codex starting model")
+    }
+
+    func catalogueRow(_ route: String) -> some View {
+        DisclosureGroup(isExpanded: Binding(
+            get: { expandedRoutes.contains(route) },
+            set: { if $0 { expandedRoutes.insert(route) } else { expandedRoutes.remove(route) } }
+        )) {
+            VStack(alignment: .leading, spacing: 12) {
+                Divider()
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Auto-compaction").font(.caption.bold())
+                    Text(compactionDescription(route)).font(.caption).foregroundStyle(.secondary)
+                }
+                Picker("Subagent priority", selection: Binding(
+                    get: { subagentRanks[route] ?? 0 },
+                    set: { setRank(route, $0 == 0 ? nil : $0) }
+                )) {
+                    Text("Automatic").tag(0)
+                    ForEach(1...Self.subagentPoolSize, id: \.self) { rank in Text("\(rank)").tag(rank) }
+                }.pickerStyle(.menu).disabled(model.busy)
+                    .help("Priority 1 is offered first. Automatic fills remaining delegation places.")
+                if !advertised.contains(route) {
+                    Text("Not currently advertised by its provider.").font(.caption).foregroundStyle(.orange)
+                }
+                Button(role: .destructive) { removeRoute(route) } label: {
+                    Label("Remove from catalogue", systemImage: "minus.circle")
+                }.disabled(curatedRoutes.count <= 1 || model.busy)
+                    .help(curatedRoutes.count <= 1 ? "Keep at least one model in the catalogue" : "Remove this model from Codex’s picker")
+            }.padding(.top, 7)
+        } label: {
+            VStack(alignment: .leading, spacing: 5) {
+                Text(model.modelLabel(route)).font(.system(size: 12, weight: .semibold)).lineLimit(2)
+                Text(model.modelFacts(route)).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(2)
+                HStack(spacing: 8) {
+                    if model.settings.codex_model == route {
+                        Label("Starting model", systemImage: "star.fill").foregroundStyle(.orange)
+                    }
+                    if let rank = subagentRanks[route] { Text("Subagent priority \(rank)").foregroundStyle(.secondary) }
+                }.font(.system(size: 11, weight: .medium))
+            }.frame(maxWidth: .infinity, alignment: .leading)
+        }.padding(10)
+            .background(Color.white.opacity(0.045), in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    @ViewBuilder var catalogueActions: some View {
+        Button("Add all") { addAll() }.disabled(model.busy || model.availableModels.isEmpty)
+        Button("Keep starting model") { keepStartingModel() }.disabled(model.busy || curatedRoutes.count <= 1)
     }
 
     var addMenu: some View {
@@ -483,13 +418,112 @@ struct CodexPage: View {
                 if !options.isEmpty {
                     Menu(provider.presentation.displayProvider) {
                         ForEach(options) { entry in
-                            Button(model.modelLabel(entry.id)) { model.settings.codex_catalogue?.append(entry.id) }
-                                .help(entry.id)
+                            Button(model.modelLabel(entry.id)) { addRoute(entry.id) }.help(entry.id)
                         }
                     }
                 }
             }
-        } label: { Label("Add model…", systemImage: "plus") }
-            .disabled(model.busy)
+        } label: { Label("Add", systemImage: "plus") }
+            .disabled(model.busy || model.availableModels.isEmpty)
+    }
+}
+
+struct CodexConfigPane: View {
+    @ObservedObject var model: BridgeModel
+
+    var applyPatchExclusionNote: String {
+        let excluded = model.settings.codex_apply_patch_exclude?.count ?? 0
+        return excluded == 0 ? "" : " except \(excluded) excluded in the settings file"
+    }
+    var applyPatchListNote: String {
+        let listed = model.settings.codex_apply_patch?.count ?? 0
+        return listed == 0 ? "" : " \(listed) model\(listed == 1 ? " is" : "s are") qualified individually in the settings file."
+    }
+
+    var body: some View {
+        Panel {
+            HubPaneHeading(title: "Codex / ChatGPT", subtitle: "App preferences", icon: "terminal")
+                Text("Account & appearance").font(.headline)
+                CodexPreference(isOn: $model.settings.codex_chatgpt_account, disabled: model.busy,
+                    title: "Show your ChatGPT account",
+                    summary: "Keep your sign-in and native account styling.",
+                    details: "A ChatGPT sign-in is required when this is on. Provider Hub writes the gateway credential into Codex’s configuration for the session, then removes it when restoring your previous setup. When off, Codex uses an accountless custom-provider session with a plain model pill. Save, then launch.")
+                Divider()
+                CodexPreference(isOn: $model.settings.codex_accent_slider, disabled: model.busy,
+                    title: "Use provider accent colours",
+                    summary: "Match the slider and activity to the provider.",
+                    details: "Provider Hub launches Codex through a DevTools pipe held only by its helper; no network port listens. This is unsupported by OpenAI and an app update may disable the colouring. A Codex self-relaunch runs without it until launched here again. In this mode, macOS attributes Codex’s privacy prompts—including microphone, camera, folders and automation—to Provider Hub. The pipe is a full control channel into Codex. Its helper outlives Provider Hub and stays until Codex quits; killing the helper closes the pipe and asks Codex to quit. Save, then launch.")
+                Divider()
+                CodexPreference(isOn: $model.settings.codex_hide_usage_banner, disabled: model.busy || !model.settings.codex_accent_slider,
+                    title: "Hide the ChatGPT usage banner",
+                    summary: model.settings.codex_accent_slider
+                        ? "Hide plan-usage banners above the composer while using provider models."
+                        : "Requires provider accent colours to be enabled above.",
+                    details: "The accent helper hides the ChatGPT plan’s out-of-usage banner and its per-model variant; hub traffic does not spend that plan. Account and usage pages, and any rate-limit prompt on submit, stay visible. If a Codex update changes the banner’s icon it may reappear. This preference takes effect when the accent helper is enabled and the app is launched from here. Save, then launch.")
+            Divider()
+                Text("Tools & goals").font(.headline)
+                CodexPreference(isOn: $model.settings.codex_apply_patch_all, disabled: model.busy,
+                    title: "Enable patch-based file editing",
+                    summary: "Include supported file edits in Review and Undo.",
+                    details: model.settings.codex_apply_patch_all
+                        ? "The tool is offered to every catalogue model\(applyPatchExclusionNote). A model that fails the patch format falls back to shell edits, which do not appear in the close-out diff card. Save, then relaunch Codex."
+                        : "Models otherwise edit through the shell, without close-out diff cards, Undo or Review for those edits.\(applyPatchListNote) Save, then relaunch Codex.")
+                Divider()
+                CodexPreference(isOn: $model.settings.codex_goal_budget, disabled: model.busy,
+                    title: "Allow goal token budgets",
+                    summary: "Let models set a token cap when creating or updating a goal.",
+                    details: "A capped goal can stop with its objective unfinished when its budget is reached. Codex asks models to set a budget only when you request one, but some models may ignore that instruction. When off, Provider Hub removes token_budget from create_goal and update_goal; goals run until complete, blocked or stopped. Your plan’s usage limits still apply. Save, then launch.")
+                Text("File editing and terminal tools are available. Web search is off in this setup.")
+                    .font(.caption).foregroundStyle(.secondary)
+                DisclosureGroup("Provider usage") {
+                    Text("Grok uses xAI API billing; Fast requests premium Priority processing. Ollama uses your existing daemon and its configured local or cloud access.")
+                        .font(.caption).foregroundStyle(.secondary).padding(.top, 5)
+                }.font(.caption)
+            Divider()
+                Text("Desktop session").font(.headline)
+                Label(model.codexProfileActive ? "Provider profile active" : "Previous setup retained",
+                      systemImage: model.codexProfileActive ? "checkmark.circle.fill" : "arrow.uturn.backward.circle")
+                    .font(.callout).foregroundStyle(model.codexProfileActive ? Color.green : Color.secondary)
+                Button(model.codexProfileActive && model.codexRunning ? "Show Codex / ChatGPT" : "Launch Codex / ChatGPT") {
+                    Task { await model.launchCodex() }
+                }.buttonStyle(.borderedProminent).controlSize(.large)
+                    .disabled(model.busy || model.codexAppPath == nil || model.settings.codex_model == nil)
+                Button("Restore previous setup") { Task { await model.restoreCodex() } }
+                    .disabled(model.busy || !model.codexRecoveryNeeded || model.codexRunning)
+                Text("Your previous model configuration is restored after the app quits. Conversations, credentials, projects and unrelated settings are retained.")
+                    .font(.caption).foregroundStyle(.secondary)
+                if model.claudeRunning && model.profileActive {
+                    Text("Claude shares this gateway. Changing the Codex catalogue before launch briefly restarts the gateway; Claude reconnects automatically.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                if model.codexRunning && !model.codexProfileActive {
+                    Text("The app is already open. Launching here asks before restarting it.")
+                        .font(.caption).foregroundStyle(.orange)
+                }
+                if model.codexAppPath == nil {
+                    Text("Install Codex / ChatGPT Desktop to launch it here.").font(.caption).foregroundStyle(.secondary)
+                } else if model.settings.codex_model == nil {
+                    Text("Choose a starting model on the Models tab first.").font(.caption).foregroundStyle(.secondary)
+                }
+        }
+    }
+}
+
+private struct CodexPreference: View {
+    @Binding var isOn: Bool
+    var disabled: Bool
+    var title: String
+    var summary: String
+    var details: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Toggle(isOn: $isOn) { Text(title).font(.system(size: 13, weight: .medium)).fixedSize(horizontal: false, vertical: true).frame(maxWidth: .infinity, alignment: .leading) }
+                .toggleStyle(.switch).disabled(disabled)
+            Text(summary).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            DisclosureGroup("Details") {
+                Text(details).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true).padding(.top, 5)
+            }.font(.caption).accessibilityLabel(title + " details")
+        }
     }
 }

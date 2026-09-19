@@ -24,10 +24,10 @@ struct ActivityEntry: Identifiable {
 }
 
 enum Page: String, CaseIterable, Identifiable {
-    case connection = "Providers", models = "Models", agents = "Agents", claude = "Claude", codex = "Codex / ChatGPT", activity = "Activity"
+    case connection = "Providers", models = "Models", config = "Config", activity = "Activity"
     var id: String { rawValue }
     var icon: String {
-        switch self { case .connection: return "point.3.connected.trianglepath.dotted"; case .models: return "square.stack.3d.up"; case .agents: return "sparkles.rectangle.stack"; case .claude: return "macwindow"; case .codex: return "terminal"; case .activity: return "waveform.path" }
+        switch self { case .connection: return "point.3.connected.trianglepath.dotted"; case .models: return "square.stack.3d.up"; case .config: return "slider.horizontal.3"; case .activity: return "waveform.path" }
     }
 }
 
@@ -141,33 +141,16 @@ final class BridgeModel: ObservableObject {
     }
     // MARK: Curated Claude catalogue (replaces the slot mappings while set)
 
-    var claudeCatalogue: [ClaudeCatalogueEntry] { settings.claude_catalogue ?? [] }
-
-    var claudeCatalogueMode: Binding<String> {
-        Binding(
-            get: { self.settings.claude_catalogue == nil ? "slots" : "catalogue" },
-            set: { value in
-                if value == "catalogue" {
-                    if self.settings.claude_catalogue == nil { self.settings.claude_catalogue = self.seededClaudeCatalogue() }
-                } else {
-                    self.settings.claude_catalogue = nil
-                }
-            }
-        )
-    }
-
-    /// Each distinct mapped route keeps its slot's tier; the first Sonnet
-    /// route becomes the Sonnet default once the worker normalizes the list.
-    private func seededClaudeCatalogue() -> [ClaudeCatalogueEntry]? {
-        var seed: [ClaudeCatalogueEntry] = []
-        for slot in slots {
-            guard let route = settings.mappings[slot.id], !route.isEmpty, !seed.contains(where: { $0.route == route }) else { continue }
-            seed.append(ClaudeCatalogueEntry(route: route, tier: slotTiers[slot.id] ?? "sonnet", tier_default: true))
+    /// Read legacy mappings without changing a running profile. The first edit
+    /// materializes the effective list, including its compaction thresholds.
+    var claudeCatalogue: [ClaudeCatalogueEntry] {
+        if let curated = settings.claude_catalogue { return curated }
+        let seed = seedClaudeCatalogue(mappings: settings.mappings, options: settings.mapping_options)
+        if !seed.isEmpty { return seed }
+        if let first = availableModels.first(where: { $0.tools ?? true }) {
+            return [ClaudeCatalogueEntry(route: first.id, tier: "fable", tier_default: true)]
         }
-        if seed.isEmpty, let first = availableModels.first(where: { $0.tools ?? true }) {
-            seed = [ClaudeCatalogueEntry(route: first.id, tier: "fable", tier_default: true)]
-        }
-        return seed.isEmpty ? nil : seed
+        return []
     }
 
     func isClaudeTierDefault(_ entry: ClaudeCatalogueEntry) -> Bool {
@@ -177,7 +160,8 @@ final class BridgeModel: ObservableObject {
     }
 
     func makeClaudeTierDefault(_ route: String) {
-        guard var list = settings.claude_catalogue, let tier = list.first(where: { $0.route == route })?.tier else { return }
+        var list = claudeCatalogue
+        guard let tier = list.first(where: { $0.route == route })?.tier else { return }
         for index in list.indices where list[index].tier == tier { list[index].tier_default = list[index].route == route }
         settings.claude_catalogue = list
     }
@@ -186,7 +170,8 @@ final class BridgeModel: ObservableObject {
         Binding(
             get: { self.claudeCatalogue.first { $0.route == route }?.tier ?? "sonnet" },
             set: { tier in
-                guard var list = self.settings.claude_catalogue, let index = list.firstIndex(where: { $0.route == route }) else { return }
+                var list = self.claudeCatalogue
+                guard let index = list.firstIndex(where: { $0.route == route }) else { return }
                 list[index].tier = tier
                 list[index].tier_default = !list.contains { $0.tier == tier && $0.route != route && $0.tier_default == true }
                 self.settings.claude_catalogue = list
@@ -195,7 +180,8 @@ final class BridgeModel: ObservableObject {
     }
 
     func addClaudeRoute(_ route: String, tier: String = "sonnet") {
-        guard var list = settings.claude_catalogue, !list.contains(where: { $0.route == route }) else { return }
+        var list = claudeCatalogue
+        guard !list.contains(where: { $0.route == route }) else { return }
         list.append(ClaudeCatalogueEntry(route: route, tier: tier, tier_default: !list.contains { $0.tier == tier && $0.tier_default == true }))
         settings.claude_catalogue = list
     }
@@ -205,7 +191,8 @@ final class BridgeModel: ObservableObject {
     }
 
     func removeClaudeRoute(_ route: String) {
-        guard var list = settings.claude_catalogue, list.count > 1 else { return }
+        var list = claudeCatalogue
+        guard list.count > 1 else { return }
         list.removeAll { $0.route == route }
         settings.claude_catalogue = list
     }
@@ -214,7 +201,8 @@ final class BridgeModel: ObservableObject {
         Binding(
             get: { self.claudeCatalogue.first { $0.route == route }?.compact_limit.map(String.init) ?? "" },
             set: { text in
-                guard var list = self.settings.claude_catalogue, let index = list.firstIndex(where: { $0.route == route }) else { return }
+                var list = self.claudeCatalogue
+                guard let index = list.firstIndex(where: { $0.route == route }) else { return }
                 let trimmed = text.trimmingCharacters(in: .whitespaces)
                 if trimmed.isEmpty { list[index].compact_limit = nil }
                 else if let value = Int(trimmed), 1...15000000 ~= value { list[index].compact_limit = value }
@@ -327,7 +315,6 @@ final class BridgeModel: ObservableObject {
         prefsOnly.claude_features = savedSettings.claude_features
         prefsOnly.claude_code_settings = savedSettings.claude_code_settings
         prefsOnly.claude_workflows = savedSettings.claude_workflows
-        if prefsOnly == savedSettings { return .prefs }
         let codexChanged = settings.codex_model != savedSettings.codex_model
             || settings.codex_catalogue != savedSettings.codex_catalogue
             || settings.codex_chatgpt_account != savedSettings.codex_chatgpt_account
@@ -339,6 +326,7 @@ final class BridgeModel: ObservableObject {
             || settings.codex_goal_budget != savedSettings.codex_goal_budget
             || settings.codex_subagent_rank != savedSettings.codex_subagent_rank
             || settings.codex_subagent_route != savedSettings.codex_subagent_route
+        if prefsOnly == savedSettings { return codexChanged ? .codexOnly : .prefs }
         return codexChanged ? .mixed : .claudeRouting
     }
     var routeOptions: [String] {
@@ -585,6 +573,27 @@ final class BridgeModel: ObservableObject {
         } catch {
             providerRefreshIssues[providerID] = error.localizedDescription
             tell(error.localizedDescription, error: true)
+        }
+    }
+
+    /// Surface the existing save rules before a user reaches a failing Save.
+    var settingsSaveBlocker: String? {
+        guard changed else { return nil }
+        if settings.claude_catalogue?.contains(where: { entry in
+            entry.compact_limit.map { !(1000...15000000).contains($0) } ?? false
+        }) == true { return "Claude compaction thresholds must be 1,000–15,000,000 tokens, or blank for automatic." }
+        if changeKind == .prefs { return nil }
+        let claudeLive = claudeRunning && profileActive
+        let codexLive = codexRunning && codexRecoveryNeeded
+        if activeRequests > 0 { return "Wait for the current requests to finish before applying model changes." }
+        switch changeKind {
+        case .codexOnly where codexLive:
+            return "Quit Codex / ChatGPT to apply its catalogue or configuration changes."
+        case .claudeRouting where claudeLive:
+            return "Quit Claude to apply its model or provider changes."
+        case .mixed where claudeLive || codexLive:
+            return "Quit the desktop sessions using this gateway to apply these changes."
+        default: return nil
         }
     }
 
@@ -1108,6 +1117,8 @@ struct StatusPill: View {
 
 struct BridgeWindow: View {
     @ObservedObject var model: BridgeModel
+    @State private var clientSelection: HubClientSelection = .both
+    @State private var windowWidth: CGFloat = 1200
     var body: some View {
         HStack(spacing: 0) {
             VStack(alignment: .leading, spacing: 28) {
@@ -1118,7 +1129,7 @@ struct BridgeWindow: View {
                 VStack(spacing: 5) {
                     ForEach(Page.allCases) { page in
                         Button { model.page = page } label: {
-                            HStack(spacing: 11) { Image(systemName: page.icon).frame(width: 18); Text(page == .codex ? "Codex" : page.rawValue).lineLimit(1); Spacer() }
+                            HStack(spacing: 11) { Image(systemName: page.icon).frame(width: 18); Text(page.rawValue).lineLimit(1); Spacer() }
                                 .font(.system(size: 13, weight: model.page == page ? .semibold : .regular))
                                 .padding(.horizontal, 12).padding(.vertical, 10)
                                 .background(model.page == page ? Color.white.opacity(0.09) : .clear, in: RoundedRectangle(cornerRadius: 8))
@@ -1138,14 +1149,13 @@ struct BridgeWindow: View {
                         header
                         switch model.page {
                         case .connection: ProviderPage(model: model)
-                        case .models: modelsPage
-                        case .agents: DevinAgentsPage(model: model)
-                        case .claude: claudePage
-                        case .codex: CodexPage(model: model)
+                        case .models, .config:
+                            HubClientWorkspace(model: model, selection: $clientSelection, allowsSplit: windowWidth >= 1080, configuration: model.page == .config)
                         case .activity: activityPage
                         }
                     }.padding(30).disabled(model.busy)
                 }
+                if model.page == .models || model.page == .config { settingsSaveBar }
                 if !model.notice.isEmpty {
                     HStack(alignment: .top, spacing: 10) {
                         Image(systemName: model.noticeIsError ? "exclamationmark.circle" : "checkmark.circle").foregroundStyle(model.noticeIsError ? Color.orange : .green)
@@ -1155,7 +1165,25 @@ struct BridgeWindow: View {
                 }
             }.frame(maxWidth: .infinity)
         }.background(Color(red: 0.095, green: 0.098, blue: 0.102)).accentColor(bridgeOrange)
-            .frame(minWidth: 870, idealWidth: 940, minHeight: 680, idealHeight: 740)
+            .frame(minWidth: 870, idealWidth: 1200, minHeight: 680, idealHeight: 820)
+            .background(GeometryReader { proxy in
+                Color.clear.onAppear { windowWidth = proxy.size.width }
+                    .onChange(of: proxy.size.width) { _, width in windowWidth = width }
+            })
+    }
+
+    private var settingsSaveBar: some View {
+        HStack(spacing: 14) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(model.changed ? "Unsaved changes" : "All changes saved").font(.system(size: 12, weight: .medium))
+                Text(model.settingsSaveBlocker ?? "App preferences apply on the next launch.")
+                    .font(.system(size: 11)).foregroundStyle(model.settingsSaveBlocker == nil ? Color.secondary : Color.orange)
+            }.frame(maxWidth: .infinity, alignment: .leading)
+            Button("Save changes") { Task { await model.saveFromUI() } }
+                .buttonStyle(.borderedProminent)
+                .disabled(model.busy || !model.changed || model.settingsSaveBlocker != nil)
+        }.padding(.horizontal, 24).padding(.vertical, 13)
+            .background(Color.white.opacity(0.045)).overlay(alignment: .top) { Divider() }
     }
 
     var header: some View {
@@ -1172,226 +1200,10 @@ struct BridgeWindow: View {
     var subtitle: String {
         switch model.page {
         case .connection: return "Connect model providers for your desktop apps."
-        case .models: return "Choose the provider and model behind each Claude option."
-        case .agents: return "Create and monitor Devin agent sessions."
-        case .claude: return "Launch Claude with your provider configuration."
-        case .codex: return "Choose a provider model for Codex / ChatGPT Desktop."
+        case .models: return "Choose what appears in each desktop app."
+        case .config: return "Set up each app and your shared gateway."
         case .activity: return "Requests through your local gateway."
         }
-    }
-
-    var modelsPage: some View {
-        VStack(spacing: 18) {
-            Panel {
-                HStack {
-                    VStack(alignment: .leading, spacing: 5) {
-                        Text(model.settings.claude_catalogue == nil ? "Model mappings" : "Curated catalogue").font(.headline)
-                        Text(model.settings.claude_catalogue == nil
-                             ? "Choose a model by name. Show technical IDs to enter a custom route."
-                             : "Pick the models Claude’s picker lists and the Claude family tier each one plays.").font(.caption).foregroundStyle(.secondary)
-                    }
-                    Spacer()
-                    Button("Provider catalogues") { model.page = .connection }.disabled(model.busy)
-                }
-                HStack {
-                    Text(model.catalogueSummary).font(.system(size: 11)).foregroundStyle(.secondary)
-                    Spacer()
-                    if model.catalogueRefreshing { ProgressView().controlSize(.small) }
-                    Button("Refresh all") { model.beginCatalogueRefresh(userInitiated: true) }.disabled(model.busy || model.catalogueRefreshing)
-                }
-                HStack {
-                    Text("Claude’s picker").font(.system(size: 13, weight: .medium))
-                    Spacer()
-                    Picker("Claude’s picker", selection: model.claudeCatalogueMode) {
-                        Text("Five Claude slots").tag("slots")
-                        Text("Curated catalogue").tag("catalogue")
-                    }.pickerStyle(.segmented).fixedSize().disabled(model.busy)
-                }
-                if model.settings.claude_catalogue != nil {
-                    claudeCatalogueEditor
-                } else {
-                ForEach(slots, id: \.id) { slot in
-                    HStack(spacing: 10) {
-                        VStack(alignment: .leading, spacing: 4) { Text(slot.label).font(.system(size: 12, weight: .medium)); if model.showRoutingIDs { Text(slot.id).font(.system(size: 8, design: .monospaced)).foregroundStyle(.tertiary) } }.frame(width: 100, alignment: .leading)
-                        Image(systemName: "arrow.right").foregroundStyle(.tertiary)
-                        VStack(alignment: .leading, spacing: 6) {
-                            Menu {
-                                ForEach(model.providerDefinitions) { provider in
-                                    Menu(provider.presentation.displayProvider) {
-                                        ForEach(model.routeOptions.filter { $0.hasPrefix(provider.id + "/") }, id: \.self) { identifier in
-                                            Button("\(model.modelLabel(identifier)) — \(model.modelFacts(identifier))") { model.settings.mappings[slot.id] = identifier }.help(identifier)
-                                        }
-                                    }
-                                }
-                                Divider()
-                                Button("Enter a custom model ID…") { model.showRoutingIDs = true }
-                            } label: {
-                                Text(model.modelLabel(model.settings.mappings[slot.id] ?? "")).font(.system(size: 12, weight: .medium)).lineLimit(1)
-                            }.menuStyle(.borderlessButton).menuIndicator(.hidden)
-                                .frame(maxWidth: .infinity, alignment: .leading).padding(10)
-                                .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 7))
-                                .help("API ID: \(model.settings.mappings[slot.id] ?? "")")
-                            Text(model.modelFacts(model.settings.mappings[slot.id] ?? "")).font(.system(size: 9)).foregroundStyle(.secondary)
-                            if model.showRoutingIDs {
-                                TextField("provider/exact-model-id", text: Binding(get: { model.settings.mappings[slot.id] ?? "" }, set: { model.settings.mappings[slot.id] = $0 }))
-                                    .textFieldStyle(.roundedBorder).font(.system(size: 10, design: .monospaced))
-                            }
-                            HStack(spacing: 14) {
-                                Toggle("Omit system", isOn: model.omitSystem(for: slot.id)).toggleStyle(.checkbox)
-                                Toggle("Omit tools", isOn: model.omitTools(for: slot.id)).toggleStyle(.checkbox)
-                            }.font(.caption).foregroundStyle(.secondary)
-                            HStack(spacing: 6) {
-                                Text("Compact at").font(.caption).foregroundStyle(.secondary)
-                                TextField("auto", text: model.compactLimit(for: slot.id))
-                                    .textFieldStyle(.roundedBorder).font(.system(size: 10, design: .monospaced)).frame(width: 90)
-                                    .help("Per-model auto-compact threshold in tokens. Blank follows the catalogue window at 85%.")
-                                Text("tokens · blank = auto 85%").font(.caption).foregroundStyle(.secondary)
-                            }
-                        }.frame(maxWidth: .infinity)
-                        Button("Test") { Task { await model.testRoute(slot.id) } }.disabled(model.busy)
-                    }
-                }
-                Text("At your own risk. Claude still sends system and tools; checked boxes drop those fields here before the model. This is a first-turn smoke test for small contexts, not a coding-agent mode — tool loops and Claude Code will break.")
-                    .font(.caption).foregroundStyle(.secondary).lineSpacing(3)
-                Divider()
-                HStack {
-                    Toggle("Show technical IDs", isOn: $model.showRoutingIDs).toggleStyle(.checkbox).font(.caption)
-                    Spacer()
-                    Button("Use Vibe for all") { for slot in slots { model.settings.mappings[slot.id] = "mistral/" + model.vibeModel } }
-                }
-                }
-            }
-            Panel {
-                Text("Model controls").font(.headline)
-                HStack { Text("Context").font(.system(size: 13, weight: .medium)); Spacer(); Text("Reported per model; never an editable guess").font(.caption).foregroundStyle(.secondary) }
-                Divider()
-                HStack { Text("Effort").font(.system(size: 13, weight: .medium)); Spacer(); Text("Use Claude’s Effort control").font(.caption).foregroundStyle(.secondary) }
-                Text("Effort follows the selected provider’s supported controls. Mistral uses standard mode at Low and reasoning at Medium or above; native Messages providers receive their supported reasoning settings.").font(.caption).foregroundStyle(.secondary).lineSpacing(3)
-                Divider()
-                HStack { Text("Fast").font(.system(size: 13, weight: .medium)); Spacer(); Text("Only when supported by the provider").font(.caption).foregroundStyle(.secondary) }
-                Text("A speed toggle never silently swaps models. Distinct models or context variants keep separate catalogue entries. Unsupported Fast requests return a clear compatibility message.").font(.caption).foregroundStyle(.secondary)
-            }
-            HStack { Spacer(); Button(model.settings.claude_catalogue == nil ? "Save mappings" : "Save catalogue") { Task { await model.saveFromUI() } }.disabled(model.busy || !model.changed).controlSize(.large); Button("Launch Claude") { Task { await model.launchClaude() } }.buttonStyle(.borderedProminent).controlSize(.large).disabled(model.busy || !model.claudeInstalled) }
-        }
-    }
-
-    var claudeCatalogueEditor: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("\(model.claudeCatalogue.count) model\(model.claudeCatalogue.count == 1 ? "" : "s") will appear in Claude’s picker, each under the family tier you assign. Claude starts on the Fable tier’s default (Opus if there is no Fable row); each tier’s default also answers Claude Code’s own fable, opus, sonnet and haiku requests, with the nearest tier standing in for a missing one.")
-                .font(.caption).foregroundStyle(.secondary).lineSpacing(3)
-            ForEach(model.claudeCatalogue) { entry in
-                HStack(spacing: 10) {
-                    VStack(alignment: .leading, spacing: 3) {
-                        HStack(spacing: 6) {
-                            Text(model.modelLabel(entry.route)).font(.system(size: 12, weight: .medium)).lineLimit(1)
-                            if model.isClaudeTierDefault(entry) {
-                                Text("tier default").font(.system(size: 9, weight: .semibold)).padding(.horizontal, 5).padding(.vertical, 1).background(bridgeOrange.opacity(0.2), in: Capsule())
-                            }
-                        }
-                        Text(model.modelFacts(entry.route)).font(.system(size: 9)).foregroundStyle(.secondary)
-                        if model.showRoutingIDs { Text(model.claudeRowID(entry)).font(.system(size: 8, design: .monospaced)).foregroundStyle(.tertiary) }
-                    }
-                    Spacer()
-                    Picker("Tier", selection: model.claudeTier(for: entry.route)) {
-                        ForEach(claudeTiers, id: \.id) { tier in Text(tier.label).tag(tier.id) }
-                    }.labelsHidden().frame(width: 96).help("Claude family tier this model plays")
-                    Button { model.makeClaudeTierDefault(entry.route) } label: {
-                        Image(systemName: model.isClaudeTierDefault(entry) ? "star.fill" : "star").foregroundStyle(model.isClaudeTierDefault(entry) ? bridgeOrange : .secondary)
-                    }.buttonStyle(.plain).help("Make this the tier’s default").disabled(model.busy)
-                    TextField("auto", text: model.claudeCompactLimit(for: entry.route))
-                        .textFieldStyle(.roundedBorder).font(.system(size: 10, design: .monospaced)).frame(width: 78)
-                        .help("Auto-compact threshold in tokens. Blank follows the catalogue window at 85%.")
-                    Button("Test") { Task { await model.testRoute(entry.route) } }.disabled(model.busy)
-                    Button { model.removeClaudeRoute(entry.route) } label: { Image(systemName: "minus.circle").foregroundStyle(.secondary) }
-                        .buttonStyle(.plain)
-                        .disabled(model.claudeCatalogue.count <= 1 || model.busy)
-                        .help(model.claudeCatalogue.count <= 1 ? "Keep at least one model in the catalogue" : "Remove from the Claude catalogue")
-                }
-                .padding(.horizontal, 10).padding(.vertical, 7)
-                .background(Color.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 7))
-            }
-            HStack(spacing: 12) {
-                claudeAddMenu
-                Button("Add all") { model.addAllClaudeRoutes() }.disabled(model.busy || model.availableModels.isEmpty)
-                Spacer()
-                Toggle("Show technical IDs", isOn: $model.showRoutingIDs).toggleStyle(.checkbox).font(.caption)
-            }
-            Text("The tier sets what Claude expects of a model. Fable, Opus and Sonnet rows carry Claude’s full effort ladder, Ultracode included; Haiku rows have no effort control. Claude Code borrows each tier’s Claude model for capabilities while “Teach Claude Code the catalogue ids” is on (Claude tab). The five slot mappings stay saved for switching back.")
-                .font(.caption).foregroundStyle(.secondary).lineSpacing(3)
-        }
-    }
-
-    var claudeAddMenu: some View {
-        Menu {
-            ForEach(model.providerDefinitions) { provider in
-                let options = model.availableModels.filter { candidate in
-                    candidate.provider_id == provider.id && (candidate.tools ?? true) && !model.claudeCatalogue.contains { $0.route == candidate.id }
-                }
-                if !options.isEmpty {
-                    Menu(provider.presentation.displayProvider) {
-                        ForEach(options) { entry in
-                            Button("\(model.modelLabel(entry.id)) — \(model.modelFacts(entry.id))") { model.addClaudeRoute(entry.id) }.help(entry.id)
-                        }
-                    }
-                }
-            }
-        } label: { Label("Add model…", systemImage: "plus") }
-            .disabled(model.busy)
-    }
-
-    var claudePage: some View {
-        VStack(spacing: 18) {
-            Panel {
-                HStack(spacing: 18) {
-                    Image(systemName: "macwindow").font(.system(size: 38, weight: .light)).foregroundStyle(bridgeOrange).frame(width: 60, height: 60)
-                    VStack(alignment: .leading, spacing: 6) { Text("Claude, with your models").font(.system(size: 19, weight: .semibold)); Text("Your usual Claude interface with the models you choose.").font(.system(size: 12)).foregroundStyle(.secondary) }
-                }
-                Divider()
-                infoRow("Provider profile", model.profileActive ? "Active" : "Ready to launch", "person.crop.rectangle")
-                infoRow("Conversations", "Saved by Claude’s third-party mode", "bubble.left.and.bubble.right")
-                infoRow("Previous setup", "Restored after this Claude session closes", "arrow.uturn.backward")
-                if model.claudeRunning && !model.profileActive {
-                    Text("Claude is already open with another profile. Finish your current work and quit Claude before switching.").font(.system(size: 12)).foregroundStyle(.orange).padding(12).frame(maxWidth: .infinity, alignment: .leading).background(Color.orange.opacity(0.07), in: RoundedRectangle(cornerRadius: 8))
-                }
-                if model.codexRunning && model.codexRecoveryNeeded {
-                    Text("Codex / ChatGPT is live on this gateway. Launching Claude shares it; changing Claude’s mappings first briefly restarts the gateway, and Codex reconnects automatically.")
-                        .font(.system(size: 12)).foregroundStyle(.secondary)
-                }
-                HStack {
-                    Button(model.profileActive && model.claudeRunning ? "Show Claude" : "Launch Claude") { Task { await model.launchClaude() } }.buttonStyle(.borderedProminent).controlSize(.large).disabled(model.busy || !model.claudeInstalled)
-                    if model.recoveryNeeded { Button("Restore previous setup") { Task { await model.restore() } }.disabled(model.busy || model.claudeRunning) }
-                    Spacer()
-                }
-            }
-            Panel {
-                Toggle(isOn: $model.settings.auto_stop) { VStack(alignment: .leading, spacing: 5) { Text("Stop gateway after the desktop sessions close").font(.system(size: 13, weight: .medium)); Text("The menu bar app stays available for your next session.").font(.caption).foregroundStyle(.secondary) } }.toggleStyle(.switch)
-                Divider()
-                Toggle(isOn: $model.settings.auto_mode) { VStack(alignment: .leading, spacing: 5) { Text("Enable Claude Auto mode").font(.system(size: 13, weight: .medium)); Text("Use Claude’s approval classifier through the configured gateway. Claude chooses its reviewer model internally.").font(.caption).foregroundStyle(.secondary) } }.toggleStyle(.switch)
-                Divider()
-                Text("Claude features in this profile").font(.system(size: 13, weight: .medium))
-                Text("Claude keeps these off in a third-party profile unless the profile asks for them. Each runs locally in Claude; its model calls still go through this gateway. They apply at the next launch.").font(.caption).foregroundStyle(.secondary).lineSpacing(3)
-                Toggle(isOn: $model.settings.claude_features.dictation) { Text("Dictation").font(.system(size: 12)) }.toggleStyle(.switch).controlSize(.small)
-                Toggle(isOn: $model.settings.claude_features.builtin_browser) { Text("Built-in browser").font(.system(size: 12)) }.toggleStyle(.switch).controlSize(.small)
-                Toggle(isOn: $model.settings.claude_features.claude_in_chrome) { Text("Claude in Chrome").font(.system(size: 12)) }.toggleStyle(.switch).controlSize(.small)
-                Toggle(isOn: $model.settings.claude_features.scheduled_tasks) { Text("Scheduled tasks").font(.system(size: 12)) }.toggleStyle(.switch).controlSize(.small)
-                Toggle(isOn: $model.settings.claude_features.cowork_tab) { Text("Cowork tab").font(.system(size: 12)) }.toggleStyle(.switch).controlSize(.small)
-                Text("Dictation and scheduled tasks depend on the installed Claude build honouring the profile field; if one stays hidden after relaunch, that build does not offer it in third-party mode yet.").font(.caption).foregroundStyle(.secondary).lineSpacing(3)
-                Divider()
-                Text("Claude Code and catalogue models").font(.system(size: 13, weight: .medium))
-                Toggle(isOn: $model.settings.claude_code_settings) { Text("Teach Claude Code the catalogue ids").font(.system(size: 12)) }.toggleStyle(.switch).controlSize(.small)
-                Text("In catalogue mode, Provider Hub adds a modelPicker row with behavesAs to ~/.claude/settings.json for each catalogue model while the profile is active, so the Claude Code inside Claude gives it the effort ladder, capabilities and context handling of its tier’s Claude model instead of treating it as an unknown model. The rows are removed when the previous setup is restored; a terminal Claude Code sees them meanwhile.").font(.caption).foregroundStyle(.secondary).lineSpacing(3)
-                Toggle(isOn: $model.settings.claude_workflows) { Text("Enable dynamic workflows for Ultracode").font(.system(size: 12)) }.toggleStyle(.switch).controlSize(.small)
-                Text("Adds enableWorkflows to the same file while the profile is active. Claude’s Ultracode effort level needs dynamic workflows and a model on the Fable, Opus or Sonnet tier. With Ultracode on, the gateway sends the provider its highest reasoning setting and adds an orchestration note so the external model reaches for the Workflow tool.").font(.caption).foregroundStyle(.secondary).lineSpacing(3)
-                Divider()
-                Text("Claude adds a standard and a 1M choice for models that support long context. New selections prefer 1M; existing session choices are preserved.").font(.caption).foregroundStyle(.secondary).lineSpacing(3)
-                Text("This uses Claude’s native third-party profile system, like Ollama. It switches the installed app’s profile; it does not create a simultaneous second Claude app. Existing Ollama and Claude conversations are retained.").font(.caption).foregroundStyle(.secondary).lineSpacing(3)
-            }
-            HStack { Spacer(); Button("Save preferences") { Task { await model.saveFromUI() } }.disabled(model.busy || !model.changed) }
-        }
-    }
-
-    func infoRow(_ label: String, _ value: String, _ icon: String) -> some View {
-        HStack { Image(systemName: icon).foregroundStyle(.secondary).frame(width: 20); Text(label).font(.system(size: 12, weight: .medium)); Spacer(); Text(value).font(.system(size: 12)).foregroundStyle(.secondary) }
     }
 
     var activityPage: some View {
@@ -1449,7 +1261,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         statusItem.button?.image?.isTemplate = true
         statusItem.button?.toolTip = hubName
         let menu = NSMenu(); menu.delegate = self; statusItem.menu = menu
-        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 940, height: 740), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
+        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1200, height: 820), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
         window.title = hubName
         window.titlebarAppearsTransparent = true
         window.isReleasedWhenClosed = false
