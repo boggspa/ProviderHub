@@ -57,6 +57,7 @@ from cli_lifecycle import cleanup_after_exit
 from cli_tool_call import TRANSCRIPT_HEADER, ToolCallError
 from cli_structured_reply import parse_reply
 from cli_images import write_images
+from agy_context import MAX_PROMPT_BYTES, ContextReads, package_prompt
 
 try:  # Repo-native effort ladder; degrade to a local copy if unavailable.
     from effort_map import map_effort as _map_effort
@@ -724,9 +725,10 @@ try:
     call = payload["toolCall"]
     name, args = call["name"], call.get("args", {})
     images = json.loads((root / "images.json").read_text())
+    context = json.loads((root / "context.json").read_text())
     path = args.get("AbsolutePath") if isinstance(args, dict) else None
     if name == "finish" or (name == "view_file" and isinstance(path, str)
-                            and str(Path(path).resolve()) in images):
+                            and str(Path(path).resolve()) in images + context):
         print(json.dumps({"decision": "allow"}))
     else:
         index = payload["stepIdx"]
@@ -743,12 +745,13 @@ except Exception:
 '''
 
 
-def _install_host_hook(workspace, image_paths):
+def _install_host_hook(workspace, image_paths, context_paths=()):
     root = Path(workspace) / ".agents"
     root.mkdir()
     script = root / "host_handoff.py"
     script.write_text(_HOST_HOOK, encoding="utf-8")
     (root / "images.json").write_text(json.dumps(image_paths), encoding="utf-8")
+    (root / "context.json").write_text(json.dumps(list(context_paths)), encoding="utf-8")
     command = shlex.join([sys.executable, str(script)])
     (root / "hooks.json").write_text(json.dumps({"provider-hub-handoff": {
         "PreToolUse": [{"matcher": ".*", "hooks": [
@@ -892,6 +895,8 @@ class _TurnState:
         self.raw_lines: list[str] = []
         self.stderr_handle = None
         self.image_paths: list[str] = []
+        self.context_reads = ContextReads([])
+        self.rejected_finish_text = None
         self.structured = False
         self.failure_status = None
         self.failure_code = None
@@ -968,6 +973,22 @@ def _translate(payload: Any, state: _TurnState) -> list[dict]:
             if state.structured and name == "finish":
                 # --json-schema is implemented by agy's own finish tool.
                 # Wait for SUCCESS and consume result.structured_output.
+                parameters = info.get("parameters") or {}
+                if (str(step.get("state") or "").upper() == "ERROR"
+                        and isinstance(parameters, dict) and "tool_calls" not in parameters
+                        and isinstance(parameters.get("text"), str)):
+                    state.rejected_finish_text = parameters["text"]
+                return []
+            parameters = info.get("parameters") or {}
+            path = parameters.get("AbsolutePath") if isinstance(parameters, dict) else None
+            resolved = str(Path(path).resolve()) if isinstance(path, str) else None
+            if name == "view_file" and resolved in state.context_reads.lines:
+                status = str(step.get("state") or "").upper()
+                if status == "ERROR":
+                    state.failure = "agy could not read its private context part."
+                    state.failure_code = "incomplete_cli_context"
+                elif status == "DONE":
+                    state.context_reads.record(resolved, parameters)
                 return []
             if state.structured and state.hook_root is not None:
                 parameters = info.get("parameters") or {}
@@ -1018,7 +1039,7 @@ def _translate(payload: Any, state: _TurnState) -> list[dict]:
         text = step.get("text_delta")
         # agy enforces --json-schema only on result.response; intermediate
         # agent responses may be prose rather than the structured answer.
-        if isinstance(text, str) and text and not state.structured:
+        if isinstance(text, str) and text and not state.structured and state.context_reads.complete():
             state.emitted_text = True
             state.text_parts.append(text)
             events.append({"type": "text_delta", "text": text})
@@ -1040,7 +1061,28 @@ def _translate(payload: Any, state: _TurnState) -> list[dict]:
         if state.structured and "structured_output" in result:
             # response contains agy's toolAction/toolSummary metadata on 1.2.7;
             # structured_output is the actual schema-shaped host response.
-            response = json.dumps(result["structured_output"], ensure_ascii=False, allow_nan=False)
+            reply = result["structured_output"]
+            # Only repair a witnessed native schema-error/repair sequence.
+            # A final answer may legitimately be JSON, even this exact shape;
+            # blindly unwrapping it could turn a quoted example into an action.
+            if (isinstance(reply, dict) and set(reply) == {"text", "tool_calls"}
+                    and reply["tool_calls"] == [] and state.rejected_finish_text is not None
+                    and reply["text"] == state.rejected_finish_text):
+                try:
+                    inner = json.loads(reply["text"])
+                except (ValueError, TypeError):
+                    inner = None
+                if isinstance(inner, dict) and set(inner) == {"text", "tool_calls"}:
+                    try:
+                        # Includes offered-tool/JSON, tool-choice, batch and
+                        # argument limits; no prose or partial call may escape.
+                        parse_reply(reply["text"], state.tools, state.tool_choice)
+                    except ToolCallError as exc:
+                        state.failure = f"agy returned an invalid nested host reply: {exc}"
+                        state.failure_code = "invalid_cli_tool_call"
+                        return []
+                    reply = inner
+            response = json.dumps(reply, ensure_ascii=False, allow_nan=False)
         if isinstance(response, str) and response:
             state.result_text = response
         denied = result.get("denied_actions")
@@ -1056,6 +1098,10 @@ def _translate(payload: Any, state: _TurnState) -> list[dict]:
                              f"{status or 'an error'}: "
                              f"{error or response or 'no detail'}")
         elif status == "SUCCESS":
+            if not state.context_reads.complete():
+                state.failure = "agy finished before reading all supplied context parts; no answer or host action was released."
+                state.failure_code = "incomplete_cli_context"
+                return []
             state.terminal = True
             state.stop_reason = "end_turn"
         else:
@@ -1183,25 +1229,33 @@ def run_turn(request, *, spawner=None, timeout=300) -> Iterator[dict]:
             state.tools = request.get("tools") or []
             state.tool_choice = request.get("tool_choice")
             argv += ["--json-schema", json.dumps(request["host_tool_schema"], ensure_ascii=False)]
-        if state.structured or request.get("images"):
+        if state.structured or request.get("images") or len(prompt.encode("utf-8")) > MAX_PROMPT_BYTES:
             workspace_path = str(Path(tempfile.mkdtemp(prefix="agy_host_")).resolve())
             argv += ["--add-dir", workspace_path]
+        suffix = ""
         if request.get("images"):
             state.image_paths = write_images(request["images"], workspace_path)
             # --add-dir establishes a scoped workspace read grant. No global
             # settings or approval-bypass flags are changed. All host actions
             # still use the host tool protocol.
-            prompt += "\n\nImage attachment transport: use native view_file only to decode " \
-                      "the exact image copies listed below. This is the sole exception to " \
-                      "the native-tool restriction; it supplies the screenshot pixels. " \
+            suffix += "\n\nImage attachment transport: use native view_file only to decode " \
+                      "the exact image copies listed below. Together with any listed private " \
+                      "context parts, these are the only native file-read exceptions. " \
                       "Use the host tool protocol for every computer or workspace action.\n"
-            prompt += "\n".join(f"Image {index}: {path}" for index, path in enumerate(state.image_paths, 1))
+            suffix += "\n".join(f"Image {index}: {path}" for index, path in enumerate(state.image_paths, 1))
         if state.structured:
-            state.hook_root = _install_host_hook(workspace_path, state.image_paths)
-            prompt += ("\n\nReturn the final structured host reply using your finish response. "
+            suffix += ("\n\nCall native finish with its fields populated directly: text is the "
+                       "answer or brief commentary, and tool_calls is the array of actual host requests "
+                       "(or [] for a final answer). Do not JSON-encode the entire response object "
+                       "inside text. Only each tool call's arguments field is a JSON-encoded object. "
                        "Do not send it with send_message: the desktop user is not an agy agent. "
                        "Native action requests are captured for the desktop; host results arrive "
                        "in the next turn. Never invent their results.\n")
+        prompt, context_paths = package_prompt(messages, system=system, suffix=suffix,
+                                              directory=workspace_path, render=render_prompt)
+        state.context_reads = ContextReads(context_paths)
+        if state.structured or context_paths:
+            state.hook_root = _install_host_hook(workspace_path, state.image_paths, context_paths)
 
         # stderr goes to a temp file, not a pipe: a pipe nobody drains can fill
         # and deadlock the child, and agy's diagnostics there are worth keeping.
@@ -1234,6 +1288,10 @@ def run_turn(request, *, spawner=None, timeout=300) -> Iterator[dict]:
                 for event in _translate(payload, state):
                     yield event
                 if state.handoff_reply is not None:
+                    if not state.context_reads.complete():
+                        yield {"type": "error", "code": "incomplete_cli_context", "message":
+                               "agy requested a host action before reading all supplied context parts."}
+                        return
                     # The denial receipt proves this call never executed. The
                     # hook remains installed until the child has been reaped.
                     yield {"type": "text_delta", "text": state.handoff_reply}

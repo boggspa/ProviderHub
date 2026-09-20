@@ -482,7 +482,7 @@ class _TurnState:
 
     def start_message(self, message):
         identifier = message.get("id") if isinstance(message, dict) else None
-        current = {"id": identifier, "blocks": {}, "snapshot": False}
+        current = {"id": identifier, "blocks": {}, "snapshot": False, "active_block": None}
         if isinstance(identifier, str) and identifier:
             current = self.messages.setdefault(identifier, current)
         self.current_message = current
@@ -510,7 +510,7 @@ class _TurnState:
                 if identifier:
                     current["id"] = identifier
             else:
-                current = {"id": identifier, "blocks": {}, "snapshot": False}
+                current = {"id": identifier, "blocks": {}, "snapshot": False, "active_block": None}
             if isinstance(identifier, str) and identifier:
                 self.messages[identifier] = current
         current["snapshot"] = True
@@ -534,6 +534,7 @@ class _TurnState:
             fragment = text[len(previous):]
             message["blocks"][key] = text
         else:
+            message["active_block"] = key
             fragment = text
             message["blocks"][key] = previous + text
         if kind == "text":
@@ -597,6 +598,10 @@ def _translate(payload: Any, state: _TurnState) -> list[dict]:
             block = event.get("content_block") or {}
             if isinstance(block, dict) and block.get("type") in {"text", "thinking"}:
                 block_type = block["type"]
+                current = state.current_message
+                if current is None:
+                    current = state.start_message({})
+                current["active_block"] = (event.get("index", 0), block_type)
                 translated = state.content_event(event.get("index", 0), block_type,
                                                  block.get(block_type), snapshot=True)
                 return [translated] if translated else []
@@ -643,6 +648,14 @@ def _translate(payload: Any, state: _TurnState) -> list[dict]:
             for index, block in enumerate(content):
                 if isinstance(block, dict) and block.get("type") in {"text", "thinking"}:
                     block_type = block["type"]
+                    # Claude Code emits a one-block assistant snapshot before
+                    # content_block_stop, with the same message id but no
+                    # stream index. Its local index 0 may be stream block 1+
+                    # (e.g. text following thinking). Full snapshots still
+                    # use their own indices; distinct blocks remain distinct.
+                    active = current.get("active_block")
+                    if len(content) == 1 and active and active[1] == block_type:
+                        index = active[0]
                     translated = state.content_event(index, block_type, block.get(block_type),
                                                      message=current, snapshot=True)
                     if translated:

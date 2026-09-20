@@ -55,6 +55,49 @@ and then reduced into one summary. Every segment must succeed before replacement
 history is returned. Cancelling compaction closes its active request and prevents
 later segments from starting.
 
+## AntiGravity context transport and finish responses
+
+AGY 1.2.7 clips its initial model input near 192,000 UTF-8 bytes. A large
+desktop tool manifest and harness preamble can exceed that before any user turn
+is included. The adapter now checks the fully framed prompt, including image
+references and response instructions, against a 160,000-byte budget.
+
+Oversized system context is moved to private files first, followed by older
+turns if necessary. Recent requests, steers and actual tool results remain
+inline whenever they fit; an oversized individual turn is also preserved in
+full. Nothing is summarized or discarded. Context parts contain at most 24,000
+bytes and 600 lines, below AGY's native view_file limits. Only those exact files
+and the existing image copies receive native read permission. Context files
+have mode 0600 inside the private per-turn directory and use the same
+process-exit cleanup as images.
+
+Every context part must be successfully read before the adapter releases an
+answer or a host action. Missing or failed reads produce an explicit context
+error instead of silently answering from a truncated transcript. The extra
+native reads add work only on oversized turns; AGY remains stateless.
+
+The native finish instruction names its fields directly: answer/commentary in
+text, host requests in tool_calls, and JSON-encoded inputs only in arguments.
+Recovery of a double-wrapped response requires a witnessed failed finish call
+with missing tool_calls, followed by a successful result with exactly the same
+nested text and an empty outer call list. The inner reply passes the existing
+host-call validation before release. Without that evidence, JSON answers stay
+literal, even when they resemble the response schema.
+
+Live checks on 2026-09-20 recovered the beginning and ending markers of a
+252,178-byte preamble and the latest steer through 11 private reads (39.72 s
+total). A separate deliberate schema-error/repair probe recovered the intended
+answer. A second probe used the host protocol planner with a 247,597-byte
+preamble, two prior tool results and a latest steer. It returned exactly one
+validated host call containing all five expected markers (52.36 s). These are
+correctness probes, not comparative latency measurements.
+
+Claude Code's partial-message stream also emits one-block assistant snapshots
+with message-local index 0, even when the streamed text is block 1 after
+thinking. The adapter maps those snapshots to the active stream block, avoiding
+the duplicated commentary at each host handoff while retaining missing suffixes
+and genuinely separate text blocks.
+
 ## Timing and benchmark
 
 Set `PROVIDER_HUB_CLI_TIMING_LOG` to a private JSONL destination to record admission,

@@ -485,6 +485,32 @@ class RunTurnTests(unittest.TestCase):
         self.assertEqual([e["type"] for e in events[:-1]],
                          ["thinking_delta", "text_delta", "thinking_delta", "text_delta", "text_delta"])
 
+    def test_per_block_snapshots_use_the_stream_index_after_thinking(self):
+        def stream(kind, **fields):
+            return {"type": "stream_event", "event": {"type": kind, **fields}}
+        def snapshot(kind, text):
+            return {"type": "assistant", "message": {"id": "m1", "content": [
+                {"type": kind, kind: text}]}}
+        text = "I'll inspect the repository."
+        fake = self._stream([
+            stream("message_start", message={"id": "m1"}),
+            stream("content_block_start", index=0, content_block={"type": "thinking", "thinking": ""}),
+            snapshot("thinking", ""), stream("content_block_stop", index=0),
+            stream("content_block_start", index=1, content_block={"type": "text", "text": ""}),
+            stream("content_block_delta", index=1, delta={"type": "text_delta", "text": text}),
+            snapshot("text", text), snapshot("text", text),
+            stream("content_block_stop", index=1),
+            # Identical text in a genuinely new block must still be kept.
+            stream("content_block_start", index=2, content_block={"type": "text", "text": ""}),
+            stream("content_block_delta", index=2, delta={"type": "text_delta", "text": text[:10]}),
+            snapshot("text", text), stream("content_block_stop", index=2),
+            _result_event(result=text),
+        ])
+        events, _, _ = self._run({"model": "sonnet", "messages": [
+            {"role": "user", "content": "Inspect the file"}]}, fake)
+        self.assertEqual([e.get("text") for e in events[:-1]], [text, text[:10], text[10:]])
+        self.assertEqual(events[-1]["type"], "message_stop")
+
     def test_result_restores_a_final_answer_after_earlier_text(self):
         for final in ("Progress. Final answer.", "A separate final answer."):
             with self.subTest(final=final):
