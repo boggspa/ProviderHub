@@ -82,6 +82,15 @@ const cases = {
       assert.equal(await colour(page, 'agent-glyph'), expected, model);
       assert.equal(await colour(page, 'main-glyph'), colours.parent, model);
     }
+    await page.locator('#agent').evaluate((el, html) => el.insertAdjacentHTML('beforeend', html), composer('editable-agent-model', 'Unlisted'));
+    await flush(page);
+    assert.equal(await colour(page, 'agent-glyph'), colours.grey);
+    await page.locator('#editable-agent-model').evaluate(el => { el.textContent = 'Kimi for Coding'; });
+    await flush(page);
+    assert.equal(await colour(page, 'agent-glyph'), colours.kimi);
+    await page.locator('#editable-agent-model').evaluate(el => el.closest('[data-codex-intelligence-trigger]').remove());
+    await flush(page);
+    assert.equal(await colour(page, 'agent-glyph'), colours.mistral);
     await page.locator('#agent-model').evaluate(el => el.remove());
     await page.locator('#agent').evaluate(el => { el.insertAdjacentHTML('beforeend', '<span>mistral/mistral-vibe-cli-latest</span>'); });
     await flush(page);

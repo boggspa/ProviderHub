@@ -595,7 +595,11 @@ _WATCHER = r"""
         if (!panels.has(element)) { clearPanel(entry); state.panels.delete(element); }
       }
       for (const element of panels) {
-        const model = models.find((model) => model.element.closest(TAB_PANEL_SELECTOR) === element) || headerModel(element);
+        const ownsComposer = (trigger) => trigger.closest(TAB_PANEL_SELECTOR) === element && !trigger.closest("[inert],[hidden]");
+        const hasComposer = Array.from(element.querySelectorAll("[data-codex-intelligence-trigger]")).some(ownsComposer);
+        // A present but unknown composer is authoritative too: the header
+        // may still describe the previous turn's model until the next send.
+        const model = models.find((model) => ownsComposer(model.element)) || (hasComposer ? null : headerModel(element));
         // `initial` makes a custom property invalid locally. An unknown
         // child therefore uses the app's grey, and an achromatic child
         // cannot accidentally borrow its parent's shimmer hue.
