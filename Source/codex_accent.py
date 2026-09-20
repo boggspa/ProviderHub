@@ -8,8 +8,9 @@ as a child of the worker with Chromium's ``--remote-debugging-pipe`` switch,
 and a small watcher script is injected into its windows over that pipe.
 
 The pipe is a pair of file descriptors only this helper holds, so nothing
-listens on a port. The watcher only reads the picker's own labels and sets
-CSS custom properties on the picker. Ultra, which the app paints with its
+listens on a port. The watcher reads the app's model labels and child-panel
+headers and sets CSS custom properties on the picker and conversation panes.
+Ultra, which the app paints with its
 purple token, takes a more saturated cut of the same provider hue instead;
 native Codex keeps #705AFF. Its word gets a shimmer sweep in both cases.
 With the Codex tab's banner switch on,
@@ -69,6 +70,18 @@ ACTIVITY_SLOT = 'span[class~="contents"]'
 # that name a colour of their own — a denied approval's warning mark and the
 # subagent identicon — carry no grey to match, so they keep their meaning.
 ACTIVITY_GLYPH_GREY = "text-text/60"
+# These are the app shell's authored tab hooks, shared by right and bottom
+# panels. Tab IDs distinguish conversation panes from browser/file tabs;
+# the main composer lives outside all such panels.
+TAB_PANEL_SELECTOR = '[role="tabpanel"][data-app-shell-tab-panel-controller]'
+CHILD_PANEL_SELECTOR = (TAB_PANEL_SELECTOR + ':is([data-tab-id^="sidechat:"],'
+                        '[data-tab-id^="sidechat-loading:"],[data-tab-id^="subagents:"])')
+# The selected subagent's header has no composer when it is read-only. Its
+# trailing metadata span shows the model and optional localised effort.
+# These layout utilities come from the shared subagent header component,
+# not hashed module names or the user's transcript text.
+SUBAGENT_MODEL_SELECTOR = ('div[class~="h-12"][class~="border-b"][class~="border-strong"]'
+                           ' > span[class~="max-w-1/2"][class~="text-tertiary"]')
 # Ultra: the app paints its top level (the popover's title, the slider's
 # fill gradient, the pill's Ultra layer) with one purple token. On the
 # picker and the pill that token is given the model's Ultra hue instead,
@@ -100,14 +113,15 @@ _ENVIRONMENT_KEYS = ("HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "LANG", "LC_A
 _LAUNCHD_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
 
 
-def accent_map(settings: dict, inventory: dict) -> dict:
-    """Composer label -> provider accent for every model Codex will list.
+def accent_map(settings: dict, inventory: dict, *, by_route: bool = False) -> dict:
+    """Composer label (or exact route) -> accent for every published model.
 
     Labels are the display names the hub itself projects into the Codex
     catalogue, so the watcher can match them exactly. Accents come from the
     projected catalogue's presentation, which already applies the hub's
     branding overrides and model brand rules (an Ollama-hosted Qwen keeps
-    the Qwen hue).
+    the Qwen hue). Child panel headers show routing IDs instead of composer
+    labels, so their lookup uses the same presentation with ``by_route``.
     """
     entries = {entry.get("id"): entry for entry in inventory.get("models", []) if isinstance(entry, dict)}
     accents = {}
@@ -115,7 +129,7 @@ def accent_map(settings: dict, inventory: dict) -> dict:
         presentation = (entries.get(model["slug"]) or {}).get("presentation") or {}
         colour = presentation.get("accent")
         if isinstance(colour, str) and _HEX.match(colour):
-            accents[model["display_name"]] = colour.upper()
+            accents[model["slug"] if by_route else model["display_name"]] = colour.upper()
     return accents
 
 
@@ -272,11 +286,15 @@ def activity_glyph_css() -> str:
     row's own ``!important`` grey sits on the label span, a *sibling* of the
     slot, so it never reaches the glyph at all. ``!important`` is kept anyway,
     because the icon component can merge an inline ``style`` onto the ``svg``.
-    The theme attribute is only on the root while the watcher holds an accent,
-    and the fallback keeps the app's grey if it is ever missing, so a build
-    that renames either hook loses the colour and nothing else.
+    The theme attribute is on the root and recognised child panes while the
+    watcher holds an accent; unknown child panes are excluded from this rule
+    so the app's original grey utility wins. A build that renames either
+    activity hook loses the colour and nothing else.
     """
-    return (f"[{THEME_ATTRIBUTE}] {activity_glyph_selector()}"
+    # Unknown child panes must not enter this rule: `currentColor` on the
+    # color property inherits the parent's text colour, not the glyph's
+    # original grey utility. Leaving the rule out preserves that utility.
+    return (f'[{THEME_ATTRIBUTE}] {activity_glyph_selector()}:not([{THEME_ATTRIBUTE}="unknown"] *)'
             f"{{color:var({ACCENT_PROPERTY},currentColor)!important}}")
 
 
@@ -331,6 +349,8 @@ _WATCHER = r"""
   if (window.__providerHubAccent) { return { skipped: "installed" }; }
   try {
     const ACCENTS = __HUB_ACCENTS__;
+    const ROUTES = __HUB_ROUTE_ACCENTS__;
+    const ROUTE_HUES = __HUB_ROUTE_HUES__;
     const NATIVE_LABELS = __HUB_NATIVE_LABELS__;
     const ULTRA = __HUB_ULTRA__;
     const STYLE_CSS = __HUB_STYLE_CSS__;
@@ -347,7 +367,10 @@ _WATCHER = r"""
     // Quoted by the substitution, not here: this selector carries its own
     // double quotes, and a quoted slot would end the string on the first one.
     const GLYPH_SELECTOR = __HUB_GLYPH_SELECTOR__;
-    const state = { targets: [], label: "", colour: "", purple: "", ultra: "", title: null, words: [], pills: [], marks: [], sheet: null, accent: "", theme: "", hue: "" };
+    const TAB_PANEL_SELECTOR = __HUB_TAB_PANEL_SELECTOR__;
+    const CHILD_PANEL_SELECTOR = __HUB_CHILD_PANEL_SELECTOR__;
+    const SUBAGENT_MODEL_SELECTOR = __HUB_SUBAGENT_MODEL_SELECTOR__;
+    const state = { targets: [], label: "", colour: "", purple: "", ultra: "", title: null, words: [], pills: [], marks: [], sheet: null, accent: "", theme: "", hue: "", panels: new Map() };
     const norm = (text) => (text || "").replace(/\s+/g, " ").trim().toLowerCase();
     // Labels may carry a leading glyph (a bullet, a tier mark); match the words.
     const lookup = (text) => {
@@ -477,10 +500,12 @@ _WATCHER = r"""
       const words = [];
       const pills = [];
       const marks = [];
+      const models = [];
       let accent = "";
       let theme = "";
       let hue = "";
       for (const trigger of document.querySelectorAll("[data-codex-intelligence-trigger]")) {
+        if (trigger.closest("[inert],[hidden]")) { continue; }
         const effort = norm(trigger.getAttribute("data-selected-reasoning-effort"));
         const labels = [];
         for (const layer of trigger.querySelectorAll("[data-reasoning-effort]")) {
@@ -495,9 +520,12 @@ _WATCHER = r"""
         const model = findModel(trigger, labels[0] || null);
         if (!model) { continue; }
         const surface = themeOf(textElement(model));
-        // The selected model's hue also tints the activity shimmer's gray;
-        // the first pill wins if there are several.
-        if (!accent) { accent = ACCENTS[model.key]; theme = surface; hue = Object.prototype.hasOwnProperty.call(HUES, model.key) ? String(HUES[model.key]) : ""; }
+        const selected = { element: trigger, colour: ACCENTS[model.key], theme: surface,
+                           hue: Object.prototype.hasOwnProperty.call(HUES, model.key) ? String(HUES[model.key]) : "" };
+        models.push(selected);
+        // A child composer can precede the main one in DOM order. Only the
+        // main conversation supplies the document's default accent.
+        if (!accent && !trigger.closest(TAB_PANEL_SELECTOR)) { accent = selected.colour; theme = surface; hue = selected.hue; }
         if (!effort) { continue; }
         if (effort === "ultra") {
           const ultra = ultraColour(model.key, surface);
@@ -514,7 +542,7 @@ _WATCHER = r"""
           words.push({ element: label, colour: ACCENTS[model.key] });
         }
       }
-      return { words: words, pills: pills, marks: marks, accent: accent, theme: theme, hue: hue };
+      return { words: words, pills: pills, marks: marks, models: models, accent: accent, theme: theme, hue: hue };
     }
     function applyShimmer(accent, theme, hue) {
       if (accent === state.accent && theme === state.theme && hue === state.hue) { return; }
@@ -532,6 +560,68 @@ _WATCHER = r"""
         root.removeAttribute(THEME);
       }
       state.accent = accent; state.theme = theme; state.hue = hue;
+    }
+    function headerModel(panel) {
+      if (!panel.getAttribute("data-tab-id").startsWith("subagents:")) { return null; }
+      const element = panel.querySelector(SUBAGENT_MODEL_SELECTOR);
+      if (!element || element.closest(TAB_PANEL_SELECTOR) !== panel) { return null; }
+      const text = norm(element.textContent);
+      // Try the whole value before removing the final effort suffix, since
+      // a Hub display label may itself contain a middle dot.
+      for (const candidate of [text, text.replace(/\s+·\s+[^·]+$/, "")]) {
+        if (Object.prototype.hasOwnProperty.call(ROUTES, candidate)) {
+          return { colour: ROUTES[candidate], theme: themeOf(element),
+                   hue: Object.prototype.hasOwnProperty.call(ROUTE_HUES, candidate) ? String(ROUTE_HUES[candidate]) : "" };
+        }
+        const key = lookup(candidate.startsWith("codex/") ? candidate.slice(6) : candidate);
+        if (key) { return { colour: ACCENTS[key], theme: themeOf(element), hue: Object.prototype.hasOwnProperty.call(HUES, key) ? String(HUES[key]) : "" }; }
+      }
+      return null;
+    }
+    function clearPanel(entry) {
+      for (const [property, saved] of entry.styles) {
+        if (entry.element.style.getPropertyValue(property) !== saved.value || entry.element.style.getPropertyPriority(property)) { continue; }
+        if (saved.previous) { entry.element.style.setProperty(property, saved.previous, saved.priority); }
+        else { entry.element.style.removeProperty(property); }
+      }
+      if (entry.element.getAttribute(THEME) === entry.theme) {
+        if (entry.previousTheme === null) { entry.element.removeAttribute(THEME); }
+        else { entry.element.setAttribute(THEME, entry.previousTheme); }
+      }
+    }
+    function applyPanels(models) {
+      const panels = new Set(document.querySelectorAll(CHILD_PANEL_SELECTOR));
+      for (const [element, entry] of state.panels) {
+        if (!panels.has(element)) { clearPanel(entry); state.panels.delete(element); }
+      }
+      for (const element of panels) {
+        const model = models.find((model) => model.element.closest(TAB_PANEL_SELECTOR) === element) || headerModel(element);
+        // `initial` makes a custom property invalid locally. An unknown
+        // child therefore uses the app's grey, and an achromatic child
+        // cannot accidentally borrow its parent's shimmer hue.
+        const values = [[ACCENT_PROPERTY, model ? model.colour : "initial"], [HUE_PROPERTY, model && model.hue ? model.hue : "initial"]];
+        let entry = state.panels.get(element);
+        if (!entry) {
+          entry = { element: element, styles: new Map(), theme: null, previousTheme: element.getAttribute(THEME) };
+          state.panels.set(element, entry);
+        }
+        for (const [property, value] of values) {
+          const current = element.style.getPropertyValue(property);
+          const priority = element.style.getPropertyPriority(property);
+          let saved = entry.styles.get(property);
+          if (!saved || current !== saved.value || priority) {
+            saved = { previous: current, priority: priority, value: value };
+            entry.styles.set(property, saved);
+          }
+          saved.value = value;
+          if (current !== value || priority) { element.style.setProperty(property, value); }
+        }
+        const theme = model ? model.theme : "unknown";
+        if (element.getAttribute(THEME) !== entry.theme) { entry.previousTheme = element.getAttribute(THEME); }
+        if (element.getAttribute(THEME) !== theme) { element.setAttribute(THEME, theme); }
+        entry.theme = theme;
+      }
+      if (panels.size) { installStyles(); }
     }
     function clearWords() {
       for (const entry of state.words) {
@@ -569,6 +659,7 @@ _WATCHER = r"""
         state.pills = found.pills; state.marks = found.marks;
       }
       applyShimmer(found.accent, found.theme, found.hue);
+      applyPanels(found.models);
     }
     function apply() {
       try { applyMenu(); } catch (error) {}
@@ -582,14 +673,15 @@ _WATCHER = r"""
     }
     // Observe the document node: at document start there is no root element yet.
     const observer = new MutationObserver(schedule);
-    observer.observe(document, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ["data-explicit-model", "data-accent", "data-maximum", "data-selected-reasoning-effort"] });
+    observer.observe(document, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ["data-explicit-model", "data-accent", "data-maximum", "data-selected-reasoning-effort", "data-tab-id", "data-app-shell-tab-panel-controller", "role", "inert", "hidden"] });
     if (document.readyState === "loading") { document.addEventListener("DOMContentLoaded", schedule, { once: true }); }
     window.__providerHubAccent = {
-      version: 12,
+      version: 13,
       accents: Object.keys(ACCENTS).length,
       check: () => ({ container: !!document.querySelector('[data-explicit-model="true"]'), label: state.label, colour: state.colour, ultra: state.ultra, targets: state.targets.length,
                       pills: state.words.map((entry) => entry.colour), ultraPills: state.pills.map((entry) => entry.colour), marks: state.marks.length,
                       shimmer: state.accent ? state.accent + ":" + state.theme : "", hue: state.hue,
+                      panels: Array.from(state.panels.values(), (entry) => ({ id: entry.element.getAttribute("data-tab-id"), accent: entry.styles.get(ACCENT_PROPERTY).value })),
                       banners: USAGE_SELECTOR ? document.querySelectorAll(USAGE_SELECTOR).length : null,
                       glyphs: document.querySelectorAll(GLYPH_SELECTOR).length }),
     };
@@ -607,8 +699,9 @@ def _label_key(label: str) -> str:
 
 
 def watcher_script(accents: dict, property_name: str = PROPERTY, hide_usage_banner: bool = False,
-                   native_labels=()) -> str:
+                   native_labels=(), route_accents: dict | None = None) -> str:
     table = {_label_key(label): colour for label, colour in accents.items()}
+    routes = {_label_key(route): colour for route, colour in (route_accents or {}).items()}
     native = {}
     for label in native_labels:
         key = _label_key(label)
@@ -623,6 +716,8 @@ def watcher_script(accents: dict, property_name: str = PROPERTY, hide_usage_bann
             ultras[key] = {"dark": NATIVE_CODEX_ACCENT, "light": NATIVE_CODEX_ACCENT}
     css = shimmer_css() + activity_glyph_css() + ultra_css() + (usage_banner_css() if hide_usage_banner else "")
     return (_WATCHER.replace("__HUB_ACCENTS__", json.dumps(table, ensure_ascii=False))
+            .replace("__HUB_ROUTE_ACCENTS__", json.dumps(routes, ensure_ascii=False))
+            .replace("__HUB_ROUTE_HUES__", json.dumps(hue_map(routes)))
             .replace("__HUB_NATIVE_LABELS__", json.dumps(native, ensure_ascii=False))
             .replace("__HUB_ULTRA__", json.dumps(ultras, ensure_ascii=False))
             .replace("__HUB_STYLE_CSS__", json.dumps(css))
@@ -630,6 +725,9 @@ def watcher_script(accents: dict, property_name: str = PROPERTY, hide_usage_bann
             .replace("__HUB_HUES__", json.dumps(hue_map(table)))
             .replace("__HUB_HUE_PROPERTY__", HUE_PROPERTY)
             .replace("__HUB_GLYPH_SELECTOR__", json.dumps(activity_glyph_selector()))
+            .replace("__HUB_TAB_PANEL_SELECTOR__", json.dumps(TAB_PANEL_SELECTOR))
+            .replace("__HUB_CHILD_PANEL_SELECTOR__", json.dumps(CHILD_PANEL_SELECTOR))
+            .replace("__HUB_SUBAGENT_MODEL_SELECTOR__", json.dumps(SUBAGENT_MODEL_SELECTOR))
             .replace("__HUB_THEME_ATTRIBUTE__", THEME_ATTRIBUTE)
             .replace("__HUB_ACCENT_PROPERTY__", ACCENT_PROPERTY)
             .replace("__HUB_ULTRA_ACCENT_PROPERTY__", ULTRA_ACCENT_PROPERTY)
@@ -969,7 +1067,9 @@ def bridge_command(app_path: str, settings: dict, inventory: dict, emit=None, lo
         emit({"event": "accents", "count": len(accents), "usage_banner": "hidden" if hide_banner else "shown"})
         run_options.setdefault("environment", child_environment(bundle))
         return run(binary, watcher_script(accents, hide_usage_banner=hide_banner,
-                                         native_labels=native_codex_labels(inventory)), emit=emit, **run_options)
+                                         native_labels=native_codex_labels(inventory),
+                                         route_accents=accent_map(settings, inventory, by_route=True)),
+                   emit=emit, **run_options)
     finally:
         if stream is not None:
             stream.close()

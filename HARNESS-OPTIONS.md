@@ -423,7 +423,7 @@ per-theme constant, `#ffffffbf` light, `#0009` dark), and resets both on
 the element with a zero-specificity `:where()` rule. The watcher sets
 `--provider-hub-accent`, `--provider-hub-hue` (the accent's OKLCH hue in
 degrees, projected by the hub; an achromatic accent gets none) and
-`data-provider-hub-theme` on the root from the pill's model, and a
+`data-provider-hub-theme` on the root from the main composer's model, and a
 zero-specificity rule in the adopted stylesheet sets the foreground to
 `oklch(from var(--color-codex-description) l 0.07 var(--provider-hub-hue))`:
 the app's own gray at its own lightness and alpha with a fixed 0.07 of
@@ -453,6 +453,30 @@ inherited, so the foreground has to be set there, and the only name on that
 element is hashed; the authored triple it also carries,
 `relative inline-block align-top`, occurs once in the whole bundle and is the
 hook if this is ever worth taking.
+
+Side Chats and selected subagent transcripts have their own accent scope.
+The watcher identifies their app-shell tab panels by the authored
+`role="tabpanel"`, `data-app-shell-tab-panel-controller` and `data-tab-id`
+hooks (`sidechat:`, `sidechat-loading:` and `subagents:` prefixes). Their
+composers cannot supply the root's accent, even if a child appears before
+the main composer in DOM order. Each child panel gets local accent, hue
+and theme values from its own composer, or from the selected subagent
+header's model metadata when there is no composer. Header routing IDs use
+the same resolved catalogue presentation as picker labels, including custom
+branding and hosted model brands; native Codex names keep the existing
+punctuation matching. The optional localised effort suffix is ignored.
+
+The child values stay inside that panel, including when a Side Chat moves
+to the bottom panel. Model changes, tab reuse and panel removal refresh or
+restore only the watcher's own values. An unknown or loading child keeps
+the app's original grey glyphs; an achromatic child blocks inherited hue.
+The main transcript keeps its parent's accent. Provider identicons and
+warning glyphs still keep their own colours. Optional Chromium regressions
+in `Source/test_codex_accent_dom.py` exercise these behaviours using the
+installed app's pane/header markup; they require Node, Playwright and its
+Chromium browser (a bundled package directory can be supplied in `NODE_PATH`).
+The worker must be rebuilt into Provider Hub, then Codex / ChatGPT relaunched
+through it for the new watcher to take effect.
 
 No rule keys on that shimmer to find an icon. One did —
 `svg:has(~ .loading-shimmer-pure-text)`, and the same icon one wrapper deep —

@@ -107,6 +107,15 @@ class AccentMapTests(unittest.TestCase):
         accents = accent_map(settings, inventory)
         self.assertEqual(accents, {"Kimi for Coding": "#0073E6", "Qwen 3": "#8C52EF"})
 
+    def test_routes_use_the_same_resolved_branding_as_composer_labels(self):
+        settings, inventory = fixture()
+        inventory["models"][0]["display_name"] = "My renamed Kimi"
+        inventory["models"][0]["presentation"]["accent"] = "#123abc"
+        self.assertEqual(accent_map(settings, inventory, by_route=True), {
+            "kimi/kimi-for-coding": "#123ABC", "ollama/qwen3:cloud": "#8C52EF",
+        })
+        self.assertEqual(accent_map(settings, inventory)["My renamed Kimi"], "#123ABC")
+
     def test_watcher_embeds_lowercased_labels_the_property_and_the_origin_guard(self):
         script = watcher_script({"Kimi for Coding": "#0073E6", "Qwen 3": "#8C52EF"})
         self.assertIn('"kimi for coding": "#0073E6"', script)
@@ -158,7 +167,7 @@ class AccentMapTests(unittest.TestCase):
         selector = activity_glyph_selector()
         self.assertEqual(selector, '[class~="group/activity-header"] span[class~="contents"] > svg[class~="text-text/60"]')
         css = activity_glyph_css()
-        self.assertEqual(css, f"[{THEME_ATTRIBUTE}] {selector}"
+        self.assertEqual(css, f'[{THEME_ATTRIBUTE}] {selector}:not([{THEME_ATTRIBUTE}="unknown"] *)'
                               f"{{color:var({ACCENT_PROPERTY},currentColor)!important}}")
         # The glyph is taken by the slot's own child, so nothing else in the row is:
         # the disclosure chevron sits outside the slot, and a glyph that names a
@@ -491,6 +500,8 @@ class LaunchTests(unittest.TestCase):
             self.assertIn("aside:has(", scripts[0])
             native_names.assert_called_once_with(inventory)
             self.assertIn('"gpt-6-astra": "#705AFF"', scripts[0])
+            routes = json.loads(re.search(r"const ROUTES = (.+);", scripts[0]).group(1))
+            self.assertEqual(routes, {"kimi/kimi-for-coding": "#0073E6", "ollama/qwen3:cloud": "#8C52EF"})
 
     def test_executable_path_reads_the_bundle_plist(self):
         with tempfile.TemporaryDirectory() as directory:
