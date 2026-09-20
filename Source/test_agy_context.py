@@ -87,3 +87,32 @@ class ContextPackagingTests(unittest.TestCase):
                     result = subprocess.run([sys.executable, str(hook / "host_handoff.py")],
                                             input=json.dumps(payload), text=True, capture_output=True, check=True)
                     self.assertEqual(json.loads(result.stdout)["decision"], decision)
+
+    def test_finish_waits_for_successful_complete_reads_and_host_actions_stay_blocked(self):
+        with tempfile.TemporaryDirectory() as directory:
+            part = str((Path(directory) / "part.txt").resolve())
+            Path(part).write_text("first\nsecond\nthird\n")
+            hook = adapter._install_host_hook(directory, [], [part])
+            reads = context.ContextReads([part])
+            reads.checkpoint(hook / "context-pending.json")
+
+            def invoke(name, index):
+                payload = {"conversationId": "test", "stepIdx": index,
+                           "toolCall": {"name": name, "args": {"text": "premature", "tool_calls": []}}}
+                result = subprocess.run([sys.executable, str(hook / "host_handoff.py")],
+                                        input=json.dumps(payload), text=True, capture_output=True, check=True)
+                return json.loads(result.stdout)
+
+            denied = invoke("finish", 1)
+            self.assertEqual(denied["decision"], "deny")
+            self.assertIn(part, denied["reason"])
+            self.assertTrue((hook / "context-wait-1.json").exists())
+            reads.record(part, {"StartLine": 2, "EndLine": 3})
+            self.assertEqual(invoke("finish", 2)["decision"], "deny")
+            self.assertEqual(json.loads((hook / "context-pending.json").read_text()), {part: [[1, 1]]})
+            self.assertIn("still loading context", invoke("run_command", 3)["reason"])
+            self.assertFalse((hook / "blocked-3.json").exists())
+            reads.record(part, {"StartLine": 1, "EndLine": 1})
+            self.assertEqual(invoke("finish", 4), {"decision": "allow"})
+            self.assertIn("captured this request", invoke("run_command", 5)["reason"])
+            self.assertTrue((hook / "blocked-5.json").exists())

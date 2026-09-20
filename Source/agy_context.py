@@ -4,6 +4,7 @@ AGY 1.2.7 silently clips an input near 192,000 UTF-8 bytes. Its view_file
 tool supports 800 lines / 46,080 bytes per read. Keep comfortably below both
 limits, including for Unicode and long single-line tool manifests.
 """
+import json
 from pathlib import Path
 from cli_tool_call import TRANSCRIPT_HEADER
 
@@ -103,6 +104,34 @@ class ContextReads:
     def __init__(self, paths):
         self.lines = {path: max(1, len(Path(path).read_bytes().splitlines())) for path in paths}
         self.seen = {path: set() for path in paths}
+        self.checkpoint_path = None
+
+    def checkpoint(self, path=None):
+        """Publish only reads confirmed DONE by the adapter, for the native hook.
+
+        A pre-tool approval is not evidence that a read succeeded. The hook
+        uses this atomic checkpoint to keep premature finish/host requests in
+        AGY's current turn until every transported line has actually arrived.
+        """
+        if path is not None:
+            self.checkpoint_path = Path(path)
+        if self.checkpoint_path is None:
+            return
+        pending = {}
+        for name, count in self.lines.items():
+            ranges = []
+            for line in range(1, count + 1):
+                if line in self.seen[name]:
+                    continue
+                if ranges and ranges[-1][1] == line - 1:
+                    ranges[-1][1] = line
+                else:
+                    ranges.append([line, line])
+            if ranges:
+                pending[name] = ranges
+        staging = self.checkpoint_path.with_suffix(".tmp")
+        staging.write_text(json.dumps(pending), encoding="utf-8")
+        staging.replace(self.checkpoint_path)
 
     def record(self, path, parameters):
         count = self.lines[path]
@@ -112,6 +141,7 @@ class ContextReads:
             return
         # Native reads are bounded even if the model asks for a wider range.
         self.seen[path].update(range(start, min(end, count, start + 799) + 1))
+        self.checkpoint()
 
     def complete(self):
         return all(len(self.seen[path]) == count for path, count in self.lines.items())

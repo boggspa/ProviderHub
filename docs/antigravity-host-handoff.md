@@ -91,3 +91,53 @@ version, build and source revision instead of an unrelated hard-coded version.
 Release verification must compare the installed manifest and worker files,
 validate the stapled notarization ticket, and check the running gateway identity
 after launch. A new archive alone does not update `/Applications`.
+
+## Workflow retries and delayed completion (2026-09-20)
+
+The reported Jev workflow's parent transcript recorded repeated HTTP 502s
+with `agy finished before reading all supplied context parts; no answer or
+host action was released`. These were incomplete context reads, not observed
+Google quota errors. The Swift helper's 45-second control-command timeout is
+not on the desktop's model-request path.
+
+The context transport now writes an atomic checkpoint after successful native
+`view_file` events. Until every required line is covered, the existing private
+hook denies `finish` and other actions with the unread paths/ranges. AGY can
+read the remaining context and continue in the same process. The adapter
+recognizes these denials only with a matching receipt and confirmed blocked
+event; they never become desktop tool calls. An approval alone does not count
+as a successful read, and the final completeness check remains in place.
+
+Streaming CLI requests now start an SSE keepalive after five quiet seconds,
+even before the first model event. This protects startup and context loading
+on Messages and its Responses relay. Immediate failures still return HTTP
+errors; failures after streaming begins emit an SSE error without a successful
+completion. This does not extend worker-slot admission or provider deadlines.
+
+Claude did wake the parent after this workflow: its transcript contains the
+completion notification at 15:26:34 BST and the automatic Gemini answer at
+15:27:29, before the user's 15:27:32 follow-up. The screenshot at 15:26:49 was
+taken during that 55-second quiet interval. No wake-up scheduling change is
+needed for this observed run.
+
+Tests cover partial reads, premature finish and host requests, recovery in one
+turn on both desktop protocols, mismatched receipts, and quiet streaming.
+Live Gemini 3.1 Pro Low probes read nine transported context parts and answered
+successfully, then recovered from a deliberately premature native `finish`
+by obeying the hook, reading the remaining private part, and completing in the
+same CLI turn. Neither probe requested a host action.
+
+### Workflow model names
+
+In the installed Claude Desktop 2.2553.1 renderer, the workflow agent row in
+`ion-dist/assets/v1/cd5a31703-ChuTw_FH.js` calls the `H_` formatter exported by
+`shared-0-8LmBcbZC.js`. That formatter parses the leading Claude family/version
+and `[1m]` suffix directly from the ID. It never consults `/v1/models`
+`display_name` or the managed `modelPicker.options[].label`.
+
+Consequently, `claude-fable-5-antigravity-gem-ini-3-1-pro[1m]` is displayed as
+`Fable 5 1M` even though its route-specific picker label is available. Changing
+the catalogue label cannot change this panel. A native sidebar fix requires
+renderer support for resolving the full model ID against the catalogue;
+Provider Hub's current profile/gateway integration has no label override for
+that formatter. Preserve the routing IDs and `behavesAs` capability metadata.

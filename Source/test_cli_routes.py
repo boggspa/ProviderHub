@@ -657,6 +657,61 @@ class GatewayCliTurnTest(unittest.TestCase):
         self.assertIn(b"not found on PATH", raw)
         self.assertEqual(self.runtime.status()["completed"], 0)
 
+    def test_quiet_cli_startup_sends_keepalive_before_model_output_on_both_surfaces(self):
+        for surface in ("messages", "responses"):
+            with self.subTest(surface=surface):
+                release = threading.Event()
+                entered = threading.Event()
+
+                def quiet_turn(request, *, timeout=300):
+                    entered.set()
+                    if not release.wait(4):
+                        yield {"type": "error", "message": "test release timed out"}
+                        return
+                    yield {"type": "text_delta", "text": "QUIET START OK"}
+                    yield {"type": "message_stop", "stop_reason": "end_turn"}
+
+                cli_routes._cache["claude"] = _fake_adapter(run_turn=quiet_turn)
+                body = {"model": "claude/claude-sonnet-5", "stream": True}
+                if surface == "messages":
+                    body.update(max_tokens=64, messages=[{"role": "user", "content": "hi"}])
+                else:
+                    body.update(store=False, input="hi")
+                connection = http.client.HTTPConnection("127.0.0.1", self.gateway.server_port, timeout=2)
+                try:
+                    with patch.object(gateway_module, "CLI_KEEPALIVE_INTERVAL", .02):
+                        connection.request("POST", "/v1/" + surface, json.dumps(body), {
+                            "Authorization": "Bearer " + self.runtime.token, "Content-Type": "application/json"})
+                        self.assertTrue(entered.wait(2))
+                        response = connection.getresponse()
+                        self.assertEqual(response.status, 200)
+                        self.assertFalse(release.is_set())
+                        if surface == "messages":
+                            self.assertEqual(response.readline(), b"event: ping\n")
+                        release.set()
+                        raw = response.read().decode()
+                        self.assertIn("QUIET START OK", raw)
+                        self.assertIn("response.completed" if surface == "responses" else "message_stop", raw)
+                        self.assertNotIn("event: error", raw)
+                finally:
+                    release.set()
+                    connection.close()
+
+    def test_error_after_idle_keepalive_uses_one_sse_error_and_no_success(self):
+        def quiet_failure(request, *, timeout=300):
+            time.sleep(.08)
+            yield {"type": "error", "message": "provider unavailable"}
+
+        cli_routes._cache["claude"] = _fake_adapter(run_turn=quiet_failure)
+        with patch.object(gateway_module, "CLI_KEEPALIVE_INTERVAL", .01):
+            status, raw = self.request({"model": "claude/claude-sonnet-5", "max_tokens": 64,
+                "stream": True, "messages": [{"role": "user", "content": "hi"}]})
+        self.assertEqual(status, 200)
+        self.assertIn(b"event: ping", raw)
+        self.assertEqual(raw.count(b"event: error"), 1)
+        self.assertNotIn(b"message_stop", raw)
+        self.assertEqual(self.runtime.status()["completed"], 0)
+
     def test_non_retryable_cli_protocol_error_returns_400_in_both_modes(self):
         self.events = [{"type": "error", "message": "thread/start: invalid dynamic tool schema", "http_status": 400}]
         for stream in (False, True):

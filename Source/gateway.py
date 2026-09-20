@@ -59,6 +59,7 @@ from codex_runtime import qualify_runtime, runtime_signature
 from claude_context import claude_context_spec
 
 MAX_BODY = 32 * 1024 * 1024
+CLI_KEEPALIVE_INTERVAL = 5.0
 
 
 def build_identity(resources=None):
@@ -756,7 +757,7 @@ class Handler(BaseHTTPRequestHandler):
         response = None
         upstream_socket = None
         disconnected = threading.Event()
-        write_lock = threading.Lock()
+        write_lock = threading.RLock()
         streaming = False
         closed = threading.Event()
         monitor = None
@@ -1059,47 +1060,52 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.flush()
 
         def emit(event):
-            if disconnected.is_set():
-                raise BrokenPipeError()
-            if streaming:
-                write_chunk(("event: " + event["type"] + "\ndata: " + json.dumps(event, ensure_ascii=False) + "\n\n").encode())
-            else:
-                collected.append(event)
+            with write_lock:
+                if disconnected.is_set():
+                    raise BrokenPipeError()
+                if closed.is_set():
+                    return
+                if streaming:
+                    write_chunk(("event: " + event["type"] + "\ndata: " + json.dumps(event, ensure_ascii=False) + "\n\n").encode())
+                else:
+                    collected.append(event)
 
         def begin_stream():
             nonlocal streaming
-            if streaming or not stream:
-                return
-            self.send_response(200)
-            self.send_header("Content-Type", "text/event-stream")
-            self.send_header("Cache-Control", "no-cache")
-            self.send_header("Transfer-Encoding", "chunked")
-            self.send_header("Connection", "close")
-            self.end_headers()
-            streaming = True
+            with write_lock:
+                if streaming or not stream or closed.is_set():
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Cache-Control", "no-cache")
+                self.send_header("Transfer-Encoding", "chunked")
+                self.send_header("Connection", "close")
+                self.end_headers()
+                streaming = True
 
-            def ping_loop():
-                while not closed.wait(10):
-                    try:
+        def ping_loop():
+            while not closed.wait(CLI_KEEPALIVE_INTERVAL):
+                try:
+                    with write_lock:
+                        begin_stream()
                         emit({"type": "ping"})
-                    except (OSError, ValueError):
-                        disconnected.set()
-                        return
-
-            threading.Thread(target=ping_loop, daemon=True).start()
+                except (OSError, ValueError):
+                    disconnected.set()
+                    return
 
         def finish_stream():
-            closed.set()
             with write_lock:
+                closed.set()
                 self.wfile.write(b"0\r\n\r\n")
                 self.wfile.flush()
             self.close_connection = True
 
         try:
             if stream:
-                # The first content event commits the reply to SSE; an error
-                # that arrives before any content is still a clean HTTP error,
-                # matching what an upstream failure would have produced.
+                # Slow startup/context loading can be silent for minutes.
+                # Commit to SSE after a short grace period even before the
+                # first model event; immediate failures still use HTTP errors.
+                threading.Thread(target=ping_loop, daemon=True).start()
                 def committing_emit(event):
                     begin_stream()
                     emit(event)
@@ -1127,15 +1133,19 @@ class Handler(BaseHTTPRequestHandler):
             message = f"{plan['provider_name']} CLI route failed: {result['error']}"
             status = 400 if result.get("http_status") == 400 else 502
             self.runtime.record("error", route, status)
-            if streaming:
-                try:
-                    emit({"type": "error", "error": {
-                        "type": "invalid_request_error" if status == 400 else "api_error", "message": message}})
-                    finish_stream()
-                except OSError:
-                    pass
-            else:
-                self.error(status, message)
+            # Serialize with the first idle ping so headers cannot be sent
+            # twice when a fast failure arrives at the grace-period boundary.
+            with write_lock:
+                if streaming:
+                    try:
+                        emit({"type": "error", "error": {
+                            "type": "invalid_request_error" if status == 400 else "api_error", "message": message}})
+                        finish_stream()
+                    except OSError:
+                        pass
+                else:
+                    closed.set()
+                    self.error(status, message)
             return False
         if stream:
             finish_stream()

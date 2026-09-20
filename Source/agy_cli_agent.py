@@ -720,6 +720,16 @@ _HOST_HOOK = '''import json, sys
 from pathlib import Path
 
 root = Path(__file__).resolve().parent
+
+def receipt(prefix, payload):
+    index = payload["stepIdx"]
+    if type(index) is not int or index < 0:
+        raise ValueError("invalid step index")
+    target = root / (prefix + str(index) + ".json")
+    staging = target.with_suffix(".tmp")
+    staging.write_text(json.dumps(payload, allow_nan=False))
+    staging.replace(target)
+
 try:
     payload = json.loads(sys.stdin.buffer.read(1024 * 1024 + 1))
     call = payload["toolCall"]
@@ -727,17 +737,22 @@ try:
     images = json.loads((root / "images.json").read_text())
     context = json.loads((root / "context.json").read_text())
     path = args.get("AbsolutePath") if isinstance(args, dict) else None
-    if name == "finish" or (name == "view_file" and isinstance(path, str)
-                            and str(Path(path).resolve()) in images + context):
+    private_read = (name == "view_file" and isinstance(path, str)
+                    and str(Path(path).resolve()) in images + context)
+    pending = {}
+    if context and not private_read:
+        checkpoint = root / "context-pending.json"
+        pending = json.loads(checkpoint.read_text()) if checkpoint.exists() else dict.fromkeys(context)
+    if pending:
+        receipt("context-wait-", payload)
+        print(json.dumps({"decision": "deny", "reason":
+            "Provider Hub is still loading context. Read these private files with native view_file "
+            "before finish or any host request (omit StartLine/EndLine to read the entire part): "
+            + json.dumps(pending) + ". Then continue from the real host results; no host action has run."}))
+    elif name == "finish" or private_read:
         print(json.dumps({"decision": "allow"}))
     else:
-        index = payload["stepIdx"]
-        if type(index) is not int or index < 0:
-            raise ValueError("invalid step index")
-        target = root / ("blocked-" + str(index) + ".json")
-        staging = target.with_suffix(".tmp")
-        staging.write_text(json.dumps(payload, allow_nan=False))
-        staging.replace(target)
+        receipt("blocked-", payload)
         print(json.dumps({"decision": "deny", "reason":
             "Provider Hub captured this request for the desktop host. Do not execute it here; return the structured host reply."}))
 except Exception:
@@ -879,6 +894,31 @@ def _capture_native_handoff(step, state):
         state.failure_code = "invalid_cli_tool_call"
 
 
+def _context_wait(step, state):
+    """Recognize our own pre-execution context deferral, never a host call."""
+    index = step.get("step_index")
+    if state.hook_root is None or type(index) is not int or index < 0:
+        return False
+    path = state.hook_root / f"context-wait-{index}.json"
+    if not path.is_file():
+        return False
+    receipt = json.loads(path.read_text(encoding="utf-8"))
+    info = step.get("tool_info") or {}
+    name = info.get("name") or step.get("tool_name")
+    if receipt.get("conversationId") != step.get("conversation_id") \
+            or receipt.get("stepIdx") != index or (receipt.get("toolCall") or {}).get("name") != name:
+        raise AgyCliAgentError("agy context deferral receipt did not match the streamed request")
+    phase = str(step.get("state") or "").upper()
+    if phase in {"ACTIVE", "PENDING", "RUNNING"}:
+        return True
+    detail = (info.get("error") or {}).get("message", "")
+    if phase != "ERROR" or not isinstance(detail, str) or not detail.startswith(
+            "tool call denied by pre-tool hook: Provider Hub is still loading context."):
+        state.failure = "agy did not confirm the premature action was blocked; no host action was dispatched."
+        state.failure_status = 400
+    return True
+
+
 class _TurnState:
     """Mutable accumulation for one streamed turn."""
 
@@ -970,6 +1010,8 @@ def _translate(payload: Any, state: _TurnState) -> list[dict]:
         if step_type == "tool":
             info = step.get("tool_info") or {}
             name = info.get("name") or step.get("tool_name")
+            if _context_wait(step, state):
+                return []
             if state.structured and name == "finish":
                 # --json-schema is implemented by agy's own finish tool.
                 # Wait for SUCCESS and consume result.structured_output.
@@ -1256,6 +1298,7 @@ def run_turn(request, *, spawner=None, timeout=300) -> Iterator[dict]:
         state.context_reads = ContextReads(context_paths)
         if state.structured or context_paths:
             state.hook_root = _install_host_hook(workspace_path, state.image_paths, context_paths)
+            state.context_reads.checkpoint(state.hook_root / "context-pending.json")
 
         # stderr goes to a temp file, not a pipe: a pipe nobody drains can fill
         # and deadlock the child, and agy's diagnostics there are worth keeping.

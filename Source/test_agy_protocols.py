@@ -1,6 +1,7 @@
 """Exercise AGY context and finish repair through both desktop protocols."""
 import json
 from pathlib import Path
+import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -125,6 +126,71 @@ class AgyDesktopProtocolTests(unittest.TestCase):
                 events = self.run_plan(plan, factory)
                 self.assertEqual([event["type"] for event in events], ["error"])
                 self.assertEqual(events[0]["code"], "incomplete_cli_context")
+
+    def test_premature_finish_and_host_requests_recover_within_one_cli_turn(self):
+        import subprocess
+        import sys
+
+        for surface in ("messages", "responses"):
+            for early_tool in ("finish", "run_command"):
+                with self.subTest(surface=surface, early_tool=early_tool):
+                    plan = cli_routes.plan_turn("antigravity", "gemini-3.1-pro",
+                        self.payload(surface, "x" * 210_000), {}, wanted_output=128)
+                    launches = []
+
+                    def factory(argv, **kwargs):
+                        root = Path(kwargs["cwd"])
+                        launches.append(root)
+                        session = Session([])
+
+                        def script():
+                            payload = {"conversationId": "c1", "stepIdx": 1,
+                                       "toolCall": {"name": early_tool, "args": {"text": "premature", "tool_calls": []}}}
+                            outcome = subprocess.run([sys.executable, str(root / ".agents/host_handoff.py")],
+                                input=json.dumps(payload), text=True, capture_output=True, check=True)
+                            denied = json.loads(outcome.stdout)
+                            self.assertEqual(denied["decision"], "deny")
+                            yield {"event": "step_update", "step_update": {
+                                "conversation_id": "c1", "step_index": 1, "step_type": "tool", "state": "ERROR",
+                                "tool_info": {"name": early_tool, "parameters": payload["toolCall"]["args"],
+                                              "error": {"message": "tool call denied by pre-tool hook: " + denied["reason"]}}}}
+                            for path in json.loads((root / ".agents/context.json").read_text()):
+                                yield {"event": "step_update", "step_update": {"step_type": "tool", "state": "DONE",
+                                    "tool_info": {"name": "view_file", "parameters": {"AbsolutePath": path}}}}
+                            self.assertEqual(json.loads((root / ".agents/context-pending.json").read_text()), {})
+                            yield finish_result({"text": "ALPHA BETA", "tool_calls": []})
+
+                        session.script = script()
+                        return session
+
+                    events = self.run_plan(plan, factory)
+                    self.assertEqual(len(launches), 1)
+                    self.assertEqual([e["type"] for e in events], ["text_delta", "message_stop"])
+                    self.check_wire(events, surface, "ALPHA BETA", 0)
+
+    def test_context_deferral_requires_matching_receipt_and_confirmed_denial(self):
+        import subprocess
+        import sys
+
+        with tempfile.TemporaryDirectory() as directory:
+            part = str((Path(directory) / "context.txt").resolve())
+            Path(part).write_text("required context")
+            root = adapter._install_host_hook(directory, [], [part])
+            payload = {"conversationId": "c1", "stepIdx": 1,
+                       "toolCall": {"name": "run_command", "args": {"CommandLine": "must not execute"}}}
+            denied = json.loads(subprocess.run([sys.executable, str(root / "host_handoff.py")],
+                input=json.dumps(payload), text=True, capture_output=True, check=True).stdout)
+            state = adapter._TurnState()
+            state.hook_root = root
+            step = {"conversation_id": "wrong", "step_index": 1, "step_type": "tool", "state": "ERROR",
+                    "tool_info": {"name": "run_command", "error": {
+                        "message": "tool call denied by pre-tool hook: " + denied["reason"]}}}
+            with self.assertRaisesRegex(adapter.AgyCliAgentError, "receipt did not match"):
+                adapter._translate({"event": "step_update", "step_update": step}, state)
+            step.update(conversation_id="c1", state="DONE")
+            adapter._translate({"event": "step_update", "step_update": step}, state)
+            self.assertEqual(state.failure_status, 400)
+            self.assertIsNone(state.handoff_reply)
 
     def test_private_context_lifetime_uses_the_process_exit_cleanup(self):
         plan = cli_routes.plan_turn("antigravity", "gemini-3.1-pro", self.payload("messages", "x" * 210_000), {}, wanted_output=128)
