@@ -391,11 +391,14 @@ class FetchModelsTests(unittest.TestCase):
             self.closed = False
             self.process = None
             self.returncode = None
+            self.config_response = {"result": {"config": {}}}
 
         def request(self, method, params, timeout=None):
             self.requests.append((method, params, timeout))
             if method == "initialize":
                 return {"result": {}}
+            if method == "config/read":
+                return self.config_response
             if method == "model/list":
                 idx = len(self.list_calls)
                 self.list_calls.append(params)
@@ -429,6 +432,58 @@ class FetchModelsTests(unittest.TestCase):
         self.assertIsNone(fake.list_calls[0]["cursor"])
         self.assertEqual(fake.list_calls[1]["cursor"], "1")
         self.assertTrue(fake.closed)
+
+    def test_native_context_survives_discovery_without_selecting_larger_maximum(self):
+        fake = self._FetchSession([{"result": {"data": [
+            {"model": "gpt-budget"}, {"model": "gpt-unknown", "displayName": "gpt-budget"}],
+            "nextCursor": None}}])
+        with tempfile.TemporaryDirectory() as tmp:
+            base = codex.Path(tmp)
+            cache = base / ".codex" / "models_cache.json"
+            cache.parent.mkdir()
+            cache.write_text(json.dumps({"models": [{"slug": "gpt-budget",
+                "context_window": 272000, "max_context_window": 872000,
+                "effective_context_window_percent": 95}]}))
+            with mock.patch.object(codex.Path, "home", return_value=base), \
+                    mock.patch.object(codex, "StdioSession", return_value=fake), \
+                    mock.patch.object(codex, "runtime_binary", return_value="/fake/codex"):
+                rows = codex.fetch_models(binary="/fake/codex", spawner="stub")
+        self.assertEqual(rows[0]["context"], 272000)
+        self.assertEqual(rows[0]["runtime_context"], 258400)
+        self.assertEqual(rows[0]["context_kind"], "runtime_catalogue")
+        self.assertEqual(rows[0]["context_evidence"], str(cache))
+        self.assertNotIn("context", rows[1])
+
+    def test_native_context_override_and_invalid_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = codex.Path(tmp) / "native-models.json"
+            argv = ["codex", "-c", "model_catalog_json=" + json.dumps(str(cache)), "app-server"]
+            valid = {"slug": "gpt-budget", "context_window": 272000,
+                     "max_context_window": 872000, "effective_context_window_percent": 95}
+            cache.write_text(json.dumps({"models": [valid]}))
+            self.assertEqual(codex._catalogue_context(argv, 100000)["gpt-budget"]["runtime_context"], 95000)
+            self.assertEqual(codex._catalogue_context(argv, True)["gpt-budget"]["runtime_context"], 258400)
+            for field, values in (("context_window", (None, True, 0, -1, "272000")),
+                                  ("effective_context_window_percent", (None, True, 0, 101, "95"))):
+                for value in values:
+                    with self.subTest(field=field, value=value):
+                        cache.write_text(json.dumps({"models": [{**valid, field: value}]}))
+                        self.assertEqual(codex._catalogue_context(argv), {})
+            for text in ("{", "[]", '{"models": null}'):
+                cache.write_text(text)
+                self.assertEqual(codex._catalogue_context(argv), {})
+            cache.unlink()
+            self.assertEqual(codex._catalogue_context(argv), {})
+            self.assertEqual(codex._catalogue_context(["codex", "app-server"]), {})
+
+    def test_failed_config_probe_does_not_hide_routable_models(self):
+        fake = self._FetchSession([{"result": {"data": [{"model": "gpt-budget"}]}}])
+        fake.config_response = {"error": {"message": "config/read unavailable"}}
+        with mock.patch.object(codex, "StdioSession", return_value=fake), \
+                mock.patch.object(codex, "runtime_binary", return_value="/fake/codex"):
+            rows = codex.fetch_models(binary="/fake/codex", spawner="stub")
+        self.assertEqual([row["model"] for row in rows], ["gpt-budget"])
+        self.assertNotIn("context", rows[0])
 
 
 class RunTurnTests(unittest.TestCase):
@@ -467,6 +522,36 @@ class RunTurnTests(unittest.TestCase):
         methods = [req[0] for req in session.requests]
         self.assertEqual(methods, ["initialize", "config/read", "thread/start", "turn/start"])
         self.assertIn("initialized", [n[0] for n in session.notifications])
+
+    def test_usage_uses_latest_request_and_splits_cached_input(self):
+        def usage(thread="t1", turn="t1", **counts):
+            return _ev("thread/tokenUsage/updated", {"threadId": thread, "turnId": turn,
+                "tokenUsage": {"total": {"inputTokens": 9000000, "outputTokens": 500000},
+                               "last": counts, "modelContextWindow": 258400}})
+        fake = FakeCodexSession([])
+        fake.script = [_delta_ev("hello"),
+            usage(inputTokens=10000, cachedInputTokens=8000, outputTokens=100),
+            usage(thread="another-thread", inputTokens=999, outputTokens=999),
+            usage(turn="another-turn", inputTokens=999, outputTokens=999),
+            usage(inputTokens=True, outputTokens=10),
+            usage(inputTokens=100, cachedInputTokens=101, outputTokens=10),
+            usage(inputTokens=8000, cachedInputTokens=6000, outputTokens=50),
+            _completed_turn()]
+        events, _, _ = self._run(self._request(), fake)
+        self.assertEqual([event["usage"] for event in events if event["type"] == "usage"], [
+            {"input_tokens": 2000, "cache_read_input_tokens": 8000, "output_tokens": 100},
+            {"input_tokens": 2000, "cache_read_input_tokens": 6000, "output_tokens": 50}])
+        self.assertEqual(events[-1]["type"], "message_stop")
+
+    def test_missing_or_invalid_usage_is_unknown_but_real_zero_is_preserved(self):
+        for last in (None, {}, {"inputTokens": -1, "outputTokens": 1},
+                     {"inputTokens": 1, "outputTokens": "2"},
+                     {"inputTokens": 1, "outputTokens": 1, "cachedInputTokens": False}):
+            with self.subTest(last=last):
+                self.assertIsNone(codex._usage_snapshot({"tokenUsage": {"last": last}}))
+        self.assertEqual(codex._usage_snapshot({"tokenUsage": {"last": {
+            "inputTokens": 0, "outputTokens": 0}}})["usage"],
+            {"input_tokens": 0, "cache_read_input_tokens": 0, "output_tokens": 0})
 
     def test_thinking_delta(self):
         fake = FakeCodexSession([])

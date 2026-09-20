@@ -50,6 +50,7 @@ Notifications consumed:
 ``item/reasoning/textDelta``   ``{"delta","contentIndex",...}``          -> thinking_delta
 ``item/reasoning/summaryTextDelta`` ``{"delta","summaryIndex",...}``     -> thinking_delta
 ``item/completed``             ``{"item":{"type":"agentMessage","text"}}``-> fallback text
+``thread/tokenUsage/updated``  ``{"tokenUsage":{"last":{...}},...}``      -> usage snapshot
 ``turn/completed``             ``{"turn":{"id","status","error"}}``       -> terminal
 ``error``                      ``{"error":{...},"willRetry",...}``        -> diagnostics
 
@@ -656,6 +657,45 @@ def parse_model_list(rows):
     return parsed
 
 
+def _catalogue_context(argv, configured_window=None):
+    """Context budgets from the same native catalogue passed to this runtime.
+
+    model/list omits context metadata. Join its exact model IDs to the native
+    catalogue selected on argv, never the Hub's projected rows or a model-name
+    guess. max_context_window is an optional larger ceiling, not the active
+    default. Preserve the runtime's reserved percentage in runtime_context.
+    """
+    path = None
+    for flag, value in zip(argv, argv[1:]):
+        if flag == "-c" and value.startswith("model_catalog_json="):
+            try:
+                path = Path(json.loads(value.split("=", 1)[1]))
+            except (ValueError, TypeError):
+                return {}
+    if path is None:
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    cards = payload.get("models") if isinstance(payload, dict) else None
+    if not isinstance(cards, list):
+        return {}
+    result = {}
+    for card in cards:
+        if not isinstance(card, dict) or not isinstance(card.get("slug"), str):
+            continue
+        window = configured_window if type(configured_window) is int and configured_window > 0 else card.get("context_window")
+        percent = card.get("effective_context_window_percent")
+        if type(window) is not int or window <= 0 or type(percent) is not int or not 0 < percent <= 100:
+            continue
+        effective = window * percent // 100
+        if effective > 0:
+            result[card["slug"]] = {"context": window, "runtime_context": effective,
+                                     "context_kind": "runtime_catalogue", "context_evidence": str(path)}
+    return result
+
+
 def _bounded_timeout(value, *, default, minimum=1.0):
     try:
         budget = float(value)
@@ -702,6 +742,17 @@ def fetch_models(*, binary=None, spawner=None, timeout=30):
         argv = _app_server_argv(binary=binary)
         session = _open_session(argv, workspace, spawner=spawner, timeout=budget)
         _handshake(session, timeout=budget * _HANDSHAKE_SHARE)
+        context = {}
+        try:
+            configured = _result(session.request("config/read", {"includeLayers": False},
+                                                 timeout=max(1.0, budget * 0.5)), context="config/read")
+            config = configured.get("config") or {}
+            if isinstance(config, dict):
+                context = _catalogue_context(argv, config.get("model_context_window"))
+        except (CodexCliAgentError, CliSessionError):
+            # An optional capacity probe must not hide otherwise routable
+            # models. Without resolved configuration, leave capacity unknown.
+            pass
         rows, cursor = [], None
         for page in range(_MAX_CATALOGUE_PAGES):
             response = session.request("model/list",
@@ -717,7 +768,7 @@ def fetch_models(*, binary=None, spawner=None, timeout=30):
                 break
         else:
             raise CodexCliAgentError("Codex returned too many catalogue pages.")
-        return parse_model_list(rows)
+        return [{**row, **context.get(row["model"], {})} for row in parse_model_list(rows)]
     finally:
         _teardown(session, workspace)
 
@@ -1209,6 +1260,25 @@ def _failure_message(turn):
     return None
 
 
+def _usage_snapshot(params):
+    """Normalize the latest request, never the thread's accumulated total.
+
+    Codex inputTokens already includes cachedInputTokens; Anthropic usage
+    counts the uncached and cached portions separately. Splitting here avoids
+    counting the cache twice when the Responses bridge recombines them.
+    """
+    info = params.get("tokenUsage")
+    last = info.get("last") if isinstance(info, dict) else None
+    if not isinstance(last, dict):
+        return None
+    incoming, outgoing = last.get("inputTokens"), last.get("outputTokens")
+    cached = last.get("cachedInputTokens", 0)
+    if any(type(value) is not int or value < 0 for value in (incoming, outgoing, cached)) or cached > incoming:
+        return None
+    return {"type": "usage", "usage": {"input_tokens": incoming - cached,
+            "cache_read_input_tokens": cached, "output_tokens": outgoing}}
+
+
 def _stream_turn(session, *, turn_id, deadline, tools=None, thread_id=None, summary_only=False,
                  lease=None, timing=None):
     """Consume notifications until the turn terminates.
@@ -1272,6 +1342,11 @@ def _stream_turn(session, *, turn_id, deadline, tools=None, thread_id=None, summ
                 if not isinstance(params, dict):
                     params = {}
                 if thread_id and params.get("threadId", thread_id) != thread_id:
+                    continue
+                if method == "thread/tokenUsage/updated":
+                    usage = _usage_snapshot(params)
+                    if usage is not None:
+                        yield usage
                     continue
                 if timing and (method in {"item/agentMessage/delta", "item/reasoning/textDelta",
                                           "item/reasoning/summaryTextDelta", "item/tool/call"} or

@@ -105,6 +105,24 @@ class CliRoutesTest(unittest.TestCase):
         self.assertIsNone(cli_routes._hub_row("codex", "a string"))
         self.assertIsNone(cli_routes._hub_row("codex", None))
 
+    def test_cli_runtime_context_and_provenance_reach_codex_catalogue(self):
+        from codex_catalogue import project_codex
+        from hub_config import project_catalogue
+
+        row = cli_routes._hub_row("codex", {"model": "gpt-budget", "context": 272000,
+            "runtime_context": 258400, "context_kind": "runtime_catalogue",
+            "context_evidence": "/native/models_cache.json"})
+        config = default_settings()
+        config["codex_catalogue"] = ["codex/gpt-budget"]
+        config["codex_model"] = "codex/gpt-budget"
+        qualified = project_catalogue("codex", {"models": [row], "source": "cli"}, config)
+        result = project_codex(config, {"models": qualified})["models"][0]
+        self.assertEqual(qualified[0]["context_evidence"], "/native/models_cache.json")
+        self.assertEqual(result["context_window"], 258400)
+        self.assertEqual(result["max_context_window"], 258400)
+        self.assertEqual(result["auto_compact_token_limit"], 219640)
+        self.assertEqual(result["effective_context_window_percent"], 100)
+
     def test_hub_row_passes_through_hub_shaped_family_cards(self):
         card = {"id": "claude-sonnet-4.6", "display_name": "Claude Sonnet 4.6",
                 "reasoning": True, "effort_modes": ["high"], "default_effort": "high",
@@ -396,6 +414,57 @@ class ParseToolStreamTest(unittest.TestCase):
                                  ("content_block_stop", 1),
                                  ("message_delta", None), ("message_stop", None)])
         self.assertEqual(emitted[2]["delta"], {"type": "thinking_delta", "thinking": "hmm"})
+
+    def test_usage_snapshots_replace_estimate_and_survive_responses_translation(self):
+        from responses_bridge import MessagesResponsesAdapter
+
+        emitted = []
+        result = relay_cli_turn(iter([
+            {"type": "text_delta", "text": "answer"},
+            {"type": "usage", "usage": {"input_tokens": 2000, "cache_read_input_tokens": 8000,
+                                        "output_tokens": 100}},
+            {"type": "usage", "usage": {"input_tokens": 2000, "cache_read_input_tokens": 6000,
+                                        "output_tokens": 50}},
+            {"type": "usage", "usage": {"input_tokens": True, "output_tokens": 999999}},
+            {"type": "message_stop", "stop_reason": "end_turn"}]),
+            emitted.append, model="codex/gpt-budget", input_tokens=15000)
+        self.assertEqual(emitted[0]["message"]["usage"], {"input_tokens": 15000, "output_tokens": 0})
+        self.assertEqual(result["usage"], {"input_tokens": 2000, "cache_read_input_tokens": 6000,
+                                           "cache_creation_input_tokens": 0, "output_tokens": 50})
+        self.assertEqual(emitted[-2]["usage"], result["usage"])
+        adapter = MessagesResponsesAdapter("codex/gpt-budget", None, "scope")
+        responses = [event for wire in emitted for event in adapter.feed(wire)]
+        self.assertEqual(responses[-1]["type"], "response.completed")
+        self.assertEqual(responses[-1]["response"]["usage"], {
+            "input_tokens": 8000, "output_tokens": 50, "total_tokens": 8050,
+            "input_tokens_details": {"cached_tokens": 6000}})
+
+    def test_relay_unknown_usage_keeps_estimate_and_measured_zero_replaces_it(self):
+        for reported, expected in ((None, 42), ({}, 42),
+                                   ({"input_tokens": 0, "output_tokens": 0}, 0)):
+            with self.subTest(reported=reported):
+                result = relay_cli_turn(iter([{"type": "usage", "usage": reported},
+                    {"type": "message_stop", "stop_reason": "end_turn"}]),
+                    lambda event: None, model="m", input_tokens=42)
+                self.assertEqual(result["usage"]["input_tokens"], expected)
+
+    def test_later_uncached_snapshot_clears_cache_already_sent_at_message_start(self):
+        from responses_bridge import MessagesResponsesAdapter
+
+        adapter = MessagesResponsesAdapter("codex/gpt-budget", None, "scope")
+        responses = []
+        relay_cli_turn(iter([
+            {"type": "usage", "usage": {"input_tokens": 2000, "cache_read_input_tokens": 8000,
+                                        "output_tokens": 100}},
+            {"type": "text_delta", "text": "answer"},
+            {"type": "usage", "usage": {"input_tokens": 1000, "output_tokens": 50}},
+            {"type": "usage", "usage": {"input_tokens": 999, "output_tokens": 999,
+                                        "cache_read_input_tokens": -1}},
+            {"type": "message_stop", "stop_reason": "end_turn"}]),
+            lambda event: responses.extend(adapter.feed(event)), model="codex/gpt-budget")
+        self.assertEqual(responses[-1]["response"]["usage"], {
+            "input_tokens": 1000, "output_tokens": 50, "total_tokens": 1050,
+            "input_tokens_details": {"cached_tokens": 0}})
 
     def test_relay_error_mid_stream_emits_no_terminal_envelope(self):
         emitted = []

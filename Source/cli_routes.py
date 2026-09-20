@@ -169,6 +169,11 @@ def _hub_row(provider_id: str, row):
         "source": "cli",
         "evidence": row.get("evidence") or f"the installed {ADAPTERS[provider_id][1]} CLI",
     }
+    if type(row.get("runtime_context")) is int and row["runtime_context"] > 0:
+        result["runtime_context"] = row["runtime_context"]
+    for field in ("context_kind", "context_evidence"):
+        if isinstance(row.get(field), str) and row[field]:
+            result[field] = row[field]
     default_effort = row.get("default_effort") or row.get("defaultReasoningEffort")
     if isinstance(default_effort, str) and default_effort in effort:
         result["default_effort"] = default_effort
@@ -645,10 +650,11 @@ def relay_cli_turn(events, emit, *, model, input_tokens=0) -> dict:
     """Translate adapter turn events into Anthropic Messages wire events.
 
     ``emit`` receives ready wire dicts (the gateway writes them as SSE chunks
-    for a streaming client or collects them for a buffered reply). Token
-    counts are the gateway's own request estimate on the input side and an
-    honest zero on the output side: none of these CLIs report usage, and an
-    invented number would poison the calibration loop.
+    for a streaming client or collects them for a buffered reply). A valid
+    adapter usage snapshot replaces the gateway's input estimate and unknown
+    (zero) output count. Snapshots are per request, never lifetime counters;
+    repeated updates replace rather than accumulate. Providers without usage
+    telemetry retain the existing estimate instead of an invented measurement.
 
     Returns a summary: ``error`` (None on success), ``started`` (whether any
     content reached the wire), ``stop_reason`` and ``usage``. Exactly one
@@ -665,6 +671,7 @@ def relay_cli_turn(events, emit, *, model, input_tokens=0) -> dict:
     error = None
     error_status = 502
     timing = getattr(events, "timing", None)
+    usage = {"input_tokens": int(input_tokens or 0), "output_tokens": 0}
 
     def start_message():
         nonlocal started
@@ -672,7 +679,7 @@ def relay_cli_turn(events, emit, *, model, input_tokens=0) -> dict:
             "id": message_id, "type": "message", "role": "assistant",
             "model": model, "content": [], "stop_reason": None,
             "stop_sequence": None,
-            "usage": {"input_tokens": int(input_tokens or 0), "output_tokens": 0}}})
+            "usage": dict(usage)}})
         started = True
 
     def open(kind, source=None):
@@ -693,6 +700,18 @@ def relay_cli_turn(events, emit, *, model, input_tokens=0) -> dict:
             kind = event.get("type") if isinstance(event, dict) else None
             if kind == "ping":
                 emit({"type": "ping"})
+                continue
+            if kind == "usage":
+                reported = event.get("usage")
+                fields = ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
+                if isinstance(reported, dict) and all(
+                        type(reported.get(key)) is int and reported[key] >= 0
+                        for key in fields[:2]) and all(
+                        type(reported[key]) is int and reported[key] >= 0
+                        for key in fields[2:] if key in reported):
+                    # Explicit zeros clear cache counts already sent at
+                    # message_start when a later snapshot has no cache use.
+                    usage = {key: reported.get(key, 0) for key in fields}
                 continue
             if kind == "error":
                 error = str(event.get("message") or "The CLI turn failed.")
@@ -747,7 +766,6 @@ def relay_cli_turn(events, emit, *, model, input_tokens=0) -> dict:
         if callable(close):
             close()
         raise
-    usage = {"input_tokens": int(input_tokens or 0), "output_tokens": 0}
     try:
         if error is not None:
             return {"error": error, "started": started, "stop_reason": None, "usage": usage,
@@ -758,7 +776,7 @@ def relay_cli_turn(events, emit, *, model, input_tokens=0) -> dict:
             emit({"type": "content_block_stop", "index": index})
         emit({"type": "message_delta",
               "delta": {"stop_reason": stop_reason, "stop_sequence": None},
-              "usage": {"output_tokens": 0}})
+              "usage": dict(usage)})
         emit({"type": "message_stop"})
         if timing:
             timing.delivered = True

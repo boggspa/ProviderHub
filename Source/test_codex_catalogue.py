@@ -111,8 +111,8 @@ class CuratedCatalogueProjectionTests(unittest.TestCase):
         self.assertEqual(automatic["excluded"][0]["id"], "mistral/no-tools-model")
 
     def test_an_account_dependent_route_still_gets_a_context_window(self):
-        # The Codex composer's ring has exactly one input, the catalogue's
-        # context_window, and draws nothing when it is null. A route whose
+        # The Codex composer's ring needs capacity as well as latest usage,
+        # and draws nothing when either is unknown. A route whose
         # window follows the account carries candidates instead of a number,
         # and dropping them left the ring dead - K3 among them, while its
         # fixed-window sibling k3-256k drew fine.

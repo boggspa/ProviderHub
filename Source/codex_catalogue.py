@@ -281,9 +281,9 @@ def project_codex(settings, inventory):
         if type(context) is not int or context <= 0:
             # A route whose window follows the account carries its candidates
             # rather than a single number, and this projection used to drop
-            # them - leaving context_window null, which is the one value the
-            # Codex composer cannot draw a context ring from. Its only input
-            # is this field; there is no fallback and no per-request channel.
+            # them, leaving the context limit unknown. The composer requires
+            # both modelContextWindow and last.totalTokens on the host's
+            # thread/tokenUsage/updated event; this row supplies its capacity.
             # Resolved upwards, as the Anthropic projection already does via
             # protocol._effective_context, so both surfaces tell the route the
             # same window. The cost is on a smaller membership, where the ring
