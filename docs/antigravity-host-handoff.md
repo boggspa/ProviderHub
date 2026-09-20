@@ -66,3 +66,28 @@ for both Messages and Responses with one host read each and no replay.
 This is a bounded adapter for the observed agy protocol, not a claim that every
 future native tool can be translated. Rebuild Provider Hub and reload its worker
 to use source changes in the desktop applications.
+
+## Recurring error traced to an older installed bundle (2026-09-20)
+
+The screenshot reporting `agy attempted a native tool instead of returning a
+host tool request` came from the installed 0.5.4 build 16. Its 39 top-level
+Python worker files exactly matched commit `41c4319`, which predates the
+`fb9c359` native handoff fix. The installed app was validly notarized; that
+established its signature and Apple approval, not that it contained later fixes.
+A newer notarized `4ac8c55` archive existed locally but had not been installed.
+
+The provider refactor was fast-forwarded to local `main`, and the pending Codex
+delegation regression test, probe and diagnosis were committed separately as
+`2ea3296`. The existing source passed 1,287 tests under CPython 3.13. Live Gemini
+3.1 Pro Medium checks on both Messages and Responses tool surfaces completed
+one host read, consumed its real result, and answered `How is it going?` without
+repeating the read. No native file or shell action executed. Medium resolves to
+the provider's high row because its Gemini 3.1 Pro catalogue exposes low/high.
+
+Build 17 adds `Contents/Resources/build-manifest.json`, which identifies the
+source commit, modified build inputs, and SHA-256 hashes of packaged worker
+files. The gateway's `/_bridge/health` endpoint reports the running bundle's
+version, build and source revision instead of an unrelated hard-coded version.
+Release verification must compare the installed manifest and worker files,
+validate the stapled notarization ticket, and check the running gateway identity
+after launch. A new archive alone does not update `/Applications`.

@@ -13,7 +13,7 @@ from unittest.mock import patch
 
 from bridge_core import (BridgeError, ClaudeProfile, PROFILE_ID, atomic_json, default_settings,
                          read_json, validate_settings)
-from gateway import Runtime, Server, rejection_details
+from gateway import Runtime, Server, build_identity, rejection_details
 from protocol import (StreamTranslator, TokenCalibration, ULTRACODE_NOTE, apply_mapping_options, compact_conversation, compact_threshold, conversation_units,
                       estimated_tokens, function_name, reported_input_tokens,
                       mapping_options_for, model_catalog, rewrite_context_reminders, tool_id,
@@ -1132,6 +1132,42 @@ class CompactionPlanTests(unittest.TestCase):
         self.assertIn('"estimated_after"', activity)
 
 
+class BuildIdentityTests(unittest.TestCase):
+    def test_bundle_manifest_reports_version_build_and_revision_only(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manifest = {"application": {"version": "0.5.5", "build": "17"},
+                        "source": {"revision": "a" * 40, "dirty": False, "verification": "git-tree",
+                                   "changed_inputs": ["private-path"]}}
+            atomic_json(Path(directory) / "build-manifest.json", manifest)
+            self.assertEqual(build_identity(directory), {
+                "version": "0.5.5", "build": "17", "source_revision": "a" * 40,
+                "source_dirty": False, "source_verification": "git-tree"})
+
+    def test_modified_or_unverified_builds_retain_their_qualification(self):
+        with tempfile.TemporaryDirectory() as directory:
+            for dirty, verification in ((True, "git-head"), (None, "unverified-export")):
+                with self.subTest(verification=verification):
+                    atomic_json(Path(directory) / "build-manifest.json", {
+                        "application": {"version": "0.5.5", "build": "17"},
+                        "source": {"revision": "a" * 40, "dirty": dirty, "verification": verification}})
+                    identity = build_identity(directory)
+                    self.assertIs(identity["source_dirty"], dirty)
+                    self.assertEqual(identity["source_verification"], verification)
+
+    def test_missing_or_malformed_manifest_never_claims_a_release_version(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "build-manifest.json"
+            for content in (None, "broken", "null", "[]", '{}',
+                            json.dumps({"application": {"version": "0.5.5", "build": "17"},
+                                        "source": {"revision": "not-a-commit"}})):
+                with self.subTest(content=content):
+                    if content is not None:
+                        path.write_text(content)
+                    self.assertEqual(build_identity(directory), {
+                        "version": "development", "build": None, "source_revision": None,
+                        "source_dirty": None, "source_verification": "unverified"})
+
+
 class GatewayTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -1163,6 +1199,14 @@ class GatewayTests(unittest.TestCase):
         self.assertEqual(self.request("GET", "/v1/models", headers={"Authorization": "Bearer bad"})[0], 401)
         self.assertEqual(self.request("GET", "/v1/models", headers={"Host": "untrusted.example"})[0], 403)
         self.assertEqual(self.request("GET", "/v1/models")[0], 200)
+
+    def test_health_identifies_the_running_build_without_authentication(self):
+        identity = {"version": "0.5.5", "build": "17", "source_revision": "a" * 40,
+                    "source_dirty": False, "source_verification": "git-tree"}
+        with patch("gateway.BUILD_IDENTITY", identity):
+            status, data, _ = self.request("GET", "/_bridge/health", headers={"Authorization": ""})
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(data), {"service": "mistral-bridge", "product": "Provider Hub", **identity})
 
     def test_browser_origin_requests_are_cors_enabled(self):
         # The desktop webview sends Origin on its model-discovery fetch; the

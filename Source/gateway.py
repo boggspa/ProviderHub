@@ -61,6 +61,33 @@ from claude_context import claude_context_spec
 MAX_BODY = 32 * 1024 * 1024
 
 
+def build_identity(resources=None):
+    """Report the running bundle's identity without exposing build host paths."""
+    resources = Path(resources) if resources is not None else Path(__file__).resolve().parent.parent
+    identity = {"version": "development", "build": None, "source_revision": None,
+                "source_dirty": None, "source_verification": "unverified"}
+    try:
+        manifest = json.loads((resources / "build-manifest.json").read_text(encoding="utf-8"))
+        application, source = manifest["application"], manifest["source"]
+        version, build, revision = application["version"], application["build"], source["revision"]
+        if not isinstance(version, str) or not isinstance(build, str):
+            return identity
+        if revision is not None and (not isinstance(revision, str) or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", revision)):
+            return identity
+        dirty, verification = source.get("dirty"), source.get("verification", "unverified")
+        if dirty is not None and type(dirty) is not bool:
+            return identity
+        if verification not in {"git-head", "git-tree", "unverified-export", "unverified"}:
+            return identity
+        return {"version": version, "build": build, "source_revision": revision,
+                "source_dirty": dirty, "source_verification": verification}
+    except (OSError, ValueError, KeyError, TypeError):
+        return identity
+
+
+BUILD_IDENTITY = build_identity()
+
+
 class Runtime:
     def __init__(self, root: Path, upstream_url=None, key=None, request_planner=None):
         self.root = root
@@ -386,7 +413,7 @@ def _client_gone(handler):
 
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "ProviderHub/0.5.3"
+    server_version = "ProviderHub/" + BUILD_IDENTITY["version"]
 
     @property
     def runtime(self):
@@ -615,7 +642,7 @@ class Handler(BaseHTTPRequestHandler):
         if not self.allowed(health=path == "/_bridge/health"):
             return
         if path == "/_bridge/health":
-            self.json_response(200, {"service": "mistral-bridge", "product": "Provider Hub", "version": "0.5.3"})
+            self.json_response(200, {"service": "mistral-bridge", "product": "Provider Hub", **BUILD_IDENTITY})
         elif path == "/_bridge/status":
             self.json_response(200, self.runtime.status())
         elif path == "/v1/models":

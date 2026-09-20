@@ -34,7 +34,7 @@ Provider implementation is split between [registry and connections](Source/provi
 8. Quitting a launched desktop app restores that harness's prior selection. The shared gateway stays available while either owned harness remains open and normally stops after both have closed. The menu bar app remains available.
 9. While one desktop harness is live, you can still change the *other* harness's model selection (e.g., edit the Codex catalogue while Claude is running). Save writes the change without stopping the gateway; launching the second app briefly restarts the gateway so both share the new snapshot, and the running app reconnects automatically. Changing shared provider settings (keys, regions, port, branding) while either app is live still requires quitting both desktop apps first.
 
-Build from the repository root to create `Provider Hub Preview.app` alongside the stable Mistral app. The in-tree build is 0.5.4 build 16. Building from source produces a development signature; distribution builds must be signed and notarized separately. The repository remains local-only, with no GitHub remote. A shorter recipient guide is in `QUICK-START.md`.
+Build from the repository root to create `Provider Hub Preview.app` alongside the stable Mistral app. The in-tree build is 0.5.5 build 17. Building from source produces a development signature; distribution builds must be signed and notarized separately. The repository remains local-only, with no GitHub remote. A shorter recipient guide is in `QUICK-START.md`.
 
 **Provider connections**
 
@@ -180,14 +180,22 @@ Cerebras reasoning tool turns need replayable assistant reasoning. For Claude, t
 From the repository root:
 
 ```bash
-python3 -m pip install -r Source/requirements.txt
+uv run --python 3.13 --with-requirements Source/requirements.txt python -m unittest discover -s Source -p 'test_*.py'
 bash Source/build.sh
-python3 -m unittest discover -s Source -v
 ```
 
-Use Python 3.11 or newer for source tests. Building requires Apple's command-line developer tools. `Source/build.sh` creates an ad-hoc signed development app. Omit `PROVIDER_HUB_PYTHON_RUNTIME` for a lightweight source build, or set it to a clean relocatable Python installation to embed that runtime in the app. Python discovery prefers the bundled runtime. The prepared shareable bundle uses a clean ARM64 CPython 3.13.13 downloaded with `uv` in an isolated work directory and includes `cryptography` 50.0.0 from `Source/requirements.txt`; it does not copy Vibe or another user installation's `site-packages`. Python's upstream licenses are retained inside the runtime.
+Use the `uv` CPython 3.13 runtime for source tests. Building requires Apple's command-line developer tools. `Source/build.sh` creates an ad-hoc signed development app. Omit `PROVIDER_HUB_PYTHON_RUNTIME` for a lightweight source build, or set it to a clean relocatable Python installation to embed that runtime in the app. Python discovery prefers the bundled runtime. The prepared shareable bundle uses a clean ARM64 CPython 3.13.13 downloaded with `uv` in an isolated work directory and includes `cryptography` 50.0.0 from `Source/requirements.txt`; it does not copy Vibe or another user installation's `site-packages`. Python's upstream licenses are retained inside the runtime.
 
-`Source/package_macos.py` accepts a Developer ID Application identity, signs the embedded native components and app, verifies the result, and creates the distribution archive. Its optional `--submit --notary-profile NAME` path submits with an existing `notarytool` Keychain profile; the password is not passed to the script. After Apple accepts a submission, staple the app with `xcrun stapler staple`, validate it, and recreate the distribution zip. The 0.5.3 build 15 distribution is Developer ID signed and Apple-notarized, superseding 0.5.1 build 14; the ticket is stapled, and Gatekeeper reports `Notarized Developer ID`. Rebuilding from source creates a new development artifact and does not inherit that notarization.
+`Source/package_macos.py` accepts a Developer ID Application identity, signs the embedded native components and app, verifies the result, and creates the distribution archive. Its optional `--submit --notary-profile NAME` path submits with an existing `notarytool` Keychain profile; the password is not passed to the script. After Apple accepts a submission, staple the app with `xcrun stapler staple`, validate it, and recreate the distribution zip. Gatekeeper must report `Notarized Developer ID` for the finished release. Rebuilding from source creates a new development artifact and does not inherit earlier notarization.
+
+Every new build includes `Contents/Resources/build-manifest.json` with its source revision, build-input state and packaged worker hashes. For an exported `git archive` source tree, set `PROVIDER_HUB_SOURCE_REVISION` to the full commit and `PROVIDER_HUB_SOURCE_REPOSITORY` to the originating checkout so the build can verify the exported inputs against that commit. Release from a clean export, then install the accepted, stapled bundle in `/Applications` and launch it. Verify the installed manifest and `http://127.0.0.1:11438/_bridge/health` agree on version, build and revision (use the configured port if changed). The [AntiGravity investigation](docs/antigravity-host-handoff.md) records why a validly notarized older installation continued failing after the source fix.
+
+Validate the installed worker contents against the intended clean commit:
+
+```bash
+python3 Source/build_provenance.py verify --require-clean \
+  --app-dir '/Applications/Provider Hub Preview.app' --revision '<full commit SHA>'
+```
 
 **Qualification**
 

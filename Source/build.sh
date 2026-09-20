@@ -4,11 +4,21 @@ SOURCE_DIR="$(cd "$(dirname "$0")" && pwd)"
 PACKAGE_DIR="$(dirname "$SOURCE_DIR")"
 APP_DIR="$PACKAGE_DIR/Provider Hub Preview.app"
 BUILD_DIR="${MISTRAL_BRIDGE_BUILD_DIR:-$SOURCE_DIR/.build}"
-mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources/worker" "$BUILD_DIR"
+mkdir -p "$APP_DIR/Contents/MacOS" "$BUILD_DIR"
+# This directory contains generated app content only. Start fresh so removed
+# modules and old vendor files cannot survive into a newly signed release.
+rm -rf "$APP_DIR/Contents/Resources/worker"
+mkdir -p "$APP_DIR/Contents/Resources/worker"
+SWIFT_SOURCES=(
+  "$SOURCE_DIR/CatalogueSelection.swift" "$SOURCE_DIR/HubModels.swift"
+  "$SOURCE_DIR/HubLayout.swift" "$SOURCE_DIR/ProviderViews.swift"
+  "$SOURCE_DIR/DevinAgentsView.swift" "$SOURCE_DIR/CodexHarness.swift"
+  "$SOURCE_DIR/MistralBridge.swift"
+)
 xcrun swiftc -swift-version 5 -parse-as-library -O -target arm64-apple-macosx14.0 \
   -module-cache-path "$BUILD_DIR/ModuleCache" \
   -framework AppKit -framework SwiftUI -framework Security \
-  "$SOURCE_DIR/CatalogueSelection.swift" "$SOURCE_DIR/HubModels.swift" "$SOURCE_DIR/HubLayout.swift" "$SOURCE_DIR/ProviderViews.swift" "$SOURCE_DIR/DevinAgentsView.swift" "$SOURCE_DIR/CodexHarness.swift" "$SOURCE_DIR/MistralBridge.swift" \
+  "${SWIFT_SOURCES[@]}" \
   -o "$APP_DIR/Contents/MacOS/MistralBridge"
 for module in bridge_core protocol gateway model_names catalogue hub_config providers provider_registry provider_discovery provider_requests devin_agent qwen_provider openrouter_provider gemini_provider branding cerebras_replay catalogue_lifecycle responses_native responses_tools responses_bridge responses_compact codex_catalogue codex_profile codex_token codex_runtime codex_accent effort_map chat_tool_order rate_limit spawn_depth subagent_catalogue ollama_lifecycle cli_session cli_lifecycle codex_session_pool cli_routes cli_auth_probe cli_tool_call cli_structured_reply cli_images cli_image_history claude_cli_agent codex_cli_agent agy_cli_agent muse_cli_agent grok_cli_agent claude_context; do
   cp "$SOURCE_DIR/$module.py" "$APP_DIR/Contents/Resources/worker/"
@@ -38,8 +48,8 @@ cat > "$APP_DIR/Contents/Info.plist" <<'PLIST'
   <key>CFBundleIdentifier</key><string>com.mistralbridge.providerhub</string>
   <key>CFBundleExecutable</key><string>MistralBridge</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>0.5.4</string>
-  <key>CFBundleVersion</key><string>16</string>
+  <key>CFBundleShortVersionString</key><string>0.5.5</string>
+  <key>CFBundleVersion</key><string>17</string>
   <key>BridgeStateName</key><string>Provider Hub Preview</string>
   <key>BridgeProfileID</key><string>14c58c94-d7e8-4a15-96b8-81668956e474</string>
   <key>BridgeDefaultPort</key><integer>11438</integer>
@@ -53,6 +63,8 @@ cat > "$APP_DIR/Contents/Info.plist" <<'PLIST'
 </dict></plist>
 PLIST
 if [ -f "$SOURCE_DIR/AppIcon.icns" ]; then cp "$SOURCE_DIR/AppIcon.icns" "$APP_DIR/Contents/Resources/"; fi
+python3 "$SOURCE_DIR/build_provenance.py" write --source-dir "$SOURCE_DIR" \
+  --app-dir "$APP_DIR" --swift-sources "${SWIFT_SOURCES[@]}"
 /usr/bin/codesign --force --sign - "$APP_DIR"
 /usr/bin/codesign --verify --strict "$APP_DIR"
 printf 'Built %s\n' "$APP_DIR"
