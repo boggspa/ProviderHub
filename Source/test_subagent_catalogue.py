@@ -27,6 +27,14 @@ def host_tools():
 
 
 class SubagentCatalogueTests(unittest.TestCase):
+    def test_nested_transport_disables_every_native_agent_launcher(self):
+        import codex_cli_agent
+        controls = codex_cli_agent._TRANSPORT_CONFIG
+        for setting in ("agents.enabled=false", "features.multi_agent=false",
+                        "features.multi_agent_v2=false"):
+            with self.subTest(setting=setting):
+                self.assertIn(setting, controls)
+
     def setUp(self):
         self.stock = inventory(*(model(f"mistral/model-{n}") for n in range(7)))
         self.config = settings(codex_model="mistral/model-0")

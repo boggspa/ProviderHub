@@ -23,7 +23,7 @@ from bridge_core import SLOTS
 
 
 def probe(binary, *, controls=(), fork_turns="none", target_index=6, multi_agent_version="v2",
-          forward_host=False):
+          forward_host=False, ephemeral=False):
     routes = [f"mistral/probe-{n}" for n in range(7)]
     routes[-1] = "gemini/probe-flash"
     target = routes[target_index]
@@ -108,7 +108,7 @@ def probe(binary, *, controls=(), fork_turns="none", target_index=6, multi_agent
                 session.notify("initialized", {})
                 effective = request("config/read", {"includeLayers": False})["config"]
                 params = {"cwd": directory, "model": routes[0],
-                    "ephemeral": False, "approvalPolicy": "never", "sandbox": "read-only",
+                    "ephemeral": ephemeral, "approvalPolicy": "never", "sandbox": "read-only",
                     "config": {"model_reasoning_effort": "high"}}
                 if forward_host:
                     from types import SimpleNamespace
@@ -159,10 +159,12 @@ if __name__ == "__main__":
     parser.add_argument("--fork-turns", default="none")
     parser.add_argument("--target-index", type=int, default=6)
     parser.add_argument("--forward-host", action="store_true")
+    parser.add_argument("--ephemeral", action="store_true",
+                        help="Reproduce nested CLI history-fork failures with an ephemeral parent.")
     parser.add_argument("--transport-controls", action="store_true",
                         help="Use the Codex CLI adapter's actual transport configuration.")
     args = parser.parse_args()
     controls = [*(_TRANSPORT_CONFIG if args.transport_controls else ()), *args.control]
     print(json.dumps(probe(args.binary or runtime_binary(), controls=controls,
                            fork_turns=args.fork_turns, target_index=args.target_index,
-                           forward_host=args.forward_host), indent=2))
+                           forward_host=args.forward_host, ephemeral=args.ephemeral), indent=2))

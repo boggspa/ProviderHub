@@ -31,6 +31,31 @@ the requested cross-provider model and `fork_turns` arguments.
 
 ## Changes
 
+### Exact missing-thread failure (2026-09-20)
+
+The installed app still carried only `features.multi_agent=false`, whereas
+the checkout already had all three controls. An isolated runtime probe
+reproduced `collab spawn failed: no thread with id: <id>` with an ephemeral
+parent and `fork_turns="all"`. The same probe with a persistent parent
+succeeded, as did an ephemeral parent with `fork_turns="none"`. This locates
+the reproduced failure in the nested native launcher's history-fork path.
+Disabling all three native controls removed native spawn and produced the
+expected host tool handoff instead.
+
+Reproduce without paid inference or real tasks:
+
+```sh
+uv run --python 3.13 python scripts/probe_codex_subagents.py --control features.multi_agent=false --ephemeral --fork-turns all
+uv run --python 3.13 python scripts/probe_codex_subagents.py --transport-controls --forward-host --fork-turns all
+```
+
+Changing fork arguments is not a routing fix: nested agents would still use
+the wrong runtime. Install the corrected transport and restart the gateway
+when active sessions can be interrupted safely. A source checkout change
+alone does not update the worker inside the installed application bundle.
+
+### Transport and catalogue changes
+
 - The CLI transport applies all three controls. Actual delegation remains
   owned by the desktop and is returned through the existing host tool bridge.
 - Before translating a Responses request, the Hub replaces the host spawn
