@@ -315,6 +315,38 @@ gemini-3.1-pro-low	Gemini 3.1 Pro (Low)
             self.assertEqual(argv[argv.index("--model") + 1], row)
             self.assertEqual(argv[argv.index("--effort") + 1], rung)
 
+    def test_fixed_thinking_models_accept_every_slider_value_without_effort_flag(self):
+        from agy_cli_agent import build_argv
+        from effort_map import EFFORT_ORDER
+
+        for family, row in (("claude-opus-4.6", "claude-opus-4-6-thinking"),
+                            ("claude-sonnet-4.6", "claude-sonnet-4-6"),
+                            ("gpt-oss-120b", "gpt-oss-120b-medium")):
+            for model in (family, row):
+                for effort in (*EFFORT_ORDER, None):
+                    with self.subTest(model=model, effort=effort):
+                        argv = build_argv(model, effort=effort)
+                        self.assertEqual(argv[argv.index("--model") + 1], row)
+                        self.assertNotIn("--effort", argv)
+
+    def test_fixed_thinking_catalogue_preserves_all_slider_values(self):
+        from agy_cli_agent import _collapse_models, _parse_models
+        from cli_routes import _hub_row
+        from codex_catalogue import _reasoning_levels
+        from effort_map import EFFORT_ORDER
+
+        rows = _collapse_models(_parse_models(
+            "claude-opus-4-6-thinking\tClaude Opus 4.6 (Thinking)\n"
+            "claude-sonnet-4-6\tClaude Sonnet 4.6 (Thinking)\n"
+            "gpt-oss-120b-medium\tGPT-OSS 120B (Medium)\n"))
+        self.assertEqual(len(rows), 3)
+        for row in rows:
+            with self.subTest(model=row["id"]):
+                card = _hub_row("antigravity", row)
+                self.assertEqual(card["effort_modes"], list(EFFORT_ORDER))
+                self.assertEqual([r["effort"] for r in _reasoning_levels("antigravity", card)],
+                                 list(EFFORT_ORDER))
+
     def test_catalogue_collapse(self):
         """Test catalogue returns collapsed models."""
         from agy_cli_agent import catalogue

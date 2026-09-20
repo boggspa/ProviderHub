@@ -115,7 +115,8 @@ READ_ONLY_FLAGS = (
 # Models and effort
 # ---------------------------------------------------------------------------
 
-# agy --effort accepts exactly these three (agy --help, verified 1.2.7).
+# agy --effort accepts these three on adjustable models (agy 1.2.7).
+# Claude's fixed-thinking rows reject the flag entirely.
 AGY_EFFORTS = ["low", "medium", "high"]
 AGY_EFFORT_ALIASES = {
     "none": "low",
@@ -168,9 +169,8 @@ _AGY_ROW_MAP: dict[str, tuple[str, str, str]] = {
     "gpt-oss-120b-medium":   ("gpt-oss-120b", "GPT-OSS 120B", "medium"),
 }
 
-# Map agy-native rung strings to canonical EFFORT_ORDER ranks.
-# agy only accepts low/medium/high on --effort, so "thinking" and bare names
-# must be translated.
+# Map native rung labels to canonical catalogue defaults. "thinking" is a
+# fixed mode, not a value that can be passed via --effort.
 _AGY_RUNG_TO_CANONICAL: dict[str, str] = {
     "low": "low",
     "medium": "medium",
@@ -241,6 +241,44 @@ _FAMILY_PROVIDER_EFFORT_MODES: dict[str, list[str]] = {
     "claude-opus-4.6": ["thinking"],
     "gpt-oss-120b": ["medium"],
 }
+
+# A single native row already selects all the reasoning the provider exposes.
+# Claude rejects --effort; GPT-OSS only has Medium on this AntiGravity route.
+# Keep the full UI ladder but carry its preference in the prompt instead.
+_FIXED_EFFORT_ROWS = frozenset(
+    row_id for row_id, (family, _, _) in _AGY_ROW_MAP.items()
+    if len(_FAMILY_PROVIDER_EFFORT_MODES[family]) == 1
+)
+_EFFORT_HINTS = {
+    "none": "Answer directly with only the reasoning needed for correctness.",
+    "minimal": "Use very brief reasoning and minimal checks.",
+    "low": "Use light reasoning and essential checks.",
+    "medium": "Use balanced reasoning and verify the main steps.",
+    "high": "Reason carefully and check important edge cases.",
+    "xhigh": "Use thorough reasoning, compare plausible approaches, and verify the result.",
+    "max": "Work through the problem in depth and check assumptions and alternatives.",
+    "ultra": "Use the deepest available reasoning and rigorous verification before answering.",
+}
+
+
+def _fixed_effort_hint(model: str, requested: str | None, thinking) -> str:
+    """Preserve a validated desktop preference without claiming a native knob."""
+    if _validate_model(model) not in _FIXED_EFFORT_ROWS:
+        return ""
+    thinking_type = thinking.get("type") if isinstance(thinking, dict) else None
+    if requested is not None:
+        requested = requested.strip().casefold()
+    elif thinking_type == "disabled":
+        requested = "none"
+    if requested is not None:
+        preference = f"Requested reasoning effort: {requested}. {_EFFORT_HINTS[requested]}"
+    elif thinking_type in ("enabled", "adaptive"):
+        preference = f"Requested thinking: {thinking_type}. Use the available reasoning as needed."
+    else:
+        return ""
+    return ("Provider Hub reasoning preference. " + preference + " "
+            "The provider's fixed thinking mode remains enabled; treat this as guidance "
+            "within that mode. Keep the user's requested answer format and length.")
 
 
 _NO_AUTH_VERB_DETAIL = (
@@ -641,7 +679,7 @@ def build_argv(model, *, effort=None, system=None, stream=True) -> list[str]:
     argv += ["--output-format", "stream-json" if stream else "text"]
     argv += list(READ_ONLY_FLAGS)
     argv += ["--model", validated_model]
-    if validated_effort:
+    if validated_effort and validated_model not in _FIXED_EFFORT_ROWS:
         # Known rows encode their effort. For example Gemini Pro's medium
         # request maps to its high row, so --effort must agree with that row.
         native_effort = _AGY_ROW_MAP.get(validated_model, (None, None, None))[2]
@@ -1244,10 +1282,14 @@ def run_turn(request, *, spawner=None, timeout=300) -> Iterator[dict]:
         _validate_model(model)
         model = model.strip()
         messages = _coerce_messages(request.get("messages"))
-        effort = _validate_effort(request.get("effort"))
+        requested_effort = request.get("effort")
+        effort = _validate_effort(requested_effort)
         system = request.get("system")
         if system is not None and not isinstance(system, str):
             raise AgyCliAgentError("system must be a string or None")
+        effort_hint = _fixed_effort_hint(model, requested_effort, request.get("thinking"))
+        if effort_hint:
+            system = (system + "\n\n" if system else "") + effort_hint
         max_tokens = request.get("max_tokens")
         if max_tokens is not None and not isinstance(max_tokens, int):
             raise AgyCliAgentError("max_tokens must be an integer or None")
