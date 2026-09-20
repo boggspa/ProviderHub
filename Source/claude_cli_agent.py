@@ -47,6 +47,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator
 
 from cli_session import CliSessionError, StdioSession, minimal_env, resolve_binary
+from cli_lifecycle import cleanup_after_exit
 from cli_tool_call import TRANSCRIPT_HEADER
 from cli_images import prompt_content
 from model_names import CLAUDE_CLI_ALIASES, CLAUDE_MODEL_LABELS
@@ -849,6 +850,20 @@ def run_turn(request, *, spawner=None, timeout=300) -> Iterator[dict]:
                 if state.failure:
                     yield {"type": "error", "message": state.failure}
                     return
+                if state.terminal:
+                    returncode = getattr(session, "returncode", None)
+                    if isinstance(returncode, int) and returncode != 0:
+                        yield {"type": "error", "message": f"the claude CLI exited with code {returncode}"}
+                        return
+                    fallback = state.result_suffix()
+                    if fallback:
+                        state.emitted_text = True
+                        yield {"type": "text_delta", "text": fallback}
+                    if not state.emitted_text:
+                        yield {"type": "error", "message": "the claude CLI produced no output"}
+                        return
+                    yield {"type": "message_stop", "stop_reason": state.stop_reason or "end_turn"}
+                    return
 
         returncode = getattr(session, "returncode", None)
         if isinstance(returncode, int) and returncode != 0:
@@ -878,9 +893,6 @@ def run_turn(request, *, spawner=None, timeout=300) -> Iterator[dict]:
     finally:
         handle = state.stderr_handle
         if handle is not None:
-            try:
-                handle.close()
-            except Exception:
-                pass
+            cleanup_after_exit(session, handle.close)
 
     yield {"type": "message_stop", "stop_reason": stop_reason}

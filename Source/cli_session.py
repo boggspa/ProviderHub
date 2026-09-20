@@ -45,6 +45,7 @@ import subprocess
 import threading
 import time
 from typing import Any, Callable, Iterable, Iterator, Mapping
+from cli_lifecycle import current_timing, check_cancelled
 
 __all__ = ["CliSessionError", "StdioSession", "minimal_env", "resolve_binary"]
 
@@ -174,7 +175,13 @@ class StdioSession:
         self._ids = itertools.count(1)
         self._eof = False
         self._closed = False
+        self.timing = current_timing()
+        if self.timing:
+            self.timing.mark("startup_started")
         self.process = self._launch(stderr)
+        if self.timing:
+            self.timing.mark("startup_complete")
+            self.timing.label(cli_pid=getattr(self.process, "pid", None))
         # Exposed because print-mode CLIs (claude, agy) duck-type the raw
         # writer: they write the prompt as plain text and signal EOF by
         # closing stdin, which their --input-format text mode requires.
@@ -291,7 +298,7 @@ class StdioSession:
         """
         with self._pending_lock:
             for index, item in enumerate(self._pending):
-                if isinstance(item, dict) and item.get("id") == identifier:
+                if isinstance(item, dict) and item.get("id") == identifier and "method" not in item:
                     del self._pending[index]
                     return item
         return _MISSING
@@ -318,6 +325,7 @@ class StdioSession:
                               "method": method, "params": params if params is not None else {}}))
         deadline = time.monotonic() + budget
         while True:
+            check_cancelled()
             buffered = self._pop_pending_match(identifier)
             if buffered is not _MISSING:
                 return buffered
@@ -331,7 +339,7 @@ class StdioSession:
                     f"timed out after {budget:.1f}s waiting for '{method}' "
                     f"(id {identifier}) to answer")
             try:
-                item = self._queue.get(timeout=max(0.01, remaining))
+                item = self._queue.get(timeout=min(.1, max(0.01, remaining)))
             except queue.Empty:
                 continue  # re-check the deadline, EOF and the child
             if item is _EOF:
@@ -339,7 +347,7 @@ class StdioSession:
                 raise CliSessionError(
                     f"the CLI session closed before answering '{method}' "
                     f"(child rc={self.returncode})")
-            if isinstance(item, dict) and item.get("id") == identifier:
+            if isinstance(item, dict) and item.get("id") == identifier and "method" not in item:
                 return item
             self._enqueue_pending(item)
 
@@ -360,19 +368,21 @@ class StdioSession:
         budget = self.timeout if timeout is None else float(timeout)
         deadline = time.monotonic() + budget
         while True:
+            check_cancelled()
             with self._pending_lock:
-                if self._pending:
-                    yield self._pending.popleft()
-                    continue
+                pending = self._pending.popleft() if self._pending else _MISSING
+            if pending is not _MISSING:
+                yield pending
+                continue
             if self._eof:
                 return
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 return
             try:
-                item = self._queue.get(timeout=max(0.01, remaining))
+                item = self._queue.get(timeout=min(.1, max(0.01, remaining)))
             except queue.Empty:
-                return
+                continue
             if item is _EOF:
                 self._eof = True
                 return

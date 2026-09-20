@@ -111,6 +111,7 @@ from pathlib import Path
 from typing import Any, Iterable, Iterator
 
 from cli_session import CliSessionError, StdioSession, minimal_env, resolve_binary
+from cli_lifecycle import cleanup_after_exit
 from cli_tool_call import OPEN_SENTINEL, TRANSCRIPT_HEADER
 from cli_images import write_images
 
@@ -137,6 +138,7 @@ BINARY_NAMES = ("muse",)
 # "prompt" => the CLI has no such flag and it is folded into the stdin/prompt
 # text. muse exec has no system-prompt flag, so the prompt is the only channel.
 SYSTEM_PROMPT_TRANSPORT = "prompt"
+EARLY_STRUCTURED_REPLY = True
 IMAGE_TRANSPORT = "image_files"
 VERIFIED_IMAGE_MODELS = frozenset({"muse-spark-1.3"})
 
@@ -1038,11 +1040,9 @@ def run_turn(request, *, spawner=None, timeout=300) -> Iterator[dict]:
         yield {"type": "error", "message": _describe(exc, state, timeout)}
         return
     finally:
-        _cleanup_workspace(workspace_path)
-        _cleanup_prompt(prompt_path)
-        handle = state.stderr_handle
-        if handle is not None:
-            try:
-                handle.close()
-            except Exception:
-                pass
+        def release_files():
+            _cleanup_workspace(workspace_path)
+            _cleanup_prompt(prompt_path)
+            if state.stderr_handle is not None:
+                state.stderr_handle.close()
+        cleanup_after_exit(session, release_files)

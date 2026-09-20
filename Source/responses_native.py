@@ -18,6 +18,7 @@ from providers import PROVIDERS, ProviderError, _auth_headers, _chat_effort, val
 from responses_tools import (flatten_tools, input_names, normalize_custom_calls, output_names, register,
                              restore_custom_call, split_hosted_search, strip_goal_budget)
 from responses_bridge import ENVELOPE_PREFIX, MessagesResponsesAdapter, ReasoningEnvelope, to_messages
+from responses_compact import expand_items
 from openrouter_provider import OpenRouterError, finalize as openrouter_finalize, app_headers as openrouter_app_headers
 from effort_map import cap_high_end, map_effort, nearest_effort, ollama_effort_aliases
 from spawn_depth import (SPAWN_NAMESPACE, SPAWN_TOOL, apply_subagent_model,
@@ -586,6 +587,11 @@ def prepare_native(runtime, payload):
     body.setdefault("store", False)
     body.setdefault("stream", False)
     body["model"] = model_id
+    if isinstance(body["input"], list) and any(isinstance(item, dict) and item.get("type") == "compaction"
+                                             for item in body["input"]):
+        from responses_compact import scope_for
+        _, scope = scope_for(runtime, route)
+        body["input"] = expand_items(body["input"], ReasoningEnvelope(runtime.root), scope)
     if "max_output_tokens" in body:
         count = body["max_output_tokens"]
         if type(count) is not int or count <= 0:

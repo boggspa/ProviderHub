@@ -30,6 +30,8 @@ import time
 import uuid
 
 import cli_structured_reply
+from cli_lifecycle import ManagedTurn, TurnTiming, observe_events
+from cli_image_history import compact_image_history
 from cli_tool_call import (HOST_EXECUTION_NOTE, MAX_CALLS_PER_TURN, ToolCallError,
                            ToolCallParser, normalize_tools, render_tool_anchor,
                            render_tool_manifest, validate_host_call)
@@ -357,7 +359,8 @@ def plan_turn(provider_id: str, upstream_model: str, payload: dict, spec: dict,
     structured_surface = (provider_id == "antigravity" or
                           provider_id in {"muse", "grok"} and payload.get("_provider_hub_surface") != "responses")
     try:
-        messages, system = _messages_for_cli(payload.get("messages"), system, images=images,
+        history, image_compaction = compact_image_history(payload.get("messages"))
+        messages, system = _messages_for_cli(history, system, images=images,
                                             full_tool_history=structured_surface)
         if images:
             if not getattr(adapter, "IMAGE_TRANSPORT", None):
@@ -419,10 +422,12 @@ def plan_turn(provider_id: str, upstream_model: str, payload: dict, spec: dict,
         request["reasoning_summary"] = summary
     if images:
         request["images"] = images
+    if provider_id == "codex" and payload.get("service_tier") is not None:
+        request["service_tier"] = payload["service_tier"]
     if dynamic_tools:
         # Keep typed tool calls/results for Codex's native history injection.
         # Flattening these into a new user transcript loses the tool loop.
-        request["history"] = [message for message in payload.get("messages", [])
+        request["history"] = [message for message in history
                               if isinstance(message, dict) and message.get("role") in {"user", "assistant"}]
     return {
         "cli": True,
@@ -436,6 +441,7 @@ def plan_turn(provider_id: str, upstream_model: str, payload: dict, spec: dict,
             "system_prompt_transport": getattr(adapter, "SYSTEM_PROMPT_TRANSPORT", "prompt"),
             "cli_image_transport": getattr(adapter, "IMAGE_TRANSPORT", None),
             "cli_images": len(images),
+            **({"cli_image_compaction": image_compaction} if image_compaction["removed"] else {}),
             **({"cli_host_tools": "structured"} if structured_tools else {}),
             **({"cli_tools": len(tools),
                 "cli_tools_dropped": len(raw_tools) - len(tools)}
@@ -448,12 +454,23 @@ def plan_turn(provider_id: str, upstream_model: str, payload: dict, spec: dict,
 def run_turn(provider_id: str, request: dict, *, parse_tool_calls: bool = False, timeout: int = 600):
     """Start the adapter's turn generator (text_delta/thinking_delta/stop)."""
     adapter = adapter_for(provider_id)
-    events = (_tool_turn(adapter, request, timeout=timeout) if parse_tool_calls
-              else adapter.run_turn(request, timeout=timeout))
-    thinking = request.get("thinking") or {}
-    if isinstance(thinking, dict) and (thinking.get("type") == "disabled" or thinking.get("display") == "omitted"):
-        return _without_thinking(events)
-    return events
+    timing = TurnTiming(provider_id, request.get("model"))
+    timing.cancel = request.get("_cli_cancel")
+    if request.get("_cli_queue_ms") is not None:
+        timing.label(gateway_queue_ms=request["_cli_queue_ms"])
+    request = {**request, "_cli_timing": timing}
+
+    def start():
+        remaining = max(0.01, timeout - (time.monotonic() - timing.started))
+        events = (_tool_turn(adapter, request, timeout=remaining) if parse_tool_calls
+                  else observe_events(adapter.run_turn(request, timeout=remaining), timing))
+        thinking = request.get("thinking") or {}
+        if isinstance(thinking, dict) and (thinking.get("type") == "disabled" or thinking.get("display") == "omitted"):
+            return _without_thinking(events)
+        return events
+
+    return ManagedTurn(start, timing, timeout,
+                       inline_close=bool(getattr(adapter, "NONBLOCKING_CLOSE", False)))
 
 
 def _without_thinking(events):
@@ -476,12 +493,16 @@ def _without_thinking(events):
 def _tool_turn(adapter, request, *, timeout):
     """Allow one protocol correction, with no replay of executed host calls."""
     deadline = time.monotonic() + timeout
-    attempts = 1 if getattr(adapter, "HOST_TOOL_TRANSPORT", None) == "dynamic" else 2
+    native = getattr(adapter, "HOST_TOOL_TRANSPORT", None) == "dynamic"
+    attempts = 1 if native else 2
     current = request
     for attempt in range(attempts):
         parser = cli_structured_reply.parse_stream if request.get("host_tool_schema") else _parse_tool_stream
-        events = parser(adapter.run_turn(current, timeout=max(0.01, deadline - time.monotonic())),
-                        tools=request.get("tools"), tool_choice=request.get("tool_choice"))
+        options = ({"stop_after_object": bool(getattr(adapter, "EARLY_STRUCTURED_REPLY", False))}
+                   if request.get("host_tool_schema") else {"native": native})
+        events = parser(observe_events(adapter.run_turn(current, timeout=max(0.01, deadline - time.monotonic())),
+                                       request.get("_cli_timing")),
+                        tools=request.get("tools"), tool_choice=request.get("tool_choice"), **options)
         retry = False
         pending_text = []
         pending_bytes = 0
@@ -492,7 +513,7 @@ def _tool_turn(adapter, request, *, timeout):
                     retry = True
                     break
                 kind = event.get("type")
-                if kind == "text_delta":
+                if kind == "text_delta" and not native:
                     # An invalid attempt has not done any host work. Keep its
                     # narration private until the handoff/reply is validated,
                     # so retrying cannot print the same promises twice.
@@ -533,7 +554,7 @@ def _tool_turn(adapter, request, *, timeout):
         }]}
 
 
-def _parse_tool_stream(events, *, tools=None, tool_choice=None):
+def _parse_tool_stream(events, *, tools=None, tool_choice=None, native=False):
     """Rewrite one adapter event stream, cutting call envelopes out of text.
 
     Text passes through unless the parser is mid-envelope; each complete,
@@ -568,7 +589,10 @@ def _parse_tool_stream(events, *, tools=None, tool_choice=None):
         for event in events:
             kind = event.get("type") if isinstance(event, dict) else None
             if kind == "text_delta":
-                yield from flush(parser.feed(event.get("text") or ""))
+                if native:
+                    yield event
+                else:
+                    yield from flush(parser.feed(event.get("text") or ""))
             elif kind == "tool_call":
                 add_call(event)
             elif kind == "message_stop":
@@ -640,6 +664,7 @@ def relay_cli_turn(events, emit, *, model, input_tokens=0) -> dict:
     stop_reason = "end_turn"
     error = None
     error_status = 502
+    timing = getattr(events, "timing", None)
 
     def start_message():
         nonlocal started
@@ -697,6 +722,8 @@ def relay_cli_turn(events, emit, *, model, input_tokens=0) -> dict:
                 open("text", event.get("source_id"))
                 emit({"type": "content_block_delta", "index": index,
                       "delta": {"type": "text_delta", "text": text}})
+                if timing:
+                    timing.mark("first_visible_text")
             elif kind == "tool_call":
                 if not started:
                     start_message()
@@ -715,20 +742,29 @@ def relay_cli_turn(events, emit, *, model, input_tokens=0) -> dict:
                 index += 1
         else:
             error = "The CLI stream ended before completing the turn."
+    except BaseException:
+        close = getattr(events, "close", None)
+        if callable(close):
+            close()
+        raise
+    usage = {"input_tokens": int(input_tokens or 0), "output_tokens": 0}
+    try:
+        if error is not None:
+            return {"error": error, "started": started, "stop_reason": None, "usage": usage,
+                    "http_status": error_status}
+        if not started:
+            start_message()
+        if open_block is not None:
+            emit({"type": "content_block_stop", "index": index})
+        emit({"type": "message_delta",
+              "delta": {"stop_reason": stop_reason, "stop_sequence": None},
+              "usage": {"output_tokens": 0}})
+        emit({"type": "message_stop"})
+        if timing:
+            timing.delivered = True
+            timing.mark("response_complete")
+        return {"error": None, "started": True, "stop_reason": stop_reason, "usage": usage}
     finally:
         close = getattr(events, "close", None)
         if callable(close):
             close()
-    usage = {"input_tokens": int(input_tokens or 0), "output_tokens": 0}
-    if error is not None:
-        return {"error": error, "started": started, "stop_reason": None, "usage": usage,
-                "http_status": error_status}
-    if not started:
-        start_message()
-    if open_block is not None:
-        emit({"type": "content_block_stop", "index": index})
-    emit({"type": "message_delta",
-          "delta": {"stop_reason": stop_reason, "stop_sequence": None},
-          "usage": {"output_tokens": 0}})
-    emit({"type": "message_stop"})
-    return {"error": None, "started": True, "stop_reason": stop_reason, "usage": usage}

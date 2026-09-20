@@ -108,6 +108,7 @@ route the turn back through the hub.
 """
 from __future__ import annotations
 
+import atexit
 import hashlib
 import json
 import os
@@ -119,8 +120,11 @@ import shutil
 import subprocess
 import tempfile
 import time
+import uuid
 
 from cli_session import CliSessionError, StdioSession, minimal_env, resolve_binary
+from codex_session_pool import SessionPool
+from cli_lifecycle import cleanup_after_exit
 from cli_tool_call import HOST_EXECUTION_NOTE, normalize_tools, validate_host_call
 from cli_images import normalize_images, responses_content
 
@@ -133,6 +137,7 @@ BINARY_NAMES = ("codex",)
 #: The host policy uses a native instruction field, above user history.
 SYSTEM_PROMPT_TRANSPORT = "developerInstructions"
 HOST_TOOL_TRANSPORT = "dynamic"
+NONBLOCKING_CLOSE = True
 IMAGE_TRANSPORT = "native_history"
 
 _NATIVE_TOOL_ITEMS = frozenset({
@@ -899,9 +904,10 @@ def _inherited_mcp_overrides(session, *, timeout):
     return {name: {"enabled": False} for name in servers}
 
 
-def _start_thread(session, payload, workspace, *, timeout):
+def _start_thread(session, payload, workspace, *, timeout, servers=None):
     params = _thread_params(payload, workspace)
-    servers = _inherited_mcp_overrides(session, timeout=timeout)
+    if servers is None:
+        servers = _inherited_mcp_overrides(session, timeout=timeout)
     if servers:
         params.setdefault("config", {})["mcp_servers"] = servers
     response = session.request("thread/start", params,
@@ -945,6 +951,8 @@ def _turn_params(payload, thread_id):
         params["effort"] = payload["effort"]
     if payload.get("reasoning_summary") is not None:
         params["summary"] = payload["reasoning_summary"]
+    if payload.get("service_tier") is not None:
+        params["serviceTier"] = payload["service_tier"]
     return params
 
 
@@ -1010,6 +1018,11 @@ def _normalise_request(request):
         summary = "auto"
     if summary is not None and summary not in {"auto", "concise", "detailed"}:
         raise CodexCliAgentError("Unsupported Codex reasoning summary mode.", http_status=400)
+    tier = request.get("service_tier")
+    if tier is not None:
+        if not isinstance(tier, str) or tier not in {"auto", "default", "standard", "fast", "priority", "flex", "ultrafast"}:
+            raise CodexCliAgentError("Unsupported Codex service tier.", http_status=400)
+        tier = {"standard": "default", "priority": "fast"}.get(tier, tier)
     if choice.get("type") == "none":
         tools = []
     elif choice.get("type") in {"any", "required"}:
@@ -1022,7 +1035,8 @@ def _normalise_request(request):
     return {"model": _checked_model(model),
             "effort": _checked_effort(request.get("effort")),
             "prompt": prompt, "system": instructions, "tools": tools,
-            "history": request.get("history"), "images": images, "reasoning_summary": summary}
+            "history": request.get("history"), "images": images, "reasoning_summary": summary,
+            "service_tier": tier}
 
 
 def _history_items(messages):
@@ -1195,13 +1209,14 @@ def _failure_message(turn):
     return None
 
 
-def _stream_turn(session, *, turn_id, deadline, tools=None, thread_id=None, summary_only=False):
+def _stream_turn(session, *, turn_id, deadline, tools=None, thread_id=None, summary_only=False,
+                 lease=None, timing=None):
     """Consume notifications until the turn terminates.
 
     Yields ``text_delta`` / ``thinking_delta`` as they arrive and always ends
     with exactly one terminal event: ``message_stop`` or ``error``.
     """
-    fragments = {}
+    fragments = lease.fragments if lease is not None else {}
     last_error = None
     host_names = {_tool_alias(tool["name"]): tool["name"] for tool in tools or []}
 
@@ -1258,6 +1273,11 @@ def _stream_turn(session, *, turn_id, deadline, tools=None, thread_id=None, summ
                     params = {}
                 if thread_id and params.get("threadId", thread_id) != thread_id:
                     continue
+                if timing and (method in {"item/agentMessage/delta", "item/reasoning/textDelta",
+                                          "item/reasoning/summaryTextDelta", "item/tool/call"} or
+                               method == "item/completed" and
+                               (params.get("item") or {}).get("type") in {"agentMessage", "reasoning"}):
+                    timing.mark("first_model_event")
                 if method == "item/tool/call":
                     if "id" not in event or params.get("namespace") != _HOST_TOOL_NAMESPACE:
                         yield {"type": "error", "message": "Codex requested an unregistered native tool."}
@@ -1265,9 +1285,11 @@ def _stream_turn(session, *, turn_id, deadline, tools=None, thread_id=None, summ
                     call = validate_host_call({"id": params.get("callId"),
                                                "name": host_names.get(params.get("tool")),
                                                "input": params.get("arguments")}, tools or [])
-                    # This route is stateless: the next host request includes
-                    # the tool result. End the nested session without replying
-                    # with a fabricated result or executing the tool locally.
+                    if lease is not None:
+                        # A bridge-owned id is unique across tasks/processes,
+                        # even when runtimes reuse local call identifiers.
+                        call["id"] = "toolu_" + uuid.uuid4().hex
+                        lease.pending = {"rpc_id": event["id"], "call": dict(call)}
                     yield {"type": "tool_call", **call}
                     yield {"type": "message_stop", "stop_reason": "tool_use"}
                     return
@@ -1380,12 +1402,104 @@ def _teardown(session, workspace):
                     pass
     if workspace is not None:
         try:
-            workspace.close()
+            cleanup_after_exit(session, workspace.close)
         except Exception:  # noqa: BLE001
             pass
 
 
-def run_turn(request, *, spawner=None, timeout=300) -> Iterator[dict]:
+def _digest(value):
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"),
+                                     ensure_ascii=False).encode()).hexdigest()
+
+
+def _history_blocks(history):
+    """Ignore message grouping, but retain every model-visible block in order."""
+    blocks = []
+    for message in history or []:
+        content = message.get("content") or []
+        if isinstance(content, str):
+            content = [{"type": "text", "text": content}]
+        for block in content:
+            blocks.append((message.get("role"), block))
+    return blocks
+
+
+def _continuation(lease, payload):
+    """Match a unique host call, unchanged history, and all subsequent input.
+
+    Changed instructions/tools/effort use another pool key. Edited or compacted
+    history falls back to native history injection in a fresh thread. A pending
+    RPC is consumed only by an exact call/result match.
+    """
+    pending = lease.pending
+    if not pending or "prefix" not in pending:
+        return None
+    blocks = _history_blocks(payload.get("history"))
+    count = pending["prefix_count"]
+    if len(blocks) <= count or _digest(blocks[:count]) != pending["prefix"]:
+        return None
+    call = pending["call"]
+    tail = blocks[count:]
+    matches = [(index, block) for index, (role, block) in enumerate(tail)
+               if role == "assistant" and block.get("type") == "tool_use"]
+    if len(matches) != 1:
+        return None
+    call_index, observed = matches[0]
+    if any(observed.get(key) != call.get(key) for key in ("id", "name", "input")):
+        return None
+    result = None
+    steering = []
+    for index, (role, block) in enumerate(tail):
+        if role == "assistant":
+            if index > call_index:
+                return None
+            continue
+        if role != "user":
+            return None
+        if block.get("type") == "tool_result":
+            if index <= call_index or result is not None or block.get("tool_use_id") != call["id"]:
+                return None
+            result = block
+        elif block.get("type") in {"text", "image", "input_image"}:
+            steering.append(block)
+        else:
+            return None
+    return (result, steering) if result is not None else None
+
+
+def _resume_host_call(lease, result, steering, *, timeout):
+    # Queue new user input before unblocking the model's tool wait. If steering
+    # is refused, fail this leg instead of silently dropping the user's input.
+    if steering:
+        inputs = []
+        for part in responses_content(steering):
+            if part["type"] == "input_text":
+                inputs.append({"type": "text", "text": part["text"], "text_elements": []})
+            else:
+                inputs.append({"type": "image", "url": part["image_url"]})
+        _result(lease.session.request("turn/steer", {
+            "threadId": lease.thread_id, "expectedTurnId": lease.turn_id,
+            "input": inputs}, timeout=timeout), context="turn/steer")
+    content = []
+    for part in responses_content(result.get("content", "")):
+        if part["type"] == "input_text":
+            content.append({"type": "inputText", "text": part["text"]})
+        else:
+            content.append({"type": "inputImage", "imageUrl": part["image_url"]})
+    lease.session.send(json.dumps({"id": lease.pending["rpc_id"], "result": {
+        "contentItems": content, "success": not bool(result.get("is_error"))}}))
+    lease.pending = None
+
+
+def _dispose_lease(lease):
+    _teardown(lease.session, lease.workspace)
+
+
+_POOL = SessionPool(_dispose_lease, capacity=8)
+atexit.register(_POOL.close)
+
+
+def run_turn(request, *, spawner=None, timeout=300, pool=None) -> Iterator[dict]:
     """One streaming turn on the user's ChatGPT subscription.
 
     Yields only ``text_delta``, ``thinking_delta``, ``message_stop`` and
@@ -1397,16 +1511,65 @@ def run_turn(request, *, spawner=None, timeout=300) -> Iterator[dict]:
     """
     workspace = None
     session = None
+    lease = None
+    healthy = False
+    timing = request.get("_cli_timing") if isinstance(request, dict) else None
+    # Custom spawners remain one-shot unless explicitly given a test pool.
+    owner = pool if pool is not None else (_POOL if spawner is None else None)
     try:
         budget = _bounded_timeout(timeout, default=300)
         deadline = time.monotonic() + budget
         payload = _normalise_request(request)
         argv = build_argv(payload["model"], effort=payload["effort"])
-        workspace = CodexTurnWorkspace(diagnostics=_diagnostics_enabled()).open()
-        session = _open_session(argv, workspace, spawner=spawner, timeout=budget)
-        _handshake(session, timeout=budget * _HANDSHAKE_SHARE)
-        thread_id = _start_thread(session, payload, workspace, timeout=budget * _START_SHARE)
-        if payload.get("history"):
+        mode = "cold"
+        if owner is not None:
+            key = _digest({"argv": argv, "env": minimal_env(), "system": payload["system"],
+                           "tools": payload["tools"], "summary": payload["reasoning_summary"],
+                           "tier": payload["service_tier"]})
+            blocks = _history_blocks(payload.get("history"))
+            continuation_key = (_digest([key, blocks]) if any(
+                role == "user" and block.get("type") == "tool_result" and
+                str(block.get("tool_use_id", "")).startswith("toolu_")
+                for role, block in blocks) else None)
+            lease, mode = owner.acquire(key, match=lambda entry: _continuation(entry, payload) is not None,
+                                        timeout=max(0.01, deadline - time.monotonic()),
+                                        request_key=continuation_key)
+            session, workspace = lease.session, lease.workspace
+        if timing:
+            timing.mark("pool_ready")
+            timing.label(reuse=mode)
+        if session is None:
+            if timing:
+                timing.mark("startup_started")
+            workspace = CodexTurnWorkspace(diagnostics=_diagnostics_enabled()).open()
+            if lease is not None:
+                lease.workspace = workspace
+            session = _open_session(argv, workspace, spawner=spawner, timeout=budget)
+            if lease is not None:
+                lease.session = session
+            if timing:
+                timing.mark("startup_complete")
+            _handshake(session, timeout=min(budget * _HANDSHAKE_SHARE, max(0.01, deadline - time.monotonic())))
+            if lease is not None:
+                lease.config = _inherited_mcp_overrides(session, timeout=max(0.01, deadline - time.monotonic()))
+            if timing:
+                timing.mark("initialization_complete")
+        if timing:
+            timing.label(cli_pid=getattr(getattr(session, "process", None), "pid", None))
+        if mode == "resumed":
+            result, steering = _continuation(lease, payload)
+            _resume_host_call(lease, result, steering, timeout=max(0.01, deadline - time.monotonic()))
+            thread_id, turn_id = lease.thread_id, lease.turn_id
+        else:
+            if lease is not None and lease.thread_id:
+                _result(session.request("thread/unsubscribe", {"threadId": lease.thread_id},
+                                        timeout=max(0.01, deadline - time.monotonic())),
+                        context="thread/unsubscribe")
+                lease.fragments.clear()
+            thread_id = _start_thread(session, payload, workspace,
+                                      timeout=max(0.01, deadline - time.monotonic()),
+                                      servers=lease.config if lease is not None else None)
+        if mode != "resumed" and payload.get("history"):
             history = payload["history"]
             # Historical calls, results and reasoning must be actual protocol
             # items. A tool result in user-message text makes some models repeat
@@ -1419,11 +1582,23 @@ def run_turn(request, *, spawner=None, timeout=300) -> Iterator[dict]:
                                        timeout=max(1.0, deadline - time.monotonic()))
             _result(response, context="thread/inject_items")
             payload["prompt"] = _RESUME_PROMPT
-        turn_id = _start_turn(session, payload, thread_id,
-                              timeout=max(1.0, deadline - time.monotonic()))
-        yield from _stream_turn(session, turn_id=turn_id, deadline=deadline,
-                                tools=payload["tools"], thread_id=thread_id,
-                                summary_only=payload["reasoning_summary"] is not None)
+        if mode != "resumed":
+            turn_id = _start_turn(session, payload, thread_id,
+                                  timeout=max(0.01, deadline - time.monotonic()))
+        if lease is not None:
+            lease.thread_id, lease.turn_id = thread_id, turn_id
+        if timing:
+            timing.mark("model_ready")
+        for event in _stream_turn(session, turn_id=turn_id, deadline=deadline,
+                                  tools=payload["tools"], thread_id=thread_id,
+                                  summary_only=payload["reasoning_summary"] is not None,
+                                  lease=lease, timing=timing):
+            if event.get("type") == "message_stop":
+                healthy = True
+                if lease is not None and lease.pending:
+                    blocks = _history_blocks(payload.get("history"))
+                    lease.pending.update(prefix=_digest(blocks), prefix_count=len(blocks))
+            yield event
     except CodexCliAgentError as exc:
         yield {"type": "error", "message": str(exc), "http_status": exc.http_status}
     except CliSessionError as exc:
@@ -1435,7 +1610,13 @@ def run_turn(request, *, spawner=None, timeout=300) -> Iterator[dict]:
         yield {"type": "error",
                "message": f"The Codex turn could not be run: {exc.__class__.__name__}: {exc}"}
     finally:
-        _teardown(session, workspace)
+        if lease is not None:
+            if timing:
+                timing.label(cleanup_kind="lease_release", session_retained=bool(
+                    healthy and timing.delivered))
+            owner.release(lease, healthy=healthy and (timing is None or timing.delivered))
+        else:
+            _teardown(session, workspace)
 
 
 # --------------------------------------------------------------------------

@@ -138,20 +138,69 @@ def parse_reply(text, tools, tool_choice=None):
     return reply["text"], calls
 
 
-def parse_stream(events, *, tools, tool_choice=None):
+class _ObjectBoundary:
+    """Find the first object in linear time, including split JSON escapes."""
+
+    def __init__(self):
+        self.started = False
+        self.depth = 0
+        self.quoted = False
+        self.escaped = False
+
+    def feed(self, text):
+        for index, char in enumerate(text):
+            if not self.started:
+                if char.isspace():
+                    continue
+                if char != "{":
+                    raise ToolCallError("structured reply must start with an object")
+                self.started = True
+            if self.quoted:
+                if self.escaped:
+                    self.escaped = False
+                elif char == "\\":
+                    self.escaped = True
+                elif char == '"':
+                    self.quoted = False
+            elif char == '"':
+                self.quoted = True
+            elif char in "{[":
+                self.depth += 1
+            elif char in "}]":
+                self.depth -= 1
+                if self.depth == 0:
+                    return index + 1
+        return None
+
+
+def parse_stream(events, *, tools, tool_choice=None, stop_after_object=False):
     chunks = []
     size = 0
+    boundary = _ObjectBoundary() if stop_after_object else None
     try:
         for event in events:
             kind = event.get("type")
             if kind == "text_delta":
                 text = event.get("text") or ""
+                end = boundary.feed(text) if boundary else None
+                if end is not None:
+                    text = text[:end]
                 size += len(text.encode("utf-8"))
                 if size > MAX_REPLY_BYTES:
                     raise ToolCallError("structured reply exceeds the size limit")
                 if not chunks:
                     yield {"type": "ping"}
                 chunks.append(text)
+                if end is not None:
+                    # Muse's first fully validated object is its handoff. Later
+                    # model steps cannot know the host result and are discarded.
+                    answer, calls = parse_reply("".join(chunks), tools, tool_choice)
+                    if answer:
+                        yield {"type": "text_delta", "text": answer}
+                    for call in calls:
+                        yield {"type": "tool_call", **call}
+                    yield {"type": "message_stop", "stop_reason": "tool_use" if calls else "end_turn"}
+                    return
             elif kind == "tool_call":
                 raise ToolCallError("the CLI used a native tool instead of the structured host response")
             elif kind == "message_stop":

@@ -319,6 +319,7 @@ class ParseToolStreamTest(unittest.TestCase):
 
     def test_wrapper_close_kills_inner_generator(self):
         closed = []
+        cleaned = threading.Event()
 
         def adapter_turn(request, *, timeout=300):
             try:
@@ -327,11 +328,13 @@ class ParseToolStreamTest(unittest.TestCase):
                 yield {"type": "text_delta", "text": "more"}
             finally:
                 closed.append(True)
+                cleaned.set()
 
         cli_routes._cache["claude"] = types.SimpleNamespace(run_turn=adapter_turn)
         events = run_turn("claude", {}, parse_tool_calls=True)
         next(events)
         events.close()
+        self.assertTrue(cleaned.wait(2), "background cleanup did not finish")
         self.assertEqual(closed, [True])
 
     def test_relay_emits_tool_use_wire_blocks(self):

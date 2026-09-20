@@ -4,10 +4,12 @@ Vendor processes are scripted; the host really reads, edits, and rereads a
 temporary file. No credentials or external services are used by this suite.
 """
 from contextlib import ExitStack
+from functools import partial
 import io
 import json
 from pathlib import Path
 import tempfile
+import threading
 import unittest
 from unittest.mock import patch
 from types import SimpleNamespace
@@ -41,6 +43,7 @@ class Session:
         self.stdin = io.StringIO()
         self.requests = []
         self.closed = False
+        self.cleaned = threading.Event()
 
     def request(self, method, params, **kwargs):
         self.requests.append((method, params))
@@ -57,6 +60,7 @@ class Session:
 
     def close(self):
         self.closed = True
+        self.cleaned.set()
 
     def __enter__(self):
         return self
@@ -110,6 +114,11 @@ class HostCycleTests(unittest.TestCase):
                     session = Session(vendor_events(provider, name, arguments), codex=provider == "codex")
                     with ExitStack() as stack:
                         stack.enter_context(patch.object(adapter, "StdioSession", return_value=session))
+                        if provider == "codex":
+                            # This existing fixture scripts a new process per leg.
+                            # Native continuation has its own persistent fixture.
+                            stack.enter_context(patch.object(adapter, "run_turn",
+                                partial(adapter.run_turn, spawner="one-shot-test")))
                         resolver = "runtime_binary" if provider == "codex" else "_resolve_binary"
                         stack.enter_context(patch.object(adapter, resolver, return_value="/fake/cli"))
                         wire = []
@@ -117,7 +126,7 @@ class HostCycleTests(unittest.TestCase):
                             parse_tool_calls=True), wire.append, model=model)
                     self.assertIsNone(outcome["error"], outcome)
                     self.assertEqual(outcome["stop_reason"], "tool_use")
-                    self.assertTrue(session.closed)
+                    self.assertTrue(session.cleaned.wait(2), "CLI cleanup did not finish")
                     blocks = [event["content_block"] for event in wire if event["type"] == "content_block_start"]
                     call = next(block for block in blocks if block["type"] == "tool_use")
                     args = json.loads(next(event["delta"]["partial_json"] for event in wire

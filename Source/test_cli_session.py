@@ -443,6 +443,38 @@ class SendFramingTests(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class RequestTests(unittest.TestCase):
+    def test_server_call_with_same_id_is_not_a_client_response(self):
+        fake = FakeProcess(script=None)
+        session = make_session(fake)
+        native = {"id": 1, "method": "item/tool/call", "params": {"callId": "host-call"}}
+        response = {"id": 1, "result": {"turnId": "turn-1"}}
+        try:
+            fake.write_stdout(native)
+            fake.write_stdout(response)
+            self.assertEqual(session.request("turn/steer", {}, timeout=1), response)
+            events = session.events(timeout=.01)
+            self.assertEqual(next(events), native)
+            # A caller can send another RPC while an event iterator is paused.
+            # The pending-queue lock must not remain held across that yield.
+            fake.write_stdout({"id": 2, "result": {}})
+            done = threading.Event()
+            results = []
+            def request_again():
+                try:
+                    results.append(session.request("turn/steer", {}, timeout=1))
+                finally:
+                    done.set()
+            worker = threading.Thread(target=request_again, daemon=True)
+            worker.start()
+            try:
+                self.assertTrue(done.wait(2), "paused event iterator retained the pending lock")
+                self.assertEqual(results, [{"id": 2, "result": {}}])
+            finally:
+                events.close()
+                worker.join(2)
+        finally:
+            session.close()
+
     def _read_request(self, fake, method):
         """Read one request line from stdin; return its id after asserting."""
         line = json.loads(read_stdin_line(fake))

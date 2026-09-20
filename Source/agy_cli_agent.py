@@ -53,6 +53,7 @@ from pathlib import Path
 from typing import Any, Iterable, Iterator
 
 from cli_session import CliSessionError, StdioSession, minimal_env, resolve_binary
+from cli_lifecycle import cleanup_after_exit
 from cli_tool_call import TRANSCRIPT_HEADER, ToolCallError
 from cli_structured_reply import parse_reply
 from cli_images import write_images
@@ -1233,13 +1234,32 @@ def run_turn(request, *, spawner=None, timeout=300) -> Iterator[dict]:
                 for event in _translate(payload, state):
                     yield event
                 if state.handoff_reply is not None:
-                    # Tear down the native loop before exposing a call to the
-                    # desktop. Only a pre-execution capture can take this path.
-                    break
+                    # The denial receipt proves this call never executed. The
+                    # hook remains installed until the child has been reaped.
+                    yield {"type": "text_delta", "text": state.handoff_reply}
+                    yield {"type": "message_stop", "stop_reason": "end_turn"}
+                    return
                 if state.failure:
                     yield {"type": "error", "message": state.failure,
                            **({"http_status": state.failure_status} if state.failure_status else {}),
                            **({"code": state.failure_code} if state.failure_code else {})}
+                    return
+                if state.terminal:
+                    returncode = getattr(session, "returncode", None)
+                    if isinstance(returncode, int) and returncode != 0:
+                        yield {"type": "error", "message": f"the agy CLI exited with code {returncode}"}
+                        return
+                    if not state.emitted_text and not state.fallback_text():
+                        denied = state.denied_actions or state.tool_error or state.saw_tool_step
+                        yield {"type": "error", "message": state.denial_detail() if denied else
+                               "the agy CLI produced no output",
+                               **({"http_status": 400} if denied and state.structured else {})}
+                        return
+                    fallback = state.result_suffix()
+                    if fallback:
+                        state.emitted_text = True
+                        yield {"type": "text_delta", "text": fallback}
+                    yield {"type": "message_stop", "stop_reason": state.stop_reason or "end_turn"}
                     return
 
         if state.handoff_reply is not None:
@@ -1278,13 +1298,11 @@ def run_turn(request, *, spawner=None, timeout=300) -> Iterator[dict]:
         yield {"type": "error", "message": _describe(exc, state, timeout)}
         return
     finally:
-        if workspace_path:
-            shutil.rmtree(workspace_path, ignore_errors=True)
-        handle = state.stderr_handle
-        if handle is not None:
-            try:
-                handle.close()
-            except Exception:
-                pass
+        def release_files():
+            if workspace_path:
+                shutil.rmtree(workspace_path, ignore_errors=True)
+            if state.stderr_handle is not None:
+                state.stderr_handle.close()
+        cleanup_after_exit(session, release_files)
 
     yield {"type": "message_stop", "stop_reason": stop_reason}

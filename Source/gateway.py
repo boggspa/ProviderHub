@@ -636,6 +636,9 @@ class Handler(BaseHTTPRequestHandler):
         if not self.allowed():
             return
         path = urllib.parse.urlsplit(self.path).path
+        if path == "/v1/responses/compact":
+            from responses_compact import handle_compact
+            return handle_compact(self)
         if path == "/v1/responses":
             # Fail-open spawn-depth middleware: without the provider flag it
             # hands the body through byte-identical for normal handling.
@@ -711,6 +714,7 @@ class Handler(BaseHTTPRequestHandler):
         # Queue for a worker slot instead of failing fast: subagent bursts
         # briefly exceed the worker count by design, and every instant 429
         # burns one of the client's own retries toward terminalisation.
+        queued_at = time.monotonic()
         if not wait_for_slot(self.runtime.semaphore, cancel=lambda: _client_gone(self),
                              timeout=SLOT_WAIT_TIMEOUT):
             if _client_gone(self):
@@ -719,6 +723,8 @@ class Handler(BaseHTTPRequestHandler):
             self.error(429, "Eight requests are already active. Try again shortly.",
                        headers={"Retry-After": str(SLOT_RETRY_AFTER)})
             return
+        if plan.get("cli"):
+            plan["body"]["_cli_queue_ms"] = round((time.monotonic() - queued_at) * 1000, 3)
         connection = None
         response = None
         upstream_socket = None
@@ -1005,7 +1011,7 @@ class Handler(BaseHTTPRequestHandler):
         and the generator is always closed, which is what kills the child CLI.
         """
         route = plan["route"]
-        request = plan["body"]
+        request = {**plan["body"], "_cli_cancel": disconnected.is_set}
         stream = bool(request.get("stream"))
         try:
             events = cli_routes.run_turn(plan["provider_id"], request,
@@ -1026,6 +1032,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.flush()
 
         def emit(event):
+            if disconnected.is_set():
+                raise BrokenPipeError()
             if streaming:
                 write_chunk(("event: " + event["type"] + "\ndata: " + json.dumps(event, ensure_ascii=False) + "\n\n").encode())
             else:
@@ -1085,6 +1093,8 @@ class Handler(BaseHTTPRequestHandler):
                     close_events()
                 except Exception:
                     pass
+        if disconnected.is_set():
+            raise BrokenPipeError()
         usage.update(result.get("usage") or {})
         if result.get("error"):
             message = f"{plan['provider_name']} CLI route failed: {result['error']}"

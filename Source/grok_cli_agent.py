@@ -49,6 +49,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from cli_session import CliSessionError, StdioSession, minimal_env, resolve_binary
+from cli_lifecycle import cleanup_after_exit
 from cli_tool_call import (MAX_ENVELOPE_BYTES, TRANSCRIPT_HEADER, ToolCallError,
                            normalize_tools, validate_host_call)
 from cli_images import prompt_content
@@ -865,6 +866,21 @@ def run_turn(request, *, spawner=None, timeout=300) -> Iterator[dict]:
                     # for host tools. Stop before the CLI's own tool loop.
                     yield {"type": "message_stop", "stop_reason": "tool_use"}
                     return
+                if state.terminal:
+                    returncode = getattr(session, "returncode", None)
+                    if isinstance(returncode, int) and returncode != 0:
+                        yield {"type": "error", "message": f"the grok CLI exited with code {returncode}"}
+                        return
+                    if not state.emitted_text:
+                        fallback = state.fallback_text()
+                        if fallback:
+                            state.emitted_text = True
+                            yield {"type": "text_delta", "text": fallback}
+                        else:
+                            yield {"type": "error", "message": "the grok CLI produced no output"}
+                            return
+                    yield {"type": "message_stop", "stop_reason": state.stop_reason or "end_turn"}
+                    return
 
         returncode = getattr(session, "returncode", None)
         if isinstance(returncode, int) and returncode != 0:
@@ -891,13 +907,11 @@ def run_turn(request, *, spawner=None, timeout=300) -> Iterator[dict]:
         yield {"type": "error", "message": _describe(exc, state, timeout)}
         return
     finally:
-        if workspace_path is not None:
-            shutil.rmtree(workspace_path, ignore_errors=True)
-        handle = state.stderr_handle
-        if handle is not None:
-            try:
-                handle.close()
-            except Exception:
-                pass
+        def release_files():
+            if workspace_path is not None:
+                shutil.rmtree(workspace_path, ignore_errors=True)
+            if state.stderr_handle is not None:
+                state.stderr_handle.close()
+        cleanup_after_exit(session, release_files)
 
     yield {"type": "message_stop", "stop_reason": stop_reason}
