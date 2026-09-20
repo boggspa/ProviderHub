@@ -4,6 +4,24 @@ A native macOS menu bar app that connects Claude Desktop and the Codex coding wo
 
 Provider Hub Preview retains the Preview label while additional provider accounts and desktop integration paths complete live qualification. Stable Mistral Bridge 0.2 is preserved separately. The stable app and the preview have separate bundle IDs, settings directories, Keychain namespaces, gateway ports, and Claude profile IDs. Installing or building the preview does not replace the stable app.
 
+**Documentation**
+
+| Guide | Contents |
+| --- | --- |
+| [Quick start](QUICK-START.md) | Installation, provider setup, and launching either desktop client |
+| [Verification record](VERIFICATION.md) | Dated test results, live checks, and qualification limits |
+| [Codex / ChatGPT harness](HARNESS-OPTIONS.md) | Responses transport, catalogues, launch, and restoration |
+| [Native agents and Auto mode](NATIVE-AGENTS.md) | Subscription boundaries, native-agent research, and Claude's approval classifier |
+| [Provider additions](PROVIDER-ADDITIONS.md) | Provider contracts, metadata sources, and qualification details |
+| [Integration roadmap](PROVIDER-ROADMAP.md) | Release history, retained boundaries, and proposed work |
+| [Close-out cards](CLOSEOUT_CARDS.md) | File-editing tool projection and desktop diff cards |
+| [Claude picker context](docs/claude-picker-context.md) | Context metadata and picker presentation |
+| [Codex provider subagents](docs/codex-provider-subagents.md) | Host delegation, runtime probes, and activation limits |
+| [AntiGravity tool handoff](docs/antigravity-host-handoff.md) | Native tool requests and desktop dispatch |
+| [Repository doctrine](AGENTS.md) | Shared-checkout ownership, testing, and commit rules |
+
+Provider implementation is split between [registry and connections](Source/provider_registry.py), [model discovery](Source/provider_discovery.py), and [request preparation](Source/provider_requests.py). [providers.py](Source/providers.py) preserves existing imports, including private helpers.
+
 **Start using the preview**
 
 1. Move **Provider Hub Preview.app** to Applications and open it. It requires an Apple Silicon Mac and macOS 14 or newer. The shareable bundle includes Python 3.13.13; no separate Python installation is needed. A lightweight source build can use Python 3.11 or newer, including a runtime installed with Vibe.
@@ -171,9 +189,6 @@ Use Python 3.11 or newer for source tests. Building requires Apple's command-lin
 
 `Source/package_macos.py` accepts a Developer ID Application identity, signs the embedded native components and app, verifies the result, and creates the distribution archive. Its optional `--submit --notary-profile NAME` path submits with an existing `notarytool` Keychain profile; the password is not passed to the script. After Apple accepts a submission, staple the app with `xcrun stapler staple`, validate it, and recreate the distribution zip. The 0.5.3 build 15 distribution is Developer ID signed and Apple-notarized, superseding 0.5.1 build 14; the ticket is stapled, and Gatekeeper reports `Notarized Developer ID`. Rebuilding from source creates a new development artifact and does not inherit that notarization.
 
-`VERIFICATION.md` records the complete test matrix and its limits; `HARNESS-OPTIONS.md` contains the Codex-specific evidence. The stable Mistral Bridge 0.2 baseline completed a live Claude read → edit → read cycle before the provider expansion. For 0.4.0, all six translated providers passed mocked JSON and streaming function-tool cycles, including Cerebras encrypted-thinking replay. The installed Codex engine completed live disposable read → edit → read cycles on both `ollama/deepseek-v4-flash:cloud` and `cerebras/gpt-oss-120b`. Each cycle made three successful HTTP 200 requests; the engine reported 1,048,576 and 131,072 context tokens respectively. These live results qualify those exact routes and account states only. The user's normal Codex GUI/configuration has not been switched, and no xAI key was available for live Grok qualification.
-
-
 **Qualification**
 
-The 0.5.0 qualification run passed 226/226 automated tests under the bundled Python runtime. The suite has since grown to 539 collected tests at `01adc96`, and that larger total has not been re-qualified as a single recorded run. Live, disposable read/edit/read cycles passed through both Messages and streaming Responses for `openrouter/cohere/north-mini-code:free` and `gemini/gemini-3.8-flash`. Gemini’s first Responses run encountered a provider limit after file verification; a paced retry completed successfully. `qwen-token-plan/qwen3.8-max` reached the intended subscription endpoint in both formats but returned HTTP 429 for exhausted weekly quota. Qwen’s live tool cycle remains unverified until quota returns. See `VERIFICATION.md` and the metadata-only live receipts.
+The [verification record](VERIFICATION.md) is the source for dated test totals, live tool-cycle results, and unverified routes. The [Codex harness guide](HARNESS-OPTIONS.md) records installed-engine and desktop-specific evidence. Each result qualifies only the model, account, and build recorded there; catalogue discovery alone does not establish inference access.

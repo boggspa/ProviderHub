@@ -1,7 +1,12 @@
 import copy
 import json
 import unittest
+from unittest.mock import patch
 
+import provider_discovery
+import provider_registry
+import provider_requests
+import providers
 from providers import (
     PROVIDERS,
     ProviderError,
@@ -21,6 +26,36 @@ def text_prompt(**changes):
     }
     value.update(changes)
     return value
+
+
+class CompatibilityTests(unittest.TestCase):
+    def test_existing_imports_share_the_registry_and_error_type(self):
+        self.assertIs(PROVIDERS, provider_registry.PROVIDERS)
+        self.assertIs(ProviderError, provider_registry.ProviderError)
+        self.assertIs(providers._auth_headers, provider_registry._auth_headers)
+        self.assertIs(providers._translate_chat_payload, provider_requests._translate_chat_payload)
+        self.assertIs(prepare_request, provider_requests.prepare_request)
+        with self.assertRaises(ProviderError):
+            provider_discovery.discover("unknown-provider", None, None)
+        with self.assertRaises(ProviderError):
+            provider_requests.prepare_request("unknown-provider", None, None, {}, "model", None)
+
+    def test_discovery_uses_the_legacy_transport_hook(self):
+        with patch.object(providers, "_fetch_json", return_value={"data": [{"id": "gpt-5"}]}) as fetch:
+            catalogue = discover("codex", None, "test-key")
+        self.assertEqual([model["id"] for model in catalogue["models"]], ["gpt-5"])
+        self.assertEqual(fetch.call_count, 1)
+        self.assertEqual(fetch.call_args.args[0]["url"], "https://api.openai.com/v1/models")
+
+    def test_explicit_transport_takes_precedence_without_changing_other_calls(self):
+        original_fetch = provider_discovery._fetch_json
+        with patch.object(providers, "_fetch_json", return_value={"data": [{"id": "gpt-4"}]}) as default_fetch:
+            explicit = discover("codex", None, "test-key", transport=lambda plan: {"data": [{"id": "gpt-5"}]})
+            default_fetch.assert_not_called()
+            default = discover("codex", None, "test-key")
+        self.assertEqual([model["id"] for model in explicit["models"]], ["gpt-5"])
+        self.assertEqual([model["id"] for model in default["models"]], ["gpt-4"])
+        self.assertIs(provider_discovery._fetch_json, original_fetch)
 
 
 class RegistryTests(unittest.TestCase):
