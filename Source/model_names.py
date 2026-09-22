@@ -33,7 +33,8 @@ PINNED_LABELS = {
 CLAUDE_MODEL_LABELS = {
     "claude-fable-5-1": "Claude Fable 5.1",
     "claude-fable-5": "Claude Fable 5 (Legacy)",
-    "claude-opus-5": "Claude Opus 5",
+    "claude-opus-5-5": "Claude Opus 5.5",
+    "claude-opus-5": "Claude Opus 5 (Legacy)",
     "claude-opus-4-8": "Claude Opus 4.8 (Legacy)",
     "claude-opus-4-7": "Claude Opus 4.7 (Legacy)",
     "claude-opus-4-6": "Claude Opus 4.6 (Legacy)",
@@ -46,7 +47,7 @@ CLAUDE_MODEL_LABELS = {
 # New picker rows use the full ID; short names are never extra picker rows.
 CLAUDE_CLI_ALIASES = {
     "fable": "claude-fable-5-1",
-    "opus": "claude-opus-5",
+    "opus": "claude-opus-5-5",
     "sonnet": "claude-sonnet-5",
     "haiku": "claude-haiku-4-5",
 }
