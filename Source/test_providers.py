@@ -199,9 +199,15 @@ class DiscoveryTests(unittest.TestCase):
     def test_documented_mimo_catalogue_has_only_messages_models(self):
         result = discover("mimo", {"region": "cn"}, None)
         by_id = {model["id"]: model for model in result["models"]}
-        self.assertEqual(set(by_id), {"mimo-v2.5", "mimo-v2.5-pro"})
-        self.assertTrue(all(model["context"] == 1048576 for model in by_id.values()))
+        self.assertEqual(set(by_id), {"mimo-v2.6-pro", "mimo-v2.6-pro-ultraspeed", "mimo-v2.6-flash",
+                                      "mimo-v2.5", "mimo-v2.5-pro"})
+        documented = set(by_id) - {"mimo-v2.6-pro-ultraspeed"}
+        self.assertTrue(all(by_id[model]["context"] == 1048576 for model in documented))
+        self.assertIsNone(by_id["mimo-v2.6-pro-ultraspeed"]["context"])
+        self.assertIsNone(by_id["mimo-v2.6-pro-ultraspeed"]["vision"])
         self.assertTrue(all(model["max_output"] == 131072 for model in by_id.values()))
+        self.assertTrue(by_id["mimo-v2.6-pro"]["vision"])
+        self.assertTrue(by_id["mimo-v2.6-flash"]["vision"])
         self.assertFalse(by_id["mimo-v2.5-pro"]["vision"])
         self.assertTrue(by_id["mimo-v2.5"]["vision"])
 

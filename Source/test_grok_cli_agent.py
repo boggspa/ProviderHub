@@ -56,19 +56,27 @@ class TestValidateModel(unittest.TestCase):
 
     def test_none_returns_default(self):
         result = module._validate_model(None)
-        self.assertEqual(result, "grok-4.6")
+        self.assertEqual(result, "grok-4.7")
 
     def test_empty_string_returns_default(self):
         result = module._validate_model("")
-        self.assertEqual(result, "grok-4.6")
+        self.assertEqual(result, "grok-4.7")
 
     def test_whitespace_only_returns_default(self):
         result = module._validate_model("   ")
-        self.assertEqual(result, "grok-4.6")
+        self.assertEqual(result, "grok-4.7")
 
     def test_valid_model_pass_through(self):
         result = module._validate_model("grok-4.5")
         self.assertEqual(result, "grok-4.5")
+
+    def test_known_models_match_grok_models_listing(self):
+        self.assertEqual(module.KNOWN_MODELS,
+                         ("grok-4.7", "grok-4.7-build-fast", "grok-4.6", "grok-4.5"))
+        self.assertEqual(module.DEFAULT_MODEL, "grok-4.7")
+        for model in module.KNOWN_MODELS:
+            argv = module.build_argv(model, stream=True)
+            self.assertEqual(argv[argv.index("--model") + 1], model)
 
     def test_model_stripped(self):
         result = module._validate_model("  grok-4.6  ")
@@ -182,7 +190,7 @@ class TestBuildArgv(unittest.TestCase):
 
     def test_model_default(self):
         argv = module.build_argv(None, stream=True)
-        self.assertIn("grok-4.6", argv)
+        self.assertIn("grok-4.7", argv)
 
 
 class TestPromptRendering(unittest.TestCase):

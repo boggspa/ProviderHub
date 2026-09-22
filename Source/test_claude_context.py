@@ -15,7 +15,8 @@ from hub_config import claude_catalogue_rows, defaults, project_catalogue
 from protocol import estimated_tokens, model_catalog
 
 
-CODEX_MODELS = ("gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol", "gpt-6-astra")
+CODEX_MODELS = ("gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol", "gpt-6-astra",
+                "gpt-6-luna", "gpt-6-sol")
 GEMINI_MODELS = ("gemini-3.1-pro", "gemini-3.6-flash", "gemini-3.7-flash", "gemini-3.8-flash")
 
 
@@ -53,12 +54,12 @@ class ClaudeContextTests(unittest.TestCase):
                 patch("gateway.attach_model_specs", return_value=(self.settings, inventory)):
             return Runtime(self.home / "hub", key="")
 
-    def test_configured_window_reaches_all_four_desktop_rows_without_duplicates(self):
+    def test_configured_window_reaches_every_desktop_row_without_duplicates(self):
         self.configure("model_context_window = 1_000_000\nmodel_auto_compact_token_limit = 900_000\n")
         self.catalogue()
         rows = model_catalog(self.settings)["data"]
-        self.assertEqual(len(rows), 4)
-        self.assertEqual(len({row["id"] for row in rows}), 4)
+        self.assertEqual(len(rows), len(CODEX_MODELS))
+        self.assertEqual(len({row["id"] for row in rows}), len(CODEX_MODELS))
         for row in rows:
             self.assertTrue(row["id"].endswith("[1m]"))
             self.assertEqual(row["max_tokens"], 1_000_000)
@@ -84,6 +85,8 @@ class ClaudeContextTests(unittest.TestCase):
             ("claude", "claude-haiku-4-5", 200_000),
             ("deepseek", "deepseek-v4-pro", 1_048_576),
             ("deepseek", "deepseek-flash", 1_048_576),
+            ("grok", "grok-4.7", 500_000),
+            ("grok", "grok-4.7-build-fast", 500_000),
             ("grok", "grok-4.6", 500_000),
             ("grok", "grok-4.5", 500_000),
             ("qwen-token-plan", "qwen3.8-flash", 1_000_000),

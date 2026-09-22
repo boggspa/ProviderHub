@@ -20,6 +20,7 @@ Verified live against grok 1.0.34 (3736acbc8658):
     --permission-mode plan, --no-subagents, --tools, --model, --reasoning-effort
     (aliases: --effort), --system-prompt-override (compat: --system-prompt)
   - ``grok models`` returns authenticated models list (2 models: grok-4.6, grok-4.5)
+  - grok 1.0.40 lists grok-4.7 (default), grok-4.7-build-fast, grok-4.6, grok-4.5
   - ``--reasoning-effort`` accepts: low, medium, high, xhigh (no none, no ultra)
   - ``--tools ""`` alone leaves native tools enabled; the removal list and
     init.tools validation below are required
@@ -150,10 +151,13 @@ GROK_EFFORT_ALIASES = {
     "ultra": "xhigh",
 }
 
-# Known models from live verification: grok-4.6 (default), grok-4.5.
-# These are UNVERIFIED SEED for the hub's model picker; catalogue() returns
-# nothing because grok has no read-only model list subcommand.
-KNOWN_MODELS = ("grok-4.6", "grok-4.5")
+# Known models from ``grok models`` (1.0.40, 2026-09-22): grok-4.7 (default),
+# grok-4.7-build-fast (Grok 4.7 Fast - Grok Build/Cursor only, not the public
+# API), grok-4.6, grok-4.5. These are UNVERIFIED SEED for the hub's model
+# picker; catalogue() returns nothing because grok has no read-only model list
+# subcommand.
+KNOWN_MODELS = ("grok-4.7", "grok-4.7-build-fast", "grok-4.6", "grok-4.5")
+DEFAULT_MODEL = "grok-4.7"
 
 _NO_MODEL_LIST_WARNING = (
     "grok has no non-interactive model list; catalogue is seeded from "
@@ -259,12 +263,12 @@ def catalogue(*, capture=None, timeout=30) -> tuple[list[dict], list[str]]:
 def _validate_model(model: str | None) -> str:
     """Validate and return the model identifier."""
     if model is None:
-        return "grok-4.6"
+        return DEFAULT_MODEL
     if not isinstance(model, str):
         raise GrokCliAgentError(f"model must be a string, got {type(model).__name__}")
     stripped = model.strip()
     if not stripped:
-        return "grok-4.6"
+        return DEFAULT_MODEL
     return stripped
 
 

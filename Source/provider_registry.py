@@ -388,7 +388,42 @@ _KIMI_MODELS = [
 ]
 
 _MIMO_DOCS = "https://mimo.mi.com/docs/en-US/api/chat/anthropic-api"
+# V2.6 IDs from the Anthropic API page above; limits and modality from
+# https://mimo.mi.com/models/en-US/mimo-v2.6-pro and .../mimo-v2.6-flash.
+# Xiaomi documents no separate window or modality for Pro UltraSpeed (the
+# faster edition of Pro), so those stay unknown rather than copied.
 _MIMO_MODELS = [
+    {
+        "id": "mimo-v2.6-pro",
+        "display_name": "MiMo V2.6 Pro",
+        "context": 1048576,
+        "max_output": 131072,
+        "tools": True,
+        "vision": True,
+        "reasoning": True,
+        "effort_modes": ["none", "high"],
+        "fast_mode": False,
+    },
+    {
+        "id": "mimo-v2.6-pro-ultraspeed",
+        "display_name": "MiMo V2.6 Pro UltraSpeed",
+        "max_output": 131072,
+        "tools": True,
+        "reasoning": True,
+        "effort_modes": ["none", "high"],
+        "fast_mode": False,
+    },
+    {
+        "id": "mimo-v2.6-flash",
+        "display_name": "MiMo V2.6 Flash",
+        "context": 1048576,
+        "max_output": 131072,
+        "tools": True,
+        "vision": True,
+        "reasoning": True,
+        "effort_modes": ["none", "high"],
+        "fast_mode": False,
+    },
     {
         "id": "mimo-v2.5-pro",
         "display_name": "MiMo V2.5 Pro",
@@ -469,10 +504,24 @@ _MUSE_REASONING_DOCS = "https://dev.meta.ai/docs/reasoning.md"
 # because Meta documents HTTP 400 when reasoning is turned off on Spark.
 _MUSE_EFFORT_RANKS = ["minimal", "low", "medium", "high", "xhigh", "max"]
 _GROK_MODEL_DOCS = "https://docs.x.ai/developers/grok-4-6"
+_GROK_4_7_DOCS = "https://docs.x.ai/developers/grok-4-7"
 _GROK_REASONING_DOCS = "https://docs.x.ai/developers/model-capabilities/text/reasoning"
 # Only enrich exact, account-listed IDs. A moving alias or a future model is
 # not evidence for a particular version, context limit, or reasoning control.
 _GROK_MODEL_METADATA = {
+    "grok-4.7": {
+        "context": 500000, "tools": True, "vision": True, "reasoning": True,
+        "effort_modes": ["low", "medium", "high", "xhigh"],
+        "metadata_evidence": _GROK_4_7_DOCS,
+    },
+    # Grok 4.7 Fast: xAI documents it as the same model on faster serving,
+    # offered only in Grok Build and Cursor. The ID is the one `grok models`
+    # lists; the public API does not, so API discovery never enriches it.
+    "grok-4.7-build-fast": {
+        "context": 500000, "tools": True, "vision": True, "reasoning": True,
+        "effort_modes": ["low", "medium", "high", "xhigh"],
+        "metadata_evidence": _GROK_4_7_DOCS,
+    },
     "grok-4.6": {
         "context": 500000, "tools": True, "vision": True, "reasoning": True,
         "effort_modes": ["low", "medium", "high", "xhigh"],
