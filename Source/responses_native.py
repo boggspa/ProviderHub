@@ -38,6 +38,7 @@ REQUEST_FIELDS = frozenset({
     "truncation", "service_tier", "prompt_cache_key", "safety_identifier", "user",
 })
 LOCAL_FIELDS = frozenset({"client_metadata"})
+KEEPALIVE_INTERVAL = 5.0
 TERMINAL_EVENTS = frozenset({"response.completed", "response.incomplete", "response.failed", "error"})
 
 # Ultra is the Codex effort rank that opts a route into multi_agent_v2, and
@@ -936,9 +937,12 @@ def handle_responses(handler):
                 return
 
     def ping():
-        while not closed.wait(5):
+        # A real event, not an SSE comment: Codex's idle timer resets only on
+        # a parsed event with data, and it ignores an unknown type. Comments
+        # left a silent CLI turn to time out and be re-sent from scratch.
+        while not closed.wait(KEEPALIVE_INTERVAL):
             try:
-                write_chunk(b": provider-hub keepalive\n\n")
+                emit({"type": "ping"})
             except OSError:
                 disconnected.set()
                 return

@@ -21,6 +21,7 @@ from unittest.mock import patch
 import cli_routes
 import gateway as gateway_module
 import providers
+import responses_native
 from bridge_core import atomic_json, connection_signature, default_settings, discover_provider
 from cli_routes import (CliRouteError, cli_credential_mode, discover_via_cli,
                         plan_turn, relay_cli_turn, run_turn)
@@ -748,15 +749,18 @@ class GatewayCliTurnTest(unittest.TestCase):
                     body.update(store=False, input="hi")
                 connection = http.client.HTTPConnection("127.0.0.1", self.gateway.server_port, timeout=2)
                 try:
-                    with patch.object(gateway_module, "CLI_KEEPALIVE_INTERVAL", .02):
+                    with patch.object(gateway_module, "CLI_KEEPALIVE_INTERVAL", .02), \
+                            patch.object(responses_native, "KEEPALIVE_INTERVAL", .02):
                         connection.request("POST", "/v1/" + surface, json.dumps(body), {
                             "Authorization": "Bearer " + self.runtime.token, "Content-Type": "application/json"})
                         self.assertTrue(entered.wait(2))
                         response = connection.getresponse()
                         self.assertEqual(response.status, 200)
                         self.assertFalse(release.is_set())
-                        if surface == "messages":
-                            self.assertEqual(response.readline(), b"event: ping\n")
+                        # Both surfaces must keep the client's idle timer
+                        # alive with a real event: Codex ignores SSE comments.
+                        self.assertEqual(response.readline(), b"event: ping\n")
+                        self.assertEqual(json.loads(response.readline()[5:]), {"type": "ping"})
                         release.set()
                         raw = response.read().decode()
                         self.assertIn("QUIET START OK", raw)
@@ -765,6 +769,24 @@ class GatewayCliTurnTest(unittest.TestCase):
                 finally:
                     release.set()
                     connection.close()
+
+    def test_committed_cli_stream_pings_at_the_slower_repeat_cadence(self):
+        def quiet_turn(request, *, timeout=300):
+            time.sleep(.3)
+            yield {"type": "text_delta", "text": "done"}
+            yield {"type": "message_stop", "stop_reason": "end_turn"}
+
+        cli_routes._cache["claude"] = _fake_adapter(run_turn=quiet_turn)
+        with patch.object(gateway_module, "CLI_KEEPALIVE_INTERVAL", .02), \
+                patch.object(gateway_module, "CLI_KEEPALIVE_REPEAT", .2):
+            status, raw = self.request({"model": "claude/claude-sonnet-5", "max_tokens": 64,
+                "stream": True, "messages": [{"role": "user", "content": "hi"}]})
+        self.assertEqual(status, 200)
+        # One commit ping at the short interval, then one at the repeat
+        # cadence, rather than ~15 at the commit interval. Each ping spends
+        # one of Claude Code's 30 watchdog re-arms.
+        self.assertIn(raw.count(b"event: ping"), {1, 2})
+        self.assertIn(b"message_stop", raw)
 
     def test_error_after_idle_keepalive_uses_one_sse_error_and_no_success(self):
         def quiet_failure(request, *, timeout=300):

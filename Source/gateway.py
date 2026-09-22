@@ -60,6 +60,12 @@ from claude_context import claude_context_spec
 
 MAX_BODY = 32 * 1024 * 1024
 CLI_KEEPALIVE_INTERVAL = 5.0
+# After the stream is committed, ping sparingly. Claude Code lets pings re-arm
+# its 300 s idle watchdog only 30 times in a row, so a silent CLI phase (long
+# thinking, buffered tool-call text) is aborted after ~30 pings + 300 s: 7.5
+# minutes at 5 s, 20 minutes at 30 s. The loopback Responses reader times out
+# at 180 s, so this must stay well below that.
+CLI_KEEPALIVE_REPEAT = 30.0
 
 
 def build_identity(resources=None):
@@ -1084,7 +1090,9 @@ class Handler(BaseHTTPRequestHandler):
                 streaming = True
 
         def ping_loop():
-            while not closed.wait(CLI_KEEPALIVE_INTERVAL):
+            interval = CLI_KEEPALIVE_INTERVAL
+            while not closed.wait(interval):
+                interval = CLI_KEEPALIVE_REPEAT
                 try:
                     with write_lock:
                         begin_stream()

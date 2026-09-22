@@ -457,7 +457,13 @@ def plan_turn(provider_id: str, upstream_model: str, payload: dict, spec: dict,
     }
 
 
-def run_turn(provider_id: str, request: dict, *, parse_tool_calls: bool = False, timeout: int = 600):
+# Whole-turn budget. Keep it inside Claude Code's ping-only ceiling (see
+# gateway.CLI_KEEPALIVE_REPEAT) so a stuck turn ends with the hub's own error
+# rather than a client-side idle abort that retries the turn from scratch.
+CLI_TURN_TIMEOUT = 1140
+
+
+def run_turn(provider_id: str, request: dict, *, parse_tool_calls: bool = False, timeout: int = CLI_TURN_TIMEOUT):
     """Start the adapter's turn generator (text_delta/thinking_delta/stop)."""
     adapter = adapter_for(provider_id)
     timing = TurnTiming(provider_id, request.get("model"))
