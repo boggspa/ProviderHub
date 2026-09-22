@@ -47,6 +47,26 @@ def retired(card, today=None):
     return date <= (today or datetime.now(timezone.utc).date())
 
 
+def image_input_blocked(provider_id, model_spec) -> bool:
+    """Whether catalogue metadata is a hard no for image input on this route.
+
+    Only an explicit False blocks.  A missing or null ``vision`` means the
+    discovery source never said -- the normal state for a CLI-backed route
+    whose adapter reports no modality field -- and unknown is not denial.
+    Every request path has always forwarded those images, so the Codex
+    projection has to advertise them too; when the two sides answer this
+    question differently, the composer refuses to attach what the gateway
+    would have carried, and the model reports that it cannot see images.
+
+    Ollama is exempt even from an explicit False: its own endpoints accept or
+    reject images, and a stale or incomplete /api/show must not veto a
+    vision-capable model or a tool turn that happens to carry a screenshot.
+    """
+    if provider_id == "ollama":
+        return False
+    return (model_spec or {}).get("vision") is False
+
+
 def read_observations(root: Path):
     result = {}
     for name in ("activity.previous.jsonl", "activity.jsonl"):

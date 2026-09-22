@@ -15,6 +15,7 @@ from bridge_core import BridgeError, atomic_json, read_json
 from hub_config import connection_signature, qualify, split_route
 from protocol import mask_effort_rejection
 from providers import PROVIDERS, ProviderError, _auth_headers, _chat_effort, validate_connection
+from catalogue import image_input_blocked
 from responses_tools import (flatten_tools, input_names, normalize_custom_calls, output_names, register,
                              restore_custom_call, split_hosted_search, strip_goal_budget)
 from responses_bridge import ENVELOPE_PREFIX, MessagesResponsesAdapter, ReasoningEnvelope, to_messages
@@ -641,7 +642,7 @@ def prepare_native(runtime, payload):
             # Computer Use screenshot or a view_image call returns an
             # input_image there, so both fields have to be checked or the
             # provider rejects the turn instead of this gateway.
-            if provider_id != "ollama" and spec.get("vision") is False:
+            if image_input_blocked(provider_id, spec):
                 for parts in (item.get("content"), item.get("output")):
                     if isinstance(parts, list) and any(
                             isinstance(part, dict) and part.get("type") == "input_image" for part in parts):

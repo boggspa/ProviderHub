@@ -18,6 +18,7 @@ from provider_registry import (
     _provider,
     validate_connection,
 )
+from catalogue import image_input_blocked
 from chat_tool_order import repair_openai_tool_order
 from effort_map import CEREBRAS_EFFORT_ALIASES, DEEPSEEK_EFFORT_ALIASES, EFFORT_ORDER, MISTRAL_EFFORT_ALIASES, cap_high_end, map_effort, mistral_effort_modes, nearest_effort, ollama_effort_aliases
 from gemini_provider import GeminiError, prepare_request as gemini_prepare_request
@@ -438,13 +439,9 @@ def _estimated_input_tokens(payload: dict) -> int:
 
 
 def _image_input_rejected(provider_id: str | None, model_spec: dict) -> bool:
-    # Catalogue vision is picker metadata. Ollama's Anthropic and Responses
-    # endpoints accept or reject images themselves, so a stale or incomplete
-    # /api/show False must not block a vision-capable model or a tool turn
-    # that happens to include an image.
-    if provider_id == "ollama":
-        return False
-    return model_spec.get("vision") is False
+    # Catalogue vision is picker metadata, shared with the Codex projection
+    # so an advertised modality and an accepted request always agree.
+    return image_input_blocked(provider_id, model_spec)
 
 
 def _image_capability_error() -> ProviderError:

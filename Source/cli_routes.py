@@ -40,6 +40,7 @@ from cli_images import (IMAGE_COORDINATE_NOTE, CliImageError, image_label,
                         normalize_image, normalize_images)
 from hub_config import MODEL_ID
 from providers import documented_context
+from catalogue import image_input_blocked
 
 #: provider id -> (adapter module name, binary label). Every adapter exposes
 #: the same surface: PROVIDER_ID, TRANSPORT, SYSTEM_PROMPT_TRANSPORT,
@@ -371,7 +372,7 @@ def plan_turn(provider_id: str, upstream_model: str, payload: dict, spec: dict,
             if not getattr(adapter, "IMAGE_TRANSPORT", None):
                 raise CliImageError(f"The {provider_id} CLI does not support screenshot/image input. "
                                     "Choose an image-capable CLI route or use text/accessibility results.")
-            if spec.get("vision") is False:
+            if image_input_blocked(provider_id, spec):
                 raise CliImageError("The selected CLI model does not support image input")
             images = normalize_images(images)
     except CliImageError as exc:

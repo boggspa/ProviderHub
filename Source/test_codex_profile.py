@@ -39,8 +39,57 @@ class CodexCatalogueTests(unittest.TestCase):
         self.assertEqual(models["grok/grok-4.6"]["effective_context_window_percent"], 100)
         self.assertEqual(models["ollama/small-model:latest"]["supported_reasoning_levels"], [])
         self.assertEqual(models["grok/grok-4.6"]["input_modalities"], ["text", "image"])
-        self.assertEqual(models["ollama/small-model:latest"]["input_modalities"], ["text"])
+        # Ollama is exempt from a catalogue vision:false, here exactly as it is
+        # in the request path: its own endpoints accept or reject images, and
+        # test_responses_native asserts the gateway forwards a screenshot to
+        # this very shape of route. Advertising text-only contradicted that and
+        # left the composer refusing an attachment the gateway would carry.
+        self.assertEqual(models["ollama/small-model:latest"]["input_modalities"], ["text", "image"])
         self.assertTrue(all(model["apply_patch_tool_type"] is None for model in models.values()))
+
+    def test_unknown_vision_advertises_image_input_to_the_desktop(self):
+        """A CLI route whose adapter never reports modalities must not read as a denial.
+
+        Every CLI-backed provider ships an image transport, so the gateway
+        delivers these images. Demanding an explicit True here made the
+        composer refuse to attach them, and the model then reported that its
+        environment prevented it from seeing images.
+        """
+        settings, inventory = fixture()
+        inventory["models"] += [
+            {"id": "claude/opus-5", "display_name": "Opus 5", "context": 200000,
+             "tools": True, "vision": None, "provider_id": "claude"},
+            {"id": "antigravity/gemini-3.8-flash", "display_name": "Gemini 3.8 Flash",
+             "context": 1000000, "tools": True, "provider_id": "antigravity"},
+        ]
+        models = {model["slug"]: model for model in project_codex(settings, inventory)["models"]}
+        self.assertEqual(models["claude/opus-5"]["input_modalities"], ["text", "image"])
+        self.assertEqual(models["antigravity/gemini-3.8-flash"]["input_modalities"], ["text", "image"])
+
+    def test_confirmed_text_only_route_still_advertises_text_only(self):
+        settings, inventory = fixture()
+        inventory["models"] += [{"id": "mistral/glm-5-2", "display_name": "GLM 5.2",
+                                 "context": 131072, "tools": True, "vision": False,
+                                 "provider_id": "mistral"}]
+        models = {model["slug"]: model for model in project_codex(settings, inventory)["models"]}
+        self.assertEqual(models["mistral/glm-5-2"]["input_modalities"], ["text"])
+
+    def test_advertised_modality_matches_what_the_request_path_accepts(self):
+        """The two sides must answer one question, or the composer and the gateway disagree."""
+        from catalogue import image_input_blocked
+        from provider_requests import _image_input_rejected
+        settings, inventory = fixture()
+        inventory["models"] += [
+            {"id": "claude/opus-5", "context": 200000, "tools": True, "vision": None, "provider_id": "claude"},
+            {"id": "mistral/glm-5-2", "context": 131072, "tools": True, "vision": False, "provider_id": "mistral"},
+        ]
+        by_slug = {entry["id"]: entry for entry in inventory["models"]}
+        for model in project_codex(settings, inventory)["models"]:
+            entry = by_slug[model["slug"]]
+            provider_id = entry.get("provider_id") or model["slug"].split("/")[0]
+            advertises = "image" in model["input_modalities"]
+            self.assertEqual(advertises, not _image_input_rejected(provider_id, entry), model["slug"])
+            self.assertEqual(advertises, not image_input_blocked(provider_id, entry), model["slug"])
 
     def test_all_provider_catalogues_preserve_unknown_context_without_fabrication(self):
         settings, inventory = fixture()

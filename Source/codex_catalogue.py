@@ -5,7 +5,7 @@ import hashlib
 import json
 
 from hub_config import MODEL_VARIANT_FIELDS, SUBAGENT_POOL_SIZE, connection_signature, split_route
-from catalogue import fits_desktop_baseline
+from catalogue import fits_desktop_baseline, image_input_blocked
 from providers import PROVIDERS
 
 
@@ -363,7 +363,13 @@ def project_codex(settings, inventory):
             "auto_compact_token_limit": int(min(context, entry.get("max_input") or context) * .85) if context is not None else None,
             "effective_context_window_percent": 100,
             "experimental_supported_tools": [],
-            "input_modalities": ["text", "image"] if entry.get("vision") is True else ["text"],
+            # Ask the request path's own question. Demanding an explicit True
+            # here made every route whose discovery source omits the field --
+            # which is every CLI-backed row outside a small hand-kept
+            # allowlist -- advertise as text-only, so the composer refused to
+            # attach an image the gateway was ready to deliver.
+            "input_modalities": (["text"] if image_input_blocked(provider_id, entry)
+                                 else ["text", "image"]),
             "supports_search_tool": False,
             # node_repl - the runtime behind Computer Use and Browser Use - is
             # wired per install rather than per provider, so a projected route
