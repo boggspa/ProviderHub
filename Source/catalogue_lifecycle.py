@@ -2,9 +2,10 @@
 
 Discovery is metadata-only.  A catalogue is fresh for 24 hours.  Launch may
 temporarily use a catalogue up to seven days old when a refresh fails for a
-transient network, rate-limit, or server error, but only when it belongs to the
-current connection and contains every exact selected route.  Credentials are
-always checked independently of cached metadata.
+transient network, rate-limit, or server error, or for a spent provider quota,
+but only when it belongs to the current connection and contains every exact
+selected route.  Credentials are always checked independently of cached
+metadata.
 
 Imports from bridge_core are deliberately lazy: bridge_core owns persistence
 and credentials while importing providers and hub_config itself.
@@ -28,6 +29,13 @@ MAX_PARALLEL_REFRESHES = 8
 BATCH_TIMEOUT_SECONDS = 58
 
 _TRANSIENT_HTTP = {408, 425, 429}
+#: Quota and billing exhaustion.  The credential is still valid and still names
+#: the same account, so metadata cached for this connection stays truthful --
+#: only the budget for a fresh listing has run out.  A spent quota must not
+#: block launch while same-connection metadata covering every exact selected
+#: route is already in hand: inference reports the quota itself, and the
+#: gateway already throttles a limited route.
+_QUOTA_HTTP = {402}
 _HTTP_STATUS = re.compile(r"\bHTTP\s+(\d{3})\b", re.IGNORECASE)
 _PLANNING_FIELDS = (
     "context", "context_options", "context_kind", "runtime_context",
@@ -105,6 +113,23 @@ def _transient_error(message: str) -> bool:
         "connection reset", "connection refused", "network is unreachable",
         "name or service not known", "temporary failure in name resolution",
     ))
+
+
+def _quota_error(message: str) -> bool:
+    """A spent quota or balance, which leaves the account's model list intact."""
+    match = _HTTP_STATUS.search(message)
+    return bool(match) and int(match.group(1)) in _QUOTA_HTTP
+
+
+def _cache_eligible_error(message: str) -> bool:
+    """Whether a failed refresh leaves same-connection metadata usable.
+
+    Authentication and authorization failures are excluded deliberately: a
+    revoked or re-scoped key can no longer vouch for what the cache claims the
+    account advertises.  A timeout, a rate limit, a server fault, or a spent
+    quota say nothing at all about the model list.
+    """
+    return _transient_error(message) or _quota_error(message)
 
 
 def _selected(settings: dict) -> dict[str, list[dict]]:
@@ -489,13 +514,13 @@ def prepare_launch(
             discover_fn(settings, provider_id, root)
         except Exception as exc:
             detail = _clean_error(exc)
-            can_fallback = (
-                _transient_error(detail)
-                and before["signature_valid"]
+            usable_cache = (
+                before["signature_valid"]
                 and exact_routes
                 and before["age_seconds"] is not None
                 and before["age_seconds"] <= STALE_FALLBACK_SECONDS
             )
+            can_fallback = usable_cache and _cache_eligible_error(detail)
             provider.update(_state_fields(before))
             if can_fallback:
                 issue = _issue(
@@ -506,14 +531,24 @@ def prepare_launch(
                 )
                 provider.update(status="cached_after_transient_error", warning=issue)
                 return provider
+            # Name the blocker that actually applies.  Reporting the stale
+            # window for a cache that is well inside it sends the reader after
+            # the wrong problem.
             if before["exists"] and not before["signature_valid"]:
                 suffix = (" Cached metadata belongs to a different connection "
                           "and cannot be used.")
-            elif exact_routes and before["age_seconds"] is not None:
+            elif not before["signature_valid"] or not exact_routes:
+                suffix = " No usable same-connection metadata contains every exact selected route."
+            elif before["age_seconds"] is None:
+                suffix = " Cached metadata carries no usable fetch time."
+            elif before["age_seconds"] > STALE_FALLBACK_SECONDS:
                 suffix = (f" Cached metadata is {before['age_seconds']} seconds old "
                           "and is outside the seven-day fallback window.")
             else:
-                suffix = " No usable same-connection metadata contains every exact selected route."
+                suffix = (f" Same-connection metadata from {before['fetched_at']} is "
+                          "inside the seven-day window but was not used: this is not "
+                          "a transient or quota failure, so it can mean the credential "
+                          "no longer covers these routes.")
             issue = _issue(
                 "discovery_failed", provider,
                 f"{provider['provider_name']} catalogue refresh failed for "

@@ -143,6 +143,82 @@ class CatalogueLifecycleTests(unittest.TestCase):
                 STALE_FALLBACK_SECONDS,
             )
 
+    def test_spent_quota_falls_back_to_recent_same_connection_cache(self):
+        """A depleted quota is a billing state, not a metadata invalidation."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            settings = settings_for()
+            write_catalogue(
+                root, settings, "deepseek", [model("deepseek-chat")],
+                fetched_at=NOW - timedelta(seconds=137304),
+            )
+
+            def out_of_credit(*_):
+                raise ValueError("DeepSeek model discovery returned HTTP 402.")
+
+            result = prepare_launch(
+                settings, root, now=NOW, credentials_fn=credentials_ok,
+                discover_fn=out_of_credit,
+            )
+
+            self.assertTrue(result["ready"])
+            self.assertEqual(
+                result["providers"]["deepseek"]["status"],
+                "cached_after_transient_error",
+            )
+            self.assertEqual(result["errors"], [])
+            warning = result["warnings"][0]
+            self.assertEqual(warning["code"], "using_recent_cache")
+            # The quota itself still has to reach the user, on the provider card.
+            self.assertIn("HTTP 402", warning["message"])
+
+    def test_quota_beyond_the_fallback_window_still_blocks_launch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            settings = settings_for()
+            write_catalogue(
+                root, settings, "deepseek", [model("deepseek-chat")],
+                fetched_at=NOW - timedelta(days=8),
+            )
+
+            def out_of_credit(*_):
+                raise ValueError("DeepSeek model discovery returned HTTP 402.")
+
+            result = prepare_launch(
+                settings, root, now=NOW, credentials_fn=credentials_ok,
+                discover_fn=out_of_credit,
+            )
+
+            self.assertFalse(result["ready"])
+            self.assertIn(
+                "outside the seven-day fallback window",
+                result["errors"][0]["message"],
+            )
+
+    def test_blocker_message_names_the_reason_that_actually_applies(self):
+        """A cache inside the window must not be blamed on the stale window."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            settings = settings_for()
+            write_catalogue(
+                root, settings, "deepseek", [model("deepseek-chat")],
+                fetched_at=NOW - timedelta(days=2),
+            )
+
+            def forbidden(*_):
+                raise ValueError("DeepSeek model discovery returned HTTP 403")
+
+            result = prepare_launch(
+                settings, root, now=NOW, credentials_fn=credentials_ok,
+                discover_fn=forbidden,
+            )
+
+            message = result["errors"][0]["message"]
+            self.assertFalse(result["ready"])
+            self.assertNotIn("seven-day fallback window", message)
+            self.assertIn("inside the seven-day window", message)
+            self.assertIn("credential no longer covers these routes", message)
+
     def test_auth_error_never_falls_back_to_cached_account_metadata(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
