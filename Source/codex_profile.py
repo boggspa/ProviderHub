@@ -222,15 +222,19 @@ class CodexProfile:
             catalog_models = {model["slug"]: model for model in catalog["models"]}
             selected_model = catalog_models.get(selected, {})
             multi_agent = selected_model.get("multi_agent_version") is not None
-            # Search follows the catalogue row rather than being switched off
-            # outright: the projection only sets web_search_tool_type for a
-            # route whose provider runs search of its own (codex_catalogue),
-            # and on those the gateway translates the hosted tool into that
-            # provider's search. Everywhere else the tool would reach a route
-            # that cannot serve it, so the setting stays disabled and Codex
-            # never offers search it would fail to perform.
+            # Search is on when any route can serve it. The projection sets
+            # web_search_tool_type only where the provider runs search of its
+            # own (codex_catalogue), but a row without it does not decline the
+            # tool: once search is on, Codex offers it on every row (measured
+            # with a recording stub against 0.155.1 and the desktop's bundled
+            # 0.155.0-alpha.16). An in-app model switch never re-runs this
+            # either, so keying it to the launch model stranded every other
+            # searching route. The gateway drops the tool for a route that
+            # cannot serve it (responses_native), and the model learns of
+            # search only from the tools array, so it is never told otherwise.
+            searchable = any(model.get("web_search_tool_type") for model in catalog["models"])
             applied = {"model": selected, "model_provider": PROVIDER_ID, "model_catalog_json": str(self.catalogue),
-                       "web_search": "live" if selected_model.get("web_search_tool_type") else "disabled"}
+                       "web_search": "live" if searchable else "disabled"}
             # model_reasoning_effort is a ROOT_KEY but intentionally absent from
             # `applied`: it is deleted on activation so the catalogue's
             # default_reasoning_level governs the starting slider position

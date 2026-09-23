@@ -172,18 +172,19 @@ command = "existing-command"
         edit(doc)
         self.manager.config.write_text(tomlkit.dumps(doc))
 
-    def test_codex_search_is_switched_on_only_for_a_route_that_can_serve_it(self):
-        """The hosted search tool reaches whichever route is selected, so the
-        Codex setting follows that route's catalogue row: live where the
-        gateway can translate the request into the provider's own search,
-        disabled where Codex would otherwise offer search it cannot perform.
-        Either value is journalled, so the user's own setting still returns."""
+    def test_codex_search_is_on_whenever_any_route_can_serve_it(self):
+        """Once search is on, Codex offers the hosted tool on every row, and an
+        in-app model switch never re-runs activation, so the setting follows
+        the whole catalogue: live if any route can search (the gateway drops
+        the tool on the rest), disabled when none can. A searching route that
+        is not the launch model must still be able to search. Either value is
+        journalled, so the user's own setting still returns."""
         self.activate()
         self.assertEqual(parse(self.manager.config.read_text())["web_search"], "disabled")
         self.manager.restore()
         searching = copy.deepcopy(self.inventory)
         for entry in searching["models"]:
-            if entry["id"] == self.settings["codex_model"]:
+            if entry["id"] != self.settings["codex_model"]:
                 entry["web_search"] = True
         self.manager.activate(self.settings, searching)
         self.assertEqual(parse(self.manager.config.read_text())["web_search"], "live")
