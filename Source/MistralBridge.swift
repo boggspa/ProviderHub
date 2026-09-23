@@ -1179,8 +1179,13 @@ struct BridgeWindow: View {
                 Text(model.settingsSaveBlocker ?? "App preferences apply on the next launch.")
                     .font(.system(size: 11)).foregroundStyle(model.settingsSaveBlocker == nil ? Color.secondary : Color.orange)
             }.frame(maxWidth: .infinity, alignment: .leading)
-            Button("Save changes") { Task { await model.saveFromUI() } }
+            Button {
+                Task { await model.saveFromUI() }
+            } label: {
+                Text("Save changes").foregroundStyle(HubTheme.Control.ink)
+            }
                 .buttonStyle(.borderedProminent)
+                .tint(HubTheme.Accent.brand)
                 .disabled(model.busy || !model.changed || model.settingsSaveBlocker != nil)
         }.padding(.horizontal, 24).padding(.vertical, 13)
             .background(Color.white.opacity(0.045)).overlay(alignment: .top) { Divider() }

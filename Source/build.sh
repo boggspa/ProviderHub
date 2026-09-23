@@ -13,6 +13,7 @@ SWIFT_SOURCES=(
   "$SOURCE_DIR/CatalogueSelection.swift" "$SOURCE_DIR/HubModels.swift"
   "$SOURCE_DIR/HubLayout.swift" "$SOURCE_DIR/ProviderViews.swift"
   "$SOURCE_DIR/DevinAgentsView.swift" "$SOURCE_DIR/CodexHarness.swift"
+  "$SOURCE_DIR/HubTheme.swift"
   "$SOURCE_DIR/MistralBridge.swift"
 )
 xcrun swiftc -swift-version 5 -parse-as-library -O -target arm64-apple-macosx14.0 \
@@ -81,6 +82,10 @@ PLIST
 if [ -f "$SOURCE_DIR/AppIcon.icns" ]; then cp "$SOURCE_DIR/AppIcon.icns" "$APP_DIR/Contents/Resources/"; fi
 python3 "$SOURCE_DIR/build_provenance.py" write --source-dir "$SOURCE_DIR" \
   --app-dir "$APP_DIR" --swift-sources "${SWIFT_SOURCES[@]}"
-/usr/bin/codesign --force --sign - "$APP_DIR"
-/usr/bin/codesign --verify --strict "$APP_DIR"
+if [ "${MISTRAL_BRIDGE_SKIP_CODESIGN:-0}" = "1" ]; then
+  rm -rf "$APP_DIR/Contents/_CodeSignature"
+else
+  /usr/bin/codesign --force --sign - "$APP_DIR"
+  /usr/bin/codesign --verify --strict "$APP_DIR"
+fi
 printf 'Built %s\n' "$APP_DIR"

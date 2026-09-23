@@ -275,9 +275,13 @@ struct ClaudeConfigPane: View {
                 if model.claudeRunning && !model.profileActive {
                     Text("Claude is open with another profile. Quit Claude before switching to this one.").font(.caption).foregroundStyle(.orange)
                 }
-                Button(model.profileActive && model.claudeRunning ? "Show Claude" : "Launch Claude") {
+                Button {
                     Task { await model.launchClaude() }
-                }.buttonStyle(.borderedProminent).disabled(model.busy || !model.claudeInstalled)
+                } label: {
+                    Text(model.profileActive && model.claudeRunning ? "Show Claude" : "Launch Claude")
+                        .foregroundStyle(HubTheme.Control.ink)
+                }.buttonStyle(.borderedProminent).tint(HubTheme.Accent.brand)
+                    .disabled(model.busy || !model.claudeInstalled)
                 if model.recoveryNeeded {
                     Button("Restore previous setup") { Task { await model.restore() } }.disabled(model.busy || model.claudeRunning)
                 }

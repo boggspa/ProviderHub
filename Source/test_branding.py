@@ -1,6 +1,7 @@
 """Offline tests for TaskWraith-compatible provider presentation data."""
 import copy
 import unittest
+from pathlib import Path
 
 from branding import BrandingError, load_branding, resolve_presentation, validate_overrides
 
@@ -27,6 +28,30 @@ class BrandingTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.catalogue = load_branding()
+
+    def test_prominent_buttons_use_white_ink_on_the_single_brand_orange(self):
+        source_dir = Path(__file__).parent
+        bridge = (source_dir / "MistralBridge.swift").read_text()
+        layout = (source_dir / "HubLayout.swift").read_text()
+        codex = (source_dir / "CodexHarness.swift").read_text()
+        theme = (source_dir / "HubTheme.swift").read_text()
+        build = (source_dir / "build.sh").read_text()
+
+        self.assertIn('.accentColor(bridgeOrange)', bridge)
+        self.assertIn('Color(red: 1.0, green: 0.43, blue: 0.18)', bridge)
+        self.assertIn('Color(red: 1.0, green: 0.43, blue: 0.18)', theme)
+        for path in source_dir.glob("*.swift"):
+            with self.subTest(path=path.name):
+                self.assertNotIn("bridgeControlOrange", path.read_text())
+
+        self.assertIn('"$SOURCE_DIR/HubTheme.swift"', build)
+        self.assertIn('static let ink = Color.white', theme)
+        self.assertIn('Text("Save changes").foregroundStyle(HubTheme.Control.ink)', bridge)
+        self.assertRegex(layout, r'Text\(model\.profileActive.*"Launch Claude"\)\s*\.foregroundStyle\(HubTheme\.Control\.ink\)')
+        self.assertRegex(codex, r'Text\(model\.codexProfileActive.*"Launch Codex / ChatGPT"\)\s*\.foregroundStyle\(HubTheme\.Control\.ink\)')
+        for source in (bridge, layout, codex):
+            with self.subTest(source=source[:30]):
+                self.assertIn('.tint(HubTheme.Accent.brand)', source)
 
     def test_required_provider_defaults_use_reviewed_taskwraith_accents(self):
         expected = {

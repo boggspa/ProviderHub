@@ -498,9 +498,12 @@ struct CodexConfigPane: View {
                 Label(model.codexProfileActive ? "Provider profile active" : "Previous setup retained",
                       systemImage: model.codexProfileActive ? "checkmark.circle.fill" : "arrow.uturn.backward.circle")
                     .font(.callout).foregroundStyle(model.codexProfileActive ? Color.green : Color.secondary)
-                Button(model.codexProfileActive && model.codexRunning ? "Show Codex / ChatGPT" : "Launch Codex / ChatGPT") {
+                Button {
                     Task { await model.launchCodex() }
-                }.buttonStyle(.borderedProminent).controlSize(.large)
+                } label: {
+                    Text(model.codexProfileActive && model.codexRunning ? "Show Codex / ChatGPT" : "Launch Codex / ChatGPT")
+                        .foregroundStyle(HubTheme.Control.ink)
+                }.buttonStyle(.borderedProminent).tint(HubTheme.Accent.brand).controlSize(.large)
                     .disabled(model.busy || model.codexAppPath == nil || model.settings.codex_model == nil)
                 Button("Restore previous setup") { Task { await model.restoreCodex() } }
                     .disabled(model.busy || !model.codexRecoveryNeeded || model.codexRunning)
