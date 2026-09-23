@@ -439,6 +439,20 @@ struct CodexConfigPane: View {
         let listed = model.settings.codex_apply_patch?.count ?? 0
         return listed == 0 ? "" : " \(listed) model\(listed == 1 ? " is" : "s are") qualified individually in the settings file."
     }
+    // Mirrors codex_profile: search is on when any launched route runs it,
+    // and the gateway drops the tool for the rest.
+    var searchNote: String {
+        var routes = model.settings.codex_catalogue ?? model.codexModels.map(\.id)
+        if let starting = model.settings.codex_model, !routes.contains(starting) { routes.append(starting) }
+        let searching = routes.filter { model.modelEntry($0)?.web_search == true }
+        guard !searching.isEmpty else {
+            return "File editing and terminal tools are available. Web search is off: no route in this catalogue runs search of its own."
+        }
+        let names = searching.prefix(3).map { model.modelEntry($0)?.display_name ?? $0 }
+        let more = searching.count > 3 ? " and \(searching.count - 3) more" : ""
+        let count = searching.count == 1 ? "1 route" : "\(searching.count) routes"
+        return "File editing and terminal tools are available. Web search is on for \(count) (\(names.joined(separator: ", "))\(more)); other routes run without it."
+    }
 
     var body: some View {
         Panel {
@@ -473,7 +487,7 @@ struct CodexConfigPane: View {
                     title: "Allow goal token budgets",
                     summary: "Let models set a token cap when creating or updating a goal.",
                     details: "A capped goal can stop with its objective unfinished when its budget is reached. Codex asks models to set a budget only when you request one, but some models may ignore that instruction. When off, Provider Hub removes token_budget from create_goal and update_goal; goals run until complete, blocked or stopped. Your plan’s usage limits still apply. Save, then launch.")
-                Text("File editing and terminal tools are available. Web search is off in this setup.")
+                Text(searchNote)
                     .font(.caption).foregroundStyle(.secondary)
                 DisclosureGroup("Provider usage") {
                     Text("Grok uses xAI API billing; Fast requests premium Priority processing. Ollama uses your existing daemon and its configured local or cloud access.")

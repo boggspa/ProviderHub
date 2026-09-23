@@ -176,8 +176,12 @@ require quitting both desktop apps.
 
 This integration applies to the Codex coding workspace. It does not reroute
 ordinary ChatGPT cloud chats, voice, or every other product feature. File
-editing and terminal tools are supported; hosted web search is off in this
-profile. Start a new task when switching provider/account boundaries that carry
+editing and terminal tools are supported. Hosted web search is on when any
+route in the catalogue can run it (Codex, Claude and Grok CLI routes, where
+OpenAI, Anthropic or xAI searches under that CLI's own sign-in, and OpenRouter
+models with native search); other routes run without it, and the Codex tab
+lists which routes search. Start a new
+task when switching provider/account boundaries that carry
 provider-specific reasoning history.
 
 ## What has been checked

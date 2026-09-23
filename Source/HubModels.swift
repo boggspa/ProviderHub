@@ -143,6 +143,7 @@ struct ModelEntry: Decodable, Identifiable {
     var reasoning: Bool?
     var effort_modes: [String]?
     var fast_mode: Bool?
+    var web_search: Bool?
     var aliases: [String]?
     var inference_status: String?
     var last_success: String?

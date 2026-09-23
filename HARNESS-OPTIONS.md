@@ -67,8 +67,18 @@ through the local Messages request to the provider connection.
 This route enables only function tools and function namespaces.
 Provider Hub deterministically flattens a namespaced Codex function into a
 provider-safe name and reverses that mapping on returned calls. A collision is
-rejected. Hosted tools, including `web_search`, are disabled in the generated
-profile. The dedicated free-form `apply_patch` catalogue metadata is `null`
+rejected. Of the hosted tools only `web_search` is honoured: the generated
+profile turns it on when any catalogue route can serve it (a Codex CLI route
+runs it inside the nested Codex under the ChatGPT plan; a Claude CLI route
+keeps Claude Code's WebSearch as its only tool, and a Grok CLI route keeps
+Grok's `web_search` as its only tool on models the CLI's model cache marks for
+server-side search, both searching on the vendor's servers under the CLI's own
+sign-in; an OpenRouter model with native search gets the router's web plugin),
+and the gateway drops it for routes that cannot, because Codex offers it on
+every row once it is on. The Claude and Grok CLIs take no cached-only mode
+and no per-request domain list, so such a request runs there without search
+rather than with a wider one. The
+dedicated free-form `apply_patch` catalogue metadata is `null`
 by default, so the installed Codex engine's function and shell path inspects
 and edits files and the desktop shows no close-out diff card. The Codex tab's
 **Offer apply_patch to catalogue models** switch (`codex_apply_patch_all`)
