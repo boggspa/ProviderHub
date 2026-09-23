@@ -38,6 +38,14 @@ if [ -n "${PROVIDER_HUB_PYTHON_RUNTIME:-}" ]; then
   # This is generated app content; no user state is stored in the bundle.
   rm -rf "$APP_DIR/Contents/Resources/python"
   ditto "$PROVIDER_HUB_PYTHON_RUNTIME" "$APP_DIR/Contents/Resources/python"
+  # Make the copied runtime distributable: prune the development subtrees the
+  # worker never imports, rewrite its recorded build prefix (a personal
+  # directory) to the neutral value CPython was configured with, then prove the
+  # result still runs. This fails the build rather than shipping a stranger's
+  # home directory or a runtime that cannot import cryptography.
+  python3 "$PACKAGE_DIR/scripts/prepare_runtime.py" \
+    "$APP_DIR/Contents/Resources/python" \
+    --worker-dir "$APP_DIR/Contents/Resources/worker"
 fi
 # A bundled CPython arrives with its own bytecode caches, and any copied tree
 # can carry .DS_Store droppings. Neither belongs in a signed, notarized

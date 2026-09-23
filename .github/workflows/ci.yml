@@ -29,6 +29,8 @@ jobs:
         run: uv run python -m pytest Source/ -q
       - name: work_guard unit tests
         run: uv run python scripts/test_work_guard.py
+      - name: runtime neutralizer unit tests
+        run: uv run python scripts/test_prepare_runtime.py
 
   hook-tests:
     name: pre-commit guard self-tests
