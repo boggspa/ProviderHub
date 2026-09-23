@@ -268,3 +268,61 @@ Sources:
 - TaskWraith `src/shared/ollamaBrandTable.ts` (`OLLAMA_DISPLAY_BRANDS`),
   `src/renderer/src/lib/ollamaDisplayBrand.ts`, and
   `src/renderer/src/styles/theme.css` (`--provider-*-color`), read-only.
+
+## Space Bunny Alpha — OpenRouter stealth preview
+
+`stealth/space-bunny-alpha` joins the curated OpenRouter roster, labelled Space
+Bunny Alpha. Like Union Alpha before it, it is a free preview from a
+third-party provider that has chosen to stay anonymous: OpenRouter routes
+requests to it but is not its developer, owner or provider, and the model page
+carries the Stealth Model Terms notice that prompts and completions may be
+retained by that provider though they are not used for training. OpenRouter
+published it on 23 September 2026, and the model page gives no end date. The
+Models API's `expiration_date` of 2098-12-31 is a far-future sentinel, also
+carried by three GLM models, rather than a preview window, so none is recorded
+here. Membership is still the curated shortlist intersected with the live
+Models API, so a withdrawal removes the route and the catalogue warning names
+it.
+
+The roster entry is the only code change. The `stealth/` prefix rule kept after
+Union Alpha's withdrawal gives it the Stealth label, the `STL` initials and the
+`#9E6C00` gold described above, while `runtimeProvider` stays `openrouter`: the
+connection, the key and the bill are OpenRouter's.
+
+On 23 September 2026 the public metadata described one standard endpoint,
+`stealth`, with 1,000,000 context and 524,288 max completion tokens; text,
+image and video input; and `reasoning`, `reasoning_effort`,
+`include_reasoning`, `tools`, `tool_choice`, `response_format`, `temperature`,
+`top_p` and `max_tokens`. That yields a single route,
+`openrouter/stealth/space-bunny-alpha`, which Codex sees with a 1,000,000-token
+window. The catalogue has no video field, so the route is marked image-capable
+and video input goes unused.
+
+Its reasoning is the opposite of Union Alpha's. The card declares reasoning
+mandatory, with five levels from low to max and max as the default, the shape
+Sakana's two Fugu models already have. Both pickers get low, medium, high,
+xhigh and max with no off stop: a Claude effort from low to max passes through
+unchanged, and Codex defaults to Max and adds Ultra, which sends max. Because
+the model cannot be switched off, a disabled thinking block or a `none` effort
+is refused with an error naming the missing off switch rather than silently
+ignored; a request that carries no reasoning control runs at the model's
+advertised max default. The endpoint advertises `auto` tool choice only, so a
+forced or suppressed choice fails the endpoint check instead of reaching the
+host. All of this follows from the metadata, and a refresh picks up any change
+to it.
+
+One test covers the addition. It takes the live card, trimmed to the fields
+discovery reads, through discovery, the catalogue and the Codex projection and
+into finalization, checking the upstream ID, limits, ladder and default, the
+Stealth presentation and the refused off switch. It pins the real ID on
+purpose, so it leaves with the roster entry when OpenRouter withdraws the
+preview; the generic stealth behaviour stays covered by the synthetic tests.
+The full, untrimmed card was also pushed through the same path. No OpenRouter
+key and no inference was used; catalogue listing is not an inference test, and
+account access to a stealth route still follows key entry.
+
+Sources:
+
+- https://openrouter.ai/stealth/space-bunny-alpha
+- https://openrouter.ai/api/v1/models
+- https://openrouter.ai/api/v1/models/stealth/space-bunny-alpha/endpoints
