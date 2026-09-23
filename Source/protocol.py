@@ -297,7 +297,10 @@ def model_catalog(settings: dict):
                "description": context_text,
                "created_at": "2026-09-12T00:00:00Z",
                "anthropic_family_tier": family, "is_family_default": default,
-               "fits_desktop_baseline": fits_desktop_baseline(effective_context)}
+               "fits_desktop_baseline": fits_desktop_baseline(effective_context),
+               "fast_mode": spec.get("fast_mode") is True}
+        if spec.get("speed_tier"):
+            row["speed_tier"] = spec["speed_tier"]
         if type(effective_context) is int:
             # Use the per-model auto-compact threshold as max_input_tokens so
             # Claude Desktop compacts at the hub's catalogue boundary (typically

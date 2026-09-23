@@ -34,8 +34,10 @@ model details, and describes their built-in speed in the Codex model card.
 They have no `service_tiers` Fast switch. This avoids offering a Standard
 position that cannot change the actual route.
 
-The Codex/ChatGPT catalogue receives `service_tiers` for switchable models;
-Claude Desktop's `/v1/models` subtitle remains context-only. Both the API
-and CLI planners validate the exact route before sending a Fast request.
+The Codex/ChatGPT catalogue receives `service_tiers` for switchable models.
+Claude Desktop's `/v1/models` response carries `fast_mode` and fixed-route
+`speed_tier` metadata, while its subtitle remains context-only. The native
+client may ignore those extra fields. Both the API and CLI planners validate
+the exact route before sending a Fast request.
 Older cached provider inventories gain the current capability mapping when
 projected, so a provider refresh is not required to see the updated controls.

@@ -3,11 +3,13 @@ import unittest
 
 from claude_cli_agent import ClaudeCliAgentError, build_argv
 from cli_routes import CliRouteError, _hub_row, plan_turn
+from catalogue import route_specs
 from codex_catalogue import project_codex
 from fast_models import (CLAUDE_FAST_MODELS, OPENAI_FAST_MODELS,
                          fixed_speed_tier, supports_fast_toggle)
 from hub_config import SLOTS, defaults, project_catalogue
 from providers import ProviderError, discover, prepare_request
+from protocol import model_catalog
 
 
 def prompt(**changes):
@@ -153,6 +155,23 @@ class FastModelTests(unittest.TestCase):
         self.assertEqual(on[on.index("--model") + 1], "claude-opus-5-5")
         with self.assertRaises(ClaudeCliAgentError):
             build_argv("claude-opus-4-7", fast_mode=True)
+
+    def test_claude_desktop_model_catalogue_carries_exact_speed_metadata(self):
+        for provider, model, fast, fixed in (
+                ("claude", "claude-opus-5-5", True, None),
+                ("claude", "claude-opus-4-7", False, None),
+                ("kimi", "kimi-for-coding-highspeed", False, "highspeed")):
+            with self.subTest(provider=provider, model=model):
+                config = defaults(SLOTS, "mistral-test")
+                route = provider + "/" + model
+                config["claude_catalogue"] = [{"route": route, "tier": "opus",
+                                               "tier_default": True}]
+                rows = project_catalogue(provider, cached_inventory(provider, model), config)
+                config["_model_specs"] = route_specs({"models": rows})
+                item = model_catalog(config)["data"][0]
+                self.assertEqual(item["fast_mode"], fast)
+                self.assertEqual(item.get("speed_tier"), fixed)
+                self.assertTrue(item["description"].endswith("token context"))
 
 
 if __name__ == "__main__":
