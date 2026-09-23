@@ -55,6 +55,82 @@ class BuildProvenanceTests(unittest.TestCase):
         source = source or self.source
         return create_manifest(source, self.app, [source / "App.swift"], **kwargs)
 
+    def add_runtime(self, files, symlinks=()):
+        """Create a stand-in bundled runtime under Contents/Resources/python."""
+        runtime = self.app / "Contents/Resources/python"
+        for relative, content in files.items():
+            path = runtime / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(content if isinstance(content, bytes) else content.encode())
+        for relative, target in symlinks:
+            path = runtime / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.symlink_to(target)
+        return runtime
+
+    def test_build_without_a_runtime_records_it_as_absent(self):
+        manifest = self.build()
+        self.assertEqual(manifest["runtime"], {"present": False})
+        self.assertEqual(verify_manifest(self.app, revision=self.revision,
+                                         require_clean=True), manifest)
+
+    def test_bundled_runtime_is_hashed_and_symlinks_are_recorded(self):
+        self.add_runtime({"bin/python3.13": b"\xcf\xfa\xed\xfe",
+                          "lib/python3.13/os.py": "x = 1\n"},
+                         symlinks=[("bin/python3", "python3.13")])
+        manifest = self.build()
+        runtime = manifest["runtime"]
+        self.assertTrue(runtime["present"])
+        # Two regular files plus the recorded bin/python3 -> python3.13 symlink.
+        self.assertEqual(runtime["entry_count"], 3)
+        self.assertEqual(runtime["personal_path_files"], [])
+        self.assertEqual(len(runtime["sha256"]), 64)
+        self.assertEqual(runtime["bytes"], len(b"\xcf\xfa\xed\xfe") + len(b"x = 1\n"))
+        self.assertNotIn(str(self.root), json.dumps(manifest))
+        self.assertEqual(verify_manifest(self.app, revision=self.revision,
+                                         require_clean=True), manifest)
+
+    def test_runtime_personal_path_is_recorded_not_hidden(self):
+        self.add_runtime({"bin/python3.13": b"x", "bin/python3": b"y",
+                          "lib/python3.13/_sysconfigdata.py":
+                              b'prefix = "/Users/someone/build/cpython"'})
+        manifest = self.build()
+        self.assertEqual(manifest["runtime"]["personal_path_files"],
+                         ["lib/python3.13/_sysconfigdata.py"])
+
+    def test_upstream_ci_paths_are_not_reported_as_personal(self):
+        self.add_runtime({"bin/python3.13": b"x", "bin/python3": b"y",
+                          "lib/site.so": b"built at /Users/runner/work/cffi/src"})
+        self.assertEqual(self.build()["runtime"]["personal_path_files"], [])
+
+    def test_verification_rejects_a_modified_runtime(self):
+        self.add_runtime({"bin/python3.13": b"x", "bin/python3": b"y",
+                          "lib/python3.13/os.py": "a\n"})
+        self.build()
+        (self.app / "Contents/Resources/python/lib/python3.13/os.py").write_text("b\n")
+        with self.assertRaises(ValueError) as caught:
+            verify_manifest(self.app, revision=self.revision)
+        self.assertIn("runtime", str(caught.exception))
+
+    def test_verification_rejects_a_removed_runtime_file(self):
+        runtime = self.add_runtime({"bin/python3.13": b"x", "bin/python3": b"y",
+                                    "lib/python3.13/os.py": "a\n"})
+        self.build()
+        (runtime / "lib/python3.13/os.py").unlink()
+        with self.assertRaises(ValueError):
+            verify_manifest(self.app, revision=self.revision)
+
+    def test_manifests_from_before_runtime_hashing_still_verify(self):
+        self.add_runtime({"bin/python3.13": b"x", "bin/python3": b"y"})
+        self.build()
+        path = self.app / "Contents/Resources/build-manifest.json"
+        legacy = json.loads(path.read_text())
+        legacy.pop("runtime")
+        path.write_text(json.dumps(legacy, indent=2, sort_keys=True) + "\n")
+        verified = verify_manifest(self.app, revision=self.revision, require_clean=True)
+        self.assertNotIn("runtime", verified)
+        self.assertEqual(verified["source"]["revision"], self.revision)
+
     def test_clean_manifest_records_real_source_and_worker_hashes_without_host_paths(self):
         manifest = self.build()
         self.assertEqual(manifest["source"]["revision"], self.revision)

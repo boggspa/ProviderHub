@@ -41,6 +41,53 @@ def _worker_hashes(app_dir):
     return hashes
 
 
+# Mirrors the gate in scripts/prepare_runtime.py, which enforces this during the
+# build. Kept inline because Source/ ships in the bundle and scripts/ does not,
+# so provenance must not depend on it. `/Users/runner/...` is a GitHub Actions
+# path compiled into third-party wheel artifacts: upstream, not personal, and
+# not rewritable, so it is deliberately excluded.
+PERSONAL_PATH_RE = re.compile(rb"/Users/(?!runner/)[A-Za-z0-9._-]+")
+
+
+def _runtime_facts(app_dir):
+    """Summarize the bundled CPython runtime, when this build embeds one.
+
+    The runtime is not source-controlled: it is a copied third-party build that
+    `scripts/prepare_runtime.py` prunes and neutralizes during the build. It is
+    also the largest thing in the bundle and the one part a source hash cannot
+    vouch for. Recording its tree digest lets a release be affirmed against the
+    artifact itself rather than only against the repository, and recording the
+    personal-path count publishes the privacy gate as a fact any reader can
+    check, instead of a build-time assertion nobody outside the build sees.
+
+    Reads files only; it never executes the runtime. Symlinks are recorded by
+    target, because `bin/python3 -> python3.13` is what the app resolves.
+    """
+    runtime = Path(app_dir) / "Contents/Resources/python"
+    if not (runtime / "bin" / "python3").exists():
+        return {"present": False}
+    entries = []
+    personal = []
+    total = 0
+    for path in sorted(runtime.rglob("*")):
+        relative = path.relative_to(runtime).as_posix()
+        if path.is_symlink():
+            entries.append("link  " + relative + " -> " + os.readlink(path))
+            continue
+        if not path.is_file():
+            continue
+        data = path.read_bytes()
+        entries.append(hashlib.sha256(data).hexdigest() + "  " + relative)
+        total += len(data)
+        if PERSONAL_PATH_RE.search(data):
+            personal.append(relative)
+    # "entry_count" rather than "file_count": recorded symlinks are entries too,
+    # and bin/python3 -> python3.13 is one the app depends on.
+    return {"present": True, "entry_count": len(entries), "bytes": total,
+            "sha256": hashlib.sha256("\n".join(entries).encode()).hexdigest(),
+            "personal_path_files": personal}
+
+
 def _git(repository, *args):
     return subprocess.check_output(
         ["git", "-C", str(repository), *args], stderr=subprocess.DEVNULL)
@@ -100,6 +147,9 @@ def create_manifest(source_dir, app_dir, swift_sources, *, revision=None, reposi
                         "build": metadata["CFBundleVersion"]},
         "source": {**identity, "sha256": dict(sorted(source_hashes.items()))},
         "worker": {"sha256": worker_hashes},
+        # Additive and optional: manifests written before this existed have no
+        # "runtime" key, and verify_manifest treats that as "not recorded".
+        "runtime": _runtime_facts(app_dir),
     }
     destination = app_dir / "Contents/Resources" / MANIFEST_NAME
     destination.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -116,6 +166,10 @@ def verify_manifest(app_dir, *, revision=None, require_clean=False):
         raise ValueError("The app requires clean source verified against a Git tree")
     if _worker_hashes(app_dir) != manifest["worker"]["sha256"]:
         raise ValueError("Packaged worker files do not match the build manifest")
+    recorded_runtime = manifest.get("runtime")
+    if recorded_runtime and recorded_runtime.get("present"):
+        if _runtime_facts(app_dir) != recorded_runtime:
+            raise ValueError("Bundled Python runtime does not match the build manifest")
     metadata = plistlib.loads((app_dir / "Contents/Info.plist").read_bytes())
     if manifest["application"] != {"version": metadata["CFBundleShortVersionString"],
                                    "build": metadata["CFBundleVersion"]}:
