@@ -324,10 +324,13 @@ class CodexTurnWorkspaceTests(unittest.TestCase):
     def test_openai_catalog_override_uses_cache_when_present(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = codex.Path(tmp)
+            config = base / ".codex" / "config.toml"
+            config.parent.mkdir(parents=True, exist_ok=True)
+            config.write_text('model_catalog_json = "/hub/codex-models.json"\n',
+                              encoding="utf-8")
             with mock.patch.object(codex.Path, "home", return_value=base):
                 self.assertIsNone(codex._openai_catalog_override())
             cache = base / ".codex" / "models_cache.json"
-            cache.parent.mkdir(parents=True, exist_ok=True)
             cache.write_text('{"models": [{"slug": "gpt-5.6-sol"}]}',
                              encoding="utf-8")
             with mock.patch.object(codex.Path, "home", return_value=base):
@@ -338,6 +341,37 @@ class CodexTurnWorkspaceTests(unittest.TestCase):
             cache.write_text('{"models": []}', encoding="utf-8")
             with mock.patch.object(codex.Path, "home", return_value=base):
                 self.assertIsNone(codex._openai_catalog_override())
+
+    def test_openai_catalog_override_needs_a_configured_catalog(self):
+        # The shared cache holds whatever list the backend served the last
+        # Codex client to refresh it. With nothing to neutralize, the runtime
+        # must list its own rather than inherit another version's.
+        with tempfile.TemporaryDirectory() as tmp:
+            base = codex.Path(tmp)
+            cache = base / ".codex" / "models_cache.json"
+            cache.parent.mkdir()
+            cache.write_text('{"client_version": "0.153.0", "models": [{"slug": "gpt-6-astra"}]}',
+                             encoding="utf-8")
+            config = base / ".codex" / "config.toml"
+            override = ("model_catalog_json", str(cache))
+            for text, expected in (
+                    (None, None),
+                    ('model = "gpt-6-astra"\n', None),
+                    ('[profiles.work]\nmodel_catalog_json = "/work.json"\n', None),
+                    ('profile = "work"\n[profiles.work]\nmodel_catalog_json = "/work.json"\n', override),
+                    ('model_catalog_json = "/hub/codex-models.json"\n', override),
+                    ('model_catalog_json = \n', override)):
+                with self.subTest(config=text):
+                    if text is None:
+                        config.unlink(missing_ok=True)
+                    else:
+                        config.write_text(text, encoding="utf-8")
+                    with mock.patch.object(codex.Path, "home", return_value=base), \
+                            mock.patch.object(codex, "runtime_binary", return_value="/fake/codex"):
+                        self.assertEqual(codex._openai_catalog_override(), expected)
+                        argv = codex._app_server_argv()
+                    self.assertEqual(any(part.startswith("model_catalog_json=") for part in argv),
+                                     expected is not None)
 
 
 class DiscoverAuthStateTests(unittest.TestCase):
@@ -474,7 +508,41 @@ class FetchModelsTests(unittest.TestCase):
                 self.assertEqual(codex._catalogue_context(argv), {})
             cache.unlink()
             self.assertEqual(codex._catalogue_context(argv), {})
-            self.assertEqual(codex._catalogue_context(["codex", "app-server"]), {})
+            with mock.patch.object(codex.Path, "home", return_value=codex.Path(tmp)):
+                self.assertEqual(codex._catalogue_context(["codex", "app-server"]), {})
+
+    def test_listing_ignores_a_cache_written_by_another_client(self):
+        # Seen live: a 0.153.0 app-server left running across an upgrade kept
+        # rewriting the shared cache without gpt-6-sol, which the 0.155.1
+        # runtime serves, and launch preparation blocked on the missing route.
+        fake = self._FetchSession([{"result": {"data": [
+            {"model": "gpt-6-astra"}, {"model": "gpt-6-sol"}], "nextCursor": None}}])
+        with tempfile.TemporaryDirectory() as tmp:
+            base = codex.Path(tmp)
+            cache = base / ".codex" / "models_cache.json"
+            cache.parent.mkdir()
+            card = {"context_window": 272000, "effective_context_window_percent": 95}
+            cache.write_text(json.dumps({"client_version": "0.153.0",
+                                         "models": [{"slug": "gpt-6-astra", **card}]}))
+            scripted = fake.request
+
+            def refreshing(method, params, timeout=None):
+                # Serving model/list re-caches the runtime's own list.
+                if method == "model/list":
+                    cache.write_text(json.dumps({"client_version": "0.155.1", "models": [
+                        {"slug": "gpt-6-astra", **card}, {"slug": "gpt-6-sol", **card}]}))
+                return scripted(method, params, timeout)
+
+            fake.request = refreshing
+            spawned = []
+            with mock.patch.object(codex.Path, "home", return_value=base), \
+                    mock.patch.object(codex, "StdioSession",
+                                      side_effect=lambda argv, **kw: spawned.append(argv) or fake), \
+                    mock.patch.object(codex, "runtime_binary", return_value="/fake/codex"):
+                rows = codex.fetch_models(binary="/fake/codex", spawner="stub")
+        self.assertFalse(any(part.startswith("model_catalog_json=") for part in spawned[0]))
+        self.assertEqual([row["model"] for row in rows], ["gpt-6-astra", "gpt-6-sol"])
+        self.assertEqual([row.get("runtime_context") for row in rows], [258400, 258400])
 
     def test_failed_config_probe_does_not_hide_routable_models(self):
         fake = self._FetchSession([{"result": {"data": [{"model": "gpt-budget"}]}}])

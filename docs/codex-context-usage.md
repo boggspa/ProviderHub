@@ -15,8 +15,10 @@ catalogue and request usage through the terminal Responses object.
 ## Capacity
 
 Codex's `model/list` omits context metadata. The CLI route now joins its exact
-model IDs to the native catalogue already selected on the nested runtime's
-command line. It preserves the default `context_window`, the effective
+model IDs to the native catalogue the nested runtime listed from: the one
+selected on its command line, or, when none is (the real configuration selects
+no `model_catalog_json` to neutralize), the runtime's own cache as that listing
+refreshed it. It preserves the default `context_window`, the effective
 percentage reserved by the runtime, and a numeric `model_context_window`
 override reported by `config/read`. The resulting `runtime_context` survives
 Hub normalization and becomes the host's effective context budget, including

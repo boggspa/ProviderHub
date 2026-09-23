@@ -89,7 +89,9 @@ routed to ``https://api.openai.com/v1/responses`` even when the user's real
 applied to the coarse ``exec`` fallback. When the real config's
 ``model_catalog_json`` has been pointed at the hub's catalog, the argv also
 points it back at the CLI's own fetched OpenAI catalog so :func:`catalogue`
-advertises models this route can actually run.
+advertises models this route can actually run. Only then: every Codex client
+on the machine rewrites that cache with the list the backend serves *its*
+version, so with no configured catalog the runtime lists its own.
 
 Nested process isolation and host permissions
 ---------------------------------------------
@@ -121,6 +123,7 @@ import shutil
 import subprocess
 import tempfile
 import time
+import tomllib
 import uuid
 
 from cli_session import CliSessionError, StdioSession, minimal_env, resolve_binary
@@ -394,8 +397,33 @@ def _pinned_binary():
     return os.environ.get("PROVIDER_HUB_CODEX_BINARY") or None
 
 
+def _models_cache():
+    """The runtime's own fetched catalog, in the real home the child reads."""
+    return Path.home() / ".codex" / "models_cache.json"
+
+
+def _configured_catalog():
+    """Whether the real Codex config selects a ``model_catalog_json``.
+
+    The hub writes one at the root for a desktop session; a user profile may
+    carry its own. A config that cannot be read counts as configured, so the
+    neutralization is only ever skipped when there is provably nothing to fight.
+    """
+    try:
+        config = tomllib.loads((Path.home() / ".codex" / "config.toml").read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return False
+    except (OSError, ValueError):
+        return True
+    if "model_catalog_json" in config:
+        return True
+    profile, profiles = config.get("profile"), config.get("profiles")
+    table = profiles.get(profile) if isinstance(profile, str) and isinstance(profiles, dict) else None
+    return isinstance(table, dict) and "model_catalog_json" in table
+
+
 def _openai_catalog_override():
-    """Neutralize a hub ``model_catalog_json`` with the CLI's own fetched catalog.
+    """Neutralize a configured ``model_catalog_json`` with the CLI's own fetched catalog.
 
     The hub preview points ``model_catalog_json`` in ``~/.codex/config.toml`` at
     its own catalog; that would make :func:`catalogue` advertise hub models that
@@ -407,9 +435,20 @@ def _openai_catalog_override():
     catalog alone (a machine that has never listed models has no hub override to
     fight).
 
-    Returns ``("model_catalog_json", <path>)`` when the cache exists, else None.
+    It is only a stand-in, so it is used only when a configured catalog needs
+    neutralizing. Every Codex client on the machine rewrites that cache with the
+    list the backend serves its own version: an app-server left running across
+    an upgrade keeps overwriting it without models this runtime can serve (seen
+    live: a 0.153.0 app-server dropped gpt-6-sol and gpt-6-luna from a 0.155.1
+    route and blocked launch). With no configured catalog the runtime lists, and
+    re-caches, its own.
+
+    Returns ``("model_catalog_json", <path>)`` when a configured catalog needs
+    neutralizing and the cache is usable, else None.
     """
-    cache = Path.home() / ".codex" / "models_cache.json"
+    if not _configured_catalog():
+        return None
+    cache = _models_cache()
     try:
         if not cache.is_file():
             return None
@@ -658,22 +697,21 @@ def parse_model_list(rows):
 
 
 def _catalogue_context(argv, configured_window=None):
-    """Context budgets from the same native catalogue passed to this runtime.
+    """Context budgets from the same native catalogue this runtime listed.
 
     model/list omits context metadata. Join its exact model IDs to the native
-    catalogue selected on argv, never the Hub's projected rows or a model-name
+    catalogue selected on argv, or, with none selected, the runtime's own cache
+    that the listing refreshed; never the Hub's projected rows or a model-name
     guess. max_context_window is an optional larger ceiling, not the active
     default. Preserve the runtime's reserved percentage in runtime_context.
     """
-    path = None
+    path = _models_cache()
     for flag, value in zip(argv, argv[1:]):
         if flag == "-c" and value.startswith("model_catalog_json="):
             try:
                 path = Path(json.loads(value.split("=", 1)[1]))
             except (ValueError, TypeError):
                 return {}
-    if path is None:
-        return {}
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -742,13 +780,11 @@ def fetch_models(*, binary=None, spawner=None, timeout=30):
         argv = _app_server_argv(binary=binary)
         session = _open_session(argv, workspace, spawner=spawner, timeout=budget)
         _handshake(session, timeout=budget * _HANDSHAKE_SHARE)
-        context = {}
+        config = None
         try:
             configured = _result(session.request("config/read", {"includeLayers": False},
                                                  timeout=max(1.0, budget * 0.5)), context="config/read")
             config = configured.get("config") or {}
-            if isinstance(config, dict):
-                context = _catalogue_context(argv, config.get("model_context_window"))
         except (CodexCliAgentError, CliSessionError):
             # An optional capacity probe must not hide otherwise routable
             # models. Without resolved configuration, leave capacity unknown.
@@ -768,6 +804,10 @@ def fetch_models(*, binary=None, spawner=None, timeout=30):
                 break
         else:
             raise CodexCliAgentError("Codex returned too many catalogue pages.")
+        # Joined after listing: with no catalog on argv, the listing is what
+        # refreshes the runtime's own cache for its version.
+        context = (_catalogue_context(argv, config.get("model_context_window"))
+                   if isinstance(config, dict) else {})
         return [{**row, **context.get(row["model"], {})} for row in parse_model_list(rows)]
     finally:
         _teardown(session, workspace)
