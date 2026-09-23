@@ -7,6 +7,8 @@ import re
 import struct
 import subprocess
 
+from build_provenance import MANIFEST_NAME, _runtime_facts, verify_manifest
+
 
 def run(arguments):
     result = subprocess.run(arguments, capture_output=True, text=True)
@@ -80,6 +82,9 @@ def main():
         parser.error("--app must point to a generated macOS app bundle")
     if args.submit and not args.notary_profile:
         parser.error("--submit requires --notary-profile")
+    # Check the unsigned build before signing can legitimately change native
+    # bytes. Otherwise refreshing its digest could bless a preexisting edit.
+    manifest = verify_manifest(app, require_clean=True)
     identity = resolve_identity(args.identity)
     components = sorted((path for path in (app / "Contents").rglob("*")
                          if loadable_macho(path) and "MacOS" not in path.relative_to(app / "Contents").parts[:1]),
@@ -89,6 +94,12 @@ def main():
         run(["codesign", "--force", "--sign", identity, "--options", "runtime", "--timestamp", str(path)])
         if index % 15 == 0:
             print(f"Signed {index}/{len(components)} components", flush=True)
+    # Developer ID signatures alter the embedded CPython files. Record those
+    # final bytes before the outer app signature seals the manifest itself.
+    manifest["runtime"] = _runtime_facts(app)
+    (app / "Contents/Resources" / MANIFEST_NAME).write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    verify_manifest(app, require_clean=True)
     run(["codesign", "--force", "--sign", identity, "--options", "runtime", "--timestamp", str(app)])
     run(["codesign", "--verify", "--deep", "--strict", str(app)])
     archive(app, args.output)
