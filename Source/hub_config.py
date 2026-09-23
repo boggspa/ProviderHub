@@ -843,3 +843,22 @@ def provider_presentations(settings: dict) -> list[dict]:
              "credential_modes": credential_modes(provider_id),
              "presentation": resolve_presentation(provider_id, overrides=settings.get("branding_overrides"))}
             for provider_id, descriptor in PROVIDERS.items()]
+
+
+def provider_display_name(settings: dict, provider_id: str) -> str:
+    """The provider as the Providers pane lists it, user renames included."""
+    return resolve_presentation(provider_id, overrides=settings.get("branding_overrides"))["displayProvider"]
+
+
+def provider_label(settings: dict, provider_id: str) -> str:
+    """How launch and refresh messages name a provider for its credential source.
+
+    The registry name names the provider's API ("Codex (OpenAI API)"), which is
+    right for every key-based source. The installed-CLI source runs the
+    vendor's own binary and login instead, so it is named the way the Providers
+    pane shows it: the listed provider name and its "Installed CLI" source.
+    """
+    connection = (settings.get("providers") or {}).get(provider_id) or {}
+    if connection.get("credential_mode") != "cli":
+        return PROVIDERS[provider_id]["name"]
+    return f"{provider_display_name(settings, provider_id)} (installed CLI)"

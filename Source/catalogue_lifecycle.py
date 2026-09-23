@@ -62,7 +62,8 @@ class CataloguePreparationError(Exception):
 def _dependencies():
     from bridge_core import credentials, discover_provider, read_json
     from catalogue import route_specs
-    from hub_config import claude_routes, connection_signature, project_catalogue, split_route
+    from hub_config import (claude_routes, connection_signature, project_catalogue,
+                            provider_label, split_route)
     from providers import PROVIDERS
     return {
         "credentials": credentials,
@@ -73,6 +74,7 @@ def _dependencies():
         "project_catalogue": project_catalogue,
         "split_route": split_route,
         "claude_routes": claude_routes,
+        "provider_label": provider_label,
         "providers": PROVIDERS,
     }
 
@@ -147,12 +149,14 @@ def _selected(settings: dict) -> dict[str, list[dict]]:
     return selected
 
 
-def _base_provider_result(provider_id: str, mappings=()) -> dict:
-    providers = _dependencies()["providers"]
+def _base_provider_result(settings: dict, provider_id: str, mappings=()) -> dict:
+    # Named for the active credential source: a CLI-mode blocker must not read
+    # as the provider's API catalogue, which discovery never contacted.
+    provider_label = _dependencies()["provider_label"]
     rows = [dict(row) for row in mappings]
     return {
         "provider_id": provider_id,
-        "provider_name": providers[provider_id]["name"],
+        "provider_name": provider_label(settings, provider_id),
         "routes": sorted({row["route_id"] for row in rows}),
         "slots": sorted({row["slot_id"] for row in rows}),
         "mappings": rows,
@@ -415,7 +419,7 @@ def refresh_all(
     identifiers = sorted(deps["providers"] if provider_ids is None else provider_ids)
 
     def refresh_one(provider_id: str) -> dict:
-        provider = _base_provider_result(provider_id)
+        provider = _base_provider_result(settings, provider_id)
         source = _credential_check(credentials_fn, settings, provider)
         if source is None:
             # Missing credentials are normal for an unselected account on app
@@ -458,7 +462,7 @@ def refresh_all(
         marker = value.get("_worker_timeout") or value.get("_worker_error")
         if not marker:
             continue
-        provider = _base_provider_result(provider_id)
+        provider = _base_provider_result(settings, provider_id)
         code = "refresh_timeout" if value.get("_worker_timeout") else "refresh_worker_failed"
         issue = _issue(
             code, provider,
@@ -495,7 +499,7 @@ def prepare_launch(
     selected = _selected(settings)
 
     def prepare_one(provider_id: str, mappings: list[dict]) -> dict:
-        provider = _base_provider_result(provider_id, mappings)
+        provider = _base_provider_result(settings, provider_id, mappings)
         source = _credential_check(credentials_fn, settings, provider)
         if source is None:
             return provider
@@ -571,7 +575,7 @@ def prepare_launch(
                    if route not in after["specs"]]
         if missing:
             missing_rows = [row for row in mappings if row["route_id"] in missing]
-            missing_provider = _base_provider_result(provider_id, missing_rows)
+            missing_provider = _base_provider_result(settings, provider_id, missing_rows)
             issue = _issue(
                 "route_not_advertised", missing_provider,
                 f"{provider['provider_name']} catalogue does not contain selected "
@@ -597,7 +601,7 @@ def prepare_launch(
         marker = value.get("_worker_timeout") or value.get("_worker_error")
         if not marker:
             continue
-        provider = _base_provider_result(provider_id, selected[provider_id])
+        provider = _base_provider_result(settings, provider_id, selected[provider_id])
         code = ("preparation_timeout" if value.get("_worker_timeout")
                 else "preparation_worker_failed")
         state = _cache_state(settings, root, provider_id, current)
@@ -654,7 +658,7 @@ def validate_prepared_launch(
     selected = _selected(settings)
 
     def validate_one(provider_id: str, mappings: list[dict]) -> dict:
-        provider = _base_provider_result(provider_id, mappings)
+        provider = _base_provider_result(settings, provider_id, mappings)
         source = _credential_check(credentials_fn, settings, provider)
         if source is None:
             return provider
@@ -674,7 +678,7 @@ def validate_prepared_launch(
                    if route not in state["specs"]]
         if missing:
             missing_rows = [row for row in mappings if row["route_id"] in missing]
-            missing_provider = _base_provider_result(provider_id, missing_rows)
+            missing_provider = _base_provider_result(settings, provider_id, missing_rows)
             issue = _issue(
                 "route_not_advertised", missing_provider,
                 f"{provider['provider_name']} catalogue does not contain selected "
@@ -704,7 +708,7 @@ def validate_prepared_launch(
         marker = value.get("_worker_error")
         if not marker:
             continue
-        provider = _base_provider_result(provider_id, selected[provider_id])
+        provider = _base_provider_result(settings, provider_id, selected[provider_id])
         issue = _issue(
             "validation_worker_failed", provider,
             f"{provider['provider_name']} launch validation failed for "

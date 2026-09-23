@@ -616,7 +616,7 @@ class DiscoverProviderBranchTest(unittest.TestCase):
                           side_effect=AssertionError("HTTP discovery must not run for a CLI route")):
             source = discover_provider(settings, "claude", root=self.root)
         self.assertEqual(called["provider_id"], "claude")
-        self.assertEqual(source, "Claude (Anthropic API) CLI login")
+        self.assertEqual(source, "Claude CLI login")
         cached = json.loads((self.root / "catalogues" / "claude.json").read_text())
         self.assertEqual(cached["connection_signature"],
                          connection_signature("claude", settings["providers"]["claude"]))

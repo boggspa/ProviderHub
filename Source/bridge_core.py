@@ -24,7 +24,8 @@ from catalogue import build_catalogue, read_observations, route_specs
 from cli_routes import cli_credential_mode, discover_via_cli
 from hub_config import (CLAUDE_TIER_MODELS, SLOTS, claude_picker_rows, claude_routes, connection_signature,
                         defaults as hub_defaults, normalize as normalize_hub_settings,
-                        project_catalogue, provider_presentations, qualify, split_route)
+                        project_catalogue, provider_display_name, provider_presentations,
+                        qualify, split_route)
 from providers import PROVIDERS, discover
 
 PROFILE_ID = str(uuid.UUID(os.environ.get("MISTRAL_BRIDGE_PROFILE_ID", "8a93d471-d0f9-428c-b203-48fce46277bc")))
@@ -184,8 +185,9 @@ def credentials(settings: dict, provider_id="mistral") -> tuple[str, str]:
         # No secret to resolve, and none may be.  The installed CLI owns this
         # login and refreshes it; a second holder of the same rotating refresh
         # token would revoke the first.  The label keeps the (key, source)
-        # contract the callers expect while the key stays empty.
-        return "", f"{provider['name']} CLI login"
+        # contract the callers expect while the key stays empty, and names the
+        # CLI rather than the provider's API, which this mode never contacts.
+        return "", f"{provider_display_name(settings, provider_id)} CLI login"
     if provider_id == "mistral" and mode == "vibe":
         return vibe_credentials()
     if mode == "environment":

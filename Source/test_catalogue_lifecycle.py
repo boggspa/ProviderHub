@@ -11,7 +11,7 @@ import unittest
 from unittest.mock import patch
 
 import gateway
-from bridge_core import BridgeError, SLOTS, atomic_json, cached_catalogue
+from bridge_core import BridgeError, SLOTS, atomic_json, cached_catalogue, credentials
 from catalogue_lifecycle import (
     FRESH_SECONDS,
     STALE_FALLBACK_SECONDS,
@@ -22,7 +22,8 @@ from catalogue_lifecycle import (
     validate_prepared_launch,
 )
 from gateway import Runtime
-from hub_config import connection_signature, defaults
+from hub_config import connection_signature, defaults, provider_label
+from providers import PROVIDERS
 
 
 NOW = datetime(2026, 9, 12, 10, 0, tzinfo=timezone.utc)
@@ -291,6 +292,62 @@ class CatalogueLifecycleTests(unittest.TestCase):
             self.assertEqual(settings["mappings"], {
                 slot_id: "deepseek/deepseek-removed" for slot_id, *_ in SLOTS
             })
+
+    def test_cli_mode_blockers_name_the_installed_cli_not_the_api(self):
+        # Seen live: a CLI-mode blocker read "Codex (OpenAI API) catalogue does
+        # not contain ...", sending the reader after an API catalogue that
+        # discovery never contacted. Key-based sources keep the API name.
+        def discover(current, provider_id, target):
+            write_catalogue(target, current, provider_id, [model("gpt-6-astra")])
+            return "Mock login"
+
+        for mode, name in (("cli", "Codex (installed CLI)"), ("keychain", "Codex (OpenAI API)")):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                settings = settings_for("codex/gpt-6-luna")
+                settings["providers"]["codex"]["credential_mode"] = mode
+
+                prepared = prepare_launch(
+                    settings, root, now=NOW, credentials_fn=credentials_ok,
+                    discover_fn=discover,
+                )
+                validated = validate_prepared_launch(
+                    settings, root, now=NOW, credentials_fn=credentials_ok)
+                refreshed = refresh_all(
+                    settings, root, provider_ids=["codex"], now=NOW,
+                    credentials_fn=credentials_ok, discover_fn=discover,
+                )
+
+                issue = prepared["errors"][0]
+                self.assertEqual(issue["code"], "route_not_advertised")
+                self.assertEqual(issue["provider_name"], name)
+                self.assertTrue(issue["message"].startswith(
+                    f"{name} catalogue does not contain selected route codex/gpt-6-luna "))
+                self.assertTrue(validated["errors"][0]["message"].startswith(
+                    f"{name} catalogue does not contain selected route codex/gpt-6-luna."))
+                self.assertEqual(refreshed["providers"]["codex"]["provider_name"], name)
+
+    def test_provider_label_names_the_active_credential_source(self):
+        settings = settings_for()
+        for provider_id, descriptor in PROVIDERS.items():
+            if settings["providers"][provider_id]["credential_mode"] != "cli":
+                self.assertEqual(provider_label(settings, provider_id), descriptor["name"])
+        cli_providers = ("codex", "claude", "muse", "grok", "antigravity")
+        for provider_id in cli_providers:
+            settings["providers"][provider_id]["credential_mode"] = "cli"
+        self.assertEqual({provider_id: provider_label(settings, provider_id)
+                          for provider_id in cli_providers}, {
+            "codex": "Codex (installed CLI)",
+            "claude": "Claude (installed CLI)",
+            "muse": "Muse (installed CLI)",
+            "grok": "Grok (installed CLI)",
+            "antigravity": "AntiGravity (installed CLI)",
+        })
+        self.assertEqual(credentials(settings, "codex"), ("", "Codex CLI login"))
+        # A rename in Appearance is the name the Providers pane lists.
+        settings["branding_overrides"] = {"codex": {"displayProvider": "ChatGPT"}}
+        self.assertEqual(provider_label(settings, "codex"), "ChatGPT (installed CLI)")
+        self.assertEqual(credentials(settings, "codex"), ("", "ChatGPT CLI login"))
 
     def test_provider_error_without_usable_cache_is_an_exact_blocker(self):
         with tempfile.TemporaryDirectory() as tmp:
