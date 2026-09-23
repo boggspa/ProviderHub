@@ -15,7 +15,7 @@ module never reads, copies, refreshes, stats or parses a credential: not
 
 For Codex that is not merely tidy, it is the only viable design. The ChatGPT
 OAuth refresh token *rotates on use*, so a second process holding a copy
-revokes the first - AGBench's ``CodexOAuthCredentialLease`` calls copying
+revokes the first - TaskWraith's ``CodexOAuthCredentialLease`` calls copying
 ``auth.json`` "actively harmful" for exactly this reason. The decoded access
 token also carries no inference scope (``openid, profile, email,
 offline_access, api.connectors.read, api.connectors.invoke``), so a copied
@@ -57,7 +57,7 @@ Notifications consumed:
 There is no ``turn/failed`` notification in 0.153.0: a failed turn arrives as
 ``turn/completed`` with ``turn.status == "failed"`` and a populated
 ``turn.error`` (``TurnStatus`` is ``completed|interrupted|failed|inProgress``).
-``turn/failed`` is still tolerated because AGBench's older client handles it,
+``turn/failed`` is still tolerated because TaskWraith's older client handles it,
 so a runtime upgrade cannot silently hang a thread.
 
 The app-server runs against the user's real default ``CODEX_HOME``

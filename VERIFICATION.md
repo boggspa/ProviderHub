@@ -1,5 +1,9 @@
 **Muse and Grok host tool handoffs on the Messages surface — 19 September 2026**
 
+> **Historical record.** Dated 19 September 2026. Version numbers, build
+> numbers and test counts below are as they were then and are not maintained.
+> For current state see [`README.md`](README.md).
+
 Claude Desktop drove the CLI-backed Muse route into narration with no host tool
 action. The Messages surface now renders host tools as the nested CLI's own
 enforced output schema rather than the prompt-only sentinel envelope, because
@@ -562,8 +566,8 @@ still treats `xhigh` as `high` and never mentions `max`; Hub follows the current
 
 Apple accepted **0.5.0 build 13** submission
 `67958106-b904-473c-b5cb-be84743be4ae`, created at
-`2026-09-13T17:00:25.830Z`. It is signed with Developer ID Application
-`Christopher Izatt (8CZML8FK2D)` (certificate SHA-1
+`2026-09-13T17:00:25.830Z`. It is signed with a Developer ID Application
+identity (signer name and team ID withheld; certificate SHA-1
 `A5D4019DBFEDE7727487D49BD08257C46A72E7E0`). All twelve embedded native
 components and the app use hardened runtime. The notarization ticket was
 stapled successfully. The recipient archive was created after stapling and

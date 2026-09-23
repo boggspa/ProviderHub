@@ -1,5 +1,9 @@
 **Provider Hub: Codex / ChatGPT Desktop harness — 13 September 2026**
 
+> **Historical record.** Dated 13 September 2026 and describing 0.5.0. Version
+> numbers, test counts and provider lists below are as they were then and are
+> not maintained. For current state see [`README.md`](README.md).
+
 Provider Hub Preview 0.5.0 extends the second desktop harness from 0.4.0 with Qwen Token Plan, curated OpenRouter and Gemini API. Every configured provider connection is now
 available to Codex. Grok, Ollama and OpenRouter retain native Responses forwarding;
 Mistral, Kimi, MiMo, DeepSeek, Cerebras, Muse, Qwen Token Plan and Gemini use a local

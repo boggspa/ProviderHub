@@ -1,5 +1,9 @@
 **Provider Hub integration status — 13 September 2026**
 
+> **Historical record.** Dated 13 September 2026 and describing 0.5.0. Version
+> numbers, test counts and provider lists below are as they were then and are
+> not maintained. For current state see [`README.md`](README.md).
+
 Provider Hub Preview 0.5.0 implements eleven model API connections behind one
 native menu bar app: Mistral, Kimi Code subscription API keys, Xiaomi MiMo
 Token Plan, the existing Ollama daemon, DeepSeek API, Cerebras API, Muse through

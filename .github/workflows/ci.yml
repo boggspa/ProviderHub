@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Deliberate omission: scripts/work_guard.py is never run here. It reasons about
+# live sessions, ownership markers and unclaimed dirty work, none of which exist
+# in a clean CI checkout — see AGENTS.md, "The clock". What CI does run is that
+# tool's own unit test suite, which is ordinary code.
+
+jobs:
+  python-tests:
+    name: Python test suite
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+      - name: Sync environment
+        run: uv sync --group dev
+      - name: unittest discover (Source)
+        run: uv run python -m unittest discover -s Source -p 'test_*.py'
+      # AGENTS.md documents pytest as the primary runner, so gate it too
+      # rather than letting the documented command rot.
+      - name: pytest (Source)
+        run: uv run python -m pytest Source/ -q
+      - name: work_guard unit tests
+        run: uv run python scripts/test_work_guard.py
+
+  hook-tests:
+    name: pre-commit guard self-tests
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run hook self-tests
+        run: bash .githooks/pre-commit.test.sh

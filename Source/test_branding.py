@@ -111,8 +111,8 @@ class BrandingTests(unittest.TestCase):
             "dark": "provider-logos/provider-logo-deepseek.png",
         })
 
-    def test_ollama_brand_table_covers_the_agbench_roster_local_and_cloud(self):
-        """The Ollama display-brand table is mirrored from AGBench's
+    def test_ollama_brand_table_covers_the_taskwraith_roster_local_and_cloud(self):
+        """The Ollama display-brand table is mirrored from TaskWraith's
         `OLLAMA_DISPLAY_BRANDS`, needles included, so a local or Cloud tag
         wears its maker's hue while the runtime stays `ollama`. Cloud tags
         are the same names with a `:…-cloud` suffix, so one needle set

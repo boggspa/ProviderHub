@@ -1,0 +1,41 @@
+# Provider Hub — Python worker environment.
+#
+# This is NOT an installable Python package. It is a macOS app whose Python
+# worker is copied into the bundle by Source/build.sh, so `package = false`
+# tells uv to manage the environment without building or installing us.
+#
+# Source/requirements.txt stays the canonical runtime dependency list, because
+# Source/responses_bridge.py names it in the error shown when `cryptography` is
+# missing from a runtime. Keep the cryptography pin in sync with it.
+
+[project]
+name = "provider-hub"
+version = "0.5.5"
+description = "Native macOS menu bar app connecting Claude Desktop and Codex / ChatGPT Desktop to multiple model API providers"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+dependencies = [
+    "cryptography==50.0.0",
+]
+
+[project.optional-dependencies]
+# Both are imported inside try/except ImportError and degrade gracefully, so
+# neither is a hard dependency:
+#   python-dotenv -> Source/bridge_core.py:vibe_credentials falls back to a
+#                    built-in .env parser
+#   certifi       -> Source/bridge_core.py:ssl_context falls back to the
+#                    system trust store
+dotenv = ["python-dotenv"]
+tls = ["certifi"]
+
+[dependency-groups]
+dev = ["pytest"]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+testpaths = ["Source"]
+python_files = ["test_*.py"]

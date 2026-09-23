@@ -181,7 +181,7 @@ for every accent, so the next arbitrary hue cannot drift out of it.
 The value is TaskWraith's, not this repo's. Both sides minted a gold
 independently for the same namespace and landed one hue degree apart — an
 unremarkable outcome, since the luminance band and the sRGB gamut leave almost
-no room at that hue. `#9E6C00` is the one in AGBench's
+no room at that hue. `#9E6C00` is the one in TaskWraith's
 `--provider-stealth-color`, so it is the one kept; this file's first draft
 recorded the local `#A06B00` before the two were compared.
 
@@ -205,19 +205,19 @@ Sources:
 - https://openrouter.ai/stealth/union-alpha
 - https://openrouter.ai/api/v1/models
 - https://openrouter.ai/api/v1/models/stealth/union-alpha/endpoints
-- AGBench `src/renderer/src/styles/theme.css` (`--provider-stealth-color`) and
+- TaskWraith `src/renderer/src/styles/theme.css` (`--provider-stealth-color`) and
   `src/shared/piBrandTable.ts` (`openrouter/stealth`), read-only.
 
 ## Ollama display brands — filling in the rest of the table
 
-The hub carried six of AGBench's seventeen `OLLAMA_DISPLAY_BRANDS` entries.
+The hub carried six of TaskWraith's seventeen `OLLAMA_DISPLAY_BRANDS` entries.
 The other eleven — Cohere, Deep Reinforce, Essential AI, Google (the Gemma
 spoof class), IBM, Liquid, MiniMax, NVIDIA, OpenAI, OpenBMB and Poolside —
 were missing, so those local and Cloud models fell through to Ollama's own
-walnut brown. They are now mirrored in full, in AGBench's order, with the
+walnut brown. They are now mirrored in full, in TaskWraith's order, with the
 needles copied verbatim: the needles are the attribution, and inventing a
 looser one here would put the two tables quietly out of step. The six that
-were already present matched AGBench exactly and are unchanged.
+were already present matched TaskWraith exactly and are unchanged.
 
 Cloud tags need no separate rules. An Ollama Cloud id is the same name with a
 `:…-cloud` suffix, so `gpt-oss:120b-cloud`, `deepseek-v3.1:671b-cloud`,
@@ -228,7 +228,7 @@ the brand through the humanised label the hub always supplies, which is the
 same second pass the upstream matcher makes. An unrecognised tag keeps
 Ollama's brown rather than guessing a maker.
 
-Six accents came with them, at AGBench's exact values: `codex` `#705AFF`,
+Six accents came with them, at TaskWraith's exact values: `codex` `#705AFF`,
 `deep-reinforce` `#BE5809`, `essential` `#8462CA`, `ibm` `#3079BC`, `liquid`
 `#D72D82` and `openbmb` `#E22B17`. Two are aliases rather than new hues,
 mirroring the `var()` indirection upstream: `openai` resolves to `codex`, so
@@ -243,7 +243,7 @@ Each new class also gets a presentation entry so its chip carries a chosen
 mnemonic instead of a derived one — OpenAI and OpenBMB both derive `OPE`, and
 `NVIDIA` derives `NVI` where the palette already says `NV`. Fallback model
 labels keep this repository's generic form (`Granite model`) rather than
-AGBench's (`Granite 4.1 (3B Param)`), which names that project's own pulled
+TaskWraith's (`Granite 4.1 (3B Param)`), which names that project's own pulled
 tags and parameter counts; the hub has not observed them, and the fallback is
 only reached when no label is available at all.
 
@@ -257,6 +257,6 @@ brown.
 
 Sources:
 
-- AGBench `src/shared/ollamaBrandTable.ts` (`OLLAMA_DISPLAY_BRANDS`),
+- TaskWraith `src/shared/ollamaBrandTable.ts` (`OLLAMA_DISPLAY_BRANDS`),
   `src/renderer/src/lib/ollamaDisplayBrand.ts`, and
   `src/renderer/src/styles/theme.css` (`--provider-*-color`), read-only.

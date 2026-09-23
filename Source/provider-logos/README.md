@@ -1,8 +1,8 @@
 The original PNG assets are copied verbatim from TaskWraith's
-`src/renderer/src/assets/provider-logos` in the user's AGBench checkout.
+`src/renderer/src/assets/provider-logos`.
 
 The following PNGs are copied verbatim from Limit Counter's
-`LLMUsageCounter/Assets.xcassets` in the user's `LLMUsageCounter` checkout:
+`LLMUsageCounter/Assets.xcassets`:
 
 | Hub asset | Limit Counter source | Used by |
 | --- | --- | --- |

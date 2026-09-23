@@ -1,24 +1,39 @@
-**Provider Hub Preview 0.5.4**
+# Provider Hub Preview
+
+**Version 0.5.5 (build 23).** Licensed Apache-2.0 — see [LICENSE](LICENSE),
+with attributions in [NOTICE](NOTICE).
 
 A native macOS menu bar app that connects Claude Desktop and the Codex coding workspace to eleven model API connections: Mistral, Kimi Code, MiMo Token Plan, Ollama, DeepSeek, Cerebras, Muse, Grok, Qwen Token Plan, OpenRouter, and the Gemini API. Claude uses the local Messages endpoint. Codex uses Responses: Grok, Ollama, and OpenRouter retain native Responses transports, while the other eight use the local Messages bridge and their provider adapters.
 
-Provider Hub Preview retains the Preview label while additional provider accounts and desktop integration paths complete live qualification. Stable Mistral Bridge 0.2 is preserved separately. The stable app and the preview have separate bundle IDs, settings directories, Keychain namespaces, gateway ports, and Claude profile IDs. Installing or building the preview does not replace the stable app.
+Provider Hub Preview retains the Preview label while additional provider accounts and desktop integration paths complete live qualification. An earlier Mistral Bridge 0.2 prototype is maintained separately and is not distributed from this repository. The two never share state: they have separate bundle IDs, settings directories, Keychain namespaces, gateway ports, and Claude profile IDs, so installing or building the preview cannot disturb the prototype.
+
+> **Not affiliated with any provider.** All provider and model names, logos and
+> marks referenced here — including Anthropic, Claude, OpenAI, Codex, ChatGPT,
+> Google, Gemini, xAI, Grok, DeepSeek, Moonshot, Kimi, Alibaba, Qwen, Xiaomi,
+> MiMo, Meta, Muse, Mistral, Cerebras, OpenRouter, Ollama, NVIDIA, Cognition and
+> Devin — are the trademarks of their respective owners. This project is not
+> affiliated with, endorsed by, sponsored by, or approved by any of them. Marks
+> appear for identification and interoperability only. Full details are in
+> [NOTICE](NOTICE).
 
 **Documentation**
 
 | Guide | Contents |
 | --- | --- |
 | [Quick start](QUICK-START.md) | Installation, provider setup, and launching either desktop client |
-| [Verification record](VERIFICATION.md) | Dated test results, live checks, and qualification limits |
-| [Codex / ChatGPT harness](HARNESS-OPTIONS.md) | Responses transport, catalogues, launch, and restoration |
-| [Native agents and Auto mode](NATIVE-AGENTS.md) | Subscription boundaries, native-agent research, and Claude's approval classifier |
+| [Verification record](VERIFICATION.md) | Dated test results, live checks, and qualification limits — historical record |
+| [Codex / ChatGPT harness](HARNESS-OPTIONS.md) | Responses transport, catalogues, launch, and restoration — historical record |
+| [Native agents and Auto mode](NATIVE-AGENTS.md) | Subscription boundaries, native-agent research, and Claude's approval classifier — historical record |
 | [Provider additions](PROVIDER-ADDITIONS.md) | Provider contracts, metadata sources, and qualification details |
-| [Integration roadmap](PROVIDER-ROADMAP.md) | Release history, retained boundaries, and proposed work |
+| [Integration roadmap](PROVIDER-ROADMAP.md) | Release history, retained boundaries, and proposed work — historical record |
 | [Close-out cards](CLOSEOUT_CARDS.md) | File-editing tool projection and desktop diff cards |
 | [Claude picker context](docs/claude-picker-context.md) | Context metadata and picker presentation |
 | [Codex provider subagents](docs/codex-provider-subagents.md) | Host delegation, runtime probes, and activation limits |
 | [AntiGravity tool handoff](docs/antigravity-host-handoff.md) | Native tool requests and desktop dispatch |
 | [Repository doctrine](AGENTS.md) | Shared-checkout ownership, testing, and commit rules |
+| [Contributing](CONTRIBUTING.md) | Development setup, tests, scratch files, and pull-request rules |
+| [Security policy](SECURITY.md) | Private vulnerability reporting, threat model, and release signing |
+| [Licence and attributions](NOTICE) | Apache-2.0, vendored code, dependencies, logos, and trademarks |
 
 Provider implementation is split between [registry and connections](Source/provider_registry.py), [model discovery](Source/provider_discovery.py), and [request preparation](Source/provider_requests.py). [providers.py](Source/providers.py) preserves existing imports, including private helpers.
 
@@ -34,7 +49,7 @@ Provider implementation is split between [registry and connections](Source/provi
 8. Quitting a launched desktop app restores that harness's prior selection. The shared gateway stays available while either owned harness remains open and normally stops after both have closed. The menu bar app remains available.
 9. While one desktop harness is live, you can still change the *other* harness's model selection (e.g., edit the Codex catalogue while Claude is running). Save writes the change without stopping the gateway; launching the second app briefly restarts the gateway so both share the new snapshot, and the running app reconnects automatically. Changing shared provider settings (keys, regions, port, branding) while either app is live still requires quitting both desktop apps first.
 
-Build from the repository root to create `Provider Hub Preview.app` alongside the stable Mistral app. The in-tree build is 0.5.5 build 17. Building from source produces a development signature; distribution builds must be signed and notarized separately. The repository remains local-only, with no GitHub remote. A shorter recipient guide is in `QUICK-START.md`.
+Build from the repository root with `bash Source/build.sh` to create `Provider Hub Preview.app` beside the checkout. The in-tree build is 0.5.5 build 23, and `Source/build.sh` is the source of truth for both the version and the build stamp. Building from source applies an ad-hoc development signature, which is enough to run locally; distribution builds are signed with an Apple Developer ID and notarized on the maintainer's machine, and those credentials are never committed. See [`CONTRIBUTING.md`](CONTRIBUTING.md) for setup and tests, and [`SECURITY.md`](SECURITY.md) for the signing and threat model. A shorter end-user guide is in `QUICK-START.md`.
 
 **Provider connections**
 
@@ -118,7 +133,7 @@ The custom Codex catalogue publishes exact IDs such as `grok/grok-4.6`, `mistral
 
 The display-name parser recognizes provider spelling, versions, sizes, release dates, and qualifiers such as Cloud and Preview. Mistral aliases use the versioned model identifier reported in provider metadata when available: Medium’s current billing-model ID identifies 3.5, while the fixed Small/Large release IDs retain their Small 4/Large 3 product names. Raw repeated API names no longer override those labels. This changes display names only; moving routing aliases remain unchanged. Provider metadata and explicit display overrides take precedence. Examples: `model-name-v1-2504` becomes `Model Name V1 · Apr 2025`; `gpt-oss:120b-cloud` becomes `GPT OSS · 120B Cloud`. Outbound routing uses the original upstream ID; OpenRouter’s local context-choice suffixes are removed before the request reaches its API.
 
-The appearance layer reuses TaskWraith's provider presentation schema: `displayProvider`, `hueKey`, `accent`, `shortCode`, `modelLabels`, and optional bundled `logo` assets. It is keyed by immutable runtime provider identity. Provider names, accents, initials, and model labels can be edited in **Appearance**. An Ollama- or OpenRouter-hosted brand can have its own accent while the route retains the account/provider identity. The original logos and palette values came from the read-only AGBench source. Codex, Claude, AntiGravity, Qwen Token Plan, OpenRouter, Devin, and Meta/Muse logos were copied from the read-only Limit Counter source; asset provenance and glyph display settings are documented in [Source/provider-logos/README.md](Source/provider-logos/README.md). A brand with no upstream palette to copy, such as OpenRouter’s anonymous Stealth preview, gets an arbitrary accent held to the same rule as the rest: accents are foreground colours on both surfaces, so each hue is normalized to one shared luminance — at least 4.5:1 against white and a clear step off the dark chrome — and then takes all the chroma sRGB allows there. Stealth’s `#9E6C00` is that gold. The Ollama display-brand table is mirrored from AGBench’s `OLLAMA_DISPLAY_BRANDS`, needles included, so a local or Cloud tag — `gpt-oss:120b-cloud`, `granite4.1:3b`, `lfm2.5:8b`, `minicpm-v4.5:8b` — wears its maker’s hue while the runtime, the daemon and the model route stay Ollama’s.
+The appearance layer reuses TaskWraith's provider presentation schema: `displayProvider`, `hueKey`, `accent`, `shortCode`, `modelLabels`, and optional bundled `logo` assets. It is keyed by immutable runtime provider identity. Provider names, accents, initials, and model labels can be edited in **Appearance**. An Ollama- or OpenRouter-hosted brand can have its own accent while the route retains the account/provider identity. The original logos and palette values came from the read-only TaskWraith source. Codex, Claude, AntiGravity, Qwen Token Plan, OpenRouter, Devin, and Meta/Muse logos were copied from the read-only Limit Counter source; asset provenance and glyph display settings are documented in [Source/provider-logos/README.md](Source/provider-logos/README.md). A brand with no upstream palette to copy, such as OpenRouter’s anonymous Stealth preview, gets an arbitrary accent held to the same rule as the rest: accents are foreground colours on both surfaces, so each hue is normalized to one shared luminance — at least 4.5:1 against white and a clear step off the dark chrome — and then takes all the chroma sRGB allows there. Stealth’s `#9E6C00` is that gold. The Ollama display-brand table is mirrored from TaskWraith’s `OLLAMA_DISPLAY_BRANDS`, needles included, so a local or Cloud tag — `gpt-oss:120b-cloud`, `granite4.1:3b`, `lfm2.5:8b`, `minicpm-v4.5:8b` — wears its maker’s hue while the runtime, the daemon and the model route stay Ollama’s.
 
 Context is read-only. Exact integer values come from provider metadata or exact documented fixed-ID limits. Genuine context variants remain separate entries. Plan-dependent or imprecise limits remain provider-managed instead of inventing a number. Ollama's architectural maximum and effective runtime allocation are distinct: `/api/show` does not establish the latter. Claude's own context meter can still use Claude-specific presets; the gateway cannot fully customize it through discovery. When Claude Desktop injects standalone `<total_tokens>` / `<ctx_window>` reminder lines, the gateway rewrites them to remaining catalogue context for the selected route. Desktop's default is a 15,000,000-token task budget that resets every user turn, which is not the provider window. Unknown or non-numeric context is left unchanged, and fenced copies of those lines are not rewritten. For Codex, a known numeric context is advertised at 100 percent with automatic compaction at 85 percent. An unknown context is advertised as `null` with no automatic-compaction threshold. The installed Codex engine preserves that unknown value as `model_context_window: null` instead of guessing 200,000 tokens; compact manually when needed on an unknown-context route.
 
@@ -199,4 +214,4 @@ python3 Source/build_provenance.py verify --require-clean \
 
 **Qualification**
 
-The [verification record](VERIFICATION.md) is the source for dated test totals, live tool-cycle results, and unverified routes. The [Codex harness guide](HARNESS-OPTIONS.md) records installed-engine and desktop-specific evidence. Each result qualifies only the model, account, and build recorded there; catalogue discovery alone does not establish inference access.
+The [verification record](VERIFICATION.md) and the [Codex harness guide](HARNESS-OPTIONS.md) are **historical records**: dated logs of what was tested against the build named inside them, kept for provenance and deliberately not updated. They are not maintained against 0.5.5. Each result qualifies only the model, account and build recorded there, and catalogue discovery alone does not establish inference access. For the current test total see [`QUICK-START.md`](QUICK-START.md).

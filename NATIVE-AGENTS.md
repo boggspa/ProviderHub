@@ -1,7 +1,11 @@
 # Native agent and Auto-mode integration boundaries
 
+> **Historical record.** Research dated 12–13 September 2026. Version numbers,
+> test counts and provider lists below are as they were then and are not
+> maintained. For current state see [`README.md`](README.md).
+
 Research date: 12 September 2026. The TaskWraith source notes below
-refer to the read-only AGBench checkout at
+refer to the read-only TaskWraith checkout at
 `b6eba91e9216eefdd7a75572585e79b48ed4e1b0`. That research did not run an
 ACP/MSP agent, read a provider credential, or live-test xAI. The separate 0.4.0
 Codex qualification used an existing Ollama daemon and is recorded in

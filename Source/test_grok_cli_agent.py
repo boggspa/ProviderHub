@@ -287,6 +287,53 @@ class TestAssertSafe(unittest.TestCase):
         self.assertIn("prefix", str(ctx.exception))
 
 
+class TestResolveBinaryExpansion(unittest.TestCase):
+    """Test that _resolve_binary honours resolve_binary's documented contract.
+
+    cli_session.resolve_binary documents ``extra_dirs`` as "already
+    user-expanded absolute directories", but _EXTRA_BIN_DIRS holds
+    "~/.grok/bin" and "~/.local/bin", so this adapter must expand them
+    itself. Every other CLI adapter already does; grok did not, so those two
+    entries could never match and a grok installed under the home directory
+    was reported as absent.
+    """
+
+    def test_tilde_extra_dirs_are_expanded(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "home"
+            bin_dir = home / ".grok" / "bin"
+            bin_dir.mkdir(parents=True)
+            binary = bin_dir / "grok"
+            binary.write_text("#!/bin/sh\nexit 0\n")
+            binary.chmod(0o755)
+            # Path.expanduser() reads $HOME, not Path.home(). PATH points at a
+            # directory that does not exist so shutil.which cannot resolve a
+            # real grok ahead of the one we planted.
+            with patch.dict("os.environ", {"HOME": str(home),
+                                           "PATH": str(home / "empty")}):
+                resolved = module._resolve_binary()
+            self.assertEqual(resolved, str(binary))
+
+    def test_extra_dirs_passed_to_resolve_binary_are_absolute(self):
+        captured = {}
+
+        def fake_resolve(names, extra_dirs=()):
+            captured["names"] = tuple(names)
+            captured["extra_dirs"] = tuple(extra_dirs)
+            return None
+
+        with patch.object(module, "resolve_binary", fake_resolve):
+            module._resolve_binary()
+
+        self.assertEqual(captured["names"], module.BINARY_NAMES)
+        self.assertTrue(captured["extra_dirs"], "extra_dirs must not be empty")
+        for directory in captured["extra_dirs"]:
+            self.assertFalse(directory.startswith("~"),
+                             f"{directory} was not user-expanded")
+            self.assertTrue(Path(directory).is_absolute(),
+                            f"{directory} is not an absolute path")
+
+
 class TestDiscover(unittest.TestCase):
     """Test CLI discovery."""
 

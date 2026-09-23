@@ -48,7 +48,7 @@ call IDs in the next stateless turn.
 
 ## Relationship to TaskWraith
 
-The reference checkout at `/Users/chrisizatt/Documents/AGBench` uses a native
+The TaskWraith reference checkout uses a native
 PreToolUse approval bridge and projects provider events into a common activity
 format. Some of that projection is display-only, after native execution.
 Provider Hub needs a different execution boundary: it captures before execution

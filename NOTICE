@@ -1,0 +1,74 @@
+Provider Hub
+Copyright 2026 Chris Izatt
+
+This product is licensed under the Apache License, Version 2.0; the full text is
+in [`LICENSE`](LICENSE).
+
+## Vendored third-party code
+
+### tomlkit 0.13.3 — MIT
+
+Vendored from its published PyPI wheel into `Source/vendor/tomlkit/` so that
+round-trip edits to a user's TOML configuration preserve formatting and
+comments.
+
+- Upstream: https://github.com/python-poetry/tomlkit
+- License: MIT — full text at `Source/vendor/tomlkit-LICENSE`
+- Wheel SHA-256: `c89c649d79ee40629a9fda55f8ace8c6a1b42deb912b2a8fd8d942ddadb606b0`
+
+`Source/codex_profile.py` inserts `Source/vendor` at the front of `sys.path`,
+so the vendored copy is always the one that loads.
+
+## Python dependencies
+
+| Package | Status | License | Purpose |
+| --- | --- | --- | --- |
+| `cryptography` 50.0.0 | required | Apache-2.0 OR BSD-3-Clause | Fernet sealing of stored reasoning envelopes (`Source/responses_bridge.py`) |
+| `tomlkit` 0.13.3 | vendored | MIT | Comment-preserving TOML edits (`Source/codex_profile.py`) |
+| `python-dotenv` | optional | BSD-3-Clause | Reading a Vibe-supplied `.env`; a built-in parser is used when absent |
+| `certifi` | optional | MPL-2.0 | CA bundle for outbound TLS; falls back to the system trust store |
+
+The two optional packages are imported inside `try`/`except ImportError`
+blocks and degrade gracefully. Provider Hub runs without them.
+
+`Source/requirements.txt` is the canonical runtime dependency list and is the
+file named in the error shown when `cryptography` is missing from a runtime.
+`pyproject.toml` mirrors it for development and CI.
+
+## Provider logos
+
+The images in `Source/provider-logos/` are third-party brand assets. Their
+exact provenance — which came from TaskWraith and which from Limit Counter —
+is recorded in `Source/provider-logos/README.md`. That file is the
+authoritative attribution and ships alongside the assets.
+
+Those images are **not** covered by the Apache-2.0 grant over the rest of this
+repository. Copyright in each logo remains with the respective provider, and
+they are reproduced here solely to identify which provider a route connects to.
+
+If you redistribute this project you are responsible for complying with each
+mark owner's brand guidelines, and for removing the assets if you cannot. Logo
+paths are keyed by provider slug in `Source/provider_branding.json`, so removal
+is a contained change.
+
+## Trademarks
+
+All provider names, model names, logos and product marks referenced in this
+repository — including Anthropic, Claude, OpenAI, Codex, ChatGPT, Google,
+Gemini, AntiGravity, xAI, Grok, DeepSeek, Moonshot, Kimi, Alibaba, Qwen,
+Xiaomi, MiMo, Meta, Muse, Mistral, Cerebras, OpenRouter, Ollama, NVIDIA,
+Cognition and Devin — are the trademarks or registered trademarks of their
+respective owners.
+
+**This project is not affiliated with, endorsed by, sponsored by, or approved
+by any of them.** Marks appear for identification and interoperability only,
+and their presence in source code or documentation implies no relationship.
+
+Model identifiers in the provider catalogues describe endpoints the author has
+access to. Their inclusion is descriptive and confers no rights.
+
+## AI-assisted authorship
+
+Parts of this codebase were written with AI coding assistants and are recorded
+as `Co-Authored-By` trailers in the commit history. Under Apache-2.0 §5 those
+are contributions offered by the copyright holder under the same terms.

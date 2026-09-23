@@ -171,7 +171,10 @@ _NO_MODEL_LIST_WARNING = (
 
 def _resolve_binary() -> str | None:
     """Resolve the grok binary from PATH and known extra directories."""
-    return resolve_binary(BINARY_NAMES, extra_dirs=_EXTRA_BIN_DIRS)
+    # _EXTRA_BIN_DIRS holds "~/.grok/bin" and "~/.local/bin"; resolve_binary
+    # compares real paths, so an unexpanded "~" entry can never match.
+    extra = tuple(str(Path(item).expanduser()) for item in _EXTRA_BIN_DIRS)
+    return resolve_binary(BINARY_NAMES, extra_dirs=extra)
 
 
 def _invoke(capture, argv, *, timeout=30) -> tuple[int | None, str, str]:
