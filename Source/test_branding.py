@@ -69,14 +69,14 @@ class BrandingTests(unittest.TestCase):
                 )
 
     def test_openrouter_stealth_preview_wears_its_own_gold(self):
-        """`stealth/union-alpha` is an anonymous provider's free preview, so
+        """An OpenRouter `stealth/` preview belongs to an anonymous provider, so
         it has no brand to borrow. It gets an arbitrary accent, the gold
         TaskWraith minted for the same namespace: the most saturated gold
         this palette's luminance can hold, clear of Claude's amber and
         Cursor's yellow. The route and the bill remain OpenRouter's.
         """
         presentation = resolve_presentation(
-            "openrouter", "stealth/union-alpha", supplied_label="Union Alpha",
+            "openrouter", "stealth/synthetic-preview", supplied_label="Synthetic Preview",
             catalogue=self.catalogue)
         self.assertEqual(presentation, {
             "runtimeProvider": "openrouter",
@@ -84,8 +84,8 @@ class BrandingTests(unittest.TestCase):
             "hueKey": "stealth",
             "accent": "#9E6C00",
             "shortCode": "STL",
-            "model": "stealth/union-alpha",
-            "modelLabel": "Union Alpha",
+            "model": "stealth/synthetic-preview",
+            "modelLabel": "Synthetic Preview",
         })
         # No sourced mark for an anonymous provider, and no borrowed one.
         self.assertNotIn("logo", presentation)

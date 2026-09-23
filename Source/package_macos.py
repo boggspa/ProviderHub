@@ -59,7 +59,11 @@ def archive(app, output):
     output.parent.mkdir(parents=True, exist_ok=True)
     if output.exists():
         output.unlink()
-    run(["ditto", "-c", "-k", "--sequesterRsrc", "--keepParent", str(app), str(output)])
+    # --sequesterRsrc is what emits the __MACOSX/ AppleDouble tree. It roughly
+    # doubled the archive's entry count with resource forks and extended
+    # attributes no user needs, and it is not what protects the signature:
+    # that lives inside the bundle's own _CodeSignature.
+    run(["ditto", "-c", "-k", "--norsrc", "--noextattr", "--keepParent", str(app), str(output)])
 
 
 def main():

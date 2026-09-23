@@ -15,8 +15,8 @@ MODELS_URL = BASE_URL + "/v1/models"
 DOCS = "https://openrouter.ai/docs/guides/routing/provider-selection"
 # OpenRouter identifies calling apps via HTTP-Referer and X-Title. Free-tier
 # models gated to "agentic harnesses" 403 without them.
-APP_TITLE = "Mistral Bridge"
-APP_URL = "https://github.com/chrisizatt/mistral-bridge"
+APP_TITLE = "Provider Hub"
+APP_URL = "https://github.com/boggspa/ProviderHub"
 DESCRIPTOR = {
     "id": "openrouter", "name": "OpenRouter", "protocol": "anthropic",
     "default_base_url": BASE_URL, "default_region": "global", "regions": {"global": BASE_URL},
@@ -42,11 +42,6 @@ CURATED = {
     "nex-agi/nex-n2.5-mini:free": "Nex N2.5 Mini · Free",
     "nex-agi/nex-n2.5-pro:free": "Nex N2.5 Pro · Free",
     "sakana/fugu-max": "Fugu Max", "sakana/fugu-ultra-v2": "Fugu Ultra v2",
-    # Added 2026-09-16, alongside TaskWraith's own Pi registration rather than
-    # from the 09-13 snapshot. An anonymous third party's free stealth preview,
-    # announced for seven days: nothing here pins it, so once OpenRouter stops
-    # listing it discovery reports it as absent and the route disappears.
-    "stealth/union-alpha": "Union Alpha",
 }
 EFFORT_ORDER = ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
 TAG = re.compile(r"[a-z0-9][a-z0-9._/-]{0,159}\Z", re.I)

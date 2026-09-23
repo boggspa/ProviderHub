@@ -39,6 +39,14 @@ if [ -n "${PROVIDER_HUB_PYTHON_RUNTIME:-}" ]; then
   rm -rf "$APP_DIR/Contents/Resources/python"
   ditto "$PROVIDER_HUB_PYTHON_RUNTIME" "$APP_DIR/Contents/Resources/python"
 fi
+# A bundled CPython arrives with its own bytecode caches, and any copied tree
+# can carry .DS_Store droppings. Neither belongs in a signed, notarized
+# distribution, so prune the whole bundle rather than only the worker.
+find "$APP_DIR" -type d -name __pycache__ -prune -exec rm -rf {} +
+find "$APP_DIR" -type f -name .DS_Store -delete
+# Apache-2.0 4(a) and 4(d): the licence text and its notices travel with the
+# distribution, not only with the source repository.
+cp "$PACKAGE_DIR/LICENSE" "$PACKAGE_DIR/NOTICE" "$APP_DIR/Contents/Resources/"
 cat > "$APP_DIR/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

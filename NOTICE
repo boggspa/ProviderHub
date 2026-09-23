@@ -51,6 +51,34 @@ mark owner's brand guidelines, and for removing the assets if you cannot. Logo
 paths are keyed by provider slug in `Source/provider_branding.json`, so removal
 is a contained change.
 
+### Per-mark rights notes
+
+TaskWraith records a rights note for each asset it publishes, in
+`design-assets/provider-logos/provider-logos.manifest.json`. The marks this
+project ships, and the conditions that came with them:
+
+| Mark | Owner | Condition |
+| --- | --- | --- |
+| Gemini | Google LLC | Official Google Image Library asset; publication use offered **with credit "Source: Google"**. |
+| AntiGravity | Google LLC | Icon from the official Google Antigravity press page; preserve unmodified. |
+| Codex | OpenAI | Product PNG from OpenAI's developer domain; not part of a public logo pack, and **source availability does not grant redistribution**. |
+| Claude | Anthropic PBC | Official media-resource asset; no separate public logo licence found. Retain unmodified, nominative reference only. |
+| Kimi | Moonshot AI | First-party guide states all rights reserved. Unmodified, nominative use only; clearance contact `team@moonshot.ai`. |
+| Grok | X.AI LLC | Accurate reference permitted subject to brand terms; logos must remain exactly as provided. **Permission is conditional and revocable.** |
+| Ollama | Ollama | Sourced from an MIT-licensed repository, but Ollama's terms separately reserve branding rights. Factual identification only. |
+| Mistral | Mistral AI | First-party brand page welcomes responsible use; prohibits modification or framing. |
+| Muse / Meta | Meta Platforms, Inc. | Locally supplied asset preserved byte-for-byte for identification. |
+| Devin | Cognition AI, Inc. | Cognition's brand download links returned 404, so this is the favicon its own documentation site serves. |
+| Cerebras | Cerebras Systems, Inc. | Official press-kit PNGs; **Cerebras' terms and any required owner permission govern external or public reuse.** |
+| DeepSeek | Hangzhou DeepSeek AI Co., Ltd. | Official repository publishes the source SVG; the PNG is a derivative recorded upstream as **design reference only**. DeepSeek's User Agreement restricts independent logo use — **do not redistribute without owner permission.** |
+| Qwen, OpenRouter | Alibaba, OpenRouter | Sourced via Limit Counter; **no upstream rights note exists for these two.** Clearance status unverified. |
+
+Two of these are unresolved for public redistribution and are flagged rather
+than papered over: **DeepSeek**, whose upstream note expressly warns against
+publishing the PNG derivative, and **Qwen / OpenRouter**, which have no recorded
+rights note at all. Shipping them is a deliberate decision by the copyright
+holder, not an oversight.
+
 ## Trademarks
 
 All provider names, model names, logos and product marks referenced in this

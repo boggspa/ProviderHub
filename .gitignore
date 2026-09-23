@@ -11,6 +11,12 @@ __pycache__/
 *.pyc
 work/
 
+# Credentials. python-dotenv is an optional dependency and bridge_core.py will
+# read a .env when one is present, so make sure one can never be staged.
+.env
+.env.*
+!.env.example
+
 # Concurrent-work markers and sidecar state (AGENTS.md)
 .WORK-IN-PROGRESS-*.md
 SHIP-HOLD-*.md

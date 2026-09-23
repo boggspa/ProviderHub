@@ -126,9 +126,17 @@ Sources:
 - https://ai.google.dev/gemini-api/docs/partner-integration
 - TaskWraith `src/main/GeminiApiProvider.ts` and `GeminiApiProvider.test.ts`.
 
-## Union Alpha — OpenRouter stealth preview
+## Union Alpha — OpenRouter stealth preview (withdrawn)
 
-`stealth/union-alpha` joins the curated OpenRouter roster as a fifteenth ID. It
+> **Withdrawn.** OpenRouter no longer serves `stealth/union-alpha`, and it was
+> removed from the curated roster on 23 September 2026. What follows is the
+> record of its addition, kept for provenance. The `stealth/` prefix branding
+> rule in `Source/provider_branding.json` is generic and stays, so a future
+> OpenRouter stealth preview is still presented correctly once it is curated.
+> The routing and withdrawal behaviour remain covered by tests that inject a
+> synthetic `stealth/` identifier.
+
+`stealth/union-alpha` joined the curated OpenRouter roster as a fifteenth ID. It
 is a free, anonymously operated stealth preview: OpenRouter routes to a single
 provider it does not own, and the model page carries the Stealth Model Terms
 notice that prompts and completions may be retained by that provider though

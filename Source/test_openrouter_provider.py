@@ -3,6 +3,7 @@ import copy
 import json
 from pathlib import Path
 import unittest
+from unittest.mock import patch
 
 from bridge_core import SLOTS
 from codex_catalogue import project_codex, catalogue_digest
@@ -214,54 +215,64 @@ class OpenRouterProviderTests(unittest.TestCase):
         self.assertEqual([tool["name"] for tool in plan["body"]["tools"]], ["read"])
         self.assertTrue(plan["url"].endswith("/v1/responses"))
 
-    def test_stealth_union_alpha_is_curated_by_id_and_carries_the_stealth_gold(self):
-        identifier = "stealth/union-alpha"
-        self.assertEqual(CURATED[identifier], "Union Alpha")
-        model = card(identifier)
-        rows = _entries(model, {"data": {"id": identifier, "endpoints": [
-            {**endpoint("stealth", 262144, 131072), "model_id": identifier}]}})
-        self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0]["upstream_model_id"], identifier)
-        self.assertEqual((rows[0]["context"], rows[0]["max_output"]), (262144, 131072))
-        settings = defaults(SLOTS, "unused")
-        projected = project_catalogue("openrouter", {"models": rows, "source": "provider_api"}, settings)[0]
-        self.assertEqual(projected["id"], "openrouter/" + identifier)
-        self.assertEqual(projected["display_name"], "Union Alpha")
-        # An anonymous upstream brand is presentation only: the connection,
-        # the key and the bill stay OpenRouter's.
-        self.assertEqual(projected["presentation"]["runtimeProvider"], "openrouter")
-        self.assertEqual(projected["presentation"]["displayProvider"], "Stealth")
-        self.assertEqual(projected["presentation"]["accent"], "#9E6C00")
-        body = {"input": "hello", "tools": [{"name": "read"}]}
-        finalize(body, rows[0], "key", responses=True)
-        self.assertEqual(body["model"], identifier)
-        self.assertEqual(body["provider"]["only"], ["stealth"])
+    def test_a_stealth_prefixed_model_carries_the_stealth_gold(self):
+        """An OpenRouter stealth preview belongs to an anonymous upstream, so
+        there is no brand to borrow and it wears the namespace's own gold.
 
+        Curation is an allowlist, so the id is injected for the duration of the
+        test: that keeps the routing and presentation behaviour covered without
+        pinning a real preview OpenRouter has since withdrawn.
+        """
+        identifier = "stealth/synthetic-preview"
+        with patch.dict(CURATED, {identifier: "Synthetic Preview"}):
+            model = card(identifier)
+            rows = _entries(model, {"data": {"id": identifier, "endpoints": [
+                {**endpoint("stealth", 262144, 131072), "model_id": identifier}]}})
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["upstream_model_id"], identifier)
+            self.assertEqual((rows[0]["context"], rows[0]["max_output"]), (262144, 131072))
+            settings = defaults(SLOTS, "unused")
+            projected = project_catalogue("openrouter", {"models": rows, "source": "provider_api"}, settings)[0]
+            self.assertEqual(projected["id"], "openrouter/" + identifier)
+            self.assertEqual(projected["display_name"], "Synthetic Preview")
+            # An anonymous upstream brand is presentation only: the connection,
+            # the key and the bill stay OpenRouter's.
+            self.assertEqual(projected["presentation"]["runtimeProvider"], "openrouter")
+            self.assertEqual(projected["presentation"]["displayProvider"], "Stealth")
+            self.assertEqual(projected["presentation"]["accent"], "#9E6C00")
+            body = {"input": "hello", "tools": [{"name": "read"}]}
+            finalize(body, rows[0], "key", responses=True)
+            self.assertEqual(body["model"], identifier)
+            self.assertEqual(body["provider"]["only"], ["stealth"])
+
+    @patch.dict(CURATED, {"stealth/synthetic-preview": "Synthetic Preview"})
     def test_a_model_with_no_reasoning_axis_takes_reasoning_off_instead_of_refusing_it(self):
         """A model that never reasons is already switched off, so a client
         asking it not to think is satisfied, not refused. The shared provider
         layer admits `none` and a disabled thinking block for exactly these
-        models; refusing them here made Union Alpha unusable from Claude
+        models; refusing them here made an OpenRouter stealth preview unusable from Claude
         Desktop, which sends a disabled block whenever thinking is off."""
-        # Union Alpha's live card: no reasoning, reasoning_effort or include_reasoning.
+        # A stealth preview's live card: no reasoning, reasoning_effort or
+        # include_reasoning. The id is injected into CURATED above because
+        # curation is an allowlist; nothing here pins a real withdrawn preview.
         parameters = ["max_tokens", "response_format", "temperature", "tool_choice", "tools", "top_p"]
-        model = {"id": "stealth/union-alpha", "context_length": 262144, "reasoning": None,
+        model = {"id": "stealth/synthetic-preview", "context_length": 262144, "reasoning": None,
                  "architecture": {"input_modalities": ["text", "image"], "output_modalities": ["text"]},
                  "supported_parameters": parameters}
-        row = _entries(model, {"data": {"id": "stealth/union-alpha", "endpoints": [
-            {"tag": "stealth", "model_id": "stealth/union-alpha", "context_length": 262144,
+        row = _entries(model, {"data": {"id": "stealth/synthetic-preview", "endpoints": [
+            {"tag": "stealth", "model_id": "stealth/synthetic-preview", "context_length": 262144,
              "max_completion_tokens": 131072, "status": 0, "supported_parameters": parameters}]}})[0]
         self.assertEqual((row["reasoning"], row["effort_modes"], row["effort_control"]), (False, [], "none"))
         self.assertFalse(reasoning_axis(row))
 
         body = {"model": "m", "messages": [{"role": "user", "content": "hi"}], "thinking": {"type": "disabled"}}
-        self.assertEqual(normalize_messages(body, "stealth/union-alpha", row),
+        self.assertEqual(normalize_messages(body, "stealth/synthetic-preview", row),
                          {"reasoning_control": "dropped_model_has_no_reasoning"})
         # The control is removed, not just ignored: left in place it would make
         # the endpoint selector demand a reasoning-capable host.
         self.assertEqual(body, {"model": "m", "messages": [{"role": "user", "content": "hi"}]})
         keeps = {"model": "m", "messages": [], "output_config": {"effort": "none", "verbosity": "low"}}
-        normalize_messages(keeps, "stealth/union-alpha", row)
+        normalize_messages(keeps, "stealth/synthetic-preview", row)
         self.assertEqual(keeps["output_config"], {"verbosity": "low"})
 
         responses = {"input": "hi", "store": False, "tools": [{"name": "read"}], "reasoning": {"enabled": False}}
@@ -272,7 +283,7 @@ class OpenRouterProviderTests(unittest.TestCase):
         # Asking such a model to think is a real mismatch and still refused.
         for asked in ({"output_config": {"effort": "high"}}, {"thinking": {"type": "enabled"}}):
             with self.subTest(asked=asked), self.assertRaises(OpenRouterError):
-                normalize_messages({"model": "m", "messages": [], **asked}, "stealth/union-alpha", row)
+                normalize_messages({"model": "m", "messages": [], **asked}, "stealth/synthetic-preview", row)
         with self.assertRaises(OpenRouterError):
             finalize({"input": "hi", "store": False, "reasoning": {"enabled": True}}, row, "key", responses=True)
         with self.assertRaises(OpenRouterError):
@@ -284,13 +295,19 @@ class OpenRouterProviderTests(unittest.TestCase):
         with self.assertRaises(OpenRouterError):
             normalize_messages({"model": "m", "messages": [], "thinking": {"type": "disabled"}}, "m", mandatory)
 
-    def test_a_withdrawn_stealth_preview_leaves_no_route_behind(self):
-        """The seven-day window is OpenRouter's to close, not ours to encode:
+    def test_a_withdrawn_preview_leaves_no_route_behind(self):
+        """A preview window is OpenRouter's to close, not ours to encode:
         membership comes from the live list, so a withdrawal removes the
-        choice and says so instead of leaving a dead route selectable."""
-        inventory = catalogue(cards=[card()])
-        self.assertNotIn("stealth/union-alpha", {row["upstream_model_id"] for row in inventory["models"]})
-        self.assertTrue(any("stealth/union-alpha" in warning for warning in inventory["warnings"]))
+        choice and says so instead of leaving a dead route selectable.
+
+        The id is synthetic for the same reason as above — the mechanism is
+        what is under test, not any particular preview.
+        """
+        identifier = "stealth/synthetic-preview"
+        with patch.dict(CURATED, {identifier: "Synthetic Preview"}):
+            inventory = catalogue(cards=[card()])
+        self.assertNotIn(identifier, {row["upstream_model_id"] for row in inventory["models"]})
+        self.assertTrue(any(identifier in warning for warning in inventory["warnings"]))
 
     def test_thinking_display_survives_and_speed_variants_are_ignored(self):
         row = catalogue(endpoints=[endpoint("host", 262144), endpoint("host/fast-us", 1048576)])["models"][0]
