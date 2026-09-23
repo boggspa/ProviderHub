@@ -42,6 +42,11 @@ CURATED = {
     "nex-agi/nex-n2.5-mini:free": "Nex N2.5 Mini · Free",
     "nex-agi/nex-n2.5-pro:free": "Nex N2.5 Pro · Free",
     "sakana/fugu-max": "Fugu Max", "sakana/fugu-ultra-v2": "Fugu Ultra v2",
+    # Added 2026-09-23, the day OpenRouter published it, rather than from the
+    # 09-13 snapshot. An anonymous third party's free stealth preview with no
+    # announced end date: nothing here pins it, so once OpenRouter stops
+    # listing it discovery reports it as absent and the route disappears.
+    "stealth/space-bunny-alpha": "Space Bunny Alpha",
 }
 EFFORT_ORDER = ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
 TAG = re.compile(r"[a-z0-9][a-z0-9._/-]{0,159}\Z", re.I)

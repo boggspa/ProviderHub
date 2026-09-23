@@ -309,6 +309,52 @@ class OpenRouterProviderTests(unittest.TestCase):
         self.assertNotIn(identifier, {row["upstream_model_id"] for row in inventory["models"]})
         self.assertTrue(any(identifier in warning for warning in inventory["warnings"]))
 
+    def test_space_bunny_alpha_is_curated_by_id_with_a_ladder_that_cannot_be_switched_off(self):
+        """`stealth/space-bunny-alpha` as OpenRouter published it on 23 September
+        2026, trimmed to the fields discovery reads: one `stealth` endpoint, a
+        1M context, and mandatory reasoning from low to max with max as the
+        default - the Fugu shape, not the empty ladder the synthetic preview
+        above carries.
+
+        This pins a real preview on purpose. When OpenRouter withdraws it, the
+        test goes with the CURATED entry; the generic stealth behaviour stays
+        covered by the synthetic tests above.
+        """
+        identifier = "stealth/space-bunny-alpha"
+        self.assertEqual(CURATED[identifier], "Space Bunny Alpha")
+        parameters = ["include_reasoning", "max_tokens", "reasoning", "reasoning_effort", "response_format",
+                      "temperature", "tool_choice", "tools", "top_p"]
+        model = {"id": identifier, "context_length": 1000000, "supported_parameters": parameters,
+                 "architecture": {"input_modalities": ["text", "image", "video"], "output_modalities": ["text"]},
+                 "reasoning": {"mandatory": True, "supported_efforts": ["max", "xhigh", "high", "medium", "low"],
+                               "default_effort": "max"}}
+        rows = _entries(model, {"data": {"id": identifier, "endpoints": [
+            {"tag": "stealth", "model_id": identifier, "context_length": 1000000, "max_completion_tokens": 524288,
+             "status": 0, "supported_parameters": parameters,
+             "supports_tool_choice": {"none": False, "auto": True, "required": False, "function": False}}]}})
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertEqual((row["upstream_model_id"], row["context"], row["max_output"]), (identifier, 1000000, 524288))
+        self.assertTrue(row["vision"])
+        self.assertEqual(row["effort_modes"], ["low", "medium", "high", "xhigh", "max"])
+        self.assertEqual((row["default_effort"], row["reasoning_mandatory"]), ("max", True))
+        settings = defaults(SLOTS, "unused")
+        projected = project_catalogue("openrouter", {"models": rows, "source": "provider_api"}, settings)
+        self.assertEqual(projected[0]["presentation"]["displayProvider"], "Stealth")
+        self.assertEqual(projected[0]["presentation"]["runtimeProvider"], "openrouter")
+        codex = project_codex(settings, {"models": projected})["models"][0]
+        self.assertEqual((codex["slug"], codex["default_reasoning_level"]), ("openrouter/" + identifier, "max"))
+        # Ultra aliases the top rung, and the route stays pinned to the one host.
+        body = {"input": "hello", "store": False, "tools": [{"name": "read"}], "reasoning": {"effort": "ultra"}}
+        finalize(body, row, "key", responses=True)
+        self.assertEqual((body["model"], body["reasoning"]), (identifier, {"effort": "max"}))
+        self.assertEqual(body["provider"]["only"], ["stealth"])
+        # There is no off stop to reach, so asking for one is refused rather
+        # than quietly left to the model's max default.
+        for off in ({"thinking": {"type": "disabled"}}, {"output_config": {"effort": "none"}}):
+            with self.subTest(off=off), self.assertRaises(OpenRouterError):
+                normalize_messages({"model": "m", "messages": [], **off}, identifier, row)
+
     def test_thinking_display_survives_and_speed_variants_are_ignored(self):
         row = catalogue(endpoints=[endpoint("host", 262144), endpoint("host/fast-us", 1048576)])["models"][0]
         self.assertEqual(row["routing_ignore"], ["host/fast-us"])
