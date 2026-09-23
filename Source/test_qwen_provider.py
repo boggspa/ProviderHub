@@ -121,8 +121,17 @@ class QwenProviderTests(unittest.TestCase):
         self.assertEqual(blocks[1], IMAGE)
         self.assertEqual(blocks[3], IMAGE)
         self.assertEqual(blocks[4]["text"], "Compare them.")
+        text_only = prepare_request("qwen-token-plan", {}, "key", source,
+                                    "qwen3.7-max", spec("qwen3.7-max"))
+        text_only_blocks = text_only["body"]["messages"][-1]["content"]
+        self.assertEqual([block["type"] for block in text_only_blocks],
+                         ["tool_result", "tool_result", "text"])
+        self.assertTrue(all("omitted" in block["content"] for block in text_only_blocks[:2]))
+        self.assertEqual([block["tool_use_id"] for block in text_only_blocks[:2]], ["shot_a", "shot_b"])
         with self.assertRaisesRegex(ProviderError, "does not advertise image input"):
-            prepare_request("qwen-token-plan", {}, "key", source, "qwen3.7-max", spec("qwen3.7-max"))
+            prepare_request("qwen-token-plan", {}, "key",
+                            payload(messages=[{"role": "user", "content": [copy.deepcopy(IMAGE)]}]),
+                            "qwen3.7-max", spec("qwen3.7-max"))
 
 
 class QwenGatewayTests(unittest.TestCase):
@@ -162,8 +171,9 @@ class QwenGatewayTests(unittest.TestCase):
                 with self.subTest(stream=stream):
                     responses_fixtures.ResponsesBridgeTests().exercise("qwen-token-plan", stream)
 
-    def test_codex_image_tool_result_can_continue_on_later_turns(self):
-        route = self.start_gateway("qwen-token-plan", "qwen3.8-max", spec())
+    def exercise_codex_image_tool_result(self, model_id):
+        model = spec(model_id)
+        route = self.start_gateway("qwen-token-plan", model_id, model)
 
         def request(body):
             client = http.client.HTTPConnection("127.0.0.1", self.gateway.server_port, timeout=8)
@@ -189,16 +199,26 @@ class QwenGatewayTests(unittest.TestCase):
         self.assertEqual(status, 200, raw)
         second = json.loads(raw)
         sent = fixtures.MockProvider.requests[1]["messages"][2]["content"]
-        self.assertEqual([block["type"] for block in sent], ["tool_result", "image"])
+        self.assertEqual([block["type"] for block in sent],
+                         ["tool_result", "image"] if model["vision"] else ["tool_result"])
         self.assertEqual(sent[0]["tool_use_id"], call["call_id"])
         self.assertTrue(sent[0]["content"].startswith("Current screen\n"))
-        self.assertEqual(sent[1], IMAGE)
+        if model["vision"]:
+            self.assertEqual(sent[1], IMAGE)
+        else:
+            self.assertIn("omitted because this Qwen model does not advertise image input", sent[0]["content"])
         body["input"] += second["output"] + [{"role": "user", "content": "What next?"}]
         status, raw = request(body)
         self.assertEqual(status, 200, raw)
         self.assertEqual(json.loads(raw)["status"], "completed")
         self.assertEqual(fixtures.MockProvider.requests[2]["messages"][2]["content"], sent)
         self.assertEqual(self.runtime.status()["completed"], 3)
+
+    def test_codex_image_tool_result_can_continue_on_later_turns(self):
+        self.exercise_codex_image_tool_result("qwen3.8-max")
+
+    def test_text_only_codex_route_can_continue_after_image_tool_result(self):
+        self.exercise_codex_image_tool_result("qwen3.7-max")
 
 
 if __name__ == "__main__":

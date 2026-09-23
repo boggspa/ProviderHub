@@ -17,8 +17,11 @@ Qwen 3.8 Flash is newer than that snapshot, so its exact limits remain unknown.
 Qwen 3.8 exposes None/Low/Medium/Extra High to Codex. Claude High/Max normalize
 to the documented Extra High setting. Earlier models use a thinking switch.
 Fast and alternate processing tiers are explicitly rejected. Text tool-result
-arrays are normalized to the string format documented by Alibaba; image inputs
-are supported as user-message images on the appropriate models.
+arrays are normalized to the string format documented by Alibaba. Images in a
+tool result move immediately after that result as user-message image blocks on
+vision models. A text-only model keeps the result and receives an explicit note
+that the image was omitted, so saved Codex tool history can continue. Direct
+user images still require a vision model.
 
 Seven new tests cover isolated credentials/endpoints, previous settings,
 catalogue provenance and context, effort mapping/conflicts, Claude JSON/SSE tool

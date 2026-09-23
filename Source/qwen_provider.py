@@ -153,8 +153,14 @@ def normalize_controls(body, model_id, spec):
                     else:
                         raise QwenError("Qwen tool results require text; only image blocks can be moved to the user message.")
                 if images:
-                    text.append(f"[Provider Hub: {len(images)} image{'s' if len(images) != 1 else ''} "
-                                "from this tool result follow immediately below.]")
+                    count = f"{len(images)} image{'s' if len(images) != 1 else ''}"
+                    if spec.get("vision") is False:
+                        text.append(f"[Provider Hub: {count} from this tool result omitted because this "
+                                    "Qwen model does not advertise image input.]")
+                        images = []
+                    else:
+                        verb = "follows" if len(images) == 1 else "follow"
+                        text.append(f"[Provider Hub: {count} from this tool result {verb} immediately below.]")
                 block["content"] = "\n".join(text)
             expanded.append(block)
             # Alibaba requires tool_result.content to be a string. Image blocks

@@ -651,9 +651,17 @@ def prepare_native(runtime, payload):
             # input_image there, so both fields have to be checked or the
             # provider rejects the turn instead of this gateway.
             if image_input_blocked(provider_id, spec):
-                for parts in (item.get("content"), item.get("output")):
+                for field in ("content", "output"):
+                    parts = item.get(field)
                     if isinstance(parts, list) and any(
                             isinstance(part, dict) and part.get("type") == "input_image" for part in parts):
+                        # Qwen's Messages adapter keeps the paired tool result
+                        # and replaces unsupported screenshot pixels with a
+                        # clear note. A tool image in saved history must not
+                        # prevent every later turn on a text-only model.
+                        if (provider_id == "qwen-token-plan" and field == "output"
+                                and item.get("type") == "function_call_output"):
+                            continue
                         raise BridgeError("The selected model does not advertise image input.")
     input_names(body["input"], tool_map)
     choice = body.get("tool_choice")
