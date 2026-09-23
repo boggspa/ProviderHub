@@ -732,6 +732,13 @@ class Handler(BaseHTTPRequestHandler):
                 for name in ("anthropic-version", "anthropic-beta"):
                     value = self.headers.get(name)
                     if value and len(value) <= 4096 and "\r" not in value and "\n" not in value:
+                        if name == "anthropic-beta" and plan["headers"].get(name):
+                            # Anthropic Fast needs its beta token even when
+                            # Desktop also sends unrelated feature tokens.
+                            value = ",".join(dict.fromkeys(
+                                token.strip() for token in
+                                (plan["headers"][name] + "," + value).split(",")
+                                if token.strip()))
                         plan["headers"][name] = value
         except (ValueError, TypeError, KeyError, AttributeError, BridgeError) as exc:
             # Planning rejections (unknown route, context over window,

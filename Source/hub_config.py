@@ -14,6 +14,7 @@ from providers import PROVIDERS, provider_defaults, validate_connection
 from branding import resolve_presentation, validate_overrides
 from ollama_lifecycle import DEFAULT_LEASE_SECONDS, KEEP_RESIDENT, MAX_LEASE_SECONDS
 from effort_map import mistral_ladder_for_model
+from fast_models import fixed_speed_tier, supports_fast_toggle
 from model_names import (CLAUDE_CLI_ALIASES, CLAUDE_MODEL_LABELS, PINNED_LABELS,
                          claude_model_label, friendly_model_name)
 
@@ -787,6 +788,16 @@ def project_catalogue(provider_id: str, inventory: dict, settings: dict, observa
                   if preferred in identifiers), group["entries"][0]),
         )
         item = copy.deepcopy(source)
+        # Upgrade older saved provider inventories as well as fresh discovery:
+        # picker metadata must follow the currently documented exact ID.
+        if provider_id in {"codex", "claude"}:
+            cli_without_speed_control = (provider_id == "claude" and
+                                         settings["providers"][provider_id]["credential_mode"] == "cli")
+            item["fast_mode"] = (not cli_without_speed_control and
+                                 supports_fast_toggle(provider_id, preferred))
+        fixed_tier = fixed_speed_tier(provider_id, preferred)
+        if fixed_tier is not None:
+            item["speed_tier"] = fixed_tier
         if provider_id == "mistral":
             # The cached discovery snapshot is trusted verbatim downstream
             # (Hub UI, Codex projection, gateway request specs), so snapshot

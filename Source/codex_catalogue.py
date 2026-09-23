@@ -6,6 +6,7 @@ import json
 
 from hub_config import MODEL_VARIANT_FIELDS, SUBAGENT_POOL_SIZE, connection_signature, split_route
 from catalogue import fits_desktop_baseline, image_input_blocked
+from fast_models import supports_fast_toggle
 from providers import PROVIDERS
 
 
@@ -162,6 +163,9 @@ def _service_tiers(provider_id, entry):
     # or name maps to fast/priority. Advertise it only for a documented
     # same-model Fast tier; never as extra catalogue rows.
     if provider_id == "ollama" or entry.get("fast_mode") is not True:
+        return []
+    if provider_id in {"codex", "claude"} and not supports_fast_toggle(
+            provider_id, entry.get("model_id") or entry["id"].split("/", 1)[-1]):
         return []
     if provider_id == "grok":
         return [{"id": "priority", "name": "Fast · xAI Priority",

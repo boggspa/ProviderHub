@@ -34,6 +34,7 @@ from provider_registry import (
 )
 from devin_agent import catalogue as devin_catalogue
 from effort_map import mistral_effort_modes, ollama_effort_modes
+from fast_models import supports_fast_toggle
 from gemini_provider import GeminiError, discover as gemini_discover
 from openrouter_provider import OpenRouterError, discover as openrouter_discover
 from qwen_provider import catalogue as qwen_catalogue
@@ -705,6 +706,7 @@ def _models_from_api(provider_id: str, raw: dict, evidence: str, *, enriched=Non
                               "verified_documentation" if context else "unknown"),
                 context_evidence=context_evidence,
                 display_name=card.get("display_name") if isinstance(card.get("display_name"), str) else identifier,
+                fast_mode=supports_fast_toggle(provider_id, identifier),
                 source="provider_api",
                 evidence=evidence,
             ))
@@ -715,6 +717,7 @@ def _models_from_api(provider_id: str, raw: dict, evidence: str, *, enriched=Non
                 continue
             models.append(_catalogue_entry(
                 identifier,
+                fast_mode=supports_fast_toggle(provider_id, identifier),
                 source="provider_api",
                 evidence=evidence,
             ))
@@ -726,7 +729,7 @@ def _models_from_api(provider_id: str, raw: dict, evidence: str, *, enriched=Non
 # OpenAI's /v1/models mixes chat ids with audio, image, realtime, embedding
 # and legacy-completion families. Chat routes accept only these shapes.
 _CODEX_CHAT_MODEL = re.compile(
- r"(?!(?:.*(?:realtime|audio|image|tts|whisper|embedding|moderation|transcribe|instruct)))(?:gpt-(?:3\.5|4|5)|o[1-9]|chatgpt-)[A-Za-z0-9.:-]*\Z")
+ r"(?!(?:.*(?:realtime|audio|image|tts|whisper|embedding|moderation|transcribe|instruct)))(?:gpt-(?:3\.5|4|5|6)|o[1-9]|chatgpt-)[A-Za-z0-9.:-]*\Z")
 
 
 def discover(provider_id: str, connection: dict | None, api_key: str | None, *, transport=None) -> dict:
