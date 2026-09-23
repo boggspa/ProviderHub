@@ -1192,7 +1192,7 @@ class Handler(BaseHTTPRequestHandler):
             kind = event.get("type")
             if kind == "content_block_start":
                 current = dict(event["content_block"])
-                if current.get("type") == "tool_use":
+                if current.get("type") in {"tool_use", "server_tool_use"}:
                     current["_partial"] = ""
             elif kind == "content_block_delta" and current is not None:
                 delta = event.get("delta", {})
@@ -1203,7 +1203,7 @@ class Handler(BaseHTTPRequestHandler):
                 elif delta.get("type") == "input_json_delta":
                     current["_partial"] = current.get("_partial", "") + delta.get("partial_json", "")
             elif kind == "content_block_stop" and current is not None:
-                if current.get("type") == "tool_use":
+                if current.get("type") in {"tool_use", "server_tool_use"}:
                     try:
                         current["input"] = json.loads(current.get("_partial") or "{}")
                     except ValueError:
@@ -1212,7 +1212,7 @@ class Handler(BaseHTTPRequestHandler):
                 content.append(current)
                 current = None
         if current is not None:
-            if current.get("type") == "tool_use":
+            if current.get("type") in {"tool_use", "server_tool_use"}:
                 try:
                     current["input"] = json.loads(current.get("_partial") or "{}")
                 except ValueError:

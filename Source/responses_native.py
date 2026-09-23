@@ -604,9 +604,12 @@ def prepare_native(runtime, payload):
     # The hosted search tool is OpenAI's, and nothing here serves OpenAI, so it
     # is lifted out before flattening and answered by the provider's own search
     # if the provider has one. Only a route whose catalogue entry carries
-    # web_search has that translation written for it; the rest say so plainly,
-    # because a model told it can search and then handed no search answers from
-    # memory and presents it as fresh.
+    # web_search has that translation written for it. Everywhere else the tool
+    # is dropped rather than refused: Codex offers it on every route once any
+    # route can search (codex_profile), so a refusal would fail every turn on
+    # the rest. The model learns of search only from the tools array, so a
+    # route without it is never told it can search and then left to answer
+    # from memory as though it had.
     tools, search = split_hosted_search(tools)
     # Codex marks a goal's token budget optional and asks the model to omit
     # it. Taking the property away is the same instruction stated where a
@@ -619,9 +622,7 @@ def prepare_native(runtime, payload):
     if tools and spec.get("tools") is False:
         raise BridgeError("The selected model does not support tool calls.")
     if search is not None and not spec.get("web_search"):
-        raise BridgeError("This route's provider does not run web search of its own, so the hosted web_search tool "
-                          "cannot be honoured. Turn Codex web search off for this route, or choose a route on a "
-                          "provider that searches.")
+        search = None
     # Ultra means orchestrate, and this is the last point at which the request
     # still says so: the provider branches below rewrite reasoning.effort to a
     # rank the route can serve. Both exits read `instructions` after this line
@@ -632,6 +633,12 @@ def prepare_native(runtime, payload):
         body["instructions"] = with_ultra_note(body.get("instructions"), note)
     if isinstance(body["input"], list):
         body["input"] = _normalize_multi_agent_items(body["input"])
+        # A search a provider ran on an earlier turn comes back as history.
+        # It carries no results, and what it found is already in the assistant
+        # text after it, so no route replays it - including a route switched to
+        # mid-task that never searched at all.
+        body["input"] = [item for item in body["input"]
+                         if not (isinstance(item, dict) and item.get("type") == "web_search_call")]
         normalize_custom_calls(body["input"], tool_map)
         for item in body["input"]:
             if not isinstance(item, dict) or item.get("type", "message") not in {"message", "function_call", "function_call_output", "reasoning"}:
@@ -670,6 +677,10 @@ def prepare_native(runtime, payload):
         translated = to_messages(body, route, spec, envelope, scope)
         if cli_mode:
             translated["_provider_hub_surface"] = "responses"
+            if search is not None:
+                # The CLI runs the hosted search itself (checked above: the
+                # route's entry carries web_search).
+                translated["_web_search"] = search
         published_summary = None
         if cli_mode and provider_id == "codex":
             published_summary = (body.get("reasoning") or {}).get("summary")

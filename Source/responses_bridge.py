@@ -197,6 +197,11 @@ def to_messages(body, route, spec, envelope, scope):
                                "input": {APPLY_PATCH_PARAM: patch}}])
         elif kind == "custom_tool_call_output":
             add("user", tool_output_blocks(item))
+        elif kind == "web_search_call":
+            # A search the provider already ran. What it found lives in the
+            # assistant text that followed, and the item carries no results
+            # to replay, so there is nothing here for a provider to take back.
+            continue
         else:
             raise BridgeError("Unsupported Responses history item.")
     flush()
@@ -242,6 +247,26 @@ def response_usage(value):
     output = integer("output_tokens")
     return {"input_tokens": input_tokens, "output_tokens": output, "total_tokens": input_tokens + output,
             "input_tokens_details": {"cached_tokens": cached}}
+
+
+#: Responses ``web_search_call`` action variants and the fields each carries.
+SEARCH_ACTION_FIELDS = {"search": ("query", "queries"), "open_page": ("url",),
+                        "find_in_page": ("url", "pattern"), "other": ()}
+
+
+def search_action(value):
+    """A web_search server tool's input as the Responses action Codex reads.
+
+    A CLI relay passes the runtime's own action; a provider's native server
+    tool carries only its query.
+    """
+    value = value if isinstance(value, dict) else {}
+    action = value.get("action")
+    if not (isinstance(action, dict) and action.get("type") in SEARCH_ACTION_FIELDS):
+        query = value.get("query")
+        action = {"type": "search", "query": query} if isinstance(query, str) and query else {"type": "other"}
+    return {"type": action["type"], **{field: copy.deepcopy(action[field])
+                                       for field in SEARCH_ACTION_FIELDS[action["type"]] if field in action}}
 
 
 class MessagesResponsesAdapter:
@@ -292,6 +317,11 @@ class MessagesResponsesAdapter:
                         "name": self.tool_map[block["name"]]["name"], "input": patch, "status": "completed"}
             return {"id": "fc_" + uuid.uuid4().hex, "type": "function_call", "call_id": block["id"],
                     "name": block["name"], "arguments": json.dumps(block["input"], separators=(",", ":")), "status": "completed"}
+        if kind == "server_tool_use" and block.get("name") == "web_search":
+            # A search the provider ran itself; Codex renders it and sends it
+            # back as history, never as a call for the client to execute.
+            return {"id": "ws_" + uuid.uuid4().hex, "type": "web_search_call", "status": "completed",
+                    "action": search_action(block.get("input"))}
         if kind in {"thinking", "redacted_thinking"}:
             summary = [{"type": "summary_text", "text": block.get("thinking", "")}] \
                 if self.has_published_summary(block) else []
@@ -302,7 +332,8 @@ class MessagesResponsesAdapter:
     def from_message(self, value):
         if value.get("type") != "message" or not isinstance(value.get("content"), list):
             raise BridgeError("The Messages adapter returned an invalid response.")
-        self.output = [self.item(block) for block in value["content"]]
+        self.output = [self.item(block) for block in value["content"]
+                       if not isinstance(block, dict) or block.get("type") != "web_search_tool_result"]
         self.usage = value.get("usage") or {}
         return self.response("incomplete" if value.get("stop_reason") == "max_tokens" else "completed")
 
@@ -319,6 +350,12 @@ class MessagesResponsesAdapter:
             return [self.event("response.created", response=self.response("in_progress"))]
         if kind == "content_block_start":
             block = copy.deepcopy(value["content_block"])
+            if block.get("type") == "web_search_tool_result":
+                # Results of the search call already emitted; web_search_call
+                # has no field for them, so they allocate no output item.
+                self.blocks[value["index"]] = {"block": block, "output_index": None, "partial": "",
+                                               "closed": False, "hidden": True}
+                return []
             index = len(self.output)
             # Allocate a stable output index now, including hidden reasoning.
             if block.get("type") in {"thinking", "redacted_thinking"}:
@@ -334,6 +371,10 @@ class MessagesResponsesAdapter:
             if item["type"] == "message":
                 events.append(self.event("response.content_part.added", item_id=item["id"], output_index=index,
                                          content_index=0, part=copy.deepcopy(item["content"][0])))
+            elif item["type"] == "web_search_call":
+                for phase in ("in_progress", "searching"):
+                    events.append(self.event("response.web_search_call." + phase, item_id=item["id"],
+                                             output_index=index))
             elif self.has_published_summary(block):
                 part = {"type": "summary_text", "text": ""}
                 events.append(self.event("response.reasoning_summary_part.added", item_id=item["id"],
@@ -348,6 +389,8 @@ class MessagesResponsesAdapter:
             state = self.blocks.get(value.get("index"))
             if state is None or state["closed"]:
                 raise BridgeError("The provider streamed an invalid content-block sequence.")
+            if state.get("hidden"):
+                return []
             block, index = state["block"], state["output_index"]
             item, delta = self.output[index], value["delta"]
             dtype = delta.get("type")
@@ -358,11 +401,12 @@ class MessagesResponsesAdapter:
                                    content_index=0, delta=delta["text"])]
             if dtype == "input_json_delta":
                 state["partial"] += delta["partial_json"]
-                if item["type"] == "custom_tool_call":
+                if item["type"] in {"custom_tool_call", "web_search_call"}:
                     # The provider streams JSON-wrapped arguments for the
                     # projected apply_patch function; Codex core builds the
                     # call from output_item.done, so the JSON bytes are
                     # dropped instead of entering the patch input buffer.
+                    # A search's query likewise arrives with its done item.
                     return []
                 return [self.event("response.function_call_arguments.delta", item_id=item["id"], output_index=index,
                                    delta=delta["partial_json"])]
@@ -382,8 +426,10 @@ class MessagesResponsesAdapter:
             if state is None or state["closed"]:
                 raise BridgeError("The provider stopped an unknown content block.")
             state["closed"] = True
+            if state.get("hidden"):
+                return []
             block, index = state["block"], state["output_index"]
-            if block["type"] == "tool_use" and state["partial"]:
+            if block["type"] in {"tool_use", "server_tool_use"} and state["partial"]:
                 try:
                     block["input"] = json.loads(state["partial"])
                 except ValueError as exc:
@@ -397,6 +443,8 @@ class MessagesResponsesAdapter:
             elif final["type"] == "message":
                 events.append(self.event("response.output_text.done", item_id=final["id"], output_index=index, content_index=0, text=final["content"][0]["text"]))
                 events.append(self.event("response.content_part.done", item_id=final["id"], output_index=index, content_index=0, part=copy.deepcopy(final["content"][0])))
+            elif final["type"] == "web_search_call":
+                events.append(self.event("response.web_search_call.completed", item_id=final["id"], output_index=index))
             elif self.has_published_summary(block):
                 part = final["summary"][0]
                 events.append(self.event("response.reasoning_summary_text.done", item_id=final["id"],

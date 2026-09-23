@@ -49,8 +49,10 @@ class ResponsesToolTests(unittest.TestCase):
                   "user_location": {"type": "approximate", "city": "Edinburgh"}}]
         kept, search = split_hosted_search(tools)
         self.assertEqual([tool["name"] for tool in kept], ["read"])
-        self.assertEqual(search, {"context_size": "high", "allowed_domains": ["docs.python.org"]})
+        self.assertEqual(search, {"context_size": "high", "allowed_domains": ["docs.python.org"], "live": True})
         self.assertNotIn("Edinburgh", json.dumps(search))
+        # Codex's cached mode stays cached for a route that can honour it.
+        self.assertIs(split_hosted_search([{"type": "web_search", "external_web_access": False}])[1]["live"], False)
         # What is left flattens exactly as it would have without the request.
         self.assertEqual(flatten_tools(kept)[0][0]["name"], "read")
         # The preview and dated spellings name the same hosted tool.
@@ -58,7 +60,7 @@ class ResponsesToolTests(unittest.TestCase):
             self.assertIsNotNone(split_hosted_search([{"type": kind}])[1])
         # An unrecognised context size is dropped, not forwarded verbatim.
         self.assertEqual(split_hosted_search([{"type": "web_search", "search_context_size": "enormous"}])[1],
-                         {"context_size": None, "allowed_domains": []})
+                         {"context_size": None, "allowed_domains": [], "live": True})
         # A turn that asked for no search is handed back untouched.
         self.assertEqual(split_hosted_search(tools[:1]), (tools[:1], None))
         # Nested is not lifted: Codex does not send it there, and guessing

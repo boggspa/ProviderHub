@@ -97,8 +97,16 @@ Nested process isolation and host permissions
 ---------------------------------------------
 The nested sandbox does not describe host tool permissions. Workspace reads
 and writes are forwarded to the host, which enforces its own settings. Native
-shell, web, plugins, and multi-agent features are disabled; unexpected native
-tool activity is an error, never silently discarded.
+shell, plugins, and multi-agent features are disabled; unexpected native tool
+activity is an error, never silently discarded.
+
+Web search is the one native tool a turn may enable, and only when the
+desktop asked for its hosted search. It is hosted: OpenAI's servers run it
+under the user's plan and nothing on the machine executes, so it sits outside
+the read-only boundary. The argv keeps it disabled; ``thread/start`` switches
+it on for that thread alone (verified live on 0.155.1: a thread-scoped
+``web_search="live"`` overrides the argv), and its ``webSearch`` items are
+relayed as searches rather than refused as tool activity.
 
 :data:`_FORBIDDEN_FLAGS` is asserted inside every argv builder, so a future
 edit cannot introduce an approval bypass or a write-capable sandbox. Threads are
@@ -143,6 +151,8 @@ SYSTEM_PROMPT_TRANSPORT = "developerInstructions"
 HOST_TOOL_TRANSPORT = "dynamic"
 NONBLOCKING_CLOSE = True
 IMAGE_TRANSPORT = "native_history"
+#: OpenAI runs the desktop's hosted web search inside the nested thread.
+WEB_SEARCH = True
 
 _NATIVE_TOOL_ITEMS = frozenset({
     "commandExecution", "fileChange", "mcpToolCall", "collabToolCall",
@@ -342,6 +352,59 @@ def _checked_effort(effort):
     if not _EFFORT_RE.match(text):
         raise CodexCliAgentError(f"'{text[:40]}' is not a usable reasoning effort.")
     return text
+
+
+#: ``WebSearchContextSize`` in the runtime's own schema.
+_SEARCH_CONTEXT_SIZES = frozenset({"low", "medium", "high"})
+#: app-server ``WebSearchAction`` -> the Responses ``web_search_call`` action
+#: the desktop reads, and the fields each variant carries.
+_SEARCH_ACTIONS = {"search": ("search", ("query", "queries")), "openPage": ("open_page", ("url",)),
+                   "findInPage": ("find_in_page", ("url", "pattern")), "other": ("other", ())}
+
+
+def _checked_search(value):
+    """The desktop's hosted search request as thread config, or None.
+
+    Only the fields the runtime's ``WebSearchToolConfig`` takes survive, and
+    ``live: False`` - Codex's cached mode - stays cached rather than being
+    widened to live fetching.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise CodexCliAgentError("web_search must be an object.", http_status=400)
+    size, domains = value.get("context_size"), value.get("allowed_domains") or []
+    if size is not None and size not in _SEARCH_CONTEXT_SIZES:
+        raise CodexCliAgentError("Unsupported web search context size.", http_status=400)
+    if not isinstance(domains, list) or not all(isinstance(domain, str) and domain for domain in domains):
+        raise CodexCliAgentError("web_search allowed_domains must be a list of domains.", http_status=400)
+    tool = {**({"context_size": size} if size else {}),
+            **({"allowed_domains": domains[:20]} if domains else {})}
+    return {"web_search": "cached" if value.get("live") is False else "live",
+            **({"tools": {"web_search": tool}} if tool else {})}
+
+
+def _search_event(method, item):
+    """A nested hosted search, in the Responses spelling the desktop renders."""
+    if method == "item/started":
+        return {"type": "web_search", "status": "in_progress", "id": item.get("id")}
+    action = item.get("action") if isinstance(item.get("action"), dict) else {}
+    if action.get("type") not in _SEARCH_ACTIONS:
+        # A missing or newer action still names the query that ran.
+        query = item.get("query")
+        action = {"type": "search", "query": query} if isinstance(query, str) and query else {"type": "other"}
+    kind, fields = _SEARCH_ACTIONS[action["type"]]
+    spelled = {"type": kind}
+    for field in fields:
+        value = action.get(field)
+        if isinstance(value, str) or (isinstance(value, list) and all(isinstance(part, str) for part in value)):
+            spelled[field] = value
+    results = [{"url": result["url"], "title": result.get("title") if isinstance(result.get("title"), str) else ""}
+               for result in item.get("results") or []
+               if isinstance(result, dict) and isinstance(result.get("url"), str)
+               and result["url"].startswith(("https://", "http://"))][:20]
+    return {"type": "web_search", "status": "completed", "id": item.get("id"),
+            "action": spelled, "results": results}
 
 
 def runtime_binary(binary=None):
@@ -696,6 +759,33 @@ def parse_model_list(rows):
     return parsed
 
 
+def _native_cards(argv):
+    """The native catalogue this runtime listed from, and its model cards.
+
+    The one selected on argv, or, with none selected, the runtime's own cache
+    that the listing refreshed. Unreadable metadata yields no cards.
+    """
+    path = _models_cache()
+    for flag, value in zip(argv, argv[1:]):
+        if flag == "-c" and value.startswith("model_catalog_json="):
+            try:
+                path = Path(json.loads(value.split("=", 1)[1]))
+            except (ValueError, TypeError):
+                return path, []
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return path, []
+    cards = payload.get("models") if isinstance(payload, dict) else None
+    return path, [card for card in cards if isinstance(card, dict)] if isinstance(cards, list) else []
+
+
+def _catalogue_search(argv):
+    """Slugs whose native card offers the hosted search tool."""
+    return {card["slug"] for card in _native_cards(argv)[1]
+            if isinstance(card.get("slug"), str) and isinstance(card.get("web_search_tool_type"), str)}
+
+
 def _catalogue_context(argv, configured_window=None):
     """Context budgets from the same native catalogue this runtime listed.
 
@@ -705,20 +795,7 @@ def _catalogue_context(argv, configured_window=None):
     guess. max_context_window is an optional larger ceiling, not the active
     default. Preserve the runtime's reserved percentage in runtime_context.
     """
-    path = _models_cache()
-    for flag, value in zip(argv, argv[1:]):
-        if flag == "-c" and value.startswith("model_catalog_json="):
-            try:
-                path = Path(json.loads(value.split("=", 1)[1]))
-            except (ValueError, TypeError):
-                return {}
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
-    cards = payload.get("models") if isinstance(payload, dict) else None
-    if not isinstance(cards, list):
-        return {}
+    path, cards = _native_cards(argv)
     result = {}
     for card in cards:
         if not isinstance(card, dict) or not isinstance(card.get("slug"), str):
@@ -808,7 +885,10 @@ def fetch_models(*, binary=None, spawner=None, timeout=30):
         # refreshes the runtime's own cache for its version.
         context = (_catalogue_context(argv, config.get("model_context_window"))
                    if isinstance(config, dict) else {})
-        return [{**row, **context.get(row["model"], {})} for row in parse_model_list(rows)]
+        searchable = _catalogue_search(argv)
+        return [{**row, **context.get(row["model"], {}),
+                 **({"web_search": True} if row["model"] in searchable else {})}
+                for row in parse_model_list(rows)]
     finally:
         _teardown(session, workspace)
 
@@ -982,6 +1062,9 @@ def _thread_params(payload, workspace):
         }]
     if payload["effort"] is not None:
         params["config"] = {"model_reasoning_effort": payload["effort"]}
+    if payload.get("web_search") is not None:
+        # Thread scope only: the argv keeps search off for every other thread.
+        params.setdefault("config", {}).update(payload["web_search"])
     return params
 
 
@@ -1127,7 +1210,7 @@ def _normalise_request(request):
             "effort": _checked_effort(request.get("effort")),
             "prompt": prompt, "system": instructions, "tools": tools,
             "history": request.get("history"), "images": images, "reasoning_summary": summary,
-            "service_tier": tier}
+            "service_tier": tier, "web_search": _checked_search(request.get("web_search"))}
 
 
 def _history_items(messages):
@@ -1320,11 +1403,12 @@ def _usage_snapshot(params):
 
 
 def _stream_turn(session, *, turn_id, deadline, tools=None, thread_id=None, summary_only=False,
-                 lease=None, timing=None):
+                 lease=None, timing=None, search=False):
     """Consume notifications until the turn terminates.
 
-    Yields ``text_delta`` / ``thinking_delta`` as they arrive and always ends
-    with exactly one terminal event: ``message_stop`` or ``error``.
+    Yields ``text_delta`` / ``thinking_delta`` as they arrive, ``web_search``
+    for each hosted search when the thread enabled it, and always ends with
+    exactly one terminal event: ``message_stop`` or ``error``.
     """
     fragments = lease.fragments if lease is not None else {}
     last_error = None
@@ -1410,6 +1494,9 @@ def _stream_turn(session, *, turn_id, deadline, tools=None, thread_id=None, summ
                     return
                 if method in {"item/started", "item/completed"}:
                     item = params.get("item") or {}
+                    if search and isinstance(item, dict) and item.get("type") == "webSearch":
+                        yield _search_event(method, item)
+                        continue
                     if isinstance(item, dict) and item.get("type") in _NATIVE_TOOL_ITEMS:
                         yield {"type": "error", "message": "Codex attempted a native CLI tool "
                                f"({item['type']}); workspace actions must use host tools."}
@@ -1617,8 +1704,9 @@ atexit.register(_POOL.close)
 def run_turn(request, *, spawner=None, timeout=300, pool=None) -> Iterator[dict]:
     """One streaming turn on the user's ChatGPT subscription.
 
-    Yields only ``text_delta``, ``thinking_delta``, ``message_stop`` and
-    ``error``, and always terminates with ``message_stop`` or ``error``: every
+    Yields only ``text_delta``, ``thinking_delta``, ``web_search`` (when the
+    request asked for hosted search), ``message_stop`` and ``error``, and
+    always terminates with ``message_stop`` or ``error``: every
     failure - absent runtime, refused argv, handshake timeout, JSON-RPC error,
     host exit, malformed NDJSON, deadline - is converted into an ``error`` event
     rather than escaping, because the caller is a harness thread drawing a
@@ -1640,7 +1728,7 @@ def run_turn(request, *, spawner=None, timeout=300, pool=None) -> Iterator[dict]
         if owner is not None:
             key = _digest({"argv": argv, "env": minimal_env(), "system": payload["system"],
                            "tools": payload["tools"], "summary": payload["reasoning_summary"],
-                           "tier": payload["service_tier"]})
+                           "tier": payload["service_tier"], "search": payload["web_search"]})
             blocks = _history_blocks(payload.get("history"))
             continuation_key = (_digest([key, blocks]) if any(
                 role == "user" and block.get("type") == "tool_result" and
@@ -1707,7 +1795,8 @@ def run_turn(request, *, spawner=None, timeout=300, pool=None) -> Iterator[dict]
         for event in _stream_turn(session, turn_id=turn_id, deadline=deadline,
                                   tools=payload["tools"], thread_id=thread_id,
                                   summary_only=payload["reasoning_summary"] is not None,
-                                  lease=lease, timing=timing):
+                                  lease=lease, timing=timing,
+                                  search=payload["web_search"] is not None):
             if event.get("type") == "message_stop":
                 healthy = True
                 if lease is not None and lease.pending:

@@ -1145,26 +1145,36 @@ class MultiAgentNormalizationTests(unittest.TestCase):
         # The caller's own payload is never edited underneath it.
         self.assertEqual(payload["text"]["format"]["schema"]["properties"]["a"], {"anyOf": []})
 
-    def test_hosted_search_is_refused_by_name_where_the_provider_runs_no_search(self):
-        """A route whose provider has no search of its own says exactly that,
-        rather than the turn dying on the tool array as a whole. Validation
-        runs before any provider or network access, so a stub runtime carrying
-        the model spec is enough to reach it."""
+    def test_hosted_search_is_dropped_where_the_provider_runs_no_search(self):
+        """Codex offers the hosted tool on every route once any route can
+        search, so a route whose provider has none plans the turn without it
+        rather than failing, and the tools around it still travel. The model
+        learns of search only from the tools array, so it is never told it
+        can search here."""
+        import tempfile
+        from pathlib import Path
         from types import SimpleNamespace
 
-        from bridge_core import BridgeError
+        import responses_native
         from hub_config import qualify
-        from responses_native import prepare_native
 
         route = qualify("mistral", "mistral-medium-2508")
-        runtime = SimpleNamespace(settings={"_model_specs": {route: {}}})
-        with self.assertRaises(BridgeError) as ctx:
-            prepare_native(runtime, {"model": route, "input": "hi", "tools": [{"type": "web_search"}]})
-        message = str(ctx.exception)
-        self.assertIn("does not run web search", message)
-        # Not the flatten refusal: the request was understood and answered on
-        # its merits, not rejected as a shape the adapter cannot read.
-        self.assertNotIn("separate adapter", message)
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = SimpleNamespace(
+                settings={"providers": {"mistral": {"credential_mode": "keychain", "base_url": "https://x.invalid"}},
+                          "_model_specs": {route: {"context": 100000, "max_output": 16384}}},
+                replay_key="replay", token="token", upstream_url=None, root=Path(directory),
+                provider_key=lambda provider_id: "provider-key")
+            tools = [{"type": "web_search"},
+                     {"type": "function", "name": "read", "parameters": {"type": "object", "properties": {}}}]
+            with patch.object(responses_native, "validate_connection", return_value={"base_url": "https://x.invalid"}), \
+                    patch.object(responses_native, "_auth_headers", return_value={}), \
+                    patch.object(responses_native, "connection_signature", return_value="sig"):
+                plan = responses_native.prepare_native(runtime, {"model": route, "input": "hi", "stream": True,
+                                                                 "store": False, "tools": tools})
+        self.assertEqual([tool["name"] for tool in plan["body"]["tools"]], ["read"])
+        self.assertNotIn("_web_search", plan["body"])
+        self.assertNotIn("web_search", json.dumps(plan["body"]))
 
     def test_extract_subagent_task_prefers_encrypted_content(self):
         """Dict-form envelopes expose the plaintext instruction, not the routing text."""
@@ -1441,6 +1451,62 @@ class CodexCliReasoningSummaryPlanTests(unittest.TestCase):
         for summary in ("raw", True, ["auto"], {"type": "detailed"}):
             with self.subTest(summary=summary), self.assertRaisesRegex(BridgeError, "reasoning.summary"):
                 self.plan(reasoning={"summary": summary})
+
+
+class CodexCliWebSearchPlanTests(unittest.TestCase):
+    """The desktop's hosted search rides the bridge to a Codex CLI that runs it."""
+
+    def setUp(self):
+        import tempfile
+        from pathlib import Path
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+
+    def plan(self, *, searchable=True, tools=None, history="hello"):
+        from types import SimpleNamespace
+        import responses_native
+        route = "codex/gpt-6-sol"
+        spec = {"context": 100000, "max_output": 16384, "effort_modes": ["low", "high"]}
+        if searchable:
+            spec["web_search"] = True
+        runtime = SimpleNamespace(
+            settings={"providers": {"codex": {"credential_mode": "cli", "base_url": "https://x.invalid"}},
+                      "_model_specs": {route: spec}},
+            replay_key="replay", token="token", upstream_url=None, root=self.root,
+            provider_key=lambda provider_id: "")
+        payload = {"model": route, "input": history, "stream": True, "store": False,
+                   "tools": [{"type": "web_search", "search_context_size": "low", "external_web_access": False}]
+                   if tools is None else tools}
+        with patch.object(responses_native, "validate_connection", return_value={"base_url": "https://x.invalid"}), \
+                patch.object(responses_native, "connection_signature", return_value="sig"):
+            return responses_native.prepare_native(runtime, payload)
+
+    def test_hosted_search_reaches_the_cli_request_intact(self):
+        plan = self.plan()
+        self.assertEqual(plan["protocol"], "messages_bridge")
+        self.assertEqual(plan["body"]["_web_search"], {"context_size": "low", "allowed_domains": [], "live": False})
+        self.assertNotIn("tools", plan["body"])
+
+    def test_a_route_that_cannot_search_runs_the_turn_without_the_tool(self):
+        # Codex offers search on every route once any route can serve it, so
+        # the tool is dropped here rather than failing the turn.
+        plan = self.plan(searchable=False)
+        self.assertNotIn("_web_search", plan["body"])
+        self.assertNotIn("tools", plan["body"])
+
+    def test_searches_returned_as_history_are_accepted_on_every_route(self):
+        history = [{"type": "message", "role": "user", "content": "latest codex tag?"},
+                   {"type": "web_search_call", "id": "ws_1", "status": "completed",
+                    "action": {"type": "search", "query": "codex releases"}},
+                   {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "0.157"}]},
+                   {"type": "message", "role": "user", "content": "thanks"}]
+        for searchable in (True, False):
+            with self.subTest(searchable=searchable):
+                plan = self.plan(searchable=searchable, tools=[], history=[dict(item) for item in history])
+                self.assertNotIn("_web_search", plan["body"])
+                self.assertEqual([message["role"] for message in plan["body"]["messages"]],
+                                 ["user", "assistant", "user"])
 
 
 class UltraDelegationNoteTests(unittest.TestCase):

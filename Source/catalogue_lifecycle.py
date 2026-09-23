@@ -46,7 +46,7 @@ _PLANNING_FIELDS = (
     "reasoning_history", "complete_tool_cycles", "capabilities",
     "default_effort", "upstream_model_id", "routing_endpoints", "routing_ignore",
     "routing_all_tags", "effort_control", "reasoning_mandatory",
-    "version", "base_model_id", "provider_effort_modes",
+    "version", "base_model_id", "provider_effort_modes", "web_search",
 )
 
 

@@ -544,6 +544,23 @@ class FetchModelsTests(unittest.TestCase):
         self.assertEqual([row["model"] for row in rows], ["gpt-6-astra", "gpt-6-sol"])
         self.assertEqual([row.get("runtime_context") for row in rows], [258400, 258400])
 
+    def test_search_capability_comes_from_the_native_catalogue(self):
+        fake = self._FetchSession([{"result": {"data": [{"model": "gpt-searches"}, {"model": "gpt-silent"}],
+                                               "nextCursor": None}}])
+        with tempfile.TemporaryDirectory() as tmp:
+            base = codex.Path(tmp)
+            cache = base / ".codex" / "models_cache.json"
+            cache.parent.mkdir()
+            cache.write_text(json.dumps({"models": [
+                {"slug": "gpt-searches", "web_search_tool_type": "text_and_image"},
+                {"slug": "gpt-silent"}]}))
+            with mock.patch.object(codex.Path, "home", return_value=base), \
+                    mock.patch.object(codex, "StdioSession", return_value=fake), \
+                    mock.patch.object(codex, "runtime_binary", return_value="/fake/codex"):
+                rows = codex.fetch_models(binary="/fake/codex", spawner="stub")
+        self.assertIs(rows[0]["web_search"], True)
+        self.assertNotIn("web_search", rows[1])
+
     def test_failed_config_probe_does_not_hide_routable_models(self):
         fake = self._FetchSession([{"result": {"data": [{"model": "gpt-budget"}]}}])
         fake.config_response = {"error": {"message": "config/read unavailable"}}
@@ -552,6 +569,32 @@ class FetchModelsTests(unittest.TestCase):
             rows = codex.fetch_models(binary="/fake/codex", spawner="stub")
         self.assertEqual([row["model"] for row in rows], ["gpt-budget"])
         self.assertNotIn("context", rows[0])
+
+
+class WebSearchRequestTests(unittest.TestCase):
+    def test_request_becomes_thread_config_and_stays_cached_when_asked(self):
+        self.assertIsNone(codex._checked_search(None))
+        self.assertEqual(codex._checked_search({"context_size": "high", "allowed_domains": ["a.dev"], "live": True}),
+                         {"web_search": "live", "tools": {"web_search": {"context_size": "high",
+                                                                         "allowed_domains": ["a.dev"]}}})
+        self.assertEqual(codex._checked_search({"context_size": None, "allowed_domains": [], "live": False}),
+                         {"web_search": "cached"})
+        for bad in ("yes", {"context_size": "huge"}, {"allowed_domains": "a.dev"}, {"allowed_domains": [""]}):
+            with self.subTest(bad=bad), self.assertRaises(codex.CodexCliAgentError):
+                codex._checked_search(bad)
+
+    def test_runtime_actions_become_the_responses_spelling(self):
+        def done(**item):
+            return codex._search_event("item/completed", {"id": "ws", **item})
+        self.assertEqual(done(query="q", action={"type": "search", "query": "q", "queries": ["q", "r"]})["action"],
+                         {"type": "search", "query": "q", "queries": ["q", "r"]})
+        self.assertEqual(done(action={"type": "findInPage", "url": "https://a.dev", "pattern": "x"})["action"],
+                         {"type": "find_in_page", "url": "https://a.dev", "pattern": "x"})
+        # A missing or newer action still names the query that ran.
+        self.assertEqual(done(query="q", action={"type": "imageSearch"})["action"], {"type": "search", "query": "q"})
+        self.assertEqual(done(query="", action=None)["action"], {"type": "other"})
+        self.assertEqual(codex._search_event("item/started", {"id": "ws"}),
+                         {"type": "web_search", "status": "in_progress", "id": "ws"})
 
 
 class RunTurnTests(unittest.TestCase):
@@ -577,6 +620,42 @@ class RunTurnTests(unittest.TestCase):
                    "messages": [{"role": "user", "content": "hi"}]}
         request.update(extra)
         return request
+
+    def test_requested_search_runs_on_the_thread_and_streams_as_searches(self):
+        # Verified live on 0.155.1: a thread-scoped web_search="live" turns on
+        # OpenAI's hosted search although the argv keeps it disabled.
+        def item(method, value):
+            return _ev(method, {"item": value, "threadId": "t1", "turnId": "t1"})
+        fake = FakeCodexSession([])
+        fake.script = [
+            item("item/started", {"type": "webSearch", "id": "ws1", "query": "", "action": None}),
+            item("item/completed", {"type": "webSearch", "id": "ws1", "query": "https://example.com/a",
+                                    "action": {"type": "openPage", "url": "https://example.com/a"},
+                                    "results": [{"type": "text_result", "url": "https://example.com/a", "title": "A"},
+                                                {"type": "text_result", "url": "file:///etc/hosts", "title": "no"}]}),
+            _delta_ev("found it"), _completed_turn()]
+        search = {"context_size": "low", "allowed_domains": ["example.com"], "live": True}
+        events, session, _ = self._run(self._request(web_search=search, effort="high"), fake)
+        self.assertEqual([e["type"] for e in events], ["web_search", "web_search", "text_delta", "message_stop"])
+        self.assertEqual(events[0], {"type": "web_search", "status": "in_progress", "id": "ws1"})
+        self.assertEqual(events[1]["action"], {"type": "open_page", "url": "https://example.com/a"})
+        self.assertEqual(events[1]["results"], [{"url": "https://example.com/a", "title": "A"}])
+        thread = next(params for method, params, _ in session.requests if method == "thread/start")
+        self.assertEqual(thread["config"]["web_search"], "live")
+        self.assertEqual(thread["config"]["tools"],
+                         {"web_search": {"context_size": "low", "allowed_domains": ["example.com"]}})
+        self.assertEqual(thread["config"]["model_reasoning_effort"], "high")
+        self.assertIn('web_search="disabled"', session.argv)
+
+    def test_unrequested_search_is_still_refused_as_native_tool_activity(self):
+        fake = FakeCodexSession([])
+        fake.script = [_ev("item/started", {"item": {"type": "webSearch", "id": "ws1", "query": ""},
+                                            "threadId": "t1", "turnId": "t1"}), _completed_turn()]
+        events, session, _ = self._run(self._request(), fake)
+        self.assertEqual(events[-1]["type"], "error")
+        self.assertIn("webSearch", events[-1]["message"])
+        thread = next(params for method, params, _ in session.requests if method == "thread/start")
+        self.assertNotIn("web_search", thread.get("config") or {})
 
     def test_streams_text_delta_and_stop(self):
         fake = FakeCodexSession([])

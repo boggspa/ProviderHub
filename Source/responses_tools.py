@@ -242,6 +242,9 @@ def split_hosted_search(tools):
             "context_size": size if size in SEARCH_CONTEXT_SIZES else None,
             "allowed_domains": [domain for domain in allowed if isinstance(domain, str) and domain][:20]
             if isinstance(allowed, list) else [],
+            # Codex's cached mode sends external_web_access: false. A route
+            # that can honour the distinction must not widen it to live.
+            "live": tool.get("external_web_access") is not False,
         }
     return kept, request
 

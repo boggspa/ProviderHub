@@ -145,6 +145,13 @@ class CliRoutesTest(unittest.TestCase):
         self.assertEqual(claude[0]["effort_modes"], ["low", "max"])
         self.assertEqual(cli_routes._seed_rows("muse", ()), [])
 
+    def test_seeded_ids_search_only_where_the_cli_cache_says_so(self):
+        cli_routes._cache["grok"] = _fake_adapter(WEB_SEARCH=True, search_models=lambda: frozenset({"grok-4.6"}))
+        rows = cli_routes._seed_rows("grok", ("grok-4.6", "grok-4.5"))
+        self.assertEqual([row.get("web_search") for row in rows], [True, None])
+        cli_routes._cache["grok"] = _fake_adapter(search_models=lambda: frozenset({"grok-4.6"}))
+        self.assertNotIn("web_search", cli_routes._seed_rows("grok", ("grok-4.6",))[0])
+
     # -- discovery -----------------------------------------------------------
 
     def test_discover_via_cli_seeds_and_reports_auth(self):
@@ -377,6 +384,63 @@ class ParseToolStreamTest(unittest.TestCase):
         self.assertEqual(emitted[5]["delta"]["type"], "input_json_delta")
         self.assertEqual(json.loads(emitted[5]["delta"]["partial_json"]), {"city": "Paris"})
         self.assertEqual(result["stop_reason"], "tool_use")
+
+    def test_cli_search_reaches_codex_as_a_rendered_web_search_call(self):
+        from responses_bridge import MessagesResponsesAdapter
+        emitted = []
+        result = relay_cli_turn(iter([
+            {"type": "web_search", "status": "in_progress", "id": "ws1"},
+            {"type": "web_search", "status": "completed", "id": "ws1",
+             "action": {"type": "search", "query": "codex release"},
+             "results": [{"url": "https://github.com/openai/codex/releases", "title": "Releases"}]},
+            # Completed without a started event still yields one whole pair.
+            {"type": "web_search", "status": "completed", "id": "ws2",
+             "action": {"type": "open_page", "url": "https://github.com/openai/codex/releases"}, "results": []},
+            {"type": "text_delta", "text": "rust-v0.157.0"},
+            {"type": "message_stop", "stop_reason": "end_turn"}]), emitted.append, model="codex/gpt-6-sol")
+        self.assertIsNone(result["error"])
+        blocks = [event["content_block"] for event in emitted if event["type"] == "content_block_start"]
+        self.assertEqual([block["type"] for block in blocks],
+                         ["server_tool_use", "web_search_tool_result", "server_tool_use",
+                          "web_search_tool_result", "text"])
+        self.assertEqual(blocks[1]["tool_use_id"], blocks[0]["id"])
+        self.assertEqual(blocks[1]["content"], [{"type": "web_search_result", "title": "Releases",
+                                                 "url": "https://github.com/openai/codex/releases"}])
+        starts = [event["index"] for event in emitted if event["type"] == "content_block_start"]
+        stops = [event["index"] for event in emitted if event["type"] == "content_block_stop"]
+        self.assertEqual(starts, [0, 1, 2, 3, 4])
+        self.assertEqual(stops, [0, 1, 2, 3, 4])
+
+        adapter = MessagesResponsesAdapter("codex/gpt-6-sol", None, "scope")
+        responses = [event for wire in emitted for event in adapter.feed(wire)]
+        kinds = [event["type"] for event in responses]
+        self.assertEqual(kinds[:6], ["response.created", "response.output_item.added",
+                                     "response.web_search_call.in_progress", "response.web_search_call.searching",
+                                     "response.web_search_call.completed", "response.output_item.done"])
+        done = [event["item"] for event in responses if event["type"] == "response.output_item.done"]
+        self.assertEqual([item["type"] for item in done], ["web_search_call", "web_search_call", "message"])
+        self.assertEqual(done[0]["action"], {"type": "search", "query": "codex release"})
+        self.assertEqual(done[1]["action"], {"type": "open_page", "url": "https://github.com/openai/codex/releases"})
+        self.assertEqual(done[0]["status"], "completed")
+        self.assertEqual(kinds[-1], "response.completed")
+        self.assertEqual([item["type"] for item in responses[-1]["response"]["output"]],
+                         ["web_search_call", "web_search_call", "message"])
+
+    def test_only_search_capable_adapters_carry_web_search(self):
+        self.assertIs(cli_routes._hub_row("codex", {"id": "gpt-6-sol", "web_search": True})["web_search"], True)
+        self.assertNotIn("web_search", cli_routes._hub_row("codex", {"id": "gpt-6-sol"}))
+        self.assertIs(cli_routes._hub_row("grok", {"id": "grok-4.6", "web_search": True})["web_search"], True)
+        self.assertNotIn("web_search", cli_routes._hub_row("muse", {"id": "muse-spark-1.3", "web_search": True}))
+        search = {"context_size": None, "allowed_domains": [], "live": True}
+        payload = {"messages": [{"role": "user", "content": "latest codex tag?"}], "_web_search": search}
+        self.assertEqual(cli_routes.plan_turn("codex", "gpt-6-sol", dict(payload), {},
+                                              wanted_output=64)["body"]["web_search"], search)
+        self.assertNotIn("web_search", cli_routes.plan_turn(
+            "codex", "gpt-6-sol", {"messages": payload["messages"]}, {}, wanted_output=64)["body"])
+        self.assertEqual(cli_routes.plan_turn("grok", "grok-4.6", dict(payload), {},
+                                              wanted_output=64)["body"]["web_search"], search)
+        with self.assertRaisesRegex(CliRouteError, "hosted web search"):
+            cli_routes.plan_turn("muse", "muse-spark-1.3", dict(payload), {}, wanted_output=64)
 
     # -- wire translation ------------------------------------------------------
 

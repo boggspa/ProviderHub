@@ -148,6 +148,34 @@ class ResponsesBridgeTests(unittest.TestCase):
             self.assertEqual(translated["messages"], [{"role": "user", "content": [{"type": "text", "text": "hello"}]}])
             self.assertEqual(translated["max_tokens"], 16384)
 
+    def test_searches_render_as_calls_and_are_not_replayed_as_history(self):
+        from responses_bridge import search_action
+        # A provider's native server tool carries only its query.
+        self.assertEqual(search_action({"query": "tide times"}), {"type": "search", "query": "tide times"})
+        self.assertEqual(search_action({}), {"type": "other"})
+        self.assertEqual(search_action({"query": "x", "action": {"type": "open_page", "url": "https://a.dev",
+                                                                 "stray": 1}}),
+                         {"type": "open_page", "url": "https://a.dev"})
+        adapter = MessagesResponsesAdapter("codex/gpt-6-sol", None, "scope")
+        response = adapter.from_message({"type": "message", "stop_reason": "end_turn", "usage": {}, "content": [
+            {"type": "server_tool_use", "id": "srvtoolu_1", "name": "web_search", "input": {"query": "tide times"}},
+            {"type": "web_search_tool_result", "tool_use_id": "srvtoolu_1", "content": []},
+            {"type": "text", "text": "High tide is at 14:02."}]})
+        self.assertEqual([item["type"] for item in response["output"]], ["web_search_call", "message"])
+        self.assertEqual(response["output"][0]["action"], {"type": "search", "query": "tide times"})
+        with self.assertRaises(BridgeError):
+            adapter.item({"type": "server_tool_use", "id": "srvtoolu_2", "name": "code_execution", "input": {}})
+        with tempfile.TemporaryDirectory() as directory:
+            body = {"stream": False, "store": False, "tools": [], "input": [
+                {"type": "message", "role": "user", "content": "tide times?"},
+                {"type": "web_search_call", "id": "ws_1", "status": "completed",
+                 "action": {"type": "search", "query": "tide times"}},
+                {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "14:02."}]},
+                {"type": "message", "role": "user", "content": "and tomorrow?"}]}
+            translated = to_messages(body, "codex/gpt-6-sol", {}, ReasoningEnvelope(Path(directory)), "scope")
+        self.assertEqual([message["role"] for message in translated["messages"]], ["user", "assistant", "user"])
+        self.assertNotIn("tide times\"", json.dumps(translated["messages"][1]))
+
     def test_empty_history_items_do_not_emit_empty_text_blocks(self):
         # A restarted Codex thread replays tool calls whose output was empty as
         # function_call_output items with output:"". Anthropic-compatible

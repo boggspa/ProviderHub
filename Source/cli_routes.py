@@ -172,6 +172,10 @@ def _hub_row(provider_id: str, row):
     }
     if type(row.get("runtime_context")) is int and row["runtime_context"] > 0:
         result["runtime_context"] = row["runtime_context"]
+    # Hosted search only where the adapter can relay it and the vendor's own
+    # catalogue offers it for this model.
+    if row.get("web_search") is True and getattr(adapter, "WEB_SEARCH", False) is True:
+        result["web_search"] = True
     for field in ("context_kind", "context_evidence"):
         if isinstance(row.get(field), str) and row[field]:
             result[field] = row[field]
@@ -197,10 +201,16 @@ def _seed_rows(provider_id: str, known_models) -> list[dict]:
 
     Seeds remain unverified for account availability. Exact published context
     ceilings are added separately, with their documentation provenance.
+    Hosted search comes from the CLI's own model cache where the adapter reads
+    one (``search_models``).
     """
+    search_models = getattr(adapter_for(provider_id), "search_models", None)
+    searchable = search_models() if callable(search_models) else frozenset()
     models = []
     for entry in known_models or ():
         row = {"id": entry} if isinstance(entry, str) else entry
+        if isinstance(row, dict) and row.get("id") in searchable:
+            row = {**row, "web_search": True}
         normalized = _hub_row(provider_id, row)
         if normalized is None:
             continue
@@ -430,6 +440,13 @@ def plan_turn(provider_id: str, upstream_model: str, payload: dict, spec: dict,
         request["images"] = images
     if provider_id == "codex" and payload.get("service_tier") is not None:
         request["service_tier"] = payload["service_tier"]
+    search = payload.get("_web_search")
+    if search is not None:
+        # Set only by the Responses planner, for a route whose catalogue entry
+        # carries web_search; the adapter runs the search itself.
+        if getattr(adapter, "WEB_SEARCH", False) is not True:
+            raise CliRouteError("This CLI route cannot run hosted web search.")
+        request["web_search"] = search
     if dynamic_tools:
         # Keep typed tool calls/results for Codex's native history injection.
         # Flattening these into a new user transcript loses the tool loop.
@@ -702,6 +719,46 @@ def relay_cli_turn(events, emit, *, model, input_tokens=0) -> dict:
         open_block = kind
         open_source = source
 
+    searches = {}
+
+    def search(event):
+        """A hosted search the CLI ran, as the Messages server tool it is.
+
+        The server_tool_use block opens when the search starts, so the client
+        can show it running, and closes with its query and action followed by
+        the web_search_tool_result that the protocol pairs with it.
+        """
+        nonlocal open_block, open_source, index
+        if not started:
+            start_message()
+        source = event.get("id")
+        running = open_block == "search" and open_source == source
+        if not running:
+            if open_block is not None:
+                emit({"type": "content_block_stop", "index": index})
+                index += 1
+            searches[source] = "srvtoolu_" + uuid.uuid4().hex[:24]
+            emit({"type": "content_block_start", "index": index, "content_block": {
+                "type": "server_tool_use", "id": searches[source], "name": "web_search", "input": {}}})
+            open_block, open_source = "search", source
+        if event.get("status") != "completed":
+            return
+        action = event.get("action") if isinstance(event.get("action"), dict) else {"type": "other"}
+        query = action.get("query") or action.get("url") or ""
+        emit({"type": "content_block_delta", "index": index, "delta": {
+            "type": "input_json_delta",
+            "partial_json": json.dumps({"query": query, "action": action}, ensure_ascii=False,
+                                       separators=(",", ":"))}})
+        emit({"type": "content_block_stop", "index": index})
+        index += 1
+        emit({"type": "content_block_start", "index": index, "content_block": {
+            "type": "web_search_tool_result", "tool_use_id": searches.pop(source),
+            "content": [{"type": "web_search_result", "url": result["url"], "title": result.get("title", "")}
+                        for result in event.get("results") or []]}})
+        emit({"type": "content_block_stop", "index": index})
+        index += 1
+        open_block = open_source = None
+
     try:
         for event in events:
             kind = event.get("type") if isinstance(event, dict) else None
@@ -750,6 +807,8 @@ def relay_cli_turn(events, emit, *, model, input_tokens=0) -> dict:
                       "delta": {"type": "text_delta", "text": text}})
                 if timing:
                     timing.mark("first_visible_text")
+            elif kind == "web_search":
+                search(event)
             elif kind == "tool_call":
                 if not started:
                     start_message()
