@@ -16,3 +16,9 @@ work/
 SHIP-HOLD-*.md
 SESSION-IN-PROGRESS-*.md
 .work-guard/
+
+# Per-session scratch — see AGENTS.md "Scratch goes in .local-only/".
+# The directory is tracked via its README so a fresh clone has it;
+# everything else inside is ignored.
+.local-only/*
+!.local-only/README.md

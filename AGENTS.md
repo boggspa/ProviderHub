@@ -51,6 +51,22 @@ Split the two questions and use the right tool for each:
 3. **Raise your own marker before your first edit to a clean file** — not
    "when you start", which is fuzzy and skippable. First write is the trigger.
 
+### Scratch goes in `.local-only/`
+
+Every session produces throwaway files: a patch script, captured test output, a
+draft commit message, a screenshot. Dumped in the repo root they become
+permanent `??` noise in `git status --porcelain` — the one signal this doctrine
+tells you to trust — and sit one `git add -A` away from being committed. This
+checkout had sixteen such files before the directory existed.
+
+Put them in `.local-only/` instead. It is gitignored except for its own README,
+so the root stays clean and the unclaimed-work alarm stays meaningful.
+
+`.local-only/` is for work you would not mind losing. `work_guard.py tick`
+snapshots with `git add -A`, which honours `.gitignore`, so unlike ordinary
+untracked files its contents are **not** captured into `refs/wip`. Anything
+worth keeping goes in a commit, or outside the repo.
+
 ### Marker format — it must self-expire
 
 Staleness has to be mechanical, not a judgement call. Name the file
