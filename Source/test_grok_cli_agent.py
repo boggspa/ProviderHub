@@ -192,6 +192,38 @@ class TestBuildArgv(unittest.TestCase):
         argv = module.build_argv(None, stream=True)
         self.assertIn("grok-4.7", argv)
 
+    def test_search_keeps_web_search_alone(self):
+        plain = module.build_argv("grok-4.7", stream=True)
+        argv = module.build_argv("grok-4.7", stream=True, search=True)
+        self.assertEqual(argv[-2:], ["--tools", "web_search"])
+        self.assertIn("--disable-web-search", plain)
+        self.assertNotIn("--disable-web-search", argv)
+        removed = set(argv[argv.index("--disallowed-tools") + 1].split(","))
+        self.assertEqual(set(plain[plain.index("--disallowed-tools") + 1].split(",")) - removed,
+                         {"web_search"})
+        self.assertIn("web_fetch", removed)
+        self.assertEqual(argv[argv.index("WebFetch") - 1], "--deny")
+
+
+class TestSearchModels(unittest.TestCase):
+    """Backend search capability comes from the CLI's own model cache."""
+
+    def test_backend_search_models_come_from_the_cli_cache(self):
+        with tempfile.TemporaryDirectory() as root:
+            cache = Path(root) / "models_cache.json"
+            cache.write_text(json.dumps({"models": {
+                "grok-4.7": {"info": {"id": "grok-4.7", "supports_backend_search": True}},
+                "grok-4.5": {"info": {"id": "grok-4.5", "supports_backend_search": False}},
+                "grok-odd": {"info": "not a row"}}}))
+            with patch.object(module, "_MODELS_CACHE", cache):
+                self.assertEqual(module.search_models(), frozenset({"grok-4.7"}))
+                cache.write_text("{torn")
+                self.assertEqual(module.search_models(), frozenset())
+                cache.write_text("[]")
+                self.assertEqual(module.search_models(), frozenset())
+            with patch.object(module, "_MODELS_CACHE", Path(root) / "missing.json"):
+                self.assertEqual(module.search_models(), frozenset())
+
 
 class TestPromptRendering(unittest.TestCase):
     """Test prompt rendering for stateless conversation."""
@@ -424,6 +456,28 @@ class TestIterEvents(unittest.TestCase):
         self.assertEqual(len(events), 0)
 
 
+# grok's documented inline backend search: a server_tool_use, then the
+# web_search_tool_result whose hits are {type, url, title}.
+_SEARCH_HITS = [{"type": "web_search_result", "url": "https://blog.rust-lang.org/", "title": "Rust Blog"},
+                {"type": "web_search_result", "url": "file:///etc/hosts", "title": "local"}]
+
+
+def _search_snapshot():
+    return {"type": "assistant", "message": {"id": "m1", "content": [
+        {"type": "server_tool_use", "id": "srvtoolu_1", "name": "web_search",
+         "input": {"query": "rust stable release"}},
+        {"type": "web_search_tool_result", "tool_use_id": "srvtoolu_1", "content": _SEARCH_HITS},
+        {"type": "text", "text": "Rust 1.99 is out."}]}}
+
+
+def _expected_search():
+    return [{"type": "web_search", "status": "in_progress", "id": "srvtoolu_1"},
+            {"type": "web_search", "status": "completed", "id": "srvtoolu_1",
+             "action": {"type": "search", "query": "rust stable release"},
+             "results": [{"url": "https://blog.rust-lang.org/", "title": "Rust Blog"}]},
+            {"type": "text_delta", "text": "Rust 1.99 is out."}]
+
+
 class TestTranslate(unittest.TestCase):
     """Test event translation from grok format to route events."""
 
@@ -646,6 +700,57 @@ class TestTranslate(unittest.TestCase):
         self.assertFalse(state.host_handoff)
         self.assertEqual(list(module._translate(payload, state)), [])
 
+    def test_streamed_backend_search_is_relayed_once(self):
+        state = module._TurnState()
+        state.search = True
+
+        def stream(event):
+            return {"type": "stream_event", "event": event}
+        payloads = [
+            {"type": "system", "subtype": "init", "tools": ["web_search"]},
+            stream({"type": "message_start", "message": {"id": "m1"}}),
+            stream({"type": "content_block_start", "index": 0, "content_block": {
+                "type": "server_tool_use", "id": "srvtoolu_1", "name": "web_search", "input": {}}}),
+            stream({"type": "content_block_delta", "index": 0, "delta": {
+                "type": "input_json_delta", "partial_json": '{"query":"rust stable release"}'}}),
+            stream({"type": "content_block_stop", "index": 0}),
+            stream({"type": "content_block_start", "index": 1, "content_block": {
+                "type": "web_search_tool_result", "tool_use_id": "srvtoolu_1", "content": _SEARCH_HITS}}),
+            stream({"type": "content_block_stop", "index": 1}),
+            stream({"type": "content_block_start", "index": 2, "content_block": {"type": "text", "text": ""}}),
+            stream({"type": "content_block_delta", "index": 2, "delta": {
+                "type": "text_delta", "text": "Rust 1.99 is out."}}),
+            stream({"type": "content_block_stop", "index": 2}),
+            stream({"type": "message_delta", "delta": {"stop_reason": "end_turn"}}),
+            _search_snapshot(),
+        ]
+        events = [event for payload in payloads for event in module._translate(payload, state)]
+        self.assertIsNone(state.failure)
+        self.assertEqual(events, _expected_search())
+        self.assertFalse(state.host_handoff)
+
+    def test_snapshot_only_search_and_failed_search(self):
+        state = module._TurnState()
+        state.search = True
+        state.native_tools_disabled = True
+        self.assertEqual(list(module._translate(_search_snapshot(), state)), _expected_search())
+        failed = {"type": "assistant", "message": {"id": "m2", "content": [
+            {"type": "server_tool_use", "id": "srvtoolu_2", "name": "web_search", "input": {"query": "x"}},
+            {"type": "web_search_tool_result", "tool_use_id": "srvtoolu_2",
+             "content": {"type": "web_search_tool_result_error", "error_code": "unavailable"}}]}}
+        events = list(module._translate(failed, state))
+        self.assertEqual([event["status"] for event in events], ["in_progress", "completed"])
+        self.assertEqual(events[1]["results"], [])
+
+    def test_search_blocks_are_refused_when_search_was_not_requested(self):
+        state = module._TurnState()
+        list(module._translate({"type": "system", "subtype": "init", "tools": ["web_search"]}, state))
+        self.assertIn("did not disable", state.failure)
+        state = module._TurnState()
+        state.native_tools_disabled = True
+        with self.assertRaises(module.ToolCallError):
+            list(module._translate(_search_snapshot(), state))
+
 
 class TestDescribe(unittest.TestCase):
     """Test error description generation."""
@@ -748,6 +853,65 @@ class TestRunTurnValidation(unittest.TestCase):
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0]["type"], "error")
         self.assertIn("string", events[0]["message"])
+
+
+class _FakeSession:
+    """Minimal stand-in for cli_session.StdioSession."""
+
+    def __init__(self, argv, **kwargs):
+        self.argv = list(argv)
+        self.returncode = 0
+        self.process = None
+        self.lines = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def events(self, timeout=None):
+        yield from self.lines
+
+
+class TestRunTurnSearch(unittest.TestCase):
+    """Hosted search reaches grok only when it cannot widen the request."""
+
+    def _run(self, web_search, lines):
+        sessions = []
+
+        def factory(argv, **kwargs):
+            session = _FakeSession(argv, **kwargs)
+            session.lines = lines
+            sessions.append(session)
+            return session
+        with patch.object(module, "StdioSession", side_effect=factory), \
+                patch.object(module, "_resolve_binary", return_value="/fake/grok"):
+            events = list(module.run_turn({"model": "grok-4.7", "web_search": web_search,
+                                           "messages": [{"role": "user", "content": "rust?"}]}))
+        return events, sessions[0]
+
+    def test_requested_search_runs_web_search_alone_and_streams_searches(self):
+        lines = [{"type": "system", "subtype": "init", "tools": ["web_search"]},
+                 _search_snapshot(),
+                 {"type": "result", "subtype": "success", "result": "Rust 1.99 is out."}]
+        events, session = self._run({"context_size": None, "allowed_domains": [], "live": True}, lines)
+        self.assertEqual(session.argv[-2:], ["--tools", "web_search"])
+        self.assertEqual([event["type"] for event in events],
+                         ["web_search", "web_search", "text_delta", "message_stop"])
+        self.assertEqual(events[1]["results"], [{"url": "https://blog.rust-lang.org/", "title": "Rust Blog"}])
+
+    def test_search_never_widens_a_cached_or_domain_limited_request(self):
+        lines = [{"type": "system", "subtype": "init", "tools": []},
+                 {"type": "assistant", "message": {"id": "m1", "content": [{"type": "text", "text": "No search."}]}},
+                 {"type": "result", "subtype": "success", "result": "No search."}]
+        for web_search in (None, {"live": False, "allowed_domains": []},
+                           {"live": True, "allowed_domains": ["blog.rust-lang.org"]}):
+            with self.subTest(web_search=web_search):
+                events, session = self._run(web_search, lines)
+                self.assertEqual(session.argv[-2:], ["--tools", ""])
+                self.assertIn("--disable-web-search", session.argv)
+                self.assertEqual([event["type"] for event in events], ["text_delta", "message_stop"])
 
 
 

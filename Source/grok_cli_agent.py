@@ -14,6 +14,13 @@ is switched off with an explicit internal-tool removal list, verified against
 insufficient in 1.0.34. Native-shaped model calls may be forwarded only after
 that empty-registry check and only for tools actually offered by the host.
 
+One exception, only when the desktop asked for hosted web search: the turn
+keeps web_search alone (``--tools web_search``, init.tools ``["web_search"]``).
+On models whose cache entry sets ``supports_backend_search`` the search runs
+on xAI's servers and arrives inline as a server_tool_use /
+web_search_tool_result pair; web_fetch, which fetches locally, stays off.
+Each search is relayed as a ``web_search`` event.
+
 Verified live against grok 1.0.34 (3736acbc8658):
   - Binary at ~/.grok/bin/grok (self-updates on launch)
   - ``--help`` confirms: --no-auto-update, --single/-p, --output-format streaming-messages-json,
@@ -80,6 +87,9 @@ BINARY_NAMES = ("grok",)
 SYSTEM_PROMPT_TRANSPORT = "flag"
 IMAGE_TRANSPORT = "acp_json_file"
 VERIFIED_IMAGE_MODELS = frozenset({"grok-4.6"})
+#: Backend web search runs on xAI's servers and never fetches a page locally,
+#: so web_search is the one tool a turn may enable (web_fetch stays off).
+WEB_SEARCH = True
 
 # Real installs live in ~/.grok/bin on this machine.
 _EXTRA_BIN_DIRS = ("~/.grok/bin", "~/.local/bin", "/opt/homebrew/bin", "/usr/local/bin")
@@ -258,6 +268,32 @@ def catalogue(*, capture=None, timeout=30) -> tuple[list[dict], list[str]]:
     return [], [_NO_MODEL_LIST_WARNING]
 
 
+_MODELS_CACHE = Path("~/.grok/models_cache.json")
+
+
+def search_models() -> frozenset[str]:
+    """Models whose web searches run on xAI's servers, per the CLI's own cache.
+
+    grok writes ~/.grok/models_cache.json from its models endpoint; it holds no
+    credential (auth lives in auth.json, which this module never opens). A
+    model with ``supports_backend_search`` reports each search inline, which
+    run_turn relays. Any other model would call the client web_search tool
+    instead, which this route does not relay, so it stays without search. No
+    readable cache means no search.
+    """
+    try:
+        with _MODELS_CACHE.expanduser().open(encoding="utf-8") as handle:
+            cache = json.load(handle)
+    except (OSError, ValueError):
+        return frozenset()
+    models = cache.get("models") if isinstance(cache, dict) else None
+    if not isinstance(models, dict):
+        return frozenset()
+    return frozenset(identifier for identifier, entry in models.items()
+                     if isinstance(entry, dict) and isinstance(entry.get("info"), dict)
+                     and entry["info"].get("supports_backend_search") is True)
+
+
 # ---------------------------------------------------------------------------
 # argv construction
 # ---------------------------------------------------------------------------
@@ -308,12 +344,16 @@ def _assert_safe(argv: list[str]) -> list[str]:
     return argv
 
 
-def build_argv(model, *, effort=None, system=None, stream=True) -> list[str]:
+def build_argv(model, *, effort=None, system=None, stream=True, search=False) -> list[str]:
     """Full argv for one print-mode turn. argv[0] is the bare binary name.
 
     ``run_turn`` replaces argv[0] with the resolved absolute path; keeping the
     name here makes this function pure and testable on a machine with no CLI
     installed.
+
+    ``search`` keeps exactly one tool, web_search: it leaves the removal list
+    and --tools, and --disable-web-search is dropped. web_search is read-only,
+    so dontAsk runs it without a prompt; web_fetch stays removed and denied.
 
     INVARIANT: Every argv carries ``--no-auto-update`` to prevent the CLI from
     self-updating during capability checks or turns.
@@ -340,7 +380,12 @@ def build_argv(model, *, effort=None, system=None, stream=True) -> list[str]:
         argv += ["--output-format", "json"]
 
     # Read-only posture
-    argv += list(READ_ONLY_FLAGS)
+    flags = list(READ_ONLY_FLAGS)
+    if search:
+        flags.remove("--disable-web-search")
+        removed = flags.index("--disallowed-tools") + 1
+        flags[removed] = ",".join(tool for tool in _DISALLOWED_TOOLS if tool != "web_search")
+    argv += flags
 
     # Model selection
     argv += ["--model", validated_model]
@@ -361,7 +406,7 @@ def build_argv(model, *, effort=None, system=None, stream=True) -> list[str]:
                 argv += ["--system-prompt-override", system_text]
 
     # Variadic flag: --tools must be last
-    argv += ["--tools", ""]
+    argv += ["--tools", "web_search" if search else ""]
 
     # Safety: verify variadic flag is at the end
     if argv[-2] not in _VARIADIC_TOOL_FLAGS:
@@ -466,6 +511,9 @@ class _TurnState:
         self.host_handoff = False
         self.pending_calls = {}
         self.backend_calls = set()
+        self.search = False
+        self.searches = {}
+        self.pending_searches = {}
 
     def start_message(self, message):
         identifier = message.get("id") if isinstance(message, dict) else None
@@ -544,6 +592,50 @@ class _TurnState:
         self.host_handoff = True
         return {"type": "tool_call", **call}
 
+    def search_started(self, block):
+        """A backend search's server_tool_use, reported once per id.
+
+        The partial stream opens the block with empty input and sends the
+        query as one input_json_delta; the whole-message snapshot repeats it
+        complete, so a later sighting only fills in a missing query.
+        """
+        identifier = block.get("id")
+        arguments = block.get("input") if isinstance(block.get("input"), dict) else {}
+        if not isinstance(identifier, str) or not identifier:
+            return None
+        search = self.searches.get(identifier)
+        if search is not None:
+            if arguments and not search["input"]:
+                search["input"] = arguments
+            return None
+        self.searches[identifier] = {"input": arguments, "done": False}
+        return {"type": "web_search", "status": "in_progress", "id": identifier}
+
+    def search_finished(self, block):
+        """The web_search_tool_result that ends a search, reported once.
+
+        Its content is the hit list, or an error object for a failed search,
+        which finishes with no results.
+        """
+        identifier = block.get("tool_use_id")
+        if not isinstance(identifier, str) or not identifier:
+            return []
+        events = []
+        if identifier not in self.searches:
+            events.append(self.search_started({"id": identifier}))
+        search = self.searches[identifier]
+        if search["done"]:
+            return events
+        search["done"] = True
+        content = block.get("content")
+        results = [{"url": hit["url"], "title": hit["title"] if isinstance(hit.get("title"), str) else ""}
+                   for hit in (content if isinstance(content, list) else [])
+                   if isinstance(hit, dict) and hit.get("type") == "web_search_result"
+                   and isinstance(hit.get("url"), str) and hit["url"].startswith(("https://", "http://"))]
+        events.append({"type": "web_search", "status": "completed", "id": identifier,
+                       "action": _search_action(search["input"]), "results": results[:20]})
+        return events
+
     def fallback_text(self) -> str:
         if self.assistant_text:
             return "".join(self.assistant_text)
@@ -614,7 +706,9 @@ def _translate(payload: Any, state: _TurnState) -> list[dict]:
     kind = payload.get("type")
 
     if kind == "system" and payload.get("subtype") == "init":
-        if payload.get("tools") != []:
+        # A search turn may keep web_search (or lose it to the user's own
+        # disable_web_search); any other native tool fails the turn.
+        if payload.get("tools") not in ([], ["web_search"] if state.search else []):
             state.failure = "grok did not disable its native CLI tools; this runtime cannot safely forward host calls."
         else:
             state.native_tools_disabled = True
@@ -637,7 +731,16 @@ def _translate(payload: Any, state: _TurnState) -> list[dict]:
                                                  block.get(block_type), snapshot=True)
                 if translated:
                     yield translated
-            if block.get("type") in {"tool_use", "server_tool_use"}:
+            elif state.search and block_type == "server_tool_use" and block.get("name") == "web_search":
+                state.pending_searches[event.get("index", 0)] = {"id": block.get("id"), "json": ""}
+                translated = state.search_started(block)
+                if translated:
+                    yield translated
+            elif state.search and block_type == "web_search_tool_result":
+                # The result block arrives whole; no delta type carries hits.
+                if isinstance(block.get("content"), (list, dict)):
+                    yield from state.search_finished(block)
+            elif block_type in {"tool_use", "server_tool_use"}:
                 if not state.native_tools_disabled:
                     state.failure = "grok attempted a native CLI tool; workspace actions must use host tools."
                     return []
@@ -652,6 +755,11 @@ def _translate(payload: Any, state: _TurnState) -> list[dict]:
                                                  delta.get(content_type))
                 if translated:
                     yield translated
+            elif delta.get("type") == "input_json_delta" and event.get("index", 0) in state.pending_searches:
+                search = state.pending_searches[event.get("index", 0)]
+                search["json"] += delta.get("partial_json") or ""
+                if len(search["json"].encode("utf-8")) > MAX_ENVELOPE_BYTES:
+                    raise ToolCallError("grok web search query exceeds the size limit")
             elif delta.get("type") == "input_json_delta":
                 call = state.pending_calls.get(event.get("index", 0))
                 if call is None:
@@ -659,6 +767,14 @@ def _translate(payload: Any, state: _TurnState) -> list[dict]:
                 call["json"] += delta.get("partial_json") or ""
                 if len(call["json"].encode("utf-8")) > MAX_ENVELOPE_BYTES:
                     raise ToolCallError("grok tool call exceeds the size limit")
+        elif event_type == "content_block_stop" and event.get("index", 0) in state.pending_searches:
+            search = state.pending_searches.pop(event.get("index", 0))
+            try:
+                arguments = json.loads(search["json"]) if search["json"] else None
+            except ValueError:
+                arguments = None
+            if isinstance(arguments, dict) and isinstance(search["id"], str):
+                state.search_started({"id": search["id"], "input": arguments})
         elif event_type == "content_block_stop":
             call = state.pending_calls.pop(event.get("index", 0), None)
             if call is not None:
@@ -674,7 +790,7 @@ def _translate(payload: Any, state: _TurnState) -> list[dict]:
         elif event_type == "message_delta":
             reason = (event.get("delta") or {}).get("stop_reason")
             if reason in {"cancelled", "canceled", "interrupted", "error", "failed"} \
-                    or (reason == "tool_use" and not state.backend_calls):
+                    or (reason == "tool_use" and not (state.backend_calls or state.searches)):
                 state.failure = f"grok reported {reason} before a host tool handoff."
         return []
 
@@ -690,6 +806,14 @@ def _translate(payload: Any, state: _TurnState) -> list[dict]:
             if not isinstance(block, dict):
                 continue
             block_type = block.get("type")
+            if state.search and block_type == "server_tool_use" and block.get("name") == "web_search":
+                translated = state.search_started(block)
+                if translated:
+                    yield translated
+                continue
+            if state.search and block_type == "web_search_tool_result":
+                yield from state.search_finished(block)
+                continue
             if block_type in {"tool_use", "server_tool_use"}:
                 if not state.native_tools_disabled:
                     state.failure = "grok attempted a native CLI tool; workspace actions must use host tools."
@@ -732,6 +856,31 @@ def _translate(payload: Any, state: _TurnState) -> list[dict]:
             state.failure = f"grok CLI error: {message}"
 
     return []
+
+
+def _search_action(arguments: dict) -> dict:
+    """The Responses action for a backend search's server_tool_use input.
+
+    grok documents only ``input.query``; a page visit, if one ever arrives
+    here, carries its URL instead.
+    """
+    query = arguments.get("query")
+    if isinstance(query, str) and query.strip():
+        return {"type": "search", "query": query}
+    url = arguments.get("url")
+    if isinstance(url, str) and url.startswith(("https://", "http://")):
+        return {"type": "open_page", "url": url}
+    return {"type": "other"}
+
+
+def search_enabled(value) -> bool:
+    """Whether the desktop's hosted search can run here without widening it.
+
+    grok searches live and takes domain limits only from its config file, so
+    a cached-only or domain-limited request runs without search rather than
+    with a broader one.
+    """
+    return isinstance(value, dict) and value.get("live") is not False and not value.get("allowed_domains")
 
 
 def _describe(exc: BaseException, state: _TurnState | None = None,
@@ -787,7 +936,8 @@ def run_turn(request, *, spawner=None, timeout=300) -> Iterator[dict]:
             )
 
         # Build argv - prompt goes as positional arg to --single
-        argv = build_argv(model, effort=effort, system=None, stream=True)
+        state.search = search_enabled(request.get("web_search"))
+        argv = build_argv(model, effort=effort, system=None, stream=True, search=state.search)
 
         # Insert the prompt as the value for --single
         # argv: [grok, --no-auto-update, --single, --output-format, ...]

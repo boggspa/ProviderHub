@@ -16,6 +16,11 @@ denied automatically rather than approved. Verified live against claude 2.1.276:
 the ``system/init`` event reports ``tools: []`` and ``mcp_servers: []`` with
 ``--permission-mode default --permission-prompts none --tools ""``.
 
+One exception, only when the desktop asked for hosted web search: the turn
+keeps WebSearch alone (``--allowedTools WebSearch --tools WebSearch``). It runs
+on Anthropic's search backend and fetches nothing locally; WebFetch, which
+does, stays off. Each search is relayed as a ``web_search`` event.
+
 Permission mode matrix tested live on claude 2.1.276:
  - ``plan``: tools=[], BUT injects plan-mode persona ("I'm in plan mode...")
  - ``default``: tools=[], NO persona, fail-closed via --permission-prompts none
@@ -76,6 +81,9 @@ BINARY_NAMES = ("claude",)
 SYSTEM_PROMPT_TRANSPORT = "flag"
 IMAGE_TRANSPORT = "stream_json"
 VERIFIED_IMAGE_MODELS = frozenset({"sonnet", "claude-sonnet-5"})
+#: Claude Code's WebSearch runs on Anthropic's search backend and never fetches
+#: a page locally, so it is the one tool a turn may enable (WebFetch stays off).
+WEB_SEARCH = True
 
 # Real installs live outside the default PATH on this machine (~/.local/bin).
 _EXTRA_BIN_DIRS = ("~/.local/bin", "/opt/homebrew/bin", "/usr/local/bin")
@@ -130,7 +138,8 @@ CLAUDE_EFFORT_ALIASES = {
 # limits remain provider-managed; the CLI's error is surfaced at turn time.
 KNOWN_MODELS = tuple(
     {"id": identifier, "display_name": label,
-     "reasoning_levels": [] if identifier == "claude-haiku-4-5" else list(CLAUDE_EFFORTS)}
+     "reasoning_levels": [] if identifier == "claude-haiku-4-5" else list(CLAUDE_EFFORTS),
+     "web_search": True}
     for identifier, label in CLAUDE_MODEL_LABELS.items()
 )
 
@@ -360,12 +369,15 @@ def catalogue(*, capture=None, timeout=30) -> tuple[list[dict], list[str]]:
 # argv construction
 # ---------------------------------------------------------------------------
 
-def build_argv(model, *, effort=None, system=None, stream=True) -> list[str]:
+def build_argv(model, *, effort=None, system=None, stream=True, search=False) -> list[str]:
     """Full argv for one print-mode turn. argv[0] is the bare binary name.
 
     ``run_turn`` replaces argv[0] with the resolved absolute path; keeping the
     name here makes this function pure and testable on a machine with no CLI
     installed. The prompt is NOT part of argv — it always goes on stdin.
+
+    ``search`` leaves exactly one tool, WebSearch, and pre-approves it: the
+    fail-closed ``--permission-prompts none`` would otherwise deny every call.
     """
     validated_model = _validate_model(model)
     # Saved short routes display a specific version in the hub catalogue.
@@ -394,7 +406,7 @@ def build_argv(model, *, effort=None, system=None, stream=True) -> list[str]:
             else:
                 argv += ["--append-system-prompt", system]
     # Variadic, so it must be the last thing on the command line.
-    argv += ["--tools", ""]
+    argv += ["--allowedTools", "WebSearch", "--tools", "WebSearch"] if search else ["--tools", ""]
 
     if argv[-2] not in _VARIADIC_TOOL_FLAGS:
         raise ClaudeCliAgentError(
@@ -479,6 +491,7 @@ class _TurnState:
         self.messages = {}
         self.current_message = None
         self.last_text_message = None
+        self.search = False
 
     def start_message(self, message):
         identifier = message.get("id") if isinstance(message, dict) else None
@@ -605,6 +618,9 @@ def _translate(payload: Any, state: _TurnState) -> list[dict]:
                 translated = state.content_event(event.get("index", 0), block_type,
                                                  block.get(block_type), snapshot=True)
                 return [translated] if translated else []
+            if state.search and isinstance(block, dict) and block.get("type") == "tool_use" \
+                    and block.get("name") == "WebSearch":
+                return [{"type": "web_search", "status": "in_progress", "id": block.get("id")}]
             return []
         if event.get("type") != "content_block_delta":
             # message_delta carries a stop reason too; record it as a fallback
@@ -685,9 +701,45 @@ def _translate(payload: Any, state: _TurnState) -> list[dict]:
         state.failure = f"claude reported an error: {message}"
         return []
 
+    if kind == "user" and state.search:
+        return _search_result(payload)
+
     # system/init, system/status, rate_limit_event, replayed user messages:
     # informational, never route output.
     return []
+
+
+def _search_result(payload: dict) -> list[dict]:
+    """A finished WebSearch, from the tool result the CLI hands back to Claude.
+
+    ``tool_use_result`` carries the query and each result's title and URL; the
+    tool_result block carries the id that pairs it with the search it ends.
+    """
+    found = payload.get("tool_use_result")
+    content = (payload.get("message") or {}).get("content")
+    ids = [block.get("tool_use_id") for block in content
+           if isinstance(block, dict) and block.get("type") == "tool_result"] if isinstance(content, list) else []
+    if not isinstance(found, dict) or not isinstance(found.get("query"), str) or not ids:
+        return []
+    results = []
+    for entry in found.get("results") or []:
+        for item in (entry.get("content") if isinstance(entry, dict) else None) or []:
+            if isinstance(item, dict) and isinstance(item.get("url"), str) \
+                    and item["url"].startswith(("https://", "http://")):
+                results.append({"url": item["url"],
+                                "title": item["title"] if isinstance(item.get("title"), str) else ""})
+    return [{"type": "web_search", "status": "completed", "id": ids[0],
+             "action": {"type": "search", "query": found["query"]}, "results": results[:20]}]
+
+
+def search_enabled(value) -> bool:
+    """Whether the desktop's hosted search can run here without widening it.
+
+    WebSearch is always live and takes domain filters only as the model's own
+    per-call choice, so a cached-only or domain-limited request runs without
+    search rather than with a broader one.
+    """
+    return isinstance(value, dict) and value.get("live") is not False and not value.get("allowed_domains")
 
 
 def _write_prompt(session, prompt: str) -> None:
@@ -822,7 +874,8 @@ def run_turn(request, *, spawner=None, timeout=300) -> Iterator[dict]:
         # The system prompt travels as a flag, so it is not also rendered into
         # the prompt; duplicating it would double-charge and could conflict.
         prompt = render_prompt(messages)
-        argv = build_argv(model, effort=effort, system=system, stream=True)
+        state.search = search_enabled(request.get("web_search"))
+        argv = build_argv(model, effort=effort, system=system, stream=True, search=state.search)
         if request.get("images"):
             argv[1:1] = ["--input-format", "stream-json"]
             prompt = json.dumps({"type": "user", "message": {"role": "user",

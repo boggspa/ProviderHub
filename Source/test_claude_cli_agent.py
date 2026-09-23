@@ -338,6 +338,40 @@ class RunTurnTests(unittest.TestCase):
             events = list(m.run_turn(request, spawner=spawner))
         return events, fake, sessions
 
+    def _search_turn(self, web_search):
+        start = {"type": "stream_event", "event": {"type": "content_block_start", "index": 1, "content_block": {
+            "type": "tool_use", "id": "toolu_1", "name": "WebSearch", "input": {}}}}
+        result = {"type": "user", "message": {"role": "user", "content": [
+                      {"type": "tool_result", "tool_use_id": "toolu_1", "content": "Web search results for ..."}]},
+                  "tool_use_result": {"query": "tide times leith", "durationSeconds": 2.1, "results": [
+                      {"tool_use_id": "srvtoolu_1", "content": [
+                          {"title": "Leith tides", "url": "https://tides.example/leith"},
+                          {"title": "local", "url": "file:///etc/hosts"}]},
+                      "A plain-text commentary entry."]}}
+        fake = self._stream([json.dumps(start), json.dumps(result),
+                             json.dumps(_se("text_delta", "text", "High tide 14:02.")),
+                             json.dumps(_result_event(result="High tide 14:02."))])
+        return self._run({"model": "sonnet", "messages": [{"role": "user", "content": "tides?"}],
+                          "web_search": web_search}, fake)
+
+    def test_requested_search_runs_websearch_alone_and_streams_searches(self):
+        events, session, _ = self._search_turn({"context_size": None, "allowed_domains": [], "live": True})
+        self.assertEqual(session.argv[-4:], ["--allowedTools", "WebSearch", "--tools", "WebSearch"])
+        self.assertEqual([e["type"] for e in events], ["web_search", "web_search", "text_delta", "message_stop"])
+        self.assertEqual(events[0], {"type": "web_search", "status": "in_progress", "id": "toolu_1"})
+        self.assertEqual(events[1]["id"], "toolu_1")
+        self.assertEqual(events[1]["action"], {"type": "search", "query": "tide times leith"})
+        self.assertEqual(events[1]["results"], [{"url": "https://tides.example/leith", "title": "Leith tides"}])
+
+    def test_search_never_widens_a_cached_or_domain_limited_request(self):
+        for web_search in (None, {"live": False, "allowed_domains": []},
+                           {"live": True, "allowed_domains": ["tides.example"]}):
+            with self.subTest(web_search=web_search):
+                events, session, _ = self._search_turn(web_search)
+                self.assertEqual(session.argv[-2:], ["--tools", ""])
+                self.assertNotIn("WebSearch", session.argv)
+                self.assertEqual([e["type"] for e in events], ["text_delta", "message_stop"])
+
     def test_bad_request_degrades(self):
         with mock.patch.object(m, "_resolve_binary", return_value="/fake/claude"):
             events = list(m.run_turn("not an object"))
