@@ -73,6 +73,14 @@ project ships, and the conditions that came with them:
 | DeepSeek | Hangzhou DeepSeek AI Co., Ltd. | Official repository publishes the source SVG; the PNG is a derivative recorded upstream as **design reference only**. DeepSeek's User Agreement restricts independent logo use — **do not redistribute without owner permission.** |
 | Qwen, OpenRouter | Alibaba, OpenRouter | Sourced via Limit Counter; **no upstream rights note exists for these two.** Clearance status unverified. |
 
+Every mark above ships as the unmodified source asset, with one exception worth
+stating plainly: **Devin** is declared `template: true` in
+`Source/provider_branding.json`, so `ProviderMark` renders it through SwiftUI
+template rendering and paints it in the interface's primary colour rather than
+reproducing its own colours. That is a modification of the mark's appearance,
+not a byte-for-byte reproduction, and it raises the bar above purely
+nominative use. It is disclosed here rather than left implicit.
+
 Two of these are unresolved for public redistribution and are flagged rather
 than papered over: **DeepSeek**, whose upstream note expressly warns against
 publishing the PNG derivative, and **Qwen / OpenRouter**, which have no recorded
