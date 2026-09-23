@@ -157,18 +157,27 @@ extension Color {
     }
 }
 struct ProviderMark: View {
+    @Environment(\.colorScheme) private var colorScheme
     var presentation: ProviderPresentation
     var size: CGFloat = 28
     var body: some View {
         Group {
             if let logo = presentation.logo,
-               let url = Bundle.main.resourceURL?.appendingPathComponent("worker").appendingPathComponent(logo.dark ?? logo.light),
+               let url = Bundle.main.resourceURL?.appendingPathComponent("worker").appendingPathComponent(logoFileName(logo)),
                let image = NSImage(contentsOf: url) {
                 artwork(image, logo: logo).foregroundStyle(.primary).scaleEffect(logo.scale ?? 1)
             } else {
                 Text(presentation.shortCode).font(.system(size: size * 0.31, weight: .bold, design: .rounded)).foregroundStyle(presentation.color)
             }
         }.frame(width: size, height: size).accessibilityLabel(presentation.displayProvider)
+    }
+
+    // Pick the artwork variant that matches the ambient colour scheme instead
+    // of always taking the dark file: light uses `logo.light`, and dark keeps
+    // the historical `logo.dark ?? logo.light` preference exactly. `light` is
+    // non-optional in BrandLogo, so the light branch needs no dark fallback.
+    private func logoFileName(_ logo: BrandLogo) -> String {
+        colorScheme == .light ? logo.light : (logo.dark ?? logo.light)
     }
 
     @ViewBuilder
