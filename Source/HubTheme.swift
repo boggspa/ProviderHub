@@ -24,9 +24,22 @@ enum HubTheme {
     enum Accent {
         // MistralBridge.swift:5; decorative mark, not a filled-control tint.
         static let brand = Color(red: 1.0, green: 0.43, blue: 0.18)
-        // MistralBridge.swift:9,1171; the concurrent control-contrast change.
-        // #BF5419 decoded exactly as HubModels.swift:154-156 decodes it.
-        // Do not merge this role with brand or with per-provider accents.
+        // PROPOSED, NOT WIRED — held for the owner's visual sign-off.
+        //
+        // Prominent buttons paint white on `brand`, which is 2.79:1 and fails
+        // the 4.5:1 rule the provider palette is held to. Two candidates were
+        // measured with the repo's own contrast helpers:
+        //   darken the fill to this in-band #BF5419 — white on it is 4.67:1,
+        //     but it adds a second, muddier orange beside the bright mark and
+        //     clears the floor by only 0.17;
+        //   keep `brand` and switch the button label to the hub's dark ink
+        //     #18191A — 6.31:1, no new colour and no collateral.
+        // Design review recommends the second. It also found the first had been
+        // implemented as a window-level `.accentColor` repoint, which darkens
+        // every toggle, picker, spinner and focus ring that inherits the accent
+        // in order to fix three buttons. Neither is wired here; `control`
+        // records the candidate only. Do not merge this role with brand or with
+        // per-provider accents.
         static let control = Color(red: 191.0 / 255.0, green: 84.0 / 255.0, blue: 25.0 / 255.0)
     }
 

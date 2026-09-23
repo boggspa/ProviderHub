@@ -111,11 +111,18 @@ is **adoptable** — another agent is entitled to harvest its paths. Re-stamp
 before a long operation, not after it, and re-stamp before your final commit
 if the work ran long.
 
-A reader treats a marker as **blocking** only if it is still held _and_ the
-clock is inside its effective (capped) `expires`; otherwise it is advisory.
-"Held" means a live pid, or a matching `lockOwnerId` (below) when the claim
-carries no pid. That way a crashed or forgotten claim decays on its own
-instead of blocking the tree forever.
+A reader treats a **manual** marker as blocking only if it is still held _and_
+the clock is inside its effective (capped) `expires`; otherwise it is
+advisory. "Held" means a live pid, or a readable `lockOwnerId` (below) when
+the claim carries no pid. That way a crashed or forgotten claim decays on its
+own instead of blocking the tree forever.
+
+Runtime-derived projections are the exception and do **not** decay on their
+lease: a full runtime marker blocks until durable authority removes it, and
+even a dead projected pid is a recovery block rather than a decay. See
+"Runtime-derived markers" below and section 1 of the hook. `work_guard`
+classifies by filename and fails closed on them for the same reason, so the
+two tools agree.
 
 #### TaskWraith seats — owner id preferred, stable pid allowed
 
@@ -127,11 +134,13 @@ absent. Without a stable ancestor PID, coordinate instead.
 
 For a **TaskWraith seat**, prefer the exact `TASKWRAITH_LOCK_OWNER_ID` that
 main stamps into the seat's environment. Read it; never invent one. It is an
-opaque id, so a human-readable stand-in (`lockOwnerId: MySeatName`) matches
-nothing at the hook — while `work-guard` still counts the field as a held
-lease, so the two tools then contradict each other over the same claim.
-Verify it in the shell you will commit from, because that is the environment
-the hook reads:
+opaque id. A human-readable stand-in (`lockOwnerId: MySeatName`) is worse than
+useless: the hook compares that field against `$TASKWRAITH_LOCK_OWNER_ID` to
+decide whether a claim is _yours_, so a stand-in never matches and you lose
+the ability to recognise your own claim — yet it is still a readable owner id,
+so it holds the lane against everyone else, at the hook and at `work_guard`
+alike. You get the blocking without the ownership. Verify the real value in
+the shell you will commit from, because that is the environment the hook reads:
 
 ```bash
 printenv TASKWRAITH_LOCK_OWNER_ID
@@ -159,15 +168,48 @@ signal.** A missing or unparseable `expires` is treated as
 decayed — the marker claims nothing — precisely so a dead seat cannot wedge
 the tree forever. Keep the lease short and renew it.
 
+#### Two ways the pid model fails — plan around them
+
+Ownership by ancestor pid is the only identity an external agent has, and it
+has two real holes. Both were hit by the session that added this section,
+which ran four concurrent agents through one host.
+
+**Co-resident sessions are mutually invisible.** `is_own_claim` walks the
+process ancestry, so a claim reads as "yours" when its pid is an _ancestor_ of
+the committing `git`. Sessions launched by the same host — several agents
+driven by one app, or a parent and its subagents — share that ancestor, so
+each one's claim looks like the other's own. In practice four agents
+independently derived the same session-host pid, and the hook then treated
+every one of their claims as self-owned: it would not block any of them from
+staging any other's paths. The single guarantee the hook exists to provide is
+void for exactly the arrangement that most needs it. If you spawn subagents
+into this checkout, do not rely on the hook to keep them apart. Partition
+paths explicitly in the task you hand each one, require each to report the
+paths it touched, and diff-audit before you commit.
+
+**A host pid that dies mid-session silently unhands the claim.** If the
+session host exits or restarts while the agent carries on working, `kill -0`
+fails and the claim decays on the spot: the hook stops blocking and
+`work_guard` reports DECAYED, so the session's dirty paths become harvestable
+by anyone while it is still editing them. Nothing tells the session that this
+happened. Treat a long-running task as needing a re-stamped claim with a
+currently-live pid before each commit, and check `work_guard.py status` for
+your own marker rather than assuming it still holds.
+
 ### Runtime-derived markers — not yours to touch
 
 TaskWraith projects runtime markers into this tree with the filename shapes
 `.WORK-IN-PROGRESS-taskwraith-runtime-*.md` and
-`.WORK-IN-PROGRESS-taskwraith-contribution-*.md`. These carry `lockOwnerId`
-and no pid. They are **not** a substitute for a manual claim: they serialise
-a single mutation and exist for seconds, and they are **not adoptable**. Do
-not manually delete, adopt, or harvest them. If one is stale, restart
-TaskWraith and let its lock recovery reconcile the projection.
+`.WORK-IN-PROGRESS-taskwraith-contribution-*.md`. The two shapes carry
+different identities: a full **runtime** marker carries `pid` + `lockOwnerId`
++ `birthReceiptHash`, and the hook rejects one missing any of them as an
+invalid projection; a **contribution** marker is the lighter shape, carrying
+`lockOwnerId` + `expires` + `paths` and no pid. Neither is a substitute for a
+manual claim: they serialise a single mutation and exist for seconds, and they
+are **not adoptable**. Do not manually delete, adopt, or harvest them. If one
+is stale, restart TaskWraith and let its lock recovery reconcile the
+projection — and note that, unlike a manual claim, a runtime marker does not
+decay on its lease, so waiting it out is not an option.
 
 ### Adopting a decayed claim
 
@@ -257,9 +299,11 @@ bash scripts/hooks_install.sh   # git config core.hooksPath .githooks
 ```
 
 [`.githooks/pre-commit`](.githooks/pre-commit) **blocks exactly one thing**:
-staging a path another live session has claimed. A manual claim blocks only
-while its pid is alive and its expiry has not passed; a valid runtime-derived
-claim blocks until durable authority removes it. Everything else advises:
+staging a path another live session has claimed. A manual claim blocks while
+its expiry has not passed _and_ it is held — by a live pid when it carries
+one, or by a readable `lockOwnerId` when it does not, since the hook skips the
+pid check entirely for an owner-id-only claim; a valid runtime-derived claim
+blocks until durable authority removes it. Everything else advises:
 forty-plus staged paths, your own claim still being up, a manual claim past
 its lease (confirm with `work_guard.py status` before adopting it), and
 unclaimed dirty work between commits. One block and otherwise quiet is
@@ -297,11 +341,21 @@ needs no attribution — you never have to work out whose file it is. A path is
 orphaned when it is dirty and no **live** claim covers it, and a decayed claim
 covers nothing.
 
-**Snapshots make loss impossible.** Every tick commits the whole working tree
-to `refs/wip/<timestamp>` — tracked edits, other sessions' staged work, and
-untracked files, plus the markers themselves so a dead session's intent
-survives with its diff. Nothing is pushed and nothing appears in `git status`,
-`git log`, or `git branch`. To recover:
+**Snapshots make loss impossible.** Every tick commits the working tree to
+`refs/wip/<timestamp>` — tracked edits and untracked files, plus the markers
+themselves, which are force-added past `.gitignore` because they are the only
+record of what a dead session was doing. A dead session's intent therefore
+does survive with its diff. Nothing is pushed and nothing appears in
+`git status`, `git log`, or `git branch`.
+
+One limit worth knowing: the snapshot is built from `read-tree HEAD` in a
+private index, so it captures HEAD plus the **working tree** and never reads
+the shared index. Another session's staged work is captured only insofar as
+the working tree still matches it — a staged hunk subset arrives merged with
+its unstaged siblings, and a staged deletion is captured as a present file. Do
+not rely on `refs/wip` to reproduce exactly what someone had staged.
+
+To recover:
 
 ```bash
 git for-each-ref --format='%(refname) %(committerdate:relative)' refs/wip/
