@@ -1,5 +1,6 @@
 """Token Plan identity, metadata and complete desktop tool cycles; no API spend."""
 import copy
+import http.client
 import json
 import unittest
 from unittest.mock import patch
@@ -11,6 +12,11 @@ from codex_catalogue import project_codex
 from hub_config import defaults, normalize, project_catalogue
 from providers import PROVIDERS, ProviderError, discover, prepare_request, validate_connection
 from qwen_provider import BASE_URL
+
+IMAGE_URL = ("data:image/png;base64,"
+             "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1cAAAAASUVORK5CYII=")
+IMAGE = {"type": "image", "source": {"type": "base64", "media_type": "image/png",
+                                      "data": IMAGE_URL.split(",", 1)[1]}}
 
 
 def spec(model_id="qwen3.8-max"):
@@ -89,6 +95,35 @@ class QwenProviderTests(unittest.TestCase):
             with self.subTest(changes=changes), self.assertRaises(ProviderError):
                 prepare_request("qwen-token-plan", {}, "key", payload(**changes), "qwen3.8-max", spec())
 
+    def test_image_tool_results_keep_text_ids_and_image_order(self):
+        source = payload(messages=[
+            {"role": "user", "content": "Inspect two screenshots."},
+            {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "shot_a", "name": "screenshot", "input": {}},
+                {"type": "tool_use", "id": "shot_b", "name": "screenshot", "input": {}}]},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "shot_a", "content": [
+                    {"type": "text", "text": "First screen"}, copy.deepcopy(IMAGE),
+                    {"type": "text", "text": "after capture"}]},
+                {"type": "tool_result", "tool_use_id": "shot_b", "content": [copy.deepcopy(IMAGE)]},
+                {"type": "text", "text": "Compare them."}]},
+        ])
+        original = copy.deepcopy(source)
+        plan = prepare_request("qwen-token-plan", {}, "key", source, "qwen3.8-max", spec())
+        self.assertEqual(source, original)
+        blocks = plan["body"]["messages"][-1]["content"]
+        self.assertEqual([block["type"] for block in blocks],
+                         ["tool_result", "image", "tool_result", "image", "text"])
+        self.assertEqual([blocks[0]["tool_use_id"], blocks[2]["tool_use_id"]], ["shot_a", "shot_b"])
+        self.assertTrue(blocks[0]["content"].startswith("First screen\nafter capture\n"))
+        self.assertIn("image from this tool result", blocks[0]["content"])
+        self.assertIn("image from this tool result", blocks[2]["content"])
+        self.assertEqual(blocks[1], IMAGE)
+        self.assertEqual(blocks[3], IMAGE)
+        self.assertEqual(blocks[4]["text"], "Compare them.")
+        with self.assertRaisesRegex(ProviderError, "does not advertise image input"):
+            prepare_request("qwen-token-plan", {}, "key", source, "qwen3.7-max", spec("qwen3.7-max"))
+
 
 class QwenGatewayTests(unittest.TestCase):
     setUp = fixtures.GatewayHubHTTPTests.setUp
@@ -126,6 +161,44 @@ class QwenGatewayTests(unittest.TestCase):
             for stream in (False, True):
                 with self.subTest(stream=stream):
                     responses_fixtures.ResponsesBridgeTests().exercise("qwen-token-plan", stream)
+
+    def test_codex_image_tool_result_can_continue_on_later_turns(self):
+        route = self.start_gateway("qwen-token-plan", "qwen3.8-max", spec())
+
+        def request(body):
+            client = http.client.HTTPConnection("127.0.0.1", self.gateway.server_port, timeout=8)
+            client.request("POST", "/v1/responses", json.dumps(body), {
+                "Authorization": "Bearer " + self.runtime.token, "Content-Type": "application/json"})
+            response = client.getresponse()
+            status, raw = response.status, response.read()
+            client.close()
+            return status, raw
+
+        body = {"model": route, "input": [{"role": "user", "content": "Inspect the screen."}],
+                "max_output_tokens": 512, "stream": False, "store": False,
+                "tools": [{"type": "function", "name": "read_file", "parameters": {"type": "object"}}]}
+        status, raw = request(body)
+        self.assertEqual(status, 200, raw)
+        first = json.loads(raw)
+        call = next(item for item in first["output"] if item["type"] == "function_call")
+        body["input"] += first["output"] + [{"type": "function_call_output",
+                                              "call_id": call["call_id"], "output": [
+            {"type": "input_text", "text": "Current screen"},
+            {"type": "input_image", "image_url": IMAGE_URL}]}]
+        status, raw = request(body)
+        self.assertEqual(status, 200, raw)
+        second = json.loads(raw)
+        sent = fixtures.MockProvider.requests[1]["messages"][2]["content"]
+        self.assertEqual([block["type"] for block in sent], ["tool_result", "image"])
+        self.assertEqual(sent[0]["tool_use_id"], call["call_id"])
+        self.assertTrue(sent[0]["content"].startswith("Current screen\n"))
+        self.assertEqual(sent[1], IMAGE)
+        body["input"] += second["output"] + [{"role": "user", "content": "What next?"}]
+        status, raw = request(body)
+        self.assertEqual(status, 200, raw)
+        self.assertEqual(json.loads(raw)["status"], "completed")
+        self.assertEqual(fixtures.MockProvider.requests[2]["messages"][2]["content"], sent)
+        self.assertEqual(self.runtime.status()["completed"], 3)
 
 
 if __name__ == "__main__":

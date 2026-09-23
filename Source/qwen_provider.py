@@ -136,13 +136,29 @@ def normalize_controls(body, model_id, spec):
     for message in body.get("messages", []):
         if not isinstance(message.get("content"), list):
             continue
+        expanded = []
         for block in message["content"]:
             if not isinstance(block, dict) or block.get("type") != "tool_result":
+                expanded.append(block)
                 continue
             content = block.get("content")
+            images = []
             if isinstance(content, list):
-                if not all(isinstance(part, dict) and part.get("type") == "text"
-                           and isinstance(part.get("text"), str) for part in content):
-                    raise QwenError("Qwen tool results require text content; image inputs can be supplied as user message images.")
-                block["content"] = "\n".join(part["text"] for part in content)
+                text = []
+                for part in content:
+                    if isinstance(part, dict) and part.get("type") == "text" and isinstance(part.get("text"), str):
+                        text.append(part["text"])
+                    elif isinstance(part, dict) and part.get("type") == "image":
+                        images.append(part)
+                    else:
+                        raise QwenError("Qwen tool results require text; only image blocks can be moved to the user message.")
+                if images:
+                    text.append(f"[Provider Hub: {len(images)} image{'s' if len(images) != 1 else ''} "
+                                "from this tool result follow immediately below.]")
+                block["content"] = "\n".join(text)
+            expanded.append(block)
+            # Alibaba requires tool_result.content to be a string. Image blocks
+            # are valid in the enclosing user message, including on replay.
+            expanded.extend(images)
+        message["content"] = expanded
     return compatibility
