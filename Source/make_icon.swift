@@ -1,28 +1,44 @@
-import AppKit
 import Foundation
-let directory = CommandLine.arguments[1]
-try FileManager.default.createDirectory(atPath: directory, withIntermediateDirectories: true)
-for size in [16, 32, 64, 128, 256, 512, 1024] {
-    let image = NSImage(size: NSSize(width: size, height: size))
-    image.lockFocus()
-    let s = CGFloat(size)
-    let rect = NSRect(x: s * 0.05, y: s * 0.05, width: s * 0.9, height: s * 0.9)
-    NSColor(calibratedRed: 0.11, green: 0.12, blue: 0.14, alpha: 1).setFill()
-    NSBezierPath(roundedRect: rect, xRadius: s * 0.2, yRadius: s * 0.2).fill()
-    let path = NSBezierPath()
-    path.move(to: NSPoint(x: s * 0.25, y: s * 0.30))
-    path.line(to: NSPoint(x: s * 0.25, y: s * 0.64))
-    path.curve(to: NSPoint(x: s * 0.75, y: s * 0.64), controlPoint1: NSPoint(x: s * 0.42, y: s * 0.43), controlPoint2: NSPoint(x: s * 0.58, y: s * 0.43))
-    path.line(to: NSPoint(x: s * 0.75, y: s * 0.30))
-    path.lineWidth = s * 0.075; path.lineCapStyle = .round; path.lineJoinStyle = .round
-    NSColor(calibratedRed: 1.0, green: 0.43, blue: 0.18, alpha: 1).setStroke(); path.stroke()
-    NSColor(calibratedWhite: 0.96, alpha: 1).setFill()
-    for x in [0.25, 0.75] { NSBezierPath(ovalIn: NSRect(x: s * (x - 0.055), y: s * 0.645, width: s * 0.11, height: s * 0.11)).fill() }
-    image.unlockFocus()
-    let data = NSBitmapImageRep(data: image.tiffRepresentation!)!.representation(using: .png, properties: [:])!
-    let name = size == 1024 ? "icon_512x512@2x.png" : "icon_\(size)x\(size).png"
-    try data.write(to: URL(fileURLWithPath: directory).appendingPathComponent(name))
-    if size > 16 && size <= 512 {
-        try data.write(to: URL(fileURLWithPath: directory).appendingPathComponent("icon_\(size/2)x\(size/2)@2x.png"))
+
+// The self-contained vector master is tracked beside this generator. See
+// AppIcon.provenance.json for its TaskWraith ghost and catalogue glyph sources.
+// Requires librsvg (rsvg-convert). From the repository root:
+//   swift Source/make_icon.swift /tmp/ProviderHub.iconset
+//   iconutil -c icns /tmp/ProviderHub.iconset -o Source/AppIcon.icns
+//   rsvg-convert -w 1024 -h 1024 Source/AppIcon.svg -o Source/AppIcon.png
+
+guard CommandLine.arguments.count == 2 else {
+    fputs("Usage: swift make_icon.swift <output.iconset>\n", stderr)
+    exit(2)
+}
+
+let directory = URL(fileURLWithPath: CommandLine.arguments[1], isDirectory: true)
+let source = URL(fileURLWithPath: #filePath)
+    .deletingLastPathComponent()
+    .appendingPathComponent("AppIcon.svg")
+
+guard FileManager.default.fileExists(atPath: source.path) else {
+    fputs("Missing AppIcon.svg beside make_icon.swift\n", stderr)
+    exit(2)
+}
+
+try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+for size in [16, 32, 128, 256, 512] {
+    for scale in [1, 2] {
+        let suffix = scale == 2 ? "@2x" : ""
+        let target = directory.appendingPathComponent("icon_\(size)x\(size)\(suffix).png")
+        let dimension = String(size * scale)
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process.arguments = [
+            "rsvg-convert", "-w", dimension, "-h", dimension,
+            "-o", target.path, source.path
+        ]
+        try process.run()
+        process.waitUntilExit()
+        guard process.terminationReason == .exit, process.terminationStatus == 0 else {
+            fputs("Icon rendering failed; ensure rsvg-convert is installed.\n", stderr)
+            exit(1)
+        }
     }
 }

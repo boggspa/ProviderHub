@@ -1,0 +1,26 @@
+{
+  "name": "Provider Hub",
+  "family": "TaskWraith companions",
+  "sourceRepository": "AGBench",
+  "sourceCommit": "63603c538d66c862f64440126a8452b98242471c",
+  "sourceDirectory": "design-assets/suite-app-icons/provider-hub",
+  "sourceGenerator": "design-assets/suite-app-icons/build.py",
+  "sourceManifest": "design-assets/suite-app-icons/manifest.json",
+  "composition": "First-party TaskWraith monoline ghost with the first-party fanout-routes catalogue glyph",
+  "accent": "#FFB276",
+  "originalSources": {
+    "design-assets/ghost/ghost-guy-mark-monoline-white.svg": "5c6055d5a9037344d50a3bf84f08fca9979de741fd1a4fed50e7172b8732fa60",
+    "design-assets/agent-pool-icons/icons/glyph-fanout-routes.svg": "692e58520cb41728a9620fc238c1b21773e9e5be747258fb8f4be27f2d7fa0c6"
+  },
+  "sha256": {
+    "AppIcon.svg": "5700203f849a11b465d681fedb3fd95ada1c83bf0dfbc72449928ac49767925e",
+    "AppIcon.png": "1b486535c51691b1edd988e76a2e3ad918fe1b93b8dbba8fd8911b2317d7aedd",
+    "AppIcon.icns": "6f08ae68a36748565e3e17a9a1c7809174fd3de5edce6062901cac43d0561ccc"
+  },
+  "regeneration": [
+    "swift Source/make_icon.swift /tmp/ProviderHub.iconset",
+    "iconutil -c icns /tmp/ProviderHub.iconset -o Source/AppIcon.icns",
+    "rsvg-convert -w 1024 -h 1024 Source/AppIcon.svg -o Source/AppIcon.png"
+  ],
+  "requirements": "macOS, Swift and librsvg's rsvg-convert; ordinary app builds use the tracked ICNS"
+}
