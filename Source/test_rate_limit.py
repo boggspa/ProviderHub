@@ -11,8 +11,8 @@ import time
 import unittest
 from email.utils import formatdate
 
-from rate_limit import (BACKOFF_BASE, BACKOFF_CAP, THROTTLE_CAP, ProviderThrottle,
-                        backoff_delay, parse_retry_after, wait_for_slot)
+from rate_limit import (BACKOFF_BASE, BACKOFF_CAP, THROTTLE_CAP, ProviderAdmission, ProviderThrottle,
+                        backoff_delay, parse_retry_after)
 
 
 class FakeClock:
@@ -114,6 +114,21 @@ class ProviderThrottleTests(unittest.TestCase):
         self.assertTrue(self.throttle.wait("mistral"))
         self.assertEqual(self.fake.sleeps, [])
 
+    def test_late_sibling_success_does_not_clear_newer_limit(self):
+        started_at = self.fake.now
+        self.fake.now += 1
+        self.throttle.note_limit("mistral", attempt=4)
+        self.assertFalse(self.throttle.note_success("mistral", started_at=started_at))
+        self.assertGreater(self.throttle.remaining("mistral"), 0)
+        self.assertTrue(self.throttle.note_success("mistral", started_at=self.fake.now))
+        self.assertEqual(self.throttle.remaining("mistral"), 0)
+
+    def test_later_limit_does_not_shorten_existing_cooldown(self):
+        self.throttle.note_limit("mistral", retry_after=30)
+        first = self.throttle.remaining("mistral")
+        self.throttle.note_limit("mistral", retry_after=1)
+        self.assertGreaterEqual(self.throttle.remaining("mistral"), first)
+
     def test_cancel_aborts_wait(self):
         self.throttle.note_limit("mistral", attempt=4)
         self.assertFalse(self.throttle.wait("mistral", cancel=cancel_after(2)))
@@ -144,50 +159,78 @@ class ProviderThrottleTests(unittest.TestCase):
         self.assertEqual(errors, [])
 
 
-class WaitForSlotTests(unittest.TestCase):
-    def test_free_slot_acquires_at_once(self):
-        fake = FakeClock()
-        semaphore = threading.Semaphore(2)
-        self.assertTrue(wait_for_slot(semaphore, clock=fake.clock, sleeper=fake.sleeper))
-        self.assertEqual(fake.sleeps, [])
-        semaphore.release()
+class ProviderAdmissionTests(unittest.TestCase):
+    def setUp(self):
+        self.semaphore = threading.BoundedSemaphore(3)
+        self.admission = ProviderAdmission(self.semaphore, capacity=3)
 
-    def test_held_slot_times_out(self):
-        fake = FakeClock()
-        semaphore = threading.Semaphore(1)
-        self.assertTrue(semaphore.acquire(blocking=False))
-        try:
-            self.assertFalse(wait_for_slot(semaphore, timeout=1.0, clock=fake.clock, sleeper=fake.sleeper))
-            self.assertAlmostEqual(sum(fake.sleeps), 1.0, places=6)
-        finally:
-            semaphore.release()
+    def test_parallel_admission_and_provider_backoff(self):
+        for attempt in range(3):
+            self.assertTrue(self.admission.acquire("kimi"))
+        self.assertFalse(self.admission.acquire("qwen", timeout=0.01))
+        self.admission.release("kimi")
+        self.assertTrue(self.admission.acquire("qwen"))
+        self.admission.release("qwen")
+        for attempt in range(2):
+            self.admission.release("kimi")
+        self.admission.note_limit("kimi")
+        self.assertTrue(self.admission.acquire("kimi"))
+        self.assertFalse(self.admission.acquire("kimi", timeout=0.01))
+        self.assertTrue(self.admission.acquire("qwen"))
+        self.admission.release("kimi")
+        self.admission.release("qwen")
 
-    def test_cancel_aborts_wait(self):
-        fake = FakeClock()
-        semaphore = threading.Semaphore(1)
-        self.assertTrue(semaphore.acquire(blocking=False))
-        try:
-            self.assertFalse(wait_for_slot(semaphore, cancel=cancel_after(3),
-                                           clock=fake.clock, sleeper=fake.sleeper))
-        finally:
-            semaphore.release()
+    def test_recovery_is_gradual(self):
+        self.admission.note_limit("cerebras")
+        for success in range(7):
+            self.admission.note_success("cerebras")
+        self.assertTrue(self.admission.acquire("cerebras"))
+        self.assertFalse(self.admission.acquire("cerebras", timeout=0.01))
+        self.admission.note_success("cerebras")
+        self.assertTrue(self.admission.acquire("cerebras"))
+        self.admission.release("cerebras")
+        self.admission.release("cerebras")
 
-    def test_release_unblocks_waiter(self):
-        semaphore = threading.Semaphore(1)
-        self.assertTrue(semaphore.acquire(blocking=False))
-        outcome = {}
+    def test_cancelled_waiter_does_not_block_next_provider(self):
+        self.assertFalse(self.admission.acquire("kimi", cancel=lambda: True))
+        self.assertTrue(self.admission.acquire("qwen"))
+        self.admission.release("qwen")
 
-        def waiter():
-            outcome["acquired"] = wait_for_slot(semaphore, timeout=5)
+    def test_waiters_rotate_across_providers(self):
+        self.assertTrue(self.semaphore.acquire(blocking=False))
+        self.assertTrue(self.semaphore.acquire(blocking=False))
+        self.assertTrue(self.semaphore.acquire(blocking=False))
+        order = []
+        permits = {name: threading.Event() for name in ("kimi-1", "kimi-2", "qwen")}
 
-        thread = threading.Thread(target=waiter)
-        thread.start()
-        time.sleep(0.2)
-        self.assertNotIn("acquired", outcome)
-        semaphore.release()
-        thread.join(timeout=5)
-        self.assertTrue(outcome.get("acquired"))
-        semaphore.release()
+        def worker(name, provider):
+            if self.admission.acquire(provider, timeout=3):
+                order.append(name)
+                permits[name].wait(3)
+                self.admission.release(provider)
+
+        threads = [threading.Thread(target=worker, args=(name, provider)) for name, provider in
+                   (("kimi-1", "kimi"), ("kimi-2", "kimi"), ("qwen", "qwen"))]
+        for index, thread in enumerate(threads):
+            thread.start()
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline:
+                with self.admission._condition:
+                    if sum(map(len, self.admission._waiting.values())) >= index + 1:
+                        break
+                time.sleep(0.01)
+        for position in range(3):
+            self.semaphore.release()
+            deadline = time.monotonic() + 2
+            while len(order) < position + 1 and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertEqual(len(order), position + 1)
+        self.assertEqual(order, ["kimi-1", "qwen", "kimi-2"])
+        for permit in permits.values():
+            permit.set()
+        for thread in threads:
+            thread.join(timeout=3)
+            self.assertFalse(thread.is_alive())
 
 
 if __name__ == "__main__":

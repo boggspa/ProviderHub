@@ -580,6 +580,11 @@ class NativeResponsesTests(unittest.TestCase):
         self.assertEqual(status, 429)
         self.assertEqual(json.loads(raw)["error"]["type"], "rate_limit_error")
         self.assertGreaterEqual(int(headers.get("retry-after", "0")), 1)
+        self.assertEqual(headers.get("x-provider-hub-origin"), "gateway")
+        log = (self.root / "activity.jsonl").read_text()
+        self.assertIn('"event": "slot_timeout"', log)
+        self.assertNotIn('"event": "throttled"', log)
+        self.assertEqual(self.runtime.status()["providers"]["ollama"]["failed"], 1)
 
     def test_truncated_or_malformed_stream_is_not_recorded_as_complete(self):
         self.start()

@@ -26,7 +26,7 @@ from spawn_depth import (SPAWN_NAMESPACE, SPAWN_TOOL, apply_subagent_model,
                          is_spawn_tool_reference)
 from subagent_catalogue import advertise_subagent_models
 from rate_limit import (MAX_UPSTREAM_ATTEMPTS, RETRYABLE_STATUSES, SLOT_RETRY_AFTER, SLOT_WAIT_TIMEOUT,
-                        THROTTLE_CAP, parse_retry_after, wait_for_slot)
+                        THROTTLE_CAP, parse_retry_after)
 
 
 NATIVE_PROVIDERS = frozenset({"grok", "ollama", "openrouter"})
@@ -845,18 +845,6 @@ def handle_responses(handler):
     delegated = plan["protocol"] == "messages_bridge"
     if delegated:
         plan["url"] = f"http://127.0.0.1:{handler.server.server_port}/v1/messages"
-    # Queue for a worker slot instead of failing fast: Codex subagent bursts
-    # briefly exceed the worker count by design, and every instant 429 burns
-    # one of the desktop client's retries toward its "exceeded retry limit"
-    # terminal state. Mirrors the Messages path that shields Mistral.
-    if not delegated and not wait_for_slot(runtime.semaphore, cancel=lambda: _client_gone(handler),
-                                           timeout=SLOT_WAIT_TIMEOUT):
-        if _client_gone(handler):
-            runtime.record("cancelled", plan["route"])
-            return
-        handler.error(429, "Eight requests are already active. Try again shortly.",
-                      headers={"Retry-After": str(SLOT_RETRY_AFTER)})
-        return
     closed = threading.Event()
     disconnected = threading.Event()
     write_lock = threading.Lock()
@@ -868,6 +856,8 @@ def handle_responses(handler):
     spawn_items = set()
     service_tier = None
     usage = {}
+    slot_held = False
+    active_counted = False
 
     def redact(value):
         text = str(value)
@@ -948,9 +938,25 @@ def handle_responses(handler):
                 return
 
     try:
-        if not delegated:
-            with runtime.lock:
-                runtime.active += 1
+        def admit_slot():
+            nonlocal slot_held, active_counted
+            if not runtime.admission.acquire(plan["provider_id"], cancel=lambda: _client_gone(handler),
+                                             timeout=SLOT_WAIT_TIMEOUT):
+                if _client_gone(handler):
+                    runtime.record("cancelled", plan["route"])
+                else:
+                    runtime.record("slot_timeout", plan["route"], 429)
+                    handler.error(429, "Gateway admission timed out waiting for a request slot.",
+                                  headers={"Retry-After": str(SLOT_RETRY_AFTER),
+                                           "X-Provider-Hub-Origin": "gateway"})
+                return False
+            slot_held = True
+            if not active_counted:
+                with runtime.lock:
+                    runtime.active += 1
+                active_counted = True
+            return True
+
         threading.Thread(target=cancel_monitor, daemon=True).start()
         encoded = json.dumps(plan["body"]).encode()
         headers = {**plan["headers"], "Accept": "text/event-stream" if plan["body"]["stream"] else "application/json"}
@@ -964,6 +970,14 @@ def handle_responses(handler):
                                                            cancel=lambda: _client_gone(handler)):
                 runtime.record("cancelled", plan["route"])
                 return
+            if not delegated:
+                if not admit_slot():
+                    return
+                if runtime.throttle.remaining(plan["provider_id"]) > 0:
+                    runtime.admission.release(plan["provider_id"])
+                    slot_held = False
+                    continue
+                started_at = time.monotonic()
             connection, endpoint = runtime.upstream(plan["url"])
             with runtime.lock:
                 runtime.connections.add(connection)
@@ -972,7 +986,8 @@ def handle_responses(handler):
             upstream_socket = connection.sock or getattr(getattr(response.fp, "raw", None), "_sock", None)
             if response.status == 200:
                 if not delegated:
-                    runtime.throttle.note_success(plan["provider_id"])
+                    if runtime.throttle.note_success(plan["provider_id"], started_at=started_at):
+                        runtime.admission.note_success(plan["provider_id"])
                 break
             data = response.read(65536)
             try:
@@ -990,6 +1005,7 @@ def handle_responses(handler):
                 # Absorbed attempts are logged, never counted as failures.
                 attempts += 1
                 runtime.throttle.note_limit(plan["provider_id"], retry_after, attempts - 1)
+                runtime.admission.note_limit(plan["provider_id"])
                 runtime.record("throttled", plan["route"], response.status)
                 response.close()
                 connection.close()
@@ -998,7 +1014,12 @@ def handle_responses(handler):
                 connection = None
                 response = None
                 upstream_socket = None
+                runtime.admission.release(plan["provider_id"])
+                slot_held = False
                 continue
+            if not delegated and response.status in RETRYABLE_STATUSES:
+                runtime.throttle.note_limit(plan["provider_id"], retry_after, attempts)
+                runtime.admission.note_limit(plan["provider_id"])
             status = response.status if response.status in {400, 401, 402, 403, 404, 413, 429, 500, 502, 503, 504} else 502
             if not delegated:
                 runtime.record("error", plan["route"], status)
@@ -1129,9 +1150,9 @@ def handle_responses(handler):
             connection.close()
         with runtime.lock:
             runtime.connections.discard(connection)
-            if not delegated:
+            if active_counted:
                 runtime.active -= 1
-        if not delegated:
-            runtime.semaphore.release()
+        if slot_held:
+            runtime.admission.release(plan["provider_id"])
         handler.close_connection = True
         runtime.release_local_model(plan)

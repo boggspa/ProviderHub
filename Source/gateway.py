@@ -35,7 +35,7 @@ from hub_config import claude_routes, connection_signature, provider_presentatio
 from ollama_lifecycle import http_transport, lease_seconds, release as release_resident_model
 from providers import PROVIDERS, prepare_request, ProviderError
 from rate_limit import (MAX_UPSTREAM_ATTEMPTS, RETRYABLE_STATUSES, SLOT_RETRY_AFTER, SLOT_WAIT_TIMEOUT,
-                        THROTTLE_CAP, ProviderThrottle, parse_retry_after, wait_for_slot)
+                        THROTTLE_CAP, ProviderAdmission, ProviderThrottle, parse_retry_after)
 from spawn_depth import filter_spawn_tools
 from devin_agent import (DESCRIPTOR as DEVIN_DESCRIPTOR, DevinAgentError,
                          create_session as devin_create_session,
@@ -115,6 +115,7 @@ class Runtime:
         self.credential_cache = {}
         self.lock = threading.Lock()
         self.semaphore = threading.BoundedSemaphore(8)
+        self.admission = ProviderAdmission(self.semaphore)
         self.throttle = ProviderThrottle()
         self.calibration = TokenCalibration()
         self.active = 0
@@ -357,6 +358,9 @@ class Runtime:
             elif kind == "error":
                 self.failed += 1
                 self.last_error = f"Request failed (HTTP {code}). See the message in the desktop client."
+            elif kind == "slot_timeout":
+                self.failed += 1
+                self.last_error = "Gateway admission timed out waiting for a request slot."
             self.last_model = model or self.last_model
             if model:
                 counters = self.provider_counts[split_route(model)[0]]
@@ -364,7 +368,7 @@ class Runtime:
                     counters["completed"] += 1
                     counters["input_tokens"] += (usage or {}).get("input_tokens", 0)
                     counters["output_tokens"] += (usage or {}).get("output_tokens", 0)
-                elif kind == "error":
+                elif kind in {"error", "slot_timeout"}:
                     counters["failed"] += 1
             path = self.root / "activity.jsonl"
             if path.exists() and path.stat().st_size > 512000:
@@ -745,20 +749,7 @@ class Handler(BaseHTTPRequestHandler):
             # terms as a provider's - see _mask_effort_rejection.
             self.error(400, mask_effort_rejection(str(exc)), headers={"X-Provider-Hub-Origin": "gateway"})
             return
-        # Queue for a worker slot instead of failing fast: subagent bursts
-        # briefly exceed the worker count by design, and every instant 429
-        # burns one of the client's own retries toward terminalisation.
         queued_at = time.monotonic()
-        if not wait_for_slot(self.runtime.semaphore, cancel=lambda: _client_gone(self),
-                             timeout=SLOT_WAIT_TIMEOUT):
-            if _client_gone(self):
-                self.runtime.record("cancelled", plan["route"])
-                return
-            self.error(429, "Eight requests are already active. Try again shortly.",
-                       headers={"Retry-After": str(SLOT_RETRY_AFTER)})
-            return
-        if plan.get("cli"):
-            plan["body"]["_cli_queue_ms"] = round((time.monotonic() - queued_at) * 1000, 3)
         connection = None
         response = None
         upstream_socket = None
@@ -770,9 +761,27 @@ class Handler(BaseHTTPRequestHandler):
         ping = None
         usage = {}
         service_tier = None
+        slot_held = False
+        active_counted = False
         try:
-            with self.runtime.lock:
-                self.runtime.active += 1
+            def admit_slot():
+                nonlocal slot_held, active_counted
+                if not self.runtime.admission.acquire(plan["provider_id"], cancel=lambda: _client_gone(self),
+                                                      timeout=SLOT_WAIT_TIMEOUT):
+                    if _client_gone(self):
+                        self.runtime.record("cancelled", plan["route"])
+                    else:
+                        self.runtime.record("slot_timeout", plan["route"], 429)
+                        self.error(429, "Gateway admission timed out waiting for a request slot.",
+                                   headers={"Retry-After": str(SLOT_RETRY_AFTER),
+                                            "X-Provider-Hub-Origin": "gateway"})
+                    return False
+                slot_held = True
+                if not active_counted:
+                    with self.runtime.lock:
+                        self.runtime.active += 1
+                    active_counted = True
+                return True
 
             def cancel_monitor():
                 while not closed.wait(.25):
@@ -801,6 +810,9 @@ class Handler(BaseHTTPRequestHandler):
             monitor = threading.Thread(target=cancel_monitor, daemon=True)
             monitor.start()
             if plan.get("cli"):
+                if not admit_slot():
+                    return
+                plan["body"]["_cli_queue_ms"] = round((time.monotonic() - queued_at) * 1000, 3)
                 # No upstream connection exists for a CLI route: the adapter's
                 # subprocess is the transport, relayed by _serve_cli_turn. The
                 # shared finally still runs (worker count, semaphore, lease).
@@ -818,6 +830,13 @@ class Handler(BaseHTTPRequestHandler):
                 if not self.runtime.throttle.wait(plan["provider_id"], cancel=lambda: _client_gone(self)):
                     self.runtime.record("cancelled", plan["route"])
                     return
+                if not admit_slot():
+                    return
+                if self.runtime.throttle.remaining(plan["provider_id"]) > 0:
+                    self.runtime.admission.release(plan["provider_id"])
+                    slot_held = False
+                    continue
+                started_at = time.monotonic()
                 connection, endpoint = self.runtime.upstream(plan["url"])
                 with self.runtime.lock:
                     self.runtime.connections.add(connection)
@@ -825,7 +844,8 @@ class Handler(BaseHTTPRequestHandler):
                 response = connection.getresponse()
                 upstream_socket = connection.sock or getattr(getattr(response.fp, "raw", None), "_sock", None)
                 if response.status == 200:
-                    self.runtime.throttle.note_success(plan["provider_id"])
+                    if self.runtime.throttle.note_success(plan["provider_id"], started_at=started_at):
+                        self.runtime.admission.note_success(plan["provider_id"])
                     break
                 raw = response.read(65536)
                 try:
@@ -855,6 +875,7 @@ class Handler(BaseHTTPRequestHandler):
                     # Absorbed attempts are logged, never counted as failures.
                     attempts += 1
                     self.runtime.throttle.note_limit(plan["provider_id"], retry_after, attempts - 1)
+                    self.runtime.admission.note_limit(plan["provider_id"])
                     self.runtime.record("throttled", plan["route"], response.status)
                     response.close()
                     connection.close()
@@ -863,7 +884,12 @@ class Handler(BaseHTTPRequestHandler):
                     connection = None
                     response = None
                     upstream_socket = None
+                    self.runtime.admission.release(plan["provider_id"])
+                    slot_held = False
                     continue
+                if response.status in RETRYABLE_STATUSES:
+                    self.runtime.throttle.note_limit(plan["provider_id"], retry_after, attempts)
+                    self.runtime.admission.note_limit(plan["provider_id"])
                 relayed = mask_effort_rejection(detail) if response.status == 400 else detail
                 message = f"{plan['provider_name']} returned HTTP {response.status}" + (": " + relayed if relayed else ".")
                 unavailable = response.status in {400, 404, 410} and any(term in detail.lower() for term in ("invalid model", "model not found", "model has been deprecated", "model is no longer"))
@@ -1030,8 +1056,10 @@ class Handler(BaseHTTPRequestHandler):
                 connection.close()
             with self.runtime.lock:
                 self.runtime.connections.discard(connection)
-                self.runtime.active -= 1
-            self.runtime.semaphore.release()
+                if active_counted:
+                    self.runtime.active -= 1
+            if slot_held:
+                self.runtime.admission.release(plan["provider_id"])
             self.close_connection = True
             self.runtime.release_local_model(plan)
 

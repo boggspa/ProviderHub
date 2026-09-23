@@ -20,6 +20,7 @@ from __future__ import annotations
 import random
 import threading
 import time
+from collections import deque
 from email.utils import parsedate_to_datetime
 
 
@@ -43,6 +44,7 @@ THROTTLE_CAP = 60.0
 RETRYABLE_STATUSES = frozenset({429, 503})
 #: Slice size for cancellable waits, mirroring the gateway monitors.
 WAIT_SLICE = 0.25
+RECOVERY_SUCCESSES = 8
 
 
 def parse_retry_after(value, now=None):
@@ -99,18 +101,31 @@ class ProviderThrottle:
         self._sleep = sleeper
         self._lock = threading.Lock()
         self._resume = {}
+        self._limited_at = {}
 
     def note_limit(self, key, retry_after=None, attempt=0):
         """Park ``key`` after an observed limit; returns the window applied."""
         delay = backoff_delay(attempt, retry_after)
         with self._lock:
-            self._resume[str(key)] = self._clock() + delay
+            key = str(key)
+            now = self._clock()
+            self._resume[key] = max(self._resume.get(key, 0.0), now + delay)
+            self._limited_at[key] = now
         return delay
 
-    def note_success(self, key):
-        """Clear any window for ``key`` after a request went through."""
+    def note_success(self, key, started_at=None):
+        """Clear the window unless this request predates a newer limit."""
         with self._lock:
-            self._resume.pop(str(key), None)
+            key = str(key)
+            if started_at is not None and started_at < self._limited_at.get(key, 0.0):
+                return False
+            self._resume.pop(key, None)
+            return True
+
+    def remaining(self, key):
+        """Check a gate again after slot admission, without sleeping in a slot."""
+        with self._lock:
+            return max(0.0, self._resume.get(str(key), 0.0) - self._clock())
 
     def wait(self, key, cancel=None, timeout=None):
         """Block until ``key``'s window passes.
@@ -135,20 +150,82 @@ class ProviderThrottle:
             self._sleep(step)
 
 
-def wait_for_slot(semaphore, cancel=None, timeout=SLOT_WAIT_TIMEOUT,
-                  clock=time.monotonic, sleeper=time.sleep):
-    """Acquire ``semaphore`` within ``timeout`` seconds.
+class ProviderAdmission:
+    """Share concurrent slots fairly across waiting providers and back off busy ones."""
 
-    Returns True when acquired (the caller owns one release), False when
-    ``cancel`` fired or the wait expired. Polling in slices keeps the
-    wait responsive to client disconnects.
-    """
-    deadline = clock() + timeout
-    while True:
-        if semaphore.acquire(blocking=False):
-            return True
-        if cancel is not None and cancel():
-            return False
-        if clock() >= deadline:
-            return False
-        sleeper(min(WAIT_SLICE, max(0.0, deadline - clock())))
+    def __init__(self, semaphore, capacity=8):
+        self._semaphore = semaphore
+        self._capacity = capacity
+        self._condition = threading.Condition()
+        self._waiting = {}
+        self._order = deque()
+        self._active = {}
+        self._limits = {}
+        self._successes = {}
+
+    def acquire(self, key, cancel=None, timeout=SLOT_WAIT_TIMEOUT):
+        """Admit one attempt, round-robin across providers with capacity."""
+        key = str(key)
+        ticket = object()
+        deadline = time.monotonic() + timeout
+        with self._condition:
+            if key not in self._waiting:
+                self._waiting[key] = deque()
+                self._order.append(key)
+            self._waiting[key].append(ticket)
+            while True:
+                if cancel is not None and cancel():
+                    self._remove(key, ticket)
+                    return False
+                eligible = next((provider for provider in self._order
+                                 if self._active.get(provider, 0) < self._limits.get(provider, self._capacity)), None)
+                if (eligible == key and self._waiting[key][0] is ticket
+                        and self._semaphore.acquire(blocking=False)):
+                    self._active[key] = self._active.get(key, 0) + 1
+                    self._remove(key, ticket)
+                    if key in self._waiting:
+                        self._order.remove(key)
+                        self._order.append(key)
+                    return True
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    self._remove(key, ticket)
+                    return False
+                self._condition.wait(min(WAIT_SLICE, remaining))
+
+    def _remove(self, key, ticket):
+        queue = self._waiting[key]
+        queue.remove(ticket)
+        if not queue:
+            del self._waiting[key]
+            self._order.remove(key)
+        self._condition.notify_all()
+
+    def release(self, key):
+        with self._condition:
+            key = str(key)
+            self._active[key] -= 1
+            if not self._active[key]:
+                del self._active[key]
+            self._semaphore.release()
+            self._condition.notify_all()
+
+    def note_limit(self, key):
+        with self._condition:
+            key = str(key)
+            current = self._limits.get(key, self._capacity)
+            self._limits[key] = max(1, current // 2)
+            self._successes[key] = 0
+            self._condition.notify_all()
+
+    def note_success(self, key):
+        with self._condition:
+            key = str(key)
+            current = self._limits.get(key, self._capacity)
+            if current >= self._capacity:
+                return
+            self._successes[key] = self._successes.get(key, 0) + 1
+            if self._successes[key] >= RECOVERY_SUCCESSES:
+                self._limits[key] = current + 1
+                self._successes[key] = 0
+                self._condition.notify_all()

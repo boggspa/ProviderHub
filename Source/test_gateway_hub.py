@@ -22,6 +22,7 @@ from cerebras_replay import validate_messages
 from gateway import Runtime, Server
 from hub_config import connection_signature
 from protocol import estimated_tokens, with_identity_note
+from rate_limit import ProviderAdmission
 
 
 LOCAL_REQUEST_TEXT = "LOCAL-REQUEST-TEXT-MUST-NOT-BE-LOGGED"
@@ -692,6 +693,61 @@ class GatewayHubHTTPTests(unittest.TestCase):
         self.assertEqual(log.count('"event": "throttled"'), 2)
         self.assertIn('"status": 429', log)
 
+    def _assert_transient_limit_absorbed(self, provider_id, model_id):
+        self.start_gateway(provider_id, model_id, {"reasoning_history": "native"})
+        MockProvider.mode = "flaky_rate_limit"
+        payload = {"model": "claude-fable-5", "max_tokens": 64,
+                   "messages": [{"role": "user", "content": "hello"}]}
+        with patch("rate_limit.random.uniform", return_value=0):
+            status, raw, _ = self.request(payload, timeout=15)
+        self.assertEqual(status, 200, raw)
+        self.assertEqual(len(MockProvider.requests), 3)
+        self.assertEqual(self.runtime.status()["failed"], 0)
+        log = (self.root / "activity.jsonl").read_text()
+        self.assertEqual(log.count('"event": "throttled"'), 2)
+        self.assertIn('"provider_id": "' + provider_id + '"', log)
+
+    def test_kimi_transient_rate_limit_is_absorbed(self):
+        self._assert_transient_limit_absorbed("kimi", "kimi-for-coding-highspeed")
+
+    def test_qwen_transient_rate_limit_is_absorbed(self):
+        self._assert_transient_limit_absorbed("qwen-token-plan", "qwen3.8-max")
+
+    def test_cerebras_transient_rate_limit_is_absorbed(self):
+        self._assert_transient_limit_absorbed("cerebras", "gpt-oss-120b")
+
+    def test_retry_backoff_releases_global_slot(self):
+        self.start_gateway("deepseek", "deepseek-flash", {"reasoning_history": "native"})
+        self.runtime.semaphore = threading.BoundedSemaphore(1)
+        self.runtime.admission = ProviderAdmission(self.runtime.semaphore, capacity=1)
+        MockProvider.mode = "flaky_rate_limit"
+        limited = threading.Event()
+        original_note_limit = self.runtime.throttle.note_limit
+
+        def observed_limit(*args):
+            delay = original_note_limit(*args)
+            limited.set()
+            return delay
+
+        outcome = {}
+
+        def send_request():
+            outcome["result"] = self.request({"model": "claude-fable-5", "max_tokens": 64,
+                                              "messages": [{"role": "user", "content": "hello"}]}, timeout=15)
+
+        with patch.object(self.runtime.throttle, "note_limit", side_effect=observed_limit), \
+                patch("rate_limit.random.uniform", return_value=0):
+            thread = threading.Thread(target=send_request)
+            thread.start()
+            try:
+                self.assertTrue(limited.wait(3))
+                self.assertTrue(self.runtime.admission.acquire("kimi", timeout=0.8))
+                self.runtime.admission.release("kimi")
+            finally:
+                thread.join(timeout=15)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(outcome["result"][0], 200)
+
     def test_long_retry_after_is_handed_back_not_absorbed(self):
         self.start_gateway("deepseek", "deepseek-flash", {"reasoning_history": "native"})
         payload = {
@@ -760,6 +816,11 @@ class GatewayHubHTTPTests(unittest.TestCase):
         self.assertEqual(result["error"]["type"], "rate_limit_error")
         lowered = {key.lower(): value for key, value in response_headers.items()}
         self.assertGreaterEqual(int(lowered.get("retry-after", "0")), 1)
+        self.assertEqual(lowered.get("x-provider-hub-origin"), "gateway")
+        log = (self.root / "activity.jsonl").read_text()
+        self.assertIn('"event": "slot_timeout"', log)
+        self.assertNotIn('"event": "throttled"', log)
+        self.assertEqual(self.runtime.status()["providers"]["deepseek"]["failed"], 1)
 
     def test_native_stream_error_and_client_cancellation_do_not_record_success(self):
         self.start_gateway("deepseek", "deepseek-flash", {"reasoning_history": "native"})
