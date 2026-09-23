@@ -36,6 +36,7 @@ from cli_tool_call import (HOST_EXECUTION_NOTE, MAX_CALLS_PER_TURN, ToolCallErro
                            ToolCallParser, normalize_tools, render_tool_anchor,
                            render_tool_manifest, validate_host_call)
 from effort_map import EFFORT_ORDER
+from fast_models import fixed_speed_tier, supports_fast_toggle
 from cli_images import (IMAGE_COORDINATE_NOTE, CliImageError, image_label,
                         normalize_image, normalize_images)
 from hub_config import MODEL_ID
@@ -165,7 +166,7 @@ def _hub_row(provider_id: str, row):
         "vision": vision,
         "reasoning": reasoning,
         "effort_modes": effort,
-        "fast_mode": False,
+        "fast_mode": supports_fast_toggle(provider_id, identifier),
         "inference_status": "advertised",
         "source": "cli",
         "evidence": row.get("evidence") or f"the installed {ADAPTERS[provider_id][1]} CLI",
@@ -188,6 +189,9 @@ def _hub_row(provider_id: str, row):
     description = row.get("description")
     if isinstance(description, str) and description.strip():
         result["description"] = description
+    fixed_tier = fixed_speed_tier(provider_id, identifier)
+    if fixed_tier is not None:
+        result["speed_tier"] = fixed_tier
     if not (type(result["context"]) is int and result["context"] > 0):
         context, evidence = documented_context(provider_id, identifier)
         if context is not None:
@@ -438,8 +442,24 @@ def plan_turn(provider_id: str, upstream_model: str, payload: dict, spec: dict,
         request["reasoning_summary"] = summary
     if images:
         request["images"] = images
-    if provider_id == "codex" and payload.get("service_tier") is not None:
-        request["service_tier"] = payload["service_tier"]
+    if provider_id in {"codex", "claude"}:
+        tier = payload.get("service_tier")
+        speed = payload.get("speed")
+        requested_fast = speed == "fast" or tier in {"fast", "priority"}
+        if requested_fast and (spec.get("fast_mode") is not True
+                               or not supports_fast_toggle(provider_id, upstream_model)):
+            raise CliRouteError(f"{provider_id.title()} Fast mode is unavailable for this model.")
+        if provider_id == "claude":
+            if speed not in (None, "standard", "fast") or tier not in (
+                    None, "", "auto", "default", "standard", "fast", "priority"):
+                raise CliRouteError("Claude supports only Standard or Fast processing.")
+            # The CLI's saved fastMode preference must not override Desktop's
+            # current off position. --settings keeps the choice per turn.
+            request["fast_mode"] = requested_fast
+        elif requested_fast:
+            request["service_tier"] = "fast"
+        elif tier is not None:
+            request["service_tier"] = tier
     search = payload.get("_web_search")
     if search is not None:
         # Set only by the Responses planner, for a route whose catalogue entry

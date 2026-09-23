@@ -1,6 +1,8 @@
 """Fast controls reflect provider requests, not just a fast-sounding name."""
 import unittest
 
+from claude_cli_agent import ClaudeCliAgentError, build_argv
+from cli_routes import CliRouteError, _hub_row, plan_turn
 from codex_catalogue import project_codex
 from fast_models import (CLAUDE_FAST_MODELS, OPENAI_FAST_MODELS,
                          fixed_speed_tier, supports_fast_toggle)
@@ -105,11 +107,52 @@ class FastModelTests(unittest.TestCase):
                                 ("cerebras", "qwen-3.8-27b")):
             with self.subTest(provider=provider, model=model):
                 self.assertIsNotNone(fixed_speed_tier(provider, model))
-                rows = project_catalogue(provider, cached_inventory(provider, model), config)
+                rows = project_catalogue(provider, cached_inventory(provider, model,
+                                                                     fast_mode=True), config)
                 self.assertEqual(rows[0]["speed_tier"], fixed_speed_tier(provider, model))
                 self.assertFalse(rows[0]["fast_mode"])
                 projected = project_codex(config, {"models": rows})["models"][0]
                 self.assertEqual(projected["service_tiers"], [])
+                self.assertIn("built into this route", projected["description"])
+
+    def test_cli_picker_rows_and_turns_follow_the_same_fast_allowlists(self):
+        for provider, model, expected in (
+                ("codex", "gpt-6-sol", True),
+                ("codex", "gpt-5.5-pro", False),
+                ("claude", "opus", True),
+                ("claude", "claude-opus-4-8", True),
+                ("claude", "claude-opus-4-7", False),
+                ("antigravity", "gemini-3.8-flash", False),
+                ("grok", "grok-4.7-build-fast", False)):
+            with self.subTest(provider=provider, model=model):
+                row = _hub_row(provider, {"id": model})
+                self.assertEqual(row["fast_mode"], expected)
+                if fixed_speed_tier(provider, model):
+                    self.assertEqual(row["speed_tier"], fixed_speed_tier(provider, model))
+
+        message = {"messages": [{"role": "user", "content": "Hello"}]}
+        claude_fast = plan_turn("claude", "opus", {**message, "service_tier": "fast"},
+                                {"fast_mode": True}, wanted_output=100)["body"]
+        self.assertIs(claude_fast["fast_mode"], True)
+        claude_standard = plan_turn("claude", "opus", {**message, "speed": "standard"},
+                                    {"fast_mode": True}, wanted_output=100)["body"]
+        self.assertIs(claude_standard["fast_mode"], False)
+        codex_fast = plan_turn("codex", "gpt-6-sol", {**message, "service_tier": "fast"},
+                               {"fast_mode": True}, wanted_output=100)["body"]
+        self.assertEqual(codex_fast["service_tier"], "fast")
+        with self.assertRaises(CliRouteError):
+            plan_turn("claude", "claude-opus-4-7", {**message, "speed": "fast"},
+                      {"fast_mode": False}, wanted_output=100)
+
+    def test_claude_print_mode_receives_per_turn_fast_setting(self):
+        on = build_argv("opus", fast_mode=True)
+        off = build_argv("opus", fast_mode=False)
+        self.assertEqual(on[on.index("--settings") + 1], '{"fastMode":true}')
+        self.assertEqual(off[off.index("--settings") + 1], '{"fastMode":false}')
+        self.assertLess(on.index("--settings"), on.index("--tools"))
+        self.assertEqual(on[on.index("--model") + 1], "claude-opus-5-5")
+        with self.assertRaises(ClaudeCliAgentError):
+            build_argv("claude-opus-4-7", fast_mode=True)
 
 
 if __name__ == "__main__":

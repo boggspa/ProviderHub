@@ -174,7 +174,7 @@ def _service_tiers(provider_id, entry):
              "description": "Same-model Fast processing advertised by this provider."}]
 
 
-def _codex_description(provider_id, provider, context, service_tiers):
+def _codex_description(provider_id, provider, context, service_tiers, speed_tier=None):
     if provider_id == "ollama":
         text = provider + " via Ollama. Runtime context is managed by the daemon."
     elif provider_id == "grok":
@@ -182,6 +182,8 @@ def _codex_description(provider_id, provider, context, service_tiers):
                 if service_tiers else "xAI API billing.")
     else:
         text = PROVIDERS[provider_id]["name"] + " model connection."
+    if speed_tier:
+        text += " Faster serving is built into this route; there is no separate Fast switch."
     if context is None:
         text += " Exact context is not reported; compact manually when needed."
     elif fits_desktop_baseline(context) is False:
@@ -313,7 +315,8 @@ def project_codex(settings, inventory):
         row = {
             "slug": route,
             "display_name": name,
-            "description": _codex_description(provider_id, provider, context, service_tiers),
+            "description": _codex_description(provider_id, provider, context, service_tiers,
+                                              entry.get("speed_tier")),
             "default_reasoning_level": _default_reasoning_level(provider_id, entry, efforts),
             "supported_reasoning_levels": levels,
             "shell_type": "default",

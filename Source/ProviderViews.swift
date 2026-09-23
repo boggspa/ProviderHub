@@ -253,6 +253,9 @@ struct ProviderPage: View {
         if model.reasoning == true { values.append("Reasoning") }
         if let modes = model.effort_modes, !modes.isEmpty { values.append("Effort: " + modes.joined(separator: ", ")) }
         if model.fast_mode == true { values.append("Fast supported") }
+        if let tier = model.speed_tier {
+            values.append(tier == "accelerated_inference" ? "Accelerated serving" : "Fast variant (always on)")
+        }
         if model.inference_status == "responded" { values.append("Previously responded") }
         return values.joined(separator: " · ")
     }

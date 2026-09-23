@@ -4,6 +4,7 @@ Fast is a request control only for the first group. The second group is
 already served on its faster route; advertising a service-tier toggle for it
 would promise a standard-speed version the provider does not offer there.
 """
+from model_names import CLAUDE_CLI_ALIASES
 
 # https://learn.chatgpt.com/docs/agent-configuration/speed
 # https://developers.openai.com/api/docs/guides/fast-mode
@@ -40,7 +41,7 @@ def supports_fast_toggle(provider_id: str, model_id: str) -> bool:
     if provider_id == "codex":
         return model_id in OPENAI_FAST_MODELS
     if provider_id == "claude":
-        return model_id in CLAUDE_FAST_MODELS
+        return CLAUDE_CLI_ALIASES.get(model_id, model_id) in CLAUDE_FAST_MODELS
     return False
 
 

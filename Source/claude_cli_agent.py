@@ -55,6 +55,7 @@ from cli_session import CliSessionError, StdioSession, minimal_env, resolve_bina
 from cli_lifecycle import cleanup_after_exit
 from cli_tool_call import TRANSCRIPT_HEADER
 from cli_images import prompt_content
+from fast_models import supports_fast_toggle
 from model_names import CLAUDE_CLI_ALIASES, CLAUDE_MODEL_LABELS
 
 try:  # Repo-native effort ladder; degrade to a local copy if unavailable.
@@ -369,7 +370,8 @@ def catalogue(*, capture=None, timeout=30) -> tuple[list[dict], list[str]]:
 # argv construction
 # ---------------------------------------------------------------------------
 
-def build_argv(model, *, effort=None, system=None, stream=True, search=False) -> list[str]:
+def build_argv(model, *, effort=None, system=None, stream=True, search=False,
+               fast_mode=None) -> list[str]:
     """Full argv for one print-mode turn. argv[0] is the bare binary name.
 
     ``run_turn`` replaces argv[0] with the resolved absolute path; keeping the
@@ -385,6 +387,10 @@ def build_argv(model, *, effort=None, system=None, stream=True, search=False) ->
     # alias select a different model behind the displayed name.
     validated_model = CLAUDE_CLI_ALIASES.get(validated_model, validated_model)
     validated_effort = _validate_effort(effort)
+    if fast_mode is not None and type(fast_mode) is not bool:
+        raise ClaudeCliAgentError("fast_mode must be true, false, or omitted")
+    if fast_mode is True and not supports_fast_toggle("claude", validated_model):
+        raise ClaudeCliAgentError("Claude Fast mode is unavailable for this model")
 
     argv: list[str] = [BINARY_NAMES[0], "-p",
                        "--output-format", "stream-json" if stream else "text"]
@@ -394,6 +400,10 @@ def build_argv(model, *, effort=None, system=None, stream=True, search=False) ->
         argv += ["--include-partial-messages", "--verbose"]
     argv += list(READ_ONLY_FLAGS)
     argv += ["--model", validated_model]
+    if fast_mode is not None:
+        # Claude Code documents this session-local setting for -p. It leaves
+        # the user's ~/.claude/settings.json untouched.
+        argv += ["--settings", json.dumps({"fastMode": fast_mode}, separators=(",", ":"))]
     if validated_effort:
         argv += ["--effort", validated_effort]
     if system is not None:
@@ -875,7 +885,8 @@ def run_turn(request, *, spawner=None, timeout=300) -> Iterator[dict]:
         # the prompt; duplicating it would double-charge and could conflict.
         prompt = render_prompt(messages)
         state.search = search_enabled(request.get("web_search"))
-        argv = build_argv(model, effort=effort, system=system, stream=True, search=state.search)
+        argv = build_argv(model, effort=effort, system=system, stream=True,
+                          search=state.search, fast_mode=request.get("fast_mode"))
         if request.get("images"):
             argv[1:1] = ["--input-format", "stream-json"]
             prompt = json.dumps({"type": "user", "message": {"role": "user",

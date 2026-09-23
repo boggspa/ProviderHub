@@ -791,13 +791,11 @@ def project_catalogue(provider_id: str, inventory: dict, settings: dict, observa
         # Upgrade older saved provider inventories as well as fresh discovery:
         # picker metadata must follow the currently documented exact ID.
         if provider_id in {"codex", "claude"}:
-            cli_without_speed_control = (provider_id == "claude" and
-                                         settings["providers"][provider_id]["credential_mode"] == "cli")
-            item["fast_mode"] = (not cli_without_speed_control and
-                                 supports_fast_toggle(provider_id, preferred))
+            item["fast_mode"] = supports_fast_toggle(provider_id, preferred)
         fixed_tier = fixed_speed_tier(provider_id, preferred)
         if fixed_tier is not None:
             item["speed_tier"] = fixed_tier
+            item["fast_mode"] = False
         if provider_id == "mistral":
             # The cached discovery snapshot is trusted verbatim downstream
             # (Hub UI, Codex projection, gateway request specs), so snapshot
