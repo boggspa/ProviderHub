@@ -216,10 +216,16 @@ def smoke_test(runtime: Path, worker_dir: Path | None) -> None:
         "import sys, os, ssl, _socket, encodings, sysconfig;"
         "import cryptography.fernet;"
         "assert sys.version_info[:2] == (3, 13), sys.version_info;"
-        "assert os.path.realpath(sys.prefix) == os.path.realpath(sys.argv[1]), sys.prefix;"
-        "leaks = [k for k, v in sysconfig.get_paths().items()"
-        "         if '/Users/' in str(v) and '/Users/runner/' not in str(v)];"
-        "assert not leaks, leaks;"
+        # The property that matters is relocatability, not the absence of a
+        # '/Users/' substring: the bundle is built inside the maintainer's home
+        # directory, so every correctly-derived path legitimately contains it.
+        # What must hold is that each path comes from the interpreter's own
+        # location rather than from the recorded build prefix.
+        "root = os.path.realpath(sys.argv[1]);"
+        "assert os.path.realpath(sys.prefix) == root, sys.prefix;"
+        "outside = {k: v for k, v in sysconfig.get_paths().items()"
+        "           if not os.path.realpath(str(v)).startswith(root)};"
+        "assert not outside, outside;"
         "print('smoke-ok')"
     )
     out = subprocess.run([str(interpreter), "-B", "-c", check, str(runtime)],
