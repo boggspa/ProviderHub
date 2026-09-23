@@ -461,7 +461,10 @@ def advance_heartbeats(root: str, markers: list[dict], dirty: list[dict], now_ms
             if any(matcher(d["path"]) for matcher in marker["matchers"]):
                 if d["mtimeMs"] and (last_seen is None or d["mtimeMs"] > last_seen):
                     last_seen = d["mtimeMs"]
-        # A live pid also counts, so a thinking session does not decay.
+        # A live pid also counts, so a session that is thinking rather than
+        # writing does not decay mid-lease. This keeps a heartbeat honest
+        # inside the lease; it cannot extend one, because `liveness` gates
+        # every signal on the capped `expires` first.
         if pid_alive(marker["pid"]):
             if last_seen is None or now_ms - last_seen > HEARTBEAT_STALE_MS:
                 last_seen = now_ms
@@ -472,6 +475,19 @@ def advance_heartbeats(root: str, markers: list[dict], dirty: list[dict], now_ms
 
 
 def liveness(marker: dict, side: dict, now_ms: float) -> dict:
+    """Decide whether a claim is live, by the same rules `.githooks/pre-commit`
+    uses, plus the heartbeat signal the hook has no access to.
+
+    The invariant that matters: this tool must never report DECAYED on a claim
+    the hook would still block. "Decayed" is the verdict that tells the next
+    agent to harvest and delete the marker, so erring toward LIVE costs only a
+    delayed adoption, while erring toward DECAYED destroys work.
+
+    Three classes, mirroring the hook:
+      runtime       fails closed — expiry is never consulted
+      contribution  expires-based only, and needs a readable owner id
+      manual        held AND inside the effective (capped) lease
+    """
     markers_map = side.get("markers", {}) if side.get("schemaVersion") == 2 else side
     entry = markers_map.get(marker["file"], {}) if isinstance(markers_map, dict) else {}
     last_seen = entry.get("lastSeen")
@@ -496,13 +512,77 @@ def liveness(marker: dict, side: dict, now_ms: float) -> dict:
     )
     owner_held = valid_opaque and lease_held
 
+    # "Held" per AGENTS.md means a live pid, or an owner id when the claim
+    # carries no pid. Note the asymmetry the hook has and `owner_held` does
+    # not: the hook uses the exact opaque value only to decide whether a claim
+    # is YOURS, and treats ANY readable owner id as blocking everyone else. So
+    # a human-readable stand-in such as `lockOwnerId: MySeatName` never
+    # identifies a seat, yet still holds the lane — and if this tool scored it
+    # as not-live it would report DECAYED on a claim the hook enforces, which
+    # is the one error that gets a live marker harvested and deleted.
+    # `owner_held` stays UUID-strict because it is reported as seat ownership.
+    identity_held = alive or bool(marker["lockOwnerId"])
+
+    # Classify by FILENAME, not by the `derived:` frontmatter field: that is
+    # how the hook recognises a projection, and a runtime marker whose writer
+    # omitted the field must not be demoted to manual-claim rules.
+    name = marker["file"]
+    if is_contribution_marker_name(name):
+        classification = "contribution"
+    elif is_runtime_marker_name(name):
+        classification = "runtime"
+    else:
+        classification = "manual"
+
+    if classification == "runtime":
+        # Fail closed. Durable authority — not the lease, and not the
+        # projected leader pid — owns cleanup of a full runtime projection.
+        # The hook keeps foreign commits blocked until TaskWraith reconciles
+        # or removes the marker, and reads a dead pid as a recovery block
+        # rather than a decay. A stale one is restarted, never adopted.
+        live = True
+        reason = "runtime projection fails closed until TaskWraith removes it"
+    elif classification == "contribution":
+        # Lighter projection: lockOwnerId + expires + paths, no pid. Liveness
+        # is expires-based only, and an unreadable owner id claims nothing.
+        if not marker["lockOwnerId"]:
+            live, reason = False, "invalid contribution projection — no lockOwnerId"
+        elif expired:
+            live, reason = False, "lease elapsed"
+        else:
+            live, reason = True, "owner id held inside its lease"
+    else:
+        # A manual promise. An elapsed — or unreadable — lease defeats every
+        # other signal: AGENTS.md says an alive pid past expiry is still
+        # decayed, and the hook reaches the same verdict by stepping past the
+        # claim. Inside the lease a fresh heartbeat keeps a quiet-but-live
+        # session from decaying; it never extends that lease. This was the
+        # bug: `heartbeat_fresh` used to outvote `expired` on its own, and
+        # because a tick refreshes lastSeen from a live pid, such a claim
+        # became immortal — printed LIVE with "expires PASSED" beside it.
+        live = not expired and (heartbeat_fresh or identity_held)
+        if expired:
+            reason = "lease elapsed" + (" though its pid is alive" if alive else "")
+        elif owner_held:
+            reason = "opaque owner id held"
+        elif alive:
+            reason = f"pid {marker['pid']} alive"
+        elif marker["lockOwnerId"]:
+            reason = f"owner id {marker['lockOwnerId']} held (not opaque)"
+        elif heartbeat_fresh:
+            reason = "heartbeat fresh"
+        else:
+            reason = "no live signal"
+
     return {
-        "live": heartbeat_fresh or (alive and not expired) or owner_held,
+        "live": live,
         "heartbeatFresh": heartbeat_fresh,
         "alive": alive,
         "ownerHeld": owner_held,
         "expired": expired,
         "lastSeen": last_seen,
+        "classification": classification,
+        "reason": reason,
     }
 
 
@@ -704,7 +784,10 @@ def cmd_status(root: str, now_ms: float, json_out: bool, hook: bool) -> int:
         lines.append("  (none)")
     for entry in result["markers"]:
         m, s = entry["marker"], entry["state"]
-        if s["heartbeatFresh"]:
+        if s.get("classification") == "runtime":
+            # No pid/heartbeat story to tell: it is live because it exists.
+            why = "runtime projection, fails closed"
+        elif s["heartbeatFresh"]:
             why = f"heartbeat {human_age(now_ms - s['lastSeen'])} ago"
         elif s["alive"]:
             why = f"pid {m['pid']} alive"

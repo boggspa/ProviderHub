@@ -229,6 +229,154 @@ class TestLiveness(unittest.TestCase):
         self.assertFalse(s["live"])
 
 
+class TestLivenessExpiryGate(unittest.TestCase):
+    """An elapsed lease must defeat every other liveness signal.
+
+    Regression cover for the immortality bug. `liveness` used to OR a fresh
+    heartbeat in without consulting `expired`, and because `advance_heartbeats`
+    refreshes `lastSeen` from a live pid on every tick, a claim whose owner was
+    merely still running could never decay. `work_guard status` then printed
+    `LIVE ... expires PASSED` indefinitely, contradicting `.githooks/pre-commit`
+    — which steps past an expired claim — so the tool reported a lane held that
+    the hook would not enforce, and four landed claims stayed unadoptable.
+    """
+
+    UUID = "4947b033-b17c-4d3e-a83e-d7440aeab5d5"
+    SHA = "a" * 64
+    RUNTIME = f".WORK-IN-PROGRESS-taskwraith-runtime-seat1-{SHA}.md"
+    CONTRIBUTION = f".WORK-IN-PROGRESS-taskwraith-contribution-{SHA}.md"
+
+    def setUp(self):
+        self.now = datetime.now(timezone.utc).timestamp() * 1000
+        self.past = self.now - 60 * 1000
+        self.future = self.now + 10 * 60 * 1000
+
+    def _marker(self, **overrides):
+        base = {
+            "file": ".WORK-IN-PROGRESS-test.md",
+            "pid": None,
+            "started": None,
+            "expires": None,
+            "expiresMs": self.future,
+            "lockOwnerId": None,
+            "matchers": [],
+            "paths": [],
+            "workspaceWide": False,
+            "derived": False,
+        }
+        base.update(overrides)
+        return base
+
+    def _fresh_heartbeat(self, filename=".WORK-IN-PROGRESS-test.md"):
+        return {"schemaVersion": 2,
+                "markers": {filename: {"lastSeen": self.now - 30 * 1000}}}
+
+    # ── the bug itself: expiry must win ─────────────────────────────────
+    def test_alive_pid_past_expiry_is_decayed(self):
+        s = wg.liveness(self._marker(pid=1, expiresMs=self.past), {}, self.now)
+        self.assertTrue(s["alive"], "pid 1 exists; EPERM still means alive")
+        self.assertTrue(s["expired"])
+        self.assertFalse(s["live"], "an alive pid past expiry is still decayed")
+
+    def test_fresh_heartbeat_cannot_outvote_an_elapsed_lease(self):
+        side = self._fresh_heartbeat()
+        s = wg.liveness(self._marker(pid=1, expiresMs=self.past), side, self.now)
+        self.assertTrue(s["heartbeatFresh"])
+        self.assertTrue(s["expired"])
+        self.assertFalse(s["live"], "a heartbeat refreshes a claim, it never renews it")
+
+    def test_missing_lease_decays_even_with_a_fresh_heartbeat(self):
+        side = self._fresh_heartbeat()
+        s = wg.liveness(self._marker(pid=1, expiresMs=None), side, self.now)
+        self.assertTrue(s["expired"])
+        self.assertFalse(s["live"])
+
+    # ── what the heartbeat is still for ─────────────────────────────────
+    def test_fresh_heartbeat_holds_a_quiet_session_inside_its_lease(self):
+        """No pid to probe: the heartbeat is the only live signal, and must
+        keep a session that is thinking rather than writing from decaying."""
+        side = self._fresh_heartbeat()
+        s = wg.liveness(self._marker(pid=None, expiresMs=self.future), side, self.now)
+        self.assertTrue(s["heartbeatFresh"])
+        self.assertTrue(s["live"])
+
+    def test_alive_pid_inside_its_lease_is_live_without_any_heartbeat(self):
+        """The safety invariant: never DECAYED while the hook would block."""
+        s = wg.liveness(self._marker(pid=1, expiresMs=self.future), {}, self.now)
+        self.assertTrue(s["live"])
+
+    # ── owner-id identity ───────────────────────────────────────────────
+    def test_opaque_seat_owner_id_holds_a_manual_claim(self):
+        s = wg.liveness(self._marker(lockOwnerId=self.UUID, expiresMs=self.future),
+                        {}, self.now)
+        self.assertTrue(s["ownerHeld"])
+        self.assertTrue(s["live"])
+
+    def test_opaque_seat_owner_id_does_not_hold_a_claim_past_its_lease(self):
+        s = wg.liveness(self._marker(lockOwnerId=self.UUID, expiresMs=self.past),
+                        {}, self.now)
+        self.assertFalse(s["ownerHeld"])
+        self.assertFalse(s["live"])
+
+    def test_human_readable_owner_id_blocks_without_being_opaque(self):
+        """`MySeatName` identifies no seat, so it is not `ownerHeld`; but the
+        hook still blocks other sessions on it, so this tool must not report
+        the lane decayed and invite the next agent to harvest it."""
+        s = wg.liveness(self._marker(lockOwnerId="MySeatName", expiresMs=self.future),
+                        {}, self.now)
+        self.assertFalse(s["ownerHeld"])
+        self.assertTrue(s["live"])
+
+    # ── runtime projections fail closed, classified by FILENAME ─────────
+    def test_runtime_projection_fails_closed_past_expiry(self):
+        m = self._marker(file=self.RUNTIME, pid=1, expiresMs=self.past,
+                         lockOwnerId=self.UUID)
+        s = wg.liveness(m, {}, self.now)
+        self.assertEqual(s["classification"], "runtime")
+        self.assertTrue(s["expired"])
+        self.assertTrue(s["live"], "durable authority owns cleanup, not the lease")
+
+    def test_runtime_projection_fails_closed_with_a_dead_pid_and_no_lease(self):
+        m = self._marker(file=self.RUNTIME, pid=999999, expiresMs=None)
+        s = wg.liveness(m, {}, self.now)
+        self.assertEqual(s["classification"], "runtime")
+        self.assertTrue(s["live"], "a dead projected leader pid is a recovery block")
+
+    def test_runtime_classification_ignores_the_derived_frontmatter_field(self):
+        """The hook recognises a projection by filename; a writer that omits
+        `derived: true` must not demote it to manual-claim rules."""
+        m = self._marker(file=self.RUNTIME, derived=False, expiresMs=self.past)
+        s = wg.liveness(m, {}, self.now)
+        self.assertEqual(s["classification"], "runtime")
+        self.assertTrue(s["live"])
+
+    # ── contribution projections are expires-based ──────────────────────
+    def test_contribution_projection_is_held_inside_its_lease(self):
+        m = self._marker(file=self.CONTRIBUTION, expiresMs=self.future,
+                         lockOwnerId=self.UUID)
+        s = wg.liveness(m, {}, self.now)
+        self.assertEqual(s["classification"], "contribution")
+        self.assertTrue(s["live"])
+
+    def test_contribution_projection_decays_past_its_lease(self):
+        m = self._marker(file=self.CONTRIBUTION, expiresMs=self.past,
+                         lockOwnerId=self.UUID)
+        s = wg.liveness(m, {}, self.now)
+        self.assertEqual(s["classification"], "contribution")
+        self.assertFalse(s["live"])
+
+    def test_contribution_projection_without_an_owner_id_claims_nothing(self):
+        m = self._marker(file=self.CONTRIBUTION, expiresMs=self.future,
+                         lockOwnerId=None)
+        s = wg.liveness(m, {}, self.now)
+        self.assertEqual(s["classification"], "contribution")
+        self.assertFalse(s["live"])
+
+    def test_manual_marker_is_classified_manual(self):
+        s = wg.liveness(self._marker(pid=1), {}, self.now)
+        self.assertEqual(s["classification"], "manual")
+
+
 class TestSnapshotRoundTrip(unittest.TestCase):
     """End-to-end: create a temp repo, snapshot, recover a file."""
 
