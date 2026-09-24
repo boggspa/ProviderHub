@@ -123,7 +123,14 @@ this mode, and the gateway credential is written into the Codex config for
 the session instead of being fetched by the helper command; it is removed
 when the previous setup is restored.
 
-**Colour the power slider by provider** (off by default) makes Provider Hub
+**Use provider accent colours** (off by default) also colours running-task
+spinners in the sidebar. Each spinner uses its task's saved model accent;
+subagents use their root parent task's accent, including your branding
+overrides. Colours refresh about every two seconds. Unknown tasks and tasks
+on remote hosts keep their original spinner colour. See the
+[sidebar accent notes](docs/codex-sidebar-accents.md) for scope and verification.
+
+The same switch makes Provider Hub
 start Codex / ChatGPT itself with a Chromium DevTools pipe and install a small
 watcher in its windows that colours the model picker's power slider, and the
 effort word in the composer's model pill, with the selected model's provider

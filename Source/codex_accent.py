@@ -1,4 +1,4 @@
-"""Codex power-slider accents.
+"""Codex provider accents for pickers, activity and sidebar spinners.
 
 The ChatGPT desktop app paints its model picker's power slider with one
 app-wide design token (``--color-chart-blue``); its model records carry no
@@ -10,6 +10,8 @@ and a small watcher script is injected into its windows over that pipe.
 The pipe is a pair of file descriptors only this helper holds, so nothing
 listens on a port. The watcher reads the app's model labels and child-panel
 headers and sets CSS custom properties on the picker and conversation panes.
+Sidebar spinners receive their owning root task's accent from bounded,
+read-only queries of Codex's local model and spawn-edge metadata.
 Ultra, which the app paints with its
 purple token, takes a more saturated cut of the same provider hue instead;
 native Codex keeps #705AFF. Its word gets a shimmer sweep in both cases.
@@ -31,6 +33,7 @@ import plistlib
 import re
 import select
 import signal
+import sqlite3
 import subprocess
 import sys
 import time
@@ -82,6 +85,19 @@ CHILD_PANEL_SELECTOR = (TAB_PANEL_SELECTOR + ':is([data-tab-id^="sidechat:"],'
 # not hashed module names or the user's transcript text.
 SUBAGENT_MODEL_SELECTOR = ('div[class~="h-12"][class~="border-b"][class~="border-strong"]'
                            ' > span[class~="max-w-1/2"][class~="text-tertiary"]')
+# Authored sidebar action hooks, observed in ChatGPT 26.917.62051. The row
+# key is local:<thread UUID>; a remote host may use the same key, so its host
+# and kind must agree before consulting the local database.
+SIDEBAR_ROW = "data-app-action-sidebar-thread-row"
+SIDEBAR_ID = "data-app-action-sidebar-thread-id"
+SIDEBAR_HOST = "data-app-action-sidebar-thread-host-id"
+SIDEBAR_KIND = "data-app-action-sidebar-thread-kind"
+SIDEBAR_MARK = "data-provider-hub-sidebar"
+SIDEBAR_ACCENT_PROPERTY = "--provider-hub-sidebar-accent"
+SIDEBAR_SPINNER = ('[role="status"][class~="text-text/70"] > '
+                   '[class~="motion-safe:animate-spin"] > svg')
+_THREAD_ID = re.compile(r"^[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$")
+_SIDEBAR_LIMIT = 256
 # Ultra: the app paints its top level (the popover's title, the slider's
 # fill gradient, the pill's Ultra layer) with one purple token. On the
 # picker and the pill that token is given the model's Ultra hue instead,
@@ -166,6 +182,83 @@ def native_codex_labels(inventory: dict, cache_path: Path | None = None) -> list
     except (OSError, ValueError):
         pass
     return sorted(labels)
+
+
+class SidebarAccents:
+    """Read model/parent metadata for sidebar IDs, never transcripts or titles.
+
+    Spawn edges are authoritative: a child uses its root parent's model even
+    if the child runs through a different provider. Missing parents, cycles,
+    unknown models, unavailable databases and schema drift leave stock grey.
+    Reads are bounded and short-lived so this optional feature cannot hold up
+    the worker which owns the desktop's lifetime.
+    """
+
+    def __init__(self, routes: dict, native_labels=(), config_home: Path | None = None):
+        self.routes = {_label_key(key): value.upper() for key, value in routes.items()
+                       if isinstance(value, str) and _HEX.fullmatch(value)}
+        self.native = {re.sub(r"[-\s]+", " ", _label_key(label)) for label in native_labels}
+        self.home = Path(config_home) if config_home is not None else Path(
+            os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
+
+    def __call__(self, identifiers) -> dict:
+        if not isinstance(identifiers, list):
+            return {}
+        requested = {value for value in identifiers[:_SIDEBAR_LIMIT]
+                     if isinstance(value, str) and _THREAD_ID.fullmatch(value)}
+        if not requested:
+            return {}
+        connection = None
+        try:
+            candidates = [(int(match.group(1)), path) for path in self.home.glob("state_*.sqlite")
+                          if (match := re.fullmatch(r"state_(\d+)\.sqlite", path.name))]
+            if not candidates:
+                return {}
+            # Only the newest schema is authoritative; never fall back to a
+            # stale older database if a future schema cannot be understood.
+            database = max(candidates)[1].resolve()
+            connection = sqlite3.connect(database.as_uri() + "?mode=ro", uri=True, timeout=0.05)
+            deadline = time.monotonic() + 0.2
+            connection.set_progress_handler(lambda: int(time.monotonic() > deadline), 1000)
+            connection.execute("BEGIN")
+            records = {}
+            pending = requested
+            for _ in range(32):
+                placeholders = ",".join("?" for _ in pending)
+                rows = connection.execute(
+                    "SELECT t.id, t.model, e.parent_thread_id FROM threads t "
+                    "LEFT JOIN thread_spawn_edges e ON e.child_thread_id=t.id "
+                    f"WHERE t.id IN ({placeholders})", tuple(pending)).fetchall()
+                records.update({row[0]: (row[1], row[2]) for row in rows})
+                pending = {parent for _, _, parent in rows if isinstance(parent, str)
+                           and _THREAD_ID.fullmatch(parent) and parent not in records}
+                if not pending:
+                    break
+            result = {}
+            for identifier in requested:
+                current, seen = identifier, set()
+                while current in records and current not in seen:
+                    seen.add(current)
+                    model, parent = records[current]
+                    if parent is not None:
+                        current = parent
+                        continue
+                    if not isinstance(model, str):
+                        break
+                    key = _label_key(model)
+                    colour = self.routes.get(key)
+                    native_key = re.sub(r"[-\s]+", " ", key.removeprefix("codex/"))
+                    if not colour and native_key in self.native:
+                        colour = NATIVE_CODEX_ACCENT
+                    if colour:
+                        result[identifier] = colour
+                    break
+            return result
+        except (OSError, sqlite3.Error):
+            return {}
+        finally:
+            if connection is not None:
+                connection.close()
 
 
 def _srgb_to_oklch(colour: str) -> tuple[float, float, float]:
@@ -337,6 +430,13 @@ def usage_banner_css() -> str:
     return f"{usage_banner_selector()}{{display:none}}"
 
 
+def sidebar_spinner_css() -> str:
+    # Mark the matched SVG itself: inherited document accents, neighbouring
+    # unread/error badges and even a nested unrecognised row cannot borrow it.
+    return (f'svg[{SIDEBAR_MARK}="1"]'
+            f"{{color:var({SIDEBAR_ACCENT_PROPERTY},currentColor)!important}}")
+
+
 _WATCHER = r"""
 (() => {
   // The completion value goes back to the helper's log. Only the app's own
@@ -370,6 +470,14 @@ _WATCHER = r"""
     const TAB_PANEL_SELECTOR = __HUB_TAB_PANEL_SELECTOR__;
     const CHILD_PANEL_SELECTOR = __HUB_CHILD_PANEL_SELECTOR__;
     const SUBAGENT_MODEL_SELECTOR = __HUB_SUBAGENT_MODEL_SELECTOR__;
+    const SIDEBAR_ROW = "__HUB_SIDEBAR_ROW__";
+    const SIDEBAR_ID = "__HUB_SIDEBAR_ID__";
+    const SIDEBAR_HOST = "__HUB_SIDEBAR_HOST__";
+    const SIDEBAR_KIND = "__HUB_SIDEBAR_KIND__";
+    const SIDEBAR_MARK = "__HUB_SIDEBAR_MARK__";
+    const SIDEBAR_PROPERTY = "__HUB_SIDEBAR_PROPERTY__";
+    const SIDEBAR_SPINNER = __HUB_SIDEBAR_SPINNER__;
+    const sidebar = { colours: new Map(), targets: new Map() };
     const state = { targets: [], label: "", colour: "", purple: "", ultra: "", title: null, words: [], pills: [], marks: [], sheet: null, accent: "", theme: "", hue: "", panels: new Map() };
     const norm = (text) => (text || "").replace(/\s+/g, " ").trim().toLowerCase();
     // Labels may carry a leading glyph (a bullet, a tier mark); match the words.
@@ -665,9 +773,62 @@ _WATCHER = r"""
       applyShimmer(found.accent, found.theme, found.hue);
       applyPanels(found.models);
     }
+    function sidebarRows() {
+      const rows = [];
+      for (const element of document.querySelectorAll("[" + SIDEBAR_ROW + "]")) {
+        if (element.getAttribute(SIDEBAR_KIND) !== "local" || element.getAttribute(SIDEBAR_HOST) !== "local") { continue; }
+        const match = /^local:([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})$/i.exec(element.getAttribute(SIDEBAR_ID) || "");
+        if (match) { rows.push({ element: element, id: match[1] }); }
+        if (rows.length >= 256) { break; }
+      }
+      return rows;
+    }
+    function clearSidebar(element, saved) {
+      if (element.style.getPropertyValue(SIDEBAR_PROPERTY) === saved.colour && !element.style.getPropertyPriority(SIDEBAR_PROPERTY)) {
+        if (saved.previous) { element.style.setProperty(SIDEBAR_PROPERTY, saved.previous, saved.priority); }
+        else { element.style.removeProperty(SIDEBAR_PROPERTY); }
+      }
+      if (element.getAttribute(SIDEBAR_MARK) === "1") {
+        if (saved.mark === null) { element.removeAttribute(SIDEBAR_MARK); }
+        else { element.setAttribute(SIDEBAR_MARK, saved.mark); }
+      }
+    }
+    function applySidebar() {
+      const targets = new Map();
+      for (const row of sidebarRows()) {
+        const colour = sidebar.colours.get(row.id);
+        if (!colour) { continue; }
+        for (const element of row.element.querySelectorAll(SIDEBAR_SPINNER)) {
+          if (element.closest("[" + SIDEBAR_ROW + "]") === row.element) { targets.set(element, colour); }
+        }
+      }
+      for (const [element, saved] of sidebar.targets) {
+        if (targets.get(element) !== saved.colour) { clearSidebar(element, saved); sidebar.targets.delete(element); }
+      }
+      for (const [element, colour] of targets) {
+        if (sidebar.targets.has(element)) { continue; }
+        sidebar.targets.set(element, { colour: colour, previous: element.style.getPropertyValue(SIDEBAR_PROPERTY),
+          priority: element.style.getPropertyPriority(SIDEBAR_PROPERTY), mark: element.getAttribute(SIDEBAR_MARK) });
+        element.style.setProperty(SIDEBAR_PROPERTY, colour);
+        element.setAttribute(SIDEBAR_MARK, "1");
+      }
+      if (targets.size) { installStyles(); }
+    }
+    function setSidebarAccents(colours) {
+      const next = new Map();
+      if (colours && typeof colours === "object" && !Array.isArray(colours)) {
+        for (const [id, colour] of Object.entries(colours).slice(0, 256)) {
+          if (typeof colour === "string" && /^#[0-9a-f]{6}$/i.test(colour)) { next.set(id, colour.toUpperCase()); }
+        }
+      }
+      sidebar.colours = next;
+      schedule();
+      return next.size;
+    }
     function apply() {
       try { applyMenu(); } catch (error) {}
       try { applyPills(); } catch (error) {}
+      try { applySidebar(); } catch (error) {}
     }
     let scheduled = false;
     function schedule() {
@@ -677,17 +838,19 @@ _WATCHER = r"""
     }
     // Observe the document node: at document start there is no root element yet.
     const observer = new MutationObserver(schedule);
-    observer.observe(document, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ["data-explicit-model", "data-accent", "data-maximum", "data-selected-reasoning-effort", "data-tab-id", "data-app-shell-tab-panel-controller", "role", "inert", "hidden"] });
+    observer.observe(document, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ["data-explicit-model", "data-accent", "data-maximum", "data-selected-reasoning-effort", "data-tab-id", "data-app-shell-tab-panel-controller", SIDEBAR_ROW, SIDEBAR_ID, SIDEBAR_HOST, SIDEBAR_KIND, "role", "inert", "hidden"] });
     if (document.readyState === "loading") { document.addEventListener("DOMContentLoaded", schedule, { once: true }); }
     window.__providerHubAccent = {
-      version: 13,
+      version: 14,
       accents: Object.keys(ACCENTS).length,
+      sidebarThreadIds: () => Array.from(new Set(sidebarRows().map(row => row.id))),
+      setSidebarAccents: setSidebarAccents,
       check: () => ({ container: !!document.querySelector('[data-explicit-model="true"]'), label: state.label, colour: state.colour, ultra: state.ultra, targets: state.targets.length,
                       pills: state.words.map((entry) => entry.colour), ultraPills: state.pills.map((entry) => entry.colour), marks: state.marks.length,
                       shimmer: state.accent ? state.accent + ":" + state.theme : "", hue: state.hue,
                       panels: Array.from(state.panels.values(), (entry) => ({ id: entry.element.getAttribute("data-tab-id"), accent: entry.styles.get(ACCENT_PROPERTY).value })),
                       banners: USAGE_SELECTOR ? document.querySelectorAll(USAGE_SELECTOR).length : null,
-                      glyphs: document.querySelectorAll(GLYPH_SELECTOR).length }),
+                      glyphs: document.querySelectorAll(GLYPH_SELECTOR).length, sidebarSpinners: sidebar.targets.size }),
     };
     schedule();
     return { installed: true, accents: Object.keys(ACCENTS).length, usageBanner: !!USAGE_SELECTOR, ready: document.readyState };
@@ -718,7 +881,7 @@ def watcher_script(accents: dict, property_name: str = PROPERTY, hide_usage_bann
     for key in table:
         if re.sub(r"[-\s]+", " ", key) in native and table[key].upper() == NATIVE_CODEX_ACCENT:
             ultras[key] = {"dark": NATIVE_CODEX_ACCENT, "light": NATIVE_CODEX_ACCENT}
-    css = shimmer_css() + activity_glyph_css() + ultra_css() + (usage_banner_css() if hide_usage_banner else "")
+    css = shimmer_css() + activity_glyph_css() + ultra_css() + sidebar_spinner_css() + (usage_banner_css() if hide_usage_banner else "")
     return (_WATCHER.replace("__HUB_ACCENTS__", json.dumps(table, ensure_ascii=False))
             .replace("__HUB_ROUTE_ACCENTS__", json.dumps(routes, ensure_ascii=False))
             .replace("__HUB_ROUTE_HUES__", json.dumps(hue_map(routes)))
@@ -732,6 +895,13 @@ def watcher_script(accents: dict, property_name: str = PROPERTY, hide_usage_bann
             .replace("__HUB_TAB_PANEL_SELECTOR__", json.dumps(TAB_PANEL_SELECTOR))
             .replace("__HUB_CHILD_PANEL_SELECTOR__", json.dumps(CHILD_PANEL_SELECTOR))
             .replace("__HUB_SUBAGENT_MODEL_SELECTOR__", json.dumps(SUBAGENT_MODEL_SELECTOR))
+            .replace("__HUB_SIDEBAR_ROW__", SIDEBAR_ROW)
+            .replace("__HUB_SIDEBAR_ID__", SIDEBAR_ID)
+            .replace("__HUB_SIDEBAR_HOST__", SIDEBAR_HOST)
+            .replace("__HUB_SIDEBAR_KIND__", SIDEBAR_KIND)
+            .replace("__HUB_SIDEBAR_MARK__", SIDEBAR_MARK)
+            .replace("__HUB_SIDEBAR_PROPERTY__", SIDEBAR_ACCENT_PROPERTY)
+            .replace("__HUB_SIDEBAR_SPINNER__", json.dumps(SIDEBAR_SPINNER))
             .replace("__HUB_THEME_ATTRIBUTE__", THEME_ATTRIBUTE)
             .replace("__HUB_ACCENT_PROPERTY__", ACCENT_PROPERTY)
             .replace("__HUB_ULTRA_ACCENT_PROPERTY__", ULTRA_ACCENT_PROPERTY)
@@ -836,10 +1006,12 @@ class AccentBridge:
     outside sites, workers) is detached again at once.
     """
 
-    def __init__(self, pipe: DevToolsPipe, script: str, emit=None):
+    def __init__(self, pipe: DevToolsPipe, script: str, emit=None, *, sidebar_accents=None):
         self.pipe = pipe
         self.script = script
         self.emit = emit or (lambda event: None)
+        self.sidebar_accents = sidebar_accents
+        self.sidebar_next_poll = 0.0
         self.pending: dict[int, tuple[str, str | None]] = {}
         self.injected: set[str] = set()
 
@@ -890,6 +1062,34 @@ class AccentBridge:
                            "line": exception.get("lineNumber"), "column": exception.get("columnNumber")})
             else:
                 self.emit({"event": "injected", "session": session_id, "result": (result.get("result") or {}).get("value")})
+        elif kind == "sidebar-read" and session_id in self.injected:
+            identifiers = ((message.get("result") or {}).get("result") or {}).get("value")
+            # A failed read replaces the previous palette with an empty one;
+            # stale ownership must never masquerade as a known provider.
+            try:
+                colours = self.sidebar_accents(identifiers) if self.sidebar_accents else {}
+            except Exception:
+                colours = {}
+            self._sidebar_evaluate(session_id, "setSidebarAccents", json.dumps(colours), "sidebar-write")
+
+    def _sidebar_evaluate(self, session_id, method, argument, kind):
+        # Repeat the origin/frame guard for each poll: an attached page can
+        # navigate after initial injection. Only an installed watcher is used.
+        expression = ("(() => { if (window !== window.top || !/^app:\\/\\/-\\//.test(String(location.href))) return null; "
+                      f"return window.__providerHubAccent?.{method}?.({argument}); }})()")
+        identifier = self.pipe.send("Runtime.evaluate", {"expression": expression,
+                                    "returnByValue": True, "timeout": 1000}, session_id=session_id)
+        self.pending[identifier] = (kind, session_id)
+
+    def refresh_sidebar(self):
+        now = time.monotonic()
+        if self.sidebar_accents is None or now < self.sidebar_next_poll:
+            return
+        self.sidebar_next_poll = now + 2.0
+        for session_id in self.injected:
+            if any(kind.startswith("sidebar-") and owner == session_id for kind, owner in self.pending.values()):
+                continue
+            self._sidebar_evaluate(session_id, "sidebarThreadIds", "", "sidebar-read")
 
     def _evaluate(self, session_id: str) -> None:
         self.pending[self.pipe.send("Runtime.evaluate", {"expression": self.script, "returnByValue": True}, session_id=session_id)] = ("evaluate", session_id)
@@ -965,7 +1165,7 @@ def already_running(binary: Path) -> bool:
     return False
 
 
-def run(binary: Path, script: str, *, emit=None, arguments=(), environment=None, poll_interval=0.25,
+def run(binary: Path, script: str, *, emit=None, arguments=(), environment=None, sidebar_accents=None, poll_interval=0.25,
         launch_timeout=45.0) -> int:
     """Launch the app, install the watcher, then stay attached until it exits.
 
@@ -987,7 +1187,7 @@ def run(binary: Path, script: str, *, emit=None, arguments=(), environment=None,
     emit({"event": "launched", "pid": pid})
     for signum in (signal.SIGTERM, signal.SIGHUP):
         signal.signal(signum, signal.SIG_IGN)
-    bridge = AccentBridge(pipe, script, emit)
+    bridge = AccentBridge(pipe, script, emit, sidebar_accents=sidebar_accents)
     started = time.monotonic()
     status = None
     try:
@@ -1010,6 +1210,10 @@ def run(binary: Path, script: str, *, emit=None, arguments=(), environment=None,
                     bridge.handle(message)
                 except Exception as exc:  # a surprise in the protocol must not end the helper
                     emit({"event": "error", "stage": "handle", "message": f"{type(exc).__name__}: {exc}"})
+            try:
+                bridge.refresh_sidebar()
+            except Exception as exc:
+                emit({"event": "error", "stage": "sidebar", "message": f"{type(exc).__name__}: {exc}"})
             done, raw = os.waitpid(pid, os.WNOHANG)
             if done:
                 status = raw
@@ -1067,12 +1271,14 @@ def bridge_command(app_path: str, settings: dict, inventory: dict, emit=None, lo
             emit({"event": "error", "stage": "launch", "message": "The app is already running; quit it first."})
             return 2
         accents = accent_map(settings, inventory)
+        routes = accent_map(settings, inventory, by_route=True)
+        native_labels = native_codex_labels(inventory)
         hide_banner = settings.get("codex_hide_usage_banner") is True
         emit({"event": "accents", "count": len(accents), "usage_banner": "hidden" if hide_banner else "shown"})
         run_options.setdefault("environment", child_environment(bundle))
+        run_options.setdefault("sidebar_accents", SidebarAccents(routes, native_labels))
         return run(binary, watcher_script(accents, hide_usage_banner=hide_banner,
-                                         native_labels=native_codex_labels(inventory),
-                                         route_accents=accent_map(settings, inventory, by_route=True)),
+                                         native_labels=native_labels, route_accents=routes),
                    emit=emit, **run_options)
     finally:
         if stream is not None:

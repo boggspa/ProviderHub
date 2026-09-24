@@ -4,6 +4,7 @@ Expose Playwright through NODE_PATH when it is supplied by a bundled runtime.
 The ordinary Python suite skips these checks if Node or Chromium is absent.
 """
 import json
+import os
 import shutil
 import subprocess
 import unittest
@@ -46,7 +47,75 @@ const mount = async (page, content) => {
   assert.equal(installed.installed, true);
   await flush(page);
 };
+const threadId = n => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
+const spinner = id => `<div role="status" aria-label="Working" class="relative flex size-5 shrink-0 items-center justify-center text-text/70" style="color:rgb(153,153,153)"><div class="motion-safe:animate-spin" style="animation-duration:2000ms"><svg id="${id}" class="icon-xs shrink-0" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" stroke-width="2" opacity=".2"/><path d="M12 4a8 8 0 0 1 8 8" fill="none" stroke="currentColor" stroke-width="2"/></svg></div></div>`;
+const sidebarRow = (id, n, host='local', kind='local') => `<div id="${id}" data-app-action-sidebar-thread-row data-app-action-sidebar-thread-kind="${kind}" data-app-action-sidebar-thread-host-id="${host}" data-app-action-sidebar-thread-id="local:${threadId(n)}"><span data-thread-title id="${id}-title">Task ${n}</span>${spinner(id + '-spin')}<svg class="text-warning" id="${id}-warning"></svg><span id="${id}-unread" style="color:rgb(0,100,200)">2</span></div>`;
+const publishSidebar = async (page, entries) => {
+  await page.evaluate(data => window.__providerHubAccent.setSidebarAccents(data), entries);
+  await flush(page);
+};
 const cases = {
+  async sidebar_spinners_keep_each_owner_colour_in_both_themes(page) {
+    await mount(page, main() + '<nav>' + sidebarRow('a', 1) + sidebarRow('b', 2) + sidebarRow('unknown', 3) + sidebarRow('host', 1, 'other-host') + sidebarRow('cloud', 1, 'local', 'remote') + '</nav>' + spinner('outside-spin'));
+    assert.deepEqual(await page.evaluate(() => window.__providerHubAccent.sidebarThreadIds()), [threadId(1), threadId(2), threadId(3)]);
+    await publishSidebar(page, {[threadId(1)]:'#D44404', [threadId(2)]:'#0073E6'});
+    for (const ink of ['#ddd', '#222']) {
+      await page.locator('html').evaluate((el, colour) => { el.style.color = colour; }, ink);
+      await flush(page);
+      assert.equal(await colour(page, 'a-spin'), colours.mistral);
+      assert.equal(await colour(page, 'b-spin'), colours.kimi);
+      for (const id of ['unknown-spin', 'host-spin', 'cloud-spin', 'outside-spin']) { assert.equal(await colour(page, id), colours.grey); }
+      assert.equal(await colour(page, 'a-warning'), 'rgb(255, 150, 0)');
+      assert.equal(await colour(page, 'a-unread'), 'rgb(0, 100, 200)');
+      assert.equal(await colour(page, 'a-title'), ink === '#ddd' ? 'rgb(221, 221, 221)' : 'rgb(34, 34, 34)');
+    }
+    await page.locator('#main-model').evaluate(el => { el.textContent = 'Qwen 3'; });
+    await flush(page);
+    assert.equal(await colour(page, 'a-spin'), colours.mistral);
+    await publishSidebar(page, {[threadId(1)]:'#8C52EF', [threadId(2)]:'#0073E6'});
+    assert.equal(await colour(page, 'a-spin'), colours.qwen);
+    assert.equal(await page.locator('#a-spin').evaluate(el => el.parentElement.style.animationDuration), '2000ms');
+    await page.emulateMedia({reducedMotion:'reduce'});
+    assert.equal(await colour(page, 'a-spin'), colours.qwen);
+    await publishSidebar(page, {});
+    assert.equal(await colour(page, 'a-spin'), colours.grey);
+  },
+  async sidebar_recycled_rows_mount_close_and_host_switch_restore_grey(page) {
+    await mount(page, sidebarRow('a', 1));
+    await publishSidebar(page, {[threadId(1)]:'#D44404', [threadId(2)]:'#0073E6'});
+    await page.locator('#a').evaluate((el, id) => el.setAttribute('data-app-action-sidebar-thread-id', 'local:' + id), threadId(2));
+    await flush(page);
+    assert.equal(await colour(page, 'a-spin'), colours.kimi);
+    await page.locator('#a').evaluate(el => el.setAttribute('data-app-action-sidebar-thread-host-id', 'another-host'));
+    await flush(page);
+    assert.equal(await colour(page, 'a-spin'), colours.grey);
+    await page.locator('body').evaluate((el, html) => el.insertAdjacentHTML('beforeend', html), sidebarRow('new', 1));
+    await flush(page);
+    assert.equal(await colour(page, 'new-spin'), colours.mistral);
+    await page.locator('#new-spin').evaluate(el => { window.oldSpinner = el; el.closest('[role="status"]').remove(); });
+    await flush(page);
+    assert.equal(await page.evaluate(() => window.oldSpinner.getAttribute('data-provider-hub-sidebar')), null);
+    assert.equal(await page.evaluate(() => window.oldSpinner.style.getPropertyValue('--provider-hub-sidebar-accent')), '');
+    await page.locator('#a').evaluate(el => el.setAttribute('data-app-action-sidebar-thread-id', 'local:pending-worktree'));
+    await flush(page);
+    assert.equal(await page.evaluate(() => window.__providerHubAccent.check().sidebarSpinners), 0);
+  },
+  async sidebar_restores_prior_style_and_rejects_invalid_colours(page) {
+    await mount(page, sidebarRow('a', 1));
+    await page.locator('#a-spin').evaluate(el => {
+      el.style.setProperty('--provider-hub-sidebar-accent', '#112233', 'important');
+      el.setAttribute('data-provider-hub-sidebar', 'prior');
+    });
+    await publishSidebar(page, {[threadId(1)]:'#D44404'});
+    assert.equal(await colour(page, 'a-spin'), colours.mistral);
+    await publishSidebar(page, {[threadId(1)]:'red;display:none'});
+    assert.equal(await colour(page, 'a-spin'), colours.grey);
+    assert.deepEqual(await page.locator('#a-spin').evaluate(el => [el.style.getPropertyValue('--provider-hub-sidebar-accent'), el.style.getPropertyPriority('--provider-hub-sidebar-accent'), el.getAttribute('data-provider-hub-sidebar')]), ['#112233','important','prior']);
+    await publishSidebar(page, {[threadId(1)]:'#D44404'});
+    await page.locator('#a-spin').evaluate(el => el.style.setProperty('--provider-hub-sidebar-accent', '#445566'));
+    await publishSidebar(page, {});
+    assert.equal(await page.locator('#a-spin').evaluate(el => el.style.getPropertyValue('--provider-hub-sidebar-accent')), '#445566');
+  },
   async separate_panes_even_when_child_composer_comes_first(page) {
     await mount(page, side() + agent() + main());
     assert.equal(await colour(page, 'main-glyph'), colours.parent);
@@ -192,7 +261,7 @@ const cases = {
 };
 (async () => {
   let browser;
-  try { browser = await chromium.launch({headless:true}); }
+  try { browser = await chromium.launch({headless:true, ...(input.executablePath ? {executablePath:input.executablePath} : {})}); }
   catch (error) {
     if (!String(error).includes("Executable doesn't exist")) { throw error; }
     process.stdout.write(JSON.stringify({skip:'Playwright Chromium is not installed'}));
@@ -223,7 +292,8 @@ class PaneAccentBrowserTests(unittest.TestCase):
         }, native_labels=["GPT-6-Astra", "gpt-6-astra"], route_accents={
             "mistral/mistral-vibe-cli-latest": "#D44404", "ollama/qwen3:cloud": "#8C52EF",
         })
-        result = subprocess.run([node, "-e", BROWSER_TESTS], input=json.dumps({"script": script}),
+        result = subprocess.run([node, "-e", BROWSER_TESTS], input=json.dumps({"script": script,
+                                "executablePath": os.environ.get("PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH")}),
                                 text=True, capture_output=True, timeout=90)
         self.assertEqual(result.returncode, 0, result.stderr)
         report = json.loads(result.stdout)

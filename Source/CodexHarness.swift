@@ -465,7 +465,7 @@ struct CodexConfigPane: View {
                 Divider()
                 CodexPreference(isOn: $model.settings.codex_accent_slider, disabled: model.busy,
                     title: "Use provider accent colours",
-                    summary: "Match the slider and activity to the provider.",
+                    summary: "Match the slider, activity and sidebar spinners to the provider.",
                     details: "Provider Hub launches Codex through a DevTools pipe held only by its helper; no network port listens. This is unsupported by OpenAI and an app update may disable the colouring. A Codex self-relaunch runs without it until launched here again. In this mode, macOS attributes Codex’s privacy prompts—including microphone, camera, folders and automation—to Provider Hub. The pipe is a full control channel into Codex. Its helper outlives Provider Hub and stays until Codex quits; killing the helper closes the pipe and asks Codex to quit. Save, then launch.")
                 Divider()
                 CodexPreference(isOn: $model.settings.codex_hide_usage_banner, disabled: model.busy || !model.settings.codex_accent_slider,

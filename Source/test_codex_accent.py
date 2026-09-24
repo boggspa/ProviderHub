@@ -244,7 +244,9 @@ class UltraTests(unittest.TestCase):
         self.assertEqual(ULTRA_PROPERTY, "--color-chart-purple")
         script = watcher_script({"Kimi for Coding": "#0073E6"})
         self.assertIn("provider-hub-ultra-sweep", script)
-        self.assertIn(json.dumps(shimmer_css() + activity_glyph_css() + ultra_css()), script)  # the stylesheets travel together
+        css_bundle = json.loads(re.search(r"const STYLE_CSS = (.+);", script).group(1))
+        self.assertIn(shimmer_css() + activity_glyph_css() + ultra_css(), css_bundle)
+        self.assertIn(codex_accent.sidebar_spinner_css(), css_bundle)
 
 
 class EnvironmentTests(unittest.TestCase):
