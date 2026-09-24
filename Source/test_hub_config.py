@@ -79,6 +79,10 @@ class SettingsMigrationTests(unittest.TestCase):
             normalize({"codex_hide_usage_banner": "yes"}, SLOTS, "mistral-test")
         self.assertIs(base["codex_goal_budget"], False)
         self.assertIs(normalize({"codex_goal_budget": True}, SLOTS, "mistral-test")["codex_goal_budget"], True)
+        self.assertIs(base["codex_unlock_composer"], False)
+        self.assertIs(normalize({"codex_unlock_composer": True}, SLOTS, "mistral-test")["codex_unlock_composer"], True)
+        with self.assertRaises(ValueError):
+            normalize({"codex_unlock_composer": "on"}, SLOTS, "mistral-test")
         with self.assertRaises(ValueError):
             normalize({"codex_goal_budget": "unlimited"}, SLOTS, "mistral-test")
 

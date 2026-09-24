@@ -486,7 +486,7 @@ def defaults(slots, vibe_model: str, port: int = 11436) -> dict:
             "claude_features": {key: False for key in CLAUDE_FEATURE_KEYS},
             "claude_catalogue": None, "claude_code_settings": True, "claude_workflows": False,
             "codex_accent_slider": False, "codex_hide_usage_banner": False,
-            "codex_goal_budget": False,
+            "codex_unlock_composer": False, "codex_goal_budget": False,
             "codex_subagent_rank": None, "codex_subagent_route": None}
 
 
@@ -621,6 +621,9 @@ def normalize(value: dict, slots, vibe_model: str, port: int = 11436) -> dict:
     # tints its power slider per model (see codex_accent).
     # codex_hide_usage_banner: that helper's stylesheet also hides the app's
     # ChatGPT usage banner.
+    # codex_unlock_composer: that helper's watcher also keeps the composer's
+    # send button usable for hub routes once the ChatGPT plan's usage is
+    # exhausted (see codex_accent).
     # codex_goal_budget: leave the optional token budget on Codex's goal tools.
     # Off - the default - deletes the property, so a goal starts unlimited on
     # every route instead of wherever the model honoured Codex's "omit unless
@@ -628,7 +631,8 @@ def normalize(value: dict, slots, vibe_model: str, port: int = 11436) -> dict:
     for key, fallback in (("auto_stop", True), ("auto_mode", False), ("codex_chatgpt_account", False),
                           ("codex_apply_patch_all", False), ("claude_code_settings", True),
                           ("claude_workflows", False), ("codex_accent_slider", False),
-                          ("codex_hide_usage_banner", False), ("codex_goal_budget", False)):
+                          ("codex_hide_usage_banner", False), ("codex_unlock_composer", False),
+                          ("codex_goal_budget", False)):
         requested = value.get(key, fallback)
         if type(requested) is not bool:
             raise ValueError(f"{key} must be true or false.")

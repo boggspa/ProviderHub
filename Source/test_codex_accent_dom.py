@@ -250,6 +250,50 @@ const cases = {
     assert.equal(await page.locator('#side [data-provider-hub-ultra]').count(), 1);
     assert.equal(await page.locator('main [data-provider-hub-ultra]').count(), 0);
   },
+  async composer_unlock_frees_only_the_core_limit_of_the_usage_status(page) {
+    await page.setContent(styles + main());
+    const unlockScript = input.unlockScript.replace('String(location.href)', '"app://-/"');
+    const installed = await page.evaluate(unlockScript);
+    assert.equal(installed.installed, true);
+    assert.equal(installed.unlock, true);
+    await flush(page);
+    const seen = await page.evaluate(() => {
+      const status = JSON.parse('{"user_id":"u1","account_id":"a1","plan_type":"plus","rate_limit":{"allowed":false,"limit_reached":true,"primary_window":{"used_percent":100}},"additional_rate_limits":[{"limit_name":"gpt-reserve","rate_limit":{"allowed":false}}],"credits":{"has_credits":false}}');
+      const snapshot = JSON.parse('{"version":1,"stream_id":"s","sequence":2,"usage":{"user_id":"u1","account_id":"a1","plan_type":"plus","rate_limit":{"allowed":false,"limit_reached":true}}}');
+      const other = JSON.parse('{"rate_limit":{"allowed":false},"plan_type":"plus"}');
+      const allowed = JSON.parse('{"user_id":"u1","account_id":"a1","plan_type":"plus","rate_limit":{"allowed":true}}');
+      const revived = JSON.parse('{"a":1}', (key, value) => (key === 'a' ? value + 1 : value));
+      let failure = null;
+      try { JSON.parse('{nope'); } catch (error) { failure = error.name; }
+      return { status, snapshot, other, allowed, revived, failure, list: JSON.parse('[1,2]'), length: JSON.parse.length, name: JSON.parse.name,
+               check: window.__providerHubAccent.check().unlock, glyph: getComputedStyle(document.getElementById('main-glyph')).color };
+    });
+    assert.equal(seen.status.rate_limit.allowed, true);
+    assert.equal(seen.status.rate_limit.limit_reached, true);
+    assert.equal(seen.status.rate_limit.primary_window.used_percent, 100);
+    assert.equal(seen.status.additional_rate_limits[0].rate_limit.allowed, false);
+    assert.equal(seen.status.credits.has_credits, false);
+    assert.equal(seen.snapshot.usage.rate_limit.allowed, true);
+    assert.equal(seen.other.rate_limit.allowed, false);
+    assert.equal(seen.allowed.rate_limit.allowed, true);
+    assert.equal(seen.revived.a, 2);
+    assert.equal(seen.failure, 'SyntaxError');
+    assert.deepEqual(seen.list, [1, 2]);
+    assert.equal(seen.length, 2);
+    assert.equal(seen.name, 'parse');
+    assert.deepEqual(seen.check, {seen: 3, unlocked: 2});
+    assert.equal(seen.glyph, colours.parent);
+    assert.deepEqual(await page.evaluate(unlockScript), {skipped: 'installed'});
+  },
+  async composer_unlock_stays_off_without_its_switch(page) {
+    await mount(page, main());
+    const seen = await page.evaluate(() => ({
+      native: /\[native code\]/.test(String(JSON.parse)),
+      allowed: JSON.parse('{"user_id":"u1","account_id":"a1","plan_type":"plus","rate_limit":{"allowed":false}}').rate_limit.allowed,
+      check: window.__providerHubAccent.check().unlock,
+    }));
+    assert.deepEqual(seen, {native: true, allowed: false, check: null});
+  },
   async origin_and_frame_guards_remain_intact(page) {
     await page.setContent(styles + main() + agent());
     assert.deepEqual(await page.evaluate(input.script), {skipped:'origin'});
@@ -286,20 +330,23 @@ class PaneAccentBrowserTests(unittest.TestCase):
         node = shutil.which("node")
         if node is None:
             self.skipTest("Node is not installed")
-        script = watcher_script({
+        accents = {
             "GPT-6 Astra": "#705AFF", "Kimi for Coding": "#0073E6",
             "Custom label · Hosted": "#0073E6", "Qwen 3": "#8C52EF", "Plain": "#808080",
-        }, native_labels=["GPT-6-Astra", "gpt-6-astra"], route_accents={
+        }
+        options = dict(native_labels=["GPT-6-Astra", "gpt-6-astra"], route_accents={
             "mistral/mistral-vibe-cli-latest": "#D44404", "ollama/qwen3:cloud": "#8C52EF",
         })
-        result = subprocess.run([node, "-e", BROWSER_TESTS], input=json.dumps({"script": script,
+        script = watcher_script(accents, **options)
+        unlock = watcher_script(accents, unlock_composer=True, **options)
+        result = subprocess.run([node, "-e", BROWSER_TESTS], input=json.dumps({"script": script, "unlockScript": unlock,
                                 "executablePath": os.environ.get("PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH")}),
                                 text=True, capture_output=True, timeout=90)
         self.assertEqual(result.returncode, 0, result.stderr)
         report = json.loads(result.stdout)
         if report.get("skip"):
             self.skipTest(report["skip"])
-        self.assertGreaterEqual(len(report["results"]), 8)
+        self.assertGreaterEqual(len(report["results"]), 10)
         for name, error in report["results"].items():
             with self.subTest(case=name):
                 self.assertIsNone(error, error)

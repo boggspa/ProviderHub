@@ -586,6 +586,39 @@ account and usage pages are unchanged, and an update that redraws the icon
 brings the banner back with no other effect. Off by default, and only
 reachable through the helper, since the stylesheet is the helper's.
 
+**Composer send lock (opt-in, with the accents)**
+
+With the account shown, the app also disables the composer's send button
+for every model once the plan's core usage is exhausted, hub routes
+included, although hub traffic never spends that plan. Read from the
+26.917.71314 bundle: two selectors feed the composer adapter's
+`submitDisabled`, a gated "hard block" and an ungated reset-credit check,
+and both key on the usage status's `rate_limit.allowed === false`; neither
+looks at the selected model. The submit function returns early on the same
+flag and the Enter path passes it, so freeing the button in the DOM changes
+nothing. The status is fetched from `/wham/usage` and streamed as
+`usage.snapshot` events from `/wham/usage/stream`, through a main-process
+fetch service rather than `window.fetch`, and both decode with the global
+`JSON.parse`. With the Codex-tab switch on, the watcher wraps `JSON.parse`
+at document start and, for an object of the status shape (a `plan_type`, a
+`user_id` and a `rate_limit` object, also inside a snapshot's `usage`),
+sets `rate_limit.allowed` to true. Nothing else is touched: `limit_reached`,
+the usage windows, the per-model `additional_rate_limits` and the credits
+stay as the server sent them, so the client sits in the state a plan with
+credits reports, "limit reached, sending still allowed", and native models
+still meet the server's 429 and the app's own inline usage-limit message.
+Side effects, all on plan-upsell surfaces: the reset-credit nudge and the
+reserve model cannot activate while `allowed` reads true, the fallback-model
+offer stays off while `limit_reached` holds, and usage meters floor at one
+percent remaining. The seam keys on the backend's JSON contract rather than
+on hashed names, so an app build that renames its internals changes nothing;
+a payload that drops the shape switches the seam off with no other effect.
+The watcher's install result reports `unlock`, and its status counts the
+statuses seen and freed. Off by default, unsupported by OpenAI, and only
+reachable through the helper. Turning **Show your ChatGPT account in Codex**
+off avoids the lock without the seam, since both selectors require the
+ChatGPT sign-in.
+
 **Shareable bundle and signing status**
 
 The shareable app can embed a clean relocatable Python runtime so its Messages

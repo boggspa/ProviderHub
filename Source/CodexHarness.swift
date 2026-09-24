@@ -474,6 +474,13 @@ struct CodexConfigPane: View {
                         ? "Hide plan-usage banners above the composer while using provider models."
                         : "Requires provider accent colours to be enabled above.",
                     details: "The accent helper hides the ChatGPT plan’s out-of-usage banner and its per-model variant; hub traffic does not spend that plan. Account and usage pages, and any rate-limit prompt on submit, stay visible. If a Codex update changes the banner’s icon it may reappear. This preference takes effect when the accent helper is enabled and the app is launched from here. Save, then launch.")
+                Divider()
+                CodexPreference(isOn: $model.settings.codex_unlock_composer, disabled: model.busy || !model.settings.codex_accent_slider,
+                    title: "Keep sending when ChatGPT usage runs out",
+                    summary: model.settings.codex_accent_slider
+                        ? "Let provider models send after the ChatGPT plan’s usage is exhausted."
+                        : "Requires provider accent colours to be enabled above.",
+                    details: "Once the ChatGPT plan’s usage is exhausted, Codex disables the composer’s send button for every model, including provider routes that never spend that plan. The accent helper’s watcher reads the app’s usage status as it arrives and reports the plan’s core limit as still allowing sends; usage windows, per-model limits and credits are left as they are. Native OpenAI models stay limited by the server and show the app’s own usage-limit message. While this is on, the app’s reset-credit prompt and reserve-model offers stay off and usage meters show at least 1% remaining. Unsupported by OpenAI; an app update that changes the usage payload switches it off with no other effect. Save, then launch.")
             Divider()
                 Text("Tools & goals").font(.headline)
                 CodexPreference(isOn: $model.settings.codex_apply_patch_all, disabled: model.busy,

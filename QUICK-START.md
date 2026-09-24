@@ -163,6 +163,17 @@ the icon brings the banner back and changes nothing else; the account and
 usage pages, and the rate-limit prompt Codex may open on submit, are
 untouched. Save, then launch.
 
+**Keep sending when ChatGPT usage runs out** (off by default; needs the
+power-slider switch) keeps the composer's send button usable for hub models
+after the ChatGPT plan's usage is exhausted. Codex otherwise disables the
+button for every model, provider routes included. The watcher reads the
+plan's usage status as the app receives it and reports the core limit as
+still allowing sends; usage windows, per-model limits and credits are left
+alone, native OpenAI models remain limited by the server and show the app's
+own usage-limit message, and while it is on the reset-credit prompt and
+reserve-model offers stay off and usage meters show at least 1% remaining.
+Unsupported by OpenAI. Save, then launch.
+
 **Offer apply_patch to catalogue models** (off by default) advertises Codex's
 own `apply_patch` editing tool for every model in the catalogue. Codex draws
 its close-out diff card (the "Edited N files" card with per-file `+N -N`

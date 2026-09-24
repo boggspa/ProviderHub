@@ -108,6 +108,9 @@ struct RouteSettings: Codable, Equatable {
     // With that helper on, also hide the app's ChatGPT usage banner
     // ("You're out of Codex and Work usage") in its windows.
     var codex_hide_usage_banner = false
+    // With that helper on, also keep the composer's send button usable for hub
+    // routes once the ChatGPT plan's usage is exhausted (see codex_accent.py).
+    var codex_unlock_composer = false
     // Leave the optional token budget on Codex's create_goal / update_goal
     // tools. Off - the default - deletes the property so a goal starts
     // unlimited on every route (see responses_tools.strip_goal_budget).

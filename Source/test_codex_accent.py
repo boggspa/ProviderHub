@@ -151,6 +151,19 @@ class AccentMapTests(unittest.TestCase):
         self.assertIn("document.querySelectorAll(USAGE_SELECTOR).length", hiding)  # the status reports matches
         self.assertNotIn("__HUB_", hiding)
 
+    def test_composer_unlock_is_opt_in_and_keys_on_the_usage_status_shape(self):
+        plain = watcher_script({"Kimi for Coding": "#0073E6"})
+        self.assertIn("const UNLOCK_COMPOSER = false;", plain)
+        unlocking = watcher_script({"Kimi for Coding": "#0073E6"}, unlock_composer=True)
+        self.assertIn("const UNLOCK_COMPOSER = true;", unlocking)
+        self.assertIn("JSON.parse = wrapped;", unlocking)  # the seam both transports decode through
+        self.assertIn('typeof value.plan_type === "string" && typeof value.user_id === "string"', unlocking)
+        self.assertIn("status.rate_limit.allowed = true;", unlocking)  # only the core limit's flag
+        self.assertNotIn("limit_reached", unlocking)  # windows, per-model limits and credits stay as sent
+        self.assertIn("free(value) || free(value.usage)", unlocking)  # the poll and the stream snapshot
+        self.assertIn("unlock: UNLOCK_COMPOSER ? { seen: unlock.seen, unlocked: unlock.unlocked } : null", unlocking)
+        self.assertNotIn("__HUB_", unlocking)
+
     def test_no_rule_finds_an_icon_by_its_shimmer_sibling(self):
         # The sibling rule was walked over every chunk carrying the class and
         # matched one element in the build: the shield leading the ChatGPT
@@ -488,7 +501,7 @@ class LaunchTests(unittest.TestCase):
             events.clear()
             with mock.patch.object(codex_accent, "already_running", lambda path: False):
                 self.assertEqual(bridge_command(str(app), settings, inventory, emit=events.append, log_path=log, poll_interval=0.05), 0)
-            self.assertEqual(events[0], {"event": "accents", "count": 2, "usage_banner": "shown"})
+            self.assertEqual(events[0], {"event": "accents", "count": 2, "usage_banner": "shown", "composer": "app"})
             self.assertEqual([event["event"] for event in events[1:]], ["launched", "exited"])
             self.assertEqual(len(log.read_text().splitlines()), 3)
             events.clear()
@@ -498,12 +511,20 @@ class LaunchTests(unittest.TestCase):
                     mock.patch.object(codex_accent, "run", lambda binary, script, **options: scripts.append(script) or 0):
                 hiding = dict(settings, codex_hide_usage_banner=True)
                 self.assertEqual(bridge_command(str(app), hiding, inventory, emit=events.append, log_path=log), 0)
-            self.assertEqual(events, [{"event": "accents", "count": 2, "usage_banner": "hidden"}])
+            self.assertEqual(events, [{"event": "accents", "count": 2, "usage_banner": "hidden", "composer": "app"}])
             self.assertIn("aside:has(", scripts[0])
             native_names.assert_called_once_with(inventory)
             self.assertIn('"gpt-6-astra": "#705AFF"', scripts[0])
             routes = json.loads(re.search(r"const ROUTES = (.+);", scripts[0]).group(1))
             self.assertEqual(routes, {"kimi/kimi-for-coding": "#0073E6", "ollama/qwen3:cloud": "#8C52EF"})
+            self.assertIn("const UNLOCK_COMPOSER = false;", scripts[0])
+            events.clear()
+            with mock.patch.object(codex_accent, "already_running", lambda path: False), \
+                    mock.patch.object(codex_accent, "run", lambda binary, script, **options: scripts.append(script) or 0):
+                unlocking = dict(settings, codex_unlock_composer=True)
+                self.assertEqual(bridge_command(str(app), unlocking, inventory, emit=events.append, log_path=log), 0)
+            self.assertEqual(events, [{"event": "accents", "count": 2, "usage_banner": "shown", "composer": "unlocked"}])
+            self.assertIn("const UNLOCK_COMPOSER = true;", scripts[-1])
 
     def test_executable_path_reads_the_bundle_plist(self):
         with tempfile.TemporaryDirectory() as directory:

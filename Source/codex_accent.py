@@ -16,7 +16,11 @@ Ultra, which the app paints with its
 purple token, takes a more saturated cut of the same provider hue instead;
 native Codex keeps #705AFF. Its word gets a shimmer sweep in both cases.
 With the Codex tab's banner switch on,
-the same stylesheet also hides the app's ChatGPT usage banner.
+the same stylesheet also hides the app's ChatGPT usage banner. With its
+composer switch on, the watcher also keeps the composer's send button usable
+for hub routes once the ChatGPT plan's usage is exhausted: the app decodes
+the plan's usage status through the global ``JSON.parse``, and the watcher
+reports the core limit as still allowing sends.
 
 The pipe is also the app's lifeline: Electron quits when it closes. So the
 helper ignores termination signals, never lets a failed status write or a
@@ -462,6 +466,7 @@ _WATCHER = r"""
     const ULTRA_ACCENT_PROPERTY = "__HUB_ULTRA_ACCENT_PROPERTY__";
     const ULTRA_MARK = "__HUB_ULTRA_MARK__";
     const USAGE_SELECTOR = __HUB_USAGE_SELECTOR__;
+    const UNLOCK_COMPOSER = __HUB_UNLOCK_COMPOSER__;
     const HUES = __HUB_HUES__;
     const HUE_PROPERTY = "__HUB_HUE_PROPERTY__";
     // Quoted by the substitution, not here: this selector carries its own
@@ -479,6 +484,43 @@ _WATCHER = r"""
     const SIDEBAR_SPINNER = __HUB_SIDEBAR_SPINNER__;
     const sidebar = { colours: new Map(), targets: new Map() };
     const state = { targets: [], label: "", colour: "", purple: "", ultra: "", title: null, words: [], pills: [], marks: [], sheet: null, accent: "", theme: "", hue: "", panels: new Map() };
+    // The composer's send lock. Once the ChatGPT plan's core usage is
+    // exhausted the app disables the send button for every model, hub routes
+    // included: two selectors key on `rate_limit.allowed === false`, and the
+    // submit path returns early on the same flag, so the DOM cannot free it.
+    // The status arrives as `/wham/usage` JSON and as `usage.snapshot` events
+    // on `/wham/usage/stream`, through a main-process fetch service rather
+    // than `window.fetch`, and both decode with the global JSON.parse: that
+    // is the seam. Only an object of the status shape is touched, and only
+    // `allowed` on the core limit. "Limit reached, sending still allowed" is
+    // what a plan with credits reports, so the app stays in a state it
+    // handles, and the server still judges native models.
+    const unlock = { seen: 0, unlocked: 0 };
+    function installUnlock() {
+      if (!UNLOCK_COMPOSER) { return false; }
+      const original = JSON.parse;
+      if (typeof original !== "function" || original.__providerHubUnlock) { return true; }
+      const isStatus = (value) => !!value && typeof value === "object" && !Array.isArray(value)
+        && typeof value.plan_type === "string" && typeof value.user_id === "string"
+        && !!value.rate_limit && typeof value.rate_limit === "object" && !Array.isArray(value.rate_limit);
+      const free = (status) => {
+        if (!isStatus(status)) { return false; }
+        unlock.seen += 1;
+        if (status.rate_limit.allowed !== false) { return false; }
+        status.rate_limit.allowed = true;
+        unlock.unlocked += 1;
+        return true;
+      };
+      const wrapped = function parse(text, reviver) {
+        const value = original.call(JSON, text, reviver);
+        try { if (value && typeof value === "object") { free(value) || free(value.usage); } } catch (error) {}
+        return value;
+      };
+      try { Object.defineProperty(wrapped, "__providerHubUnlock", { value: unlock }); } catch (error) {}
+      JSON.parse = wrapped;
+      return true;
+    }
+    try { installUnlock(); } catch (error) {}
     const norm = (text) => (text || "").replace(/\s+/g, " ").trim().toLowerCase();
     // Labels may carry a leading glyph (a bullet, a tier mark); match the words.
     const lookup = (text) => {
@@ -841,7 +883,7 @@ _WATCHER = r"""
     observer.observe(document, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ["data-explicit-model", "data-accent", "data-maximum", "data-selected-reasoning-effort", "data-tab-id", "data-app-shell-tab-panel-controller", SIDEBAR_ROW, SIDEBAR_ID, SIDEBAR_HOST, SIDEBAR_KIND, "role", "inert", "hidden"] });
     if (document.readyState === "loading") { document.addEventListener("DOMContentLoaded", schedule, { once: true }); }
     window.__providerHubAccent = {
-      version: 14,
+      version: 15,
       accents: Object.keys(ACCENTS).length,
       sidebarThreadIds: () => Array.from(new Set(sidebarRows().map(row => row.id))),
       setSidebarAccents: setSidebarAccents,
@@ -850,10 +892,11 @@ _WATCHER = r"""
                       shimmer: state.accent ? state.accent + ":" + state.theme : "", hue: state.hue,
                       panels: Array.from(state.panels.values(), (entry) => ({ id: entry.element.getAttribute("data-tab-id"), accent: entry.styles.get(ACCENT_PROPERTY).value })),
                       banners: USAGE_SELECTOR ? document.querySelectorAll(USAGE_SELECTOR).length : null,
+                      unlock: UNLOCK_COMPOSER ? { seen: unlock.seen, unlocked: unlock.unlocked } : null,
                       glyphs: document.querySelectorAll(GLYPH_SELECTOR).length, sidebarSpinners: sidebar.targets.size }),
     };
     schedule();
-    return { installed: true, accents: Object.keys(ACCENTS).length, usageBanner: !!USAGE_SELECTOR, ready: document.readyState };
+    return { installed: true, accents: Object.keys(ACCENTS).length, usageBanner: !!USAGE_SELECTOR, unlock: UNLOCK_COMPOSER, ready: document.readyState };
   } catch (error) {
     return { error: String(error && error.message ? error.message : error) };
   }
@@ -866,7 +909,7 @@ def _label_key(label: str) -> str:
 
 
 def watcher_script(accents: dict, property_name: str = PROPERTY, hide_usage_banner: bool = False,
-                   native_labels=(), route_accents: dict | None = None) -> str:
+                   native_labels=(), route_accents: dict | None = None, unlock_composer: bool = False) -> str:
     table = {_label_key(label): colour for label, colour in accents.items()}
     routes = {_label_key(route): colour for route, colour in (route_accents or {}).items()}
     native = {}
@@ -889,6 +932,7 @@ def watcher_script(accents: dict, property_name: str = PROPERTY, hide_usage_bann
             .replace("__HUB_ULTRA__", json.dumps(ultras, ensure_ascii=False))
             .replace("__HUB_STYLE_CSS__", json.dumps(css))
             .replace("__HUB_USAGE_SELECTOR__", json.dumps(usage_banner_selector() if hide_usage_banner else ""))
+            .replace("__HUB_UNLOCK_COMPOSER__", json.dumps(bool(unlock_composer)))
             .replace("__HUB_HUES__", json.dumps(hue_map(table)))
             .replace("__HUB_HUE_PROPERTY__", HUE_PROPERTY)
             .replace("__HUB_GLYPH_SELECTOR__", json.dumps(activity_glyph_selector()))
@@ -1274,10 +1318,12 @@ def bridge_command(app_path: str, settings: dict, inventory: dict, emit=None, lo
         routes = accent_map(settings, inventory, by_route=True)
         native_labels = native_codex_labels(inventory)
         hide_banner = settings.get("codex_hide_usage_banner") is True
-        emit({"event": "accents", "count": len(accents), "usage_banner": "hidden" if hide_banner else "shown"})
+        unlock = settings.get("codex_unlock_composer") is True
+        emit({"event": "accents", "count": len(accents), "usage_banner": "hidden" if hide_banner else "shown",
+              "composer": "unlocked" if unlock else "app"})
         run_options.setdefault("environment", child_environment(bundle))
         run_options.setdefault("sidebar_accents", SidebarAccents(routes, native_labels))
-        return run(binary, watcher_script(accents, hide_usage_banner=hide_banner,
+        return run(binary, watcher_script(accents, hide_usage_banner=hide_banner, unlock_composer=unlock,
                                          native_labels=native_labels, route_accents=routes),
                    emit=emit, **run_options)
     finally:
