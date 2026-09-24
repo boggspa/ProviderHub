@@ -1,4 +1,5 @@
 """Offline regression suite. Never uses real credentials or Claude directories."""
+import base64
 import copy
 import http.client
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -16,7 +17,7 @@ from bridge_core import (BridgeError, ClaudeProfile, PROFILE_ID, atomic_json, de
 from gateway import Runtime, Server, build_identity, rejection_details
 from protocol import (StreamTranslator, TokenCalibration, ULTRACODE_NOTE, apply_mapping_options, compact_conversation, compact_threshold, conversation_units,
                       estimated_tokens, function_name, reported_input_tokens,
-                      mapping_options_for, model_catalog, rewrite_context_reminders, tool_id,
+                      limit_image_history, mapping_options_for, model_catalog, rewrite_context_reminders, tool_id,
                       translate_request, translate_response, resolve_model, resolve_mapping_slot, stated_context, identity_note, with_identity_note, _effective_context, ultracode_active, with_ultracode_note, mask_effort_rejection)
 from hub_config import claude_routes
 from catalogue import build_catalogue, read_observations, route_specs
@@ -54,6 +55,11 @@ def sized_conversation(turns, chars_per_turn, **extra):
         messages.append({"role": "user", "content": f"u{index}-" + "U" * chars_per_turn})
         messages.append({"role": "assistant", "content": f"a{index}-" + "A" * chars_per_turn})
     return prompt(messages=messages, **extra)
+
+
+def sample_image(index):
+    return {"type": "image", "source": {"type": "base64", "media_type": "image/png",
+            "data": base64.b64encode(f"image-{index}".encode()).decode()}}
 
 
 class ProtocolTests(unittest.TestCase):
@@ -334,6 +340,28 @@ class ProtocolTests(unittest.TestCase):
         roles = [message["role"] for message in kept]
         for first, second in zip(roles, roles[1:]):
             self.assertNotEqual(first, second)
+
+    def test_image_history_keeps_newest_images_without_losing_tool_context(self):
+        history = [
+            {"role": "assistant", "content": [{"type": "tool_use", "id": "screen", "name": "view_image",
+                "input": {"type": "image", "value": "tool argument, not a vision input"}}]},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "screen", "content": [
+                    {"type": "text", "text": "Screenshot result"}, *[sample_image(i) for i in range(9)]]},
+                {"type": "text", "text": "Keep this correction"}, sample_image(9), sample_image(10)]},
+        ]
+        original = copy.deepcopy(history)
+        limited, report = limit_image_history(history, 8)
+        self.assertEqual(report, {"removed": 3, "kept": 8})
+        self.assertEqual(history, original)
+        self.assertEqual(limited[0], original[0])
+        result = limited[1]["content"][0]
+        self.assertEqual(result["tool_use_id"], "screen")
+        self.assertEqual(result["content"][0]["text"], "Screenshot result")
+        self.assertTrue(all("omitted this older image" in part["text"] for part in result["content"][1:4]))
+        self.assertEqual(result["content"][4:], original[1]["content"][0]["content"][4:])
+        self.assertEqual(limited[1]["content"][1]["text"], "Keep this correction")
+        self.assertEqual(limited[1]["content"][2:], original[1]["content"][2:])
 
     def test_compact_threshold_reserves_output_headroom(self):
         self.assertEqual(compact_threshold(131072, {}, reserve_output=32000), 99072)
@@ -973,6 +1001,13 @@ class MockMistral(BaseHTTPRequestHandler):
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         type(self).requests.append(body)
+        if self.mode == "image_limit":
+            images = sum(part.get("type") == "image_url" for message in body["messages"]
+                         for part in (message.get("content") if isinstance(message.get("content"), list) else [])
+                         if isinstance(part, dict))
+            if images > 8:
+                raw = b'{"message":"Total number of images exceeds the maximum allowed of 8."}'
+                self.send_response(400); self.send_header("Content-Length", str(len(raw))); self.end_headers(); self.wfile.write(raw); return
         if self.mode == "reject_effort":
             raw = b'{"message":"output_config.effort: Extra inputs are not permitted"}'
             self.send_response(400); self.send_header("Content-Length", str(len(raw))); self.end_headers(); self.wfile.write(raw); return
@@ -1279,6 +1314,72 @@ class GatewayTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(headers["X-Mistral-Bridge-Token-Count"], "estimate")
         self.assertGreater(json.loads(data)["input_tokens"], 0)
+
+    def test_mistral_image_limit_retries_turn_and_remembers_model_ceiling(self):
+        MockMistral.mode = "image_limit"
+        images = [sample_image(i) for i in range(10)]
+        for streaming in (False, True):
+            with self.subTest(stream=streaming):
+                MockMistral.requests = []
+                self.runtime.mistral_image_limits.clear()
+                body = prompt(stream=streaming, messages=[{"role": "user", "content": [
+                    {"type": "text", "text": "Read the newest screenshot"}, *images]}])
+                original = copy.deepcopy(body)
+                status, data, _ = self.request("POST", "/v1/messages", body)
+                self.assertEqual(status, 200, data)
+                self.assertEqual(len(MockMistral.requests), 2)
+                self.assertEqual(body, original)
+
+                def sent_images(request):
+                    return [part["image_url"] for message in request["messages"]
+                            for part in (message["content"] if isinstance(message.get("content"), list) else [])
+                            if isinstance(part, dict) and part.get("type") == "image_url"]
+
+                self.assertEqual(len(sent_images(MockMistral.requests[0])), 10)
+                self.assertEqual(len(sent_images(MockMistral.requests[1])), 8)
+                self.assertEqual([url.split(",", 1)[1] for url in sent_images(MockMistral.requests[1])],
+                                 [image["source"]["data"] for image in images[-8:]])
+                self.assertIn("omitted this older image", json.dumps(MockMistral.requests[1]))
+                if streaming:
+                    self.assertIn(b'"type": "message_stop"', data)
+                else:
+                    self.assertEqual(json.loads(data)["content"][0]["text"], "Connected")
+                self.assertEqual(self.runtime.failed, 0)
+                self.assertEqual(self.runtime.mistral_image_limits["test-model"], 8)
+
+                plan = self.runtime.plan(body)
+                self.assertEqual(plan["compatibility"]["mistral_image_compaction"],
+                                 {"limit": 8, "removed": 2, "kept": 8})
+                status, data, _ = self.request("POST", "/v1/messages", body)
+                self.assertEqual(status, 200, data)
+                self.assertEqual(len(MockMistral.requests), 3)
+                self.assertEqual(len(sent_images(MockMistral.requests[-1])), 8)
+
+    def test_codex_responses_turn_survives_mistral_image_limit(self):
+        # Codex's Responses request is translated to Messages before the same
+        # Mistral chat request path receives the image-limit rejection.
+        MockMistral.mode = "image_limit"
+        body = {"model": "mistral/test-model", "stream": True, "store": False,
+                "max_output_tokens": 64, "input": [
+                    {"role": "user", "content": "Inspect the screenshots"},
+                    {"type": "function_call", "call_id": "screen1", "name": "view_image", "arguments": "{}"},
+                    {"type": "function_call_output", "call_id": "screen1", "output": [
+                        {"type": "input_text", "text": "Viewed an image"},
+                        *[{"type": "input_image", "image_url":
+                            "data:image/png;base64," + sample_image(i)["source"]["data"]}
+                          for i in range(10)]]},
+                    {"role": "user", "content": "Continue after viewing the screenshots"}]}
+        status, data, _ = self.request("POST", "/v1/responses", body)
+        self.assertEqual(status, 200, data)
+        self.assertIn(b'"type": "response.completed"', data)
+        self.assertEqual(len(MockMistral.requests), 2)
+        self.assertTrue(any(message.get("role") == "tool" and "Viewed an image" in message["content"]
+                            for message in MockMistral.requests[1]["messages"]))
+        self.assertEqual(sum(part.get("type") == "image_url" for message in MockMistral.requests[1]["messages"]
+                             for part in (message["content"] if isinstance(message.get("content"), list) else [])
+                             if isinstance(part, dict)), 8)
+        self.assertEqual(self.runtime.mistral_image_limits["test-model"], 8)
+        self.assertEqual(self.runtime.failed, 0)
 
     def test_relayed_provider_400_cannot_read_as_effort_unsupported(self):
         # One 400 whose text reads like the provider refusing the effort

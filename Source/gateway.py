@@ -47,7 +47,7 @@ from devin_agent import (DESCRIPTOR as DEVIN_DESCRIPTOR, DevinAgentError,
                          catalogue as devin_catalogue)
 from cerebras_replay import CerebrasReplayError, CerebrasStreamAdapter, sanitize_compacted_messages, sign_thinking, validate_messages
 from gemini_provider import GeminiError, GeminiStreamAdapter, translate_response as translate_gemini_response, _estimated_input_tokens as estimated_gemini_tokens
-from protocol import (StreamTranslator, apply_mapping_options, apply_mistral_prefix, compact_conversation, compact_threshold, estimated_tokens, mapping_options_for, reported_input_tokens, TokenCalibration, validate_mistral_roles,
+from protocol import (StreamTranslator, apply_mapping_options, apply_mistral_prefix, compact_conversation, compact_threshold, estimated_tokens, limit_image_history, mapping_options_for, reported_input_tokens, TokenCalibration, validate_mistral_roles,
                       model_catalog, normalize_native_message, resolve_model, response_shape, rewrite_context_reminders, translate_request,
                       ultracode_active, with_ultracode_note, with_identity_note, without_reasoning_controls, mask_effort_rejection,
                       translate_response, _effective_context)
@@ -118,6 +118,9 @@ class Runtime:
         self.admission = ProviderAdmission(self.semaphore)
         self.throttle = ProviderThrottle()
         self.calibration = TokenCalibration()
+        # Mistral reports a model-dependent image count only when rejecting a
+        # request. Remember it for later turns in this gateway process.
+        self.mistral_image_limits = {}
         self.active = 0
         self.completed = 0
         self.failed = 0
@@ -188,6 +191,17 @@ class Runtime:
         # reaching it, so the controls come off here as well.
         payload, reasoning_dropped = (without_reasoning_controls(payload)
                                       if spec.get("reasoning") is False else (payload, []))
+        image_compaction = None
+        if provider_id == "mistral":
+            with self.lock:
+                image_limit = self.mistral_image_limits.get(upstream_model)
+            if image_limit is not None:
+                messages, image_compaction = limit_image_history(payload.get("messages"), image_limit)
+                if image_compaction["removed"]:
+                    payload = {**payload, "messages": messages}
+                    image_compaction = {"limit": image_limit, **image_compaction}
+                else:
+                    image_compaction = None
         raw_estimate_fn = estimated_gemini_tokens if provider_id == "gemini" else estimated_tokens
         # Scale the pessimistic byte estimate by what this route's provider
         # has actually reported for earlier requests (never upwards), so a
@@ -287,6 +301,8 @@ class Runtime:
             plan.setdefault("compatibility", {})["omitted_mapping_fields"] = dropped
         if auto_compact is not None:
             plan.setdefault("compatibility", {})["auto_compact"] = auto_compact
+        if image_compaction is not None:
+            plan.setdefault("compatibility", {})["mistral_image_compaction"] = image_compaction
         if cerebras_repair is not None and cerebras_repair.get("repaired"):
             plan.setdefault("compatibility", {})["cerebras_history_repair"] = cerebras_repair
         if type(context) is int and provider_id != "gemini":
@@ -391,6 +407,12 @@ class Runtime:
 def error_type(status):
     return {400: "invalid_request_error", 401: "authentication_error", 403: "permission_error",
             404: "not_found_error", 413: "request_too_large", 429: "rate_limit_error", 503: "overloaded_error"}.get(status, "api_error")
+
+
+def mistral_image_limit_error(detail):
+    """Extract the request image ceiling from Mistral's specific 400 error."""
+    match = re.search(r"\btotal number of images exceeds the maximum allowed of (\d+)\b", detail, re.I)
+    return int(match.group(1)) if match else None
 
 
 def rejection_details(payload):
@@ -830,6 +852,7 @@ class Handler(BaseHTTPRequestHandler):
             encoded = json.dumps(upstream, ensure_ascii=False).encode()
             headers = {**plan["headers"], "Accept": "text/event-stream" if upstream.get("stream") else "application/json"}
             attempts = 0
+            image_retry_used = False
             while True:
                 # Serialize on the shared provider gate: a sibling's 429 parks
                 # this route, so bursts pause here instead of firing requests
@@ -873,6 +896,29 @@ class Handler(BaseHTTPRequestHandler):
                 if plan["private_key"]:
                     detail = detail.replace(plan["private_key"], "[redacted]")
                 detail = detail[:700]
+                if response.status == 400 and plan["provider_id"] == "mistral" and not image_retry_used:
+                    image_limit = mistral_image_limit_error(detail)
+                    if image_limit is not None:
+                        messages, image_compaction = limit_image_history(upstream.get("messages"), image_limit)
+                        if image_compaction["removed"]:
+                            # The rejected request produced no turn. Retry it
+                            # before sending a response to the desktop client.
+                            image_retry_used = True
+                            with self.runtime.lock:
+                                previous = self.runtime.mistral_image_limits.get(plan["upstream_model"])
+                                if previous is None or image_limit < previous:
+                                    self.runtime.mistral_image_limits[plan["upstream_model"]] = image_limit
+                            upstream["messages"] = messages
+                            encoded = json.dumps(upstream, ensure_ascii=False).encode()
+                            self.runtime.record("image_compacted", plan["route"], 400, image_compaction)
+                            response.close()
+                            connection.close()
+                            with self.runtime.lock:
+                                self.runtime.connections.discard(connection)
+                            connection = response = upstream_socket = None
+                            self.runtime.admission.release(plan["provider_id"])
+                            slot_held = False
+                            continue
                 retry_after = parse_retry_after(response.getheader("Retry-After")) if response.status in RETRYABLE_STATUSES else None
                 if (response.status in RETRYABLE_STATUSES
                         and attempts + 1 < MAX_UPSTREAM_ATTEMPTS

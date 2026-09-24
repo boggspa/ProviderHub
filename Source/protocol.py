@@ -1271,6 +1271,48 @@ def _append_note(message, note):
 COMPACT_HEAD_SHARE = 0.25
 
 
+def limit_image_history(messages: list, max_images: int) -> tuple[list, dict]:
+    """Keep the newest images in Messages or translated chat history.
+
+    Only image content blocks count. In particular, an image-shaped value in
+    a tool call's arguments is data, not an image sent to the vision model.
+    Tool results retain their identity and text when an older image is
+    replaced with an explicit omission note. The caller's history is intact.
+    """
+    if type(max_images) is not int or max_images < 0:
+        raise ValueError("max_images must be a non-negative integer")
+
+    def image_slots(history):
+        slots = []
+
+        def visit(content):
+            if not isinstance(content, list):
+                return
+            for index, block in enumerate(content):
+                if not isinstance(block, dict):
+                    continue
+                if block.get("type") in {"image", "input_image", "image_url"}:
+                    slots.append((content, index))
+                elif block.get("type") == "tool_result":
+                    visit(block.get("content"))
+
+        for message in history or []:
+            if isinstance(message, dict):
+                visit(message.get("content"))
+        return slots
+
+    found = image_slots(messages)
+    removed = max(0, len(found) - max_images)
+    if not removed:
+        return messages, {"removed": 0, "kept": len(found)}
+    copied = copy.deepcopy(messages)
+    for content, index in image_slots(copied)[:removed]:
+        content[index] = {"type": "text", "text":
+            "[Provider Hub omitted this older image to fit Mistral's image limit. "
+            "Its accompanying text and tool result remain. Reopen the image with a tool if needed.]"}
+    return copied, {"removed": removed, "kept": len(found) - removed}
+
+
 def compact_conversation(payload: dict, max_tokens: int, estimate=None) -> dict:
     """Compact conversation history to fit within max_tokens budget.
 
