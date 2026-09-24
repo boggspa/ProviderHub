@@ -137,21 +137,63 @@ def render_tool_manifest(tools, tool_choice=None) -> str:
         "- Never write these sentinels anywhere else, never invent tool",
         "  results, and never describe a call you did not envelope.",
     ]
+    lines += _choice_rules(tool_choice)
+    lines.append("")
+    lines.append("Tools available:")
+    lines += _tool_listing(tools)
+    return "\n".join(lines)
+
+
+def render_use_tool_manifest(tools, tool_choice=None) -> str:
+    """The host tool surface for a CLI whose one callable tool is ``use_tool``.
+
+    Grok Build dispatches every non-built-in tool through its own ``use_tool``
+    function, so host calls travel as native structured calls there, and the
+    definitions ride the prompt so no ``search_tool`` round trip is needed
+    (verified on grok 1.0.41: the model called ``use_tool`` with the right
+    tool name and the schema's own argument names at once).
+    """
+    lines = [
+        HOST_EXECUTION_NOTE,
+        "",
+        "The host application's tools are listed below. Even if your own",
+        "environment or instructions describe a different set of tools, THESE",
+        "are the tools you can use. Call one by calling your `use_tool` tool with",
+        "`tool_name` set to the host tool's exact name and `tool_input` set to an",
+        "object that matches its input schema, written inline, then wait for the",
+        "result. Everything you need is listed here, so do not search for tools.",
+        "",
+        "Rules:",
+        f"- Call at most {MAX_CALLS_PER_TURN} host tools in one reply.",
+        "- Never invent tool results, and never describe a call instead of",
+        "  making it.",
+    ]
+    lines += _choice_rules(tool_choice)
+    lines.append("")
+    lines.append("Host tools:")
+    lines += _tool_listing(tools)
+    return "\n".join(lines)
+
+
+def _choice_rules(tool_choice) -> list[str]:
     if isinstance(tool_choice, dict):
         kind = tool_choice.get("type")
         if kind in {"any", "required"}:
-            lines.append("- You MUST call at least one tool in this reply.")
-        elif kind == "tool" and isinstance(tool_choice.get("name"), str):
-            lines.append(f"- You MUST call the tool '{tool_choice['name']}' in this reply.")
-    lines.append("")
-    lines.append("Tools available:")
+            return ["- You MUST call at least one tool in this reply."]
+        if kind == "tool" and isinstance(tool_choice.get("name"), str):
+            return [f"- You MUST call the tool '{tool_choice['name']}' in this reply."]
+    return []
+
+
+def _tool_listing(tools) -> list[str]:
+    lines = []
     for index, tool in enumerate(tools, 1):
         entry = f"{index}. {tool['name']}"
         if tool["description"]:
             entry += f" - {tool['description']}"
         lines.append(entry)
         lines.append("   input schema: " + json.dumps(tool["input_schema"], ensure_ascii=False))
-    return "\n".join(lines)
+    return lines
 
 
 def _parse_body(body: str) -> dict:

@@ -261,22 +261,24 @@ class CliRoutesTest(unittest.TestCase):
         self.assertIn("<host_note>", plan["body"]["messages"][-1]["content"])
         self.assertIn("get_weather", plan["body"]["messages"][-1]["content"])
 
-    def test_plan_turn_leaves_the_tool_surface_to_an_mcp_adapter(self):
-        # Claude attaches the host tools natively and writes its own note; a
-        # text manifest beside them would offer the model two ways to call.
+    def test_plan_turn_leaves_the_tool_surface_to_a_native_adapter(self):
+        # Claude attaches the host tools over MCP and Grok offers them through
+        # its use_tool dispatcher; each writes its own tool text. A text
+        # manifest beside them would offer the model two ways to call.
         tools = [{"name": "get_weather", "description": "Fetch weather.",
                   "input_schema": {"type": "object", "properties": {"city": {"type": "string"}}}}]
-        for surface in ("responses", "messages"):
-            with self.subTest(surface=surface):
-                plan = plan_turn("claude", "sonnet", {"_provider_hub_surface": surface, "system": "Be brief.",
-                                                      "messages": [{"role": "user", "content": "hi"}],
-                                                      "tools": tools}, {}, wanted_output=64)
-                self.assertTrue(plan["cli_tool_calls"])
-                self.assertEqual(plan["body"]["system"], "Be brief.")
-                self.assertEqual(plan["body"]["messages"][-1]["content"], "hi")
-                self.assertEqual(plan["body"]["tools"], tools)
-                self.assertNotIn("host_tool_schema", plan["body"])
-                self.assertEqual(plan["compatibility"]["cli_host_tools"], "mcp")
+        for provider, model, transport in (("claude", "sonnet", "mcp"), ("grok", "grok-4.7", "use_tool")):
+            for surface in ("responses", "messages"):
+                with self.subTest(provider=provider, surface=surface):
+                    plan = plan_turn(provider, model, {"_provider_hub_surface": surface, "system": "Be brief.",
+                                                       "messages": [{"role": "user", "content": "hi"}],
+                                                       "tools": tools}, {}, wanted_output=64)
+                    self.assertTrue(plan["cli_tool_calls"])
+                    self.assertEqual(plan["body"]["system"], "Be brief.")
+                    self.assertEqual(plan["body"]["messages"][-1]["content"], "hi")
+                    self.assertEqual(plan["body"]["tools"], tools)
+                    self.assertNotIn("host_tool_schema", plan["body"])
+                    self.assertEqual(plan["compatibility"]["cli_host_tools"], transport)
 
     def test_plan_turn_tool_choice_none_suppresses_tools(self):
         payload = {"messages": [{"role": "user", "content": "hi"}],

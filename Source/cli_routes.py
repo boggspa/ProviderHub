@@ -377,9 +377,11 @@ def plan_turn(provider_id: str, upstream_model: str, payload: dict, spec: dict,
         system = None
     images = []
     transport = getattr(adapter, "HOST_TOOL_TRANSPORT", None)
-    # An adapter that serves host tools natively over MCP needs neither the
-    # structured reply schema nor its JSON-spelled history.
-    structured_surface = transport != "mcp" and (
+    # An adapter that offers host tools natively (over MCP, or through the
+    # CLI's own use_tool dispatcher) needs neither the structured reply schema
+    # nor its JSON-spelled history.
+    native_surface = transport in {"mcp", "use_tool"}
+    structured_surface = not native_surface and (
         provider_id == "antigravity" or
         provider_id in {"muse", "grok"} and payload.get("_provider_hub_surface") != "responses")
     try:
@@ -406,11 +408,11 @@ def plan_turn(provider_id: str, upstream_model: str, payload: dict, spec: dict,
     # transport needs a schema to avoid native-tool name collisions.
     structured_tools = bool(tools) and structured_surface
     # Native transports carry the tools themselves: codex registers them as
-    # dynamic tools, and an MCP adapter attaches them and writes its own note
-    # (or, when the server fails to attach, falls back to this manifest).
+    # dynamic tools; an MCP or use_tool adapter writes its own tool text (and
+    # falls back to this manifest itself when its native surface is missing).
     manifest = (cli_structured_reply.render_manifest(tools, tool_choice) if structured_tools
                 else render_tool_manifest(tools, tool_choice)
-                if tools and transport not in {"dynamic", "mcp"} else "")
+                if tools and not dynamic_tools and not native_surface else "")
     if manifest:
         # The tool surface rides the system text: the harness's definitions,
         # the call convention, and the anti-simulation rules. Nothing else
@@ -499,7 +501,7 @@ def plan_turn(provider_id: str, upstream_model: str, payload: dict, spec: dict,
             "cli_images": len(images),
             **({"cli_image_compaction": image_compaction} if image_compaction["removed"] else {}),
             **({"cli_host_tools": "structured"} if structured_tools else
-               {"cli_host_tools": "mcp"} if tools and transport == "mcp" else {}),
+               {"cli_host_tools": transport} if tools and native_surface else {}),
             **({"cli_tools": len(tools),
                 "cli_tools_dropped": len(raw_tools) - len(tools)}
                if tools and isinstance(raw_tools, list) and len(raw_tools) != len(tools)

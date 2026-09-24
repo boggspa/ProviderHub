@@ -67,6 +67,32 @@ If `system/init` shows the server's tools missing, the adapter respawns once
 with the text manifest before any event reaches the client. The tools file
 lives in a per-turn directory that is removed after the child exits.
 
+Grok Build 1.0.41 never offers its model a non-built-in tool directly. An MCP
+server's tools are reached only through its `search_tool` and `use_tool`
+functions, and the CLI has no `--mcp-config` flag. With a stub server attached
+through a project `.grok/config.toml` (`GROK_FOLDER_TRUST=0`), init listed
+`search_tool` and `use_tool`. The model searched twice, then guessed
+`use_tool` with a `command` argument where the schema says `cmd`. So the Grok
+route keeps `use_tool` alone and lists the host's tools, with their schemas,
+in the system text. `--deny MCPTool` stays, so the CLI refuses to run the call
+(`deny rule on mcp`). The adapter reads the call off the stream, hands it to
+the host at the message's `tool_use` stop, and signals the child. Live checks
+on grok 1.0.41:
+
+- The list in the prompt and no server: init.tools `["use_tool"]`, and the
+  model called it at once with `tool_name` `exec_command` and the schema's own
+  `cmd` and `workdir` arguments.
+- Codex's 111 tools through `cli_routes.plan_turn` and `run_turn`
+  (`grok-4.7-build-fast`, `cli_host_tools: use_tool`, search on): the route
+  handed Codex `exec_command` with
+  `git -C "/Users/chrisizatt/Documents/Mistral Bridge" rev-parse --abbrev-ref HEAD && …`
+  and ended with `stop_reason: tool_use` in 4.9 s. The follow-up request, with
+  Codex's result in history, answered that the repository is on the main
+  branch (`end_turn`, 4.2 s).
+
+If init does not list `use_tool`, the adapter respawns once with the text
+envelope before any event reaches the client.
+
 **Antigravity handoff hook and the bundle seal — 24 September 2026**
 
 > **Historical record.** Dated 24 September 2026. Version numbers, build

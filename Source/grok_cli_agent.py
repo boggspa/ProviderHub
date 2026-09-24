@@ -30,6 +30,20 @@ respawned once with those names appended to the removal list, names that
 worked are remembered for the process lifetime, and a second failure reports
 the names instead of a bare refusal.
 
+Host tools ride grok's own ``use_tool`` function. Grok Build never offers a
+non-built-in tool to its model directly: MCP tools too are reached only
+through ``search_tool``/``use_tool`` (grok 1.0.41). So a turn with host tools
+keeps ``use_tool`` alone out of the removal list, lists the host's tools with
+their schemas in the system text (no ``search_tool`` round trip), and reads
+each ``use_tool`` call - ``{"tool_name", "tool_input"}`` - off the stream as a
+host call. ``--deny MCPTool`` stays, so the CLI refuses to dispatch it: the
+call streams first, and the turn ends at that message before the refusal
+reaches the model. Verified live on 1.0.41: init.tools ``["use_tool"]``, and
+the model called ``use_tool`` with the right tool and the schema's own
+argument names. This replaces the text envelope, which Grok followed but
+which competed with its native tools. If init does not list ``use_tool`` the
+turn is spawned again, invisibly, with the envelope manifest.
+
 One exception, only when the desktop asked for hosted web search: the turn
 keeps web_search alone (``--tools web_search``, init.tools ``["web_search"]``).
 On models whose cache entry sets ``supports_backend_search`` the search runs
@@ -79,7 +93,8 @@ from typing import Any, Iterator
 from cli_session import CliSessionError, StdioSession, minimal_env, resolve_binary
 from cli_lifecycle import cleanup_after_exit
 from cli_tool_call import (MAX_ENVELOPE_BYTES, TRANSCRIPT_HEADER, ToolCallError,
-                           normalize_tools, validate_host_call)
+                           normalize_tools, render_tool_anchor, render_tool_manifest,
+                           render_use_tool_manifest, validate_host_call)
 from cli_images import prompt_content
 
 try:
@@ -110,6 +125,13 @@ VERIFIED_IMAGE_MODELS = frozenset({"grok-4.6"})
 #: Backend web search runs on xAI's servers and never fetches a page locally,
 #: so web_search is the one tool a turn may enable (web_fetch stays off).
 WEB_SEARCH = True
+#: Host tools travel through grok's own ``use_tool`` dispatcher as native
+#: structured calls; cli_routes renders no manifest and run_turn writes it.
+HOST_TOOL_TRANSPORT = "use_tool"
+_USE_TOOL = "use_tool"
+#: grok's catalogue key for a tool of an MCP server named "host" (server__tool);
+#: a model that spells a host tool that way still reaches it.
+_HOST_KEY_PREFIX = "host__"
 
 # Real installs live in ~/.grok/bin on this machine.
 _EXTRA_BIN_DIRS = ("~/.grok/bin", "~/.local/bin", "/opt/homebrew/bin", "/usr/local/bin")
@@ -388,7 +410,7 @@ def _assert_safe(argv: list[str]) -> list[str]:
 
 
 def build_argv(model, *, effort=None, system=None, stream=True, search=False,
-               extra_removals=()) -> list[str]:
+               extra_removals=(), host_tools=False) -> list[str]:
     """Full argv for one print-mode turn. argv[0] is the bare binary name.
 
     ``run_turn`` replaces argv[0] with the resolved absolute path; keeping the
@@ -403,6 +425,9 @@ def build_argv(model, *, effort=None, system=None, stream=True, search=False,
     CLI's own init line reported still registered. Removal can only narrow,
     so they are appended as given, except a name that could not be a plain
     value (``_REMOVAL_NAME``) or web_search on a search turn.
+
+    ``host_tools`` keeps ``use_tool``, the dispatcher host calls travel
+    through. ``--deny MCPTool`` still refuses to run anything it names.
 
     INVARIANT: Every argv carries ``--no-auto-update`` to prevent the CLI from
     self-updating during capability checks or turns.
@@ -430,10 +455,11 @@ def build_argv(model, *, effort=None, system=None, stream=True, search=False,
 
     # Read-only posture
     flags = list(READ_ONLY_FLAGS)
-    removals = [tool for tool in _DISALLOWED_TOOLS if not (search and tool == "web_search")]
+    kept = ({"web_search"} if search else set()) | ({_USE_TOOL} if host_tools else set())
+    removals = [tool for tool in _DISALLOWED_TOOLS if tool not in kept]
     for name in extra_removals:
         if isinstance(name, str) and _REMOVAL_NAME.fullmatch(name) and name not in removals \
-                and not (search and name == "web_search"):
+                and name not in kept:
             removals.append(name)
     flags[flags.index("--disallowed-tools") + 1] = ",".join(removals)
     if search:
@@ -567,6 +593,13 @@ class _TurnState:
         self.host_tools = []
         self.host_handoff = False
         self.pending_calls = {}
+        # Host calls read off this message, by id; handed over at its end.
+        self.host_calls = {}
+        # "use_tool" when host calls ride grok's dispatcher, "envelope" for
+        # the text fallback, None for a turn without host tools.
+        self.mode = None
+        # init did not list use_tool: respawn with the envelope manifest.
+        self.use_tool_missing = False
         self.backend_calls = set()
         self.search = False
         self.searches = {}
@@ -645,9 +678,19 @@ class _TurnState:
             return {"type": "thinking_delta", "text": f"Grok backend activity: {arguments['variant']}.\n"}
         if not self.native_tools_disabled:
             raise ToolCallError("grok attempted a native CLI tool before confirming tool isolation")
+        if call.get("name") == _USE_TOOL and self.mode == "use_tool":
+            call = _unwrap_use_tool(call, self.host_tools)
+        identifier = call.get("id")
+        if isinstance(identifier, str) and identifier in self.host_calls:
+            return None
         validate_host_call(call, self.host_tools)
-        self.host_handoff = True
+        self.host_calls[identifier] = call
         return {"type": "tool_call", **call}
+
+    def end_of_calls(self) -> None:
+        """The message that made host calls is complete: hand them over."""
+        if self.host_calls:
+            self.host_handoff = True
 
     def search_started(self, block):
         """A backend search's server_tool_use, reported once per id.
@@ -770,7 +813,8 @@ def _translate(payload: Any, state: _TurnState) -> list[dict]:
         if not isinstance(tools, list) or not all(isinstance(tool, str) for tool in tools):
             state.failure = "grok did not report its native tool registry; this runtime cannot safely forward host calls."
             return []
-        allowed = {"web_search"} if state.search else set()
+        allowed = ({"web_search"} if state.search else set()) \
+            | ({_USE_TOOL} if state.mode == "use_tool" else set())
         extras = sorted(set(tools) - allowed)
         if extras:
             state.native_tools_seen = extras
@@ -782,6 +826,8 @@ def _translate(payload: Any, state: _TurnState) -> list[dict]:
                 f"grok did not disable its native CLI tools ({names}); this runtime cannot safely forward host calls.")
         else:
             state.native_tools_disabled = True
+            if state.mode == "use_tool" and _USE_TOOL not in tools:
+                state.use_tool_missing = True
         return []
 
     if kind == "stream_event":
@@ -860,8 +906,17 @@ def _translate(payload: Any, state: _TurnState) -> list[dict]:
         elif event_type == "message_delta":
             reason = (event.get("delta") or {}).get("stop_reason")
             if reason in {"cancelled", "canceled", "interrupted", "error", "failed"} \
-                    or (reason == "tool_use" and not (state.backend_calls or state.searches)):
+                    or (reason == "tool_use" and not (state.backend_calls or state.searches or state.host_calls)):
                 state.failure = f"grok reported {reason} before a host tool handoff."
+            elif reason == "tool_use":
+                # Every call in the message has closed; the CLI's refusal and
+                # the whole-message snapshot come after this line (1.0.41).
+                state.end_of_calls()
+        return []
+
+    if kind == "user" and state.host_calls:
+        # The CLI is answering the calls itself; no message_delta arrived.
+        state.end_of_calls()
         return []
 
     if kind == "assistant":
@@ -899,6 +954,9 @@ def _translate(payload: Any, state: _TurnState) -> list[dict]:
                 if translated:
                     yield translated
 
+    elif kind in {"end", "result"} and state.host_calls:
+        state.end_of_calls()
+
     elif kind == "end":
         state.terminal = True
         stop_reason = payload.get("stopReason") or payload.get("stop_reason")
@@ -926,6 +984,49 @@ def _translate(payload: Any, state: _TurnState) -> list[dict]:
             state.failure = f"grok CLI error: {message}"
 
     return []
+
+
+#: _attempt_turn's signal that init lacked use_tool before any event reached
+#: the client, so run_turn may fall back to the text envelope.
+_USE_TOOL_MISSING = "use_tool_missing"
+
+
+def _interrupt(session) -> None:
+    """SIGTERM the child at a host handoff; anything it does next is discarded."""
+    terminate = getattr(getattr(session, "process", None), "terminate", None)
+    if callable(terminate):
+        try:
+            terminate()
+        except Exception:  # noqa: BLE001 - teardown must never raise
+            pass
+
+
+def _unwrap_use_tool(call, host_tools) -> dict:
+    """The host call inside a ``use_tool`` dispatch: ``{tool_name, tool_input}``.
+
+    grok also documents file-based arguments for large MCP inputs; a host call
+    has no file the host could read, so anything but inline ``tool_input`` is
+    a protocol error for the route's one correction, never a guessed call.
+    """
+    arguments = call.get("input")
+    if not isinstance(arguments, dict) or not isinstance(arguments.get("tool_name"), str):
+        raise ToolCallError("use_tool call has no tool_name")
+    if set(arguments) - {"tool_name", "tool_input"}:
+        raise ToolCallError("use_tool arguments must be inline in tool_input")
+    name = arguments["tool_name"]
+    offered = {tool["name"] for tool in host_tools}
+    if name not in offered and name.startswith(_HOST_KEY_PREFIX) \
+            and name[len(_HOST_KEY_PREFIX):] in offered:
+        name = name[len(_HOST_KEY_PREFIX):]
+    tool_input = arguments.get("tool_input", {})
+    if isinstance(tool_input, str):
+        try:
+            tool_input = json.loads(tool_input)
+        except ValueError as exc:
+            raise ToolCallError("use_tool tool_input is not valid JSON") from exc
+    if not isinstance(tool_input, dict):
+        raise ToolCallError("use_tool tool_input must be an object")
+    return {"id": call.get("id"), "name": name, "input": tool_input}
 
 
 def _search_action(arguments: dict) -> dict:
@@ -992,21 +1093,50 @@ def _plan_turn(request) -> dict:
         raise GrokCliAgentError("max_tokens must be an integer or None")
     if isinstance(max_tokens, int) and max_tokens <= 0:
         raise GrokCliAgentError("max_tokens must be positive")
-    prompt = render_prompt(messages)
-    system_text = system.strip() if isinstance(system, str) else ""
-    images = request.get("images") or []
-    argv_bytes = len(prompt.encode("utf-8")) + len(system_text.encode("utf-8"))
+    tool_choice = request.get("tool_choice")
     return {
         "model": model,
         "host_tools": host_tools,
+        "tool_choice": tool_choice if isinstance(tool_choice, dict) else None,
         "effort": effort,
-        "system": system_text,
-        "prompt": prompt,
-        "images": images,
-        "prompt_file": bool(images) or argv_bytes > _MAX_PROMPT_ARGV_BYTES,
+        "system": system.strip() if isinstance(system, str) else "",
+        "messages": messages,
+        "images": request.get("images") or [],
         "search": search_enabled(request.get("web_search")),
         "host_tool_schema": request.get("host_tool_schema"),
     }
+
+
+def _modes(plan) -> tuple:
+    """The host tool surfaces to try, in order, for one turn."""
+    if plan["host_tools"] and not plan["host_tool_schema"]:
+        return ("use_tool", "envelope")
+    return (None,)
+
+
+def _surface(plan, mode) -> dict:
+    """``plan`` rendered for one surface: system text, prompt and its transport.
+
+    ``use_tool`` lists the host tools for grok's own dispatcher; ``envelope``
+    is the text fallback plus its anchor on the final user turn, which the
+    route's parser still reads.
+    """
+    system, messages = plan["system"], plan["messages"]
+    tools, choice = plan["host_tools"], plan["tool_choice"]
+    if mode == "use_tool":
+        system = render_use_tool_manifest(tools, choice) + ("\n\n" + system if system else "")
+    elif mode == "envelope":
+        system = render_tool_manifest(tools, choice) + ("\n\n" + system if system else "")
+        anchor = render_tool_anchor(tools)
+        messages = [dict(message) for message in messages]
+        for message in reversed(messages):
+            if message["role"] == "user":
+                message["content"] = (message["content"] + "\n\n" + anchor) if message["content"] else anchor
+                break
+    prompt = render_prompt(messages)
+    argv_bytes = len(prompt.encode("utf-8")) + len(system.encode("utf-8"))
+    return {**plan, "mode": mode, "system": system, "prompt": prompt,
+            "prompt_file": bool(plan["images"]) or argv_bytes > _MAX_PROMPT_ARGV_BYTES}
 
 
 def _turn_argv(plan, workspace_path, *, extra_removals=()) -> list[str]:
@@ -1017,7 +1147,8 @@ def _turn_argv(plan, workspace_path, *, extra_removals=()) -> list[str]:
     transcripts out of argv.
     """
     argv = build_argv(plan["model"], effort=plan["effort"], system=None, stream=True,
-                      search=plan["search"], extra_removals=extra_removals)
+                      search=plan["search"], extra_removals=extra_removals,
+                      host_tools=plan.get("mode") == "use_tool")
     try:
         single = argv.index("--single")
     except ValueError:
@@ -1099,12 +1230,15 @@ def _attempt_turn(plan, state, *, spawner, timeout, extra_removals, retry_allowe
                     # init is the stream's first line, so nothing has reached
                     # the client: the respawn is invisible to it.
                     return frozenset(state.native_tools_seen)
+                if state.use_tool_missing and not produced:
+                    return _USE_TOOL_MISSING
                 if state.failure:
                     yield {"type": "error", "message": state.failure}
                     return None
                 if state.host_handoff:
                     # With an empty native registry these are model requests
                     # for host tools. Stop before the CLI's own tool loop.
+                    _interrupt(session)
                     yield {"type": "message_stop", "stop_reason": "tool_use"}
                     return None
                 if state.terminal:
@@ -1144,6 +1278,11 @@ def _attempt_turn(plan, state, *, spawner, timeout, extra_removals, retry_allowe
                     yield {"type": "error", "message": "the grok CLI produced no output"}
                     return None
             stop_reason = state.stop_reason or "end_turn"
+    except ToolCallError as exc:
+        # The route's protocol correction keys on this code; nothing ran.
+        yield {"type": "error", "code": "invalid_cli_tool_call",
+               "message": f"Invalid CLI host tool call: {exc}."}
+        return None
     except Exception as exc:
         yield {"type": "error", "message": _describe(exc, state, timeout)}
         return None
@@ -1170,22 +1309,33 @@ def run_turn(request, *, spawner=None, timeout=300) -> Iterator[dict]:
     spawned a second time with those names appended to the removal list
     before the client sees anything. A removal that worked is remembered in
     ``_LEARNED_REMOVALS`` so later turns spawn correctly first time.
+
+    A turn with host tools offers them through ``use_tool``; if init does not
+    list that dispatcher, the turn is spawned again with the text envelope,
+    also before anything reaches the client.
     """
     try:
         plan = _plan_turn(request)
     except Exception as exc:
         yield {"type": "error", "message": _describe(exc, None, timeout)}
         return
-    removals = frozenset(_LEARNED_REMOVALS)
-    for attempt in (1, 2):
-        state = _TurnState()
-        state.host_tools = plan["host_tools"]
-        state.search = plan["search"]
-        state.retried = attempt == 2
-        extras = yield from _attempt_turn(plan, state, spawner=spawner, timeout=timeout,
-                                          extra_removals=sorted(removals), retry_allowed=attempt == 1)
-        if attempt == 2 and state.native_tools_disabled and len(_LEARNED_REMOVALS) < _MAX_LEARNED_REMOVALS:
-            _LEARNED_REMOVALS.update(name for name in removals if _REMOVAL_NAME.fullmatch(name))
-        if not extras:
+    for mode in _modes(plan):
+        surface = _surface(plan, mode)
+        removals = frozenset(_LEARNED_REMOVALS)
+        for attempt in (1, 2):
+            state = _TurnState()
+            state.host_tools = plan["host_tools"]
+            state.search = plan["search"]
+            state.mode = mode
+            state.retried = attempt == 2
+            outcome = yield from _attempt_turn(surface, state, spawner=spawner, timeout=timeout,
+                                               extra_removals=sorted(removals), retry_allowed=attempt == 1)
+            if attempt == 2 and state.native_tools_disabled and len(_LEARNED_REMOVALS) < _MAX_LEARNED_REMOVALS:
+                _LEARNED_REMOVALS.update(name for name in removals if _REMOVAL_NAME.fullmatch(name))
+            if outcome == _USE_TOOL_MISSING:
+                break
+            if not outcome:
+                return
+            removals = removals | outcome
+        else:
             return
-        removals = removals | extras

@@ -5,7 +5,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 # Import the module under test
 import grok_cli_agent as module
@@ -725,6 +725,10 @@ class TestTranslate(unittest.TestCase):
         events = [event for payload in payloads for event in module._translate(payload, state)]
         self.assertEqual(events, [{"type": "tool_call", "id": "call_1", "name": "read_file",
                                    "input": {"path": "file"}}])
+        # A parallel call may still follow in the same message.
+        self.assertFalse(state.host_handoff)
+        list(module._translate({"type": "stream_event", "event": {
+            "type": "message_delta", "delta": {"stop_reason": "tool_use"}}}, state))
         self.assertTrue(state.host_handoff)
 
     def test_isolated_runtime_cannot_forward_an_unoffered_tool(self):
@@ -1100,6 +1104,149 @@ class TestRunTurnPromptTransport(unittest.TestCase):
         self.assertEqual(session.argv[session.argv.index("--system-prompt-override") + 1], half)
         self.assertEqual(json.loads(session.prompt_file), [{"type": "text", "text": half}])
         self.assertEqual([event["type"] for event in events], ["text_delta", "message_stop"])
+
+
+_HOST_TOOLS = [
+    {"name": "exec_command", "description": "Run a command on the host.",
+     "input_schema": {"type": "object", "properties": {"cmd": {"type": "string"},
+                                                       "workdir": {"type": "string"}}, "required": ["cmd"]}},
+    {"name": "get_goal", "description": "Read the thread goal.", "input_schema": {"type": "object", "properties": {}}},
+]
+
+
+def _use_tool(index, identifier, arguments):
+    """One use_tool call as grok 1.0.41 streams it: a single input_json_delta."""
+    return [
+        {"type": "stream_event", "event": {"type": "content_block_start", "index": index, "content_block": {
+            "type": "tool_use", "id": identifier, "name": "use_tool", "input": {}}}},
+        {"type": "stream_event", "event": {"type": "content_block_delta", "index": index, "delta": {
+            "type": "input_json_delta", "partial_json": json.dumps(arguments)}}},
+        {"type": "stream_event", "event": {"type": "content_block_stop", "index": index}},
+    ]
+
+
+def _refused_message(identifiers):
+    """What grok sends once the message ends: stop reason, snapshot, then its refusal."""
+    return [
+        {"type": "stream_event", "event": {"type": "message_delta", "delta": {"stop_reason": "tool_use"}}},
+        {"type": "stream_event", "event": {"type": "message_stop"}},
+        {"type": "assistant", "message": {"id": "msg_0", "content": [
+            {"type": "tool_use", "id": identifier, "name": "use_tool",
+             "input": {"tool_name": "get_goal", "tool_input": {}}} for identifier in identifiers]}},
+        {"type": "user", "message": {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": identifier, "content": [{"type": "content", "content": {
+                "type": "text", "text": "Tool `use_tool` was not executed: Denied by permission policy: "
+                                        "deny rule on mcp"}}]} for identifier in identifiers]}},
+        {"type": "assistant", "message": {"id": "msg_1", "content": [
+            {"type": "text", "text": "The permission policy blocked it."}]}},
+        {"type": "result", "subtype": "success", "result": "The permission policy blocked it."},
+    ]
+
+
+_USE_TOOL_INIT = {"type": "system", "subtype": "init", "tools": ["use_tool"], "mcp_servers": []}
+
+
+class TestRunTurnHostTools(unittest.TestCase):
+    """Host tools ride grok's own use_tool dispatcher as native structured calls."""
+
+    def _run(self, batches, *, tools=_HOST_TOOLS, web_search=None, tool_choice=None):
+        sessions = []
+        queue = [list(batch) for batch in batches]
+
+        def factory(argv, **kwargs):
+            session = _FakeSession(argv, **kwargs)
+            session.lines = queue.pop(0)
+            session.process = Mock()
+            sessions.append(session)
+            return session
+        request = {"model": "grok-4.7", "messages": [{"role": "user", "content": "which branch?"}],
+                   "tools": tools, "web_search": web_search, "tool_choice": tool_choice}
+        with patch.object(module, "StdioSession", side_effect=factory), \
+                patch.object(module, "_resolve_binary", return_value="/fake/grok"), \
+                patch.object(module, "_LEARNED_REMOVALS", set()):
+            events = list(module.run_turn(request))
+        return events, sessions
+
+    @staticmethod
+    def _removed(session):
+        return set(session.argv[session.argv.index("--disallowed-tools") + 1].split(","))
+
+    @staticmethod
+    def _system(session):
+        return session.argv[session.argv.index("--system-prompt-override") + 1]
+
+    def test_host_call_rides_use_tool_and_hands_off_at_the_end_of_the_message(self):
+        events, [session] = self._run([[
+            _USE_TOOL_INIT,
+            {"type": "stream_event", "event": {"type": "message_start", "message": {"id": "msg_0"}}},
+            *_use_tool(1, "call-a-0", {"tool_name": "exec_command",
+                                       "tool_input": {"cmd": "git branch --show-current", "workdir": "/repo"}}),
+            *_refused_message(["call-a-0"])]])
+        self.assertEqual(events, [
+            {"type": "tool_call", "id": "call-a-0", "name": "exec_command",
+             "input": {"cmd": "git branch --show-current", "workdir": "/repo"}},
+            {"type": "message_stop", "stop_reason": "tool_use"}])
+        session.process.terminate.assert_called_once()
+        self.assertNotIn("use_tool", self._removed(session))
+        self.assertIn("search_tool", self._removed(session))
+        self.assertEqual(session.argv[session.argv.index("MCPTool") - 1], "--deny")
+        system = self._system(session)
+        self.assertIn("calling your `use_tool` tool", system)
+        self.assertIn('"workdir"', system)
+        self.assertNotIn("<<<tool_call>>>", system)
+
+    def test_parallel_calls_hand_off_together_and_the_host_key_spelling_resolves(self):
+        events, _ = self._run([[
+            _USE_TOOL_INIT,
+            *_use_tool(0, "call-b-0", {"tool_name": "host__get_goal", "tool_input": {}}),
+            *_use_tool(1, "call-b-1", {"tool_name": "exec_command", "tool_input": '{"cmd": "ls"}'}),
+            *_refused_message(["call-b-0", "call-b-1"])]])
+        self.assertEqual([(event["type"], event.get("name"), event.get("input")) for event in events],
+                         [("tool_call", "get_goal", {}), ("tool_call", "exec_command", {"cmd": "ls"}),
+                          ("message_stop", None, None)])
+
+    def test_unoffered_names_and_file_arguments_are_protocol_errors(self):
+        for arguments in ({"tool_name": "Bash", "tool_input": {"command": "ls"}},
+                          {"tool_name": "exec_command", "file": "/tmp/mcp-call.json"},
+                          {"tool_name": "exec_command", "tool_input": "not json"},
+                          {"tool_input": {"cmd": "ls"}}):
+            with self.subTest(arguments=arguments):
+                events, _ = self._run([[_USE_TOOL_INIT, *_use_tool(0, "call-c-0", arguments),
+                                        *_refused_message(["call-c-0"])]])
+                self.assertEqual([event["type"] for event in events], ["error"])
+                self.assertEqual(events[0]["code"], "invalid_cli_tool_call")
+
+    def test_search_and_host_tools_share_the_registry(self):
+        events, [session] = self._run([[
+            {"type": "system", "subtype": "init", "tools": ["web_search", "use_tool"]},
+            *_use_tool(0, "call-d-0", {"tool_name": "get_goal", "tool_input": {}}),
+            *_refused_message(["call-d-0"])]],
+            web_search={"context_size": None, "allowed_domains": [], "live": True})
+        self.assertEqual([event["type"] for event in events], ["tool_call", "message_stop"])
+        self.assertEqual(session.argv[-2:], ["--tools", "web_search"])
+
+    def test_missing_use_tool_falls_back_to_the_envelope_before_any_output(self):
+        events, sessions = self._run([
+            [_INIT_EMPTY, {"type": "assistant", "message": {"id": "m0", "content": [
+                {"type": "text", "text": "never shown"}]}}],
+            [_INIT_EMPTY, {"type": "assistant", "message": {"id": "m1", "content": [
+                {"type": "text", "text": "Listing."}]}},
+             {"type": "result", "subtype": "success", "result": "Listing."}]],
+            tool_choice={"type": "any"})
+        self.assertEqual([(event["type"], event.get("text")) for event in events],
+                         [("text_delta", "Listing."), ("message_stop", None)])
+        first, second = sessions
+        self.assertNotIn("use_tool", self._removed(first))
+        self.assertIn("use_tool", self._removed(second))
+        self.assertIn("<<<tool_call>>>", self._system(second))
+        self.assertIn("You MUST call at least one tool", self._system(second))
+        self.assertIn("<host_note>", second.argv[second.argv.index("--single") + 1])
+
+    def test_turns_without_host_tools_keep_use_tool_removed(self):
+        events, [session] = self._run([list(_OK_TURN)], tools=[])
+        self.assertEqual([event["type"] for event in events], ["text_delta", "message_stop"])
+        self.assertIn("use_tool", self._removed(session))
+        self.assertNotIn("--system-prompt-override", session.argv)
 
 
 if __name__ == "__main__":

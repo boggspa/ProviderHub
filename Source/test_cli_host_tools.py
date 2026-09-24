@@ -11,6 +11,7 @@ from pathlib import Path
 import tempfile
 import threading
 import unittest
+import uuid
 from unittest.mock import patch
 from types import SimpleNamespace
 
@@ -80,8 +81,16 @@ def vendor_events(provider, name, arguments):
             "threadId": "thread", "turnId": "turn", "callId": "host_call",
             "namespace": "host", "tool": _tool_alias(name), "arguments": arguments}}]
     if provider == "grok":
-        return [{"type": "assistant", "message": {"content": [{"type": "text", "text": wire}]}},
-                {"type": "end", "stopReason": "end_turn"}]
+        # grok 1.0.41 dispatches host tools through its own use_tool function.
+        identifier = "call-" + uuid.uuid4().hex[:12]
+        return [{"type": "system", "subtype": "init", "tools": ["use_tool"]},
+                {"type": "stream_event", "event": {"type": "content_block_start", "index": 0, "content_block": {
+                    "type": "tool_use", "id": identifier, "name": "use_tool", "input": {}}}},
+                {"type": "stream_event", "event": {"type": "content_block_delta", "index": 0, "delta": {
+                    "type": "input_json_delta",
+                    "partial_json": json.dumps({"tool_name": name, "tool_input": arguments})}}},
+                {"type": "stream_event", "event": {"type": "content_block_stop", "index": 0}},
+                {"type": "stream_event", "event": {"type": "message_delta", "delta": {"stop_reason": "tool_use"}}}]
     if provider == "muse":
         return [{"payload_type": "run.output.delta", "payload": {"text": wire}},
                 {"payload_type": "run.terminal.completed", "payload": {"terminal": "completed"}}]

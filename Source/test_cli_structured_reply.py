@@ -131,14 +131,19 @@ class StructuredRouteTests(unittest.TestCase):
                                     payload, {}, wanted_output=512)
 
     def test_messages_uses_schema_but_responses_keeps_existing_protocol(self):
-        for provider in ("muse", "grok"):
-            with self.subTest(provider=provider):
-                messages = self.plan(provider)
-                responses = self.plan(provider, "responses")
-                self.assertIn("host_tool_schema", messages["body"])
-                self.assertNotIn(OPEN_SENTINEL, messages["body"]["system"])
-                self.assertNotIn("host_tool_schema", responses["body"])
-                self.assertIn(OPEN_SENTINEL, responses["body"]["system"])
+        messages = self.plan("muse")
+        responses = self.plan("muse", "responses")
+        self.assertIn("host_tool_schema", messages["body"])
+        self.assertNotIn(OPEN_SENTINEL, messages["body"]["system"])
+        self.assertNotIn("host_tool_schema", responses["body"])
+        self.assertIn(OPEN_SENTINEL, responses["body"]["system"])
+        # Grok offers host tools through its own use_tool dispatcher on both
+        # surfaces instead, so neither schema nor envelope is planned for it.
+        for surface in (None, "responses"):
+            plan = self.plan("grok", surface)
+            self.assertNotIn("host_tool_schema", plan["body"])
+            self.assertNotIn(OPEN_SENTINEL, plan["body"]["system"] or "")
+            self.assertEqual(plan["compatibility"]["cli_host_tools"], "use_tool")
 
     def test_adapter_schema_flags_and_temporary_file_cleanup(self):
         for provider in ("muse", "grok"):
@@ -164,9 +169,11 @@ class StructuredRouteTests(unittest.TestCase):
                 self.assertFalse(observed["path"].exists())
                 self.assertEqual(argv[argv.index("--max-model-steps") + 1], "4")
             else:
-                self.assertEqual(json.loads(argv[argv.index("--json-schema") + 1]), plan["body"]["host_tool_schema"])
+                # Grok's host call rides use_tool: no schema, no turn cap.
+                self.assertNotIn("--json-schema", argv)
+                self.assertNotIn("--max-turns", argv)
+                self.assertNotIn("use_tool", argv[argv.index("--disallowed-tools") + 1].split(","))
                 self.assertEqual(argv[-2:], ["--tools", ""])
-                self.assertEqual(argv[argv.index("--max-turns") + 1], "1")
 
 
 if __name__ == "__main__":
