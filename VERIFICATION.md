@@ -1,3 +1,58 @@
+**Antigravity handoff hook and the bundle seal — 24 September 2026**
+
+> **Historical record.** Dated 24 September 2026. Version numbers, build
+> numbers and test counts below are as they were then and are not maintained.
+> For current state see [`README.md`](README.md).
+
+After build 29 was copied over `/Applications`, strict verification of the
+installed app failed on six `__pycache__` directories inside the bundled
+runtime's stdlib (`python3.13` itself, `collections`, `encodings`, `json`,
+`pathlib`, `re`), all written at 22:27:53. The writer was the Antigravity
+route's PreToolUse hook. `_install_host_hook` writes a per-turn
+`.agents/hooks.json` whose command was `sys.executable host_handoff.py`. In
+the installed app `sys.executable` is the interpreter inside the signed
+bundle, and agy runs hooks in the environment the hub spawns it with,
+`minimal_env()`, whose allowlist drops the `PYTHONPYCACHEPREFIX` the app sets
+for the worker. So every hook call imported `json` and `pathlib` with
+bytecode writing on and no prefix, and Python wrote the stdlib caches beside
+their sources, inside the seal. The hook runs as a main script and imports
+nothing from the worker, so the caches landed only in the stdlib tree,
+outside the worker directory the app scrubs before each spawn. Every process
+the app starts itself gets the worker environment with the prefix.
+
+Evidence: nothing from the release session ran between 22:27:49 (the stapled
+ZIP) and 22:27:55 (the ChatGPT quit), while an Antigravity turn from Codex
+was in flight until 22:28:20. The same six directories reappeared in the
+freshly installed build 29 at 22:49:40, the minute of the first Antigravity
+turn after the relaunch. Running the hook's installed command through
+`/bin/sh` under `minimal_env()`, against a cache-free scratch copy of the
+bundled runtime, reproduced the same six directories with the same modules:
+the `json` decoder, encoder and scanner, `pathlib._abc` and `_local`, the `re`
+internals, `encodings.aliases` and `utf_8`, and `contextlib`, `copyreg`,
+`enum`, `fnmatch`, `functools`, `glob`, `keyword`, `operator`, `reprlib`,
+`types` and `warnings`. The Codex token helper, the only other place the
+worker hands the interpreter path to another program, already runs it with
+`-I -B`, and the current settings use the bearer-token mode, where that
+helper is not configured at all.
+
+The hook command is now `sys.executable -I -B host_handoff.py`. The flags
+travel inside the command, so they hold however agy launches it and whatever
+environment it passes; `-I` also keeps that environment out of the hook,
+matching the token helper. On the same scratch runtime the fixed command left
+no cache directories, still denied and wrote its receipt, and took about 75 ms
+per warm call instead of 32 ms, because the stdlib now compiles each time.
+The hook's timeout is 5 s. New tests execute the command from `hooks.json`
+through `/bin/sh` under `minimal_env()`, as agy does: they pin the argv, check
+that the interpreter really runs isolated with bytecode writing off, and
+check that the real hook still decides through it. Against the previous
+adapter the first two fail.
+
+Build 29 as installed still carries the old command, so each Antigravity
+tool call rewrites the six directories until a build with this change is
+installed. `ditto` merges into the existing bundle, so after that install the
+stray directories must be removed once, by name, from a `diff -rq` against the
+built bundle.
+
 **Grok CLI route: the MCP compat race and the argv cap — 24 September 2026**
 
 > **Historical record.** Dated 24 September 2026. Version numbers, build

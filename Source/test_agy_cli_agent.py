@@ -1,5 +1,11 @@
 """Tests for agy_cli_agent.py - model collapse and effort routing."""
+import json
+import shlex
+import subprocess
+import sys
+import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
 
@@ -587,6 +593,59 @@ class TestRunTurnStreams(unittest.TestCase):
         events = self._run([self._result("", denied_actions=[{"display_name": "run_command"}])])
         self.assertEqual([event["type"] for event in events], ["error"])
         self.assertIn("denied", events[0]["message"])
+
+
+class TestHostHookCommand(unittest.TestCase):
+    """The command agy runs for the handoff hook never writes bytecode.
+
+    In the installed app sys.executable is the interpreter inside the signed
+    bundle, and agy runs the hook in the hub's minimal_env, which carries no
+    PYTHONPYCACHEPREFIX. A cache written beside the stdlib breaks the seal.
+    These tests execute the command from hooks.json, as agy does, rather than
+    the script path.
+    """
+
+    def _install(self, directory):
+        from agy_cli_agent import _install_host_hook
+        # A space, like "Provider Hub Preview.app", exercises the quoting.
+        workspace = Path(directory) / "Provider Hub workspace"
+        workspace.mkdir()
+        root = _install_host_hook(str(workspace), [], [])
+        entry = json.loads((root / "hooks.json").read_text())["provider-hub-handoff"]
+        return root, entry["PreToolUse"][0]["hooks"][0]["command"]
+
+    def _run(self, command, payload, cwd):
+        from cli_session import minimal_env
+        result = subprocess.run(["/bin/sh", "-c", command], input=json.dumps(payload), text=True,
+                                capture_output=True, env=minimal_env(), cwd=cwd, timeout=30, check=True)
+        return json.loads(result.stdout)
+
+    def test_command_runs_the_interpreter_isolated_and_without_bytecode(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root, command = self._install(directory)
+            self.assertEqual(shlex.split(command),
+                             [sys.executable, "-I", "-B", str(root / "host_handoff.py")])
+
+    def test_flags_hold_through_the_shell_and_the_agy_environment(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root, command = self._install(directory)
+            # A probe in place of the script body; the command stays as installed.
+            (root / "host_handoff.py").write_text(
+                "import json, sys\n"
+                "print(json.dumps({'dont_write_bytecode': sys.flags.dont_write_bytecode,"
+                " 'isolated': sys.flags.isolated}))\n")
+            self.assertEqual(self._run(command, {}, root.parent),
+                             {"dont_write_bytecode": 1, "isolated": 1})
+
+    def test_real_hook_still_decides_through_the_installed_command(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root, command = self._install(directory)
+            denied = self._run(command, {"stepIdx": 0, "toolCall": {
+                "name": "run_command", "args": {"CommandLine": "ls"}}}, root.parent)
+            self.assertEqual(denied["decision"], "deny")
+            self.assertTrue((root / "blocked-0.json").exists())
+            self.assertEqual(self._run(command, {"stepIdx": 1, "toolCall": {"name": "finish", "args": {}}},
+                                       root.parent), {"decision": "allow"})
 
 
 if __name__ == '__main__':

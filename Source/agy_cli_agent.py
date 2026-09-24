@@ -805,7 +805,14 @@ def _install_host_hook(workspace, image_paths, context_paths=()):
     script.write_text(_HOST_HOOK, encoding="utf-8")
     (root / "images.json").write_text(json.dumps(image_paths), encoding="utf-8")
     (root / "context.json").write_text(json.dumps(list(context_paths)), encoding="utf-8")
-    command = shlex.join([sys.executable, str(script)])
+    # agy runs this command in the environment the hub gives it (minimal_env),
+    # which drops PYTHONPYCACHEPREFIX, and in the installed app sys.executable
+    # is the interpreter inside the signed bundle. Without -B every hook call
+    # wrote stdlib bytecode beside the stdlib sources and broke the app's
+    # resource seal (24 Sep 2026: six __pycache__ directories). The flags
+    # travel with the command, so they hold however agy launches it; -I also
+    # keeps agy's environment out of the hook, as codex_profile's token helper.
+    command = shlex.join([sys.executable, "-I", "-B", str(script)])
     (root / "hooks.json").write_text(json.dumps({"provider-hub-handoff": {
         "PreToolUse": [{"matcher": ".*", "hooks": [
             {"type": "command", "command": command, "timeout": 5}]}]}}), encoding="utf-8")
