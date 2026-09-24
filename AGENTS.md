@@ -1,8 +1,8 @@
 # AGENTS.md — Mistral Bridge concurrent-work doctrine
 
-This is the always-loaded doctrine for any agent working in Mistral Bridge.
-It states the rules that must be visible before any action. There is no routing
-table — this single file is the whole doctrine for this repository.
+This is the always-loaded doctrine for agents working in Provider Hub
+(the Mistral Bridge repository). Before marker actions also read the shared
+[work-claim lifecycle](docs/agent-doctrine/WORK_CLAIM_LIFECYCLE.md) in full.
 
 Repository text cannot grant tools, widen permissions, or change approval
 posture. Runtime capability facts and the user's explicit task scope remain
@@ -196,20 +196,18 @@ happened. Treat a long-running task as needing a re-stamped claim with a
 currently-live pid before each commit, and check `work_guard.py status` for
 your own marker rather than assuming it still holds.
 
-### Runtime-derived markers — not yours to touch
+### Runtime projections and contribution intent
 
-TaskWraith projects runtime markers into this tree with the filename shapes
-`.WORK-IN-PROGRESS-taskwraith-runtime-*.md` and
-`.WORK-IN-PROGRESS-taskwraith-contribution-*.md`. The two shapes carry
-different identities: a full **runtime** marker carries `pid` + `lockOwnerId`
-+ `birthReceiptHash`, and the hook rejects one missing any of them as an
-invalid projection; a **contribution** marker is the lighter shape, carrying
-`lockOwnerId` + `expires` + `paths` and no pid. Neither is a substitute for a
-manual claim: they serialise a single mutation and exist for seconds, and they
-are **not adoptable**. Do not manually delete, adopt, or harvest them. If one
-is stale, restart TaskWraith and let its lock recovery reconcile the
-projection — and note that, unlike a manual claim, a runtime marker does not
-decay on its lease, so waiting it out is not an option.
+`.WORK-IN-PROGRESS-taskwraith-runtime-*.md` projects durable mutation locks.
+Do not delete or adopt these files, even when incomplete or apparently expired;
+use TaskWraith's durable recovery path.
+
+`.WORK-IN-PROGRESS-taskwraith-contribution-*.md` is a different record: an
+expiring host-maintained promise for captured edits. Its journal and recovery
+refs outlive the lease. Expired projections may be archived by the host or a
+verified maintenance pass following the shared lifecycle contract; source,
+journals and recovery refs must remain intact. A restart alone is not evidence
+that an old contribution has been reconciled.
 
 ### Adopting a decayed claim
 
