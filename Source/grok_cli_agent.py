@@ -14,6 +14,22 @@ is switched off with an explicit internal-tool removal list, verified against
 insufficient in 1.0.34. Native-shaped model calls may be forwarded only after
 that empty-registry check and only for tools actually offered by the host.
 
+The registry is not only built-ins. By default the CLI also imports MCP
+servers from Cursor's and Claude Code's configs (``[compat.cursor] mcps`` and
+``[compat.claude] mcps``: ``~/.cursor/mcp.json``, ``~/.claude.json``), and
+their tools land in the same ``init.tools`` list whenever a server handshake
+wins the startup race against the turn start (observed on 1.0.41: the
+taskwraith server connected 1 ms before ``turn_started`` and the guard
+tripped, while every other run of the day passed). Hub turns therefore switch
+both scans off for the child process alone, through the documented env cells
+``GROK_CURSOR_MCPS_ENABLED=0`` and ``GROK_CLAUDE_MCPS_ENABLED=0`` (verified:
+init reports ``mcp_servers: []`` and the session records no MCP events). The
+user's own config is never edited. Should the registry still name tools (a
+built-in added by a newer CLI, a native ``[mcp_servers]`` entry), the turn is
+respawned once with those names appended to the removal list, names that
+worked are remembered for the process lifetime, and a second failure reports
+the names instead of a bare refusal.
+
 One exception, only when the desktop asked for hosted web search: the turn
 keeps web_search alone (``--tools web_search``, init.tools ``["web_search"]``).
 On models whose cache entry sets ``supports_backend_search`` the search runs
@@ -34,8 +50,11 @@ Verified live against grok 1.0.34 (3736acbc8658):
   - ``--output-format streaming-messages-json`` outputs NDJSON in Anthropic Messages API format
   - Prompt travels as positional argument to ``--single``, NOT on stdin
     (verified: ``--single`` with no positional aborts with "a value is required
-    for '--single <PROMPT\u003e'"; stdin is ignored). Long prompts are therefore
-    bounded by argv size; prompts above ~256 KB are refused before spawn.
+    for '--single <PROMPT\u003e'"; stdin is ignored). argv is bounded by the
+    kernel, so past ~256 KB (prompt plus system override together) the prompt
+    travels in the workspace prompt file instead, the ACP JSON transport that
+    screenshots already use (``--prompt-file``; verified on 1.0.41 with a
+    text-only file).
   - Variadic: ``--tools`` must be last on command line
 
 INVARIANT: Every argv this module builds carries ``--no-auto-update``. The
@@ -50,6 +69,7 @@ SYSTEM_PROMPT_TRANSPORT is "flag" (``--system-prompt-override``).
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 import tempfile
@@ -98,9 +118,10 @@ _EXTRA_BIN_DIRS = ("~/.grok/bin", "~/.local/bin", "/opt/homebrew/bin", "/usr/loc
 # Safety invariants
 # ---------------------------------------------------------------------------
 
-#: Maximum prompt byte length delivered as a positional argument to --single.
-#: macOS ARG_MAX is ~1 MB; we keep a large margin so the CLI never receives
-#: an argv the kernel would refuse before it can be executed.
+#: Largest prompt-plus-system byte length delivered on argv (the positional
+#: --single value and --system-prompt-override). macOS ARG_MAX is ~1 MB; past
+#: this margin the prompt moves into the workspace prompt file so a long host
+#: conversation keeps working instead of being refused before spawn.
 _MAX_PROMPT_ARGV_BYTES = 256 * 1024
 
 # Never constructed, never forwarded, asserted against in build_argv.
@@ -111,6 +132,8 @@ _FORBIDDEN_FLAGS = frozenset({
 # Internal IDs differ from the names shown in init.tools. Empty --tools alone
 # leaves the stock toolset enabled in Grok 1.0.34. Remove built-ins explicitly,
 # including MCP dispatch and task tools, then verify init.tools is empty.
+# 1.0.41 added sports_search (X data lookups); a built-in this list does not
+# know yet is removed by name on the turn's one respawn (see run_turn).
 _DISALLOWED_TOOLS = (
     "run_terminal_cmd", "run_terminal_command", "read_file", "search_replace",
     "list_dir", "grep", "kill_task", "get_task_output", "task", "Agent",
@@ -120,6 +143,7 @@ _DISALLOWED_TOOLS = (
     "exit_plan_mode", "ask_user_question", "send_feedback", "image_gen",
     "image_edit", "image_to_video", "reference_to_video", "write",
     "web_search", "web_fetch", "memory_search", "memory_get", "lsp",
+    "sports_search",
 )
 
 # dontAsk denies approval prompts. Explicit deny rules also cover tools
@@ -137,6 +161,25 @@ READ_ONLY_FLAGS = (
 _VARIADIC_TOOL_FLAGS = ("--tools", "--allow", "--allowedTools",
                         "--deny", "--disallow", "--disallowedTools",
                         "--disallowed-tools")
+
+# Per-process compat cells (documented in the CLI's config reference; env wins
+# over config.toml). They stop the child importing MCP servers from Cursor's
+# and Claude Code's configs, whose tools would otherwise race into
+# init.tools. Nothing here edits the user's ~/.grok/config.toml.
+_CHILD_ENV = {
+    "GROK_CURSOR_MCPS_ENABLED": "0",
+    "GROK_CLAUDE_MCPS_ENABLED": "0",
+}
+
+# A tool name the CLI reported may join the removal list only in this shape:
+# one argv element value, never something clap could read as a flag.
+_REMOVAL_NAME = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.:/-]{0,127}\Z")
+_MAX_LEARNED_REMOVALS = 64
+
+#: Names whose removal let a respawned turn pass the registry check. Every
+#: later argv carries them, so a newer CLI's built-in costs one wasted spawn
+#: per hub process rather than one per turn.
+_LEARNED_REMOVALS: set[str] = set()
 
 # ---------------------------------------------------------------------------
 # Models and effort
@@ -344,7 +387,8 @@ def _assert_safe(argv: list[str]) -> list[str]:
     return argv
 
 
-def build_argv(model, *, effort=None, system=None, stream=True, search=False) -> list[str]:
+def build_argv(model, *, effort=None, system=None, stream=True, search=False,
+               extra_removals=()) -> list[str]:
     """Full argv for one print-mode turn. argv[0] is the bare binary name.
 
     ``run_turn`` replaces argv[0] with the resolved absolute path; keeping the
@@ -354,6 +398,11 @@ def build_argv(model, *, effort=None, system=None, stream=True, search=False) ->
     ``search`` keeps exactly one tool, web_search: it leaves the removal list
     and --tools, and --disable-web-search is dropped. web_search is read-only,
     so dontAsk runs it without a prompt; web_fetch stays removed and denied.
+
+    ``extra_removals`` are further names for ``--disallowed-tools``: what the
+    CLI's own init line reported still registered. Removal can only narrow,
+    so they are appended as given, except a name that could not be a plain
+    value (``_REMOVAL_NAME``) or web_search on a search turn.
 
     INVARIANT: Every argv carries ``--no-auto-update`` to prevent the CLI from
     self-updating during capability checks or turns.
@@ -381,10 +430,14 @@ def build_argv(model, *, effort=None, system=None, stream=True, search=False) ->
 
     # Read-only posture
     flags = list(READ_ONLY_FLAGS)
+    removals = [tool for tool in _DISALLOWED_TOOLS if not (search and tool == "web_search")]
+    for name in extra_removals:
+        if isinstance(name, str) and _REMOVAL_NAME.fullmatch(name) and name not in removals \
+                and not (search and name == "web_search"):
+            removals.append(name)
+    flags[flags.index("--disallowed-tools") + 1] = ",".join(removals)
     if search:
         flags.remove("--disable-web-search")
-        removed = flags.index("--disallowed-tools") + 1
-        flags[removed] = ",".join(tool for tool in _DISALLOWED_TOOLS if tool != "web_search")
     argv += flags
 
     # Model selection
@@ -507,6 +560,10 @@ class _TurnState:
         self.messages = {}
         self.current_message = None
         self.native_tools_disabled = False
+        # Names init.tools carried beyond the allowed set; None until init.
+        self.native_tools_seen = None
+        # True on the respawn, so a repeat failure says the removal was tried.
+        self.retried = False
         self.host_tools = []
         self.host_handoff = False
         self.pending_calls = {}
@@ -707,9 +764,22 @@ def _translate(payload: Any, state: _TurnState) -> list[dict]:
 
     if kind == "system" and payload.get("subtype") == "init":
         # A search turn may keep web_search (or lose it to the user's own
-        # disable_web_search); any other native tool fails the turn.
-        if payload.get("tools") not in ([], ["web_search"] if state.search else []):
-            state.failure = "grok did not disable its native CLI tools; this runtime cannot safely forward host calls."
+        # disable_web_search); any other registered tool fails the turn, and
+        # is named so the cause (a new built-in, an MCP server) is visible.
+        tools = payload.get("tools")
+        if not isinstance(tools, list) or not all(isinstance(tool, str) for tool in tools):
+            state.failure = "grok did not report its native tool registry; this runtime cannot safely forward host calls."
+            return []
+        allowed = {"web_search"} if state.search else set()
+        extras = sorted(set(tools) - allowed)
+        if extras:
+            state.native_tools_seen = extras
+            names = ", ".join(extras)
+            state.failure = (
+                f"grok did not disable its native CLI tools ({names}) even after a respawn that "
+                "removed them by name; this runtime cannot safely forward host calls."
+                if state.retried else
+                f"grok did not disable its native CLI tools ({names}); this runtime cannot safely forward host calls.")
         else:
             state.native_tools_disabled = True
         return []
@@ -901,96 +971,104 @@ def _describe(exc: BaseException, state: _TurnState | None = None,
     return text + extra
 
 
-def run_turn(request, *, spawner=None, timeout=300) -> Iterator[dict]:
-    """Stream one stateless turn as text_delta / thinking_delta / message_stop.
+def _plan_turn(request) -> dict:
+    """Validate the request and render everything a spawn needs. No I/O.
 
-    Always terminates with exactly one message_stop or error event, and never
-    raises: every failure mode (missing binary, bad request, CLI error result,
-    non-zero exit, timeout, unparsable stream) degrades to an error event.
+    The prompt and the system override both travel on argv. Past the cap
+    the prompt moves into the workspace prompt file instead (the screenshot
+    transport), so a long host conversation never reaches the kernel's limit.
     """
-    state = _TurnState()
+    if not isinstance(request, dict):
+        raise GrokCliAgentError("request must be an object")
+    model = _validate_model(request.get("model"))
+    host_tools = normalize_tools(request.get("tools"))
+    messages = _coerce_messages(request.get("messages"))
+    effort = _validate_effort(request.get("effort"))
+    system = request.get("system")
+    if system is not None and not isinstance(system, str):
+        raise GrokCliAgentError("system must be a string or None")
+    max_tokens = request.get("max_tokens")
+    if max_tokens is not None and not isinstance(max_tokens, int):
+        raise GrokCliAgentError("max_tokens must be an integer or None")
+    if isinstance(max_tokens, int) and max_tokens <= 0:
+        raise GrokCliAgentError("max_tokens must be positive")
+    prompt = render_prompt(messages)
+    system_text = system.strip() if isinstance(system, str) else ""
+    images = request.get("images") or []
+    argv_bytes = len(prompt.encode("utf-8")) + len(system_text.encode("utf-8"))
+    return {
+        "model": model,
+        "host_tools": host_tools,
+        "effort": effort,
+        "system": system_text,
+        "prompt": prompt,
+        "images": images,
+        "prompt_file": bool(images) or argv_bytes > _MAX_PROMPT_ARGV_BYTES,
+        "search": search_enabled(request.get("web_search")),
+        "host_tool_schema": request.get("host_tool_schema"),
+    }
+
+
+def _turn_argv(plan, workspace_path, *, extra_removals=()) -> list[str]:
+    """argv for one spawn of ``plan`` inside ``workspace_path`` (bare binary name).
+
+    A prompt file is written only when the plan needs one: Grok parses .json
+    prompt files as ACP blocks, which keeps screenshot bytes and oversized
+    transcripts out of argv.
+    """
+    argv = build_argv(plan["model"], effort=plan["effort"], system=None, stream=True,
+                      search=plan["search"], extra_removals=extra_removals)
+    try:
+        single = argv.index("--single")
+    except ValueError:
+        raise GrokCliAgentError("internal error: --single not found in argv")
+    if plan["prompt_file"]:
+        prompt_path = Path(workspace_path) / "prompt.json"
+        with prompt_path.open("x", encoding="utf-8") as handle:
+            prompt_path.chmod(0o600)
+            json.dump(prompt_content(plan["prompt"], plan["images"], acp=True), handle,
+                      ensure_ascii=False)
+        argv[single:single + 1] = ["--prompt-file", str(prompt_path)]
+    else:
+        argv.insert(single + 1, plan["prompt"])
+    if plan["host_tool_schema"]:
+        tools_idx = argv.index("--tools")
+        argv[tools_idx:tools_idx] = ["--json-schema", json.dumps(plan["host_tool_schema"]),
+                                     "--max-turns", "1"]
+    # System prompt as flag, before the variadic --tools that ends argv.
+    if plan["system"]:
+        tools_idx = argv.index("--tools")
+        if plan["system"].startswith("-"):
+            argv.insert(tools_idx, f"--system-prompt-override={plan['system']}")
+        else:
+            argv[tools_idx:tools_idx] = ["--system-prompt-override", plan["system"]]
+    return argv
+
+
+def _attempt_turn(plan, state, *, spawner, timeout, extra_removals, retry_allowed):
+    """One spawn of the CLI, streamed as route events.
+
+    Returns the tool names init reported still registered when the registry
+    check failed before any event reached the caller and a respawn is
+    allowed; ``run_turn`` then spawns again with them removed. Otherwise the
+    turn ends here, with exactly one message_stop or error event.
+    """
     workspace_path = None
     try:
-        if not isinstance(request, dict):
-            raise GrokCliAgentError("request must be an object")
-        model = _validate_model(request.get("model"))
-        state.host_tools = normalize_tools(request.get("tools"))
-        messages = _coerce_messages(request.get("messages"))
-        effort = _validate_effort(request.get("effort"))
-        system = request.get("system")
-        if system is not None and not isinstance(system, str):
-            raise GrokCliAgentError("system must be a string or None")
-        max_tokens = request.get("max_tokens")
-        if max_tokens is not None and not isinstance(max_tokens, int):
-            raise GrokCliAgentError("max_tokens must be an integer or None")
-        if isinstance(max_tokens, int) and max_tokens <= 0:
-            raise GrokCliAgentError("max_tokens must be positive")
-
-        # Render the prompt
-        prompt = render_prompt(messages)
-        prompt_bytes = prompt.encode("utf-8")
-        if not request.get("images") and len(prompt_bytes) > _MAX_PROMPT_ARGV_BYTES:
-            raise GrokCliAgentError(
-                f"prompt is too large for the grok CLI positional argument "
-                f"({len(prompt_bytes)} bytes; maximum {_MAX_PROMPT_ARGV_BYTES} bytes)"
-            )
-
-        # Build argv - prompt goes as positional arg to --single
-        state.search = search_enabled(request.get("web_search"))
-        argv = build_argv(model, effort=effort, system=None, stream=True, search=state.search)
-
-        # Insert the prompt as the value for --single
-        # argv: [grok, --no-auto-update, --single, --output-format, ...]
-        # need: [grok, --no-auto-update, --single, PROMPT, --output-format, ...]
-        try:
-            single_idx = argv.index("--single")
-        except ValueError:
-            raise GrokCliAgentError("internal error: --single not found in argv")
-        argv.insert(single_idx + 1, prompt)
-        if request.get("host_tool_schema"):
-            tools_idx = argv.index("--tools")
-            argv[tools_idx:tools_idx] = ["--json-schema", json.dumps(request["host_tool_schema"]),
-                                      "--max-turns", "1"]
-
-        # Handle system prompt separately (we passed None to build_argv to avoid
-        # duplication, but need to add it back if provided)
-        if system is not None:
-            system_text = system.strip()
-            if system_text:
-                # Find position before --tools (which is last)
-                try:
-                    tools_idx = argv.index("--tools")
-                except ValueError:
-                    tools_idx = len(argv)
-                if system_text.startswith("-"):
-                    argv.insert(tools_idx, f"--system-prompt-override={system_text}")
-                else:
-                    argv.insert(tools_idx, "--system-prompt-override")
-                    argv.insert(tools_idx + 1, system_text)
-
         binary = _resolve_binary()
         if not binary:
             raise GrokCliAgentError(
                 "the grok CLI was not found on PATH; install Grok or "
                 "switch this route to API-key credentials"
             )
-        argv[0] = binary
-
         # stderr goes to a temp file, not a pipe
         state.stderr_handle = tempfile.TemporaryFile(mode="w+", encoding="utf-8")
         workspace_path = tempfile.mkdtemp(prefix="grok_ws_")
-        if request.get("images"):
-            # Grok parses .json prompt files as ACP blocks. Keep screenshot
-            # bytes out of argv and avoid the OS command-line size limit.
-            prompt_path = Path(workspace_path) / "prompt.json"
-            with prompt_path.open("x", encoding="utf-8") as handle:
-                prompt_path.chmod(0o600)
-                json.dump(prompt_content(prompt, request["images"], acp=True), handle, ensure_ascii=False)
-            index = argv.index("--single")
-            argv[index:index + 2] = ["--prompt-file", str(prompt_path)]
+        argv = _turn_argv(plan, workspace_path, extra_removals=extra_removals)
+        argv[0] = binary
         session = StdioSession(
             argv,
-            env=minimal_env(),
+            env=minimal_env(_CHILD_ENV),
             cwd=workspace_path,
             timeout=float(timeout),
             spawner=spawner,
@@ -1003,9 +1081,10 @@ def run_turn(request, *, spawner=None, timeout=300) -> Iterator[dict]:
         if workspace_path is not None:
             shutil.rmtree(workspace_path, ignore_errors=True)
         yield {"type": "error", "message": message}
-        return
+        return None
 
     stop_reason = state.stop_reason or "end_turn"
+    produced = False
     try:
         with session:
             # For grok --single, prompt is already in argv, not on stdin
@@ -1014,20 +1093,25 @@ def run_turn(request, *, spawner=None, timeout=300) -> Iterator[dict]:
                     state.raw_lines.append(payload)
                     continue
                 for event in _translate(payload, state):
+                    produced = True
                     yield event
+                if state.native_tools_seen and retry_allowed and not produced:
+                    # init is the stream's first line, so nothing has reached
+                    # the client: the respawn is invisible to it.
+                    return frozenset(state.native_tools_seen)
                 if state.failure:
                     yield {"type": "error", "message": state.failure}
-                    return
+                    return None
                 if state.host_handoff:
                     # With an empty native registry these are model requests
                     # for host tools. Stop before the CLI's own tool loop.
                     yield {"type": "message_stop", "stop_reason": "tool_use"}
-                    return
+                    return None
                 if state.terminal:
                     returncode = getattr(session, "returncode", None)
                     if isinstance(returncode, int) and returncode != 0:
                         yield {"type": "error", "message": f"the grok CLI exited with code {returncode}"}
-                        return
+                        return None
                     if not state.emitted_text:
                         fallback = state.fallback_text()
                         if fallback:
@@ -1035,21 +1119,21 @@ def run_turn(request, *, spawner=None, timeout=300) -> Iterator[dict]:
                             yield {"type": "text_delta", "text": fallback}
                         else:
                             yield {"type": "error", "message": "the grok CLI produced no output"}
-                            return
+                            return None
                     yield {"type": "message_stop", "stop_reason": state.stop_reason or "end_turn"}
-                    return
+                    return None
 
         returncode = getattr(session, "returncode", None)
         if isinstance(returncode, int) and returncode != 0:
             detail = f"the grok CLI exited with code {returncode}"
             yield {"type": "error", "message": detail + state.diagnostics() + state.stderr_tail()}
-            return
+            return None
         elif state.failure:
             yield {"type": "error", "message": state.failure}
-            return
+            return None
         elif not state.terminal:
             yield {"type": "error", "message": "the grok CLI stream ended before completing the turn"}
-            return
+            return None
         else:
             if not state.emitted_text:
                 fallback = state.fallback_text()
@@ -1058,11 +1142,11 @@ def run_turn(request, *, spawner=None, timeout=300) -> Iterator[dict]:
                     yield {"type": "text_delta", "text": fallback}
                 elif not state.raw_lines:
                     yield {"type": "error", "message": "the grok CLI produced no output"}
-                    return
+                    return None
             stop_reason = state.stop_reason or "end_turn"
     except Exception as exc:
         yield {"type": "error", "message": _describe(exc, state, timeout)}
-        return
+        return None
     finally:
         def release_files():
             if workspace_path is not None:
@@ -1072,3 +1156,36 @@ def run_turn(request, *, spawner=None, timeout=300) -> Iterator[dict]:
         cleanup_after_exit(session, release_files)
 
     yield {"type": "message_stop", "stop_reason": stop_reason}
+    return None
+
+
+def run_turn(request, *, spawner=None, timeout=300) -> Iterator[dict]:
+    """Stream one stateless turn as text_delta / thinking_delta / message_stop.
+
+    Always terminates with exactly one message_stop or error event, and never
+    raises: every failure mode (missing binary, bad request, CLI error result,
+    non-zero exit, timeout, unparsable stream) degrades to an error event.
+
+    When the CLI's init line still names registered tools, the turn is
+    spawned a second time with those names appended to the removal list
+    before the client sees anything. A removal that worked is remembered in
+    ``_LEARNED_REMOVALS`` so later turns spawn correctly first time.
+    """
+    try:
+        plan = _plan_turn(request)
+    except Exception as exc:
+        yield {"type": "error", "message": _describe(exc, None, timeout)}
+        return
+    removals = frozenset(_LEARNED_REMOVALS)
+    for attempt in (1, 2):
+        state = _TurnState()
+        state.host_tools = plan["host_tools"]
+        state.search = plan["search"]
+        state.retried = attempt == 2
+        extras = yield from _attempt_turn(plan, state, spawner=spawner, timeout=timeout,
+                                          extra_removals=sorted(removals), retry_allowed=attempt == 1)
+        if attempt == 2 and state.native_tools_disabled and len(_LEARNED_REMOVALS) < _MAX_LEARNED_REMOVALS:
+            _LEARNED_REMOVALS.update(name for name in removals if _REMOVAL_NAME.fullmatch(name))
+        if not extras:
+            return
+        removals = removals | extras

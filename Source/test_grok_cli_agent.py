@@ -204,6 +204,23 @@ class TestBuildArgv(unittest.TestCase):
         self.assertIn("web_fetch", removed)
         self.assertEqual(argv[argv.index("WebFetch") - 1], "--deny")
 
+    def test_extra_removals_extend_the_removal_list_safely(self):
+        self.assertIn("sports_search", module._DISALLOWED_TOOLS)
+        argv = module.build_argv("grok-4.7", stream=True, extra_removals=[
+            "new_tool", "-flag", "bad name", "a,b", "web_search", "read_file", 7])
+        removed = argv[argv.index("--disallowed-tools") + 1].split(",")
+        self.assertIn("new_tool", removed)
+        self.assertNotIn("-flag", removed)
+        self.assertNotIn("bad name", removed)
+        self.assertNotIn("a", removed)
+        self.assertEqual(removed.count("read_file"), 1)
+        self.assertEqual(argv[-2:], ["--tools", ""])
+        search = module.build_argv("grok-4.7", stream=True, search=True,
+                                   extra_removals=["web_search", "sports_search"])
+        kept = search[search.index("--disallowed-tools") + 1].split(",")
+        self.assertNotIn("web_search", kept)
+        self.assertIn("sports_search", kept)
+
 
 class TestSearchModels(unittest.TestCase):
     """Backend search capability comes from the CLI's own model cache."""
@@ -666,6 +683,34 @@ class TestTranslate(unittest.TestCase):
         list(module._translate({"type": "system", "subtype": "init", "tools": ["read_file"]}, state))
         self.assertIn("did not disable", state.failure)
 
+    def test_init_names_the_tools_that_stayed_registered(self):
+        state = module._TurnState()
+        list(module._translate({"type": "system", "subtype": "init",
+                                "tools": ["write_file", "read_file"]}, state))
+        self.assertEqual(state.native_tools_seen, ["read_file", "write_file"])
+        self.assertIn("(read_file, write_file)", state.failure)
+        self.assertNotIn("respawn", state.failure)
+        state = module._TurnState()
+        state.retried = True
+        list(module._translate({"type": "system", "subtype": "init", "tools": ["read_file"]}, state))
+        self.assertIn("even after a respawn", state.failure)
+        # Order never matters; a search turn keeps web_search and nothing else.
+        state = module._TurnState()
+        state.search = True
+        list(module._translate({"type": "system", "subtype": "init", "tools": ["web_search"]}, state))
+        self.assertIsNone(state.failure)
+        self.assertTrue(state.native_tools_disabled)
+        state = module._TurnState()
+        state.search = True
+        list(module._translate({"type": "system", "subtype": "init",
+                                "tools": ["web_search", "sports_search"]}, state))
+        self.assertEqual(state.native_tools_seen, ["sports_search"])
+        # No usable registry is a failure, not a retry.
+        state = module._TurnState()
+        list(module._translate({"type": "system", "subtype": "init", "tools": "read_file"}, state))
+        self.assertIn("did not report", state.failure)
+        self.assertIsNone(state.native_tools_seen)
+
     def test_isolated_native_request_is_forwarded_to_offered_host_tool(self):
         state = module._TurnState()
         state.host_tools = [{"name": "read_file"}]
@@ -860,9 +905,16 @@ class _FakeSession:
 
     def __init__(self, argv, **kwargs):
         self.argv = list(argv)
+        self.kwargs = kwargs
         self.returncode = 0
         self.process = None
         self.lines = []
+        # The workspace is released when the turn ends, so read the prompt
+        # file at spawn time, as the real CLI would.
+        self.prompt_file = None
+        if "--prompt-file" in self.argv:
+            path = Path(self.argv[self.argv.index("--prompt-file") + 1])
+            self.prompt_file = path.read_text(encoding="utf-8")
 
     def __enter__(self):
         return self
@@ -913,6 +965,141 @@ class TestRunTurnSearch(unittest.TestCase):
                 self.assertIn("--disable-web-search", session.argv)
                 self.assertEqual([event["type"] for event in events], ["text_delta", "message_stop"])
 
+
+_INIT_EMPTY = {"type": "system", "subtype": "init", "tools": []}
+_OK_TURN = [_INIT_EMPTY,
+            {"type": "assistant", "message": {"id": "m1", "content": [{"type": "text", "text": "Hello."}]}},
+            {"type": "result", "subtype": "success", "result": "Hello."}]
+
+
+class TestRunTurnRegistryRespawn(unittest.TestCase):
+    """A registry that is not empty at init is respawned once, names removed."""
+
+    def _run(self, batches, request=None, learned=None):
+        sessions = []
+        queue = [list(batch) for batch in batches]
+
+        def factory(argv, **kwargs):
+            session = _FakeSession(argv, **kwargs)
+            session.lines = queue.pop(0)
+            sessions.append(session)
+            return session
+        request = request or {"model": "grok-4.7", "messages": [{"role": "user", "content": "hi"}]}
+        with patch.object(module, "StdioSession", side_effect=factory), \
+                patch.object(module, "_resolve_binary", return_value="/fake/grok"), \
+                patch.object(module, "_LEARNED_REMOVALS", set(learned or ())):
+            events = list(module.run_turn(request))
+            remembered = set(module._LEARNED_REMOVALS)
+        return events, sessions, remembered
+
+    @staticmethod
+    def _removed(session):
+        return set(session.argv[session.argv.index("--disallowed-tools") + 1].split(","))
+
+    def test_respawn_removes_the_named_tools_and_remembers_them(self):
+        events, sessions, learned = self._run([
+            [{"type": "system", "subtype": "init", "tools": ["sports_search", "new_tool"]}], _OK_TURN])
+        self.assertEqual([event["type"] for event in events], ["text_delta", "message_stop"])
+        self.assertEqual(events[0]["text"], "Hello.")
+        self.assertEqual(len(sessions), 2)
+        self.assertNotIn("new_tool", self._removed(sessions[0]))
+        self.assertLessEqual({"sports_search", "new_tool"}, self._removed(sessions[1]))
+        self.assertEqual(sessions[1].argv[-2:], ["--tools", ""])
+        self.assertIn("new_tool", learned)
+
+    def test_learned_removal_applies_to_the_next_turn_first_time(self):
+        events, sessions, learned = self._run([_OK_TURN], learned={"new_tool"})
+        self.assertEqual(len(sessions), 1)
+        self.assertIn("new_tool", self._removed(sessions[0]))
+        self.assertEqual([event["type"] for event in events], ["text_delta", "message_stop"])
+
+    def test_second_failure_names_the_tools_and_stops(self):
+        events, sessions, learned = self._run([
+            [{"type": "system", "subtype": "init", "tools": ["mcp_tool"]}],
+            [{"type": "system", "subtype": "init", "tools": ["mcp_tool"]}]])
+        self.assertEqual(len(sessions), 2)
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["type"], "error")
+        self.assertIn("(mcp_tool)", events[0]["message"])
+        self.assertIn("even after a respawn", events[0]["message"])
+        self.assertEqual(learned, set())
+
+    def test_unsafe_names_never_reach_argv(self):
+        events, sessions, learned = self._run([
+            [{"type": "system", "subtype": "init", "tools": ["--always-approve", "ok_name"]}], _OK_TURN])
+        removed = self._removed(sessions[1])
+        self.assertIn("ok_name", removed)
+        self.assertNotIn("--always-approve", removed)
+        self.assertFalse(any(arg.startswith("--always-approve") for arg in sessions[1].argv))
+        self.assertEqual(learned, {"ok_name"} | (learned & set(module._DISALLOWED_TOOLS)))
+        self.assertNotIn("--always-approve", learned)
+
+    def test_child_env_disables_compat_mcp_scans_only(self):
+        with patch.dict("os.environ", {"XAI_API_KEY": "secret", "PATH": "/usr/bin"}, clear=False):
+            events, sessions, _ = self._run([_OK_TURN])
+        env = sessions[0].kwargs["env"]
+        self.assertEqual(env["GROK_CURSOR_MCPS_ENABLED"], "0")
+        self.assertEqual(env["GROK_CLAUDE_MCPS_ENABLED"], "0")
+        self.assertNotIn("XAI_API_KEY", env)
+        self.assertIn("PATH", env)
+
+    def test_init_without_a_registry_is_not_retried(self):
+        events, sessions, _ = self._run([[{"type": "system", "subtype": "init"}]])
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual(events, [{"type": "error", "message":
+                                   "grok did not report its native tool registry; "
+                                   "this runtime cannot safely forward host calls."}])
+
+    def test_registry_failure_after_output_is_not_retried(self):
+        late = [{"type": "assistant", "message": {"id": "m1", "content": [{"type": "text", "text": "Hi"}]}},
+                {"type": "system", "subtype": "init", "tools": ["read_file"]}]
+        events, sessions, _ = self._run([late])
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual([event["type"] for event in events], ["text_delta", "error"])
+
+
+class TestRunTurnPromptTransport(unittest.TestCase):
+    """Oversized prompts travel in the workspace prompt file, never on argv."""
+
+    def _run(self, request):
+        sessions = []
+
+        def factory(argv, **kwargs):
+            session = _FakeSession(argv, **kwargs)
+            session.lines = [_INIT_EMPTY, {"type": "result", "subtype": "success", "result": "OK"}]
+            sessions.append(session)
+            return session
+        with patch.object(module, "StdioSession", side_effect=factory), \
+                patch.object(module, "_resolve_binary", return_value="/fake/grok"):
+            events = list(module.run_turn(request))
+        return events, sessions[0]
+
+    def test_small_prompt_stays_on_argv(self):
+        events, session = self._run({"model": "grok-4.7", "messages": [{"role": "user", "content": "hi"}]})
+        self.assertEqual(session.argv[session.argv.index("--single") + 1], "hi")
+        self.assertNotIn("--prompt-file", session.argv)
+        self.assertIsNone(session.prompt_file)
+        self.assertEqual([event["type"] for event in events], ["text_delta", "message_stop"])
+
+    def test_oversized_prompt_moves_to_the_prompt_file(self):
+        big = "x" * (module._MAX_PROMPT_ARGV_BYTES + 1)
+        events, session = self._run({"model": "grok-4.7", "messages": [{"role": "user", "content": big}]})
+        self.assertEqual([event["type"] for event in events], ["text_delta", "message_stop"])
+        self.assertNotIn("--single", session.argv)
+        self.assertIn("--prompt-file", session.argv)
+        self.assertEqual(json.loads(session.prompt_file), [{"type": "text", "text": big}])
+        self.assertTrue(session.argv[session.argv.index("--prompt-file") + 1].endswith("/prompt.json"))
+        self.assertEqual(session.argv[-2:], ["--tools", ""])
+        self.assertEqual(session.kwargs["cwd"], str(Path(session.argv[session.argv.index("--prompt-file") + 1]).parent))
+
+    def test_system_override_counts_toward_the_argv_budget(self):
+        half = "y" * (module._MAX_PROMPT_ARGV_BYTES // 2 + 1)
+        events, session = self._run({"model": "grok-4.7", "system": half,
+                                     "messages": [{"role": "user", "content": half}]})
+        self.assertIn("--prompt-file", session.argv)
+        self.assertEqual(session.argv[session.argv.index("--system-prompt-override") + 1], half)
+        self.assertEqual(json.loads(session.prompt_file), [{"type": "text", "text": half}])
+        self.assertEqual([event["type"] for event in events], ["text_delta", "message_stop"])
 
 
 if __name__ == "__main__":

@@ -1,3 +1,61 @@
+**Grok CLI route: the MCP compat race and the argv cap — 24 September 2026**
+
+> **Historical record.** Dated 24 September 2026. Version numbers, build
+> numbers and test counts below are as they were then and are not maintained.
+> For current state see [`README.md`](README.md).
+
+Two failures made the Grok Build CLI route unusable from the Codex desktop app
+on `grok-4.7-build-fast`, and the hub's activity log for the day shows both:
+one 502 at 21:58 with "grok did not disable its native CLI tools; this runtime
+cannot safely forward host calls", and sixty 502s between 19:06 and 19:12,
+which the Codex rollouts record as "prompt is too large for the grok CLI
+positional argument (272167 bytes; maximum 262144 bytes)" retried by the app.
+
+The first was diagnosed from the CLI's own session records rather than from
+the hub, which did not say which tools it had seen. grok 1.0.41 imports MCP
+servers from `~/.cursor/mcp.json` and `~/.claude.json` by default (its
+`[compat.cursor] mcps` and `[compat.claude] mcps` cells), so every hub turn
+started the user's three Cursor MCP servers inside the throwaway workspace,
+and the taskwraith server registers `read_file`, `write_file`, `web_search`,
+`web_fetch`, `run_shell_command` and `list_directory`. Whether those names
+are in the `system/init` line's `tools` list depends on a race between the
+server handshake and the turn start: in the failing session the server
+connected 1 ms before `turn_started`; in every other session of the day, and
+in four direct replays of the hub's argv, the turn started first and the
+registry read `[]`. `--disallowed-tools` removes built-ins only, and the
+guard, which requires an exactly empty registry before it will forward a
+tool call to the host, was doing its job: the tools really were live.
+
+Hub turns now spawn the CLI with `GROK_CURSOR_MCPS_ENABLED=0` and
+`GROK_CLAUDE_MCPS_ENABLED=0`, the per-process env cells the CLI documents
+for exactly this; `grok inspect --json` under that environment reports the
+three servers `disabled` with `source: env`, and two live turns (one via
+`--single`, one via `--prompt-file`) reported `mcp_servers: []`, `tools: []`,
+and no MCP events in the session record. The user's `~/.grok/config.toml`
+is not touched. The guard now compares the registry as a set, names the
+tools it found, and when the registry is not empty before any output has
+reached the client the turn is spawned a second time with those names
+appended to the removal list, which covers a built-in a newer CLI adds
+(1.0.41 added `sports_search`, now also on the static list) and a native
+`[mcp_servers]` entry when the second spawn wins the race; names whose
+removal worked are kept for the process lifetime, and a second failure
+reports the names. A missing registry is still refused without a retry, and
+only names that can be a plain argv value are ever appended.
+
+The second failure was the route's own 256 KB cap on the `--single`
+positional argument, refused before spawn once a Codex conversation grew
+past it, so long conversations died permanently. The prompt now moves into
+the workspace prompt file when prompt and system override together exceed
+the cap, the same ACP JSON transport the screenshot path already uses,
+verified live on 1.0.41 with a text-only file (`result: "OK"`, same token
+count as the positional form). Small prompts keep the positional argument.
+
+Offline coverage: registry naming and order independence, the single
+respawn with names removed and remembered, refusal after a second failure,
+unsafe names never reaching argv, the child environment carrying only the
+two cells plus the allowlist, and the prompt-file switch-over including the
+system override's share of the budget.
+
 **Muse and Grok host tool handoffs on the Messages surface — 19 September 2026**
 
 > **Historical record.** Dated 19 September 2026. Version numbers, build
