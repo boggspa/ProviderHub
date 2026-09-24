@@ -1,3 +1,72 @@
+**CLI-backed routes get native host tools — 25 September 2026**
+
+> **Historical record.** Dated 25 September 2026. Version numbers, build
+> numbers and test counts below are as they were then and are not maintained.
+> For current state see [`README.md`](README.md).
+
+Two Codex desktop sessions on 24 September failed to act. A Sonnet 5 turn on
+the Claude CLI route (build 30) told the user that `exec_command` and
+`get_goal` returned "No such tool available" and that only web search was
+wired up. A `grok-4.7-build-fast` session on the Grok CLI route (build 27)
+narrated the same intention twenty times and never ran a command. Both routes
+had carried the host's tools as a text envelope in the prompt since they
+shipped. Since the hosted-search commits (`e0a1608`, `ae65b4c`), every Codex
+turn also spawned the CLI with a native search tool. Claude Desktop turns
+never request hosted search, so they were not affected.
+
+Evidence. The hub's activity log records only statuses, so the causes came
+from the CLIs. Claude Code 2.1.280's unknown-tool reply is exactly
+`<tool_use_error>Error: No such tool available: …`, and the Claude adapter
+ignored every native `tool_use` other than WebSearch, so the model's native
+calls never reached Codex. The Grok CLI kept per-turn records under
+`~/.grok/sessions/`: each of the session's twelve steps ran 5 to 21 hosted
+searches, and the envelopes that followed did reach Codex (`exec_command`,
+`view_image`, `js`). The last step ran 100 backend tool calls, the CLI's
+ceiling, and no envelope: 22.7M input tokens, `costUsdTicks` 1.34 × 10¹¹. It
+had asked xAI's page fetcher for `http://127.0.0.1:8765/state` and
+`http://127.0.0.1:8772/stage`, the user's local emulator, and then opened
+example.com, IANA and some forty RFCs. That session also loaded the user's
+Cursor MCP servers, one exposing shell tools; build 29 had already switched
+that import off.
+
+Commit `99a95fc` forwards a native call for a host tool once `system/init`
+shows the CLI's registry lacks it. It also caps envelope routes at 8 searches
+per step, tells the model that search cannot reach the machine, and keeps
+narration split by a search in separate paragraphs. A Claude Code 2.1.280
+stream recorded live (a real WebSearch call) replayed through the adapter and
+route. Unchanged, it still relays as a search. With the call renamed to
+`exec_command` and the CLI's refusal substituted, it yields one host call, the
+child is signalled, and the refusal and later text never reach the host.
+
+That fix still left the tools in prompt text. The Claude route now attaches
+them as a stdio MCP server that only lists them (`host_tools_mcp.py`, launched
+as `sys.executable -I -B`). The model sees each one as `mcp__host__<tool>` in
+its real tool list, and the adapter hands each native call to the host. Live
+checks on claude 2.1.280 (Sonnet 5, `--strict-mcp-config`, the hub's usual
+flags):
+
+- Codex's real tool list, 111 tools, about 180 KB of schemas, rebuilt from the
+  recorded Grok manifest: `init.tools` listed all 111 as `mcp__host__…`, with
+  no built-ins and no tool-search step. Asked to capture the screen, Sonnet
+  called `mcp__host__capture_screen_context` directly (7.5 s). With search on
+  and `ENABLE_TOOL_SEARCH=false` there were 112 tools and the same direct call
+  (4.2 s). `--permission-prompts none` refused the call inside the CLI both
+  times, so nothing ran there.
+- The same tools through `cli_routes.plan_turn` and `run_turn`
+  (`cli_host_tools: mcp`, search on): Sonnet said it would check the branch
+  and called `exec_command` with
+  `git -C "/Users/chrisizatt/Documents/Mistral Bridge" branch --show-current`.
+  The route ended with `stop_reason: tool_use` in 4.6 s. The follow-up request,
+  with Codex's result `main` in history, answered "It's on `main`." in 2.7 s.
+- Without a manifest and without MCP, the same Codex-style prompt got "I don't
+  have an exec_command tool available in this session—only WebSearch is
+  provided to me". Small probes with the text manifest used the envelope
+  correctly. The native misfire needed the full Codex context.
+
+If `system/init` shows the server's tools missing, the adapter respawns once
+with the text manifest before any event reaches the client. The tools file
+lives in a per-turn directory that is removed after the child exits.
+
 **Antigravity handoff hook and the bundle seal — 24 September 2026**
 
 > **Historical record.** Dated 24 September 2026. Version numbers, build

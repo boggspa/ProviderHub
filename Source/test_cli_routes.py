@@ -247,11 +247,11 @@ class CliRoutesTest(unittest.TestCase):
         self.assertEqual(plan["body"]["images"], [IMAGE])
 
     def test_plan_turn_renders_tool_manifest(self):
-        payload = {"messages": [{"role": "user", "content": "hi"}],
+        payload = {"_provider_hub_surface": "responses", "messages": [{"role": "user", "content": "hi"}],
                    "tools": [{"name": "get_weather", "description": "Fetch weather.",
                               "input_schema": {"type": "object",
                                                "properties": {"city": {"type": "string"}}}}]}
-        plan = plan_turn("claude", "sonnet", payload, {}, wanted_output=64)
+        plan = plan_turn("muse", "muse-spark-1.3", payload, {}, wanted_output=64)
         self.assertTrue(plan["cli_tool_calls"])
         self.assertIn(OPEN_SENTINEL, plan["body"]["system"])
         self.assertIn("get_weather", plan["body"]["system"])
@@ -260,6 +260,23 @@ class CliRoutesTest(unittest.TestCase):
         # The availability anchor also joins the final user turn (and only it).
         self.assertIn("<host_note>", plan["body"]["messages"][-1]["content"])
         self.assertIn("get_weather", plan["body"]["messages"][-1]["content"])
+
+    def test_plan_turn_leaves_the_tool_surface_to_an_mcp_adapter(self):
+        # Claude attaches the host tools natively and writes its own note; a
+        # text manifest beside them would offer the model two ways to call.
+        tools = [{"name": "get_weather", "description": "Fetch weather.",
+                  "input_schema": {"type": "object", "properties": {"city": {"type": "string"}}}}]
+        for surface in ("responses", "messages"):
+            with self.subTest(surface=surface):
+                plan = plan_turn("claude", "sonnet", {"_provider_hub_surface": surface, "system": "Be brief.",
+                                                      "messages": [{"role": "user", "content": "hi"}],
+                                                      "tools": tools}, {}, wanted_output=64)
+                self.assertTrue(plan["cli_tool_calls"])
+                self.assertEqual(plan["body"]["system"], "Be brief.")
+                self.assertEqual(plan["body"]["messages"][-1]["content"], "hi")
+                self.assertEqual(plan["body"]["tools"], tools)
+                self.assertNotIn("host_tool_schema", plan["body"])
+                self.assertEqual(plan["compatibility"]["cli_host_tools"], "mcp")
 
     def test_plan_turn_tool_choice_none_suppresses_tools(self):
         payload = {"messages": [{"role": "user", "content": "hi"}],

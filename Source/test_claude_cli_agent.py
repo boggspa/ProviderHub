@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import unittest
+from pathlib import Path
 from unittest import mock
 
 import claude_cli_agent as m
@@ -114,6 +115,32 @@ def _no_such_tool(identifier, name):
     return {"type": "user", "message": {"role": "user", "content": [
         {"type": "tool_result", "tool_use_id": identifier, "is_error": True,
          "content": f"<tool_use_error>Error: No such tool available: {name}</tool_use_error>"}]}}
+
+
+def _denied(identifier):
+    """Claude Code 2.1.280's reply to an attached MCP tool that nothing pre-approved."""
+    return {"type": "user", "message": {"role": "user", "content": [
+        {"type": "tool_result", "tool_use_id": identifier, "is_error": True,
+         "content": "Permission for this tool use was denied. It requires approval, and this session "
+                    "has no approval surface"}]}}
+
+
+#: init once the host tools' MCP server has attached (as on claude 2.1.280).
+_MCP_INIT = {"type": "system", "subtype": "init", "tools": [
+    "WebSearch", "mcp__host__exec_command", "mcp__host__get_goal"],
+    "mcp_servers": [{"name": "host", "status": "connected", "source": "dynamic"}]}
+
+
+class _RecordingStdin(_FakeStdin):
+    def __init__(self):
+        self.written = []
+
+    def write(self, data):
+        self.written.append(data)
+
+    @property
+    def text(self):
+        return "".join(self.written)
 
 
 class BuildArgvTests(unittest.TestCase):
@@ -409,31 +436,81 @@ class RunTurnTests(unittest.TestCase):
                 self.assertNotIn("WebSearch", session.argv)
                 self.assertEqual([e["type"] for e in events], ["text_delta", "message_stop"])
 
-    # -- native calls for host tools ---------------------------------------------
+    # -- host tools as native MCP tools -----------------------------------------
+
+    def _attempts(self, request, scripts):
+        """Run a turn whose spawns replay ``scripts`` in order, one fresh session each."""
+        sessions = []
+
+        def factory(argv, **kwargs):
+            fake = FakeSession(argv, **kwargs)
+            fake.lines = [json.dumps(line) for line in scripts[len(sessions)]]
+            fake.process = mock.Mock()
+            fake.stdin = _RecordingStdin()
+            fake.mcp = fake.served = None
+            if "--mcp-config" in argv:
+                fake.mcp = json.loads(argv[argv.index("--mcp-config") + 1])
+                with open(fake.mcp["mcpServers"]["host"]["args"][-1], encoding="utf-8") as handle:
+                    fake.served = json.load(handle)
+            sessions.append(fake)
+            return fake
+
+        with mock.patch.object(m, "StdioSession", side_effect=factory), \
+                mock.patch.object(m, "_resolve_binary", return_value="/fake/claude"):
+            events = list(m.run_turn(request, spawner="spawner-stub"))
+        return events, sessions
 
     def _host_turn(self, lines, *, tools=_HOST_TOOLS, search=True):
-        fake = self._stream([json.dumps(line) for line in lines])
-        fake.process = mock.Mock()
         request = {"model": "sonnet", "messages": [{"role": "user", "content": "read the emulator state"}],
                    "tools": tools}
         if search:
             request["web_search"] = {"context_size": None, "allowed_domains": [], "live": True}
-        events, session, _ = self._run(request, fake)
-        return events, session
+        events, sessions = self._attempts(request, [lines, lines])
+        return events, sessions[-1]
+
+    def test_host_tools_attach_as_a_native_mcp_server(self):
+        events, sessions = self._attempts(
+            {"model": "sonnet", "system": "Be brief.", "tools": _HOST_TOOLS,
+             "messages": [{"role": "user", "content": "hi"}]},
+            [[_MCP_INIT, _se("text_delta", "text", "hello"), _result_event(result="hello")]])
+        self.assertEqual([e["type"] for e in events], ["text_delta", "message_stop"])
+        [session] = sessions
+        server = session.mcp["mcpServers"]["host"]
+        self.assertEqual(server["type"], "stdio")
+        self.assertEqual(server["args"][:3], ["-I", "-B", str(Path(m.__file__).resolve().with_name("host_tools_mcp.py"))])
+        self.assertEqual([tool["name"] for tool in session.served], ["exec_command", "get_goal"])
+        self.assertEqual(session.served[0]["input_schema"], _HOST_TOOLS[0]["input_schema"])
+        self.assertEqual(session.argv[-2:], ["--tools", ""])
+        self.assertIn("--strict-mcp-config", session.argv)
+        self.assertNotIn("--allowedTools", session.argv)
+        self.assertEqual({key: session.env[key] for key in m._MCP_ENV}, m._MCP_ENV)
+        system = session.argv[session.argv.index("--append-system-prompt") + 1]
+        self.assertIn("`mcp__host__exec_command`", system)
+        self.assertTrue(system.endswith("Be brief."))
+        self.assertNotIn("<<<tool_call>>>", system + session.stdin.text)
+        # The tools file lives only as long as the child.
+        self.assertFalse(Path(server["args"][-1]).exists())
+
+    def test_turns_without_host_tools_attach_nothing(self):
+        _, [session] = self._attempts({"model": "sonnet", "messages": [{"role": "user", "content": "hi"}]},
+                                      [[_se("text_delta", "text", "hello"), _result_event(result="hello")]])
+        self.assertIsNone(session.mcp)
+        self.assertNotIn("ENABLE_TOOL_SEARCH", session.env)
 
     def test_native_host_call_is_forwarded_before_the_cli_refuses_it(self):
-        # Sonnet 5 under Codex, 24 Sep 2026: WebSearch made the tool list
-        # native, the model called exec_command natively, Claude Code said
-        # "No such tool available" and the model told the user it had no tools.
+        # Sonnet 5 under Codex, 24 Sep 2026, called host tools natively; the
+        # CLI's refusal convinced it that it had no tools. Now the call is
+        # handed over and the refusal never reaches the model.
         events, session = self._host_turn([
-            _init(["WebSearch"]),
+            _MCP_INIT,
             _se("text_delta", "text", "Reading the live state."),
-            _block_start(1, {"type": "tool_use", "id": "toolu_9", "name": "exec_command", "input": {}}),
+            _block_start(1, {"type": "tool_use", "id": "toolu_9", "name": "mcp__host__exec_command", "input": {}}),
+            _json_delta(1, ""),
             _json_delta(1, '{"cmd": "curl -s 127.0.0.1'),
             _json_delta(1, ':8765/state"}'),
             _block_stop(1),
             _message_delta("tool_use"),
-            _no_such_tool("toolu_9", "exec_command"),
+            _denied("toolu_9"),
             _se("text_delta", "text", "I have no shell access in this session."),
             _result_event(result="I have no shell access in this session.")])
         self.assertEqual([e["type"] for e in events], ["text_delta", "tool_call", "message_stop"])
@@ -443,12 +520,23 @@ class RunTurnTests(unittest.TestCase):
         self.assertNotIn("no shell access", "".join(e.get("text", "") for e in events))
         session.process.terminate.assert_called_once()
 
+    def test_plain_named_native_call_is_forwarded_once_the_registry_lacks_it(self):
+        events, _ = self._host_turn([
+            _MCP_INIT,
+            _block_start(0, {"type": "tool_use", "id": "toolu_8", "name": "exec_command", "input": {}}),
+            _json_delta(0, '{"cmd": "ls"}'),
+            _block_stop(0),
+            _message_delta("tool_use"),
+            _no_such_tool("toolu_8", "exec_command")])
+        self.assertEqual([(e["type"], e.get("name")) for e in events],
+                         [("tool_call", "exec_command"), ("message_stop", None)])
+
     def test_parallel_native_calls_hand_off_together(self):
         events, _ = self._host_turn([
-            _init(["WebSearch"]),
-            _block_start(0, {"type": "tool_use", "id": "toolu_1", "name": "get_goal", "input": {}}),
+            _MCP_INIT,
+            _block_start(0, {"type": "tool_use", "id": "toolu_1", "name": "mcp__host__get_goal", "input": {}}),
             _block_stop(0),
-            _block_start(1, {"type": "tool_use", "id": "toolu_2", "name": "exec_command", "input": {}}),
+            _block_start(1, {"type": "tool_use", "id": "toolu_2", "name": "mcp__host__exec_command", "input": {}}),
             _json_delta(1, '{"cmd": "ls"}'),
             _block_stop(1),
             _message_delta("tool_use")])
@@ -458,35 +546,37 @@ class RunTurnTests(unittest.TestCase):
 
     def test_snapshot_and_stream_report_one_call_once(self):
         snapshot = {"type": "assistant", "message": {"id": "msg_1", "content": [
-            {"type": "tool_use", "id": "toolu_3", "name": "exec_command", "input": {"cmd": "pwd"}}]}}
+            {"type": "tool_use", "id": "toolu_3", "name": "mcp__host__exec_command", "input": {"cmd": "pwd"}}]}}
         for lines in (
-                # Claude Code's per-block snapshot lands before content_block_stop.
-                [_init(["WebSearch"]),
-                 _block_start(0, {"type": "tool_use", "id": "toolu_3", "name": "exec_command", "input": {}}),
+                # Claude Code 2.1.280 sends the snapshot before content_block_stop.
+                [_MCP_INIT,
+                 _block_start(0, {"type": "tool_use", "id": "toolu_3", "name": "mcp__host__exec_command",
+                                  "input": {}}),
                  _json_delta(0, '{"cmd": "pwd"}'), snapshot, _block_stop(0), _message_delta("tool_use")],
                 # A snapshot alone, ended by the CLI's own tool result.
-                [_init(["WebSearch"]), snapshot, _no_such_tool("toolu_3", "exec_command")]):
+                [_MCP_INIT, snapshot, _denied("toolu_3")]):
             with self.subTest(stream=len(lines) > 3):
                 events, _ = self._host_turn(lines)
                 self.assertEqual([e["type"] for e in events], ["tool_call", "message_stop"])
+                self.assertEqual(events[0]["name"], "exec_command")
                 self.assertEqual(events[0]["input"], {"cmd": "pwd"})
 
-    def test_native_calls_are_never_forwarded_without_a_reported_registry(self):
+    def test_plain_names_are_never_forwarded_without_a_reported_registry(self):
         events, session = self._host_turn([
             _block_start(0, {"type": "tool_use", "id": "toolu_4", "name": "exec_command", "input": {}}),
             _json_delta(0, '{"cmd": "ls"}'),
             _block_stop(0),
             _message_delta("tool_use"),
             _no_such_tool("toolu_4", "exec_command"),
-            _se("text_delta", "text", "Using the envelope instead."),
-            _result_event(result="Using the envelope instead.")])
+            _se("text_delta", "text", "Done differently."),
+            _result_event(result="Done differently.")])
         self.assertEqual([e["type"] for e in events], ["text_delta", "message_stop"])
         session.process.terminate.assert_not_called()
 
     def test_a_tool_the_cli_registered_itself_is_never_forwarded(self):
         # The CLI would have run it already; forwarding would run it twice.
         events, _ = self._host_turn([
-            _init(["WebSearch", "exec_command"]),
+            _init(["WebSearch", "exec_command", "mcp__host__exec_command", "mcp__host__get_goal"]),
             _block_start(0, {"type": "tool_use", "id": "toolu_5", "name": "exec_command", "input": {}}),
             _json_delta(0, '{"cmd": "ls"}'),
             _block_stop(0),
@@ -497,7 +587,7 @@ class RunTurnTests(unittest.TestCase):
 
     def test_stray_native_call_is_a_protocol_error_only_when_host_tools_exist(self):
         lines = [
-            _init(["WebSearch"]),
+            _MCP_INIT,
             _block_start(0, {"type": "tool_use", "id": "toolu_6", "name": "Bash", "input": {}}),
             _json_delta(0, '{"command": "ls"}'),
             _block_stop(0),
@@ -509,17 +599,37 @@ class RunTurnTests(unittest.TestCase):
         self.assertEqual([e["type"] for e in events], ["error"])
         self.assertEqual(events[0]["code"], "invalid_cli_tool_call")
         self.assertIn("Bash", events[0]["message"])
-        events, _ = self._host_turn(lines, tools=[])
+        events, _ = self._host_turn([_init(["WebSearch"]), *lines[1:]], tools=[])
         self.assertEqual([e["type"] for e in events], ["text_delta", "message_stop"])
 
     def test_invalid_native_arguments_are_a_protocol_error(self):
         events, _ = self._host_turn([
-            _init(["WebSearch"]),
-            _block_start(0, {"type": "tool_use", "id": "toolu_7", "name": "exec_command", "input": {}}),
+            _MCP_INIT,
+            _block_start(0, {"type": "tool_use", "id": "toolu_7", "name": "mcp__host__exec_command", "input": {}}),
             _json_delta(0, '{"cmd": '),
             _block_stop(0)])
         self.assertEqual([e["type"] for e in events], ["error"])
         self.assertEqual(events[0]["code"], "invalid_cli_tool_call")
+
+    def test_unattached_host_tools_fall_back_to_the_text_manifest_invisibly(self):
+        # init is the stream's first line: when the server's tools are not in
+        # it, nothing has reached the client and the turn is spawned again.
+        events, sessions = self._attempts(
+            {"model": "sonnet", "tools": _HOST_TOOLS, "tool_choice": {"type": "any"},
+             "messages": [{"role": "user", "content": "list files"}]},
+            [[_init([]), _se("text_delta", "text", "never shown"), _result_event(result="never shown")],
+             [_init([]), _se("text_delta", "text", "Listing."), _result_event(result="Listing.")]])
+        self.assertEqual([(e["type"], e.get("text")) for e in events],
+                         [("text_delta", "Listing."), ("message_stop", None)])
+        first, second = sessions
+        first.process.terminate.assert_called_once()
+        self.assertIsNotNone(first.mcp)
+        self.assertIsNone(second.mcp)
+        self.assertNotIn("ENABLE_TOOL_SEARCH", second.env)
+        system = second.argv[second.argv.index("--append-system-prompt") + 1]
+        self.assertIn("<<<tool_call>>>", system)
+        self.assertIn("You MUST call at least one tool", system)
+        self.assertIn("<host_note>", second.stdin.text)
 
     def test_bad_request_degrades(self):
         with mock.patch.object(m, "_resolve_binary", return_value="/fake/claude"):

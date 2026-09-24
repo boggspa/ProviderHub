@@ -147,26 +147,30 @@ class HostCycleTests(unittest.TestCase):
                 self.assertEqual(results, ["before", "write completed", "after"])
                 self.assertEqual(path.read_text(), "after")
 
-    def test_claude_native_host_call_reaches_the_host_instead_of_no_such_tool(self):
-        # Codex + Sonnet 5, 24 Sep 2026: hosted search gave Claude Code a
-        # native tool list, the model called a host tool natively, and the
-        # CLI's "No such tool available" convinced it that it had no tools.
+    def test_claude_native_mcp_call_reaches_the_host_instead_of_no_such_tool(self):
+        # Codex + Sonnet 5, 24 Sep 2026: with the host tools only in prompt
+        # text, the model called them natively and Claude Code answered "No
+        # such tool available". Now they are attached over MCP, the model's
+        # native call is handed to the host, and the CLI's refusal is cut off.
         import claude_cli_agent
         plan = cli_routes.plan_turn("claude", "sonnet", {
             "_provider_hub_surface": "responses", "tools": TOOLS,
             "_web_search": {"context_size": None, "allowed_domains": [], "live": True},
             "messages": [{"role": "user", "content": "Read sample.txt"}]}, {}, wanted_output=128)
+        self.assertNotIn(OPEN_SENTINEL, plan["body"]["system"] or "")
         session = Session([
-            {"type": "system", "subtype": "init", "tools": ["WebSearch"], "mcp_servers": []},
+            {"type": "system", "subtype": "init", "tools": [
+                "WebSearch", "mcp__host__read_file", "mcp__host__write_file"],
+             "mcp_servers": [{"name": "host", "status": "connected"}]},
             {"type": "stream_event", "event": {"type": "content_block_start", "index": 0, "content_block": {
-                "type": "tool_use", "id": "toolu_n1", "name": "read_file", "input": {}}}},
+                "type": "tool_use", "id": "toolu_n1", "name": "mcp__host__read_file", "input": {}}}},
             {"type": "stream_event", "event": {"type": "content_block_delta", "index": 0, "delta": {
                 "type": "input_json_delta", "partial_json": json.dumps({"path": "sample.txt"})}}},
             {"type": "stream_event", "event": {"type": "content_block_stop", "index": 0}},
             {"type": "stream_event", "event": {"type": "message_delta", "delta": {"stop_reason": "tool_use"}}},
             {"type": "user", "message": {"role": "user", "content": [{
                 "type": "tool_result", "tool_use_id": "toolu_n1", "is_error": True,
-                "content": "<tool_use_error>Error: No such tool available: read_file</tool_use_error>"}]}},
+                "content": "Permission for this tool use was denied."}]}},
             {"type": "stream_event", "event": {"type": "content_block_delta", "delta": {
                 "type": "text_delta", "text": "I have no file access here."}}},
             {"type": "result", "subtype": "success", "stop_reason": "end_turn"}])
@@ -184,7 +188,9 @@ class HostCycleTests(unittest.TestCase):
         self.assertIsNone(outcome["error"], outcome)
         self.assertEqual(outcome["stop_reason"], "tool_use")
         self.assertTrue(session.cleaned.wait(2), "CLI cleanup did not finish")
-        self.assertEqual(spawned[0][-2:], ["--tools", "WebSearch"])
+        self.assertEqual(len(spawned), 1)
+        self.assertIn("--mcp-config", spawned[0])
+        self.assertEqual(spawned[0][-4:], ["--allowedTools", "WebSearch", "--tools", "WebSearch"])
         blocks = [event["content_block"] for event in wire if event["type"] == "content_block_start"]
         self.assertEqual([(block["type"], block.get("name")) for block in blocks], [("tool_use", "read_file")])
         arguments = [json.loads(event["delta"]["partial_json"]) for event in wire

@@ -376,8 +376,12 @@ def plan_turn(provider_id: str, upstream_model: str, payload: dict, spec: dict,
     if system is not None and not isinstance(system, str):
         system = None
     images = []
-    structured_surface = (provider_id == "antigravity" or
-                          provider_id in {"muse", "grok"} and payload.get("_provider_hub_surface") != "responses")
+    transport = getattr(adapter, "HOST_TOOL_TRANSPORT", None)
+    # An adapter that serves host tools natively over MCP needs neither the
+    # structured reply schema nor its JSON-spelled history.
+    structured_surface = transport != "mcp" and (
+        provider_id == "antigravity" or
+        provider_id in {"muse", "grok"} and payload.get("_provider_hub_surface") != "responses")
     try:
         history, image_compaction = compact_image_history(payload.get("messages"))
         messages, system = _messages_for_cli(history, system, images=images,
@@ -396,13 +400,17 @@ def plan_turn(provider_id: str, upstream_model: str, payload: dict, spec: dict,
     tool_choice = payload.get("tool_choice")
     if isinstance(tool_choice, dict) and tool_choice.get("type") == "none":
         tools, tool_choice = [], None
-    dynamic_tools = getattr(adapter, "HOST_TOOL_TRANSPORT", None) == "dynamic"
+    dynamic_tools = transport == "dynamic"
     # AntiGravity enforces its response schema on both desktop surfaces.
     # Muse/Grok retain their existing Responses handoff; their Messages
     # transport needs a schema to avoid native-tool name collisions.
     structured_tools = bool(tools) and structured_surface
+    # Native transports carry the tools themselves: codex registers them as
+    # dynamic tools, and an MCP adapter attaches them and writes its own note
+    # (or, when the server fails to attach, falls back to this manifest).
     manifest = (cli_structured_reply.render_manifest(tools, tool_choice) if structured_tools
-                else render_tool_manifest(tools, tool_choice) if tools and not dynamic_tools else "")
+                else render_tool_manifest(tools, tool_choice)
+                if tools and transport not in {"dynamic", "mcp"} else "")
     if manifest:
         # The tool surface rides the system text: the harness's definitions,
         # the call convention, and the anti-simulation rules. Nothing else
@@ -490,7 +498,8 @@ def plan_turn(provider_id: str, upstream_model: str, payload: dict, spec: dict,
             "cli_image_transport": getattr(adapter, "IMAGE_TRANSPORT", None),
             "cli_images": len(images),
             **({"cli_image_compaction": image_compaction} if image_compaction["removed"] else {}),
-            **({"cli_host_tools": "structured"} if structured_tools else {}),
+            **({"cli_host_tools": "structured"} if structured_tools else
+               {"cli_host_tools": "mcp"} if tools and transport == "mcp" else {}),
             **({"cli_tools": len(tools),
                 "cli_tools_dropped": len(raw_tools) - len(tools)}
                if tools and isinstance(raw_tools, list) and len(raw_tools) != len(tools)

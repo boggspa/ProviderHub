@@ -21,16 +21,25 @@ keeps WebSearch alone (``--allowedTools WebSearch --tools WebSearch``). It runs
 on Anthropic's search backend and fetches nothing locally; WebFetch, which
 does, stays off. Each search is relayed as a ``web_search`` event.
 
-A native tool list, even one holding only WebSearch, lets the model answer
-with native ``tool_use`` blocks, and a model that reads the host tools in the
-manifest will sometimes call them that way instead of with the envelope.
-Claude Code registers none of them, so it would answer each with "No such tool
-available" and the model would conclude it has no tools (seen live on Sonnet 5
-under Codex, 24 Sep 2026). Such a call is therefore forwarded to the host as a
-tool call, the same handoff the Grok route makes, but only when ``system/init``
-has shown that the CLI's own registry lacks the name: the CLI cannot have run
-it, so the host runs it exactly once. The turn ends at that message, before
-the CLI's unknown-tool reply reaches the model.
+Host tools travel as native tools. A turn that carries the desktop harness's
+tools attaches them as a stdio MCP server (``cli_host_mcp``, server ``host``),
+so the model sees ``mcp__host__<tool>`` in its real tool list and calls it the
+way it was trained to, instead of through a text protocol it must be talked
+into (Sonnet 5 under Codex ignored that protocol for native calls, 24 Sep
+2026). A native call is handed to the host as a tool call and the turn ends at
+that message: the CLI's fail-closed permission mode refuses to run it, and the
+server executes nothing either way. Verified live on claude 2.1.280 with
+Codex's 111 tools: init lists every ``mcp__host__`` tool, the model calls the
+right one directly, and ``ENABLE_TOOL_SEARCH=false`` keeps them out of a
+deferred tool-search step the turn could not reach. If ``system/init`` shows
+the server did not attach, the turn is spawned again, invisibly, with the
+older text manifest (``cli_tool_call``).
+
+A native call for a host tool under its plain name (no ``mcp__host__``) is
+forwarded too, but only when ``system/init`` has shown that the CLI's own
+registry lacks the name: the CLI cannot have run it, so the host runs it
+exactly once. A native call for a tool nobody provides becomes the route's
+protocol correction rather than the CLI's "No such tool available".
 
 Permission mode matrix tested live on claude 2.1.276:
  - ``plan``: tools=[], BUT injects plan-mode persona ("I'm in plan mode...")
@@ -57,15 +66,19 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator
 
 from cli_session import CliSessionError, StdioSession, minimal_env, resolve_binary
 from cli_lifecycle import cleanup_after_exit
+from cli_host_mcp import SERVER_NAME, HostToolset, server_command, tools_note
 from cli_tool_call import (MAX_ENVELOPE_BYTES, TRANSCRIPT_HEADER, ToolCallError,
-                           normalize_tools, validate_host_call)
+                           normalize_tools, render_tool_anchor, render_tool_manifest,
+                           validate_host_call)
 from cli_images import prompt_content
 from fast_models import supports_fast_toggle
 from model_names import CLAUDE_CLI_ALIASES, CLAUDE_MODEL_LABELS
@@ -97,6 +110,17 @@ VERIFIED_IMAGE_MODELS = frozenset({"sonnet", "claude-sonnet-5"})
 #: Claude Code's WebSearch runs on Anthropic's search backend and never fetches
 #: a page locally, so it is the one tool a turn may enable (WebFetch stays off).
 WEB_SEARCH = True
+#: Host tools reach the model as native MCP tools; cli_routes renders no text
+#: manifest for this route and leaves the tool surface to run_turn.
+HOST_TOOL_TRANSPORT = "mcp"
+#: How Claude Code names a tool from the ``host`` MCP server to its model.
+MCP_TOOL_PREFIX = f"mcp__{SERVER_NAME}__"
+#: Child environment for a turn that attaches the host tools (claude 2.1.280):
+#: connect the server before the first request instead of racing it, give up
+#: on it after 20 s rather than waiting indefinitely, and list every host tool
+#: directly, never behind a tool-search step this turn's tool set lacks.
+_MCP_ENV = {"MCP_CONNECTION_NONBLOCKING": "false", "MCP_TIMEOUT": "20000",
+            "ENABLE_TOOL_SEARCH": "false"}
 
 # Real installs live outside the default PATH on this machine (~/.local/bin).
 _EXTRA_BIN_DIRS = ("~/.local/bin", "/opt/homebrew/bin", "/usr/local/bin")
@@ -383,7 +407,7 @@ def catalogue(*, capture=None, timeout=30) -> tuple[list[dict], list[str]]:
 # ---------------------------------------------------------------------------
 
 def build_argv(model, *, effort=None, system=None, stream=True, search=False,
-               fast_mode=None) -> list[str]:
+               fast_mode=None, mcp_config=None) -> list[str]:
     """Full argv for one print-mode turn. argv[0] is the bare binary name.
 
     ``run_turn`` replaces argv[0] with the resolved absolute path; keeping the
@@ -392,6 +416,10 @@ def build_argv(model, *, effort=None, system=None, stream=True, search=False,
 
     ``search`` leaves exactly one tool, WebSearch, and pre-approves it: the
     fail-closed ``--permission-prompts none`` would otherwise deny every call.
+
+    ``mcp_config`` (a JSON string) attaches the host tools' MCP server. Under
+    ``--strict-mcp-config`` it is the only server; its tools are listed to the
+    model but never pre-approved, so the CLI refuses to run them itself.
     """
     validated_model = _validate_model(model)
     # Saved short routes display a specific version in the hub catalogue.
@@ -427,6 +455,11 @@ def build_argv(model, *, effort=None, system=None, stream=True, search=False,
                 argv += [f"--append-system-prompt={system}"]
             else:
                 argv += ["--append-system-prompt", system]
+    if mcp_config is not None:
+        if not isinstance(mcp_config, str) or not mcp_config.startswith("{"):
+            raise ClaudeCliAgentError("mcp_config must be a JSON object string")
+        # Variadic too, so a following flag must end it: the tools flags do.
+        argv += ["--mcp-config", mcp_config]
     # Variadic, so it must be the last thing on the command line.
     argv += ["--allowedTools", "WebSearch", "--tools", "WebSearch"] if search else ["--tools", ""]
 
@@ -516,6 +549,11 @@ class _TurnState:
         self.search = False
         self.host_tools: list[dict] = []
         self.host_names: frozenset[str] = frozenset()
+        # The host tools served over MCP on this attempt; None without them.
+        self.toolset: HostToolset | None = None
+        # system/init showed the MCP server's tools missing: respawn with the
+        # text manifest before anything reaches the client.
+        self.mcp_unavailable = False
         # The CLI's own tool registry from system/init; None until reported.
         self.registry: frozenset[str] | None = None
         self.pending_calls: dict = {}
@@ -523,21 +561,35 @@ class _TurnState:
         self.stray_calls: list[str] = []
         self.host_handoff = False
 
-    def forwardable(self, name) -> bool:
-        """Whether a native tool_use names a host tool the CLI cannot run.
+    def host_tool_for(self, name) -> str | None:
+        """The host tool a native tool_use stands for, when handing it over is safe.
 
-        Forwarding is safe only then: the host offered the name on this
-        request and the CLI's reported registry does not hold it, so nothing
-        has executed. Before init reports the registry nothing is forwarded.
+        An ``mcp__host__`` tool is one this turn attached: the CLI never runs
+        it (not pre-approved, and the server executes nothing). A plain host
+        name is safe only once init has shown the CLI's registry lacks it, so
+        nothing can have executed. Anything else stays with the CLI.
         """
-        return (isinstance(name, str) and name in self.host_names
-                and self.registry is not None and name not in self.registry)
+        if self.toolset is not None:
+            host = self.toolset.host_name(name)
+            if host is not None:
+                return host
+        if isinstance(name, str) and name in self.host_names \
+                and self.registry is not None and name not in self.registry:
+            return name
+        return None
+
+    def attach_check(self) -> None:
+        """At init: every attached host tool must be in the model's tool list."""
+        if self.toolset is not None and not (self.registry is not None
+                                             and self.toolset.model_names <= self.registry):
+            self.mcp_unavailable = True
 
     def begin_native_call(self, index, block) -> None:
         name = block.get("name")
-        if self.forwardable(name):
+        host = self.host_tool_for(name)
+        if host is not None:
             arguments = block.get("input")
-            self.pending_calls[index] = {"id": block.get("id"), "name": name,
+            self.pending_calls[index] = {"id": block.get("id"), "name": host,
                                          "input": arguments if isinstance(arguments, dict) else {},
                                          "json": ""}
         elif self.host_names and self.registry is not None and name not in self.registry:
@@ -680,6 +732,7 @@ def _translate(payload: Any, state: _TurnState) -> list[dict]:
         tools = payload.get("tools")
         if isinstance(tools, list) and all(isinstance(tool, str) for tool in tools):
             state.registry = frozenset(tools)
+        state.attach_check()
         return []
 
     if kind == "stream_event":
@@ -755,12 +808,13 @@ def _translate(payload: Any, state: _TurnState) -> list[dict]:
                 content = [{"type": "text", "text": content}]
             events = []
             for index, block in enumerate(content):
-                if isinstance(block, dict) and block.get("type") == "tool_use" \
-                        and state.forwardable(block.get("name")):
+                host = state.host_tool_for(block.get("name")) \
+                    if isinstance(block, dict) and block.get("type") == "tool_use" else None
+                if host is not None:
                     # A snapshot holds only complete blocks, so it can carry a
                     # call whose stream events never arrived.
                     events.extend(state.finish_native_call({
-                        "id": block.get("id"), "name": block.get("name"), "input": block.get("input")}))
+                        "id": block.get("id"), "name": host, "input": block.get("input")}))
                     continue
                 if isinstance(block, dict) and block.get("type") in {"text", "thinking"}:
                     block_type = block["type"]
@@ -967,41 +1021,116 @@ def _describe(exc: BaseException, state: _TurnState | None = None,
     return text + extra
 
 
+def _plan_turn(request) -> dict:
+    """Validate the request and gather everything the attempts share. No I/O."""
+    if not isinstance(request, dict):
+        raise ClaudeCliAgentError("request must be an object")
+    model = _validate_model(request.get("model"))
+    messages = _coerce_messages(request.get("messages"))
+    effort = _validate_effort(request.get("effort"))
+    system = request.get("system")
+    if system is not None and not isinstance(system, str):
+        raise ClaudeCliAgentError("system must be a string or None")
+    max_tokens = request.get("max_tokens")
+    if max_tokens is not None and not isinstance(max_tokens, int):
+        raise ClaudeCliAgentError("max_tokens must be an integer or None")
+    if isinstance(max_tokens, int) and max_tokens <= 0:
+        raise ClaudeCliAgentError("max_tokens must be positive")
+    host_tools = normalize_tools(request.get("tools"))
+    tool_choice = request.get("tool_choice")
+    return {
+        "model": model, "messages": messages, "effort": effort, "system": system,
+        "search": search_enabled(request.get("web_search")),
+        "fast_mode": request.get("fast_mode"), "images": request.get("images") or [],
+        "host_tools": host_tools,
+        "tool_choice": tool_choice if isinstance(tool_choice, dict) else None,
+        "toolset": HostToolset(host_tools, prefix=MCP_TOOL_PREFIX) if host_tools else None,
+    }
+
+
+def _surface(plan, mode):
+    """The system text and messages for one attempt's host tool surface.
+
+    ``mcp`` explains the attached native tools; ``envelope`` is the fallback
+    text manifest plus its anchor on the final user turn, which the route's
+    parser still understands; ``None`` is a turn without host tools.
+    """
+    system, messages = plan["system"] or "", plan["messages"]
+    if mode == "mcp":
+        system = tools_note(plan["toolset"], plan["tool_choice"]) + ("\n\n" + system if system else "")
+    elif mode == "envelope":
+        system = render_tool_manifest(plan["host_tools"], plan["tool_choice"]) + ("\n\n" + system if system else "")
+        anchor = render_tool_anchor(plan["host_tools"])
+        messages = [dict(message) for message in messages]
+        for message in reversed(messages):
+            if message["role"] == "user":
+                message["content"] = (message["content"] + "\n\n" + anchor) if message["content"] else anchor
+                break
+    return system or None, messages
+
+
 def run_turn(request, *, spawner=None, timeout=300) -> Iterator[dict]:
     """Stream one stateless turn as text_delta / thinking_delta / message_stop.
 
     Always terminates with exactly one message_stop or error event, and never
     raises: every failure mode (missing binary, bad request, CLI error result,
     non-zero exit, timeout, unparsable stream) degrades to an error event.
-    """
-    state = _TurnState()
-    try:
-        if not isinstance(request, dict):
-            raise ClaudeCliAgentError("request must be an object")
-        model = _validate_model(request.get("model"))
-        messages = _coerce_messages(request.get("messages"))
-        effort = _validate_effort(request.get("effort"))
-        system = request.get("system")
-        if system is not None and not isinstance(system, str):
-            raise ClaudeCliAgentError("system must be a string or None")
-        max_tokens = request.get("max_tokens")
-        if max_tokens is not None and not isinstance(max_tokens, int):
-            raise ClaudeCliAgentError("max_tokens must be an integer or None")
-        if isinstance(max_tokens, int) and max_tokens <= 0:
-            raise ClaudeCliAgentError("max_tokens must be positive")
 
+    A turn with host tools attaches them over MCP; when init shows they did
+    not attach, it is spawned once more with the text manifest before any
+    event has reached the caller.
+    """
+    try:
+        plan = _plan_turn(request)
+    except Exception as exc:
+        yield {"type": "error", "message": _describe(exc, None, timeout)}
+        return
+    started = time.monotonic()
+    for mode in (("mcp", "envelope") if plan["toolset"] else (None,)):
+        state = _TurnState()
+        state.search = plan["search"]
+        state.host_tools = plan["host_tools"]
+        state.host_names = frozenset(tool["name"] for tool in plan["host_tools"])
+        state.toolset = plan["toolset"] if mode == "mcp" else None
+        remaining = max(0.01, timeout - (time.monotonic() - started))
+        outcome = yield from _attempt_turn(plan, mode, state, spawner=spawner, timeout=remaining)
+        if outcome != "mcp_unavailable":
+            return
+
+
+def _attempt_turn(plan, mode, state, *, spawner, timeout):
+    """One spawn of the CLI, streamed as route events.
+
+    Returns "mcp_unavailable" when init showed the host tools missing before
+    any event was yielded; otherwise ends with exactly one message_stop or
+    error event and returns None.
+    """
+    workspace = None
+    session = None
+
+    def release():
+        if state.stderr_handle is not None:
+            state.stderr_handle.close()
+        if workspace is not None:
+            shutil.rmtree(workspace, ignore_errors=True)
+
+    try:
+        system, messages = _surface(plan, mode)
         # The system prompt travels as a flag, so it is not also rendered into
         # the prompt; duplicating it would double-charge and could conflict.
         prompt = render_prompt(messages)
-        state.search = search_enabled(request.get("web_search"))
-        state.host_tools = normalize_tools(request.get("tools"))
-        state.host_names = frozenset(tool["name"] for tool in state.host_tools)
-        argv = build_argv(model, effort=effort, system=system, stream=True,
-                          search=state.search, fast_mode=request.get("fast_mode"))
-        if request.get("images"):
+        mcp_config = None
+        if mode == "mcp":
+            workspace = tempfile.mkdtemp(prefix="claude_host_")
+            command = server_command(plan["toolset"].write(workspace))
+            mcp_config = json.dumps({"mcpServers": {SERVER_NAME: {
+                "type": "stdio", "command": command[0], "args": command[1:]}}}, separators=(",", ":"))
+        argv = build_argv(plan["model"], effort=plan["effort"], system=system, stream=True,
+                          search=plan["search"], fast_mode=plan["fast_mode"], mcp_config=mcp_config)
+        if plan["images"]:
             argv[1:1] = ["--input-format", "stream-json"]
             prompt = json.dumps({"type": "user", "message": {"role": "user",
-                "content": prompt_content(prompt, request["images"])}}, ensure_ascii=False)
+                "content": prompt_content(prompt, plan["images"])}}, ensure_ascii=False)
 
         binary = _resolve_binary()
         if not binary:
@@ -1016,16 +1145,19 @@ def run_turn(request, *, spawner=None, timeout=300) -> Iterator[dict]:
         state.stderr_handle = tempfile.TemporaryFile(mode="w+", encoding="utf-8")
         session = StdioSession(
             argv,
-            env=minimal_env(),
+            env=minimal_env(_MCP_ENV if mode == "mcp" else None),
             timeout=float(timeout),
             spawner=spawner,
             stderr=state.stderr_handle,
         )
     except Exception as exc:
-        yield {"type": "error", "message": _describe(exc, state, timeout)}
-        return
+        message = _describe(exc, state, timeout)
+        release()
+        yield {"type": "error", "message": message}
+        return None
 
     stop_reason = state.stop_reason or "end_turn"
+    produced = False
     try:
         with session:
             _write_prompt(session, prompt)
@@ -1034,7 +1166,17 @@ def run_turn(request, *, spawner=None, timeout=300) -> Iterator[dict]:
                     state.raw_lines.append(payload)
                     continue
                 for event in _translate(payload, state):
+                    produced = True
                     yield event
+                if state.mcp_unavailable:
+                    _interrupt(session)
+                    if produced:
+                        yield {"type": "error", "message": "the host tools could not be attached to the "
+                               "claude CLI" + state.diagnostics() + state.stderr_tail()}
+                        return None
+                    # init is the stream's first line, so the respawn is
+                    # invisible to the client.
+                    return "mcp_unavailable"
                 if state.failure:
                     yield {"type": "error", "message": state.failure}
                     return
@@ -1091,8 +1233,8 @@ def run_turn(request, *, spawner=None, timeout=300) -> Iterator[dict]:
         yield {"type": "error", "message": _describe(exc, state, timeout)}
         return
     finally:
-        handle = state.stderr_handle
-        if handle is not None:
-            cleanup_after_exit(session, handle.close)
+        # The MCP server reads its tools file while the CLI runs, so the
+        # workspace goes only after the child has exited.
+        cleanup_after_exit(session, release)
 
     yield {"type": "message_stop", "stop_reason": stop_reason}
