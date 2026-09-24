@@ -21,6 +21,17 @@ keeps WebSearch alone (``--allowedTools WebSearch --tools WebSearch``). It runs
 on Anthropic's search backend and fetches nothing locally; WebFetch, which
 does, stays off. Each search is relayed as a ``web_search`` event.
 
+A native tool list, even one holding only WebSearch, lets the model answer
+with native ``tool_use`` blocks, and a model that reads the host tools in the
+manifest will sometimes call them that way instead of with the envelope.
+Claude Code registers none of them, so it would answer each with "No such tool
+available" and the model would conclude it has no tools (seen live on Sonnet 5
+under Codex, 24 Sep 2026). Such a call is therefore forwarded to the host as a
+tool call, the same handoff the Grok route makes, but only when ``system/init``
+has shown that the CLI's own registry lacks the name: the CLI cannot have run
+it, so the host runs it exactly once. The turn ends at that message, before
+the CLI's unknown-tool reply reaches the model.
+
 Permission mode matrix tested live on claude 2.1.276:
  - ``plan``: tools=[], BUT injects plan-mode persona ("I'm in plan mode...")
  - ``default``: tools=[], NO persona, fail-closed via --permission-prompts none
@@ -53,7 +64,8 @@ from typing import Any, Callable, Iterable, Iterator
 
 from cli_session import CliSessionError, StdioSession, minimal_env, resolve_binary
 from cli_lifecycle import cleanup_after_exit
-from cli_tool_call import TRANSCRIPT_HEADER
+from cli_tool_call import (MAX_ENVELOPE_BYTES, TRANSCRIPT_HEADER, ToolCallError,
+                           normalize_tools, validate_host_call)
 from cli_images import prompt_content
 from fast_models import supports_fast_toggle
 from model_names import CLAUDE_CLI_ALIASES, CLAUDE_MODEL_LABELS
@@ -502,6 +514,60 @@ class _TurnState:
         self.current_message = None
         self.last_text_message = None
         self.search = False
+        self.host_tools: list[dict] = []
+        self.host_names: frozenset[str] = frozenset()
+        # The CLI's own tool registry from system/init; None until reported.
+        self.registry: frozenset[str] | None = None
+        self.pending_calls: dict = {}
+        self.host_calls: dict = {}
+        self.stray_calls: list[str] = []
+        self.host_handoff = False
+
+    def forwardable(self, name) -> bool:
+        """Whether a native tool_use names a host tool the CLI cannot run.
+
+        Forwarding is safe only then: the host offered the name on this
+        request and the CLI's reported registry does not hold it, so nothing
+        has executed. Before init reports the registry nothing is forwarded.
+        """
+        return (isinstance(name, str) and name in self.host_names
+                and self.registry is not None and name not in self.registry)
+
+    def begin_native_call(self, index, block) -> None:
+        name = block.get("name")
+        if self.forwardable(name):
+            arguments = block.get("input")
+            self.pending_calls[index] = {"id": block.get("id"), "name": name,
+                                         "input": arguments if isinstance(arguments, dict) else {},
+                                         "json": ""}
+        elif self.host_names and self.registry is not None and name not in self.registry:
+            # Neither the host's nor the CLI's: it would come back "No such
+            # tool available", which models read as having no tools at all.
+            self.stray_calls.append(str(name))
+
+    def finish_native_call(self, call) -> list[dict]:
+        """One forwarded host call, validated and reported once per id."""
+        identifier = call.get("id")
+        if isinstance(identifier, str) and identifier in self.host_calls:
+            return []
+        raw = call.pop("json", "")
+        if raw:
+            try:
+                call["input"] = json.loads(raw)
+            except ValueError as exc:
+                raise ToolCallError("claude tool call has invalid JSON arguments") from exc
+        validate_host_call(call, self.host_tools)
+        self.host_calls[identifier] = call
+        return [{"type": "tool_call", "id": identifier, "name": call["name"], "input": call["input"]}]
+
+    def end_of_calls(self) -> None:
+        """The assistant message that made native calls is complete."""
+        if self.host_calls:
+            self.host_handoff = True
+        elif self.stray_calls:
+            raise ToolCallError(
+                f"claude called {', '.join(sorted(set(self.stray_calls)))} as a native tool, which neither "
+                "the host nor the CLI provides")
 
     def start_message(self, message):
         identifier = message.get("id") if isinstance(message, dict) else None
@@ -610,6 +676,12 @@ def _translate(payload: Any, state: _TurnState) -> list[dict]:
         return []
     kind = payload.get("type")
 
+    if kind == "system" and payload.get("subtype") == "init":
+        tools = payload.get("tools")
+        if isinstance(tools, list) and all(isinstance(tool, str) for tool in tools):
+            state.registry = frozenset(tools)
+        return []
+
     if kind == "stream_event":
         event = payload.get("event")
         if not isinstance(event, dict):
@@ -628,10 +700,14 @@ def _translate(payload: Any, state: _TurnState) -> list[dict]:
                 translated = state.content_event(event.get("index", 0), block_type,
                                                  block.get(block_type), snapshot=True)
                 return [translated] if translated else []
-            if state.search and isinstance(block, dict) and block.get("type") == "tool_use" \
-                    and block.get("name") == "WebSearch":
-                return [{"type": "web_search", "status": "in_progress", "id": block.get("id")}]
+            if isinstance(block, dict) and block.get("type") == "tool_use":
+                if state.search and block.get("name") == "WebSearch":
+                    return [{"type": "web_search", "status": "in_progress", "id": block.get("id")}]
+                state.begin_native_call(event.get("index", 0), block)
             return []
+        if event.get("type") == "content_block_stop":
+            call = state.pending_calls.pop(event.get("index", 0), None)
+            return state.finish_native_call(call) if call is not None else []
         if event.get("type") != "content_block_delta":
             # message_delta carries a stop reason too; record it as a fallback
             # so a stream truncated before `result` still reports why it ended
@@ -642,6 +718,8 @@ def _translate(payload: Any, state: _TurnState) -> list[dict]:
                     reason = delta.get("stop_reason")
                     if isinstance(reason, str) and reason:
                         state.stop_reason = reason
+                    if reason == "tool_use":
+                        state.end_of_calls()
             return []
         delta = event.get("delta")
         if not isinstance(delta, dict):
@@ -659,8 +737,13 @@ def _translate(payload: Any, state: _TurnState) -> list[dict]:
                 text = delta.get("text")
             translated = state.content_event(event.get("index", 0), "thinking", text)
             return [translated] if translated else []
-        # input_json_delta and friends are tool traffic; tools are stripped, so
-        # anything arriving here is ignored rather than surfaced as text.
+        if delta_type == "input_json_delta":
+            call = state.pending_calls.get(event.get("index", 0))
+            if call is not None:
+                call["json"] += delta.get("partial_json") or ""
+                if len(call["json"].encode("utf-8")) > MAX_ENVELOPE_BYTES:
+                    raise ToolCallError("claude tool call exceeds the size limit")
+        # Other tool traffic (WebSearch arguments) is never surfaced as text.
         return []
 
     if kind == "assistant":
@@ -672,6 +755,13 @@ def _translate(payload: Any, state: _TurnState) -> list[dict]:
                 content = [{"type": "text", "text": content}]
             events = []
             for index, block in enumerate(content):
+                if isinstance(block, dict) and block.get("type") == "tool_use" \
+                        and state.forwardable(block.get("name")):
+                    # A snapshot holds only complete blocks, so it can carry a
+                    # call whose stream events never arrived.
+                    events.extend(state.finish_native_call({
+                        "id": block.get("id"), "name": block.get("name"), "input": block.get("input")}))
+                    continue
                 if isinstance(block, dict) and block.get("type") in {"text", "thinking"}:
                     block_type = block["type"]
                     # Claude Code emits a one-block assistant snapshot before
@@ -690,6 +780,9 @@ def _translate(payload: Any, state: _TurnState) -> list[dict]:
         return []
 
     if kind == "result":
+        if state.host_calls or state.stray_calls:
+            state.end_of_calls()
+            return []
         subtype = str(payload.get("subtype") or "")
         stop_reason = payload.get("stop_reason")
         if isinstance(stop_reason, str) and stop_reason:
@@ -709,6 +802,12 @@ def _translate(payload: Any, state: _TurnState) -> list[dict]:
     if kind == "error":
         message = payload.get("message") or payload.get("error") or payload
         state.failure = f"claude reported an error: {message}"
+        return []
+
+    if kind == "user" and (state.host_calls or state.stray_calls):
+        # The CLI is answering the calls itself ("No such tool available").
+        # Without a message_delta to end on, this is the last safe stop.
+        state.end_of_calls()
         return []
 
     if kind == "user" and state.search:
@@ -840,6 +939,16 @@ def _iter_events(session, *, timeout) -> Iterator[tuple[str, Any]]:
             yield "raw", state_lines
 
 
+def _interrupt(session) -> None:
+    """SIGTERM the child at a host handoff; anything it does next is discarded."""
+    terminate = getattr(getattr(session, "process", None), "terminate", None)
+    if callable(terminate):
+        try:
+            terminate()
+        except Exception:  # noqa: BLE001 - teardown must never raise
+            pass
+
+
 def _describe(exc: BaseException, state: _TurnState | None = None,
               timeout=None) -> str:
     text = str(exc).strip() or exc.__class__.__name__
@@ -885,6 +994,8 @@ def run_turn(request, *, spawner=None, timeout=300) -> Iterator[dict]:
         # the prompt; duplicating it would double-charge and could conflict.
         prompt = render_prompt(messages)
         state.search = search_enabled(request.get("web_search"))
+        state.host_tools = normalize_tools(request.get("tools"))
+        state.host_names = frozenset(tool["name"] for tool in state.host_tools)
         argv = build_argv(model, effort=effort, system=system, stream=True,
                           search=state.search, fast_mode=request.get("fast_mode"))
         if request.get("images"):
@@ -927,6 +1038,13 @@ def run_turn(request, *, spawner=None, timeout=300) -> Iterator[dict]:
                 if state.failure:
                     yield {"type": "error", "message": state.failure}
                     return
+                if state.host_handoff:
+                    # Native calls for host tools the CLI does not have. Stop
+                    # before its unknown-tool reply reaches the model; its
+                    # stdin is already at EOF, so only a signal ends it now.
+                    _interrupt(session)
+                    yield {"type": "message_stop", "stop_reason": "tool_use"}
+                    return
                 if state.terminal:
                     returncode = getattr(session, "returncode", None)
                     if isinstance(returncode, int) and returncode != 0:
@@ -964,6 +1082,11 @@ def run_turn(request, *, spawner=None, timeout=300) -> Iterator[dict]:
                 yield {"type": "error", "message": "the claude CLI produced no output"}
                 return
             stop_reason = state.stop_reason or "end_turn"
+    except ToolCallError as exc:
+        # The route's protocol correction keys on this code; nothing ran.
+        yield {"type": "error", "code": "invalid_cli_tool_call",
+               "message": f"Invalid CLI host tool call: {exc}."}
+        return
     except Exception as exc:
         yield {"type": "error", "message": _describe(exc, state, timeout)}
         return

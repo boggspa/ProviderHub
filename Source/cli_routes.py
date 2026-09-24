@@ -33,8 +33,8 @@ import cli_structured_reply
 from cli_lifecycle import ManagedTurn, TurnTiming, observe_events
 from cli_image_history import compact_image_history
 from cli_tool_call import (HOST_EXECUTION_NOTE, MAX_CALLS_PER_TURN, ToolCallError,
-                           ToolCallParser, normalize_tools, render_tool_anchor,
-                           render_tool_manifest, validate_host_call)
+                           ToolCallParser, hosted_search_note, normalize_tools,
+                           render_tool_anchor, render_tool_manifest, validate_host_call)
 from effort_map import EFFORT_ORDER
 from fast_models import fixed_speed_tier, supports_fast_toggle
 from cli_images import (IMAGE_COORDINATE_NOTE, CliImageError, image_label,
@@ -418,6 +418,12 @@ def plan_turn(provider_id: str, upstream_model: str, payload: dict, spec: dict,
                 break
     if dynamic_tools:
         system = HOST_EXECUTION_NOTE + ("\n\n" + system if system else "")
+    search = payload.get("_web_search")
+    searches = search is not None and (not callable(getattr(adapter, "search_enabled", None))
+                                       or adapter.search_enabled(search))
+    if tools and searches and not dynamic_tools:
+        # Only where _tool_turn enforces the budget it quotes.
+        system = (system + "\n\n" if system else "") + hosted_search_note(CLI_SEARCH_BUDGET)
     if images:
         system = (system + "\n\n" if system else "") + IMAGE_COORDINATE_NOTE
     request = {
@@ -460,7 +466,6 @@ def plan_turn(provider_id: str, upstream_model: str, payload: dict, spec: dict,
             request["service_tier"] = "fast"
         elif tier is not None:
             request["service_tier"] = tier
-    search = payload.get("_web_search")
     if search is not None:
         # Set only by the Responses planner, for a route whose catalogue entry
         # carries web_search; the adapter runs the search itself.
@@ -539,30 +544,54 @@ def _without_thinking(events):
             close()
 
 
+#: Hosted searches one CLI step may run before the hub stops it and asks again
+#: with search off. The CLIs' own ceilings are far higher (Grok's is 100 per
+#: turn) and every search re-sends the whole context: a Codex step on
+#: grok-4.7-build-fast spent 22.7M input tokens that way on 24 Sep 2026 and
+#: ended without a host call. The same session's other steps ran 5 to 21.
+CLI_SEARCH_BUDGET = 8
+
+
 def _tool_turn(adapter, request, *, timeout):
-    """Allow one protocol correction, with no replay of executed host calls."""
+    """Allow one protocol correction and one search stop, never replaying host calls."""
     deadline = time.monotonic() + timeout
     native = getattr(adapter, "HOST_TOOL_TRANSPORT", None) == "dynamic"
-    attempts = 1 if native else 2
+    corrections = 0 if native else 1
     current = request
-    for attempt in range(attempts):
+    while True:
         parser = cli_structured_reply.parse_stream if request.get("host_tool_schema") else _parse_tool_stream
         options = ({"stop_after_object": bool(getattr(adapter, "EARLY_STRUCTURED_REPLY", False))}
                    if request.get("host_tool_schema") else {"native": native})
         events = parser(observe_events(adapter.run_turn(current, timeout=max(0.01, deadline - time.monotonic())),
                                        request.get("_cli_timing")),
                         tools=request.get("tools"), tool_choice=request.get("tool_choice"), **options)
-        retry = False
+        restart = None
+        searches = set()
+        paragraph = False
         pending_text = []
         pending_bytes = 0
         try:
             for event in events:
-                if event.get("code") == "invalid_cli_tool_call" and attempt + 1 < attempts \
+                if event.get("code") == "invalid_cli_tool_call" and corrections \
                         and time.monotonic() < deadline:
-                    retry = True
+                    restart = "protocol"
                     break
                 kind = event.get("type")
+                if kind == "web_search" and not native and current.get("web_search") is not None:
+                    searches.add(event.get("id"))
+                    if len(searches) > CLI_SEARCH_BUDGET and time.monotonic() < deadline:
+                        # Host calls are released only at message_stop, so
+                        # cutting here leaves nothing half-executed.
+                        restart = "search"
+                        break
+                    # The buffer below would run the narration on either side
+                    # of a search together into one sentence.
+                    paragraph = paragraph or bool(pending_text)
                 if kind == "text_delta" and not native:
+                    text = event.get("text") or ""
+                    if paragraph and text and not text[:1].isspace():
+                        event = {**event, "text": "\n\n" + text}
+                    paragraph = False
                     # An invalid attempt has not done any host work. Keep its
                     # narration private until the handoff/reply is validated,
                     # so retrying cannot print the same promises twice.
@@ -582,25 +611,32 @@ def _tool_turn(adapter, request, *, timeout):
                 yield event
         finally:
             events.close()
-        if not retry:
+        if restart is None:
             return
         # Only the rejected reply is undone. Every host result already in the
         # transcript really happened, so this must not read as "do that last
         # call again": a model told to "reissue the intended call" re-ran a
         # completed edit, which then failed on a file it had already changed.
-        current = {**request, "messages": [*request.get("messages", []), {
-            "role": "user",
-            "content": "Your previous response was rejected for its formatting alone, and nothing in it "
-                       "was executed. Every host tool result already in this conversation is real and "
-                       "complete: do not perform that work again or restate its outcome as new. Continue "
-                       "from those results and issue only the call that comes next - or the final answer "
-                       "if no call remains - "
-                       + ("as the structured response, with text and tool_calls whose arguments are "
-                          "JSON-encoded objects. " if request.get("host_tool_schema") else
-                          "using a complete JSON object between the exact tool-call delimiters from the "
-                          "tool instructions. ")
-                       + "Never simulate a result.",
-        }]}
+        convention = ("as the structured response, with text and tool_calls whose arguments are "
+                      "JSON-encoded objects. " if request.get("host_tool_schema") else
+                      "using a complete JSON object between the exact tool-call delimiters from the "
+                      "tool instructions. ")
+        if restart == "protocol":
+            corrections -= 1
+            note = ("Your previous response was rejected for its formatting alone, and nothing in it "
+                    "was executed. Every host tool result already in this conversation is real and "
+                    "complete: do not perform that work again or restate its outcome as new. Continue "
+                    "from those results and issue only the call that comes next - or the final answer "
+                    "if no call remains - " + convention + "Never simulate a result.")
+        else:
+            current = {key: value for key, value in current.items() if key != "web_search"}
+            note = (f"The host stopped your previous response after {CLI_SEARCH_BUDGET} web searches. "
+                    "Their results are not available to you, nothing else in that response was "
+                    "executed, and web search is off for the rest of this step. Every host tool result "
+                    "already in this conversation is real and complete. Continue from those results "
+                    "and issue only the host tool call that comes next - or the final answer if no call "
+                    "remains - " + convention + "Never simulate a result.")
+        current = {**current, "messages": [*current.get("messages", []), {"role": "user", "content": note}]}
 
 
 def _parse_tool_stream(events, *, tools=None, tool_choice=None, native=False):

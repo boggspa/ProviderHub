@@ -79,6 +79,43 @@ def _result_event(subtype="success", stop_reason="end_turn", result="full answer
             "stop_reason": stop_reason, "result": result}
 
 
+_HOST_TOOLS = [
+    {"name": "exec_command", "description": "Run a shell command on the host.",
+     "input_schema": {"type": "object", "properties": {"cmd": {"type": "string"}}, "required": ["cmd"]}},
+    {"name": "get_goal", "description": "Read the thread goal.",
+     "input_schema": {"type": "object", "properties": {}}},
+]
+
+
+def _init(tools):
+    return {"type": "system", "subtype": "init", "tools": tools, "mcp_servers": []}
+
+
+def _block_start(index, block):
+    return {"type": "stream_event", "event": {"type": "content_block_start", "index": index,
+                                              "content_block": block}}
+
+
+def _json_delta(index, partial):
+    return {"type": "stream_event", "event": {"type": "content_block_delta", "index": index,
+                                              "delta": {"type": "input_json_delta", "partial_json": partial}}}
+
+
+def _block_stop(index):
+    return {"type": "stream_event", "event": {"type": "content_block_stop", "index": index}}
+
+
+def _message_delta(stop_reason):
+    return {"type": "stream_event", "event": {"type": "message_delta", "delta": {"stop_reason": stop_reason}}}
+
+
+def _no_such_tool(identifier, name):
+    """Claude Code 2.1.280's own reply to a tool it does not register."""
+    return {"type": "user", "message": {"role": "user", "content": [
+        {"type": "tool_result", "tool_use_id": identifier, "is_error": True,
+         "content": f"<tool_use_error>Error: No such tool available: {name}</tool_use_error>"}]}}
+
+
 class BuildArgvTests(unittest.TestCase):
     def test_structure_and_variadic_termination(self):
         argv = m.build_argv("sonnet", effort="high")
@@ -371,6 +408,118 @@ class RunTurnTests(unittest.TestCase):
                 self.assertEqual(session.argv[-2:], ["--tools", ""])
                 self.assertNotIn("WebSearch", session.argv)
                 self.assertEqual([e["type"] for e in events], ["text_delta", "message_stop"])
+
+    # -- native calls for host tools ---------------------------------------------
+
+    def _host_turn(self, lines, *, tools=_HOST_TOOLS, search=True):
+        fake = self._stream([json.dumps(line) for line in lines])
+        fake.process = mock.Mock()
+        request = {"model": "sonnet", "messages": [{"role": "user", "content": "read the emulator state"}],
+                   "tools": tools}
+        if search:
+            request["web_search"] = {"context_size": None, "allowed_domains": [], "live": True}
+        events, session, _ = self._run(request, fake)
+        return events, session
+
+    def test_native_host_call_is_forwarded_before_the_cli_refuses_it(self):
+        # Sonnet 5 under Codex, 24 Sep 2026: WebSearch made the tool list
+        # native, the model called exec_command natively, Claude Code said
+        # "No such tool available" and the model told the user it had no tools.
+        events, session = self._host_turn([
+            _init(["WebSearch"]),
+            _se("text_delta", "text", "Reading the live state."),
+            _block_start(1, {"type": "tool_use", "id": "toolu_9", "name": "exec_command", "input": {}}),
+            _json_delta(1, '{"cmd": "curl -s 127.0.0.1'),
+            _json_delta(1, ':8765/state"}'),
+            _block_stop(1),
+            _message_delta("tool_use"),
+            _no_such_tool("toolu_9", "exec_command"),
+            _se("text_delta", "text", "I have no shell access in this session."),
+            _result_event(result="I have no shell access in this session.")])
+        self.assertEqual([e["type"] for e in events], ["text_delta", "tool_call", "message_stop"])
+        self.assertEqual(events[1], {"type": "tool_call", "id": "toolu_9", "name": "exec_command",
+                                     "input": {"cmd": "curl -s 127.0.0.1:8765/state"}})
+        self.assertEqual(events[2]["stop_reason"], "tool_use")
+        self.assertNotIn("no shell access", "".join(e.get("text", "") for e in events))
+        session.process.terminate.assert_called_once()
+
+    def test_parallel_native_calls_hand_off_together(self):
+        events, _ = self._host_turn([
+            _init(["WebSearch"]),
+            _block_start(0, {"type": "tool_use", "id": "toolu_1", "name": "get_goal", "input": {}}),
+            _block_stop(0),
+            _block_start(1, {"type": "tool_use", "id": "toolu_2", "name": "exec_command", "input": {}}),
+            _json_delta(1, '{"cmd": "ls"}'),
+            _block_stop(1),
+            _message_delta("tool_use")])
+        self.assertEqual([(e["type"], e.get("name")) for e in events],
+                         [("tool_call", "get_goal"), ("tool_call", "exec_command"), ("message_stop", None)])
+        self.assertEqual(events[0]["input"], {})
+
+    def test_snapshot_and_stream_report_one_call_once(self):
+        snapshot = {"type": "assistant", "message": {"id": "msg_1", "content": [
+            {"type": "tool_use", "id": "toolu_3", "name": "exec_command", "input": {"cmd": "pwd"}}]}}
+        for lines in (
+                # Claude Code's per-block snapshot lands before content_block_stop.
+                [_init(["WebSearch"]),
+                 _block_start(0, {"type": "tool_use", "id": "toolu_3", "name": "exec_command", "input": {}}),
+                 _json_delta(0, '{"cmd": "pwd"}'), snapshot, _block_stop(0), _message_delta("tool_use")],
+                # A snapshot alone, ended by the CLI's own tool result.
+                [_init(["WebSearch"]), snapshot, _no_such_tool("toolu_3", "exec_command")]):
+            with self.subTest(stream=len(lines) > 3):
+                events, _ = self._host_turn(lines)
+                self.assertEqual([e["type"] for e in events], ["tool_call", "message_stop"])
+                self.assertEqual(events[0]["input"], {"cmd": "pwd"})
+
+    def test_native_calls_are_never_forwarded_without_a_reported_registry(self):
+        events, session = self._host_turn([
+            _block_start(0, {"type": "tool_use", "id": "toolu_4", "name": "exec_command", "input": {}}),
+            _json_delta(0, '{"cmd": "ls"}'),
+            _block_stop(0),
+            _message_delta("tool_use"),
+            _no_such_tool("toolu_4", "exec_command"),
+            _se("text_delta", "text", "Using the envelope instead."),
+            _result_event(result="Using the envelope instead.")])
+        self.assertEqual([e["type"] for e in events], ["text_delta", "message_stop"])
+        session.process.terminate.assert_not_called()
+
+    def test_a_tool_the_cli_registered_itself_is_never_forwarded(self):
+        # The CLI would have run it already; forwarding would run it twice.
+        events, _ = self._host_turn([
+            _init(["WebSearch", "exec_command"]),
+            _block_start(0, {"type": "tool_use", "id": "toolu_5", "name": "exec_command", "input": {}}),
+            _json_delta(0, '{"cmd": "ls"}'),
+            _block_stop(0),
+            _message_delta("tool_use"),
+            _se("text_delta", "text", "done"),
+            _result_event(result="done")])
+        self.assertEqual([e["type"] for e in events], ["text_delta", "message_stop"])
+
+    def test_stray_native_call_is_a_protocol_error_only_when_host_tools_exist(self):
+        lines = [
+            _init(["WebSearch"]),
+            _block_start(0, {"type": "tool_use", "id": "toolu_6", "name": "Bash", "input": {}}),
+            _json_delta(0, '{"command": "ls"}'),
+            _block_stop(0),
+            _message_delta("tool_use"),
+            _no_such_tool("toolu_6", "Bash"),
+            _se("text_delta", "text", "No tools here."),
+            _result_event(result="No tools here.")]
+        events, _ = self._host_turn(lines)
+        self.assertEqual([e["type"] for e in events], ["error"])
+        self.assertEqual(events[0]["code"], "invalid_cli_tool_call")
+        self.assertIn("Bash", events[0]["message"])
+        events, _ = self._host_turn(lines, tools=[])
+        self.assertEqual([e["type"] for e in events], ["text_delta", "message_stop"])
+
+    def test_invalid_native_arguments_are_a_protocol_error(self):
+        events, _ = self._host_turn([
+            _init(["WebSearch"]),
+            _block_start(0, {"type": "tool_use", "id": "toolu_7", "name": "exec_command", "input": {}}),
+            _json_delta(0, '{"cmd": '),
+            _block_stop(0)])
+        self.assertEqual([e["type"] for e in events], ["error"])
+        self.assertEqual(events[0]["code"], "invalid_cli_tool_call")
 
     def test_bad_request_degrades(self):
         with mock.patch.object(m, "_resolve_binary", return_value="/fake/claude"):

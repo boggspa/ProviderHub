@@ -442,6 +442,89 @@ class ParseToolStreamTest(unittest.TestCase):
         with self.assertRaisesRegex(CliRouteError, "hosted web search"):
             cli_routes.plan_turn("muse", "muse-spark-1.3", dict(payload), {}, wanted_output=64)
 
+    def test_plan_turn_says_where_hosted_search_reaches_beside_host_tools(self):
+        search = {"context_size": None, "allowed_domains": [], "live": True}
+        tools = [{"name": "exec_command", "input_schema": {"type": "object"}}]
+        base = {"_provider_hub_surface": "responses",
+                "messages": [{"role": "user", "content": "check the emulator"}]}
+        for provider, model in (("grok", "grok-4.7"), ("claude", "sonnet")):
+            with self.subTest(provider=provider):
+                def system(**extra):
+                    return plan_turn(provider, model, {**base, **extra}, {}, wanted_output=64)["body"]["system"] or ""
+                note = system(tools=tools, _web_search=search)
+                self.assertIn("cannot open localhost, 127.0.0.1", note)
+                self.assertIn(f"At most {cli_routes.CLI_SEARCH_BUDGET} searches run per step", note)
+                # Nothing to redirect to, or no search to explain.
+                self.assertNotIn("127.0.0.1", system(_web_search=search))
+                self.assertNotIn("127.0.0.1", system(tools=tools))
+                self.assertNotIn("127.0.0.1", system(tools=tools, _web_search={**search, "live": False}))
+        # Codex's native route enforces no hub budget, so it is not quoted one.
+        self.assertNotIn("127.0.0.1", plan_turn("codex", "gpt-6-sol", {**base, "tools": tools, "_web_search": search},
+                                                {}, wanted_output=64)["body"]["system"])
+
+    def test_search_budget_stops_a_runaway_step_and_asks_again_without_search(self):
+        # grok-4.7-build-fast under Codex, 24 Sep 2026: one step searched up to
+        # the CLI's own ceiling of 100 and ended without a host call.
+        requests, closed_before = [], []
+        closed = []
+        call = OPEN_SENTINEL + json.dumps({"name": "exec_command", "input": {"cmd": "curl -s 127.0.0.1:8765/state"}}) \
+            + CLOSE_SENTINEL
+
+        def adapter_turn(request, *, timeout=300):
+            requests.append(request)
+            closed_before.append(len(closed))
+            try:
+                if request.get("web_search") is None:
+                    yield {"type": "text_delta", "text": "Reading it through the host."}
+                    yield {"type": "text_delta", "text": call}
+                    yield {"type": "message_stop", "stop_reason": "end_turn"}
+                    return
+                for number in range(100):
+                    yield {"type": "text_delta", "text": f"Searching again ({number})."}
+                    yield {"type": "web_search", "status": "in_progress", "id": f"ws{number}"}
+                    yield {"type": "web_search", "status": "completed", "id": f"ws{number}",
+                           "action": {"type": "open_page", "url": "https://www.rfc-editor.org/rfc/rfc5735.txt"},
+                           "results": []}
+                yield {"type": "message_stop", "stop_reason": "end_turn"}
+            finally:
+                closed.append(True)
+
+        cli_routes._cache["grok"] = types.SimpleNamespace(run_turn=adapter_turn)
+        request = {"tools": [{"name": "exec_command", "input_schema": {"type": "object"}}],
+                   "messages": [{"role": "user", "content": "keep playing"}],
+                   "web_search": {"context_size": None, "allowed_domains": [], "live": True}}
+        events = [event for event in run_turn("grok", request, parse_tool_calls=True) if event["type"] != "ping"]
+        budget = cli_routes.CLI_SEARCH_BUDGET
+        searches = [event for event in events if event["type"] == "web_search"]
+        self.assertEqual(len({event["id"] for event in searches}), budget)
+        self.assertEqual([event["type"] for event in events[len(searches):]],
+                         ["text_delta", "tool_call", "message_stop"])
+        self.assertEqual(events[-2]["input"], {"cmd": "curl -s 127.0.0.1:8765/state"})
+        self.assertNotIn("Searching again", "".join(event.get("text", "") for event in events))
+        self.assertEqual(len(requests), 2)
+        self.assertEqual(closed_before, [0, 1])
+        self.assertNotIn("web_search", requests[1])
+        note = requests[1]["messages"][-1]["content"]
+        self.assertIn(f"after {budget} web searches", note)
+        self.assertIn("web search is off for the rest of this step", note)
+        self.assertIn("nothing else in that response was executed", note)
+        self.assertEqual(len(request["messages"]), 1)
+
+    def test_narration_split_by_a_search_keeps_its_paragraphs(self):
+        def adapter_turn(request, *, timeout=300):
+            yield {"type": "text_delta", "text": "Route 34 is the live map."}
+            yield {"type": "web_search", "status": "in_progress", "id": "ws1"}
+            yield {"type": "web_search", "status": "completed", "id": "ws1",
+                   "action": {"type": "search", "query": "route 34 day care"}, "results": []}
+            yield {"type": "text_delta", "text": "I'll read the screen."}
+            yield {"type": "text_delta", "text": " Then walk north."}
+            yield {"type": "message_stop", "stop_reason": "end_turn"}
+
+        cli_routes._cache["grok"] = types.SimpleNamespace(run_turn=adapter_turn)
+        events = list(run_turn("grok", {"web_search": {"live": True}}, parse_tool_calls=True))
+        self.assertEqual("".join(event["text"] for event in events if event["type"] == "text_delta"),
+                         "Route 34 is the live map.\n\nI'll read the screen. Then walk north.")
+
     # -- wire translation ------------------------------------------------------
 
     def _events(self, *items):

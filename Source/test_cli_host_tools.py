@@ -147,6 +147,50 @@ class HostCycleTests(unittest.TestCase):
                 self.assertEqual(results, ["before", "write completed", "after"])
                 self.assertEqual(path.read_text(), "after")
 
+    def test_claude_native_host_call_reaches_the_host_instead_of_no_such_tool(self):
+        # Codex + Sonnet 5, 24 Sep 2026: hosted search gave Claude Code a
+        # native tool list, the model called a host tool natively, and the
+        # CLI's "No such tool available" convinced it that it had no tools.
+        import claude_cli_agent
+        plan = cli_routes.plan_turn("claude", "sonnet", {
+            "_provider_hub_surface": "responses", "tools": TOOLS,
+            "_web_search": {"context_size": None, "allowed_domains": [], "live": True},
+            "messages": [{"role": "user", "content": "Read sample.txt"}]}, {}, wanted_output=128)
+        session = Session([
+            {"type": "system", "subtype": "init", "tools": ["WebSearch"], "mcp_servers": []},
+            {"type": "stream_event", "event": {"type": "content_block_start", "index": 0, "content_block": {
+                "type": "tool_use", "id": "toolu_n1", "name": "read_file", "input": {}}}},
+            {"type": "stream_event", "event": {"type": "content_block_delta", "index": 0, "delta": {
+                "type": "input_json_delta", "partial_json": json.dumps({"path": "sample.txt"})}}},
+            {"type": "stream_event", "event": {"type": "content_block_stop", "index": 0}},
+            {"type": "stream_event", "event": {"type": "message_delta", "delta": {"stop_reason": "tool_use"}}},
+            {"type": "user", "message": {"role": "user", "content": [{
+                "type": "tool_result", "tool_use_id": "toolu_n1", "is_error": True,
+                "content": "<tool_use_error>Error: No such tool available: read_file</tool_use_error>"}]}},
+            {"type": "stream_event", "event": {"type": "content_block_delta", "delta": {
+                "type": "text_delta", "text": "I have no file access here."}}},
+            {"type": "result", "subtype": "success", "stop_reason": "end_turn"}])
+        spawned = []
+
+        def spawn(argv, **kwargs):
+            spawned.append(argv)
+            return session
+
+        with patch.object(claude_cli_agent, "StdioSession", side_effect=spawn), \
+                patch.object(claude_cli_agent, "_resolve_binary", return_value="/fake/cli"):
+            wire = []
+            outcome = cli_routes.relay_cli_turn(cli_routes.run_turn("claude", plan["body"], parse_tool_calls=True),
+                                                wire.append, model="sonnet")
+        self.assertIsNone(outcome["error"], outcome)
+        self.assertEqual(outcome["stop_reason"], "tool_use")
+        self.assertTrue(session.cleaned.wait(2), "CLI cleanup did not finish")
+        self.assertEqual(spawned[0][-2:], ["--tools", "WebSearch"])
+        blocks = [event["content_block"] for event in wire if event["type"] == "content_block_start"]
+        self.assertEqual([(block["type"], block.get("name")) for block in blocks], [("tool_use", "read_file")])
+        arguments = [json.loads(event["delta"]["partial_json"]) for event in wire
+                     if event.get("delta", {}).get("type") == "input_json_delta"]
+        self.assertEqual(arguments, [{"path": "sample.txt"}])
+
     def test_antigravity_replays_complete_host_history_on_both_surfaces(self):
         arguments = {"path": "sample.txt", "text": "preserve this edit\n" * 100}
         for surface in ("messages", "responses"):

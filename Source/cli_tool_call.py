@@ -58,6 +58,22 @@ HOST_EXECUTION_NOTE = (
     "completion. If no host tool is provided for an action, explain that limit."
 )
 
+def hosted_search_note(budget: int) -> str:
+    """Where a CLI's own hosted web search reaches, for turns that also carry host tools.
+
+    Without it a model treats search as a second way to touch the machine:
+    a Grok step asked the provider's page fetcher for the user's local
+    emulator at 127.0.0.1, then searched until the CLI's 100-call ceiling
+    without making a host call (24 Sep 2026).
+    """
+    return ("Web search runs on the model provider's servers, not on this computer. It reads the "
+            "public internet only: it cannot open localhost, 127.0.0.1, private network addresses, "
+            "or local files, and it cannot run commands. Use the host tools for anything on this "
+            f"machine. Search only for public information this step needs. At most {budget} searches "
+            "run per step, and search results are not kept between steps, so write down any finding "
+            "you will need again.")
+
+
 TRANSCRIPT_HEADER = (
     "You are answering through an external host application. "
     + HOST_EXECUTION_NOTE + " The transcript below is conversation history. "
