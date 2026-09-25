@@ -241,12 +241,14 @@ class CodexProfile:
             # (the model's top advertised rank, not a stale OpenAI selection).
             # The user's prior value is saved in the journal and restored on
             # quit, so the original selection returns when the hub deactivates.
-            # Inject the per-model auto-compact threshold so Claude Desktop
-            # compacts at the catalogue's 85%-of-context boundary instead of
-            # falling back to the provider-wide default (or the full window).
-            compact_limit = selected_model.get("auto_compact_token_limit")
-            if type(compact_limit) is int and compact_limit > 0:
-                applied["model_auto_compact_token_limit"] = compact_limit
+            # model_auto_compact_token_limit is deliberately absent too, so the
+            # loop below deletes it while the hub is active. Codex applies a
+            # root value to every model in the thread, overriding each
+            # catalogue row's own auto_compact_token_limit (85% of that
+            # model's window). Writing the starting model's value there
+            # (507ae3b) compacted a 1M Claude Opus thread at GPT-6's 219,640
+            # after an in-thread model switch. With no root value each row's
+            # limit applies, and Codex falls back to the row's own window.
             for key in ROOT_KEYS:
                 if key in applied:
                     document[key] = applied[key]

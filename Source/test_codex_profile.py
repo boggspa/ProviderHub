@@ -191,6 +191,21 @@ command = "existing-command"
         self.manager.restore()
         self.assertNotIn("web_search", parse(self.manager.config.read_text()))
 
+    def test_no_root_compaction_limit_overrides_the_catalogue_rows(self):
+        """A root model_auto_compact_token_limit applies to every model in a
+        thread, so the starting model's value would compact a 1M route at a
+        smaller model's threshold after an in-app switch. Activation leaves
+        none (each catalogue row carries its own), and the user's own value
+        returns on restore."""
+        self.edit(lambda doc: doc.__setitem__("model_auto_compact_token_limit", 123456))
+        self.activate()
+        rows = json.loads(self.manager.catalogue.read_text())["models"]
+        starting = next(row for row in rows if row["slug"] == self.settings["codex_model"])
+        self.assertIsInstance(starting["auto_compact_token_limit"], int)  # the value that used to leak
+        self.assertNotIn("model_auto_compact_token_limit", parse(self.manager.config.read_text()))
+        self.manager.restore()
+        self.assertEqual(parse(self.manager.config.read_text())["model_auto_compact_token_limit"], 123456)
+
     def test_switch_and_restore_preserve_original_bytes_and_unrelated_state(self):
         self.activate()
         updated = self.manager.config.read_text()
