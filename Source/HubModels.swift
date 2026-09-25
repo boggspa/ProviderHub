@@ -17,6 +17,26 @@ struct ProviderConnection: Codable, Equatable {
     /// absent takes the gateway's own default, and no other provider's
     /// saved connection grows a field its daemon-less routes ignore.
     var idle_unload_seconds: Int?
+    /// Claude and Codex CLI logins beyond the CLI's default one: each is a
+    /// config folder (CLAUDE_CONFIG_DIR / CODEX_HOME) the CLI itself signed
+    /// in to. `cli_account` names the active one; nil is the default login.
+    /// Both stay omitted until used, like idle_unload_seconds.
+    var cli_accounts: [CliAccount]?
+    var cli_account: String?
+}
+struct CliAccount: Codable, Equatable, Identifiable {
+    var id: String
+    var label: String
+    var config_dir: String
+}
+/// One row of the worker's `cli-accounts` answer: a sign-in probe per login.
+struct CliAccountState: Identifiable {
+    var id: String?
+    var label: String
+    var config_dir: String?
+    var active: Bool
+    var state: String
+    var detail: String
 }
 struct BrandLogo: Codable, Equatable {
     var light: String

@@ -9,6 +9,9 @@ import SwiftUI
 /// Local-only and opt-in per provider — there is no master flag. Choosing
 /// "Installed CLI login" *is* turning the experiment on for that one provider.
 fileprivate let cliAuthProviders: Set<String> = ["codex", "claude", "muse", "grok", "antigravity"]
+/// CLI providers that can hold several logins side by side, one config folder
+/// each. Mirrors `hub_config.CLI_ACCOUNT_PROVIDERS`.
+fileprivate let cliAccountProviders: Set<String> = ["codex", "claude"]
 
 struct ProviderPage: View {
     @ObservedObject var model: BridgeModel
@@ -105,6 +108,9 @@ struct ProviderPage: View {
                             }
                         } else if connection.credential_mode == "cli" {
                             Text("Local-only experiment. Runs this provider’s own installed CLI and lets it keep the subscription login it already has: the hub never reads, copies, or refreshes a credential, because these tokens rotate and a second holder revokes the first. Tools are answered by your desktop app and never executed by the CLI itself. Sign in through the CLI itself, then save.").font(.caption).foregroundStyle(.secondary)
+                            if cliAccountProviders.contains(provider.id) {
+                                CliAccountsSection(model: model, provider: provider.id)
+                            }
                         } else {
                             Text("Reads " + (provider.credential_env ?? "the provider key") + " from the app’s launch environment; a Finder launch may not inherit shell variables.").font(.caption).foregroundStyle(.secondary)
                         }
@@ -258,5 +264,73 @@ struct ProviderPage: View {
         }
         if model.inference_status == "responded" { values.append("Previously responded") }
         return values.joined(separator: " · ")
+    }
+}
+
+/// The provider's CLI logins: the CLI's default one plus any extra account
+/// folders, with the active one chosen here. Switching applies to the next
+/// turn once saved - the gateway re-reads it, so no restart is needed.
+struct CliAccountsSection: View {
+    @ObservedObject var model: BridgeModel
+    var provider: String
+    var accounts: [CliAccount] { model.settings.providers[provider]?.cli_accounts ?? [] }
+    var defaultFolder: String { provider == "claude" ? "~/.claude" : "~/.codex" }
+
+    func state(_ id: String?) -> CliAccountState? {
+        model.cliAccountStates[provider]?.first { $0.id == id }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Picker("Active account", selection: Binding(
+                get: { model.settings.providers[provider]?.cli_account ?? "" },
+                set: { model.settings.providers[provider]?.cli_account = $0.isEmpty ? nil : $0 })) {
+                Text("Default (\(defaultFolder))").tag("")
+                ForEach(accounts) { Text($0.label).tag($0.id) }
+            }
+            row(id: nil, label: "Default", folder: nil)
+            ForEach(accounts) { account in row(id: account.id, label: account.label, folder: account.config_dir) }
+            HStack {
+                Button("Add account…") { model.addCliAccount(provider) }
+                    .disabled(accounts.count >= 8)
+                Button("Check sign-in") { Task { await model.checkCliAccounts(provider) } }
+                    .disabled(model.cliAccountsChecking.contains(provider))
+                if model.cliAccountsChecking.contains(provider) { ProgressView().controlSize(.small) }
+                Spacer()
+            }
+            Text("Each extra account is a folder its CLI signs in to (\(provider == "claude" ? "CLAUDE_CONFIG_DIR" : "CODEX_HOME")). Sign in opens Terminal on the CLI’s own browser login; the login stays in that folder and the hub only stores the path. Save to switch - the next turn uses the new account without restarting anything.")
+                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    @ViewBuilder func row(id: String?, label: String, folder: String?) -> some View {
+        let probe = state(id)
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Circle().fill(probe.map { $0.state == "authenticated" ? Color.green : ($0.state == "missing" ? Color.orange : Color.gray) } ?? Color.gray.opacity(0.4))
+                .frame(width: 7, height: 7)
+            VStack(alignment: .leading, spacing: 2) {
+                if let id {
+                    TextField("Account name", text: Binding(
+                        get: { accounts.first { $0.id == id }?.label ?? label },
+                        set: { value in
+                            guard let index = model.settings.providers[provider]?.cli_accounts?.firstIndex(where: { $0.id == id }) else { return }
+                            model.settings.providers[provider]?.cli_accounts?[index].label = value
+                        })).textFieldStyle(.plain).font(.system(size: 12, weight: .medium))
+                } else {
+                    Text(label).font(.system(size: 12, weight: .medium))
+                }
+                Text(folder ?? defaultFolder).font(.system(size: 10, design: .monospaced)).foregroundStyle(.secondary)
+                    .lineLimit(1).truncationMode(.middle)
+                if let probe, !probe.detail.isEmpty {
+                    Text(probe.detail).font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(2)
+                }
+            }
+            Spacer()
+            Button("Sign in…") { model.signInCliAccount(provider, folder: folder) }
+            if let id {
+                Button(role: .destructive) { model.removeCliAccount(provider, id: id) } label: { Image(systemName: "minus.circle") }
+                    .buttonStyle(.borderless).help("Remove this account from the hub. Its folder and login are left as they are.")
+            }
+        }
     }
 }

@@ -54,6 +54,9 @@ final class BridgeModel: ObservableObject {
     @Published var catalogueRefreshing = false
     @Published var catalogueNotice = ""
     @Published var providerRefreshIssues: [String: String] = [:]
+    /// Last sign-in probe per CLI provider: the default login, then each extra account.
+    @Published var cliAccountStates: [String: [CliAccountState]] = [:]
+    @Published var cliAccountsChecking: Set<String> = []
     var catalogueRefreshTask: Task<Void, Never>?
     @Published var claudeInstalled = false
     @Published var claudeRunning = false
@@ -316,6 +319,12 @@ final class BridgeModel: ObservableObject {
         prefsOnly.claude_features = savedSettings.claude_features
         prefsOnly.claude_code_settings = savedSettings.claude_code_settings
         prefsOnly.claude_workflows = savedSettings.claude_workflows
+        // The gateway re-reads the active CLI account on every turn, so
+        // adding, renaming or switching accounts needs no restart either.
+        for id in prefsOnly.providers.keys {
+            prefsOnly.providers[id]?.cli_accounts = savedSettings.providers[id]?.cli_accounts
+            prefsOnly.providers[id]?.cli_account = savedSettings.providers[id]?.cli_account
+        }
         let codexChanged = settings.codex_model != savedSettings.codex_model
             || settings.codex_catalogue != savedSettings.codex_catalogue
             || settings.codex_chatgpt_account != savedSettings.codex_chatgpt_account
@@ -449,7 +458,7 @@ final class BridgeModel: ObservableObject {
                     try process.run()
                     if let input { try stdin.fileHandleForWriting.write(contentsOf: input) }
                     try stdin.fileHandleForWriting.close()
-                    let timeout: Double = ["refresh-all", "prepare-launch", "discover", "activate", "codex-prepare", "codex-activate"].contains(command) ? 120 : 45
+                    let timeout: Double = ["refresh-all", "prepare-launch", "discover", "activate", "codex-prepare", "codex-activate", "cli-accounts"].contains(command) ? 120 : 45
                     DispatchQueue.global().asyncAfter(deadline: .now() + timeout) {
                         if process.isRunning { process.terminate() }
                     }
@@ -1095,6 +1104,78 @@ final class BridgeModel: ObservableObject {
         var error: NSDictionary?
         NSAppleScript(source: source)?.executeAndReturnError(&error)
         if error != nil { tell("Terminal could not open Vibe. Start Vibe normally, then reconnect.", error: true) }
+    }
+
+    /// Ask each of a provider's CLI logins whether it is signed in. Sends the
+    /// pane's current settings, so an account added but not yet saved is
+    /// checked too.
+    func checkCliAccounts(_ provider: String) async {
+        guard !cliAccountsChecking.contains(provider) else { return }
+        cliAccountsChecking.insert(provider); defer { cliAccountsChecking.remove(provider) }
+        do {
+            let result = try await command("cli-accounts", provider: provider, input: try JSONEncoder().encode(settings))
+            cliAccountStates[provider] = (result["accounts"] as? [[String: Any]] ?? []).map {
+                CliAccountState(id: $0["id"] as? String, label: $0["label"] as? String ?? "",
+                                config_dir: $0["config_dir"] as? String, active: $0["active"] as? Bool ?? false,
+                                state: $0["state"] as? String ?? "unknown", detail: $0["detail"] as? String ?? "")
+            }
+        } catch {
+            tell(error.localizedDescription, error: true)
+        }
+    }
+
+    /// Pick (or create) the config folder for another CLI login. The CLI signs
+    /// in to it itself; the hub only stores the path.
+    func addCliAccount(_ provider: String) {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true; panel.canChooseFiles = false
+        panel.canCreateDirectories = true; panel.showsHiddenFiles = true
+        panel.allowsMultipleSelection = false
+        panel.directoryURL = FileManager.default.homeDirectoryForCurrentUser
+        panel.message = provider == "claude"
+            ? "Choose or create a folder for this Claude account, e.g. ~/.claude-work. Claude Code keeps that account's login there."
+            : "Choose or create a folder for this Codex account, e.g. ~/.codex-lite. Codex keeps that account's login there."
+        panel.prompt = "Use Folder"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        var accounts = settings.providers[provider]?.cli_accounts ?? []
+        guard !accounts.contains(where: { $0.config_dir == url.path }) else {
+            tell("That folder is already one of this provider’s accounts.", error: true); return
+        }
+        let name = url.lastPathComponent.trimmingCharacters(in: CharacterSet(charactersIn: "."))
+        let label = name.isEmpty ? "Account \(accounts.count + 2)" : String(name.prefix(60))
+        let base = String(label.lowercased().map { $0.isASCII && ($0.isLetter || $0.isNumber) ? $0 : "-" }
+            .drop { $0 == "-" }.prefix(24))
+        var id = base.isEmpty ? "account" : base
+        var suffix = 2
+        while accounts.contains(where: { $0.id == id }) { id = (base.isEmpty ? "account" : base) + "-\(suffix)"; suffix += 1 }
+        accounts.append(CliAccount(id: id, label: label, config_dir: url.path))
+        settings.providers[provider]?.cli_accounts = accounts
+    }
+
+    func removeCliAccount(_ provider: String, id: String) {
+        var accounts = settings.providers[provider]?.cli_accounts ?? []
+        accounts.removeAll { $0.id == id }
+        settings.providers[provider]?.cli_accounts = accounts.isEmpty ? nil : accounts
+        if settings.providers[provider]?.cli_account == id { settings.providers[provider]?.cli_account = nil }
+        cliAccountStates[provider]?.removeAll { $0.id == id }
+    }
+
+    /// Open Terminal on the CLI's own browser sign-in, pointed at the
+    /// account's folder. The CLI owns the whole OAuth flow and the login it
+    /// leaves behind; nothing passes through the hub.
+    func signInCliAccount(_ provider: String, folder: String?) {
+        func quote(_ value: String) -> String { "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'" }
+        let variable = provider == "claude" ? "CLAUDE_CONFIG_DIR" : "CODEX_HOME"
+        // Codex turns read the login from auth.json (see codex_cli_agent's
+        // credentials-store override), so the sign-in stores it there too.
+        let login = provider == "claude" ? "claude auth login && claude auth status"
+            : "codex login -c " + quote("cli_auth_credentials_store=\"file\"") + " && codex login status"
+        let script = folder.map { "export \(variable)=\(quote($0)) && mkdir -p \"$\(variable)\" && " + login } ?? login
+        let escaped = script.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
+        let source = "tell application \"Terminal\"\nactivate\ndo script \"\(escaped)\"\nend tell"
+        var error: NSDictionary?
+        NSAppleScript(source: source)?.executeAndReturnError(&error)
+        if error != nil { tell("Terminal could not open. Run this yourself, then check again: " + script, error: true) }
     }
 }
 
