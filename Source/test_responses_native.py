@@ -281,6 +281,22 @@ class NativeResponsesTests(unittest.TestCase):
             self.assertNotIn("CLIENT-KEY-NOT-FORWARDED", json.dumps(headers))
         self.assertNotIn(fixtures.LOCAL_REQUEST_TEXT, (self.root / "activity.jsonl").read_text())
 
+    def test_switching_to_a_native_route_drops_hub_sealed_reasoning(self):
+        """A thread switched here from a translated route carries reasoning
+        the hub sealed for that route; the native provider gets the thread
+        without it instead of the turn failing."""
+        self.start()
+        body = self.body()
+        body["input"] += [{"type": "reasoning", "encrypted_content": "ph_reasoning_v1.sealed-for-opus"},
+                          {"type": "reasoning", "encrypted_content": "opaque-provider-reasoning"},
+                          {"role": "user", "content": "Keep going"}]
+        status, raw = self.request(body)
+        self.assertEqual(status, 200, raw)
+        sent = MockProvider.requests[-1]["input"]
+        self.assertNotIn("ph_reasoning_v1.sealed-for-opus", json.dumps(sent))
+        self.assertIn("opaque-provider-reasoning", json.dumps(sent))
+        self.assertEqual(sent[-1]["content"], "Keep going")
+
     def test_streaming_preserves_function_deltas_and_terminal_usage(self):
         self.start()
         status, raw = self.request(self.body(stream=True))

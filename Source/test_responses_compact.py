@@ -13,7 +13,8 @@ from unittest.mock import patch
 
 from bridge_core import BridgeError
 from responses_bridge import ReasoningEnvelope
-from responses_compact import PREFIX, _split, compact_payload, expand_items, scope_for
+from responses_compact import (PARALLEL_SUMMARIES, PREFIX, _split, compact_payload, expand_items,
+                                scope_for, summarizer_route)
 from responses_native import prepare_native
 from test_cli_host_tools import MODELS
 
@@ -94,8 +95,8 @@ class CompactionTests(unittest.TestCase):
         envelope = ReasoningEnvelope(self.runtime.root)
         expanded = expand_items(result["output"], envelope, scope)
         self.assertIn("Earlier reads are complete", expanded[0]["content"][0]["text"])
-        with self.assertRaises(BridgeError):
-            expand_items(result["output"], envelope, "different-account")
+        # An in-app switch to another route keeps the thread's summary.
+        self.assertEqual(expand_items(result["output"], envelope, "another-route"), expanded)
         bad = copy.deepcopy(result["output"])
         bad[0]["encrypted_content"] = bad[0]["encrypted_content"][:-4] + "xxxx"
         with self.assertRaises(BridgeError):
@@ -192,6 +193,53 @@ class CompactionTests(unittest.TestCase):
                             for message in restored for block in message["content"]))
 
 
+class FasterCompactionTests(unittest.TestCase):
+    # The same fixture as CompactionTests, without re-running its tests.
+    setUp, summarize, compact = CompactionTests.setUp, CompactionTests.summarize, CompactionTests.compact
+
+    def test_claude_opus_and_fable_summarize_on_sonnet_when_catalogued(self):
+        specs = self.runtime.settings["_model_specs"]
+        for route in ("claude/opus", "claude/fable", "claude/sonnet", "claude/claude-haiku-4-5"):
+            specs[route] = {"context": 1000000}
+        self.assertEqual(summarizer_route(self.runtime, "claude/opus"), "claude/sonnet")
+        self.assertEqual(summarizer_route(self.runtime, "claude/fable"), "claude/sonnet")
+        self.assertEqual(summarizer_route(self.runtime, "claude/claude-haiku-4-5"), "claude/claude-haiku-4-5")
+        self.assertEqual(summarizer_route(self.runtime, self.route), self.route)
+        del specs["claude/sonnet"]
+        self.assertEqual(summarizer_route(self.runtime, "claude/opus"), "claude/opus")
+
+    def test_summary_written_by_sonnet_is_sealed_to_the_threads_route(self):
+        self.runtime.settings["providers"]["claude"] = {"credential_mode": "cli"}
+        for route in ("claude/opus", "claude/sonnet"):
+            self.runtime.settings["_model_specs"][route] = {"context": 1000000}
+        self.route = "claude/opus"
+        result = self.compact()
+        self.assertEqual({route for route, _, _ in self.calls}, {"claude/sonnet"})
+        _, scope = scope_for(self.runtime, "claude/opus")
+        sealed = ReasoningEnvelope(self.runtime.root).cipher.decrypt(
+            result["output"][0]["encrypted_content"][len(PREFIX):].encode())
+        self.assertEqual(json.loads(sealed)["scope"], scope)
+
+    def test_large_history_summarizes_pieces_side_by_side_in_order(self):
+        running, peak, lock = [0], [0], threading.Lock()
+
+        def summarize(route, transcript, instructions):
+            with lock:
+                running[0] += 1
+                peak[0] = max(peak[0], running[0])
+            time.sleep(.05)
+            with lock:
+                running[0] -= 1
+            head = transcript.split("\n", 1)[0]
+            return "summary of " + head[:40], {"input_tokens": 1, "output_tokens": 1}
+
+        items = [{"role": "user", "content": "x" * 900000}, *long_history()]
+        result = compact_payload(self.runtime, {"model": self.route, "input": items}, summarize)
+        self.assertGreater(peak[0], 1)
+        self.assertLessEqual(peak[0], PARALLEL_SUMMARIES)
+        self.assertEqual(result["object"], "response.compaction")
+
+
 class CompactionHTTPTests(unittest.TestCase):
     def setUp(self):
         from test_cli_routes import ResponsesEndToEndTest
@@ -257,8 +305,8 @@ class CompactionHTTPTests(unittest.TestCase):
     def test_disconnect_stops_silent_summary_and_prevents_later_segments(self):
         import cli_routes
         from test_cli_session import FakeProcess, make_session
-        entered, finished = threading.Event(), threading.Event()
-        requests = []
+        entered = threading.Event()
+        requests, finished = [], []
 
         def run(request, **kwargs):
             requests.append(request)
@@ -268,25 +316,28 @@ class CompactionHTTPTests(unittest.TestCase):
                 yield from session.events(timeout=30)
             finally:
                 session.close()
-                finished.set()
+                finished.append(request)
 
         cli_routes._cache["grok"].run_turn = run
         client = http.client.HTTPConnection("127.0.0.1", self.gateway.server_port, timeout=5)
         try:
             client.request("POST", "/v1/responses/compact", json.dumps({
                 "model": "grok/grok-4.6", "input": [
-                    {"role": "user", "content": "large transcript " * 20000}]}), {
+                    {"role": "user", "content": "large transcript " * 120000}]}), {
                 "Authorization": "Bearer " + self.runtime.token,
                 "Content-Type": "application/json"})
             self.assertTrue(entered.wait(3), "summary did not start")
             client.sock.shutdown(socket.SHUT_RDWR)
             client.close()
-            self.assertTrue(finished.wait(3), "cancelled compaction left a silent CLI running")
-            deadline = time.monotonic() + 2
-            while self.runtime.active and time.monotonic() < deadline:
+            # Pieces run PARALLEL_SUMMARIES at a time; every one that started
+            # must be torn down, and no piece past that first wave may start.
+            deadline = time.monotonic() + 3
+            while (len(finished) < len(requests) or self.runtime.active) and time.monotonic() < deadline:
                 time.sleep(.01)
+            self.assertEqual(len(finished), len(requests), "cancelled compaction left a silent CLI running")
             self.assertEqual(self.runtime.active, 0)
-            self.assertEqual(len(requests), 1, "a later summary segment started after cancellation")
+            self.assertLessEqual(len(requests), PARALLEL_SUMMARIES,
+                                 "a later summary segment started after cancellation")
         finally:
             client.close()
 

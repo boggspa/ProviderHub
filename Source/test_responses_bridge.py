@@ -102,6 +102,32 @@ class ResponsesBridgeTests(unittest.TestCase):
             with self.assertRaises(BridgeError): first.open("foreign-token", "account-one")
             self.assertNotIn("PRIVATE THINKING", ''.join(path.read_text() for path in root.iterdir() if path.is_file()))
 
+    def test_a_model_switch_drops_other_routes_reasoning_instead_of_failing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            envelope = ReasoningEnvelope(Path(directory))
+            opus = envelope.seal([{"type": "thinking", "thinking": "Opus planned this.", "signature": "s"}], "claude-opus")
+            mine = envelope.seal([{"type": "thinking", "thinking": "Kimi planned this.", "signature": "k"}], "kimi-k3")
+            body = {"input": [
+                {"type": "message", "role": "user", "content": "Keep playing"},
+                {"type": "reasoning", "encrypted_content": opus},
+                {"type": "reasoning", "encrypted_content": "gAAAA-native-openai-reasoning"},
+                {"type": "reasoning", "summary": [{"type": "summary_text", "text": "bare summary"}]},
+                {"type": "reasoning", "encrypted_content": mine},
+                {"type": "message", "role": "assistant", "content": "On it"},
+                {"type": "message", "role": "user", "content": "Continue"}], "stream": False, "store": False}
+            translated = to_messages(body, "kimi/k3", {}, envelope, "kimi-k3")
+            text = json.dumps(translated["messages"])
+            self.assertNotIn("Opus planned", text)
+            self.assertNotIn("bare summary", text)
+            self.assertIn("Kimi planned this.", text)
+            self.assertIn("Keep playing", text)
+            self.assertIn("Continue", text)
+            # Reasoning that authenticates for this very route but is corrupt still fails.
+            broken = envelope.cipher.encrypt(json.dumps({"scope": "kimi-k3", "blocks": [{"type": "text"}]}).encode()).decode()
+            with self.assertRaises(BridgeError):
+                to_messages({"input": [{"type": "reasoning", "encrypted_content": "ph_reasoning_v1." + broken}],
+                             "stream": False, "store": False}, "kimi/k3", {}, envelope, "kimi-k3")
+
     def test_codex_legacy_reasoning_and_phases_replay_without_native_references(self):
         from codex_cli_agent import _history_items
 

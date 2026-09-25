@@ -72,6 +72,27 @@ class ReasoningEnvelope:
             raise BridgeError("The saved reasoning history is malformed.")
         return blocks
 
+    def replayable(self, token, scope):
+        """The blocks to replay for this route, or [] for someone else's reasoning.
+
+        A Codex thread keeps its reasoning items across an in-app model
+        switch. Reasoning sealed for another route or account, sealed by
+        another install, or produced by a native provider cannot be replayed
+        to this model, and the model does not need it: the visible messages
+        and tool history carry the conversation. So it is dropped rather than
+        failing the turn. A token that authenticates for this very scope but
+        is malformed is still an error.
+        """
+        if not isinstance(token, str) or not token.startswith(ENVELOPE_PREFIX):
+            return []
+        try:
+            value = json.loads(self.cipher.decrypt(token[len(ENVELOPE_PREFIX):].encode()))
+        except Exception:
+            return []
+        if not isinstance(value, dict) or value.get("scope") != scope:
+            return []
+        return self.open(token, scope)
+
 
 def content_blocks(content):
     if isinstance(content, str):
@@ -180,11 +201,13 @@ def to_messages(body, route, spec, envelope, scope):
         elif kind == "function_call_output":
             add("user", tool_output_blocks(item))
         elif kind == "reasoning":
+            # Only this route's own sealed reasoning is replayed; anything
+            # else (another model's after a switch, or a bare summary) is
+            # dropped, never promoted to reasoning (see replayable).
             token = item.get("encrypted_content")
-            if token:
-                add("assistant", envelope.open(token, scope))
-            elif item.get("summary"):
-                raise BridgeError("Reasoning summaries cannot replace authenticated provider reasoning. Start a new task.")
+            blocks = envelope.replayable(token, scope) if token and envelope is not None else []
+            if blocks:
+                add("assistant", blocks)
         elif kind == "custom_tool_call":
             # The gateway normalizes these before delegating; direct callers
             # get the same projection so every layer accepts Codex history.

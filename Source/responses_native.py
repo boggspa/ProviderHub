@@ -706,8 +706,14 @@ def prepare_native(runtime, payload):
                 "provider_name": PROVIDERS[provider_id]["name"], "protocol": "messages_bridge",
                 "adapter": MessagesResponsesAdapter(requested, envelope, scope, tool_map,
                                                     expose_reasoning_summaries=expose_summaries)}
-    if isinstance(body["input"], list) and any(isinstance(item, dict) and str(item.get("encrypted_content", "")).startswith(ENVELOPE_PREFIX) for item in body["input"]):
-        raise BridgeError("This reasoning history belongs to a different provider connection. Start a new task when changing providers.")
+    if isinstance(body["input"], list):
+        # Reasoning the hub sealed for a translated route (the thread was
+        # switched here from one) means nothing to a native provider. Drop
+        # it rather than failing the turn; the messages and tool history
+        # still carry the conversation.
+        body["input"] = [item for item in body["input"] if not (
+            isinstance(item, dict) and item.get("type") == "reasoning"
+            and str(item.get("encrypted_content", "")).startswith(ENVELOPE_PREFIX))]
     if provider_id == "openrouter":
         try:
             openrouter_finalize(body, spec, key, responses=True, search=search)
