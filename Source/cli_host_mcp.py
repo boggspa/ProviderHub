@@ -8,9 +8,12 @@ Serving the harness's tools from an MCP server puts them in the model's real
 tool list, so every model calls them the way it was trained to, and the
 adapter hands each call to the harness exactly as before.
 
-The server (host_tools_mcp.py) only lists the tools. Execution stays with the
-harness: the adapter reads the call off the CLI's stream and ends the turn,
-and the CLI's fail-closed permission mode refuses to run the call itself.
+The server (host_tools_mcp.py) never executes anything. By default it only
+lists the tools: the adapter reads the call off the CLI's stream and ends the
+turn, and the CLI's fail-closed permission mode refuses to run the call itself.
+With a bridge (cli_host_bridge) the CLI may call them, and the server forwards
+each call to the hub, which answers it with the harness's result so that the
+same CLI process carries on.
 """
 from __future__ import annotations
 
@@ -27,6 +30,15 @@ SERVER_NAME = "host"
 SERVER_SCRIPT = Path(__file__).resolve().with_name("host_tools_mcp.py")
 #: The providers' tool-name ceiling (Anthropic and xAI both allow 64).
 NAME_LIMIT = 64
+#: Inline result ceiling a bridged tool declares (``anthropic/maxResultSizeChars``,
+#: claude 2.1.280's cap). Past its default, Claude Code saves a large result to a
+#: file and shows the model a preview, and a route without file tools cannot read it.
+LIVE_RESULT_CHARS = 500_000
+#: For bridged tools only. Claude Code runs the calls of one message
+#: concurrently only when every tool is marked read-only (``readOnlyHint``), and
+#: a live session needs all of a message's calls waiting at once before the
+#: host runs any of them. Nothing ever runs inside the CLI either way.
+LIVE_ANNOTATIONS = {"readOnlyHint": True}
 
 
 def _alias(name: str, budget: int, taken) -> str:
@@ -78,7 +90,7 @@ class HostToolset:
     def model_names(self) -> frozenset[str]:
         return frozenset(self._hosts)
 
-    def served_tools(self) -> list[dict]:
+    def served_tools(self, *, live: bool = False) -> list[dict]:
         """The tool list the server publishes, in the host's order."""
         served = []
         for tool in self.tools:
@@ -86,16 +98,26 @@ class HostToolset:
             description = tool.get("description") or ""
             if name != tool["name"]:
                 description = f"(Host tool `{tool['name']}`.) " + description
-            served.append({"name": name, "description": description,
-                           "input_schema": tool.get("input_schema") or {"type": "object", "properties": {}}})
+            entry = {"name": name, "description": description,
+                     "input_schema": tool.get("input_schema") or {"type": "object", "properties": {}}}
+            if live:
+                entry["annotations"] = dict(LIVE_ANNOTATIONS)
+                entry["_meta"] = {"anthropic/maxResultSizeChars": LIVE_RESULT_CHARS}
+            served.append(entry)
         return served
 
-    def write(self, directory) -> Path:
-        """Write the server's tools file into ``directory`` (owner-only) and return its path."""
+    def write(self, directory, *, bridge=None) -> Path:
+        """Write the server's tools file into ``directory`` (owner-only) and return its path.
+
+        With ``bridge`` (a cli_host_bridge.HostCallBridge) the file also carries
+        its endpoint, and the server forwards calls instead of refusing them.
+        """
         path = Path(directory) / "host-tools.json"
+        payload = (self.served_tools() if bridge is None
+                   else {"tools": self.served_tools(live=True), "bridge": bridge.endpoint})
         descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            json.dump(self.served_tools(), handle, ensure_ascii=False)
+            json.dump(payload, handle, ensure_ascii=False)
         return path
 
 

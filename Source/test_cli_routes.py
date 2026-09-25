@@ -280,6 +280,24 @@ class CliRoutesTest(unittest.TestCase):
                     self.assertNotIn("host_tool_schema", plan["body"])
                     self.assertEqual(plan["compatibility"]["cli_host_tools"], transport)
 
+    def test_plan_turn_gives_a_live_session_adapter_its_typed_history(self):
+        # Claude matches a host request to the CLI waiting on its calls by the
+        # typed history; the flattened transcript cannot show tool ids.
+        tools = [{"name": "get_weather", "description": "Fetch weather.",
+                  "input_schema": {"type": "object", "properties": {"city": {"type": "string"}}}}]
+        messages = [{"role": "developer", "content": "House rules."},
+                    {"role": "user", "content": [{"type": "text", "text": "Weather in Paris?"}]},
+                    {"role": "assistant", "content": [{"type": "tool_use", "id": "toolu_1", "name": "get_weather",
+                                                       "input": {"city": "Paris"}}]},
+                    {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_1",
+                                                  "content": "Sunny"}]}]
+        plan = plan_turn("claude", "sonnet", {"messages": messages, "tools": tools}, {}, wanted_output=64)
+        self.assertEqual(plan["body"]["history"], messages[1:])
+        without_tools = plan_turn("claude", "sonnet", {"messages": messages}, {}, wanted_output=64)
+        self.assertNotIn("history", without_tools["body"])
+        grok = plan_turn("grok", "grok-4.7", {"messages": messages, "tools": tools}, {}, wanted_output=64)
+        self.assertNotIn("history", grok["body"])
+
     def test_plan_turn_tool_choice_none_suppresses_tools(self):
         payload = {"messages": [{"role": "user", "content": "hi"}],
                    "tools": [{"name": "get_weather"}],

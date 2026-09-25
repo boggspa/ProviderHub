@@ -8,11 +8,16 @@ injected by monkeypatching the module's ``StdioSession`` name.
 from __future__ import annotations
 
 import json
+import queue
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
 
 import claude_cli_agent as m
+import host_tools_mcp
+from codex_session_pool import SessionPool
 
 
 class _FakeStdin:
@@ -162,6 +167,16 @@ class BuildArgvTests(unittest.TestCase):
         # Safety invariants hold by construction.
         for flag in m._FORBIDDEN_FLAGS:
             self.assertNotIn(flag, argv)
+
+    def test_live_sessions_pre_approve_only_the_host_server(self):
+        config = '{"mcpServers":{}}'
+        argv = m.build_argv("sonnet", mcp_config=config, run_host_tools=True)
+        self.assertEqual(argv[-4:], ["--allowedTools", "mcp__host", "--tools", ""])
+        argv = m.build_argv("sonnet", search=True, mcp_config=config, run_host_tools=True)
+        self.assertEqual(argv[-4:], ["--allowedTools", "WebSearch,mcp__host", "--tools", "WebSearch"])
+        self.assertNotIn("--allowedTools", m.build_argv("sonnet", mcp_config=config))
+        with self.assertRaises(m.ClaudeCliAgentError):
+            m.build_argv("sonnet", run_host_tools=True)
 
     def test_forbidden_flag_assertion_fires(self):
         for bad in ([*list(m._FORBIDDEN_FLAGS)],
@@ -845,6 +860,320 @@ class RunTurnTests(unittest.TestCase):
                 events = list(m.run_turn(request))
                 self.assertEqual([e["type"] for e in events], ["error"])
                 self.assertIn(needle, events[0]["message"])
+
+
+# -- live sessions ------------------------------------------------------------
+
+_EXIT = object()
+
+
+def _calls(*calls):
+    """A script step: the CLI makes these MCP calls, as (tool_use id, served name, arguments)."""
+    return ("calls", calls)
+
+
+def _message_start(identifier):
+    return {"type": "stream_event", "event": {"type": "message_start", "message": {"id": identifier}}}
+
+
+def _text(index, text):
+    return {"type": "stream_event", "event": {"type": "content_block_delta", "index": index,
+                                              "delta": {"type": "text_delta", "text": text}}}
+
+
+class _LiveCli:
+    """A scripted Claude CLI whose host calls really wait in the hub's bridge.
+
+    Script items are stream lines, ``_calls(...)`` to make MCP calls the way
+    host_tools_mcp does (each blocks in the bridge until the hub delivers its
+    result, then the CLI echoes the results as Claude Code 2.1.280 does), or
+    ``_EXIT`` for a clean exit.
+    """
+
+    def __init__(self, argv, script, **kwargs):
+        self.argv = list(argv)
+        self.env = kwargs.get("env")
+        self.lines = queue.Queue()
+        self.returncode = None
+        self.process = mock.Mock()
+        self.process.terminate.side_effect = self._stop
+        self.stdin = _RecordingStdin()
+        self.closed = threading.Event()
+        self.results = {}
+        config = json.loads(argv[argv.index("--mcp-config") + 1])
+        self.server = config["mcpServers"]["host"]
+        with open(self.server["args"][-1], encoding="utf-8") as handle:
+            self.served = json.load(handle)
+        threading.Thread(target=self._play, args=(script,), daemon=True).start()
+
+    def _play(self, script):
+        for item in script:
+            if item is _EXIT:
+                self.returncode = 0
+                self.lines.put(_EXIT)
+            elif isinstance(item, tuple) and item[0] == "calls":
+                self._call(item[1])
+            else:
+                self.lines.put(item)
+
+    def _call(self, calls):
+        def forward(identifier, name, arguments):
+            request = {"jsonrpc": "2.0", "id": identifier, "method": "tools/call", "params": {
+                "name": name, "arguments": arguments, "_meta": {host_tools_mcp.TOOL_USE_META: identifier}}}
+            self.results[identifier] = host_tools_mcp.forward(request, self.served["bridge"])
+
+        threads = [threading.Thread(target=forward, args=call, daemon=True) for call in calls]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(30)
+        if self.returncode is None:
+            for identifier, _, _ in calls:
+                self.lines.put({"type": "user", "message": {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": identifier,
+                     "content": self.results[identifier]["content"]}]}})
+
+    def events(self, timeout=None):
+        deadline = time.monotonic() + (timeout or 5)
+        while time.monotonic() < deadline:
+            try:
+                item = self.lines.get(timeout=0.02)
+            except queue.Empty:
+                continue
+            if item is _EXIT:
+                self.lines.put(_EXIT)
+                return
+            yield item
+
+    def _stop(self):
+        if self.returncode is None:
+            self.returncode = -15
+        self.lines.put(_EXIT)
+
+    def close(self):
+        self._stop()
+        self.closed.set()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.close()
+
+
+_TASK = [{"role": "user", "content": [{"type": "text", "text": "list the files"}]}]
+
+
+def _host_leg(identifier="toolu_1", arguments='{"cmd": "ls"}', text="Listing."):
+    return [_message_start("msg_1"), _text(0, text),
+            _block_start(1, {"type": "tool_use", "id": identifier, "name": "mcp__host__exec_command", "input": {}}),
+            _json_delta(1, ""), _json_delta(1, arguments), _block_stop(1), _message_delta("tool_use")]
+
+
+def _answered(history, calls, results, *, text="Listing."):
+    """``history`` continued the way the host sends it: the handoff message, then its results."""
+    return [*history,
+            {"role": "assistant", "content": [{"type": "text", "text": text}, *[
+                {"type": "tool_use", "id": identifier, "name": name, "input": arguments}
+                for identifier, name, arguments in calls]]},
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": identifier, "content": result}
+                                         for identifier, result in results]}]
+
+
+class LiveSessionTests(unittest.TestCase):
+    def setUp(self):
+        self.pool = SessionPool(m._dispose_live, capacity=2, idle_ttl=0, pending_ttl=60, label="Claude")
+        self.addCleanup(self.pool.close)
+        self.spawned = []
+        self.scripts = []
+
+        def factory(argv, **kwargs):
+            session = _LiveCli(argv, self.scripts[len(self.spawned)], **kwargs)
+            self.spawned.append(session)
+            return session
+
+        for patcher in (mock.patch.object(m, "StdioSession", side_effect=factory),
+                        mock.patch.object(m, "_resolve_binary", return_value="/fake/claude"),
+                        mock.patch.object(m, "_LIVE_CONFIRM_SECONDS", 1.0)):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def turn(self, history, **extra):
+        request = {"model": "sonnet", "messages": [{"role": "user", "content": "list the files"}],
+                   "tools": _HOST_TOOLS, "history": history, **extra}
+        return list(m.run_turn(request, pool=self.pool))
+
+    def test_the_cli_waits_in_its_host_call_and_the_result_resumes_it(self):
+        self.scripts = [[_MCP_INIT, *_host_leg(), _calls(("toolu_1", "exec_command", {"cmd": "ls"})),
+                         _message_start("msg_2"), _text(0, "Two files."),
+                         _result_event(result="Two files."), _EXIT]]
+        first = self.turn(_TASK)
+        self.assertEqual([e["type"] for e in first], ["text_delta", "tool_call", "message_stop"])
+        self.assertEqual(first[1], {"type": "tool_call", "id": "toolu_1", "name": "exec_command",
+                                    "input": {"cmd": "ls"}})
+        self.assertEqual(first[2]["stop_reason"], "tool_use")
+        [cli] = self.spawned
+        cli.process.terminate.assert_not_called()
+        self.assertEqual(cli.argv[-4:], ["--allowedTools", "mcp__host", "--tools", ""])
+        self.assertEqual(cli.server["timeout"], m._LIVE_CALL_TIMEOUT_MS)
+        self.assertEqual({key: cli.env[key] for key in m._LIVE_ENV}, m._LIVE_ENV)
+        self.assertEqual(cli.served["tools"][0]["annotations"], {"readOnlyHint": True})
+
+        second = self.turn(_answered(_TASK, [("toolu_1", "exec_command", {"cmd": "ls"})],
+                                     [("toolu_1", "a.txt\nb.txt")]))
+        self.assertEqual(second, [{"type": "text_delta", "text": "Two files."},
+                                  {"type": "message_stop", "stop_reason": "end_turn"}])
+        self.assertEqual(len(self.spawned), 1)
+        self.assertEqual(cli.results["toolu_1"], {"content": [{"type": "text", "text": "a.txt\nb.txt"}],
+                                                  "isError": False})
+        # A finished turn keeps nothing waiting.
+        self.assertTrue(cli.closed.wait(5))
+
+    def test_parallel_calls_wait_together_and_take_their_own_results(self):
+        leg = [_MCP_INIT, _message_start("msg_1"),
+               _block_start(0, {"type": "tool_use", "id": "toolu_a", "name": "mcp__host__get_goal", "input": {}}),
+               _block_stop(0),
+               _block_start(1, {"type": "tool_use", "id": "toolu_b", "name": "mcp__host__exec_command",
+                                "input": {}}),
+               _json_delta(1, '{"cmd": "pwd"}'), _block_stop(1), _message_delta("tool_use")]
+        calls = [("toolu_a", "get_goal", {}), ("toolu_b", "exec_command", {"cmd": "pwd"})]
+        self.scripts = [[*leg, _calls(*calls), _message_start("msg_2"), _text(0, "Done."),
+                         _result_event(result="Done."), _EXIT]]
+        first = self.turn(_TASK)
+        self.assertEqual([(e["type"], e.get("id")) for e in first],
+                         [("tool_call", "toolu_a"), ("tool_call", "toolu_b"), ("message_stop", None)])
+        second = self.turn(_answered(_TASK, calls, [("toolu_b", [{"type": "text", "text": "/work"}]),
+                                                    ("toolu_a", "ship it")], text=""))
+        self.assertEqual([e["type"] for e in second], ["text_delta", "message_stop"])
+        [cli] = self.spawned
+        self.assertEqual(cli.results["toolu_a"]["content"], [{"type": "text", "text": "ship it"}])
+        self.assertEqual(cli.results["toolu_b"]["content"], [{"type": "text", "text": "/work"}])
+
+    def test_a_second_host_call_keeps_the_same_cli_waiting_again(self):
+        self.scripts = [[_MCP_INIT, *_host_leg(), _calls(("toolu_1", "exec_command", {"cmd": "ls"})),
+                         _message_start("msg_2"),
+                         _block_start(0, {"type": "tool_use", "id": "toolu_2", "name": "mcp__host__exec_command",
+                                          "input": {}}),
+                         _json_delta(0, '{"cmd": "cat a.txt"}'), _block_stop(0), _message_delta("tool_use"),
+                         _calls(("toolu_2", "exec_command", {"cmd": "cat a.txt"})),
+                         _message_start("msg_3"), _text(0, "It says hi."), _result_event(result="It says hi."),
+                         _EXIT]]
+        self.turn(_TASK)
+        history = _answered(_TASK, [("toolu_1", "exec_command", {"cmd": "ls"})], [("toolu_1", "a.txt")])
+        second = self.turn(history)
+        self.assertEqual([(e["type"], e.get("id")) for e in second],
+                         [("tool_call", "toolu_2"), ("message_stop", None)])
+        third = self.turn(_answered(history, [("toolu_2", "exec_command", {"cmd": "cat a.txt"})],
+                                    [("toolu_2", "hi")], text=""))
+        self.assertEqual([e.get("text") for e in third if e["type"] == "text_delta"], ["It says hi."])
+        self.assertEqual(len(self.spawned), 1)
+
+    def test_anything_but_an_exact_continuation_replays_into_a_fresh_cli(self):
+        calls = [("toolu_1", "exec_command", {"cmd": "ls"})]
+        variants = {
+            "new user input": [*_answered(_TASK, calls, [("toolu_1", "a.txt")])[:-1],
+                               {"role": "user", "content": [
+                                   {"type": "tool_result", "tool_use_id": "toolu_1", "content": "a.txt"},
+                                   {"type": "text", "text": "actually, stop"}]}],
+            "edited history": _answered([{"role": "user", "content": [{"type": "text", "text": "other task"}]}],
+                                        calls, [("toolu_1", "a.txt")]),
+            "missing result": _answered(_TASK, calls, [])[:-1],
+            "other call": _answered(_TASK, [("toolu_9", "exec_command", {"cmd": "ls"})], [("toolu_9", "a.txt")]),
+        }
+        for label, history in variants.items():
+            with self.subTest(label):
+                self.spawned.clear()
+                self.scripts = [[_MCP_INIT, *_host_leg(), _calls(*calls)],
+                                [_MCP_INIT, _message_start("msg_9"), _text(0, "Fresh."),
+                                 _result_event(result="Fresh."), _EXIT]]
+                self.turn(_TASK)
+                replayed = self.turn(history)
+                self.assertEqual([e.get("text") for e in replayed if e["type"] == "text_delta"], ["Fresh."])
+                self.assertEqual(len(self.spawned), 2)
+                self.assertEqual(self.spawned[0].results, {})
+
+    def test_a_cli_that_does_not_wait_in_the_bridge_is_handed_off_statelessly(self):
+        for label, tail in (("answered itself", [_denied("toolu_1")]), ("never called", [])):
+            with self.subTest(label):
+                self.spawned.clear()
+                self.scripts = [[_MCP_INIT, *_host_leg(), *tail],
+                                [_MCP_INIT, _message_start("msg_9"), _text(0, "Fresh."),
+                                 _result_event(result="Fresh."), _EXIT]]
+                first = self.turn(_TASK)
+                self.assertEqual([e["type"] for e in first], ["text_delta", "tool_call", "message_stop"])
+                self.spawned[0].process.terminate.assert_called()
+                replayed = self.turn(_answered(_TASK, [("toolu_1", "exec_command", {"cmd": "ls"})],
+                                               [("toolu_1", "a.txt")]))
+                self.assertEqual([e.get("text") for e in replayed if e["type"] == "text_delta"], ["Fresh."])
+                self.assertEqual(len(self.spawned), 2)
+
+    def test_a_handoff_the_client_never_received_keeps_nothing_waiting(self):
+        self.scripts = [[_MCP_INIT, *_host_leg(), _calls(("toolu_1", "exec_command", {"cmd": "ls"}))]]
+        timing = mock.Mock(delivered=False)
+        request = {"model": "sonnet", "messages": [{"role": "user", "content": "list the files"}],
+                   "tools": _HOST_TOOLS, "history": _TASK, "_cli_timing": timing}
+        events = list(m.run_turn(request, pool=self.pool))
+        self.assertEqual(events[-1], {"type": "message_stop", "stop_reason": "tool_use"})
+        self.assertTrue(self.spawned[0].closed.wait(5))
+        self.assertEqual(self.spawned[0].results["toolu_1"]["content"][0]["text"], host_tools_mcp.NO_RESULT)
+
+    def test_a_busy_pool_replays_and_a_cancelled_wait_is_an_error(self):
+        self.scripts = [[_MCP_INIT, _message_start("msg_1"), _text(0, "hi"), _result_event(result="hi"), _EXIT]]
+        with mock.patch.object(self.pool, "acquire", side_effect=RuntimeError("at capacity")):
+            events = self.turn(_TASK)
+        self.assertEqual([e["type"] for e in events], ["text_delta", "message_stop"])
+        self.assertNotIn("mcp__host", self.spawned[0].argv)
+        with mock.patch.object(self.pool, "acquire", side_effect=BrokenPipeError("The CLI request was cancelled.")):
+            events = self.turn(_TASK)
+        self.assertEqual([e["type"] for e in events], ["error"])
+        self.assertIn("cancelled", events[0]["message"])
+        self.assertEqual(len(self.spawned), 1)
+
+    def test_without_typed_history_the_turn_stays_stateless(self):
+        self.scripts = [[_MCP_INIT, _message_start("msg_1"), _text(0, "hi"), _result_event(result="hi"), _EXIT]]
+        with mock.patch.object(m, "_live_turn") as live:
+            request = {"model": "sonnet", "messages": [{"role": "user", "content": "hi"}], "tools": _HOST_TOOLS}
+            events = list(m.run_turn(request, pool=self.pool))
+        live.assert_not_called()
+        self.assertEqual([e["type"] for e in events], ["text_delta", "message_stop"])
+        self.assertNotIn("mcp__host", self.spawned[0].argv)
+
+
+class ContinuationTests(unittest.TestCase):
+    def lease(self, history, calls):
+        blocks = m.history_blocks(history)
+        return mock.Mock(pending={"calls": {identifier: {"id": identifier, "name": name, "input": arguments}
+                                            for identifier, name, arguments in calls},
+                                  "prefix": m.digest(blocks), "prefix_count": len(blocks)})
+
+    def test_results_become_mcp_content(self):
+        png = ("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==")
+        image = {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": png}}
+        self.assertEqual(m._mcp_result({"content": "a.txt"}), {"content": [{"type": "text", "text": "a.txt"}],
+                                                               "isError": False})
+        self.assertEqual(m._mcp_result({"content": [{"type": "text", "text": "shot"}, image], "is_error": True}),
+                         {"content": [{"type": "text", "text": "shot"},
+                                      {"type": "image", "data": png, "mimeType": "image/png"}], "isError": True})
+        self.assertEqual(m._mcp_result({"content": ""}), {"content": [], "isError": False})
+        for unsupported in ({"content": [{"type": "document", "source": {}}]},
+                            {"content": [{"type": "image", "source": {"type": "url", "url": "https://x.test/a.png"}}]},
+                            {"content": 7}):
+            self.assertIsNone(m._mcp_result(unsupported))
+
+    def test_only_the_handoff_message_and_its_results_may_follow(self):
+        calls = [("toolu_1", "exec_command", {"cmd": "ls"})]
+        lease = self.lease(_TASK, calls)
+        exact = _answered(_TASK, calls, [("toolu_1", "a.txt")])
+        self.assertEqual(m._continuation(lease, exact),
+                         {"toolu_1": {"content": [{"type": "text", "text": "a.txt"}], "isError": False}})
+        # Reasoning or no text in the handoff message is fine.
+        self.assertIsNotNone(m._continuation(lease, _answered(_TASK, calls, [("toolu_1", "a.txt")], text="")))
+        after_results = [*exact, {"role": "assistant", "content": [{"type": "text", "text": "more"}]}]
+        renamed = _answered(_TASK, [("toolu_1", "get_goal", {"cmd": "ls"})], [("toolu_1", "a.txt")])
+        twice = [*exact[:-1], {"role": "user", "content": exact[-1]["content"] * 2}]
+        for history in (after_results, renamed, twice, _TASK, None, exact[:1] + exact[1:2]):
+            self.assertIsNone(m._continuation(lease, history))
+        self.assertIsNone(m._continuation(mock.Mock(pending=None), exact))
 
 
 if __name__ == "__main__":

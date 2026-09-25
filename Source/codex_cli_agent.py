@@ -135,7 +135,7 @@ import tomllib
 import uuid
 
 from cli_session import CliSessionError, StdioSession, minimal_env, resolve_binary
-from codex_session_pool import SessionPool
+from codex_session_pool import SessionPool, digest as _digest, history_blocks as _history_blocks
 from cli_lifecycle import cleanup_after_exit
 from cli_tool_call import HOST_EXECUTION_NOTE, normalize_tools, validate_host_call
 from cli_images import normalize_images, responses_content
@@ -1607,23 +1607,6 @@ def _teardown(session, workspace):
             cleanup_after_exit(session, workspace.close)
         except Exception:  # noqa: BLE001
             pass
-
-
-def _digest(value):
-    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"),
-                                     ensure_ascii=False).encode()).hexdigest()
-
-
-def _history_blocks(history):
-    """Ignore message grouping, but retain every model-visible block in order."""
-    blocks = []
-    for message in history or []:
-        content = message.get("content") or []
-        if isinstance(content, str):
-            content = [{"type": "text", "text": content}]
-        for block in content:
-            blocks.append((message.get("role"), block))
-    return blocks
 
 
 def _continuation(lease, payload):

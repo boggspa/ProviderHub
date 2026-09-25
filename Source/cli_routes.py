@@ -482,9 +482,10 @@ def plan_turn(provider_id: str, upstream_model: str, payload: dict, spec: dict,
         if getattr(adapter, "WEB_SEARCH", False) is not True:
             raise CliRouteError("This CLI route cannot run hosted web search.")
         request["web_search"] = search
-    if dynamic_tools:
-        # Keep typed tool calls/results for Codex's native history injection.
-        # Flattening these into a new user transcript loses the tool loop.
+    if dynamic_tools or (tools and getattr(adapter, "LIVE_HOST_CALLS", False)):
+        # Keep typed tool calls/results for Codex's native history injection,
+        # and for an adapter that matches a host request to the live CLI
+        # waiting on its calls. Flattening these loses the tool loop.
         request["history"] = [message for message in history
                               if isinstance(message, dict) and message.get("role") in {"user", "assistant"}]
     return {

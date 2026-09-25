@@ -1,3 +1,68 @@
+**The Claude CLI route keeps one process across host calls — 25 September 2026**
+
+> **Historical record.** Dated 25 September 2026. Version numbers, build
+> numbers and test counts below are as they were then and are not maintained.
+> For current state see [`README.md`](README.md).
+
+Native host tools (next entry) still ended the Claude CLI at every host call.
+Each step then spawned a fresh process and replayed the whole conversation as
+a transcript, so the model lost its reasoning and search results every step.
+Earlier tool calls also reached it as text, not as native tool history. Now,
+when the route passes typed history, the Claude adapter runs the `host` MCP
+server with a bridge (`cli_host_bridge.py`). The host tools are pre-approved
+for that server alone. The server forwards each `tools/call` over a private
+Unix socket to the hub and waits there, so the CLI waits inside its own tool
+call.
+
+The adapter hands a message's calls to the host only once the bridge shows
+the CLI waiting on exactly those calls: the same tool_use id, tool and
+arguments. It then keeps the process in a pool lease (`codex_session_pool`,
+four waiting CLIs at most, 15 minutes each). The next request resumes that
+process only if it continues exactly from the handoff: the same earlier
+history, that message, then one result per call and nothing else. The
+results then answer the waiting calls. Anything else replays into a fresh
+process as before: new user input, edited or compacted history, an exited CLI,
+a result the CLI cannot take, or a CLI not waiting on every call. If the hub
+disappears mid-call, the server SIGTERMs its CLI rather than let the model
+carry on unsupervised.
+
+Claude Code 2.1.280 facts this depends on, from probes with a logging stub
+server and from the binary:
+
+- Every `tools/call` carries `_meta["claudecode/toolUseId"]`, the stream's
+  tool_use id, and a `progressToken`.
+- A message's calls reach the server concurrently only when each tool has
+  `readOnlyHint` (`isConcurrencySafe` reads it). Without it, the second call
+  arrived only after the first one's result. The bridge needs every call
+  waiting before the host runs any, so bridged tools carry the hint.
+- A per-server `timeout` is both the hard limit and the idle limit of one
+  call. The stdio idle default is 30 minutes. The bridge sets one hour, past
+  the pool's 15.
+- Results past 25,000 tokens (`MAX_MCP_OUTPUT_TOKENS`) are truncated, and past
+  the tool's `maxResultSizeChars` they are saved to a file behind a 2 KB
+  preview, which a route without file tools cannot read. Bridged tools
+  declare `anthropic/maxResultSizeChars` 500,000 (the CLI's ceiling), and the
+  child gets `MAX_MCP_OUTPUT_TOKENS=150000`.
+- Long calls are never auto-backgrounded in print mode. The child also sets
+  `CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS=0`.
+- An empty result reaches the model as "(mcp__host__… completed with no
+  output)".
+
+Live on claude 2.1.280, with Codex's 111 tools and search on, through
+`cli_routes.plan_turn`, `run_turn` and `relay_cli_turn`. The task was to
+report the repository's branch and then, as a separate step, its commit
+count, with host results taken from fixed read-only git commands:
+
+| Model | Step 1 (cold) | Step 2 (resumed) | Step 3 (resumed) |
+| --- | --- | --- | --- |
+| Sonnet 5 | `exec_command` branch, 2.3 s | "Branch: `main`." then `rev-list --count`, 1.2 s | "Branch: `main`, with 235 commits.", 0.7 s |
+| Opus 5.5 | `exec_command` branch, 2.8 s | `rev-list --count`, 1.3 s | "The repo is on the `main` branch, which has 235 commits.", 0.9 s |
+
+Each run used one CLI process. Between steps the pool held one waiting lease
+with the process alive, and after the answer the pool was empty and the
+process had exited. Before this change, the follow-up step on this route took
+2.7 s from a fresh process.
+
 **CLI-backed routes get native host tools — 25 September 2026**
 
 > **Historical record.** Dated 25 September 2026. Version numbers, build

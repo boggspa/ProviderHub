@@ -58,6 +58,24 @@ class HostToolsetTests(unittest.TestCase):
             with self.assertRaises(FileExistsError):
                 toolset.write(directory)
 
+    def test_a_bridged_tools_file_carries_the_endpoint_and_live_hints(self):
+        class Bridge:
+            endpoint = {"socket": "/private/tmp/x/host.sock", "token": "t0k"}
+
+        with tempfile.TemporaryDirectory() as directory:
+            toolset = HostToolset([tool("exec_command", "Run it.")], prefix=PREFIX)
+            path = toolset.write(directory, bridge=Bridge())
+            self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
+            payload = json.loads(path.read_text())
+            self.assertEqual(payload["bridge"], Bridge.endpoint)
+            self.assertEqual(payload["tools"], [
+                {"name": "exec_command", "description": "Run it.",
+                 "input_schema": {"type": "object", "properties": {}},
+                 # Claude Code runs a message's calls together only for
+                 # read-only tools, and keeps results this large inline.
+                 "annotations": {"readOnlyHint": True},
+                 "_meta": {"anthropic/maxResultSizeChars": 500_000}}])
+
     def test_server_command_keeps_the_signed_interpreter_clean(self):
         command = server_command("/tmp/tools.json")
         self.assertEqual(command, [sys.executable, "-I", "-B", str(SERVER_SCRIPT), "/tmp/tools.json"])

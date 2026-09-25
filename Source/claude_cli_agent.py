@@ -41,6 +41,26 @@ registry lacks the name: the CLI cannot have run it, so the host runs it
 exactly once. A native call for a tool nobody provides becomes the route's
 protocol correction rather than the CLI's "No such tool available".
 
+Live sessions. Ending the CLI at every host call made each step a fresh
+process fed the whole conversation as a transcript: the model's reasoning,
+its search results and its native tool history were gone at every step. So a
+turn whose request carries its typed history runs the ``host`` server with a
+bridge (cli_host_bridge) instead. The host tools are pre-approved for that
+server alone, and it forwards each call to the hub rather than refusing it,
+so the CLI waits inside its own tool call. Once the bridge shows the CLI
+waiting on exactly the calls its message made (same ids, tools and
+arguments), the adapter hands them to the host and keeps the process in a
+pool lease. When the host's next request continues from that handoff -
+unchanged history, then that message, then one result per call and nothing
+else - the results answer the waiting calls and the same process streams on.
+Anything else replays the conversation into a fresh process as before: an
+edited or compacted history, new user input, a CLI that has exited, a result
+it cannot take, or a CLI that is not waiting on every call it made. Verified
+live on claude 2.1.280 through the route with Codex's 111 tools and search
+on: Sonnet 5 and Opus 5.5 each ran a three-step git task on one process (the
+first step cold in 2.3-2.8 s, each continuation resumed in 0.7-1.3 s), and
+the process exited when the turn ended.
+
 Permission mode matrix tested live on claude 2.1.276:
  - ``plan``: tools=[], BUT injects plan-mode persona ("I'm in plan mode...")
  - ``default``: tools=[], NO persona, fail-closed via --permission-prompts none
@@ -64,6 +84,7 @@ versus ``"prompt"`` for CLIs that expose no system-prompt flag.
 """
 from __future__ import annotations
 
+import atexit
 import json
 import re
 import shutil
@@ -75,11 +96,13 @@ from typing import Any, Callable, Iterable, Iterator
 
 from cli_session import CliSessionError, StdioSession, minimal_env, resolve_binary
 from cli_lifecycle import cleanup_after_exit
+from cli_host_bridge import HostBridgeError, HostCallBridge
 from cli_host_mcp import SERVER_NAME, HostToolset, server_command, tools_note
 from cli_tool_call import (MAX_ENVELOPE_BYTES, TRANSCRIPT_HEADER, ToolCallError,
                            normalize_tools, render_tool_anchor, render_tool_manifest,
                            validate_host_call)
-from cli_images import prompt_content
+from cli_images import CliImageError, normalize_image, prompt_content
+from codex_session_pool import SessionPool, digest, history_blocks
 from fast_models import supports_fast_toggle
 from model_names import CLAUDE_CLI_ALIASES, CLAUDE_MODEL_LABELS
 
@@ -121,6 +144,22 @@ MCP_TOOL_PREFIX = f"mcp__{SERVER_NAME}__"
 #: directly, never behind a tool-search step this turn's tool set lacks.
 _MCP_ENV = {"MCP_CONNECTION_NONBLOCKING": "false", "MCP_TIMEOUT": "20000",
             "ENABLE_TOOL_SEARCH": "false"}
+#: The route passes typed history so a host call can continue a live session.
+LIVE_HOST_CALLS = True
+#: How long a CLI may wait for the host's result before it is retired and the
+#: next step replays the conversation into a fresh process instead.
+LIVE_PENDING_TTL = 900
+#: The bridge server's per-server call ceiling. claude 2.1.280 reads it as both
+#: the hard and the idle limit of one call, and it sits well past
+#: LIVE_PENDING_TTL, so the hub always retires a waiting CLI before the CLI
+#: gives up on the call.
+_LIVE_CALL_TIMEOUT_MS = 3_600_000
+#: How long the CLI has, once its message ends, to be waiting on every call it
+#: made. After that the calls are handed off without a live session.
+_LIVE_CONFIRM_SECONDS = 15.0
+#: A live child also keeps host results inline (Claude Code truncates MCP
+#: output past 25,000 tokens by default) and never backgrounds a long call.
+_LIVE_ENV = {**_MCP_ENV, "MAX_MCP_OUTPUT_TOKENS": "150000", "CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS": "0"}
 
 # Real installs live outside the default PATH on this machine (~/.local/bin).
 _EXTRA_BIN_DIRS = ("~/.local/bin", "/opt/homebrew/bin", "/usr/local/bin")
@@ -407,7 +446,7 @@ def catalogue(*, capture=None, timeout=30) -> tuple[list[dict], list[str]]:
 # ---------------------------------------------------------------------------
 
 def build_argv(model, *, effort=None, system=None, stream=True, search=False,
-               fast_mode=None, mcp_config=None) -> list[str]:
+               fast_mode=None, mcp_config=None, run_host_tools=False) -> list[str]:
     """Full argv for one print-mode turn. argv[0] is the bare binary name.
 
     ``run_turn`` replaces argv[0] with the resolved absolute path; keeping the
@@ -420,7 +459,11 @@ def build_argv(model, *, effort=None, system=None, stream=True, search=False,
     ``mcp_config`` (a JSON string) attaches the host tools' MCP server. Under
     ``--strict-mcp-config`` it is the only server; its tools are listed to the
     model but never pre-approved, so the CLI refuses to run them itself.
+    ``run_host_tools`` pre-approves that one server for a live session, whose
+    server forwards each call to the hub (cli_host_bridge) and runs nothing.
     """
+    if run_host_tools and mcp_config is None:
+        raise ClaudeCliAgentError("run_host_tools needs the host tools' MCP server")
     validated_model = _validate_model(model)
     # Saved short routes display a specific version in the hub catalogue.
     # Pin the CLI request to that same version instead of letting its moving
@@ -461,7 +504,10 @@ def build_argv(model, *, effort=None, system=None, stream=True, search=False,
         # Variadic too, so a following flag must end it: the tools flags do.
         argv += ["--mcp-config", mcp_config]
     # Variadic, so it must be the last thing on the command line.
-    argv += ["--allowedTools", "WebSearch", "--tools", "WebSearch"] if search else ["--tools", ""]
+    allowed = (["WebSearch"] if search else []) + ([f"mcp__{SERVER_NAME}"] if run_host_tools else [])
+    if allowed:
+        argv += ["--allowedTools", ",".join(allowed)]
+    argv += ["--tools", "WebSearch" if search else ""]
 
     if argv[-2] not in _VARIADIC_TOOL_FLAGS:
         raise ClaudeCliAgentError(
@@ -560,6 +606,29 @@ class _TurnState:
         self.host_calls: dict = {}
         self.stray_calls: list[str] = []
         self.host_handoff = False
+        # Host calls handed over on earlier legs of a live session.
+        self.handed: set = set()
+
+    def next_leg(self) -> None:
+        """Start the next host request on a live session.
+
+        What one request reports starts afresh; what the process has already
+        shown (its registry, its tool set, the messages it has streamed) stays,
+        so a late snapshot of an earlier message repeats neither text nor calls.
+        """
+        self.handed.update(identifier for identifier in self.host_calls if isinstance(identifier, str))
+        self.host_calls = {}
+        self.pending_calls = {}
+        self.stray_calls = []
+        self.host_handoff = False
+        self.emitted_text = False
+        self.result_text = None
+        self.stop_reason = None
+        self.failure = None
+        self.terminal = False
+        self.current_message = None
+        self.last_text_message = None
+        self.raw_lines = self.raw_lines[-5:]
 
     def host_tool_for(self, name) -> str | None:
         """The host tool a native tool_use stands for, when handing it over is safe.
@@ -600,7 +669,7 @@ class _TurnState:
     def finish_native_call(self, call) -> list[dict]:
         """One forwarded host call, validated and reported once per id."""
         identifier = call.get("id")
-        if isinstance(identifier, str) and identifier in self.host_calls:
+        if isinstance(identifier, str) and (identifier in self.host_calls or identifier in self.handed):
             return []
         raw = call.pop("json", "")
         if raw:
@@ -1038,6 +1107,7 @@ def _plan_turn(request) -> dict:
         raise ClaudeCliAgentError("max_tokens must be positive")
     host_tools = normalize_tools(request.get("tools"))
     tool_choice = request.get("tool_choice")
+    history = request.get("history")
     return {
         "model": model, "messages": messages, "effort": effort, "system": system,
         "search": search_enabled(request.get("web_search")),
@@ -1045,6 +1115,10 @@ def _plan_turn(request) -> dict:
         "host_tools": host_tools,
         "tool_choice": tool_choice if isinstance(tool_choice, dict) else None,
         "toolset": HostToolset(host_tools, prefix=MCP_TOOL_PREFIX) if host_tools else None,
+        # Typed Messages history, when the route passes it: live sessions match
+        # a host request to the CLI waiting on its calls with it.
+        "history": history if isinstance(history, list) else None,
+        "timing": request.get("_cli_timing"),
     }
 
 
@@ -1069,8 +1143,40 @@ def _surface(plan, mode):
     return system or None, messages
 
 
-def run_turn(request, *, spawner=None, timeout=300) -> Iterator[dict]:
-    """Stream one stateless turn as text_delta / thinking_delta / message_stop.
+def _new_state(plan, mode) -> _TurnState:
+    state = _TurnState()
+    state.search = plan["search"]
+    state.host_tools = plan["host_tools"]
+    state.host_names = frozenset(tool["name"] for tool in plan["host_tools"])
+    state.toolset = plan["toolset"] if mode == "mcp" else None
+    return state
+
+
+def _turn_argv(plan, mode, *, mcp_config=None, run_host_tools=False) -> tuple[list[str], str]:
+    """argv (with the resolved binary) and the stdin prompt for one spawn of ``plan``."""
+    system, messages = _surface(plan, mode)
+    # The system prompt travels as a flag, so it is not also rendered into
+    # the prompt; duplicating it would double-charge and could conflict.
+    prompt = render_prompt(messages)
+    argv = build_argv(plan["model"], effort=plan["effort"], system=system, stream=True,
+                      search=plan["search"], fast_mode=plan["fast_mode"], mcp_config=mcp_config,
+                      run_host_tools=run_host_tools)
+    if plan["images"]:
+        argv[1:1] = ["--input-format", "stream-json"]
+        prompt = json.dumps({"type": "user", "message": {"role": "user",
+            "content": prompt_content(prompt, plan["images"])}}, ensure_ascii=False)
+    binary = _resolve_binary()
+    if not binary:
+        raise ClaudeCliAgentError(
+            "the claude CLI was not found on PATH; install Claude Code or "
+            "switch this route to API-key credentials"
+        )
+    argv[0] = binary
+    return argv, prompt
+
+
+def run_turn(request, *, spawner=None, timeout=300, pool=None) -> Iterator[dict]:
+    """Stream one host request as text_delta / thinking_delta / message_stop.
 
     Always terminates with exactly one message_stop or error event, and never
     raises: every failure mode (missing binary, bad request, CLI error result,
@@ -1078,7 +1184,10 @@ def run_turn(request, *, spawner=None, timeout=300) -> Iterator[dict]:
 
     A turn with host tools attaches them over MCP; when init shows they did
     not attach, it is spawned once more with the text manifest before any
-    event has reached the caller.
+    event has reached the caller. With typed history and a session pool (the
+    module's own unless a test ``spawner`` is given) it runs as a live
+    session, and a request that continues a waiting CLI resumes it; whenever
+    no live session can serve the request, it runs statelessly as before.
     """
     try:
         plan = _plan_turn(request)
@@ -1086,12 +1195,16 @@ def run_turn(request, *, spawner=None, timeout=300) -> Iterator[dict]:
         yield {"type": "error", "message": _describe(exc, None, timeout)}
         return
     started = time.monotonic()
-    for mode in (("mcp", "envelope") if plan["toolset"] else (None,)):
-        state = _TurnState()
-        state.search = plan["search"]
-        state.host_tools = plan["host_tools"]
-        state.host_names = frozenset(tool["name"] for tool in plan["host_tools"])
-        state.toolset = plan["toolset"] if mode == "mcp" else None
+    modes = ("mcp", "envelope") if plan["toolset"] else (None,)
+    owner = pool if pool is not None else (_POOL if spawner is None else None)
+    if owner is not None and plan["toolset"] and plan["history"] is not None:
+        outcome = yield from _live_turn(plan, owner, spawner=spawner, timeout=timeout)
+        if outcome == "mcp_unavailable":
+            modes = ("envelope",)
+        elif outcome != "stateless":
+            return
+    for mode in modes:
+        state = _new_state(plan, mode)
         remaining = max(0.01, timeout - (time.monotonic() - started))
         outcome = yield from _attempt_turn(plan, mode, state, spawner=spawner, timeout=remaining)
         if outcome != "mcp_unavailable":
@@ -1099,7 +1212,7 @@ def run_turn(request, *, spawner=None, timeout=300) -> Iterator[dict]:
 
 
 def _attempt_turn(plan, mode, state, *, spawner, timeout):
-    """One spawn of the CLI, streamed as route events.
+    """One spawn of the CLI that ends with the turn or at its first host handoff.
 
     Returns "mcp_unavailable" when init showed the host tools missing before
     any event was yielded; otherwise ends with exactly one message_stop or
@@ -1115,31 +1228,13 @@ def _attempt_turn(plan, mode, state, *, spawner, timeout):
             shutil.rmtree(workspace, ignore_errors=True)
 
     try:
-        system, messages = _surface(plan, mode)
-        # The system prompt travels as a flag, so it is not also rendered into
-        # the prompt; duplicating it would double-charge and could conflict.
-        prompt = render_prompt(messages)
         mcp_config = None
         if mode == "mcp":
             workspace = tempfile.mkdtemp(prefix="claude_host_")
             command = server_command(plan["toolset"].write(workspace))
             mcp_config = json.dumps({"mcpServers": {SERVER_NAME: {
                 "type": "stdio", "command": command[0], "args": command[1:]}}}, separators=(",", ":"))
-        argv = build_argv(plan["model"], effort=plan["effort"], system=system, stream=True,
-                          search=plan["search"], fast_mode=plan["fast_mode"], mcp_config=mcp_config)
-        if plan["images"]:
-            argv[1:1] = ["--input-format", "stream-json"]
-            prompt = json.dumps({"type": "user", "message": {"role": "user",
-                "content": prompt_content(prompt, plan["images"])}}, ensure_ascii=False)
-
-        binary = _resolve_binary()
-        if not binary:
-            raise ClaudeCliAgentError(
-                "the claude CLI was not found on PATH; install Claude Code or "
-                "switch this route to API-key credentials"
-            )
-        argv[0] = binary
-
+        argv, prompt = _turn_argv(plan, mode, mcp_config=mcp_config)
         # stderr goes to a temp file, not a pipe: a pipe nobody drains can fill
         # and deadlock the child, and the text is worth keeping for diagnosis.
         state.stderr_handle = tempfile.TemporaryFile(mode="w+", encoding="utf-8")
@@ -1156,85 +1251,376 @@ def _attempt_turn(plan, mode, state, *, spawner, timeout):
         yield {"type": "error", "message": message}
         return None
 
-    stop_reason = state.stop_reason or "end_turn"
-    produced = False
+    outcome = None
     try:
         with session:
-            _write_prompt(session, prompt)
-            for kind, payload in _iter_events(session, timeout=timeout):
-                if kind == "raw":
-                    state.raw_lines.append(payload)
-                    continue
-                for event in _translate(payload, state):
-                    produced = True
-                    yield event
-                if state.mcp_unavailable:
-                    _interrupt(session)
-                    if produced:
-                        yield {"type": "error", "message": "the host tools could not be attached to the "
-                               "claude CLI" + state.diagnostics() + state.stderr_tail()}
-                        return None
-                    # init is the stream's first line, so the respawn is
-                    # invisible to the client.
-                    return "mcp_unavailable"
-                if state.failure:
-                    yield {"type": "error", "message": state.failure}
-                    return
-                if state.host_handoff:
-                    # Native calls for host tools the CLI does not have. Stop
-                    # before its unknown-tool reply reaches the model; its
-                    # stdin is already at EOF, so only a signal ends it now.
-                    _interrupt(session)
+            try:
+                _write_prompt(session, prompt)
+            except Exception as exc:
+                yield {"type": "error", "message": _describe(exc, state, timeout)}
+                return None
+            outcome = yield from _stream(session, state, timeout=timeout)
+    finally:
+        # The MCP server reads its tools file while the CLI runs, so the
+        # workspace goes only after the child has exited.
+        cleanup_after_exit(session, release)
+    return outcome
+
+
+def _stream(session, state, *, timeout, on_handoff=None):
+    """Stream the CLI's output as route events until the turn, or this leg of it, ends.
+
+    Returns "mcp_unavailable" when init showed the host tools missing before
+    any event was yielded, and "pending" when ``on_handoff`` kept the CLI
+    waiting inside its host calls; otherwise None. Every return but
+    "mcp_unavailable" follows exactly one message_stop or error event.
+    """
+    produced = False
+    try:
+        for kind, payload in _iter_events(session, timeout=timeout):
+            if kind == "raw":
+                state.raw_lines.append(payload)
+                continue
+            for event in _translate(payload, state):
+                produced = True
+                yield event
+            if state.mcp_unavailable:
+                _interrupt(session)
+                if produced:
+                    yield {"type": "error", "message": "the host tools could not be attached to the "
+                           "claude CLI" + state.diagnostics() + state.stderr_tail()}
+                    return None
+                # init is the stream's first line, so the respawn is
+                # invisible to the client.
+                return "mcp_unavailable"
+            if state.failure:
+                yield {"type": "error", "message": state.failure}
+                return None
+            if state.host_handoff:
+                if on_handoff is not None and on_handoff():
+                    # The CLI waits in the bridge for the host's results.
                     yield {"type": "message_stop", "stop_reason": "tool_use"}
-                    return
-                if state.terminal:
-                    returncode = getattr(session, "returncode", None)
-                    if isinstance(returncode, int) and returncode != 0:
-                        yield {"type": "error", "message": f"the claude CLI exited with code {returncode}"}
-                        return
-                    fallback = state.result_suffix()
-                    if fallback:
-                        state.emitted_text = True
-                        yield {"type": "text_delta", "text": fallback}
-                    if not state.emitted_text:
-                        yield {"type": "error", "message": "the claude CLI produced no output"}
-                        return
-                    yield {"type": "message_stop", "stop_reason": state.stop_reason or "end_turn"}
-                    return
+                    return "pending"
+                # Native calls for host tools the CLI must not run. Stop
+                # before its refusal reaches the model; its stdin is already
+                # at EOF, so only a signal ends it now.
+                _interrupt(session)
+                yield {"type": "message_stop", "stop_reason": "tool_use"}
+                return None
+            if state.terminal:
+                returncode = getattr(session, "returncode", None)
+                if isinstance(returncode, int) and returncode != 0:
+                    yield {"type": "error", "message": f"the claude CLI exited with code {returncode}"}
+                    return None
+                fallback = state.result_suffix()
+                if fallback:
+                    state.emitted_text = True
+                    yield {"type": "text_delta", "text": fallback}
+                if not state.emitted_text:
+                    yield {"type": "error", "message": "the claude CLI produced no output"}
+                    return None
+                yield {"type": "message_stop", "stop_reason": state.stop_reason or "end_turn"}
+                return None
 
         returncode = getattr(session, "returncode", None)
         if isinstance(returncode, int) and returncode != 0:
             detail = f"the claude CLI exited with code {returncode}"
             yield {"type": "error", "message": detail + state.diagnostics() + state.stderr_tail()}
-            return
-        elif state.failure:
+            return None
+        if state.failure:
             yield {"type": "error", "message": state.failure}
-            return
-        elif not state.terminal:
+            return None
+        if not state.terminal:
             detail = ("the claude CLI stream ended before completing the turn"
                       if state.emitted_text or state.raw_lines else "the claude CLI produced no output")
             yield {"type": "error", "message": detail}
-            return
-        else:
-            fallback = state.result_suffix()
-            if fallback:
-                state.emitted_text = True
-                yield {"type": "text_delta", "text": fallback}
-            if not state.emitted_text:
-                yield {"type": "error", "message": "the claude CLI produced no output"}
-                return
-            stop_reason = state.stop_reason or "end_turn"
+            return None
+        fallback = state.result_suffix()
+        if fallback:
+            state.emitted_text = True
+            yield {"type": "text_delta", "text": fallback}
+        if not state.emitted_text:
+            yield {"type": "error", "message": "the claude CLI produced no output"}
+            return None
+        stop_reason = state.stop_reason or "end_turn"
     except ToolCallError as exc:
         # The route's protocol correction keys on this code; nothing ran.
         yield {"type": "error", "code": "invalid_cli_tool_call",
                "message": f"Invalid CLI host tool call: {exc}."}
-        return
+        return None
     except Exception as exc:
         yield {"type": "error", "message": _describe(exc, state, timeout)}
-        return
-    finally:
-        # The MCP server reads its tools file while the CLI runs, so the
-        # workspace goes only after the child has exited.
-        cleanup_after_exit(session, release)
-
+        return None
     yield {"type": "message_stop", "stop_reason": stop_reason}
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Live sessions
+# ---------------------------------------------------------------------------
+
+class _LiveSession:
+    """A CLI process that waits inside its host tool calls between host requests.
+
+    A pool lease owns it: ``returncode`` lets the pool retire a CLI that has
+    exited, and ``close`` is the lease's disposal.
+    """
+
+    def __init__(self, session, workspace, bridge, state):
+        self.session = session
+        self.workspace = workspace
+        self.bridge = bridge
+        self.state = state
+        self.closed = False
+
+    @property
+    def returncode(self):
+        return getattr(self.session, "returncode", None)
+
+    def resume(self, results) -> bool:
+        """Answer every waiting call with the host's result; False when the CLI cannot take them."""
+        if self.returncode is not None:
+            return False
+        self.state.next_leg()
+        return all(self.bridge.deliver(identifier, result) for identifier, result in results.items())
+
+    def close(self) -> None:
+        if self.closed:
+            return
+        self.closed = True
+        # The CLI goes first, so the bridge dropping its calls can never reach
+        # the model as tool results it would act on.
+        _interrupt(self.session)
+        self.bridge.close()
+        try:
+            self.session.close()
+        except Exception:  # noqa: BLE001 - disposal must never raise
+            pass
+        cleanup_after_exit(self.session, self._release)
+
+    def _release(self) -> None:
+        if self.state.stderr_handle is not None:
+            self.state.stderr_handle.close()
+        shutil.rmtree(self.workspace, ignore_errors=True)
+
+
+def _dispose_live(lease) -> None:
+    if lease.session is not None:
+        lease.session.close()
+
+
+#: Each waiting CLI is a whole Claude Code process; past four, the oldest is
+#: retired and its task's next step replays instead.
+_POOL = SessionPool(_dispose_live, capacity=4, idle_ttl=0, pending_ttl=LIVE_PENDING_TTL, label="Claude")
+atexit.register(_POOL.close)
+
+
+def _pool_key(plan) -> str:
+    """What a waiting CLI must share with a request to continue it: argv and system text."""
+    system, _ = _surface(plan, "mcp")
+    return digest({"model": plan["model"], "effort": plan["effort"], "fast_mode": plan["fast_mode"],
+                   "search": plan["search"], "system": system, "tools": plan["host_tools"],
+                   "tool_choice": plan["tool_choice"]})
+
+
+def _mcp_result(block) -> dict | None:
+    """A host tool_result as the MCP result its waiting call returns, or None if it cannot be one."""
+    content = block.get("content")
+    items = []
+    if isinstance(content, str):
+        if content:
+            items.append({"type": "text", "text": content})
+    elif isinstance(content, list):
+        for part in content:
+            kind = part.get("type") if isinstance(part, dict) else None
+            if kind == "text":
+                if part.get("text"):
+                    items.append({"type": "text", "text": str(part["text"])})
+            elif kind in {"image", "input_image"}:
+                try:
+                    source = normalize_image(part)["source"]
+                except CliImageError:
+                    return None
+                items.append({"type": "image", "data": source["data"], "mimeType": source["media_type"]})
+            else:
+                return None
+    elif content is not None:
+        return None
+    return {"content": items, "isError": block.get("is_error") is True}
+
+
+def _continuation(lease, history) -> dict | None:
+    """The host's results for a waiting CLI, when ``history`` continues exactly from its handoff.
+
+    The history up to that handoff must be unchanged. After it come the
+    handoff's own message - any text or reasoning, and each call handed over
+    once - and then one result per call and nothing else. New user input goes
+    to a fresh turn instead, where it arrives as the user's own words rather
+    than inside a tool result.
+    """
+    pending = lease.pending
+    if not pending or "prefix" not in pending or not isinstance(history, list):
+        return None
+    blocks = history_blocks(history)
+    count = pending["prefix_count"]
+    if len(blocks) <= count or digest(blocks[:count]) != pending["prefix"]:
+        return None
+    calls = pending["calls"]
+    made, results = set(), {}
+    for role, block in blocks[count:]:
+        if not isinstance(block, dict):
+            return None
+        if role == "assistant":
+            if results:
+                return None
+            if block.get("type") == "tool_use":
+                identifier = block.get("id")
+                call = calls.get(identifier)
+                if call is None or identifier in made or block.get("name") != call["name"]:
+                    return None
+                made.add(identifier)
+            continue
+        if role != "user" or block.get("type") != "tool_result":
+            return None
+        identifier = block.get("tool_use_id")
+        if identifier not in calls or identifier in results:
+            return None
+        result = _mcp_result(block)
+        if result is None:
+            return None
+        results[identifier] = result
+    if made != set(calls) or set(results) != set(calls):
+        return None
+    return results
+
+
+def _answers_itself(payload, calls) -> bool:
+    """Whether a stream line is the CLI's own tool result for one of ``calls``."""
+    if not isinstance(payload, dict) or payload.get("type") != "user":
+        return False
+    content = (payload.get("message") or {}).get("content")
+    return isinstance(content, list) and any(
+        isinstance(block, dict) and block.get("type") == "tool_result" and block.get("tool_use_id") in calls
+        for block in content)
+
+
+def _confirm(live, deadline) -> bool:
+    """Whether the CLI is waiting in the bridge on exactly the calls its message made.
+
+    The message has already ended, so the lines read meanwhile only settle its
+    record. If the CLI answers a call itself, exits, or is not waiting on every
+    call in time, the handoff goes ahead without a live session.
+    """
+    state, session = live.state, live.session
+    limit = min(deadline, time.monotonic() + _LIVE_CONFIRM_SECONDS)
+    while True:
+        verdict = live.bridge.check(state.host_calls)
+        if verdict != "waiting":
+            return verdict == "ready"
+        if time.monotonic() >= limit or live.returncode is not None:
+            return False
+        for kind, payload in _iter_events(session, timeout=0.05):
+            if kind == "raw":
+                state.raw_lines.append(payload)
+            elif _answers_itself(payload, state.host_calls):
+                return False
+            else:
+                try:
+                    _translate(payload, state)
+                except ToolCallError:
+                    return False
+                if state.failure:
+                    return False
+            break
+
+
+def _hold(live, lease, history, deadline) -> bool:
+    """At a host handoff: keep the CLI waiting in its calls when the bridge shows exactly them."""
+    if not _confirm(live, deadline):
+        return False
+    blocks = history_blocks(history)
+    lease.pending = {"calls": {identifier: dict(call) for identifier, call in live.state.host_calls.items()},
+                     "prefix": digest(blocks), "prefix_count": len(blocks)}
+    return True
+
+
+def _spawn_live(plan, state, *, spawner, timeout) -> _LiveSession:
+    """Start the CLI with its host tools bridged and pre-approved, and send the prompt."""
+    workspace = tempfile.mkdtemp(prefix="claude_host_")
+    bridge = None
+    try:
+        toolset = plan["toolset"]
+        bridge = HostCallBridge(workspace, lambda served: toolset.host_name(MCP_TOOL_PREFIX + served))
+        command = server_command(toolset.write(workspace, bridge=bridge))
+        mcp_config = json.dumps({"mcpServers": {SERVER_NAME: {
+            "type": "stdio", "command": command[0], "args": command[1:],
+            "timeout": _LIVE_CALL_TIMEOUT_MS}}}, separators=(",", ":"))
+        argv, prompt = _turn_argv(plan, "mcp", mcp_config=mcp_config, run_host_tools=True)
+        state.stderr_handle = tempfile.TemporaryFile(mode="w+", encoding="utf-8")
+        session = StdioSession(argv, env=minimal_env(_LIVE_ENV), timeout=float(timeout),
+                               spawner=spawner, stderr=state.stderr_handle)
+    except BaseException:
+        if bridge is not None:
+            bridge.close()
+        if state.stderr_handle is not None:
+            state.stderr_handle.close()
+            state.stderr_handle = None
+        shutil.rmtree(workspace, ignore_errors=True)
+        raise
+    live = _LiveSession(session, workspace, bridge, state)
+    try:
+        _write_prompt(session, prompt)
+    except BaseException:
+        live.close()
+        raise
+    return live
+
+
+def _live_turn(plan, owner, *, spawner, timeout):
+    """One host request on a live session, resumed from its waiting calls or started cold.
+
+    Returns "stateless" when no live session can serve the request and
+    "mcp_unavailable" when the host tools did not attach - in both cases
+    before any event was yielded. Otherwise it ends with exactly one
+    message_stop or error event and returns None or "pending".
+    """
+    deadline = time.monotonic() + timeout
+    timing = plan["timing"]
+    history = plan["history"]
+    key = _pool_key(plan)
+    try:
+        lease, reuse = owner.acquire(key, match=lambda entry: _continuation(entry, history) is not None,
+                                     timeout=max(0.01, deadline - time.monotonic()))
+    except (RuntimeError, TimeoutError):
+        # A full pool or a continuation still being released: this request
+        # replays the conversation instead of waiting on either.
+        return "stateless"
+    except Exception as exc:  # the client cancelled while the lease was awaited
+        yield {"type": "error", "message": _describe(exc, None, timeout)}
+        return None
+    try:
+        live = None
+        if reuse == "resumed":
+            results = _continuation(lease, history)
+            lease.pending = None
+            live = lease.session
+            if results is None or not live.resume(results):
+                # Nothing has reached the client: retire the CLI and replay.
+                return "stateless"
+        if timing:
+            timing.label(reuse="resumed" if live is not None else "cold")
+        if live is None:
+            state = _new_state(plan, "mcp")
+            try:
+                live = _spawn_live(plan, state, spawner=spawner, timeout=max(0.01, deadline - time.monotonic()))
+            except HostBridgeError:
+                return "stateless"
+            except Exception as exc:
+                yield {"type": "error", "message": _describe(exc, state, timeout)}
+                return None
+            lease.session = live
+        return (yield from _stream(live.session, live.state, timeout=max(0.01, deadline - time.monotonic()),
+                                   on_handoff=lambda: _hold(live, lease, history, deadline)))
+    finally:
+        # Only a handoff the client has received keeps the CLI waiting.
+        owner.release(lease, healthy=bool(lease.pending) and (timing is None or timing.delivered))

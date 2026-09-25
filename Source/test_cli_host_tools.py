@@ -199,7 +199,11 @@ class HostCycleTests(unittest.TestCase):
         self.assertTrue(session.cleaned.wait(2), "CLI cleanup did not finish")
         self.assertEqual(len(spawned), 1)
         self.assertIn("--mcp-config", spawned[0])
-        self.assertEqual(spawned[0][-4:], ["--allowedTools", "WebSearch", "--tools", "WebSearch"])
+        # The route passes typed history, so the turn starts as a live session
+        # (its host server pre-approved). This CLI answers the call itself
+        # rather than waiting in the bridge, so the handoff falls back to the
+        # stateless one: the child is stopped and nothing is kept waiting.
+        self.assertEqual(spawned[0][-4:], ["--allowedTools", "WebSearch,mcp__host", "--tools", "WebSearch"])
         blocks = [event["content_block"] for event in wire if event["type"] == "content_block_start"]
         self.assertEqual([(block["type"], block.get("name")) for block in blocks], [("tool_use", "read_file")])
         arguments = [json.loads(event["delta"]["partial_json"]) for event in wire
