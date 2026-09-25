@@ -281,8 +281,8 @@ class CliRoutesTest(unittest.TestCase):
                     self.assertEqual(plan["compatibility"]["cli_host_tools"], transport)
 
     def test_plan_turn_gives_a_live_session_adapter_its_typed_history(self):
-        # Claude matches a host request to the CLI waiting on its calls by the
-        # typed history; the flattened transcript cannot show tool ids.
+        # Claude and Grok match a host request to the CLI waiting on its calls
+        # by the typed history; the flattened transcript cannot show tool ids.
         tools = [{"name": "get_weather", "description": "Fetch weather.",
                   "input_schema": {"type": "object", "properties": {"city": {"type": "string"}}}}]
         messages = [{"role": "developer", "content": "House rules."},
@@ -296,7 +296,9 @@ class CliRoutesTest(unittest.TestCase):
         without_tools = plan_turn("claude", "sonnet", {"messages": messages}, {}, wanted_output=64)
         self.assertNotIn("history", without_tools["body"])
         grok = plan_turn("grok", "grok-4.7", {"messages": messages, "tools": tools}, {}, wanted_output=64)
-        self.assertNotIn("history", grok["body"])
+        self.assertEqual(grok["body"]["history"], messages[1:])
+        muse = plan_turn("muse", "muse-spark-1.3", {"messages": messages, "tools": tools}, {}, wanted_output=64)
+        self.assertNotIn("history", muse["body"])
 
     def test_plan_turn_tool_choice_none_suppresses_tools(self):
         payload = {"messages": [{"role": "user", "content": "hi"}],

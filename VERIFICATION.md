@@ -1,3 +1,60 @@
+**The Grok CLI route keeps one process across host calls — 25 September 2026**
+
+> **Historical record.** Dated 25 September 2026. Version numbers, build
+> numbers and test counts below are as they were then and are not maintained.
+> For current state see [`README.md`](README.md).
+
+The Grok route now runs live sessions too, on the bridge the Claude route
+uses (next entry). The shared logic lives in `cli_live_session.py`. Grok
+Build has no MCP config flag, so a live turn registers the `host` server in
+its private workspace's `.grok/config.toml`. `GROK_FOLDER_TRUST=0` lets
+grok load it headless. That also ungates project hooks, instructions and
+skills, but the workspace holds only the hub's own files. Only that server
+is pre-approved: `--allow MCPTool(host__*)` replaces the blanket
+`--deny MCPTool`, and the other denies stay. The child also gets
+`GROK_MAX_MCP_OUTPUT_BYTES` of 8 MiB, because grok spills results past
+20,000 bytes to a file.
+
+Grok 1.0.41 facts this depends on, from probes with a logging stub server
+and grok's session records (`~/.grok/sessions/<cwd>/<id>/events.jsonl`,
+`tool_definitions.json`):
+
+- `use_tool` resolves only the catalog key `host__<tool>`. Grok skips a tool
+  name with a second `__` or a leading `_`, which covered 44 of Codex's 111
+  tools (the `ph_mcp__…` connectors, `_execute_document_command`). The model
+  is shown catalog keys, and such tools get clean aliases that map back.
+- A `tools/call` carries only a `progressToken` in `_meta`, with no call id,
+  so the bridge pairs waiting calls with the stream's by tool and arguments.
+  Two calls in one message reached the server together.
+- Grok dispatches a call as soon as its block closes. It writes
+  `message_delta`, `message_stop` and the snapshot only after every call
+  has returned. With a stub that waited 20 s, the call reached the server at
+  3.2 s and the message's end reached stdout at 23.7 s. A live Grok leg
+  therefore hands off once every call it has read is waiting in the bridge
+  and the stream has been quiet for 0.75 s. The deferred end arrives on the
+  next leg and is recognised as belonging to a message already handed over.
+- If the server finishes connecting before the turn starts, init lists its
+  `host__…` keys, but grok still offers the model `use_tool` alone. The
+  first live run respawned on that, took the keys for stray built-ins, and
+  then stalled waiting for a message end that could not come; both are
+  fixed.
+- Image results are not relayed through grok's MCP client until that path is
+  verified. A continuation carrying a screenshot replays through the
+  existing image transport instead.
+
+Live through `cli_routes.plan_turn`, `run_turn` and `relay_cli_turn`, with
+`grok-4.7-build-fast`, Codex's 111 tools and search on, on the same branch
+then commit-count task as the Claude runs:
+
+| Step | Process | Elapsed | Result |
+| --- | --- | --- | --- |
+| 1 | cold | 4.6 s | `exec_command` `git rev-parse --abbrev-ref HEAD`, CLI waiting in the pool |
+| 2 | resumed | 2.3 s (first event 1.1 s) | `exec_command` `git rev-list --count HEAD` |
+| 3 | resumed | 1.4 s | "… is on branch **main**, with **236** commits." |
+
+One process served all three steps. After the answer the pool was empty and
+the process had exited.
+
 **The Claude CLI route keeps one process across host calls — 25 September 2026**
 
 > **Historical record.** Dated 25 September 2026. Version numbers, build

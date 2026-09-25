@@ -43,6 +43,21 @@ class HostToolsetTests(unittest.TestCase):
         self.assertTrue(served[alias[len(PREFIX):]]["description"].startswith(f"(Host tool `{long_name}`.)"))
         self.assertEqual(served[near]["description"], "does a thing")
 
+    def test_a_name_the_cli_would_not_admit_is_served_under_a_clean_alias(self):
+        # Grok's catalog skips a tool name with a second "__" or a leading "_".
+        import re
+        catalog = re.compile(r"(?!_)(?!.*__)[A-Za-z0-9_-]+")
+        names = ["exec_command", "ph_mcp__codex_apps__create_key", "_private", "dotted.name"]
+        toolset = HostToolset([tool(name) for name in names], prefix="host__", limit=256, pattern=catalog)
+        self.assertEqual(toolset.model_name("exec_command"), "host__exec_command")
+        for name in names[1:]:
+            served = toolset.model_name(name)[len("host__"):]
+            self.assertIsNotNone(catalog.fullmatch(served), served)
+            self.assertEqual(toolset.host_name("host__" + served), name)
+        self.assertTrue(toolset.model_name(names[1]).startswith("host__ph_mcp_codex_apps_create_key_"))
+        self.assertEqual(HostToolset([tool(names[1])], prefix="host__", limit=256, pattern=catalog)
+                         .model_name(names[1]), toolset.model_name(names[1]))
+
     def test_prefix_must_leave_room_for_names(self):
         with self.assertRaises(ValueError):
             HostToolset([tool("x")], prefix="p" * 50)

@@ -2,13 +2,19 @@
 from __future__ import annotations
 
 import json
+import queue
 import tempfile
+import threading
+import time
+import tomllib
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, Mock, patch
 
 # Import the module under test
 import grok_cli_agent as module
+import host_tools_mcp
+from codex_session_pool import SessionPool
 
 
 class TestProviderIdentity(unittest.TestCase):
@@ -1247,6 +1253,302 @@ class TestRunTurnHostTools(unittest.TestCase):
         self.assertEqual([event["type"] for event in events], ["text_delta", "message_stop"])
         self.assertIn("use_tool", self._removed(session))
         self.assertNotIn("--system-prompt-override", session.argv)
+
+
+# -- live sessions ------------------------------------------------------------
+
+_EXIT = object()
+
+
+def _calls(*calls):
+    """A script step: grok dispatches these use_tool calls to the host server and waits.
+
+    Each is (the stream's call id, served tool name, arguments). Grok's MCP
+    client sends no call id, only a progress token (1.0.41).
+    """
+    return ("calls", calls)
+
+
+def _echo(*call_ids):
+    """A script step: grok's own user line with the results its calls returned."""
+    return ("echo", call_ids)
+
+
+def _message(identifier, *blocks, stop="end_turn"):
+    """A whole grok message with text blocks, as 1.0.41 streams it."""
+    lines = [{"type": "stream_event", "event": {"type": "message_start", "message": {"id": identifier}}}]
+    for index, text in enumerate(blocks):
+        lines.append({"type": "stream_event", "event": {"type": "content_block_delta", "index": index,
+                                                        "delta": {"type": "text_delta", "text": text}}})
+    lines += [{"type": "stream_event", "event": {"type": "message_delta", "delta": {"stop_reason": stop}}},
+              {"type": "stream_event", "event": {"type": "message_stop"}},
+              {"type": "assistant", "message": {"id": identifier, "content": [
+                  {"type": "text", "text": text} for text in blocks]}}]
+    return lines
+
+
+def _handoff(identifier, *calls):
+    """A message of use_tool calls as grok 1.0.41 streams it.
+
+    The blocks come at once; the message's end (message_delta, message_stop
+    and the snapshot) only once every call has returned.
+    """
+    blocks = [{"type": "stream_event", "event": {"type": "message_start", "message": {"id": identifier}}}]
+    for index, (call_id, key, arguments) in enumerate(calls):
+        blocks += _use_tool(index, call_id, {"tool_name": key, "tool_input": arguments})
+    end = [{"type": "stream_event", "event": {"type": "message_delta", "delta": {"stop_reason": "tool_use"}}},
+           {"type": "stream_event", "event": {"type": "message_stop"}},
+           {"type": "assistant", "message": {"id": identifier, "content": [
+               {"type": "tool_use", "id": call_id, "name": "use_tool",
+                "input": {"tool_name": key, "tool_input": arguments}} for call_id, key, arguments in calls]}}]
+    return blocks, end
+
+
+class _LiveGrok:
+    """A scripted grok CLI whose use_tool calls really wait in the hub's bridge.
+
+    It finds its host server the way grok does, in the workspace's
+    ``.grok/config.toml``; ``_calls`` steps forward calls as that server
+    would, and the results come back as grok's own user line.
+    """
+
+    def __init__(self, argv, script, **kwargs):
+        self.argv = list(argv)
+        self.env = kwargs.get("env")
+        self.cwd = kwargs.get("cwd")
+        with open(Path(self.cwd) / ".grok" / "config.toml", "rb") as handle:
+            self.config = tomllib.load(handle)["mcp_servers"]["host"]
+        with open(self.config["args"][-1], encoding="utf-8") as handle:
+            self.served = json.load(handle)
+        self.lines = queue.Queue()
+        self.returncode = None
+        self.process = Mock()
+        self.process.terminate.side_effect = self._stop
+        self.closed = threading.Event()
+        self.resume = threading.Event()
+        self.results = {}
+        threading.Thread(target=self._play, args=(script,), daemon=True).start()
+
+    def _play(self, script):
+        for item in script:
+            if item is _EXIT:
+                self.returncode = 0
+                self.lines.put(_EXIT)
+            elif isinstance(item, tuple) and item[0] == "calls":
+                self._call(item[1])
+            elif isinstance(item, tuple) and item[0] == "pause":
+                self.resume.wait(30)
+            elif isinstance(item, tuple) and item[0] == "echo":
+                if self.returncode is None:
+                    self.lines.put({"type": "user", "message": {"role": "user", "content": [
+                        {"type": "tool_result", "tool_use_id": call_id, "content": json.dumps(self.results[call_id])}
+                        for call_id in item[1]]}})
+            else:
+                self.lines.put(item)
+
+    def _call(self, calls):
+        def forward(number, call_id, name, arguments):
+            request = {"jsonrpc": "2.0", "id": number, "method": "tools/call", "params": {
+                "_meta": {"progressToken": number}, "name": name, "arguments": arguments}}
+            self.results[call_id] = host_tools_mcp.forward(request, self.served["bridge"])
+
+        threads = [threading.Thread(target=forward, args=(number, *call), daemon=True)
+                   for number, call in enumerate(calls, 1)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(30)
+
+    def events(self, timeout=None):
+        deadline = time.monotonic() + (timeout or 5)
+        while time.monotonic() < deadline:
+            try:
+                item = self.lines.get(timeout=0.02)
+            except queue.Empty:
+                continue
+            if item is _EXIT:
+                self.lines.put(_EXIT)
+                return
+            yield item
+
+    def _stop(self):
+        if self.returncode is None:
+            self.returncode = -15
+        self.lines.put(_EXIT)
+
+    def close(self):
+        self._stop()
+        self.closed.set()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.close()
+
+
+_TASK = [{"role": "user", "content": [{"type": "text", "text": "which branch?"}]}]
+
+
+def _answered(history, calls, results):
+    """``history`` continued the way the host sends it: the handoff message, then its results."""
+    return [*history,
+            {"role": "assistant", "content": [{"type": "tool_use", "id": call_id, "name": name, "input": arguments}
+                                              for call_id, name, arguments in calls]},
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": call_id, "content": result}
+                                         for call_id, result in results]}]
+
+
+class TestLiveSessions(unittest.TestCase):
+    def setUp(self):
+        self.pool = SessionPool(module.live_session.dispose, capacity=2, idle_ttl=0, pending_ttl=60, label="Grok")
+        self.addCleanup(self.pool.close)
+        self.spawned, self.scripts = [], []
+
+        def factory(argv, **kwargs):
+            session = _LiveGrok(argv, self.scripts[len(self.spawned)], **kwargs)
+            self.spawned.append(session)
+            return session
+
+        for patcher in (patch.object(module, "StdioSession", side_effect=factory),
+                        patch.object(module, "_resolve_binary", return_value="/fake/grok"),
+                        patch.object(module, "_LEARNED_REMOVALS", set()),
+                        patch.object(module, "_LIVE_CONFIRM_SECONDS", 1.0)):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def turn(self, history, tools=_HOST_TOOLS):
+        request = {"model": "grok-4.7", "messages": [{"role": "user", "content": "which branch?"}],
+                   "tools": tools, "history": history}
+        return list(module.run_turn(request, pool=self.pool))
+
+    def test_grok_dispatches_to_the_bridge_and_the_result_resumes_it(self):
+        blocks, end = _handoff("msg_0", ("call-a-0", "host__exec_command", {"cmd": "git branch"}))
+        # The message's end arrives only after its call returns, on the next
+        # leg, which must neither fail on it nor repeat what it carries.
+        self.scripts = [[_USE_TOOL_INIT, *blocks, _calls(("call-a-0", "exec_command", {"cmd": "git branch"})),
+                         *end, _echo("call-a-0"), *_message("msg_1", "On main."),
+                         {"type": "result", "subtype": "success", "result": "On main."}, _EXIT]]
+        first = self.turn(_TASK)
+        self.assertEqual(first, [{"type": "tool_call", "id": "call-a-0", "name": "exec_command",
+                                  "input": {"cmd": "git branch"}},
+                                 {"type": "message_stop", "stop_reason": "tool_use"}])
+        [cli] = self.spawned
+        cli.process.terminate.assert_not_called()
+        mcp = cli.argv.index("MCPTool(host__*)")
+        self.assertEqual(cli.argv[mcp - 1], "--allow")
+        self.assertNotIn("MCPTool", cli.argv)
+        self.assertEqual(cli.argv[cli.argv.index("--deny") + 1], "Bash")
+        self.assertEqual({key: cli.env[key] for key in module._LIVE_ENV_EXTRA}, module._LIVE_ENV_EXTRA)
+        self.assertEqual(cli.config["tool_timeout_sec"], module._LIVE_CALL_TIMEOUT_SEC)
+        self.assertEqual(cli.config["args"][:2], ["-I", "-B"])
+        system = cli.argv[cli.argv.index("--system-prompt-override") + 1]
+        self.assertIn("1. host__exec_command", system)
+        self.assertIn("exactly as listed", system)
+
+        second = self.turn(_answered(_TASK, [("call-a-0", "exec_command", {"cmd": "git branch"})],
+                                     [("call-a-0", "main")]))
+        self.assertEqual(second, [{"type": "text_delta", "text": "On main."},
+                                  {"type": "message_stop", "stop_reason": "end_turn"}])
+        self.assertEqual(len(self.spawned), 1)
+        self.assertEqual(cli.results["call-a-0"], {"content": [{"type": "text", "text": "main"}], "isError": False})
+        self.assertTrue(cli.closed.wait(5))
+
+    def test_catalog_unsafe_names_are_served_under_aliases_that_map_back(self):
+        tools = [*_HOST_TOOLS, {"name": "ph_mcp__codex_apps__create_key", "description": "Create a key.",
+                                "input_schema": {"type": "object", "properties": {}}}]
+        toolset = module._plan_turn({"model": "grok-4.7", "messages": [{"role": "user", "content": "x"}],
+                                     "tools": tools})["toolset"]
+        key = toolset.model_name("ph_mcp__codex_apps__create_key")
+        self.assertTrue(key.startswith("host__ph_mcp_codex_apps_create_key_"))
+        self.assertIsNotNone(module._CATALOG_TOOL.fullmatch(key[len("host__"):]))
+        served = key[len("host__"):]
+        blocks, end = _handoff("msg_0", ("call-k-0", key, {}))
+        self.scripts = [[_USE_TOOL_INIT, *blocks, _calls(("call-k-0", served, {})), *end, _echo("call-k-0"),
+                         *_message("msg_1", "Made it."), {"type": "result", "subtype": "success"}, _EXIT]]
+        first = self.turn(_TASK, tools)
+        self.assertEqual(first[0]["name"], "ph_mcp__codex_apps__create_key")
+        second = self.turn(_answered(_TASK, [("call-k-0", "ph_mcp__codex_apps__create_key", {})],
+                                     [("call-k-0", "key-1")]), tools)
+        self.assertEqual([e.get("text") for e in second if e["type"] == "text_delta"], ["Made it."])
+        self.assertEqual(len(self.spawned), 1)
+
+    def test_parallel_calls_pair_by_tool_and_arguments_without_ids(self):
+        blocks, end = _handoff("msg_0", ("call-p-0", "host__exec_command", {"cmd": "ls"}),
+                               ("call-p-1", "host__get_goal", {}))
+        self.scripts = [[_USE_TOOL_INIT, *blocks,
+                         _calls(("call-p-1", "get_goal", {}), ("call-p-0", "exec_command", {"cmd": "ls"})),
+                         *end, _echo("call-p-0", "call-p-1"), *_message("msg_1", "Done."),
+                         {"type": "result", "subtype": "success"}, _EXIT]]
+        self.turn(_TASK)
+        self.turn(_answered(_TASK, [("call-p-0", "exec_command", {"cmd": "ls"}), ("call-p-1", "get_goal", {})],
+                            [("call-p-0", "a.txt"), ("call-p-1", "ship it")]))
+        [cli] = self.spawned
+        self.assertEqual(cli.results["call-p-0"]["content"], [{"type": "text", "text": "a.txt"}])
+        self.assertEqual(cli.results["call-p-1"]["content"], [{"type": "text", "text": "ship it"}])
+
+    def test_init_listing_the_bridged_catalog_is_not_a_stray_tool(self):
+        # The server can finish connecting before the turn starts (1.0.41),
+        # and init then lists its catalog keys; the model still sees use_tool.
+        init = {"type": "system", "subtype": "init", "tools": ["use_tool", "host__exec_command", "host__get_goal"],
+                "mcp_servers": [{"name": "host", "status": "connected"}]}
+        self.scripts = [[init, *_message("msg_0", "Hi."), {"type": "result", "subtype": "success"}, _EXIT]]
+        events = self.turn(_TASK)
+        self.assertEqual([e["type"] for e in events], ["text_delta", "message_stop"])
+        self.assertEqual(len(self.spawned), 1)
+
+    def test_a_call_that_streams_in_after_the_handoff_is_handed_over_next(self):
+        first, end = _handoff("msg_0", ("call-x-0", "host__exec_command", {"cmd": "ls"}))
+        late = _use_tool(1, "call-x-1", {"tool_name": "host__get_goal", "tool_input": {}})
+        self.scripts = [[_USE_TOOL_INIT, *first, _calls(("call-x-0", "exec_command", {"cmd": "ls"})),
+                         ("pause",), *late, _calls(("call-x-1", "get_goal", {})), *end,
+                         _echo("call-x-0", "call-x-1"), *_message("msg_1", "Both done."),
+                         {"type": "result", "subtype": "success"}, _EXIT]]
+        leg1 = self.turn(_TASK)
+        self.assertEqual([(e["type"], e.get("id")) for e in leg1], [("tool_call", "call-x-0"), ("message_stop", None)])
+        history = _answered(_TASK, [("call-x-0", "exec_command", {"cmd": "ls"})], [("call-x-0", "a.txt")])
+        self.spawned[0].resume.set()
+        leg2 = self.turn(history)
+        self.assertEqual([(e["type"], e.get("id")) for e in leg2], [("tool_call", "call-x-1"), ("message_stop", None)])
+        leg3 = self.turn(_answered(history, [("call-x-1", "get_goal", {})], [("call-x-1", "ship it")]))
+        self.assertEqual([e.get("text") for e in leg3 if e["type"] == "text_delta"], ["Both done."])
+        self.assertEqual(len(self.spawned), 1)
+
+    def test_screenshots_and_new_input_replay_into_a_fresh_cli(self):
+        png = ("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==")
+        image = {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": png}}
+        calls = [("call-s-0", "exec_command", {"cmd": "ls"})]
+        for label, history in (("screenshot", _answered(_TASK, calls, [("call-s-0", [image])])),
+                               ("new input", [*_answered(_TASK, calls, [("call-s-0", "a.txt")]),
+                                              {"role": "user", "content": [{"type": "text", "text": "stop"}]}])):
+            with self.subTest(label):
+                self.spawned.clear()
+                blocks, _ = _handoff("msg_0", ("call-s-0", "host__exec_command", {"cmd": "ls"}))
+                self.scripts = [[_USE_TOOL_INIT, *blocks, _calls(("call-s-0", "exec_command", {"cmd": "ls"}))],
+                                [_USE_TOOL_INIT, *_message("msg_0", "Fresh."),
+                                 {"type": "result", "subtype": "success"}, _EXIT]]
+                self.turn(_TASK)
+                replayed = self.turn(history)
+                self.assertEqual([e.get("text") for e in replayed if e["type"] == "text_delta"], ["Fresh."])
+                self.assertEqual(len(self.spawned), 2)
+
+    def test_a_refused_dispatch_falls_back_to_the_stateless_handoff(self):
+        blocks, end = _handoff("msg_0", ("call-r-0", "exec_command", {"cmd": "ls"}))
+        refusal = {"type": "user", "message": {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "call-r-0", "is_error": True,
+             "content": "Tool `exec_command` not found in the catalog"}]}}
+        self.scripts = [[_USE_TOOL_INIT, *blocks, *end, refusal]]
+        events = self.turn(_TASK)
+        self.assertEqual([e["type"] for e in events], ["tool_call", "message_stop"])
+        self.spawned[0].process.terminate.assert_called()
+        self.assertEqual([lease for lease in self.pool.leases if lease.pending], [])
+
+    def test_live_argv_needs_the_dispatcher(self):
+        with self.assertRaises(module.GrokCliAgentError):
+            module.build_argv("grok-4.7", run_host_tools=True)
+        argv = module.build_argv("grok-4.7", host_tools=True, run_host_tools=True, search=True)
+        self.assertEqual(argv[argv.index("MCPTool(host__*)") - 1], "--allow")
+        self.assertEqual(argv[-2:], ["--tools", "web_search"])
 
 
 if __name__ == "__main__":

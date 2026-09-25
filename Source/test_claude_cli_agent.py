@@ -17,7 +17,7 @@ from unittest import mock
 
 import claude_cli_agent as m
 import host_tools_mcp
-from codex_session_pool import SessionPool
+from codex_session_pool import SessionPool, digest, history_blocks
 
 
 class _FakeStdin:
@@ -1141,10 +1141,10 @@ class LiveSessionTests(unittest.TestCase):
 
 class ContinuationTests(unittest.TestCase):
     def lease(self, history, calls):
-        blocks = m.history_blocks(history)
+        blocks = history_blocks(history)
         return mock.Mock(pending={"calls": {identifier: {"id": identifier, "name": name, "input": arguments}
                                             for identifier, name, arguments in calls},
-                                  "prefix": m.digest(blocks), "prefix_count": len(blocks)})
+                                  "prefix": digest(blocks), "prefix_count": len(blocks)})
 
     def test_results_become_mcp_content(self):
         png = ("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==")

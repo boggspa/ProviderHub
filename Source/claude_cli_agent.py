@@ -101,8 +101,9 @@ from cli_host_mcp import SERVER_NAME, HostToolset, server_command, tools_note
 from cli_tool_call import (MAX_ENVELOPE_BYTES, TRANSCRIPT_HEADER, ToolCallError,
                            normalize_tools, render_tool_anchor, render_tool_manifest,
                            validate_host_call)
-from cli_images import CliImageError, normalize_image, prompt_content
-from codex_session_pool import SessionPool, digest, history_blocks
+import cli_live_session as live_session
+from cli_images import prompt_content
+from codex_session_pool import SessionPool, digest
 from fast_models import supports_fast_toggle
 from model_names import CLAUDE_CLI_ALIASES, CLAUDE_MODEL_LABELS
 
@@ -1359,54 +1360,9 @@ def _stream(session, state, *, timeout, on_handoff=None):
 # Live sessions
 # ---------------------------------------------------------------------------
 
-class _LiveSession:
-    """A CLI process that waits inside its host tool calls between host requests.
-
-    A pool lease owns it: ``returncode`` lets the pool retire a CLI that has
-    exited, and ``close`` is the lease's disposal.
-    """
-
-    def __init__(self, session, workspace, bridge, state):
-        self.session = session
-        self.workspace = workspace
-        self.bridge = bridge
-        self.state = state
-        self.closed = False
-
-    @property
-    def returncode(self):
-        return getattr(self.session, "returncode", None)
-
-    def resume(self, results) -> bool:
-        """Answer every waiting call with the host's result; False when the CLI cannot take them."""
-        if self.returncode is not None:
-            return False
-        self.state.next_leg()
-        return all(self.bridge.deliver(identifier, result) for identifier, result in results.items())
-
-    def close(self) -> None:
-        if self.closed:
-            return
-        self.closed = True
-        # The CLI goes first, so the bridge dropping its calls can never reach
-        # the model as tool results it would act on.
-        _interrupt(self.session)
-        self.bridge.close()
-        try:
-            self.session.close()
-        except Exception:  # noqa: BLE001 - disposal must never raise
-            pass
-        cleanup_after_exit(self.session, self._release)
-
-    def _release(self) -> None:
-        if self.state.stderr_handle is not None:
-            self.state.stderr_handle.close()
-        shutil.rmtree(self.workspace, ignore_errors=True)
-
-
-def _dispose_live(lease) -> None:
-    if lease.session is not None:
-        lease.session.close()
+_dispose_live = live_session.dispose
+_mcp_result = live_session.mcp_result
+_continuation = live_session.continuation
 
 
 #: Each waiting CLI is a whole Claude Code process; past four, the oldest is
@@ -1423,128 +1379,7 @@ def _pool_key(plan) -> str:
                    "tool_choice": plan["tool_choice"]})
 
 
-def _mcp_result(block) -> dict | None:
-    """A host tool_result as the MCP result its waiting call returns, or None if it cannot be one."""
-    content = block.get("content")
-    items = []
-    if isinstance(content, str):
-        if content:
-            items.append({"type": "text", "text": content})
-    elif isinstance(content, list):
-        for part in content:
-            kind = part.get("type") if isinstance(part, dict) else None
-            if kind == "text":
-                if part.get("text"):
-                    items.append({"type": "text", "text": str(part["text"])})
-            elif kind in {"image", "input_image"}:
-                try:
-                    source = normalize_image(part)["source"]
-                except CliImageError:
-                    return None
-                items.append({"type": "image", "data": source["data"], "mimeType": source["media_type"]})
-            else:
-                return None
-    elif content is not None:
-        return None
-    return {"content": items, "isError": block.get("is_error") is True}
-
-
-def _continuation(lease, history) -> dict | None:
-    """The host's results for a waiting CLI, when ``history`` continues exactly from its handoff.
-
-    The history up to that handoff must be unchanged. After it come the
-    handoff's own message - any text or reasoning, and each call handed over
-    once - and then one result per call and nothing else. New user input goes
-    to a fresh turn instead, where it arrives as the user's own words rather
-    than inside a tool result.
-    """
-    pending = lease.pending
-    if not pending or "prefix" not in pending or not isinstance(history, list):
-        return None
-    blocks = history_blocks(history)
-    count = pending["prefix_count"]
-    if len(blocks) <= count or digest(blocks[:count]) != pending["prefix"]:
-        return None
-    calls = pending["calls"]
-    made, results = set(), {}
-    for role, block in blocks[count:]:
-        if not isinstance(block, dict):
-            return None
-        if role == "assistant":
-            if results:
-                return None
-            if block.get("type") == "tool_use":
-                identifier = block.get("id")
-                call = calls.get(identifier)
-                if call is None or identifier in made or block.get("name") != call["name"]:
-                    return None
-                made.add(identifier)
-            continue
-        if role != "user" or block.get("type") != "tool_result":
-            return None
-        identifier = block.get("tool_use_id")
-        if identifier not in calls or identifier in results:
-            return None
-        result = _mcp_result(block)
-        if result is None:
-            return None
-        results[identifier] = result
-    if made != set(calls) or set(results) != set(calls):
-        return None
-    return results
-
-
-def _answers_itself(payload, calls) -> bool:
-    """Whether a stream line is the CLI's own tool result for one of ``calls``."""
-    if not isinstance(payload, dict) or payload.get("type") != "user":
-        return False
-    content = (payload.get("message") or {}).get("content")
-    return isinstance(content, list) and any(
-        isinstance(block, dict) and block.get("type") == "tool_result" and block.get("tool_use_id") in calls
-        for block in content)
-
-
-def _confirm(live, deadline) -> bool:
-    """Whether the CLI is waiting in the bridge on exactly the calls its message made.
-
-    The message has already ended, so the lines read meanwhile only settle its
-    record. If the CLI answers a call itself, exits, or is not waiting on every
-    call in time, the handoff goes ahead without a live session.
-    """
-    state, session = live.state, live.session
-    limit = min(deadline, time.monotonic() + _LIVE_CONFIRM_SECONDS)
-    while True:
-        verdict = live.bridge.check(state.host_calls)
-        if verdict != "waiting":
-            return verdict == "ready"
-        if time.monotonic() >= limit or live.returncode is not None:
-            return False
-        for kind, payload in _iter_events(session, timeout=0.05):
-            if kind == "raw":
-                state.raw_lines.append(payload)
-            elif _answers_itself(payload, state.host_calls):
-                return False
-            else:
-                try:
-                    _translate(payload, state)
-                except ToolCallError:
-                    return False
-                if state.failure:
-                    return False
-            break
-
-
-def _hold(live, lease, history, deadline) -> bool:
-    """At a host handoff: keep the CLI waiting in its calls when the bridge shows exactly them."""
-    if not _confirm(live, deadline):
-        return False
-    blocks = history_blocks(history)
-    lease.pending = {"calls": {identifier: dict(call) for identifier, call in live.state.host_calls.items()},
-                     "prefix": digest(blocks), "prefix_count": len(blocks)}
-    return True
-
-
-def _spawn_live(plan, state, *, spawner, timeout) -> _LiveSession:
+def _spawn_live(plan, state, *, spawner, timeout) -> live_session.LiveSession:
     """Start the CLI with its host tools bridged and pre-approved, and send the prompt."""
     workspace = tempfile.mkdtemp(prefix="claude_host_")
     bridge = None
@@ -1567,7 +1402,7 @@ def _spawn_live(plan, state, *, spawner, timeout) -> _LiveSession:
             state.stderr_handle = None
         shutil.rmtree(workspace, ignore_errors=True)
         raise
-    live = _LiveSession(session, workspace, bridge, state)
+    live = live_session.LiveSession(session, workspace, bridge, state, interrupt=_interrupt)
     try:
         _write_prompt(session, prompt)
     except BaseException:
@@ -1620,7 +1455,14 @@ def _live_turn(plan, owner, *, spawner, timeout):
                 return None
             lease.session = live
         return (yield from _stream(live.session, live.state, timeout=max(0.01, deadline - time.monotonic()),
-                                   on_handoff=lambda: _hold(live, lease, history, deadline)))
+                                   on_handoff=lambda: live_session.hold(
+                                       live, lease, history, deadline, events=_iter_events,
+                                       translate=_translate, seconds=_LIVE_CONFIRM_SECONDS)))
     finally:
-        # Only a handoff the client has received keeps the CLI waiting.
-        owner.release(lease, healthy=bool(lease.pending) and (timing is None or timing.delivered))
+        # Only a handoff the client has received keeps the CLI waiting. Any
+        # other ending closes it now, as a stateless turn would, rather than
+        # leaving it to the pool's reaper.
+        keep = bool(lease.pending) and (timing is None or timing.delivered)
+        if not keep and lease.session is not None:
+            lease.session.close()
+        owner.release(lease, healthy=keep)

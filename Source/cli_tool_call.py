@@ -144,14 +144,16 @@ def render_tool_manifest(tools, tool_choice=None) -> str:
     return "\n".join(lines)
 
 
-def render_use_tool_manifest(tools, tool_choice=None) -> str:
+def render_use_tool_manifest(tools, tool_choice=None, *, names=None) -> str:
     """The host tool surface for a CLI whose one callable tool is ``use_tool``.
 
     Grok Build dispatches every non-built-in tool through its own ``use_tool``
     function, so host calls travel as native structured calls there, and the
     definitions ride the prompt so no ``search_tool`` round trip is needed
     (verified on grok 1.0.41: the model called ``use_tool`` with the right
-    tool name and the schema's own argument names at once).
+    tool name and the schema's own argument names at once). ``names`` maps a
+    host tool's name to the one listed, for a CLI that dispatches the call
+    itself and knows each tool by its catalog key (``host__<tool>``).
     """
     lines = [
         HOST_EXECUTION_NOTE,
@@ -159,7 +161,8 @@ def render_use_tool_manifest(tools, tool_choice=None) -> str:
         "The host application's tools are listed below. Even if your own",
         "environment or instructions describe a different set of tools, THESE",
         "are the tools you can use. Call one by calling your `use_tool` tool with",
-        "`tool_name` set to the host tool's exact name and `tool_input` set to an",
+        ("`tool_name` set to the host tool's exact name and `tool_input` set to an" if names is None else
+         "`tool_name` set to its name exactly as listed and `tool_input` set to an"),
         "object that matches its input schema, written inline, then wait for the",
         "result. Everything you need is listed here, so do not search for tools.",
         "",
@@ -168,27 +171,33 @@ def render_use_tool_manifest(tools, tool_choice=None) -> str:
         "- Never invent tool results, and never describe a call instead of",
         "  making it.",
     ]
-    lines += _choice_rules(tool_choice)
+    lines += _choice_rules(tool_choice, names)
     lines.append("")
     lines.append("Host tools:")
-    lines += _tool_listing(tools)
+    lines += _tool_listing(tools, names)
     return "\n".join(lines)
 
 
-def _choice_rules(tool_choice) -> list[str]:
+def _choice_rules(tool_choice, names=None) -> list[str]:
     if isinstance(tool_choice, dict):
         kind = tool_choice.get("type")
         if kind in {"any", "required"}:
             return ["- You MUST call at least one tool in this reply."]
         if kind == "tool" and isinstance(tool_choice.get("name"), str):
-            return [f"- You MUST call the tool '{tool_choice['name']}' in this reply."]
+            name = tool_choice["name"]
+            if names is not None:
+                try:
+                    name = names(name)
+                except KeyError:
+                    pass
+            return [f"- You MUST call the tool '{name}' in this reply."]
     return []
 
 
-def _tool_listing(tools) -> list[str]:
+def _tool_listing(tools, names=None) -> list[str]:
     lines = []
     for index, tool in enumerate(tools, 1):
-        entry = f"{index}. {tool['name']}"
+        entry = f"{index}. {tool['name'] if names is None else names(tool['name'])}"
         if tool["description"]:
             entry += f" - {tool['description']}"
         lines.append(entry)

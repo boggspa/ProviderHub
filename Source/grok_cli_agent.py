@@ -44,6 +44,26 @@ argument names. This replaces the text envelope, which Grok followed but
 which competed with its native tools. If init does not list ``use_tool`` the
 turn is spawned again, invisibly, with the envelope manifest.
 
+Live sessions (see cli_live_session). With typed history from the route, the
+turn instead lets grok dispatch ``use_tool`` to a ``host`` MCP server that
+forwards each call to the hub (cli_host_bridge) and waits, so the CLI waits
+inside its own tool call and the next host request continues the same
+process. The server is registered in the turn's private workspace
+(``.grok/config.toml``, loaded headless with ``GROK_FOLDER_TRUST=0``, which
+the workspace's contents make safe). Only that server is pre-approved
+(``--allow MCPTool(host__*)`` in place of the blanket MCPTool deny; the other
+denies stay). The model is shown each tool under its catalog key
+``host__<tool>``. That is the one spelling grok's dispatcher resolves, so a
+host name its catalog would skip (a second ``__``, say) is served under an
+alias. Grok's MCP client sends no tool-call id, so the bridge pairs each
+waiting call with the stream's by tool and arguments. Verified on 1.0.41:
+two ``use_tool`` calls in one message reached the server together, and grok
+returned their results to its model. Grok writes a message's end only after
+its calls return, so a live leg hands off once the stream has gone quiet
+with every call it read waiting in the bridge (``_LIVE_QUIET_SECONDS``). The
+deferred end arrives on the next leg and belongs to a message already handed
+over. A call that streams in after the handoff is handed over on its own.
+
 One exception, only when the desktop asked for hosted web search: the turn
 keeps web_search alone (``--tools web_search``, init.tools ``["web_search"]``).
 On models whose cache entry sets ``supports_backend_search`` the search runs
@@ -82,20 +102,27 @@ SYSTEM_PROMPT_TRANSPORT is "flag" (``--system-prompt-override``).
 """
 from __future__ import annotations
 
+import atexit
 import json
+import os
 import re
 import shutil
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 from typing import Any, Iterator
 
 from cli_session import CliSessionError, StdioSession, minimal_env, resolve_binary
 from cli_lifecycle import cleanup_after_exit
+from cli_host_bridge import HostBridgeError, HostCallBridge
+from cli_host_mcp import SERVER_NAME, HostToolset, server_command
+import cli_live_session as live_session
 from cli_tool_call import (MAX_ENVELOPE_BYTES, TRANSCRIPT_HEADER, ToolCallError,
                            normalize_tools, render_tool_anchor, render_tool_manifest,
                            render_use_tool_manifest, validate_host_call)
 from cli_images import prompt_content
+from codex_session_pool import SessionPool, digest
 
 try:
     from effort_map import map_effort as _map_effort
@@ -131,7 +158,32 @@ HOST_TOOL_TRANSPORT = "use_tool"
 _USE_TOOL = "use_tool"
 #: grok's catalogue key for a tool of an MCP server named "host" (server__tool);
 #: a model that spells a host tool that way still reaches it.
-_HOST_KEY_PREFIX = "host__"
+_HOST_KEY_PREFIX = f"{SERVER_NAME}__"
+#: The surfaces on which host calls ride use_tool: refused by the CLI
+#: ("use_tool"), or dispatched to the bridged host server ("live").
+_USE_TOOL_MODES = frozenset({"use_tool", "live"})
+#: What grok 1.0.41 admits as the tool half of a catalog key: letters, digits,
+#: ``_`` and ``-``, with no leading underscore and no ``__`` inside.
+_CATALOG_TOOL = re.compile(r"(?!_)(?!.*__)[A-Za-z0-9_-]+")
+#: grok's catalog-key ceiling; the 64-character cap is for use_tool itself.
+_CATALOG_KEY_LIMIT = 256
+#: The route passes typed history so a host call can continue a live session.
+LIVE_HOST_CALLS = True
+#: How long a CLI may wait for the host's result before it is retired and the
+#: next step replays the conversation into a fresh process instead.
+LIVE_PENDING_TTL = 900
+#: The bridged server's per-call ceiling (tool_timeout_sec), past LIVE_PENDING_TTL.
+_LIVE_CALL_TIMEOUT_SEC = 3600
+#: How long the CLI has, once its message ends, to be waiting on every call.
+_LIVE_CONFIRM_SECONDS = 15.0
+#: grok 1.0.41 dispatches each use_tool call as its block closes but writes the
+#: message's end (message_delta, message_stop, snapshot) only once every call
+#: has returned. So on a live session the handoff comes when every call read so
+#: far is waiting in the bridge and the stream has been quiet this long.
+_LIVE_QUIET_SECONDS = 0.75
+#: A live child loads the workspace's server config headless and keeps host
+#: results inline (grok spills MCP results past 20,000 bytes to a file).
+_LIVE_ENV_EXTRA = {"GROK_FOLDER_TRUST": "0", "GROK_MAX_MCP_OUTPUT_BYTES": str(8 * 1024 * 1024)}
 
 # Real installs live in ~/.grok/bin on this machine.
 _EXTRA_BIN_DIRS = ("~/.grok/bin", "~/.local/bin", "/opt/homebrew/bin", "/usr/local/bin")
@@ -410,7 +462,7 @@ def _assert_safe(argv: list[str]) -> list[str]:
 
 
 def build_argv(model, *, effort=None, system=None, stream=True, search=False,
-               extra_removals=(), host_tools=False) -> list[str]:
+               extra_removals=(), host_tools=False, run_host_tools=False) -> list[str]:
     """Full argv for one print-mode turn. argv[0] is the bare binary name.
 
     ``run_turn`` replaces argv[0] with the resolved absolute path; keeping the
@@ -428,6 +480,9 @@ def build_argv(model, *, effort=None, system=None, stream=True, search=False,
 
     ``host_tools`` keeps ``use_tool``, the dispatcher host calls travel
     through. ``--deny MCPTool`` still refuses to run anything it names.
+    ``run_host_tools`` (a live session) lets it reach the bridged ``host``
+    server alone: ``--allow MCPTool(host__*)`` replaces that one deny, and
+    the server forwards each call to the hub, running nothing itself.
 
     INVARIANT: Every argv carries ``--no-auto-update`` to prevent the CLI from
     self-updating during capability checks or turns.
@@ -438,6 +493,8 @@ def build_argv(model, *, effort=None, system=None, stream=True, search=False,
     """
     validated_model = _validate_model(model)
     validated_effort = _validate_effort(effort)
+    if run_host_tools and not host_tools:
+        raise GrokCliAgentError("run_host_tools needs host_tools")
 
     argv: list[str] = [BINARY_NAMES[0]]
 
@@ -464,6 +521,9 @@ def build_argv(model, *, effort=None, system=None, stream=True, search=False,
     flags[flags.index("--disallowed-tools") + 1] = ",".join(removals)
     if search:
         flags.remove("--disable-web-search")
+    if run_host_tools:
+        at = flags.index("MCPTool")
+        flags[at - 1:at + 1] = ["--allow", f"MCPTool({_HOST_KEY_PREFIX}*)"]
     argv += flags
 
     # Model selection
@@ -595,15 +655,46 @@ class _TurnState:
         self.pending_calls = {}
         # Host calls read off this message, by id; handed over at its end.
         self.host_calls = {}
-        # "use_tool" when host calls ride grok's dispatcher, "envelope" for
-        # the text fallback, None for a turn without host tools.
+        # "use_tool" when host calls ride grok's dispatcher (refused by the
+        # CLI), "live" when it dispatches them to the bridged host server,
+        # "envelope" for the text fallback, None for a turn without host tools.
         self.mode = None
+        # Catalog keys (host__<tool>) of a live session's bridged server.
+        self.toolset = None
+        # Host calls handed over on earlier legs of a live session, and the
+        # messages that made them (grok ends a message only after its calls).
+        self.handed = set()
+        self.handed_messages = set()
         # init did not list use_tool: respawn with the envelope manifest.
         self.use_tool_missing = False
         self.backend_calls = set()
         self.search = False
         self.searches = {}
         self.pending_searches = {}
+
+    def next_leg(self) -> None:
+        """Start the next host request on a live session.
+
+        What one request reports starts afresh; what the process has already
+        shown (its registry, the messages and searches it has streamed) stays,
+        so the snapshot of the handoff message, which grok sends after the
+        message ends, repeats neither text, searches nor calls.
+        """
+        self.handed.update(identifier for identifier in self.host_calls if isinstance(identifier, str))
+        if self.current_message is not None:
+            # Still open: its end, and perhaps more of it, arrive on this leg.
+            self.handed_messages.add(id(self.current_message))
+        self.host_calls = {}
+        self.pending_calls = {}
+        self.pending_searches = {}
+        self.host_handoff = False
+        self.emitted_text = False
+        self.assistant_text = []
+        self.result_text = None
+        self.stop_reason = None
+        self.failure = None
+        self.terminal = False
+        self.raw_lines = self.raw_lines[-5:]
 
     def start_message(self, message):
         identifier = message.get("id") if isinstance(message, dict) else None
@@ -678,9 +769,11 @@ class _TurnState:
             return {"type": "thinking_delta", "text": f"Grok backend activity: {arguments['variant']}.\n"}
         if not self.native_tools_disabled:
             raise ToolCallError("grok attempted a native CLI tool before confirming tool isolation")
-        if call.get("name") == _USE_TOOL and self.mode == "use_tool":
-            call = _unwrap_use_tool(call, self.host_tools)
         identifier = call.get("id")
+        if isinstance(identifier, str) and identifier in self.handed:
+            return None
+        if call.get("name") == _USE_TOOL and self.mode in _USE_TOOL_MODES:
+            call = _unwrap_use_tool(call, self.host_tools, self.toolset)
         if isinstance(identifier, str) and identifier in self.host_calls:
             return None
         validate_host_call(call, self.host_tools)
@@ -814,8 +907,12 @@ def _translate(payload: Any, state: _TurnState) -> list[dict]:
             state.failure = "grok did not report its native tool registry; this runtime cannot safely forward host calls."
             return []
         allowed = ({"web_search"} if state.search else set()) \
-            | ({_USE_TOOL} if state.mode == "use_tool" else set())
-        extras = sorted(set(tools) - allowed)
+            | ({_USE_TOOL} if state.mode in _USE_TOOL_MODES else set())
+        # A live turn's own server can finish connecting before the turn
+        # starts, and init then lists its catalog; grok still offers the
+        # model use_tool alone (1.0.41 tool_definitions.json).
+        extras = sorted(tool for tool in set(tools) - allowed
+                        if state.toolset is None or state.toolset.host_name(tool) is None)
         if extras:
             state.native_tools_seen = extras
             names = ", ".join(extras)
@@ -826,7 +923,7 @@ def _translate(payload: Any, state: _TurnState) -> list[dict]:
                 f"grok did not disable its native CLI tools ({names}); this runtime cannot safely forward host calls.")
         else:
             state.native_tools_disabled = True
-            if state.mode == "use_tool" and _USE_TOOL not in tools:
+            if state.mode in _USE_TOOL_MODES and _USE_TOOL not in tools:
                 state.use_tool_missing = True
         return []
 
@@ -905,6 +1002,10 @@ def _translate(payload: Any, state: _TurnState) -> list[dict]:
                     yield event
         elif event_type == "message_delta":
             reason = (event.get("delta") or {}).get("stop_reason")
+            if state.current_message is not None and id(state.current_message) in state.handed_messages \
+                    and not state.host_calls:
+                # The end of a message whose calls a previous leg handed over.
+                return []
             if reason in {"cancelled", "canceled", "interrupted", "error", "failed"} \
                     or (reason == "tool_use" and not (state.backend_calls or state.searches or state.host_calls)):
                 state.failure = f"grok reported {reason} before a host tool handoff."
@@ -1001,12 +1102,14 @@ def _interrupt(session) -> None:
             pass
 
 
-def _unwrap_use_tool(call, host_tools) -> dict:
+def _unwrap_use_tool(call, host_tools, toolset=None) -> dict:
     """The host call inside a ``use_tool`` dispatch: ``{tool_name, tool_input}``.
 
     grok also documents file-based arguments for large MCP inputs; a host call
     has no file the host could read, so anything but inline ``tool_input`` is
     a protocol error for the route's one correction, never a guessed call.
+    On a live session ``toolset`` maps the catalog key the model was shown
+    (``host__<tool>``, perhaps an alias) back to the host tool.
     """
     arguments = call.get("input")
     if not isinstance(arguments, dict) or not isinstance(arguments.get("tool_name"), str):
@@ -1015,7 +1118,9 @@ def _unwrap_use_tool(call, host_tools) -> dict:
         raise ToolCallError("use_tool arguments must be inline in tool_input")
     name = arguments["tool_name"]
     offered = {tool["name"] for tool in host_tools}
-    if name not in offered and name.startswith(_HOST_KEY_PREFIX) \
+    if toolset is not None and toolset.host_name(name) is not None:
+        name = toolset.host_name(name)
+    elif name not in offered and name.startswith(_HOST_KEY_PREFIX) \
             and name[len(_HOST_KEY_PREFIX):] in offered:
         name = name[len(_HOST_KEY_PREFIX):]
     tool_input = arguments.get("tool_input", {})
@@ -1094,6 +1199,7 @@ def _plan_turn(request) -> dict:
     if isinstance(max_tokens, int) and max_tokens <= 0:
         raise GrokCliAgentError("max_tokens must be positive")
     tool_choice = request.get("tool_choice")
+    history = request.get("history")
     return {
         "model": model,
         "host_tools": host_tools,
@@ -1104,11 +1210,18 @@ def _plan_turn(request) -> dict:
         "images": request.get("images") or [],
         "search": search_enabled(request.get("web_search")),
         "host_tool_schema": request.get("host_tool_schema"),
+        # A live session's host tools under the catalog keys grok dispatches.
+        "toolset": HostToolset(host_tools, prefix=_HOST_KEY_PREFIX, limit=_CATALOG_KEY_LIMIT,
+                               pattern=_CATALOG_TOOL) if host_tools else None,
+        # Typed Messages history, when the route passes it: live sessions match
+        # a host request to the CLI waiting on its calls with it.
+        "history": history if isinstance(history, list) else None,
+        "timing": request.get("_cli_timing"),
     }
 
 
 def _modes(plan) -> tuple:
-    """The host tool surfaces to try, in order, for one turn."""
+    """The host tool surfaces to try, in order, for one stateless turn."""
     if plan["host_tools"] and not plan["host_tool_schema"]:
         return ("use_tool", "envelope")
     return (None,)
@@ -1117,14 +1230,16 @@ def _modes(plan) -> tuple:
 def _surface(plan, mode) -> dict:
     """``plan`` rendered for one surface: system text, prompt and its transport.
 
-    ``use_tool`` lists the host tools for grok's own dispatcher; ``envelope``
-    is the text fallback plus its anchor on the final user turn, which the
-    route's parser still reads.
+    ``use_tool`` lists the host tools for grok's own dispatcher and ``live``
+    lists them under the catalog keys it resolves; ``envelope`` is the text
+    fallback plus its anchor on the final user turn, which the route's parser
+    still reads.
     """
     system, messages = plan["system"], plan["messages"]
     tools, choice = plan["host_tools"], plan["tool_choice"]
-    if mode == "use_tool":
-        system = render_use_tool_manifest(tools, choice) + ("\n\n" + system if system else "")
+    if mode in _USE_TOOL_MODES:
+        names = plan["toolset"].model_name if mode == "live" else None
+        system = render_use_tool_manifest(tools, choice, names=names) + ("\n\n" + system if system else "")
     elif mode == "envelope":
         system = render_tool_manifest(tools, choice) + ("\n\n" + system if system else "")
         anchor = render_tool_anchor(tools)
@@ -1148,7 +1263,8 @@ def _turn_argv(plan, workspace_path, *, extra_removals=()) -> list[str]:
     """
     argv = build_argv(plan["model"], effort=plan["effort"], system=None, stream=True,
                       search=plan["search"], extra_removals=extra_removals,
-                      host_tools=plan.get("mode") == "use_tool")
+                      host_tools=plan.get("mode") in _USE_TOOL_MODES,
+                      run_host_tools=plan.get("mode") == "live")
     try:
         single = argv.index("--single")
     except ValueError:
@@ -1176,8 +1292,18 @@ def _turn_argv(plan, workspace_path, *, extra_removals=()) -> list[str]:
     return argv
 
 
+def _new_state(plan, mode, *, retried=False) -> _TurnState:
+    state = _TurnState()
+    state.host_tools = plan["host_tools"]
+    state.search = plan["search"]
+    state.mode = mode
+    state.retried = retried
+    state.toolset = plan["toolset"] if mode == "live" else None
+    return state
+
+
 def _attempt_turn(plan, state, *, spawner, timeout, extra_removals, retry_allowed):
-    """One spawn of the CLI, streamed as route events.
+    """One spawn of the CLI that ends with the turn or at its first host handoff.
 
     Returns the tool names init reported still registered when the registry
     check failed before any event reached the caller and a respawn is
@@ -1214,48 +1340,101 @@ def _attempt_turn(plan, state, *, spawner, timeout, extra_removals, retry_allowe
         yield {"type": "error", "message": message}
         return None
 
-    stop_reason = state.stop_reason or "end_turn"
-    produced = False
+    def release_files():
+        if workspace_path is not None:
+            shutil.rmtree(workspace_path, ignore_errors=True)
+        if state.stderr_handle is not None:
+            state.stderr_handle.close()
+
     try:
         with session:
             # For grok --single, prompt is already in argv, not on stdin
-            for kind, payload in _iter_events(session, timeout=timeout):
-                if kind == "raw":
-                    state.raw_lines.append(payload)
+            return (yield from _stream(session, state, timeout=timeout, retry_allowed=retry_allowed))
+    finally:
+        cleanup_after_exit(session, release_files)
+
+
+def _paced_events(session, *, timeout, idle):
+    """``_iter_events``, plus ("idle", None) after each ``idle`` seconds with nothing to read."""
+    deadline = time.monotonic() + timeout
+    while True:
+        started = time.monotonic()
+        window = min(idle, deadline - started)
+        if window <= 0:
+            return
+        quiet = True
+        for item in _iter_events(session, timeout=window):
+            quiet = False
+            yield item
+        if quiet:
+            if time.monotonic() - started < window / 2:
+                return  # the stream ended rather than went quiet
+            yield ("idle", None)
+
+
+def _stream(session, state, *, timeout, retry_allowed, on_handoff=None, ready=None):
+    """Stream the CLI's output as route events until the turn, or this leg of it, ends.
+
+    Returns, before any event was yielded: the names init reported still
+    registered (a frozenset) when a respawn is allowed, or ``_USE_TOOL_MISSING``.
+    Otherwise it ends with exactly one message_stop or error event and returns
+    "pending" when ``on_handoff`` kept the CLI waiting inside its host calls,
+    or None. ``ready`` (a live session's) says whether every host call read
+    so far is waiting in the bridge; once it is and the stream has gone quiet,
+    the calls are handed over without waiting for the message's end.
+    """
+    stop_reason = state.stop_reason or "end_turn"
+    produced = False
+    events = (_paced_events(session, timeout=timeout, idle=_LIVE_QUIET_SECONDS) if ready is not None
+              else _iter_events(session, timeout=timeout))
+    try:
+        for kind, payload in events:
+            if kind == "idle":
+                if not (state.host_calls and not state.pending_calls and not state.host_handoff
+                        and ready()):
                     continue
+                state.host_handoff = True
+            elif kind == "raw":
+                state.raw_lines.append(payload)
+                continue
+            else:
                 for event in _translate(payload, state):
                     produced = True
                     yield event
-                if state.native_tools_seen and retry_allowed and not produced:
-                    # init is the stream's first line, so nothing has reached
-                    # the client: the respawn is invisible to it.
-                    return frozenset(state.native_tools_seen)
-                if state.use_tool_missing and not produced:
-                    return _USE_TOOL_MISSING
-                if state.failure:
-                    yield {"type": "error", "message": state.failure}
-                    return None
-                if state.host_handoff:
-                    # With an empty native registry these are model requests
-                    # for host tools. Stop before the CLI's own tool loop.
-                    _interrupt(session)
+            if state.native_tools_seen and retry_allowed and not produced:
+                # init is the stream's first line, so nothing has reached
+                # the client: the respawn is invisible to it.
+                return frozenset(state.native_tools_seen)
+            if state.use_tool_missing and not produced:
+                return _USE_TOOL_MISSING
+            if state.failure:
+                yield {"type": "error", "message": state.failure}
+                return None
+            if state.host_handoff:
+                if on_handoff is not None and on_handoff():
+                    # The CLI waits in the bridge for the host's results.
                     yield {"type": "message_stop", "stop_reason": "tool_use"}
+                    return "pending"
+                # With an empty native registry these are model requests
+                # for host tools. Stop before the CLI's own tool loop.
+                _interrupt(session)
+                yield {"type": "message_stop", "stop_reason": "tool_use"}
+                return None
+            if state.terminal:
+                returncode = getattr(session, "returncode", None)
+                if isinstance(returncode, int) and returncode != 0:
+                    yield {"type": "error", "message": f"the grok CLI exited with code {returncode}"}
                     return None
-                if state.terminal:
-                    returncode = getattr(session, "returncode", None)
-                    if isinstance(returncode, int) and returncode != 0:
-                        yield {"type": "error", "message": f"the grok CLI exited with code {returncode}"}
+                if not state.emitted_text:
+                    fallback = state.fallback_text()
+                    if fallback:
+                        state.emitted_text = True
+                        yield {"type": "text_delta", "text": fallback}
+                    else:
+                        yield {"type": "error", "message": "the grok CLI produced no output"}
                         return None
-                    if not state.emitted_text:
-                        fallback = state.fallback_text()
-                        if fallback:
-                            state.emitted_text = True
-                            yield {"type": "text_delta", "text": fallback}
-                        else:
-                            yield {"type": "error", "message": "the grok CLI produced no output"}
-                            return None
-                    yield {"type": "message_stop", "stop_reason": state.stop_reason or "end_turn"}
-                    return None
+                yield {"type": "message_stop", "stop_reason": state.stop_reason or "end_turn"}
+                return None
 
         returncode = getattr(session, "returncode", None)
         if isinstance(returncode, int) and returncode != 0:
@@ -1286,20 +1465,13 @@ def _attempt_turn(plan, state, *, spawner, timeout, extra_removals, retry_allowe
     except Exception as exc:
         yield {"type": "error", "message": _describe(exc, state, timeout)}
         return None
-    finally:
-        def release_files():
-            if workspace_path is not None:
-                shutil.rmtree(workspace_path, ignore_errors=True)
-            if state.stderr_handle is not None:
-                state.stderr_handle.close()
-        cleanup_after_exit(session, release_files)
 
     yield {"type": "message_stop", "stop_reason": stop_reason}
     return None
 
 
-def run_turn(request, *, spawner=None, timeout=300) -> Iterator[dict]:
-    """Stream one stateless turn as text_delta / thinking_delta / message_stop.
+def run_turn(request, *, spawner=None, timeout=300, pool=None) -> Iterator[dict]:
+    """Stream one host request as text_delta / thinking_delta / message_stop.
 
     Always terminates with exactly one message_stop or error event, and never
     raises: every failure mode (missing binary, bad request, CLI error result,
@@ -1312,22 +1484,29 @@ def run_turn(request, *, spawner=None, timeout=300) -> Iterator[dict]:
 
     A turn with host tools offers them through ``use_tool``; if init does not
     list that dispatcher, the turn is spawned again with the text envelope,
-    also before anything reaches the client.
+    also before anything reaches the client. With typed history and a session
+    pool (the module's own unless a test ``spawner`` is given) it runs as a
+    live session, and a request that continues a waiting CLI resumes it;
+    whenever no live session can serve the request, it runs statelessly.
     """
     try:
         plan = _plan_turn(request)
     except Exception as exc:
         yield {"type": "error", "message": _describe(exc, None, timeout)}
         return
-    for mode in _modes(plan):
+    modes = _modes(plan)
+    owner = pool if pool is not None else (_POOL if spawner is None else None)
+    if owner is not None and modes[0] == "use_tool" and plan["history"] is not None:
+        outcome = yield from _live_turn(plan, owner, spawner=spawner, timeout=timeout)
+        if outcome == _USE_TOOL_MISSING:
+            modes = ("envelope",)
+        elif outcome != "stateless":
+            return
+    for mode in modes:
         surface = _surface(plan, mode)
         removals = frozenset(_LEARNED_REMOVALS)
         for attempt in (1, 2):
-            state = _TurnState()
-            state.host_tools = plan["host_tools"]
-            state.search = plan["search"]
-            state.mode = mode
-            state.retried = attempt == 2
+            state = _new_state(plan, mode, retried=attempt == 2)
             outcome = yield from _attempt_turn(surface, state, spawner=spawner, timeout=timeout,
                                                extra_removals=sorted(removals), retry_allowed=attempt == 1)
             if attempt == 2 and state.native_tools_disabled and len(_LEARNED_REMOVALS) < _MAX_LEARNED_REMOVALS:
@@ -1339,3 +1518,145 @@ def run_turn(request, *, spawner=None, timeout=300) -> Iterator[dict]:
             removals = removals | outcome
         else:
             return
+
+
+# ---------------------------------------------------------------------------
+# Live sessions
+# ---------------------------------------------------------------------------
+
+#: Each waiting CLI is a whole Grok process; past four, the oldest is retired
+#: and its task's next step replays instead.
+_POOL = SessionPool(live_session.dispose, capacity=4, idle_ttl=0, pending_ttl=LIVE_PENDING_TTL, label="Grok")
+atexit.register(_POOL.close)
+
+
+def _pool_key(plan) -> str:
+    """What a waiting CLI must share with a request to continue it: argv and system text."""
+    return digest({"model": plan["model"], "effort": plan["effort"], "search": plan["search"],
+                   "system": _surface(plan, "live")["system"], "tools": plan["host_tools"],
+                   "tool_choice": plan["tool_choice"]})
+
+
+def _write_server_config(workspace_path, command) -> None:
+    """Register the bridged host server for this workspace alone (grok reads cwd/.grok)."""
+    directory = Path(workspace_path) / ".grok"
+    directory.mkdir(mode=0o700)
+    # JSON strings and arrays are valid TOML basic strings and arrays.
+    body = (f"[mcp_servers.{SERVER_NAME}]\n"
+            f"command = {json.dumps(command[0])}\n"
+            f"args = {json.dumps(command[1:])}\n"
+            "startup_timeout_sec = 20\n"
+            f"tool_timeout_sec = {_LIVE_CALL_TIMEOUT_SEC}\n")
+    descriptor = os.open(directory / "config.toml", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        handle.write(body)
+
+
+def _spawn_live(surface, state, *, spawner, timeout, extra_removals) -> live_session.LiveSession:
+    """Start the CLI in a workspace whose host server is bridged to the hub."""
+    binary = _resolve_binary()
+    if not binary:
+        raise GrokCliAgentError(
+            "the grok CLI was not found on PATH; install Grok or "
+            "switch this route to API-key credentials"
+        )
+    workspace_path = tempfile.mkdtemp(prefix="grok_ws_")
+    bridge = None
+    try:
+        toolset = surface["toolset"]
+        bridge = HostCallBridge(workspace_path, lambda served: toolset.host_name(_HOST_KEY_PREFIX + served))
+        _write_server_config(workspace_path, server_command(toolset.write(workspace_path, bridge=bridge)))
+        argv = _turn_argv(surface, workspace_path, extra_removals=extra_removals)
+        argv[0] = binary
+        state.stderr_handle = tempfile.TemporaryFile(mode="w+", encoding="utf-8")
+        session = StdioSession(argv, env=minimal_env({**_CHILD_ENV, **_LIVE_ENV_EXTRA}), cwd=workspace_path,
+                               timeout=float(timeout), spawner=spawner, stderr=state.stderr_handle)
+    except BaseException:
+        if bridge is not None:
+            bridge.close()
+        if state.stderr_handle is not None:
+            state.stderr_handle.close()
+            state.stderr_handle = None
+        shutil.rmtree(workspace_path, ignore_errors=True)
+        raise
+    return live_session.LiveSession(session, workspace_path, bridge, state, interrupt=_interrupt)
+
+
+def _live_turn(plan, owner, *, spawner, timeout):
+    """One host request on a live session, resumed from its waiting calls or started cold.
+
+    Returns "stateless" when no live session can serve the request and
+    ``_USE_TOOL_MISSING`` when init lacked the dispatcher - in both cases
+    before any event was yielded. Otherwise it ends with exactly one
+    message_stop or error event and returns None or "pending".
+    """
+    deadline = time.monotonic() + timeout
+    timing = plan["timing"]
+    history = plan["history"]
+    key = _pool_key(plan)
+    try:
+        # Grok's MCP client is not shown to pass images to the model, so a
+        # screenshot result replays through the verified image transport.
+        lease, reuse = owner.acquire(
+            key, match=lambda entry: live_session.continuation(entry, history, images=False) is not None,
+            timeout=max(0.01, deadline - time.monotonic()))
+    except (RuntimeError, TimeoutError):
+        return "stateless"
+    except Exception as exc:  # the client cancelled while the lease was awaited
+        yield {"type": "error", "message": _describe(exc, None, timeout)}
+        return None
+
+    def on_handoff(live):
+        return lambda: live_session.hold(live, lease, history, deadline, events=_iter_events,
+                                         translate=_translate, seconds=_LIVE_CONFIRM_SECONDS)
+
+    def ready(live):
+        return lambda: live.bridge.check(live.state.host_calls) == "ready"
+
+    try:
+        if reuse == "resumed":
+            results = live_session.continuation(lease, history, images=False)
+            lease.pending = None
+            live = lease.session
+            if results is None or not live.resume(results):
+                return "stateless"
+            if timing:
+                timing.label(reuse="resumed")
+            return (yield from _stream(live.session, live.state, timeout=max(0.01, deadline - time.monotonic()),
+                                       retry_allowed=False, on_handoff=on_handoff(live), ready=ready(live)))
+        if timing:
+            timing.label(reuse="cold")
+        surface = _surface(plan, "live")
+        removals = frozenset(_LEARNED_REMOVALS)
+        for attempt in (1, 2):
+            state = _new_state(plan, "live", retried=attempt == 2)
+            try:
+                live = _spawn_live(surface, state, spawner=spawner, timeout=max(0.01, deadline - time.monotonic()),
+                                   extra_removals=sorted(removals))
+            except HostBridgeError:
+                return "stateless"
+            except Exception as exc:
+                yield {"type": "error", "message": _describe(exc, state, timeout)}
+                return None
+            lease.session = live
+            outcome = yield from _stream(live.session, state, timeout=max(0.01, deadline - time.monotonic()),
+                                         retry_allowed=attempt == 1, on_handoff=on_handoff(live),
+                                         ready=ready(live))
+            if attempt == 2 and state.native_tools_disabled and len(_LEARNED_REMOVALS) < _MAX_LEARNED_REMOVALS:
+                _LEARNED_REMOVALS.update(name for name in removals if _REMOVAL_NAME.fullmatch(name))
+            if not isinstance(outcome, frozenset):
+                return outcome
+            # init named tools the removal list missed: this process goes, and
+            # the respawn, still before any event, removes them by name.
+            live.close()
+            lease.session = None
+            removals = removals | outcome
+        return None
+    finally:
+        # Only a handoff the client has received keeps the CLI waiting. Any
+        # other ending closes it now, as a stateless turn would, rather than
+        # leaving it to the pool's reaper.
+        keep = bool(lease.pending) and (timing is None or timing.delivered)
+        if not keep and lease.session is not None:
+            lease.session.close()
+        owner.release(lease, healthy=keep)

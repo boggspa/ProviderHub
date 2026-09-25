@@ -20,6 +20,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -41,11 +42,21 @@ LIVE_RESULT_CHARS = 500_000
 LIVE_ANNOTATIONS = {"readOnlyHint": True}
 
 
-def _alias(name: str, budget: int, taken) -> str:
-    """A stable name within ``budget`` characters for a host tool that is too long."""
+def _alias(name: str, budget: int, taken, *, clean: bool = False) -> str:
+    """A stable name within ``budget`` characters for a host tool that cannot be served as is.
+
+    ``clean`` also reduces the name to letters, digits, ``-`` and single
+    underscores, with none leading or trailing, before the digest is added.
+    """
     digest = hashlib.sha256(name.encode("utf-8")).hexdigest()
+    base = name
+    if clean:
+        base = re.sub(r"_{2,}", "_", re.sub(r"[^A-Za-z0-9_-]+", "_", name)).strip("_") or "tool"
     for size in range(8, len(digest) + 1):
-        candidate = name[:budget - size - 1] + "_" + digest[:size]
+        stem = base[:budget - size - 1]
+        if clean:
+            stem = stem.rstrip("_") or "tool"
+        candidate = stem + "_" + digest[:size]
         if candidate not in taken:
             return candidate
     raise ValueError("host tool names collide after aliasing")
@@ -55,22 +66,28 @@ class HostToolset:
     """One request's host tools under the names a CLI's MCP client shows its model.
 
     ``prefix`` is how the CLI qualifies an MCP tool (Claude Code writes
-    ``mcp__host__<tool>``). A host name that would overflow the name ceiling
-    once prefixed is served under a short alias whose description names the
-    original, so instructions that mention the tool still lead to it.
+    ``mcp__host__<tool>``, Grok's catalog ``host__<tool>``). A host name that
+    would overflow the name ceiling once prefixed, or that fails ``pattern``
+    (what the CLI admits as a served name), is served under an alias whose
+    description names the original, so instructions that mention the tool
+    still lead to it.
     """
 
-    def __init__(self, tools, *, prefix: str, limit: int = NAME_LIMIT):
+    def __init__(self, tools, *, prefix: str, limit: int = NAME_LIMIT, pattern=None):
         self.prefix = prefix
         self.tools = [dict(tool) for tool in tools]
         budget = limit - len(prefix)
         if budget < 16:
             raise ValueError("MCP tool prefix leaves too little room for tool names")
+
+        def fits(name):
+            return len(name) <= budget and (pattern is None or pattern.fullmatch(name) is not None)
+
         self._served = {}
-        taken = {tool["name"] for tool in self.tools if len(tool["name"]) <= budget}
+        taken = {tool["name"] for tool in self.tools if fits(tool["name"])}
         for tool in self.tools:
             name = tool["name"]
-            served = name if len(name) <= budget else _alias(name, budget, taken)
+            served = name if fits(name) else _alias(name, budget, taken, clean=pattern is not None)
             taken.add(served)
             self._served[name] = served
         self._hosts = {prefix + served: name for name, served in self._served.items()}
