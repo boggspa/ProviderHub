@@ -258,6 +258,24 @@ struct CodexModelsPane: View {
         model.settings.codex_subagent_rank = ranks.isEmpty ? nil : ranks
     }
 
+    /// The model in a priority slot. The per-card picker can leave two models
+    /// on one rank; the slot shows the one Codex orders first (the starting
+    /// model, then by name) and says how many more share it.
+    func slotRoutes(_ rank: Int) -> [String] {
+        subagentRanks.filter { $0.value == rank }.map(\.key).sorted {
+            let lhs = model.settings.codex_model == $0, rhs = model.settings.codex_model == $1
+            return lhs != rhs ? lhs : model.modelLabel($0) < model.modelLabel($1)
+        }
+    }
+
+    /// Put one model in a slot, replacing whatever held it; nil empties it.
+    func setSlot(_ rank: Int, _ route: String?) {
+        materializeCatalogue()
+        var ranks = subagentRanks.filter { $0.value != rank }
+        if let route { ranks[route] = rank }
+        model.settings.codex_subagent_rank = ranks.isEmpty ? nil : ranks
+    }
+
     func contextWindow(_ route: String) -> Int? {
         if let entry = model.modelEntry(route) {
             if let runtime = entry.runtime_context, runtime > 0 { return runtime }
@@ -331,7 +349,26 @@ struct CodexModelsPane: View {
                     DisclosureGroup("Model priorities") {
                         VStack(alignment: .leading, spacing: 8) {
                             Text("Every model in this catalogue is available to subagents. Assign priorities 1–\(Self.subagentPoolSize) to put preferred models first. Unranked models follow. Ties prefer the starting model, then model name.")
-                        }.font(.caption).foregroundStyle(.secondary).padding(.top, 6)
+                                .foregroundStyle(.secondary)
+                            ForEach(1...Self.subagentPoolSize, id: \.self) { rank in
+                                let holders = slotRoutes(rank)
+                                HStack(spacing: 8) {
+                                    Text("\(rank)").font(.system(size: 12, weight: .semibold, design: .rounded))
+                                        .frame(width: 18, alignment: .trailing)
+                                    Picker("Priority \(rank)", selection: Binding(
+                                        get: { holders.first ?? "" },
+                                        set: { setSlot(rank, $0.isEmpty ? nil : $0) }
+                                    )) {
+                                        Text("Automatic").tag("")
+                                        ForEach(curatedRoutes, id: \.self) { route in Text(model.modelLabel(route)).tag(route) }
+                                    }.labelsHidden().pickerStyle(.menu).disabled(model.busy)
+                                    if holders.count > 1 {
+                                        Text("+\(holders.count - 1) sharing").foregroundStyle(.orange)
+                                            .help("Several models share this priority; choosing one here gives the slot to it alone.")
+                                    }
+                                }
+                            }
+                        }.font(.caption).padding(.top, 6)
                     }.font(.caption)
                 }
         }
