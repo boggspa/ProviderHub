@@ -8,6 +8,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import os
 import re
 
 from providers import PROVIDERS, provider_defaults, validate_connection
@@ -61,6 +62,60 @@ CLI_AUTH_PROVIDERS = frozenset({"codex", "claude", "muse", "grok", "antigravity"
 def cli_auth_available(provider_id: str) -> bool:
     """Whether this provider offers a CLI-login credential source at all."""
     return provider_id in CLI_AUTH_PROVIDERS and provider_id in PROVIDERS
+
+
+#: CLI providers whose login lives in a relocatable config folder, so one
+#: machine can hold several subscriptions side by side: Claude Code reads
+#: CLAUDE_CONFIG_DIR (and keys its Keychain item by that folder), Codex reads
+#: CODEX_HOME. Each extra account is only a folder path the user signed in to
+#: with the CLI itself; the hub stores the path, never a token, and the CLI
+#: keeps refreshing its own login there.
+CLI_ACCOUNT_PROVIDERS = frozenset({"claude", "codex"})
+MAX_CLI_ACCOUNTS = 8
+_CLI_ACCOUNT_ID = re.compile(r"[a-z0-9][a-z0-9-]{0,31}\Z")
+
+
+def _cli_accounts(provider_id: str, value) -> list[dict]:
+    """Validate a provider's extra CLI accounts: [{id, label, config_dir}]."""
+    if value in (None, []):
+        return []
+    if provider_id not in CLI_ACCOUNT_PROVIDERS:
+        raise ValueError(f"{PROVIDERS[provider_id]['name']} does not support extra CLI accounts.")
+    if not isinstance(value, list) or len(value) > MAX_CLI_ACCOUNTS:
+        raise ValueError(f"CLI accounts must be a list of at most {MAX_CLI_ACCOUNTS} entries.")
+    accounts, ids, folders = [], set(), set()
+    for entry in value:
+        if not isinstance(entry, dict) or set(entry) - {"id", "label", "config_dir"}:
+            raise ValueError("A CLI account needs only an id, a label and a config folder.")
+        account_id, label, folder = entry.get("id"), entry.get("label"), entry.get("config_dir")
+        if not isinstance(account_id, str) or not _CLI_ACCOUNT_ID.match(account_id):
+            raise ValueError("A CLI account id must be 1-32 lowercase letters, digits or hyphens.")
+        if not isinstance(label, str) or not label.strip() or len(label.strip()) > 60:
+            raise ValueError("Give each CLI account a name of at most 60 characters.")
+        if not isinstance(folder, str) or not folder.strip() or "\0" in folder or "\n" in folder:
+            raise ValueError("Choose a config folder for each CLI account.")
+        folder = folder.strip()
+        if folder == "~" or folder.startswith("~/"):
+            folder = os.path.expanduser(folder)
+        if not os.path.isabs(folder):
+            raise ValueError("A CLI account's config folder must be an absolute path.")
+        folder = os.path.normpath(folder)
+        if account_id in ids or folder in folders:
+            raise ValueError("Each CLI account needs its own id and its own config folder.")
+        ids.add(account_id)
+        folders.add(folder)
+        accounts.append({"id": account_id, "label": label.strip(), "config_dir": folder})
+    return accounts
+
+
+def cli_account_dir(settings: dict, provider_id: str) -> str | None:
+    """The config folder of the provider's active CLI account; None is the CLI's default."""
+    connection = (settings.get("providers") or {}).get(provider_id) or {}
+    active = connection.get("cli_account")
+    for account in connection.get("cli_accounts") or ():
+        if account.get("id") == active:
+            return account.get("config_dir")
+    return None
 
 
 def _default_credential_mode(provider_id: str) -> str:
@@ -540,6 +595,17 @@ def normalize(value: dict, slots, vibe_model: str, port: int = 11436) -> dict:
         lease = _idle_unload_seconds(provider_id, requested.get("idle_unload_seconds", baseline.get("idle_unload_seconds")))
         if lease is not None:
             connection["idle_unload_seconds"] = lease
+        # Present only once used, so no other provider's saved connection
+        # grows fields. An unset or dropped active id means the CLI's own
+        # default login, which is also the pre-accounts behaviour.
+        accounts = _cli_accounts(provider_id, requested.get("cli_accounts"))
+        active = requested.get("cli_account")
+        if active is not None and active not in {account["id"] for account in accounts}:
+            raise ValueError("The active CLI account is not in this provider's account list.")
+        if accounts:
+            connection["cli_accounts"] = accounts
+        if active is not None:
+            connection["cli_account"] = active
         result["providers"][provider_id] = connection
     result["branding_overrides"] = validate_overrides(value.get("branding_overrides", {}))
     if value.get("codex_model") is not None:

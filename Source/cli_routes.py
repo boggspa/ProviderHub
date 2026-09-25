@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import importlib
 import json
+from concurrent.futures import ThreadPoolExecutor
 import time
 import uuid
 
@@ -39,7 +40,7 @@ from effort_map import EFFORT_ORDER
 from fast_models import fixed_speed_tier, supports_fast_toggle
 from cli_images import (IMAGE_COORDINATE_NOTE, CliImageError, image_label,
                         normalize_image, normalize_images)
-from hub_config import MODEL_ID
+from hub_config import CLI_ACCOUNT_PROVIDERS, MODEL_ID
 from providers import documented_context
 from catalogue import image_input_blocked
 
@@ -225,7 +226,7 @@ def _seed_rows(provider_id: str, known_models) -> list[dict]:
     return models
 
 
-def discover_via_cli(provider_id: str, *, timeout: int = 45) -> dict:
+def discover_via_cli(provider_id: str, *, timeout: int = 45, config_dir: str | None = None) -> dict:
     """A CLI-backed provider's model inventory, in the cached-catalogue shape.
 
     Never raises for a wedged or signed-out CLI: the adapters already degrade
@@ -233,10 +234,13 @@ def discover_via_cli(provider_id: str, *, timeout: int = 45) -> dict:
     pane can say why a row is empty instead of failing the whole refresh.
     """
     adapter = adapter_for(provider_id)
+    # Only the account-aware adapters take a config folder; the rest keep
+    # their no-argument probes.
+    account = {"config_dir": config_dir} if config_dir and provider_id in CLI_ACCOUNT_PROVIDERS else {}
     warnings = []
     auth = {}
     try:
-        auth = adapter.auth_state() or {}
+        auth = adapter.auth_state(**account) or {}
     except Exception as exc:  # an auth probe must never take discovery down
         auth = {"state": "unknown", "detail": f"auth probe failed: {exc}"}
     state = auth.get("state")
@@ -246,7 +250,7 @@ def discover_via_cli(provider_id: str, *, timeout: int = 45) -> dict:
         warnings.append(f"Auth state {state}: {auth['detail']}")
     rows, notes = [], []
     try:
-        rows, notes = adapter.catalogue(timeout=timeout)
+        rows, notes = adapter.catalogue(timeout=timeout, **account)
     except Exception as exc:
         notes = [f"catalogue probe failed: {exc}"]
     warnings.extend(str(note) for note in (notes or []) if note)
@@ -268,6 +272,33 @@ def discover_via_cli(provider_id: str, *, timeout: int = 45) -> dict:
     if state:
         inventory["auth_state"] = state
     return inventory
+
+
+def account_states(settings: dict, provider_id: str, *, timeout: int = 40) -> list[dict]:
+    """Sign-in state for the provider's default CLI login and each extra account.
+
+    Asks each CLI, pointed at that account's folder, the same read-only
+    status question discovery asks; the probes run side by side so a
+    signed-out or slow account cannot hold the others up.
+    """
+    if provider_id not in CLI_ACCOUNT_PROVIDERS:
+        raise CliRouteError(f"The {provider_id} CLI route does not support extra accounts.")
+    adapter = adapter_for(provider_id)
+    connection = (settings.get("providers") or {}).get(provider_id) or {}
+    active = connection.get("cli_account")
+    accounts = [{"id": None, "label": "Default", "config_dir": None}] + list(connection.get("cli_accounts") or ())
+
+    def probe(account):
+        try:
+            state = adapter.auth_state(**({"config_dir": account["config_dir"]} if account["config_dir"] else {})) or {}
+        except Exception as exc:  # a probe must never take the pane down
+            state = {"state": "unknown", "detail": f"auth probe failed: {exc}"}
+        return {"id": account["id"], "label": account["label"], "config_dir": account["config_dir"],
+                "active": account["id"] == active, "state": state.get("state", "unknown"),
+                "detail": str(state.get("detail") or "")}
+
+    with ThreadPoolExecutor(max_workers=len(accounts)) as pool:
+        return list(pool.map(probe, accounts, timeout=timeout))
 
 
 # ---------------------------------------------------------------------------
@@ -355,7 +386,7 @@ def _messages_for_cli(messages, system, *, images=None, full_tool_history=False)
 
 
 def plan_turn(provider_id: str, upstream_model: str, payload: dict, spec: dict,
-              *, wanted_output) -> dict:
+              *, wanted_output, config_dir: str | None = None) -> dict:
     """Translate a planned Messages payload into an adapter run_turn request.
 
     The gateway's universal pre-processing (identity note, compaction, window
@@ -458,6 +489,12 @@ def plan_turn(provider_id: str, upstream_model: str, payload: dict, spec: dict,
         request["reasoning_summary"] = summary
     if images:
         request["images"] = images
+    if config_dir:
+        # The active CLI account's config folder; the adapter points its CLI
+        # there (CLAUDE_CONFIG_DIR / CODEX_HOME). Absent means the default login.
+        if provider_id not in CLI_ACCOUNT_PROVIDERS:
+            raise CliRouteError(f"The {provider_id} CLI route does not support extra accounts.")
+        request["config_dir"] = config_dir
     if provider_id in {"codex", "claude"}:
         tier = payload.get("service_tier")
         speed = payload.get("speed")

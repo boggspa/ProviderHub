@@ -460,12 +460,26 @@ def _pinned_binary():
     return os.environ.get("PROVIDER_HUB_CODEX_BINARY") or None
 
 
-def _models_cache():
+def _codex_home(home=None) -> Path:
+    """The Codex home a child reads: an extra account's folder, else ``~/.codex``."""
+    return Path(home) if home else Path.home() / ".codex"
+
+
+def _home_env(home) -> dict:
+    """Point the child at one account's ``CODEX_HOME``; empty means the default login."""
+    if not home:
+        return {}
+    if not isinstance(home, str) or not os.path.isabs(home):
+        raise CodexCliAgentError("A Codex account's config folder must be an absolute path.")
+    return {"CODEX_HOME": home}
+
+
+def _models_cache(home=None):
     """The runtime's own fetched catalog, in the real home the child reads."""
-    return Path.home() / ".codex" / "models_cache.json"
+    return _codex_home(home) / "models_cache.json"
 
 
-def _configured_catalog():
+def _configured_catalog(home=None):
     """Whether the real Codex config selects a ``model_catalog_json``.
 
     The hub writes one at the root for a desktop session; a user profile may
@@ -473,7 +487,7 @@ def _configured_catalog():
     neutralization is only ever skipped when there is provably nothing to fight.
     """
     try:
-        config = tomllib.loads((Path.home() / ".codex" / "config.toml").read_text(encoding="utf-8"))
+        config = tomllib.loads((_codex_home(home) / "config.toml").read_text(encoding="utf-8"))
     except FileNotFoundError:
         return False
     except (OSError, ValueError):
@@ -485,7 +499,7 @@ def _configured_catalog():
     return isinstance(table, dict) and "model_catalog_json" in table
 
 
-def _openai_catalog_override():
+def _openai_catalog_override(home=None):
     """Neutralize a configured ``model_catalog_json`` with the CLI's own fetched catalog.
 
     The hub preview points ``model_catalog_json`` in ``~/.codex/config.toml`` at
@@ -509,9 +523,9 @@ def _openai_catalog_override():
     Returns ``("model_catalog_json", <path>)`` when a configured catalog needs
     neutralizing and the cache is usable, else None.
     """
-    if not _configured_catalog():
+    if not _configured_catalog(home):
         return None
-    cache = _models_cache()
+    cache = _models_cache(home)
     try:
         if not cache.is_file():
             return None
@@ -523,7 +537,7 @@ def _openai_catalog_override():
     return None
 
 
-def _app_server_argv(*, model=None, effort=None, binary=None):
+def _app_server_argv(*, model=None, effort=None, binary=None, codex_home=None):
     """The app-server argv, with model/effort as optional TOML overrides.
 
     Read-only is expressed three times over - as ``-c`` overrides here, as
@@ -542,7 +556,7 @@ def _app_server_argv(*, model=None, effort=None, binary=None):
             "-c", 'approval_policy="never"']
     for setting in _TRANSPORT_CONFIG:
         argv += ["-c", setting]
-    catalog = _openai_catalog_override()
+    catalog = _openai_catalog_override(codex_home)
     if catalog is not None:
         argv += ["-c", f"{catalog[0]}={_toml_string(catalog[1])}"]
     if checked_model is not None:
@@ -553,7 +567,7 @@ def _app_server_argv(*, model=None, effort=None, binary=None):
     return _assert_safe_argv(argv, context="app-server")
 
 
-def build_argv(model, *, effort=None, system=None, stream=True):
+def build_argv(model, *, effort=None, system=None, stream=True, codex_home=None):
     """The app-server argv: the primary, delta-streaming transport.
 
     ``system`` and ``stream`` are accepted so the hub can call every CLI
@@ -561,7 +575,7 @@ def build_argv(model, *, effort=None, system=None, stream=True):
     system prompt travels in thread/start developerInstructions, and the
     Codex app-server streams by design.
     """
-    return _app_server_argv(model=model, effort=effort, binary=_pinned_binary())
+    return _app_server_argv(model=model, effort=effort, binary=_pinned_binary(), codex_home=codex_home)
 
 
 def build_exec_argv(model, *, effort=None):
@@ -597,7 +611,7 @@ def build_exec_argv(model, *, effort=None):
 # read-only capability probes
 # --------------------------------------------------------------------------
 
-def default_capture(argv, *, timeout=25):
+def default_capture(argv, *, timeout=25, env=None):
     """The production capture: run one argv, bounded, no stdin, scrubbed env.
 
     Same contract as ``cli_auth_probe.default_capture`` - ``capture(argv, *,
@@ -610,7 +624,7 @@ def default_capture(argv, *, timeout=25):
     binary = resolve_binary((str(argv[0]),)) or str(argv[0])
     completed = subprocess.run([binary, *[str(part) for part in argv[1:]]],
                                capture_output=True, text=True, timeout=timeout,
-                               env=minimal_env(), stdin=_DEVNULL, check=False)
+                               env=minimal_env(env), stdin=_DEVNULL, check=False)
     return completed.returncode, completed.stdout, completed.stderr
 
 
@@ -665,13 +679,14 @@ _AUTHENTICATED_MARKERS = ("logged in", "signed in")
 _MISSING_MARKERS = ("not logged in", "logged out", "not signed in", "signed out")
 
 
-def auth_state(*, capture=None) -> dict:
+def auth_state(*, capture=None, config_dir=None) -> dict:
     """Sign-in state, from ``codex login status`` and nothing else.
 
     Deliberately runs against the user's *real* ``~/.codex`` (via ``HOME`` in
     :func:`minimal_env`) with no ``CODEX_HOME`` override, so it reports the
-    login the turn will actually use. Running it is a read: the CLI prints its
-    state and exits 0 or 1.
+    login the turn will actually use - or, given ``config_dir``, against that
+    extra account's ``CODEX_HOME``, which is what its turns use. Running it is
+    a read: the CLI prints its state and exits 0 or 1.
 
     Following the repo's doctrine on markers, a status we cannot parse is
     *absence of evidence*, not evidence of absence: it is reported ``unknown``.
@@ -684,7 +699,9 @@ def auth_state(*, capture=None) -> dict:
     except (CodexCliAgentError, OSError, ValueError):
         return {"state": "unknown", "detail": "No Codex runtime was found to ask."}
     try:
-        rc, stdout, stderr = runner([binary, "login", "status"], timeout=25)
+        account = _home_env(config_dir)
+        rc, stdout, stderr = (runner([binary, "login", "status"], timeout=25, env=account) if account
+                              else runner([binary, "login", "status"], timeout=25))
     except subprocess.TimeoutExpired:
         return {"state": "unknown", "detail": "`codex login status` did not answer within 25s."}
     except Exception as exc:  # noqa: BLE001 - a probe must never raise at the hub
@@ -759,13 +776,13 @@ def parse_model_list(rows):
     return parsed
 
 
-def _native_cards(argv):
+def _native_cards(argv, home=None):
     """The native catalogue this runtime listed from, and its model cards.
 
     The one selected on argv, or, with none selected, the runtime's own cache
     that the listing refreshed. Unreadable metadata yields no cards.
     """
-    path = _models_cache()
+    path = _models_cache(home)
     for flag, value in zip(argv, argv[1:]):
         if flag == "-c" and value.startswith("model_catalog_json="):
             try:
@@ -780,13 +797,13 @@ def _native_cards(argv):
     return path, [card for card in cards if isinstance(card, dict)] if isinstance(cards, list) else []
 
 
-def _catalogue_search(argv):
+def _catalogue_search(argv, home=None):
     """Slugs whose native card offers the hosted search tool."""
-    return {card["slug"] for card in _native_cards(argv)[1]
+    return {card["slug"] for card in _native_cards(argv, home)[1]
             if isinstance(card.get("slug"), str) and isinstance(card.get("web_search_tool_type"), str)}
 
 
-def _catalogue_context(argv, configured_window=None):
+def _catalogue_context(argv, configured_window=None, home=None):
     """Context budgets from the same native catalogue this runtime listed.
 
     model/list omits context metadata. Join its exact model IDs to the native
@@ -795,7 +812,7 @@ def _catalogue_context(argv, configured_window=None):
     guess. max_context_window is an optional larger ceiling, not the active
     default. Preserve the runtime's reserved percentage in runtime_context.
     """
-    path, cards = _native_cards(argv)
+    path, cards = _native_cards(argv, home)
     result = {}
     for card in cards:
         if not isinstance(card, dict) or not isinstance(card.get("slug"), str):
@@ -843,18 +860,18 @@ def _result(response, *, context):
     raise CodexCliAgentError(f"{context}: the Codex runtime returned a malformed response.")
 
 
-def fetch_models(*, binary=None, spawner=None, timeout=30):
+def fetch_models(*, binary=None, spawner=None, timeout=30, codex_home=None):
     """Drive ``model/list`` over the app-server, paging cursors to exhaustion.
 
     Cursor paging is real and was observed live: with ``limit=1`` the runtime
     returned ``nextCursor`` ``'1'``, ``'2'``, ... and finally ``null``.
     """
     budget = _bounded_timeout(timeout, default=30)
-    workspace = CodexTurnWorkspace()
+    workspace = CodexTurnWorkspace(codex_home=codex_home)
     session = None
     try:
         workspace.open()
-        argv = _app_server_argv(binary=binary)
+        argv = _app_server_argv(binary=binary, codex_home=codex_home)
         session = _open_session(argv, workspace, spawner=spawner, timeout=budget)
         _handshake(session, timeout=budget * _HANDSHAKE_SHARE)
         config = None
@@ -883,9 +900,9 @@ def fetch_models(*, binary=None, spawner=None, timeout=30):
             raise CodexCliAgentError("Codex returned too many catalogue pages.")
         # Joined after listing: with no catalog on argv, the listing is what
         # refreshes the runtime's own cache for its version.
-        context = (_catalogue_context(argv, config.get("model_context_window"))
+        context = (_catalogue_context(argv, config.get("model_context_window"), codex_home)
                    if isinstance(config, dict) else {})
-        searchable = _catalogue_search(argv)
+        searchable = _catalogue_search(argv, codex_home)
         return [{**row, **context.get(row["model"], {}),
                  **({"web_search": True} if row["model"] in searchable else {})}
                 for row in parse_model_list(rows)]
@@ -893,7 +910,7 @@ def fetch_models(*, binary=None, spawner=None, timeout=30):
         _teardown(session, workspace)
 
 
-def catalogue(*, capture=None, spawner=None, timeout=30) -> tuple[list[dict], list[str]]:
+def catalogue(*, capture=None, spawner=None, timeout=30, config_dir=None) -> tuple[list[dict], list[str]]:
     """The installed runtime's own model rows, plus human-readable notes.
 
     ``spawner`` is accepted in addition to the specified ``capture``/``timeout``
@@ -913,7 +930,7 @@ def catalogue(*, capture=None, spawner=None, timeout=30) -> tuple[list[dict], li
         except (CodexCliAgentError, OSError, ValueError) as exc:
             return [], [f"No Codex runtime is available: {exc}"]
     try:
-        rows = fetch_models(spawner=spawner, timeout=timeout)
+        rows = fetch_models(spawner=spawner, timeout=timeout, codex_home=config_dir)
     except CodexCliAgentError as exc:
         return [], [str(exc)]
     except CliSessionError as exc:
@@ -945,9 +962,10 @@ class CodexTurnWorkspace:
     a context-manager exit without racing.
     """
 
-    def __init__(self, *, prefix="provider-hub-codex-cli-", diagnostics=None):
+    def __init__(self, *, prefix="provider-hub-codex-cli-", diagnostics=None, codex_home=None):
         self.prefix = prefix
         self.diagnostics = diagnostics
+        self.codex_home = codex_home
         self.base: Path | None = None
         self.cwd: Path | None = None
         self.diagnostics_path: Path | None = None
@@ -971,11 +989,13 @@ class CodexTurnWorkspace:
         """The child's environment: the shared minimal allowlist, no CODEX_HOME.
 
         Leaving ``CODEX_HOME`` unset is the point: the CLI then uses its real
-        default ``~/.codex`` and reads the login it owns there.
+        default ``~/.codex`` and reads the login it owns there. An extra
+        account sets it to that account's own folder instead, where the CLI
+        owns (and refreshes) that account's login in exactly the same way.
         """
         if self.base is None:
             raise CodexCliAgentError("The Codex turn workspace was never created.")
-        return minimal_env()
+        return minimal_env(_home_env(self.codex_home))
 
     def close(self):
         """Release the diagnostics handle, then delete the whole tree.
@@ -1210,7 +1230,8 @@ def _normalise_request(request):
             "effort": _checked_effort(request.get("effort")),
             "prompt": prompt, "system": instructions, "tools": tools,
             "history": request.get("history"), "images": images, "reasoning_summary": summary,
-            "service_tier": tier, "web_search": _checked_search(request.get("web_search"))}
+            "service_tier": tier, "web_search": _checked_search(request.get("web_search")),
+            "codex_home": _home_env(request.get("config_dir")).get("CODEX_HOME")}
 
 
 def _history_items(messages):
@@ -1706,10 +1727,10 @@ def run_turn(request, *, spawner=None, timeout=300, pool=None) -> Iterator[dict]
         budget = _bounded_timeout(timeout, default=300)
         deadline = time.monotonic() + budget
         payload = _normalise_request(request)
-        argv = build_argv(payload["model"], effort=payload["effort"])
+        argv = build_argv(payload["model"], effort=payload["effort"], codex_home=payload["codex_home"])
         mode = "cold"
         if owner is not None:
-            key = _digest({"argv": argv, "env": minimal_env(), "system": payload["system"],
+            key = _digest({"argv": argv, "env": minimal_env(_home_env(payload["codex_home"])), "system": payload["system"],
                            "tools": payload["tools"], "summary": payload["reasoning_summary"],
                            "tier": payload["service_tier"], "search": payload["web_search"]})
             blocks = _history_blocks(payload.get("history"))
@@ -1727,7 +1748,8 @@ def run_turn(request, *, spawner=None, timeout=300, pool=None) -> Iterator[dict]
         if session is None:
             if timing:
                 timing.mark("startup_started")
-            workspace = CodexTurnWorkspace(diagnostics=_diagnostics_enabled()).open()
+            workspace = CodexTurnWorkspace(diagnostics=_diagnostics_enabled(),
+                                           codex_home=payload["codex_home"]).open()
             if lease is not None:
                 lease.workspace = workspace
             session = _open_session(argv, workspace, spawner=spawner, timeout=budget)
@@ -1895,10 +1917,11 @@ def run_turn_fallback(request, *, spawner=None, timeout=300) -> Iterator[dict]:
             raise CodexCliAgentError("Codex host tools require the app-server transport; exec cannot forward them.")
         if payload["images"]:
             raise CodexCliAgentError("Codex image inputs require the app-server transport.")
-        workspace = CodexTurnWorkspace(diagnostics=_diagnostics_enabled()).open()
+        workspace = CodexTurnWorkspace(diagnostics=_diagnostics_enabled(),
+                                       codex_home=payload["codex_home"]).open()
         # exec has no per-thread config request. Read config without starting
         # a model turn, then explicitly disable inherited MCP servers on argv.
-        config_session = _open_session(_app_server_argv(), workspace, timeout=budget)
+        config_session = _open_session(_app_server_argv(codex_home=payload["codex_home"]), workspace, timeout=budget)
         _handshake(config_session, timeout=budget * _HANDSHAKE_SHARE)
         servers = _inherited_mcp_overrides(config_session, timeout=budget * _START_SHARE)
         _teardown(config_session, None)

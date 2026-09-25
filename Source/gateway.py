@@ -31,7 +31,7 @@ from catalogue_lifecycle import (CataloguePreparationError, catalogue_fingerprin
                                  runtime_fingerprint_error,
                                  validate_prepared_launch)
 from catalogue import build_catalogue, read_observations
-from hub_config import claude_routes, connection_signature, provider_presentations, qualify, split_route
+from hub_config import claude_routes, cli_account_dir, connection_signature, provider_presentations, qualify, split_route
 from ollama_lifecycle import http_transport, lease_seconds, release as release_resident_model
 from providers import PROVIDERS, prepare_request, ProviderError
 from rate_limit import (MAX_UPSTREAM_ATTEMPTS, RETRYABLE_STATUSES, SLOT_RETRY_AFTER, SLOT_WAIT_TIMEOUT,
@@ -143,6 +143,32 @@ class Runtime:
         if route not in self.settings["_model_specs"]:
             raise BridgeError("This route is not in the current provider catalogue. Refresh its models first.")
         return route
+
+    def cli_account_dir(self, provider_id):
+        """The active CLI account's config folder, read live from settings.json.
+
+        Unlike model planning, which snapshots at startup, the account choice
+        is re-read whenever the settings file changes, so switching to another
+        subscription (say, when one plan runs out) takes effect on the next
+        turn without restarting the gateway or quitting the desktop app.
+        Every account serves the same routes, so the catalogue snapshot stays
+        valid. An unreadable file keeps the last good choice.
+        """
+        try:
+            stamp = (self.root / "settings.json").stat().st_mtime_ns
+        except OSError:
+            stamp = None
+        with self.lock:
+            cached = getattr(self, "_cli_account_settings", None)
+            if cached is not None and cached[0] == stamp:
+                return cli_account_dir(cached[1], provider_id)
+        try:
+            live = load_settings(self.root) if stamp is not None else self.settings
+        except (BridgeError, OSError, ValueError):
+            live = cached[1] if cached is not None else self.settings
+        with self.lock:
+            self._cli_account_settings = (stamp, live)
+        return cli_account_dir(live, provider_id)
 
     def provider_key(self, provider_id):
         if self.key is not None:
@@ -282,7 +308,8 @@ class Runtime:
                 # The CLI owns this login: skip HTTP request building entirely.
                 # The adapter turns the payload into a prompt-in/text-out turn.
                 plan = cli_routes.plan_turn(provider_id, upstream_model, payload, spec,
-                                            wanted_output=wanted_output)
+                                            wanted_output=wanted_output,
+                                            config_dir=self.cli_account_dir(provider_id))
             else:
                 plan = (self.request_planner or prepare_request)(provider_id, self.settings["providers"][provider_id], key, payload, upstream_model, spec, **request_options)
         except (ProviderError, CerebrasReplayError) as exc:
@@ -1355,7 +1382,7 @@ def catalogue_command_result(settings, root, lifecycle):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=["inspect", "validate", "save", "discover", "refresh-all", "prepare-launch", "activate", "restore", "serve", "codex-status", "codex-prepare", "codex-activate", "codex-restore", "codex-accent"])
+    parser.add_argument("command", choices=["inspect", "validate", "save", "discover", "refresh-all", "prepare-launch", "activate", "restore", "serve", "codex-status", "codex-prepare", "codex-activate", "codex-restore", "codex-accent", "cli-accounts"])
     parser.add_argument("--provider", choices=list(PROVIDERS), default="mistral")
     parser.add_argument("--parent-pipe", action="store_true")
     parser.add_argument("--app", help="App bundle to launch for codex-accent")
@@ -1433,6 +1460,11 @@ def main():
                   "friendly_names": model_labels(settings, inventory.get("models", [])), "models": inventory.get("models", []),
                   "catalog_summary": {k: v for k, v in inventory.items() if k != "models"},
                   "provider_definitions": provider_presentations(settings), "codex_models": codex_choices(settings, inventory)}
+    elif args.command == "cli-accounts":
+        # The pane's current (possibly unsaved) settings arrive on stdin, so a
+        # just-added account can be checked before it is saved.
+        settings = validate_settings(json.load(sys.stdin))
+        result = {"accounts": cli_routes.account_states(settings, args.provider)}
     elif args.command == "discover":
         settings = load_settings(root)
         source = discover_provider(settings, args.provider, root)

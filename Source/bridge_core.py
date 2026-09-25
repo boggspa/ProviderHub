@@ -22,7 +22,7 @@ import uuid
 from model_names import friendly_model_name, label_catalog
 from catalogue import build_catalogue, read_observations, route_specs
 from cli_routes import cli_credential_mode, discover_via_cli
-from hub_config import (CLAUDE_TIER_MODELS, SLOTS, claude_picker_rows, claude_routes, connection_signature,
+from hub_config import (CLAUDE_TIER_MODELS, SLOTS, claude_picker_rows, claude_routes, cli_account_dir, connection_signature,
                         defaults as hub_defaults, normalize as normalize_hub_settings,
                         project_catalogue, provider_display_name, provider_presentations,
                         qualify, split_route)
@@ -187,7 +187,10 @@ def credentials(settings: dict, provider_id="mistral") -> tuple[str, str]:
         # token would revoke the first.  The label keeps the (key, source)
         # contract the callers expect while the key stays empty, and names the
         # CLI rather than the provider's API, which this mode never contacts.
-        return "", f"{provider_display_name(settings, provider_id)} CLI login"
+        active = connection.get("cli_account")
+        label = next((account["label"] for account in connection.get("cli_accounts") or ()
+                      if account.get("id") == active), None)
+        return "", f"{provider_display_name(settings, provider_id)} CLI login" + (f" · {label}" if label else "")
     if provider_id == "mistral" and mode == "vibe":
         return vibe_credentials()
     if mode == "environment":
@@ -623,7 +626,7 @@ def discover_provider(settings, provider_id, root=None):
     if cli_credential_mode(settings, provider_id):
         # The CLI owns this login. Its own catalogue report is the inventory:
         # no HTTP endpoint is contacted and no key is resolved for this mode.
-        inventory = discover_via_cli(provider_id)
+        inventory = discover_via_cli(provider_id, config_dir=cli_account_dir(settings, provider_id))
     else:
         try:
             inventory = discover(provider_id, settings["providers"][provider_id], key)

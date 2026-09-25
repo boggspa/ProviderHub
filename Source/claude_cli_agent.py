@@ -86,6 +86,7 @@ from __future__ import annotations
 
 import atexit
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -282,7 +283,20 @@ def _assert_safe(argv: Iterable[str]) -> list[str]:
 # Capture plumbing (discover / auth_state / catalogue)
 # ---------------------------------------------------------------------------
 
-def _default_capture(argv, *, timeout=30, stdin=None):
+def _account_env(config_dir) -> dict:
+    """Point the CLI at one account's config folder; empty means its default login.
+
+    Claude Code keys its Keychain item by this folder, so each account keeps
+    its own login (and refreshes it itself) without touching the default one.
+    """
+    if not config_dir:
+        return {}
+    if not isinstance(config_dir, str) or not os.path.isabs(config_dir):
+        raise ValueError("A Claude account's config folder must be an absolute path")
+    return {"CLAUDE_CONFIG_DIR": config_dir}
+
+
+def _default_capture(argv, *, timeout=30, stdin=None, env=None):
     """One-shot bounded subprocess using a minimal environment."""
     try:
         completed = subprocess.run(
@@ -291,7 +305,7 @@ def _default_capture(argv, *, timeout=30, stdin=None):
             text=True,
             timeout=float(timeout),
             input=stdin,
-            env=minimal_env(),
+            env=minimal_env(env),
         )
     except subprocess.TimeoutExpired as exc:
         raise CliSessionError(
@@ -324,7 +338,7 @@ def _coerce_result(result: Any) -> tuple[int | None, str, str]:
             str(getattr(result, "stderr", "") or ""))
 
 
-def _invoke(capture, argv, *, timeout=30, stdin=None) -> tuple[int | None, str, str]:
+def _invoke(capture, argv, *, timeout=30, stdin=None, env=None) -> tuple[int | None, str, str]:
     """Call an injected capture, adapting to whichever kwargs it accepts.
 
     ``capture`` is supplied by the hub; its exact signature is not part of this
@@ -350,10 +364,14 @@ def _invoke(capture, argv, *, timeout=30, stdin=None) -> tuple[int | None, str, 
                 if accepts_var_kw or name in declared:
                     kwargs[name] = stdin
                     break
+        if env and (accepts_var_kw or "env" in declared):
+            kwargs["env"] = env
     except (TypeError, ValueError):
         kwargs = {"timeout": timeout}
         if stdin is not None:
             kwargs["stdin"] = stdin
+        if env:
+            kwargs["env"] = env
     return _coerce_result(runner(materialized, **kwargs))
 
 
@@ -388,22 +406,33 @@ def discover(*, capture=None) -> dict:
     return {"installed": True, "binary": binary, "version": version}
 
 
-def auth_state(*, capture=None) -> dict:
+def auth_state(*, capture=None, config_dir=None) -> dict:
     """Ask the CLI, and only the CLI, whether it is signed in.
 
     Never reads ~/.claude, auth.json, or the Keychain. An unparseable answer or
     a failing subcommand is reported as "unknown" rather than guessed at: this
     route is default-off, and a wrong "missing" would look like a broken login.
+    ``config_dir`` asks about that account's folder instead of the default.
     """
     binary = _resolve_binary()
     if not binary:
         return {"state": "missing",
                 "detail": "the claude CLI is not installed or not on PATH"}
     try:
-        rc, out, err = _invoke(capture, [binary, "auth", "status"], timeout=30)
+        rc, out, err = _invoke(capture, [binary, "auth", "status"], timeout=30,
+                               env=_account_env(config_dir))
     except Exception as exc:
         return {"state": "unknown", "detail": f"auth probe failed: {exc}"}
     if rc not in (0, None):
+        # A signed-out CLI exits 1 but still prints its status object
+        # (seen on 2.1.281 with an unused CLAUDE_CONFIG_DIR): that is an answer.
+        try:
+            if json.loads(out).get("loggedIn") is False:
+                return {"state": "missing",
+                        "detail": "claude reports no active login; sign in with the "
+                                  "claude CLI itself"}
+        except (ValueError, TypeError, AttributeError):
+            pass
         detail = (err or out).strip().splitlines()
         return {"state": "unknown",
                 "detail": f"claude auth status exited {rc}"
@@ -421,6 +450,9 @@ def auth_state(*, capture=None) -> dict:
         method = str(payload.get("authMethod") or "unknown")
         plan = payload.get("subscriptionType")
         detail = f"signed in via {method}"
+        email = payload.get("email")
+        if isinstance(email, str) and email:
+            detail += f" as {email}"
         if plan:
             detail += f" ({plan} subscription)"
         return {"state": "authenticated", "detail": detail}
@@ -432,7 +464,7 @@ def auth_state(*, capture=None) -> dict:
             "detail": "claude auth status did not report a loggedIn field"}
 
 
-def catalogue(*, capture=None, timeout=30) -> tuple[list[dict], list[str]]:
+def catalogue(*, capture=None, timeout=30, config_dir=None) -> tuple[list[dict], list[str]]:
     """No discovery is possible: Claude Code has no read-only model list.
 
     Returns an empty catalogue plus the reason, and never spawns anything. The
@@ -1109,7 +1141,12 @@ def _plan_turn(request) -> dict:
     host_tools = normalize_tools(request.get("tools"))
     tool_choice = request.get("tool_choice")
     history = request.get("history")
+    try:
+        account_env = _account_env(request.get("config_dir"))
+    except ValueError as exc:
+        raise ClaudeCliAgentError(str(exc)) from exc
     return {
+        "account_env": account_env,
         "model": model, "messages": messages, "effort": effort, "system": system,
         "search": search_enabled(request.get("web_search")),
         "fast_mode": request.get("fast_mode"), "images": request.get("images") or [],
@@ -1241,7 +1278,7 @@ def _attempt_turn(plan, mode, state, *, spawner, timeout):
         state.stderr_handle = tempfile.TemporaryFile(mode="w+", encoding="utf-8")
         session = StdioSession(
             argv,
-            env=minimal_env(_MCP_ENV if mode == "mcp" else None),
+            env=minimal_env({**(_MCP_ENV if mode == "mcp" else {}), **plan["account_env"]}),
             timeout=float(timeout),
             spawner=spawner,
             stderr=state.stderr_handle,
@@ -1374,7 +1411,7 @@ atexit.register(_POOL.close)
 def _pool_key(plan) -> str:
     """What a waiting CLI must share with a request to continue it: argv and system text."""
     system, _ = _surface(plan, "mcp")
-    return digest({"model": plan["model"], "effort": plan["effort"], "fast_mode": plan["fast_mode"],
+    return digest({"account": plan["account_env"], "model": plan["model"], "effort": plan["effort"], "fast_mode": plan["fast_mode"],
                    "search": plan["search"], "system": system, "tools": plan["host_tools"],
                    "tool_choice": plan["tool_choice"]})
 
@@ -1392,7 +1429,7 @@ def _spawn_live(plan, state, *, spawner, timeout) -> live_session.LiveSession:
             "timeout": _LIVE_CALL_TIMEOUT_MS}}}, separators=(",", ":"))
         argv, prompt = _turn_argv(plan, "mcp", mcp_config=mcp_config, run_host_tools=True)
         state.stderr_handle = tempfile.TemporaryFile(mode="w+", encoding="utf-8")
-        session = StdioSession(argv, env=minimal_env(_LIVE_ENV), timeout=float(timeout),
+        session = StdioSession(argv, env=minimal_env({**_LIVE_ENV, **plan["account_env"]}), timeout=float(timeout),
                                spawner=spawner, stderr=state.stderr_handle)
     except BaseException:
         if bridge is not None:
