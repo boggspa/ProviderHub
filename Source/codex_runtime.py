@@ -16,12 +16,30 @@ from codex_catalogue import project_codex
 from codex_profile import CodexProfile, installed_app
 
 
+#: Where a desktop app bundles its Codex runtime, newest layout first.
+#: ChatGPT 26.924 moved it into a nested CodexCLI.app; codex-cli/bin/codex is
+#: only a shell wrapper that execs this binary, so the binary is used directly.
+BUNDLED_RUNTIME_PATHS = (
+    "Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex",
+    "Contents/Resources/codex",
+)
+
+
+def bundled_runtime(app):
+    """The first executable runtime inside ``app``, or None."""
+    for relative in BUNDLED_RUNTIME_PATHS:
+        path = Path(app) / relative
+        if path.is_file() and os.access(path, os.X_OK):
+            return path
+    return None
+
+
 def runtime_binary():
     app = installed_app()
     if not app:
         raise BridgeError("Install Codex / ChatGPT Desktop before preparing this harness.")
-    path = Path(app) / "Contents/Resources/codex"
-    if not path.is_file() or not os.access(path, os.X_OK):
+    path = bundled_runtime(app)
+    if path is None:
         raise BridgeError("The installed desktop app has no usable Codex runtime.")
     return path
 

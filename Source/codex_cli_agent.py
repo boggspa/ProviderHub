@@ -411,7 +411,7 @@ def runtime_binary(binary=None):
     """The runtime to spawn: an explicit path, ``codex`` on PATH, or the app's.
 
     Mirrors ``codex_runtime.runtime_binary``'s desktop-app resolution
-    (``<app>/Contents/Resources/codex``) as the fallback, but prefers PATH
+    (``codex_runtime.BUNDLED_RUNTIME_PATHS``) as the fallback, but prefers PATH
     first: this route is CLI-backed, so the binary the user actually invokes is
     the one whose login they manage.
     """
@@ -434,8 +434,10 @@ def runtime_binary(binary=None):
 def _desktop_runtime_candidates():
     """The desktop apps' bundled runtimes, in preference order."""
     roots = (Path("/Applications"), Path.home() / "Applications")
-    return tuple(root / f"{name}.app/Contents/Resources/codex"
-                 for root in roots for name in ("ChatGPT", "Codex"))
+    from codex_runtime import BUNDLED_RUNTIME_PATHS
+    return tuple(root / f"{name}.app" / relative
+                 for root in roots for name in ("ChatGPT", "Codex")
+                 for relative in BUNDLED_RUNTIME_PATHS)
 
 
 def runtime_signature(binary=None):
