@@ -815,12 +815,37 @@ _WATCHER = r"""
       applyShimmer(found.accent, found.theme, found.hue);
       applyPanels(found.models);
     }
+    const THREAD_UUID = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
+    // The window that starts a thread keeps its row keyed by the renderer's
+    // own client id (local:client-new-thread:<uuid>) for as long as the
+    // window lives; every other window keys it by the real thread id. Only
+    // the row component knows both: its props carry the same dataAttributes
+    // the row was rendered with and the conversationId. Accept it only from
+    // the component whose dataAttributes name this exact row, so a parent
+    // showing another thread can never lend its id.
+    function clientRowThreadId(element, key) {
+      const fiberKey = Object.keys(element).find(name => name.startsWith("__reactFiber$"));
+      let fiber = fiberKey ? element[fiberKey] : null;
+      for (let depth = 0; fiber && depth < 24; depth += 1, fiber = fiber.return) {
+        const props = fiber.memoizedProps;
+        const attributes = props && typeof props === "object" ? props.dataAttributes : null;
+        if (attributes && typeof attributes === "object" && attributes[SIDEBAR_ID] === key) {
+          return typeof props.conversationId === "string" && THREAD_UUID.test(props.conversationId) ? props.conversationId : null;
+        }
+      }
+      return null;
+    }
     function sidebarRows() {
       const rows = [];
       for (const element of document.querySelectorAll("[" + SIDEBAR_ROW + "]")) {
         if (element.getAttribute(SIDEBAR_KIND) !== "local" || element.getAttribute(SIDEBAR_HOST) !== "local") { continue; }
-        const match = /^local:([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})$/i.exec(element.getAttribute(SIDEBAR_ID) || "");
-        if (match) { rows.push({ element: element, id: match[1] }); }
+        const key = element.getAttribute(SIDEBAR_ID) || "";
+        const match = /^local:([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})$/i.exec(key);
+        let id = match ? match[1] : null;
+        if (!id && /^local:client-new-thread:/.test(key)) {
+          try { id = clientRowThreadId(element, key); } catch (error) { id = null; }
+        }
+        if (id) { rows.push({ element: element, id: id }); }
         if (rows.length >= 256) { break; }
       }
       return rows;
@@ -883,7 +908,7 @@ _WATCHER = r"""
     observer.observe(document, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ["data-explicit-model", "data-accent", "data-maximum", "data-selected-reasoning-effort", "data-tab-id", "data-app-shell-tab-panel-controller", SIDEBAR_ROW, SIDEBAR_ID, SIDEBAR_HOST, SIDEBAR_KIND, "role", "inert", "hidden"] });
     if (document.readyState === "loading") { document.addEventListener("DOMContentLoaded", schedule, { once: true }); }
     window.__providerHubAccent = {
-      version: 15,
+      version: 16,
       accents: Object.keys(ACCENTS).length,
       sidebarThreadIds: () => Array.from(new Set(sidebarRows().map(row => row.id))),
       setSidebarAccents: setSidebarAccents,

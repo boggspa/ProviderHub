@@ -80,6 +80,26 @@ const cases = {
     await publishSidebar(page, {});
     assert.equal(await colour(page, 'a-spin'), colours.grey);
   },
+  async sidebar_client_keyed_rows_resolve_through_their_own_row_props(page) {
+    // The window that started a thread keys its row by the client id; only
+    // the row component's props (same dataAttributes) carry the thread id.
+    const client = id => `<div id="${id}" data-app-action-sidebar-thread-row data-app-action-sidebar-thread-kind="local" data-app-action-sidebar-thread-host-id="local" data-app-action-sidebar-thread-id="local:client-new-thread:${threadId(90)}">${spinner(id + '-spin')}</div>`;
+    await mount(page, '<nav>' + client('own') + client('borrowed') + client('bare') + sidebarRow('plain', 1) + '</nav>');
+    await page.evaluate(() => {
+      const key = el => el.getAttribute('data-app-action-sidebar-thread-id');
+      const own = document.getElementById('own');
+      own.__reactFiber$test = {memoizedProps: {className: 'row'}, return: {memoizedProps: {dataAttributes: {'data-app-action-sidebar-thread-id': key(own)}, conversationId: '00000000-0000-4000-8000-000000000007'}, return: null}};
+      // A parent for another row must never lend its thread id.
+      const borrowed = document.getElementById('borrowed');
+      borrowed.__reactFiber$test = {memoizedProps: {}, return: {memoizedProps: {dataAttributes: {'data-app-action-sidebar-thread-id': 'local:someone-else'}, conversationId: '00000000-0000-4000-8000-000000000008'}, return: null}};
+    });
+    assert.deepEqual(await page.evaluate(() => window.__providerHubAccent.sidebarThreadIds()), [threadId(7), threadId(1)]);
+    await publishSidebar(page, {[threadId(7)]: '#D44404', [threadId(8)]: '#0073E6', [threadId(1)]: '#8C52EF'});
+    assert.equal(await colour(page, 'own-spin'), colours.mistral);
+    assert.equal(await colour(page, 'borrowed-spin'), colours.grey);
+    assert.equal(await colour(page, 'bare-spin'), colours.grey);
+    assert.equal(await colour(page, 'plain-spin'), colours.qwen);
+  },
   async sidebar_recycled_rows_mount_close_and_host_switch_restore_grey(page) {
     await mount(page, sidebarRow('a', 1));
     await publishSidebar(page, {[threadId(1)]:'#D44404', [threadId(2)]:'#0073E6'});
