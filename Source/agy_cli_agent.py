@@ -494,6 +494,9 @@ def _parse_version(text: str) -> str | None:
 # Model list parsing
 # ---------------------------------------------------------------------------
 
+GEMINI_CONTEXT = 1_000_000
+
+
 def _collapse_models(raw_models: list[dict]) -> list[dict]:
     """Collapse 14 agy row ids into 7 model families for the hub picker.
 
@@ -533,6 +536,11 @@ def _collapse_models(raw_models: list[dict]) -> list[dict]:
             "provider_effort_modes": list(_FAMILY_PROVIDER_EFFORT_MODES.get(family_id, [])),
             "aliases": aliases,
             "reasoning": True,
+            # agy models reports names and effort only. Gemini 3 publishes a
+            # 1M window: https://ai.google.dev/gemini-api/docs/gemini-3
+            **({"context": GEMINI_CONTEXT, "context_kind": "verified_documentation",
+                "context_evidence": "https://ai.google.dev/gemini-api/docs/gemini-3"}
+               if family_id.startswith("gemini-3") else {}),
         })
 
     return collapsed

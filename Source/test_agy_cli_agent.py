@@ -84,6 +84,10 @@ gpt-oss-120b-medium	GPT-OSS 120B (Medium)
         }
         actual_families = {c["id"] for c in collapsed}
         self.assertEqual(actual_families, expected_families)
+        # Gemini 3 families carry their documented 1M window; others stay unknown.
+        contexts = {c["id"]: c.get("context") for c in collapsed}
+        for family, context in contexts.items():
+            self.assertEqual(context, 1_000_000 if family.startswith("gemini-3") else None, family)
 
     def test_collapsed_card_structure(self):
         """Test that each collapsed card has the required fields."""

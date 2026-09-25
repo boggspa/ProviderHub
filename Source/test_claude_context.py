@@ -73,6 +73,11 @@ class ClaudeContextTests(unittest.TestCase):
             self.assertEqual(row["max_tokens"], 256_000)
             self.assertFalse(row["id"].endswith("[1m]"))
 
+    def test_absent_setting_keeps_the_runtime_catalogue_window(self):
+        self.catalogue(context=872_000)
+        for row in model_catalog(self.settings)["data"]:
+            self.assertEqual(row["max_tokens"], 872_000)
+
     def test_saved_catalogues_gain_documented_context_without_refresh(self):
         self.settings["providers"]["claude"]["credential_mode"] = "cli"
         cases = (

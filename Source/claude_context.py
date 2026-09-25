@@ -66,6 +66,10 @@ def claude_context_spec(spec: dict, settings: dict) -> dict:
             return spec
         context = codex_context_window()
         if context is None:
+            # The runtime catalogue's own window (its max ceiling, which turns
+            # run with) outranks the documented default.
+            if type(spec.get("context")) is int and spec["context"] > 0:
+                return spec
             if model not in _CODEX_MODELS:
                 return spec
             context = _CODEX_DEFAULT_CONTEXT

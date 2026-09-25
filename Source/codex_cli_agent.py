@@ -561,6 +561,9 @@ def _app_server_argv(*, model=None, effort=None, binary=None, codex_home=None):
         argv += ["-c", f"{catalog[0]}={_toml_string(catalog[1])}"]
     if checked_model is not None:
         argv += ["-c", f"model={_toml_string(checked_model)}"]
+        window = _max_context_override(argv, checked_model, codex_home)
+        if window is not None:
+            argv += ["-c", window]
     if checked_effort is not None:
         argv += ["-c", f"model_reasoning_effort={_toml_string(checked_effort)}"]
     argv.append("app-server")
@@ -602,6 +605,9 @@ def build_exec_argv(model, *, effort=None):
             "-m", checked_model]
     for setting in _TRANSPORT_CONFIG:
         argv += ["-c", setting]
+    window = _max_context_override(argv, checked_model)
+    if window is not None:
+        argv += ["-c", window]
     if checked_effort is not None:
         argv += ["-c", f"model_reasoning_effort={_toml_string(checked_effort)}"]
     return _assert_safe_argv(argv, context="exec")
@@ -803,21 +809,49 @@ def _catalogue_search(argv, home=None):
             if isinstance(card.get("slug"), str) and isinstance(card.get("web_search_tool_type"), str)}
 
 
+def _card_window(card):
+    """The card's largest valid window: max_context_window over context_window."""
+    window = card.get("context_window")
+    ceiling = card.get("max_context_window")
+    if type(window) is int and window > 0 and type(ceiling) is int and ceiling > window:
+        return ceiling
+    return window
+
+
+def _max_context_override(argv, model, home=None):
+    """A model_context_window override lifting ``model`` to its native ceiling.
+
+    The runtime's default window is the card's context_window; the larger
+    max_context_window applies only when configured. The hub advertises the
+    ceiling, so each turn must run with it or the runtime would compact at the
+    smaller default under a window the desktop believes is larger.
+    """
+    for card in _native_cards(argv, home)[1]:
+        if card.get("slug") == model:
+            window = card.get("context_window")
+            ceiling = _card_window(card)
+            if type(ceiling) is int and ceiling != window:
+                return f"model_context_window={ceiling}"
+    return None
+
+
 def _catalogue_context(argv, configured_window=None, home=None):
     """Context budgets from the same native catalogue this runtime listed.
 
     model/list omits context metadata. Join its exact model IDs to the native
     catalogue selected on argv, or, with none selected, the runtime's own cache
     that the listing refreshed; never the Hub's projected rows or a model-name
-    guess. max_context_window is an optional larger ceiling, not the active
-    default. Preserve the runtime's reserved percentage in runtime_context.
+    guess. Without an explicit setting, the larger max_context_window wins:
+    turns run with it applied (see _max_context_override), so a 1M-class
+    model is not metered and compacted at its 272K default. Preserve the
+    runtime's reserved percentage in runtime_context.
     """
     path, cards = _native_cards(argv, home)
     result = {}
     for card in cards:
         if not isinstance(card, dict) or not isinstance(card.get("slug"), str):
             continue
-        window = configured_window if type(configured_window) is int and configured_window > 0 else card.get("context_window")
+        window = configured_window if type(configured_window) is int and configured_window > 0 else _card_window(card)
         percent = card.get("effective_context_window_percent")
         if type(window) is not int or window <= 0 or type(percent) is not int or not 0 < percent <= 100:
             continue

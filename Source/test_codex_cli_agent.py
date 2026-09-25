@@ -467,7 +467,7 @@ class FetchModelsTests(unittest.TestCase):
         self.assertEqual(fake.list_calls[1]["cursor"], "1")
         self.assertTrue(fake.closed)
 
-    def test_native_context_survives_discovery_without_selecting_larger_maximum(self):
+    def test_native_context_survives_discovery_at_the_larger_maximum(self):
         fake = self._FetchSession([{"result": {"data": [
             {"model": "gpt-budget"}, {"model": "gpt-unknown", "displayName": "gpt-budget"}],
             "nextCursor": None}}])
@@ -482,8 +482,8 @@ class FetchModelsTests(unittest.TestCase):
                     mock.patch.object(codex, "StdioSession", return_value=fake), \
                     mock.patch.object(codex, "runtime_binary", return_value="/fake/codex"):
                 rows = codex.fetch_models(binary="/fake/codex", spawner="stub")
-        self.assertEqual(rows[0]["context"], 272000)
-        self.assertEqual(rows[0]["runtime_context"], 258400)
+        self.assertEqual(rows[0]["context"], 872000)
+        self.assertEqual(rows[0]["runtime_context"], 828400)
         self.assertEqual(rows[0]["context_kind"], "runtime_catalogue")
         self.assertEqual(rows[0]["context_evidence"], str(cache))
         self.assertNotIn("context", rows[1])
@@ -496,7 +496,12 @@ class FetchModelsTests(unittest.TestCase):
                      "max_context_window": 872000, "effective_context_window_percent": 95}
             cache.write_text(json.dumps({"models": [valid]}))
             self.assertEqual(codex._catalogue_context(argv, 100000)["gpt-budget"]["runtime_context"], 95000)
-            self.assertEqual(codex._catalogue_context(argv, True)["gpt-budget"]["runtime_context"], 258400)
+            self.assertEqual(codex._catalogue_context(argv, True)["gpt-budget"]["runtime_context"], 828400)
+            for ceiling in (None, True, 0, 100000, "872000"):
+                with self.subTest(max_context_window=ceiling):
+                    cache.write_text(json.dumps({"models": [{**valid, "max_context_window": ceiling}]}))
+                    self.assertEqual(codex._catalogue_context(argv)["gpt-budget"]["runtime_context"], 258400)
+            cache.write_text(json.dumps({"models": [valid]}))
             for field, values in (("context_window", (None, True, 0, -1, "272000")),
                                   ("effective_context_window_percent", (None, True, 0, 101, "95"))):
                 for value in values:
@@ -510,6 +515,21 @@ class FetchModelsTests(unittest.TestCase):
             self.assertEqual(codex._catalogue_context(argv), {})
             with mock.patch.object(codex.Path, "home", return_value=codex.Path(tmp)):
                 self.assertEqual(codex._catalogue_context(["codex", "app-server"]), {})
+
+    def test_turn_argv_runs_with_the_advertised_maximum_window(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = codex.Path(tmp) / ".codex" / "models_cache.json"
+            cache.parent.mkdir()
+            cache.write_text(json.dumps({"models": [
+                {"slug": "gpt-6-astra", "context_window": 272000, "max_context_window": 872000},
+                {"slug": "gpt-5.5", "context_window": 272000, "max_context_window": 272000}]}))
+            with mock.patch.object(codex.Path, "home", return_value=codex.Path(tmp)), \
+                    mock.patch.object(codex, "_openai_catalog_override", return_value=None), \
+                    mock.patch.object(codex, "runtime_binary", return_value="/fake/codex"):
+                self.assertIn("model_context_window=872000", codex.build_argv("gpt-6-astra"))
+                self.assertIn("model_context_window=872000", codex.build_exec_argv("gpt-6-astra"))
+                for argv in (codex.build_argv("gpt-5.5"), codex.build_exec_argv("gpt-5.5")):
+                    self.assertFalse(any(arg.startswith("model_context_window=") for arg in argv))
 
     def test_listing_ignores_a_cache_written_by_another_client(self):
         # Seen live: a 0.153.0 app-server left running across an upgrade kept
