@@ -38,6 +38,7 @@ from fast_models import supports_fast_toggle
 from gemini_provider import GeminiError, discover as gemini_discover
 from openrouter_provider import OpenRouterError, discover as openrouter_discover
 from qwen_provider import catalogue as qwen_catalogue
+from minimax_provider import catalogue as minimax_catalogue
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -126,6 +127,8 @@ def _catalogue_entry(
 
 
 def _static_catalogue(provider_id: str) -> tuple[list[dict], list[str], str] | None:
+    if provider_id == "minimax":
+        return minimax_catalogue()
     if provider_id == "qwen-token-plan":
         return qwen_catalogue()
     if provider_id == "kimi":

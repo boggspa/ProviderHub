@@ -25,6 +25,7 @@ from fast_models import CLAUDE_FAST_BETA, supports_fast_toggle
 from gemini_provider import GeminiError, prepare_request as gemini_prepare_request
 from openrouter_provider import OpenRouterError, finalize as openrouter_finalize, normalize_messages as openrouter_controls
 from qwen_provider import QwenError, normalize_controls as qwen_controls
+from minimax_provider import MiniMaxError, normalize_controls as minimax_controls
 
 
 def _valid_model_id(value: str) -> str:
@@ -133,6 +134,11 @@ def _normalize_native_controls(
 ) -> dict:
     descriptor = _provider(provider_id)
     compatibility = {}
+    if provider_id == "minimax":
+        try:
+            return minimax_controls(body, upstream_model, model_spec)
+        except MiniMaxError as exc:
+            raise ProviderError(str(exc)) from exc
     if provider_id == "claude":
         tier = body.pop("service_tier", None)
         if tier in {"fast", "priority"}:

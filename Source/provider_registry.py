@@ -275,12 +275,14 @@ PROVIDERS = {
 # Canonical paths accepted from settings.  A user may paste a provider base URL
 # or its documented request endpoint; both normalize to the same safe base.
 from qwen_provider import DESCRIPTOR as QWEN_DESCRIPTOR, OFFICIAL_PATHS as QWEN_PATHS, QwenError, catalogue as qwen_catalogue, normalize_controls as qwen_controls
+from minimax_provider import DESCRIPTOR as MINIMAX_DESCRIPTOR, OFFICIAL_PATHS as MINIMAX_PATHS
 from openrouter_provider import DESCRIPTOR as OPENROUTER_DESCRIPTOR, OFFICIAL_PATHS as OPENROUTER_PATHS, OpenRouterError, discover as openrouter_discover, finalize as openrouter_finalize, normalize_messages as openrouter_controls, app_headers as openrouter_app_headers
 from gemini_provider import DESCRIPTOR as GEMINI_DESCRIPTOR, OFFICIAL_PATHS as GEMINI_PATHS, GeminiError, discover as gemini_discover, prepare_request as gemini_prepare_request, validate_connection as gemini_validate_connection
 from devin_agent import DESCRIPTOR as DEVIN_DESCRIPTOR, OFFICIAL_PATHS as DEVIN_PATHS, DevinAgentError, catalogue as devin_catalogue, validate_connection as devin_validate_connection
 from effort_map import EFFORT_ORDER, CEREBRAS_EFFORT_ALIASES, DEEPSEEK_EFFORT_ALIASES, MISTRAL_EFFORT_ALIASES, MISTRAL_REASONING_EFFORTS, cap_high_end, map_effort, mistral_effort_modes, nearest_effort, ollama_effort_aliases, ollama_effort_modes
 
 PROVIDERS[QWEN_DESCRIPTOR["id"]] = QWEN_DESCRIPTOR
+PROVIDERS[MINIMAX_DESCRIPTOR["id"]] = MINIMAX_DESCRIPTOR
 PROVIDERS[OPENROUTER_DESCRIPTOR["id"]] = OPENROUTER_DESCRIPTOR
 PROVIDERS[GEMINI_DESCRIPTOR["id"]] = GEMINI_DESCRIPTOR
 PROVIDERS[DEVIN_DESCRIPTOR["id"]] = DEVIN_DESCRIPTOR
@@ -296,6 +298,7 @@ _OFFICIAL_PATHS = {
     "claude": {"", "/v1", "/v1/models", "/v1/messages"},
     "codex": {"", "/v1", "/v1/models", "/v1/chat/completions", "/v1/responses"},
     "qwen-token-plan": QWEN_PATHS,
+    "minimax": MINIMAX_PATHS,
     "openrouter": OPENROUTER_PATHS,
     "gemini": GEMINI_PATHS,
     "devin": DEVIN_PATHS,

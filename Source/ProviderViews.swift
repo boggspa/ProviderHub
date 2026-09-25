@@ -235,6 +235,7 @@ struct ProviderPage: View {
         case "mistral": return "Vibe’s configured API key or another Mistral key"
         case "kimi": return "Kimi Code subscription API key"
         case "mimo": return "MiMo Token Plan key for your account region"
+        case "minimax": return "MiniMax Subscription Key (sk-cp) or pay-as-you-go API key"
         case "ollama": return "Your existing Ollama installation"
         case "deepseek": return "DeepSeek API key"
         case "cerebras": return "Cerebras API key"

@@ -63,7 +63,7 @@ class RegistryTests(unittest.TestCase):
         self.assertEqual(
             set(PROVIDERS),
             {"mistral", "kimi", "mimo", "ollama", "deepseek", "cerebras", "muse", "grok", "qwen-token-plan", "openrouter", "gemini", "devin",
-             "claude", "codex", "antigravity"},
+             "claude", "codex", "antigravity", "minimax"},
         )
         json.loads(json.dumps(PROVIDERS))
         for provider_id, descriptor in PROVIDERS.items():
