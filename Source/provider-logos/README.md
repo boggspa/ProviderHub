@@ -13,6 +13,7 @@ The following PNGs are copied verbatim from Limit Counter's
 | `provider-logo-openrouter.png` | `ProviderOpenRouterLogo.imageset/logo.png` | OpenRouter |
 | `provider-logo-devin.png` | `ProviderDevinLogo.imageset/logo.png` | Devin |
 | `provider-logo-meta.png` | `ProviderMetaLogo.imageset/logo.png` | Muse and Meta display branding |
+| `provider-logo-minimax.png` | `ProviderMiniMaxLogo.imageset/logo.png` | MiniMax |
 
 Both source checkouts remain read-only. The display palette and logo settings
 are recorded in `../provider_branding.json`.

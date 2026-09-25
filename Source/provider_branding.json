@@ -205,7 +205,10 @@
     "minimax": {
       "displayProvider": "MiniMax",
       "hueKey": "minimax",
-      "shortCode": "MMX"
+      "shortCode": "MMX",
+      "logo": {
+        "light": "provider-logos/provider-logo-minimax.png"
+      }
     },
     "thinkingmachines": {
       "displayProvider": "Thinking Machines",
