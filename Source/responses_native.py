@@ -115,6 +115,49 @@ def ultra_delegation_note(body, tool_map):
     return None if spawn is None else ULTRA_DELEGATION_NOTE.format(spawn=spawn)
 
 
+#: The opening of the prompt Codex Desktop's engine appends as the final user
+#: message when it compacts a thread locally. The desktop sends it for every
+#: hub route, so recognising it here serves every provider, not one CLI.
+CODEX_COMPACTION_PROMPT = "You are performing a CONTEXT CHECKPOINT COMPACTION."
+
+COMPACTION_NOTE = (
+    "Provider Hub note: this request is a context compaction checkpoint, not a "
+    "working turn. Write only the handoff summary the final user message asks "
+    "for. Keep exact file paths, identifiers, commands, test results, "
+    "decisions, and the remaining steps. Do not continue the task."
+)
+
+COMPACTION_TOOLS_NOTE = (
+    " Tools are deliberately not offered for this one step. The session's tools "
+    "are intact and return on the next turn, so do not report them as missing, "
+    "ask for them to be restored, or say you cannot continue."
+)
+
+
+def compaction_note(body, tools):
+    """The note a Codex compaction request should carry, or None.
+
+    Codex compacts with its whole tool-calling history and no tool
+    definitions. Seen live on 25 Sep 2026: GPT-6 Astra read that as a broken
+    session and returned "please restore the host workspace tools" as the
+    summary, which Codex then handed to the next window as its only record of
+    the work so far.
+    """
+    inputs = body.get("input")
+    if not isinstance(inputs, list) or not inputs:
+        return None
+    last = inputs[-1]
+    if not isinstance(last, dict) or last.get("type", "message") != "message" or last.get("role") != "user":
+        return None
+    content = last.get("content")
+    if isinstance(content, list):
+        content = "".join(part.get("text", "") for part in content
+                          if isinstance(part, dict) and isinstance(part.get("text"), str))
+    if not isinstance(content, str) or not content.lstrip().startswith(CODEX_COMPACTION_PROMPT):
+        return None
+    return COMPACTION_NOTE + ("" if tools else COMPACTION_TOOLS_NOTE)
+
+
 def with_ultra_note(instructions, note):
     """Append the note to a request's `instructions`, keeping what is there.
 
@@ -629,6 +672,9 @@ def prepare_native(runtime, payload):
     # - to_messages copies it into `system` for the bridged path and the native
     # path forwards it verbatim - so one edit here reaches every provider.
     note = ultra_delegation_note(body, tool_map)
+    if note is not None:
+        body["instructions"] = with_ultra_note(body.get("instructions"), note)
+    note = compaction_note(body, tools)
     if note is not None:
         body["instructions"] = with_ultra_note(body.get("instructions"), note)
     if isinstance(body["input"], list):
