@@ -136,6 +136,43 @@ class CustomApplyPatchUnitTests(unittest.TestCase):
         # The caller's payload is not edited underneath it.
         self.assertIn("token_budget", payload["tools"][0]["parameters"]["properties"])
 
+    def test_goal_calls_round_trip_on_an_api_route(self):
+        """A provider's goal call reaches the desktop under the desktop's own name."""
+        from types import SimpleNamespace
+        import responses_native
+        from responses_tools import output_names
+        route = "grok/grok-4.6"
+        runtime = SimpleNamespace(
+            settings={"providers": {"grok": {"base_url": "https://x.invalid"}},
+                      "_model_specs": {route: {"context": 500000, "effort_modes": ["low", "high"]}}},
+            replay_key="replay", token="token", upstream_url=None,
+            provider_key=lambda provider_id: "provider-key")
+        continuation = ('<codex_internal_context source="goal"> Continue working toward the active '
+                        "thread goal. <objective>Beat the gym</objective></codex_internal_context>")
+        payload = {"model": route, "store": False, "stream": False,
+                   "tools": copy.deepcopy(self.GOAL_TOOLS),
+                   "input": [{"role": "user", "content": "set a goal and play"},
+                             {"type": "function_call", "call_id": "g1", "name": "create_goal",
+                              "arguments": json.dumps({"objective": "Beat the gym"})},
+                             {"type": "function_call_output", "call_id": "g1",
+                              "output": json.dumps({"goal": {"status": "active"}})},
+                             {"role": "user", "content": continuation}]}
+        with patch.object(responses_native, "validate_connection",
+                          return_value={"base_url": "https://x.invalid"}), \
+                patch.object(responses_native, "_auth_headers", return_value={}), \
+                patch.object(responses_native, "connection_signature", return_value="sig"):
+            plan = responses_native.prepare_native(runtime, payload)
+        names = [tool["name"] for tool in plan["body"]["tools"]]
+        self.assertEqual(names, ["create_goal", "update_goal", "get_goal"])
+        replayed = [item for item in plan["body"]["input"] if item.get("type") == "function_call"]
+        self.assertEqual([item["name"] for item in replayed], ["create_goal"])
+        for name, arguments in (("create_goal", {"objective": "Beat the gym"}), ("update_goal", {"status": "complete"})):
+            with self.subTest(name=name):
+                item = output_names({"type": "function_call", "call_id": "c", "name": name,
+                                     "arguments": json.dumps(arguments)}, plan["tool_map"])
+                self.assertEqual(item["name"], name)
+                self.assertNotIn("namespace", item)
+
     def test_goal_tools_keep_their_token_budget_when_the_switch_is_on(self):
         tools, _ = self._goal_plan(allow_budget=True)
         self.assertIn("token_budget", tools["create_goal"]["parameters"]["properties"])

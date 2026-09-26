@@ -994,6 +994,64 @@ class RunTurnTests(unittest.TestCase):
         self.assertEqual(items[0]["content"][0]["text"],
                          "[Prior reasoning context]\nthis route's own reasoning")
 
+    def test_long_screenshot_history_keeps_the_newest_images_instead_of_failing(self):
+        # A seat that views a frame every few steps passes the CLI image budget.
+        # The route drops the oldest pixels, keeps every turn's text and tool
+        # identity, marks each elision, and the turn still runs.
+        import cli_routes
+        from cli_images import MAX_IMAGES
+        pixel = ("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==")
+        image = {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": pixel}}
+        messages = [{"role": "user", "content": "Play on."}]
+        total = MAX_IMAGES + 5
+        for index in range(total):
+            messages.append({"role": "assistant", "content": [
+                {"type": "tool_use", "id": f"s{index}", "name": "view_image", "input": {}}]})
+            messages.append({"role": "user", "content": [{"type": "tool_result", "tool_use_id": f"s{index}",
+                                                          "content": [{"type": "text", "text": f"frame {index}"}, image]}]})
+        body = cli_routes.plan_turn("codex", "gpt-6-sol", {"messages": messages, "tools": [
+            {"name": "view_image", "input_schema": {"type": "object"}}]}, {}, wanted_output=64)["body"]
+        fake = FakeCodexSession([])
+        fake.script = [_completed_turn()]
+        events, session, _ = self._run(body, fake)
+        self.assertEqual(events[-1]["type"], "message_stop")
+        items = next(params for method, params, _ in session.requests if method == "thread/inject_items")["items"]
+        outputs = [item["output"] for item in items if item["type"] == "function_call_output"]
+        self.assertEqual(len(outputs), total)
+        with_image = [index for index, output in enumerate(outputs)
+                      if any(part.get("type") == "input_image" for part in output)]
+        self.assertEqual(with_image, list(range(5, total)))
+        for output in outputs[:5]:
+            self.assertTrue(any("omitted this earlier image" in part.get("text", "") for part in output))
+        self.assertTrue(all(any(f"frame {index}" == part.get("text") for part in output)
+                            for index, output in enumerate(outputs)))
+
+    def test_rejoin_prompt_names_a_tool_result_only_when_one_is_last(self):
+        call = {"role": "assistant", "content": [{"type": "tool_use", "id": "c1", "name": "shell", "input": {}}]}
+        result = {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "c1", "content": "clean"}]}
+        goal = {"role": "user", "content": '<codex_internal_context source="goal"> Continue working toward '
+                                           "the active thread goal. </codex_internal_context>"}
+        cases = [("tool result", [call, result], codex._RESUME_PROMPT),
+                 ("user message", [call, result, {"role": "user", "content": "Now heal at the Pokemon Center."}],
+                  codex._NEW_INPUT_PROMPT),
+                 ("goal continuation", [call, result, {"role": "assistant", "content": "Paused at the gym."}, goal],
+                  codex._NEW_INPUT_PROMPT),
+                 ("steer beside a result", [call, {"role": "user", "content": [
+                     result["content"][0], {"type": "text", "text": "Use the stairs instead."}]}],
+                  codex._NEW_INPUT_PROMPT),
+                 ("trailing empty text", [call, {"role": "user", "content": [
+                     result["content"][0], {"type": "text", "text": "  "}]}], codex._RESUME_PROMPT)]
+        for label, history, expected in cases:
+            with self.subTest(label):
+                fake = FakeCodexSession([])
+                fake.script = [_completed_turn()]
+                _, session, _ = self._run(self._request(tools=[{"name": "shell"}], history=history), fake)
+                prompt = next(params for method, params, _ in session.requests
+                              if method == "turn/start")["input"][0]["text"]
+                self.assertEqual(prompt, expected)
+        self.assertIn("new instruction has arrived", codex._NEW_INPUT_PROMPT)
+        self.assertNotIn("tool call", codex._NEW_INPUT_PROMPT)
+
     def test_resumed_turn_is_not_prompted_as_a_fresh_task(self):
         fake = FakeCodexSession([])
         fake.script = [_completed_turn()]
@@ -1089,6 +1147,46 @@ class RunTurnTests(unittest.TestCase):
                 else:
                     self.assertNotIn(codex._tool_alias("view_image"), thread["developerInstructions"])
                     self.assertNotIn("no native image viewer", thread["developerInstructions"])
+
+    def test_goal_tools_are_named_to_the_model_by_their_host_aliases(self):
+        # Goals keep an autonomous seat working. The nested runtime's own goal
+        # tools are off (its thread is ephemeral), so a Codex model that wants
+        # create_goal must be told which host alias it is.
+        goals = [{"name": name, "input_schema": {"type": "object"}}
+                 for name in ("create_goal", "update_goal", "get_goal")]
+        other = {"name": "exec_command", "input_schema": {"type": "object"}}
+        cases = [({"tools": [other, *goals]}, ("create_goal", "update_goal", "get_goal")),
+                 ({"tools": [other, goals[1]]}, ("update_goal",)),
+                 ({"tools": [other]}, ()),
+                 ({"tools": [other, *goals], "tool_choice": {"type": "none"}}, ())]
+        for extra, named in cases:
+            with self.subTest(extra=[tool["name"] for tool in extra["tools"]], choice=extra.get("tool_choice")):
+                fake = FakeCodexSession([])
+                fake.script = [_completed_turn()]
+                _, session, _ = self._run(self._request(**extra), fake)
+                thread = next(params for method, params, _ in session.requests if method == "thread/start")
+                instructions = thread["developerInstructions"]
+                for name in ("create_goal", "update_goal", "get_goal"):
+                    hint = f"call host.{codex._tool_alias(name)} for {name}"
+                    if name in named:
+                        self.assertIn(hint, instructions)
+                    else:
+                        self.assertNotIn(hint, instructions)
+                self.assertEqual("Thread goals are host tools here" in instructions, bool(named))
+
+    def test_host_goal_call_reaches_the_desktop_under_its_own_name(self):
+        tool = {"name": "create_goal", "input_schema": {"type": "object"}}
+        fake = FakeCodexSession([])
+        fake.script = [{"id": 5, "method": "item/tool/call", "params": {
+            "namespace": "host", "tool": codex._tool_alias("create_goal"),
+            "arguments": {"objective": "Beat the Violet City gym"}, "callId": "g1"}}]
+        events, session, _ = self._run(self._request(tools=[tool]), fake)
+        self.assertEqual(events, [{"type": "tool_call", "id": "g1", "name": "create_goal",
+                                   "input": {"objective": "Beat the Violet City gym"}},
+                                  {"type": "message_stop", "stop_reason": "tool_use"}])
+        self.assertIn("features.goals=false", session.argv)
+        thread = next(params for method, params, _ in session.requests if method == "thread/start")
+        self.assertIs(thread["ephemeral"], True)
 
     def test_host_view_image_call_carries_the_picture_back_to_the_model(self):
         # The host alias is the working path: its call is handed to the host

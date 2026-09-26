@@ -198,3 +198,51 @@ class ParserTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TranscriptFooterTest(unittest.TestCase):
+    """The closing line must not invite a wrap-up when the host just answered a call."""
+
+    RESULT = {"role": "user", "content": "[tool result for c1]\nframe 7", "_tool_results": True}
+    HISTORY = [{"role": "user", "content": "Play the game."},
+               {"role": "assistant", "content": "[tool call: press (c1) with {}]"}]
+
+    def test_footer_follows_what_the_final_turn_carries(self):
+        from cli_tool_call import TOOL_RESULT_FOOTER, TRANSCRIPT_FOOTER, transcript_footer
+        self.assertEqual(transcript_footer([*self.HISTORY, self.RESULT]), TOOL_RESULT_FOOTER)
+        self.assertEqual(transcript_footer([*self.HISTORY, {"role": "user", "content": "Heal first."}]),
+                         TRANSCRIPT_FOOTER)
+        self.assertEqual(transcript_footer([self.RESULT, {"role": "assistant", "content": "x"}]), TRANSCRIPT_FOOTER)
+        self.assertEqual(transcript_footer([]), TRANSCRIPT_FOOTER)
+        self.assertEqual(TRANSCRIPT_FOOTER, 'Respond now to the final <turn role="user"> above.')
+        self.assertIn("Continue with the next step of the task", TOOL_RESULT_FOOTER)
+        self.assertIn("do not summarise unless the task is complete", TOOL_RESULT_FOOTER)
+
+    def test_each_transcript_adapter_closes_with_the_matching_footer(self):
+        import agy_cli_agent, claude_cli_agent, grok_cli_agent, muse_cli_agent
+        from cli_tool_call import TOOL_RESULT_FOOTER, TRANSCRIPT_FOOTER
+        for module in (claude_cli_agent, muse_cli_agent, agy_cli_agent, grok_cli_agent):
+            with self.subTest(module=module.__name__):
+                after_result = module.render_prompt([*self.HISTORY, dict(self.RESULT)], system="host")
+                self.assertTrue(after_result.rstrip().endswith(TOOL_RESULT_FOOTER))
+                self.assertNotIn(TRANSCRIPT_FOOTER, after_result)
+                after_user = module.render_prompt([*self.HISTORY, {"role": "user", "content": "Heal first."}],
+                                                  system="host")
+                self.assertTrue(after_user.rstrip().endswith(TRANSCRIPT_FOOTER))
+
+    def test_cli_routes_marks_only_a_final_turn_of_pure_tool_results(self):
+        import cli_routes
+        call = {"role": "assistant", "content": [{"type": "tool_use", "id": "c1", "name": "press", "input": {}}]}
+        result = {"type": "tool_result", "tool_use_id": "c1", "content": "frame 7"}
+        cases = [("results only", [result], True),
+                 ("results and blank text", [result, {"type": "text", "text": " "}], True),
+                 ("results and a steer", [result, {"type": "text", "text": "Use the stairs."}], False),
+                 ("plain user text", "Heal first.", False)]
+        for label, content, expected in cases:
+            with self.subTest(label):
+                payload = {"_provider_hub_surface": "responses", "tools": [{"name": "press"}],
+                           "messages": [{"role": "user", "content": "Play."}, call,
+                                        {"role": "user", "content": content}]}
+                body = cli_routes.plan_turn("claude", "sonnet", payload, {}, wanted_output=64)["body"]
+                self.assertIs(body["messages"][-1].get("_tool_results") is True, expected)
+                self.assertNotIn("_tool_results", body["messages"][0])

@@ -358,10 +358,45 @@ class ProtocolTests(unittest.TestCase):
         result = limited[1]["content"][0]
         self.assertEqual(result["tool_use_id"], "screen")
         self.assertEqual(result["content"][0]["text"], "Screenshot result")
-        self.assertTrue(all("omitted this older image" in part["text"] for part in result["content"][1:4]))
-        self.assertEqual(result["content"][4:], original[1]["content"][0]["content"][4:])
+        self.assertEqual(result["content"][1]["text"], "[3 earlier images omitted to fit Mistral's limit of 8]")
+        self.assertEqual(result["content"][2:], original[1]["content"][0]["content"][4:])
         self.assertEqual(limited[1]["content"][1]["text"], "Keep this correction")
         self.assertEqual(limited[1]["content"][2:], original[1]["content"][2:])
+
+    def test_a_run_of_dropped_images_becomes_one_counted_note(self):
+        # One note per dropped image, regenerated from the full history on every
+        # request, grows for the life of a screenshot-heavy thread.
+        history = [{"role": "user", "content": "Play."}]
+        for index in range(32):
+            history.append({"role": "assistant", "content": [
+                {"type": "tool_use", "id": f"s{index}", "name": "view_image", "input": {}}]})
+            history.append({"role": "user", "content": [{"type": "tool_result", "tool_use_id": f"s{index}",
+                                                         "content": [{"type": "text", "text": f"frame {index}"},
+                                                                     sample_image(index)]}]})
+        history.append({"role": "user", "content": [sample_image(99)]})
+        limited, report = limit_image_history(history, 2, "MiniMax")
+        self.assertEqual(report, {"removed": 31, "kept": 2})
+        text = json.dumps(limited)
+        self.assertEqual(text.count("earlier images omitted"), 1)
+        self.assertIn("[31 earlier images omitted to fit MiniMax's limit of 2]", text)
+        self.assertNotIn("omitted this older image", text)
+        # The note sits where the oldest dropped image was; every turn keeps its text.
+        self.assertEqual(limited[2]["content"][0]["content"][1]["text"],
+                         "[31 earlier images omitted to fit MiniMax's limit of 2]")
+        for index in range(32):
+            self.assertIn(f"frame {index}", text)
+        # The newest images are untouched.
+        self.assertEqual(limited[-2]["content"][0]["content"][1], sample_image(31))
+        self.assertEqual(limited[-1]["content"], [sample_image(99)])
+        # A message that held only a dropped image cannot become empty.
+        only = [{"role": "user", "content": [sample_image(0)]}, {"role": "user", "content": [sample_image(1)]},
+                {"role": "user", "content": [sample_image(2)]}]
+        limited, _ = limit_image_history(only, 1)
+        self.assertEqual([len(message["content"]) for message in limited], [1, 1, 1])
+        self.assertEqual(json.dumps(limited).count("earlier images omitted"), 1)
+        # A single dropped image keeps its own note.
+        limited, _ = limit_image_history(only, 2)
+        self.assertIn("omitted this older image to fit Mistral's image limit", limited[0]["content"][0]["text"])
 
     def test_compact_threshold_reserves_output_headroom(self):
         self.assertEqual(compact_threshold(131072, {}, reserve_output=32000), 99072)
@@ -1321,7 +1356,7 @@ class GatewayTests(unittest.TestCase):
         for streaming in (False, True):
             with self.subTest(stream=streaming):
                 MockMistral.requests = []
-                self.runtime.mistral_image_limits.clear()
+                self.runtime.image_limits.clear()
                 body = prompt(stream=streaming, messages=[{"role": "user", "content": [
                     {"type": "text", "text": "Read the newest screenshot"}, *images]}])
                 original = copy.deepcopy(body)
@@ -1339,13 +1374,13 @@ class GatewayTests(unittest.TestCase):
                 self.assertEqual(len(sent_images(MockMistral.requests[1])), 8)
                 self.assertEqual([url.split(",", 1)[1] for url in sent_images(MockMistral.requests[1])],
                                  [image["source"]["data"] for image in images[-8:]])
-                self.assertIn("omitted this older image", json.dumps(MockMistral.requests[1]))
+                self.assertIn("[2 earlier images omitted to fit Mistral's limit of 8]", json.dumps(MockMistral.requests[1]))
                 if streaming:
                     self.assertIn(b'"type": "message_stop"', data)
                 else:
                     self.assertEqual(json.loads(data)["content"][0]["text"], "Connected")
                 self.assertEqual(self.runtime.failed, 0)
-                self.assertEqual(self.runtime.mistral_image_limits["test-model"], 8)
+                self.assertEqual(self.runtime.image_limits[("mistral", "test-model")], 8)
 
                 plan = self.runtime.plan(body)
                 self.assertEqual(plan["compatibility"]["mistral_image_compaction"],
@@ -1378,7 +1413,7 @@ class GatewayTests(unittest.TestCase):
         self.assertEqual(sum(part.get("type") == "image_url" for message in MockMistral.requests[1]["messages"]
                              for part in (message["content"] if isinstance(message.get("content"), list) else [])
                              if isinstance(part, dict)), 8)
-        self.assertEqual(self.runtime.mistral_image_limits["test-model"], 8)
+        self.assertEqual(self.runtime.image_limits[("mistral", "test-model")], 8)
         self.assertEqual(self.runtime.failed, 0)
 
     def test_relayed_provider_400_cannot_read_as_effort_unsupported(self):

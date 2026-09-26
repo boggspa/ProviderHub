@@ -228,6 +228,21 @@ class MockProvider(BaseHTTPRequestHandler):
                                  "content": None, "stop_reason": "max_tokens", "stop_sequence": None,
                                  "usage": {"input_tokens": 3, "output_tokens": 1}})
             return
+        if self.mode == "minimax_image_limit":
+            # MiniMax's own rejection text (live, 26 Sep 2026), at its stated ceiling.
+            def images(content):
+                count = 0
+                for block in content if isinstance(content, list) else []:
+                    if isinstance(block, dict) and block.get("type") == "image":
+                        count += 1
+                    elif isinstance(block, dict) and block.get("type") == "tool_result":
+                        count += images(block.get("content"))
+                return count
+            if sum(images(message.get("content")) for message in body.get("messages", [])) > 200:
+                self.send_json(400, {"type": "error", "error": {
+                    "type": "bad_request_error",
+                    "message": "invalid params, the num of image is larger than the limit: 200 (2013)"}})
+                return
         if self.mode == "native_bare_error":
             self.send_json(200, {"error": {"type": "rate_limit_error", "message": "slow down"}})
             return
@@ -456,6 +471,39 @@ class GatewayHubHTTPTests(unittest.TestCase):
         while self.runtime.status()["active"] and time.monotonic() < deadline:
             time.sleep(.01)
         return status, raw, response_headers
+
+    def test_minimax_image_limit_drops_oldest_images_instead_of_failing_the_turn(self):
+        # A game-playing seat views a screenshot every few steps; the turn
+        # that crosses MiniMax's ceiling must not end the autonomous loop.
+        # Each image weighs 4,096 tokens in the gateway's estimate; a window this
+        # size keeps context compaction out of the test.
+        self.start_gateway("minimax", "MiniMax-M3", {"vision": True, "reasoning_history": "native",
+                                                     "context": 4_000_000})
+        MockProvider.reset("minimax_image_limit")
+        pixel = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+        messages = [{"role": "user", "content": "Play on."}]
+        for index in range(203):
+            messages.append({"role": "assistant", "content": [
+                {"type": "tool_use", "id": f"shot{index}", "name": "view_image", "input": {"path": f"f{index}.png"}}]})
+            messages.append({"role": "user", "content": [{"type": "tool_result", "tool_use_id": f"shot{index}", "content": [
+                {"type": "text", "text": f"frame {index}"},
+                {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": pixel}}]}]})
+        messages.append({"role": "user", "content": "Take the next step."})
+        body = {"model": "claude-fable-5", "max_tokens": 64, "messages": messages}
+        status, raw, _ = self.request(body, extra_headers={"anthropic-version": "2023-06-01"}, timeout=20)
+        self.assertEqual(status, 200, raw[:400])
+        self.assertEqual(len(MockProvider.requests), 2)
+        retried = MockProvider.requests[1]
+        text = json.dumps(retried)
+        self.assertEqual(text.count('"type": "image"'), 200)
+        self.assertEqual(text.count("earlier images omitted"), 1)
+        self.assertIn("[3 earlier images omitted to fit MiniMax's limit of 200]", text)
+        # The dropped turns keep their text and tool identity; the newest images stay.
+        for index in (0, 1, 2, 202):
+            self.assertIn(f"frame {index}", text)
+        newest = retried["messages"][-2]["content"][0]["content"]
+        self.assertEqual(newest[1]["type"], "image")
+        self.assertEqual(self.runtime.image_limits[("minimax", "MiniMax-M3")], 200)
 
     def assert_upstream_secret_boundary(self, provider_id):
         self.assertTrue(MockProvider.request_headers)

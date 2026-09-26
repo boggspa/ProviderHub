@@ -162,6 +162,10 @@ _NATIVE_TOOL_ITEMS = frozenset({
 # Host tools live in their own namespace so a host's exec/apply_patch tool
 # cannot collide with a built-in tool of the nested runtime.
 _HOST_TOOL_NAMESPACE = "host"
+#: The desktop's thread-goal tools. A Codex model is trained to call these
+#: names, but here they are host tools under bridge_ aliases, so each offered
+#: one is named for the model in the developer instructions.
+_GOAL_TOOLS = ("create_goal", "update_goal", "get_goal")
 _HOST_INSTRUCTIONS = HOST_EXECUTION_NOTE + (
     " Host tools are registered in the host namespace with bridge_ aliases. "
     "Each tool description identifies its original host name. Use the registered "
@@ -183,6 +187,26 @@ _RESUME_PROMPT = (
     "is already above, and do not restate a plan or intention you have already given. "
     "Continue from where your own reasoning left off and take the next real step."
 )
+
+#: The rejoin prompt when the last item is new input rather than a tool result:
+#: a user message, a steer, or the desktop's goal continuation
+#: (``<codex_internal_context source="goal">``). Telling the model a tool result
+#: is last when it is not misreads the instruction it has to act on.
+_NEW_INPUT_PROMPT = (
+    "A new instruction has arrived: the last item in the conversation above is the "
+    "latest user or host message. Act on it now, building on the work already above: "
+    "do not re-read context already shown above, do not repeat a command whose output "
+    "is already above, and do not restate a plan or intention you have already given."
+)
+
+
+def _rejoin_prompt(history):
+    """_RESUME_PROMPT only when the last history block is really a tool result."""
+    blocks = [(role, block) for role, block in _history_blocks(history)
+              if isinstance(block, dict) and not (block.get("type") == "text" and not str(block.get("text") or "").strip())]
+    if blocks and blocks[-1][0] == "user" and blocks[-1][1].get("type") == "tool_result":
+        return _RESUME_PROMPT
+    return _NEW_INPUT_PROMPT
 
 _TRANSPORT_CONFIG = (
     'features.shell_tool=false',
@@ -207,6 +231,12 @@ _TRANSPORT_CONFIG = (
     # it has no native tool to read) duplicate the host's goal tools or point
     # at native reads. All three verified with `codex features list` and
     # `codex debug prompt-input` on 0.155.1 and ChatGPT's 0.158.0-alpha.2.
+    # Goals especially stay off: the nested thread is ephemeral, and the
+    # runtime refuses goal tools there ("Goal tools require a persistent
+    # thread."). Even a persistent nested goal would live in a throwaway
+    # thread the desktop never sees. The desktop's own create_goal /
+    # update_goal / get_goal arrive as host tools and act on its real thread;
+    # _normalise_request names them for the model (_GOAL_TOOLS).
     'features.goals=false',
     'features.skill_search=false',
     'skills.include_instructions=false',
@@ -1288,6 +1318,11 @@ def _normalise_request(request):
     if any(tool["name"] == "view_image" for tool in tools):
         instructions += (f"\nThis session has no native image viewer. To look at a local image, "
                          f"call host.{_tool_alias('view_image')} (host tool view_image).")
+    offered = {tool["name"] for tool in tools}
+    goals = [name for name in _GOAL_TOOLS if name in offered]
+    if goals:
+        instructions += ("\nThread goals are host tools here and persist on the host's thread: "
+                         + "; ".join(f"call host.{_tool_alias(name)} for {name}" for name in goals) + ".")
     return {"model": _checked_model(model),
             "effort": _checked_effort(request.get("effort")),
             "prompt": prompt, "system": instructions, "tools": tools,
@@ -1851,7 +1886,7 @@ def run_turn(request, *, spawner=None, timeout=300, pool=None) -> Iterator[dict]
             response = session.request("thread/inject_items", {"threadId": thread_id, "items": items},
                                        timeout=max(1.0, deadline - time.monotonic()))
             _result(response, context="thread/inject_items")
-            payload["prompt"] = _RESUME_PROMPT
+            payload["prompt"] = _rejoin_prompt(history)
         if mode != "resumed":
             turn_id = _start_turn(session, payload, thread_id,
                                   timeout=max(0.01, deadline - time.monotonic()))

@@ -12,6 +12,8 @@ import queue
 import threading
 import time
 import unittest
+
+from cli_tool_call import TRANSCRIPT_FOOTER
 from pathlib import Path
 from unittest import mock
 
@@ -289,7 +291,7 @@ class RenderPromptTests(unittest.TestCase):
             [{"role": "user", "content": "hello"},
              {"role": "assistant", "content": "hi there"}])
         self.assertIn(m._TRANSCRIPT_HEADER, prompt)
-        self.assertIn(m._TRANSCRIPT_FOOTER, prompt)
+        self.assertIn(TRANSCRIPT_FOOTER, prompt)
         self.assertIn('<turn role="user">', prompt)
         self.assertIn('<turn role="assistant">', prompt)
 
@@ -298,7 +300,7 @@ class RenderPromptTests(unittest.TestCase):
                                  system="be nice")
         self.assertIn(m._TRANSCRIPT_HEADER, prompt)
         self.assertIn("<system>\nbe nice\n</system>", prompt)
-        self.assertIn(m._TRANSCRIPT_FOOTER, prompt)
+        self.assertIn(TRANSCRIPT_FOOTER, prompt)
 
     def test_coerce_messages_roles_and_content(self):
         self.assertEqual(

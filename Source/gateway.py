@@ -120,7 +120,9 @@ class Runtime:
         self.calibration = TokenCalibration()
         # Mistral reports a model-dependent image count only when rejecting a
         # request. Remember it for later turns in this gateway process.
-        self.mistral_image_limits = {}
+        # (provider_id, upstream_model) -> the image ceiling that provider
+        # stated in a rejection; see IMAGE_LIMIT_ERRORS.
+        self.image_limits = {}
         self.active = 0
         self.completed = 0
         self.failed = 0
@@ -218,11 +220,12 @@ class Runtime:
         payload, reasoning_dropped = (without_reasoning_controls(payload)
                                       if spec.get("reasoning") is False else (payload, []))
         image_compaction = None
-        if provider_id == "mistral":
+        if provider_id in IMAGE_LIMIT_ERRORS:
             with self.lock:
-                image_limit = self.mistral_image_limits.get(upstream_model)
+                image_limit = self.image_limits.get((provider_id, upstream_model))
             if image_limit is not None:
-                messages, image_compaction = limit_image_history(payload.get("messages"), image_limit)
+                messages, image_compaction = limit_image_history(payload.get("messages"), image_limit,
+                                                                 IMAGE_LIMIT_ERRORS[provider_id][0])
                 if image_compaction["removed"]:
                     payload = {**payload, "messages": messages}
                     image_compaction = {"limit": image_limit, **image_compaction}
@@ -329,7 +332,7 @@ class Runtime:
         if auto_compact is not None:
             plan.setdefault("compatibility", {})["auto_compact"] = auto_compact
         if image_compaction is not None:
-            plan.setdefault("compatibility", {})["mistral_image_compaction"] = image_compaction
+            plan.setdefault("compatibility", {})[provider_id + "_image_compaction"] = image_compaction
         if cerebras_repair is not None and cerebras_repair.get("repaired"):
             plan.setdefault("compatibility", {})["cerebras_history_repair"] = cerebras_repair
         if type(context) is int and provider_id != "gemini":
@@ -436,10 +439,25 @@ def error_type(status):
             404: "not_found_error", 413: "request_too_large", 429: "rate_limit_error", 503: "overloaded_error"}.get(status, "api_error")
 
 
-def mistral_image_limit_error(detail):
-    """Extract the request image ceiling from Mistral's specific 400 error."""
-    match = re.search(r"\btotal number of images exceeds the maximum allowed of (\d+)\b", detail, re.I)
+#: Providers that reject a request for carrying too many images, and state
+#: the ceiling in their 400 text. The number is always read from that text,
+#: never assumed. MiniMax's wording is from its live rejection on 26 Sep
+#: 2026: "invalid params, the num of image is larger than the limit: 200
+#: (2013)". A long autonomous session (a screenshot every few steps) reaches
+#: these; failing the turn stops a goal's continuation, so the gateway drops
+#: the oldest images and retries instead.
+IMAGE_LIMIT_ERRORS = {
+    "mistral": ("Mistral", re.compile(r"\btotal number of images exceeds the maximum allowed of (\d+)\b", re.I)),
+    "minimax": ("MiniMax", re.compile(r"\bnum of image is larger than the limit:\s*(\d+)\b", re.I)),
+}
+
+
+def image_limit_error(provider_id, detail):
+    """The request image ceiling a provider's 400 text states, or None."""
+    entry = IMAGE_LIMIT_ERRORS.get(provider_id)
+    match = entry[1].search(detail) if entry else None
     return int(match.group(1)) if match else None
+
 
 
 def rejection_details(payload):
@@ -923,18 +941,20 @@ class Handler(BaseHTTPRequestHandler):
                 if plan["private_key"]:
                     detail = detail.replace(plan["private_key"], "[redacted]")
                 detail = detail[:700]
-                if response.status == 400 and plan["provider_id"] == "mistral" and not image_retry_used:
-                    image_limit = mistral_image_limit_error(detail)
+                if response.status == 400 and plan["provider_id"] in IMAGE_LIMIT_ERRORS and not image_retry_used:
+                    image_limit = image_limit_error(plan["provider_id"], detail)
                     if image_limit is not None:
-                        messages, image_compaction = limit_image_history(upstream.get("messages"), image_limit)
+                        messages, image_compaction = limit_image_history(
+                            upstream.get("messages"), image_limit, IMAGE_LIMIT_ERRORS[plan["provider_id"]][0])
                         if image_compaction["removed"]:
                             # The rejected request produced no turn. Retry it
                             # before sending a response to the desktop client.
                             image_retry_used = True
                             with self.runtime.lock:
-                                previous = self.runtime.mistral_image_limits.get(plan["upstream_model"])
+                                limit_key = (plan["provider_id"], plan["upstream_model"])
+                                previous = self.runtime.image_limits.get(limit_key)
                                 if previous is None or image_limit < previous:
-                                    self.runtime.mistral_image_limits[plan["upstream_model"]] = image_limit
+                                    self.runtime.image_limits[limit_key] = image_limit
                             upstream["messages"] = messages
                             encoded = json.dumps(upstream, ensure_ascii=False).encode()
                             self.runtime.record("image_compacted", plan["route"], 400, image_compaction)

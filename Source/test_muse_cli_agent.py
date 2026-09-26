@@ -11,6 +11,8 @@ import json
 import os
 import tempfile
 import unittest
+
+from cli_tool_call import TRANSCRIPT_FOOTER
 from unittest import mock
 
 import muse_cli_agent as m
@@ -203,7 +205,7 @@ class RenderPromptTests(unittest.TestCase):
         self.assertIn("<system>", prompt)
         self.assertIn("SYS", prompt)
         self.assertIn("hi", prompt)
-        self.assertIn(m._TRANSCRIPT_FOOTER, prompt)
+        self.assertIn(TRANSCRIPT_FOOTER, prompt)
 
 
 class TranslateTests(unittest.TestCase):

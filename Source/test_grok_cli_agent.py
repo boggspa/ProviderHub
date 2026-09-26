@@ -8,6 +8,8 @@ import threading
 import time
 import tomllib
 import unittest
+
+from cli_tool_call import TRANSCRIPT_FOOTER
 from pathlib import Path
 from unittest.mock import MagicMock, Mock, patch
 
@@ -263,7 +265,7 @@ class TestPromptRendering(unittest.TestCase):
         self.assertIn("Be helpful", prompt)
         self.assertIn("Hello", prompt)
         self.assertIn(module._TRANSCRIPT_HEADER, prompt)
-        self.assertIn(module._TRANSCRIPT_FOOTER, prompt)
+        self.assertIn(TRANSCRIPT_FOOTER, prompt)
 
     def test_multi_turn_conversation(self):
         messages = [
@@ -276,7 +278,7 @@ class TestPromptRendering(unittest.TestCase):
         self.assertIn("A1", prompt)
         self.assertIn("Q2", prompt)
         self.assertIn(module._TRANSCRIPT_HEADER, prompt)
-        self.assertIn(module._TRANSCRIPT_FOOTER, prompt)
+        self.assertIn(TRANSCRIPT_FOOTER, prompt)
 
     def test_no_user_message_raises(self):
         messages = [{"role": "assistant", "content": "Hello"}]

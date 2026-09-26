@@ -33,7 +33,7 @@ import uuid
 import cli_structured_reply
 from cli_lifecycle import ManagedTurn, TurnTiming, observe_events
 from cli_image_history import compact_image_history
-from cli_tool_call import (HOST_EXECUTION_NOTE, MAX_CALLS_PER_TURN, ToolCallError,
+from cli_tool_call import (HOST_EXECUTION_NOTE, MAX_CALLS_PER_TURN, TOOL_RESULTS_KEY, ToolCallError,
                            ToolCallParser, hosted_search_note, normalize_tools,
                            render_tool_anchor, render_tool_manifest, validate_host_call)
 from effort_map import EFFORT_ORDER
@@ -356,6 +356,17 @@ def _flatten_blocks(content, *, images=None, full_tool_history=False) -> str:
     return "\n".join(part for part in parts if part)
 
 
+def _only_tool_results(content):
+    """Whether a turn is purely the host answering calls: results, images, blank text."""
+    if not isinstance(content, list):
+        return False
+    kinds = [block.get("type") if isinstance(block, dict) else None for block in content]
+    return "tool_result" in kinds and all(
+        kind in {"tool_result", "image", "input_image"}
+        or kind == "text" and not str(block.get("text") or "").strip()
+        for kind, block in zip(kinds, content))
+
+
 def _messages_for_cli(messages, system, *, images=None, full_tool_history=False):
     """Fold developer/system messages into system; flatten block content.
 
@@ -380,7 +391,8 @@ def _messages_for_cli(messages, system, *, images=None, full_tool_history=False)
             continue
         if role not in {"user", "assistant"}:
             continue
-        cleaned.append({"role": role, "content": text})
+        cleaned.append({"role": role, "content": text,
+                        **({TOOL_RESULTS_KEY: True} if role == "user" and _only_tool_results(message.get("content")) else {})})
     combined = "\n\n".join(parts) if parts else None
     return cleaned, combined
 

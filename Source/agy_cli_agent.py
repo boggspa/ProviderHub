@@ -54,7 +54,7 @@ from typing import Any, Iterable, Iterator
 
 from cli_session import CliSessionError, StdioSession, minimal_env, resolve_binary
 from cli_lifecycle import cleanup_after_exit
-from cli_tool_call import TRANSCRIPT_HEADER, ToolCallError
+from cli_tool_call import TOOL_RESULTS_KEY, TRANSCRIPT_HEADER, ToolCallError, transcript_footer
 from cli_structured_reply import parse_reply
 from cli_images import write_images
 from agy_context import MAX_PROMPT_BYTES, ContextReads, package_prompt
@@ -701,7 +701,6 @@ def build_argv(model, *, effort=None, system=None, stream=True) -> list[str]:
 # ---------------------------------------------------------------------------
 
 _TRANSCRIPT_HEADER = TRANSCRIPT_HEADER
-_TRANSCRIPT_FOOTER = 'Respond now to the final <turn role="user"> above.'
 
 
 def _coerce_messages(messages: Any) -> list[dict]:
@@ -722,7 +721,8 @@ def _coerce_messages(messages: Any) -> list[dict]:
             content = ""
         if not isinstance(content, str):
             content = str(content)
-        normalized.append({"role": role, "content": content})
+        normalized.append({"role": role, "content": content,
+                           **({TOOL_RESULTS_KEY: True} if message.get(TOOL_RESULTS_KEY) is True else {})})
     if not any(item["role"] == "user" for item in normalized):
         raise AgyCliAgentError("request contains no user message to answer")
     return normalized
@@ -750,7 +750,7 @@ def render_prompt(messages, *, system=None) -> str:
         blocks.append(
             f'<turn role="{message["role"]}">\n{message["content"]}\n</turn>'
         )
-    blocks.append(_TRANSCRIPT_FOOTER)
+    blocks.append(transcript_footer(normalized))
     return "\n\n".join(blocks) + "\n"
 
 

@@ -81,6 +81,23 @@ TRANSCRIPT_HEADER = (
     "when host tools are provided."
 )
 
+#: Transcript closing lines. A final user turn that only carries host tool
+#: results is the host answering a call, not a new request; "Respond now"
+#: there invites a wrap-up reply, and an autonomous seat then ends its turn
+#: mid-task. cli_routes marks such a turn with TOOL_RESULTS_KEY.
+TRANSCRIPT_FOOTER = 'Respond now to the final <turn role="user"> above.'
+TOOL_RESULT_FOOTER = ('The final <turn role="user"> above holds host tool results. Continue with '
+                      "the next step of the task; do not summarise unless the task is complete.")
+TOOL_RESULTS_KEY = "_tool_results"
+
+
+def transcript_footer(messages) -> str:
+    """The closing line for a rendered transcript, from what its last turn carries."""
+    last = next((message for message in reversed(messages or []) if isinstance(message, dict)), None)
+    if last is not None and last.get("role") == "user" and last.get(TOOL_RESULTS_KEY) is True:
+        return TOOL_RESULT_FOOTER
+    return TRANSCRIPT_FOOTER
+
 
 def normalize_tools(tools) -> list[dict]:
     """Validate Anthropic-shaped tool definitions; drop the unusable ones.

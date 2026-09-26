@@ -1271,7 +1271,7 @@ def _append_note(message, note):
 COMPACT_HEAD_SHARE = 0.25
 
 
-def limit_image_history(messages: list, max_images: int) -> tuple[list, dict]:
+def limit_image_history(messages: list, max_images: int, provider_name: str = "Mistral") -> tuple[list, dict]:
     """Keep the newest images in Messages or translated chat history.
 
     Only image content blocks count. In particular, an image-shaped value in
@@ -1306,10 +1306,26 @@ def limit_image_history(messages: list, max_images: int) -> tuple[list, dict]:
     if not removed:
         return messages, {"removed": 0, "kept": len(found)}
     copied = copy.deepcopy(messages)
-    for content, index in image_slots(copied)[:removed]:
+    dropped = image_slots(copied)[:removed]
+    if removed == 1:
+        content, index = dropped[0]
         content[index] = {"type": "text", "text":
-            "[Provider Hub omitted this older image to fit Mistral's image limit. "
+            f"[Provider Hub omitted this older image to fit {provider_name}'s image limit. "
             "Its accompanying text and tool result remain. Reopen the image with a tool if needed.]"}
+        return copied, {"removed": removed, "kept": len(found) - removed}
+    # The dropped images are the oldest, so they are one consecutive run. A
+    # note per image is rebuilt from the whole history on every request and
+    # grows with the thread, so the run becomes one counted line where its
+    # oldest image was. Later positions are removed, except where that would
+    # leave a content list empty, which some providers reject.
+    for content, index in reversed(dropped[1:]):
+        if len(content) == 1:
+            content[index] = {"type": "text", "text": "[image omitted]"}
+        else:
+            del content[index]
+    content, index = dropped[0]
+    content[index] = {"type": "text", "text":
+        f"[{removed} earlier images omitted to fit {provider_name}'s limit of {max_images}]"}
     return copied, {"removed": removed, "kept": len(found) - removed}
 
 
