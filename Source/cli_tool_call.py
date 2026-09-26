@@ -201,7 +201,10 @@ def _tool_listing(tools, names=None) -> list[str]:
         if tool["description"]:
             entry += f" - {tool['description']}"
         lines.append(entry)
-        lines.append("   input schema: " + json.dumps(tool["input_schema"], ensure_ascii=False))
+        # Context reduction: compact separators. The schema is unchanged;
+        # only the ", " / ": " padding between JSON tokens goes.
+        lines.append("   input schema: " + json.dumps(tool["input_schema"], ensure_ascii=False,
+                                                      separators=(",", ":")))
     return lines
 
 

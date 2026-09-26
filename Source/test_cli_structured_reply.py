@@ -16,6 +16,16 @@ def reply(name="read_file", arguments=None, text="Inspecting the file."):
         {"name": name, "arguments": json.dumps(arguments or {"path": "sample.txt"})}]})
 
 
+class StructuredManifestTests(unittest.TestCase):
+    def test_manifest_lists_each_tool_as_compact_lossless_json(self):
+        tool = {"name": "note", "description": "Keep, verbatim: this.",
+                "input_schema": {"type": "object", "properties": {"text": {"type": "string"}}}}
+        lines = structured.render_manifest([tool]).splitlines()
+        listed = lines[lines.index("Host tools available:") + 1:]
+        self.assertEqual(listed, [json.dumps(tool, separators=(",", ":"))])
+        self.assertEqual(json.loads(listed[0]), tool)
+
+
 class StructuredReplyTests(unittest.TestCase):
     def parse(self, chunks, terminal="completed", **kwargs):
         events = [{"type": "text_delta", "text": chunk} for chunk in chunks]

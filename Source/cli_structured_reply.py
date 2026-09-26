@@ -61,7 +61,8 @@ def render_manifest(tools, tool_choice=None):
         lines.append("Request only this tool: " + str(choice.get("name")))
     lines.append("\nHost tools available:")
     for tool in tools:
-        lines.append(json.dumps(tool, ensure_ascii=False))
+        # Context reduction: compact separators; the definition is unchanged.
+        lines.append(json.dumps(tool, ensure_ascii=False, separators=(",", ":")))
     return "\n".join(lines)
 
 

@@ -55,6 +55,18 @@ class ManifestTest(unittest.TestCase):
         self.assertIn('"city"', text)
         self.assertIn("2. shell - Run a command.", text)
 
+    def test_manifest_schemas_are_compact_json_and_lossless(self):
+        spaced = {"name": "note", "description": "Keep, verbatim: this.",
+                  "input_schema": {"type": "object", "properties": {
+                      "text": {"type": "string", "description": "a, b: c"}}, "required": ["text"]}}
+        text = render_tool_manifest([spaced])
+        line = next(line for line in text.splitlines() if line.startswith("   input schema: "))
+        body = line[len("   input schema: "):]
+        self.assertEqual(json.loads(body), spaced["input_schema"])
+        self.assertEqual(body, json.dumps(spaced["input_schema"], separators=(",", ":")))
+        self.assertIn('"a, b: c"', body)
+        self.assertIn("1. note - Keep, verbatim: this.", text)
+
     def test_tool_choice_variants(self):
         self.assertIn("MUST call at least one tool",
                       render_tool_manifest([WEATHER], {"type": "any"}))

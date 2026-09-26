@@ -246,6 +246,29 @@ class ArgvTests(unittest.TestCase):
             self.assertIn('model="gpt-5.6-sol"', argv2)
             self.assertIn('model_reasoning_effort="max"', argv2)
 
+    def test_native_image_viewer_is_disabled_on_both_transports(self):
+        # A native imageView item aborts the turn (the runtime read the file
+        # itself, outside host permissions), so the tool must not be offered.
+        # features.view_image is a stable flag on 0.155.1 and 0.158.0-alpha.2.
+        with mock.patch.object(codex, "runtime_binary", return_value="/fake/codex"):
+            for transport, argv in (("app-server", codex.build_argv("gpt-5.6-sol")),
+                                    ("exec", codex.build_exec_argv("gpt-5.6-sol"))):
+                with self.subTest(transport=transport):
+                    self.assertIn("features.view_image=false", argv)
+                    self.assertEqual(argv[argv.index("features.view_image=false") - 1], "-c")
+
+    def test_nested_goals_skill_search_and_skills_catalogue_are_off(self):
+        # First-turn context: the host already offers goal tools, and the
+        # nested runtime cannot read the SKILL.md files its catalogue lists.
+        with mock.patch.object(codex, "runtime_binary", return_value="/fake/codex"):
+            for transport, argv in (("app-server", codex.build_argv("gpt-5.6-sol")),
+                                    ("exec", codex.build_exec_argv("gpt-5.6-sol"))):
+                for setting in ("features.goals=false", "features.skill_search=false",
+                                "skills.include_instructions=false"):
+                    with self.subTest(transport=transport, setting=setting):
+                        self.assertIn(setting, argv)
+                        self.assertEqual(argv[argv.index(setting) - 1], "-c")
+
     def test_build_exec_argv_shape(self):
         with mock.patch.object(codex, "runtime_binary", return_value="/fake/codex"):
             argv = codex.build_exec_argv("gpt-5.6-sol", effort="high")
@@ -1030,8 +1053,12 @@ class RunTurnTests(unittest.TestCase):
             "local-tools": {"enabled": False}, "remote-tools": {"enabled": False}})
 
     def test_native_tools_and_interactive_requests_are_explicit_errors(self):
+        # imageView stays fail-closed if a runtime ever ignores
+        # features.view_image: the read already bypassed host permissions.
         for event in [_ev("item/started", {"item": {"type": "commandExecution"}}),
                       _ev("item/completed", {"item": {"type": "fileChange"}}),
+                      _ev("item/started", {"item": {"type": "imageView", "id": "iv", "path": "frame.png"}}),
+                      _ev("item/completed", {"item": {"type": "imageGeneration", "id": "ig"}}),
                       {"id": 7, "method": "item/commandExecution/requestApproval", "params": {}}]:
             with self.subTest(event=event):
                 fake = FakeCodexSession([])
@@ -1039,6 +1066,74 @@ class RunTurnTests(unittest.TestCase):
                 events, _, _ = self._run(self._request(), fake)
                 self.assertEqual([e["type"] for e in events], ["error"])
                 self.assertTrue(fake.closed)
+
+    def test_image_viewing_is_steered_to_the_host_view_image_alias(self):
+        # The nested runtime has no image viewer of its own, so a model that
+        # wants to look at a downloaded frame.png must reach the host's tool.
+        viewer = {"name": "view_image", "description": "View a local image.",
+                  "input_schema": {"type": "object", "properties": {"path": {"type": "string"}}}}
+        other = {"name": "exec_command", "input_schema": {"type": "object"}}
+        cases = [({"tools": [other, viewer]}, True),
+                 ({"tools": [other]}, False),
+                 ({"tools": [other, viewer], "tool_choice": {"type": "none"}}, False)]
+        for extra, expected in cases:
+            with self.subTest(extra=extra):
+                fake = FakeCodexSession([])
+                fake.script = [_completed_turn()]
+                _, session, _ = self._run(self._request(**extra), fake)
+                self.assertIn("features.view_image=false", session.argv)
+                thread = next(params for method, params, _ in session.requests if method == "thread/start")
+                hint = f"call host.{codex._tool_alias('view_image')} (host tool view_image)"
+                if expected:
+                    self.assertIn(hint, thread["developerInstructions"])
+                else:
+                    self.assertNotIn(codex._tool_alias("view_image"), thread["developerInstructions"])
+                    self.assertNotIn("no native image viewer", thread["developerInstructions"])
+
+    def test_host_view_image_call_carries_the_picture_back_to_the_model(self):
+        # The host alias is the working path: its call is handed to the host
+        # and its image result returns as a native function_call_output image.
+        png = ("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==")
+        viewer = {"name": "view_image", "input_schema": {"type": "object"}}
+        fake = FakeCodexSession([])
+        fake.script = [{"id": 4, "method": "item/tool/call", "params": {
+            "namespace": "host", "tool": codex._tool_alias("view_image"),
+            "arguments": {"path": "frame.png"}, "callId": "v1"}}]
+        events, _, _ = self._run(self._request(tools=[viewer]), fake)
+        self.assertEqual(events, [{"type": "tool_call", "id": "v1", "name": "view_image",
+                                   "input": {"path": "frame.png"}},
+                                  {"type": "message_stop", "stop_reason": "tool_use"}])
+        items = codex._history_items([
+            {"role": "assistant", "content": [{"type": "tool_use", "id": "v1", "name": "view_image",
+                                               "input": {"path": "frame.png"}}]},
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "v1", "content": [
+                {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": png}}]}]}])
+        self.assertEqual(items[1]["type"], "function_call_output")
+        self.assertEqual(items[1]["output"][0]["type"], "input_image")
+        self.assertTrue(items[1]["output"][0]["image_url"].startswith("data:image/png;base64,"))
+
+    def test_tool_aliases_are_short_stable_and_distinct(self):
+        names = [f"mcp__codex_apps__sites._tool_{n}" for n in range(5000)] + ["exec_command", "view_image"]
+        aliases = [codex._tool_alias(name) for name in names]
+        self.assertEqual(len(set(aliases)), len(names))
+        for alias in aliases[:50] + aliases[-2:]:
+            self.assertRegex(alias, r"^bridge_[0-9a-f]{16}$")
+        self.assertEqual(codex._tool_alias("exec_command"), aliases[-2])
+
+    def test_host_execution_note_is_sent_once(self):
+        import cli_routes
+        from cli_tool_call import HOST_EXECUTION_NOTE
+        tools = [{"name": "exec_command", "input_schema": {"type": "object"}}]
+        for system in (None, "Desktop policy"):
+            with self.subTest(system=system):
+                payload = {"messages": [{"role": "user", "content": "hi"}], "tools": tools,
+                           **({"system": system} if system else {})}
+                body = cli_routes.plan_turn("codex", "gpt-6-sol", payload, {}, wanted_output=64)["body"]
+                instructions = codex._normalise_request(body)["system"]
+                self.assertEqual(instructions.count(HOST_EXECUTION_NOTE), 1)
+                self.assertTrue(instructions.startswith(codex._HOST_INSTRUCTIONS))
+                if system:
+                    self.assertIn("\n\nDesktop policy", instructions)
 
     def test_unoffered_dynamic_tool_is_an_error(self):
         fake = FakeCodexSession([])

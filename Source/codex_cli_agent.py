@@ -97,8 +97,8 @@ Nested process isolation and host permissions
 ---------------------------------------------
 The nested sandbox does not describe host tool permissions. Workspace reads
 and writes are forwarded to the host, which enforces its own settings. Native
-shell, plugins, and multi-agent features are disabled; unexpected native tool
-activity is an error, never silently discarded.
+shell, image viewing, plugins, and multi-agent features are disabled;
+unexpected native tool activity is an error, never silently discarded.
 
 Web search is the one native tool a turn may enable, and only when the
 desktop asked for its hosted search. It is hosted: OpenAI's servers run it
@@ -196,6 +196,20 @@ _TRANSPORT_CONFIG = (
     'features.apps=false',
     'features.plugins=false',
     'features.hooks=false',
+    # The native image viewer reads a local file inside the runtime, outside
+    # the host's permissions, and its imageView item aborts the turn. With it
+    # off the model views images through the host's view_image alias, whose
+    # result returns as a native image. A stable feature on 0.155.1 and on
+    # ChatGPT's bundled 0.158.0-alpha.2 (`codex features list`).
+    'features.view_image=false',
+    # Context reduction: the nested runtime's own goal and skill-search tools
+    # and its skills catalogue (about 3,000 characters listing SKILL.md files
+    # it has no native tool to read) duplicate the host's goal tools or point
+    # at native reads. All three verified with `codex features list` and
+    # `codex debug prompt-input` on 0.155.1 and ChatGPT's 0.158.0-alpha.2.
+    'features.goals=false',
+    'features.skill_search=false',
+    'skills.include_instructions=false',
     'web_search="disabled"',
 )
 
@@ -292,8 +306,11 @@ def _tool_alias(name):
 
     All tools are mapped so a host tool named like one of our aliases cannot
     collide with another tool. History uses the same mapping on every turn.
+    Context reduction: 16 hex digits (64 bits) rather than 48. Every alias is
+    model-visible and hex tokenizes poorly; a desktop offering ~110 tools paid
+    for 32 surplus digits on each, and 64 bits leaves no practical collision.
     """
-    return "bridge_" + hashlib.sha256(name.encode("utf-8")).hexdigest()[:48]
+    return "bridge_" + hashlib.sha256(name.encode("utf-8")).hexdigest()[:16]
 
 
 # --------------------------------------------------------------------------
@@ -1239,7 +1256,13 @@ def _normalise_request(request):
     system = request.get("system")
     if system is not None and not isinstance(system, str):
         raise CodexCliAgentError("system must be a string or None")
-    instructions = _HOST_INSTRUCTIONS + ("\n\n" + system.strip() if system else "")
+    system = system.strip() if system else ""
+    # Context reduction: cli_routes prefixes the dynamic transport's system
+    # text with HOST_EXECUTION_NOTE, and _HOST_INSTRUCTIONS already opens
+    # with it. Send it once.
+    if system.startswith(HOST_EXECUTION_NOTE):
+        system = system[len(HOST_EXECUTION_NOTE):].strip()
+    instructions = _HOST_INSTRUCTIONS + ("\n\n" + system if system else "")
     choice = request.get("tool_choice") or {}
     tools = normalize_tools(request.get("tools"))
     summary = request.get("reasoning_summary")
@@ -1262,6 +1285,9 @@ def _normalise_request(request):
         if name not in {tool["name"] for tool in tools}:
             raise CodexCliAgentError("The required host tool was not offered.", http_status=400)
         instructions += f"\nCall host.{_tool_alias(name)} (host tool {name}) in this reply."
+    if any(tool["name"] == "view_image" for tool in tools):
+        instructions += (f"\nThis session has no native image viewer. To look at a local image, "
+                         f"call host.{_tool_alias('view_image')} (host tool view_image).")
     return {"model": _checked_model(model),
             "effort": _checked_effort(request.get("effort")),
             "prompt": prompt, "system": instructions, "tools": tools,
