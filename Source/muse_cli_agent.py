@@ -107,6 +107,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 from typing import Any, Iterable, Iterator
 
@@ -238,6 +239,33 @@ _MODEL_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:/+\-]{0,199}\Z")
 _VERSION = re.compile(r"(\d+(?:\.\d+)+(?:[.\-+][0-9A-Za-z.\-+]*)?)")
 _ROLES = ("user", "assistant")
 _MAX_STDERR_CHARS = 2000
+
+# ---------------------------------------------------------------------------
+# Stall detection
+# ---------------------------------------------------------------------------
+
+#: Seconds a turn may go without muse printing a single stdout record before
+#: the hub stops it. Headless ``muse exec`` does not fail closed on a tool
+#: approval: when the model asks its native ``bash`` tool for an elevated
+#: permission, the request is presented as ``human_pending`` and the run
+#: waits for a person who is never there. Six Pokémon-race turns (26-27 Sep
+#: 2026, muse 1.4.0-R4302.1) sat like that until CLI_TURN_TIMEOUT (1140 s)
+#: SIGTERMed them, surfacing as "exited with code 143". Across the 321 runs
+#: that finished on the same seats no trace gap exceeded 105 s and no whole
+#: run lasted 240 s, so this bound cannot cut short a run that is working
+#: even if it printed nothing until its terminal record.
+STALL_SECONDS = 360.0
+
+#: Seconds an approval wait on the turn's own run may stay unresolved.
+#: Muse's reminder observer raises and at once cancels an approval on its own
+#: run every turn, so a wait is only fatal once it outlives this grace.
+APPROVAL_GRACE_SECONDS = 20.0
+
+#: Length of one stdout poll window; bounds how late either check can fire.
+POLL_SECONDS = 5.0
+
+# Indirection so tests can drive a fake clock instead of sleeping.
+_monotonic = time.monotonic
 
 
 def _validate_model(model: Any) -> str:
@@ -692,6 +720,10 @@ class _TurnState:
         self.failure: str | None = None
         self.raw_lines: list[str] = []
         self.stderr_handle = None
+        # (tool name, pending action id) of an unresolved approval wait on
+        # this turn's run, and when the hub first saw it.
+        self.approval_wait: tuple[str, str] | None = None
+        self.approval_since: float | None = None
 
     def accepts_run(self, body: dict) -> bool:
         """Correlate the body run stream, never the enclosing session stream.
@@ -793,6 +825,23 @@ def _translate(payload: Any, state: _TurnState) -> list[dict]:
             return [{"type": "text_delta", "text": text}]
         return []
 
+    # A native tool waiting for a human decision. Headless exec never gets
+    # one, so run_turn stops the turn once the wait outlives its grace.
+    approval = _approval_record(payload_type, kind, body)
+    if approval is not None:
+        phase, run_id, tool, action = approval
+        if run_id is not None and state.run_id is not None and run_id != state.run_id:
+            return []
+        if phase == "started":
+            if state.approval_wait is None:
+                state.approval_since = _monotonic()
+            state.approval_wait = (tool or "a native tool", action or "")
+        elif state.approval_wait is not None and (
+                not action or not state.approval_wait[1] or action == state.approval_wait[1]):
+            state.approval_wait = None
+            state.approval_since = None
+        return []
+
     # Defensive only: no plaintext thinking vocabulary was observed with the
     # offline echo provider. This is not a verified Meta reasoning mapping.
     if "think" in payload_type.casefold():
@@ -807,6 +856,73 @@ def _translate(payload: Any, state: _TurnState) -> list[dict]:
     # task.lifecycle.failed is a background sub-task failure, not a run failure:
     # the echo provider emits one and still completes successfully.
     return []
+
+
+_APPROVAL_START_SUFFIXES = (".started", ".requested", ".pending")
+_APPROVAL_END_SUFFIXES = (".terminal", ".decided", ".resolved", ".completed", ".cancelled", ".denied")
+
+
+def _approval_record(payload_type: str, kind: str, body: dict):
+    """(phase, run id, tool name, pending action id) for an approval record, else None.
+
+    Muse's session log spells an approval wait ``approval_wait.effect.started``
+    / ``.terminal`` (body kind ``approval_wait_effect``, details under
+    ``record``); its trace spells it ``approval.requested`` / ``.decided``. The
+    exec stream's own spelling was never captured, so both families are read.
+    """
+    if not (payload_type.startswith("approval") or kind.startswith("approval")):
+        return None
+    record = body.get("record") if isinstance(body.get("record"), dict) else {}
+    record_kind = str(record.get("kind") or "")
+    if payload_type.endswith(_APPROVAL_START_SUFFIXES) or record_kind == "started" \
+            or kind in {"approval_requested", "approval_pending"}:
+        phase = "started"
+    elif payload_type.endswith(_APPROVAL_END_SUFFIXES) or record_kind in {"terminal", "decided", "resolved"} \
+            or kind in {"approval_decided", "approval_resolved"}:
+        phase = "ended"
+    else:
+        return None
+    run_id = None
+    for holder in (body, record):
+        stream = holder.get("run_stream")
+        if isinstance(stream, dict) and stream.get("kind") == "run" and isinstance(stream.get("id"), str):
+            run_id = stream["id"]
+            break
+    if run_id is None and isinstance(body.get("run_id"), str) and body["run_id"]:
+        run_id = body["run_id"]
+    tool = record.get("tool_name") or body.get("tool_name")
+    action = record.get("pending_action_id") or body.get("pending_action_id")
+    return (phase, run_id, tool if isinstance(tool, str) else None,
+            action if isinstance(action, str) else None)
+
+
+def _paced_events(session, *, timeout, poll=POLL_SECONDS):
+    """``_iter_events`` in short windows, plus ("quiet", None) after each
+    window with nothing to read and ("deadline", None) when ``timeout`` runs out.
+
+    The stream has ended - not gone quiet - when the session reports EOF, or,
+    for a session without that flag, when a window returns well before its
+    length elapsed.
+    """
+    deadline = _monotonic() + timeout
+    while True:
+        remaining = deadline - _monotonic()
+        if remaining <= 0:
+            yield ("deadline", None)
+            return
+        window = min(poll, remaining)
+        started = _monotonic()
+        quiet = True
+        for item in _iter_events(session, timeout=window):
+            quiet = False
+            yield item
+        eof = getattr(session, "_eof", None)
+        if eof is True:
+            return
+        if quiet:
+            if not isinstance(eof, bool) and _monotonic() - started < window / 2:
+                return
+            yield ("quiet", None)
 
 
 def _raw_stdin(session):
@@ -1007,7 +1123,34 @@ def run_turn(request, *, spawner=None, timeout=300) -> Iterator[dict]:
     try:
         with session:
             _close_raw_stdin(session)
-            for kind, payload in _iter_events(session, timeout=timeout):
+            stall = min(STALL_SECONDS, float(timeout))
+            last_output = _monotonic()
+            for kind, payload in _paced_events(session, timeout=timeout):
+                if kind == "deadline":
+                    yield {"type": "error", "message":
+                           f"the muse CLI did not finish within {timeout:.0f}s; Provider Hub stopped it"
+                           + state.diagnostics() + state.stderr_tail()}
+                    return
+                if kind != "quiet":
+                    last_output = _monotonic()
+                if state.approval_wait is not None and state.approval_since is not None \
+                        and _monotonic() - state.approval_since >= APPROVAL_GRACE_SECONDS:
+                    tool = state.approval_wait[0]
+                    yield {"type": "error", "message":
+                           f"muse is waiting for a human approval of its native {tool} call, which this "
+                           f"headless route cannot answer; Provider Hub stopped the turn after "
+                           f"{APPROVAL_GRACE_SECONDS:.0f}s instead of waiting out the {timeout:.0f}s turn limit"
+                           + state.stderr_tail()}
+                    return
+                if kind == "quiet":
+                    if _monotonic() - last_output >= stall:
+                        yield {"type": "error", "message":
+                               f"the muse CLI printed nothing for {stall:.0f}s; Provider Hub stopped it instead "
+                               f"of waiting out the {timeout:.0f}s turn limit (a native tool call waiting on an "
+                               f"approval nobody can give is the known cause)"
+                               + state.diagnostics() + state.stderr_tail()}
+                        return
+                    continue
                 if kind == "raw":
                     state.raw_lines.append(payload)
                     continue

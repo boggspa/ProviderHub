@@ -217,6 +217,14 @@ def handle_native_response(server):
                              headers={"Retry-After": "0.01"})
             return
         # Fall through to normal handling below.
+    if MockProvider.mode == "context_overflow":
+        # Ollama Cloud's verbatim rejection of the race's gemma4:31b-cloud
+        # thread (27 Sep 2026 08:08:20Z), less its request reference.
+        server.send_json(400, {"error": {"message": "The prompt is too long: 262150, model maximum context length: 262144"}})
+        return
+    if MockProvider.mode == "bad_request":
+        server.send_json(400, {"error": {"message": "Unsupported parameter: temperature"}})
+        return
     if MockProvider.mode == "exhausted_quota":
         server.send_json(429, {"error": {"message": "mock monthly quota exhausted"}},
                          headers={"Retry-After": "3600"})
@@ -374,6 +382,79 @@ class NativeResponsesTests(unittest.TestCase):
         self.assertEqual(MockProvider.requests[0]["model"], "sample:cloud")
         for changes in ({"store": True}, {"previous_response_id": "resp-first"}, {"service_tier": "fast"}):
             self.assertEqual(self.request(self.body(**changes))[0], 400)
+
+    def test_ollama_caps_an_unbounded_response_below_the_compaction_headroom(self):
+        # Codex sends no max_output_tokens and Ollama's own default is "until
+        # the window is full": the race's Gemma seat spent 90,083 tokens
+        # repeating one line in a single response, from 172K straight past
+        # its 262K window, before Codex's 85% compaction could run.
+        self.provider = "ollama"
+        self.route = self.start_gateway("ollama", "sample:cloud", {"context": 262144})
+        status, raw = self.request(self.body())
+        self.assertEqual(status, 200, raw)
+        self.assertEqual(MockProvider.requests[-1]["max_output_tokens"], 32768)
+
+    def test_a_smaller_ollama_window_gets_a_smaller_cap(self):
+        self.provider = "ollama"
+        self.route = self.start_gateway("ollama", "small:cloud", {"context": 131072})
+        status, raw = self.request(self.body())
+        self.assertEqual(status, 200, raw)
+        cap = MockProvider.requests[-1]["max_output_tokens"]
+        self.assertEqual(cap, 131072 - int(131072 * .85))
+
+    def test_ollama_keeps_a_limit_the_client_chose(self):
+        self.start("ollama")
+        status, raw = self.request(self.body(max_output_tokens=900))
+        self.assertEqual(status, 200, raw)
+        self.assertEqual(MockProvider.requests[-1]["max_output_tokens"], 900)
+
+    def test_a_provider_context_overflow_reaches_codex_as_context_length_exceeded(self):
+        # Codex compacts and retries only for a response.failed whose error
+        # code is context_length_exceeded; a plain HTTP 400 is a fatal
+        # invalid request, which left the Gemma thread unable to take a turn.
+        self.start("ollama")
+        MockProvider.mode = "context_overflow"
+        status, raw = self.request(self.body(stream=True))
+        self.assertEqual(status, 200, raw)
+        events = fixtures.parse_sse(raw)
+        self.assertEqual([event["type"] for event in events], ["response.failed"])
+        failed = events[0]["response"]
+        self.assertEqual(failed["status"], "failed")
+        self.assertEqual(failed["error"]["code"], "context_length_exceeded")
+        self.assertIn("Ollama returned HTTP 400", failed["error"]["message"])
+        self.assertIn("262144", failed["error"]["message"])
+        self.assertEqual(failed["model"], self.route)
+        self.assertEqual(self.runtime.status()["active"], 0)
+
+    def test_a_non_streamed_context_overflow_carries_the_code(self):
+        self.start("ollama")
+        MockProvider.mode = "context_overflow"
+        status, raw = self.request(self.body())
+        self.assertEqual(status, 400, raw)
+        error = json.loads(raw)["error"]
+        self.assertEqual(error["code"], "context_length_exceeded")
+
+    def test_the_gateways_own_window_refusal_on_a_translated_route_carries_the_code(self):
+        self.provider = "mistral"
+        self.route = self.start_gateway("mistral", "tiny-window", {"context": 2000})
+        body = self.body(stream=True, input=[{"role": "user", "content": "word " * 6000}])
+        status, raw = self.request(body)
+        self.assertEqual(status, 200, raw)
+        events = fixtures.parse_sse(raw)
+        self.assertEqual([event["type"] for event in events], ["response.failed"])
+        error = events[0]["response"]["error"]
+        self.assertEqual(error["code"], "context_length_exceeded")
+        self.assertIn("context limit", error["message"])
+        self.assertEqual(MockProvider.requests, [])
+
+    def test_other_provider_rejections_stay_plain_invalid_requests(self):
+        self.start("ollama")
+        MockProvider.mode = "bad_request"
+        status, raw = self.request(self.body(stream=True))
+        self.assertEqual(status, 400, raw)
+        error = json.loads(raw)["error"]
+        self.assertEqual(error["type"], "invalid_request_error")
+        self.assertNotIn("code", error)
 
     def test_ollama_forwards_images_even_when_catalogue_omits_vision(self):
         self.provider = "ollama"

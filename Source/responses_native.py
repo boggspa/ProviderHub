@@ -10,6 +10,7 @@ import select
 import socket
 import threading
 import time
+import uuid
 
 from bridge_core import BridgeError, atomic_json, read_json
 from hub_config import connection_signature, qualify, split_route
@@ -30,6 +31,50 @@ from rate_limit import (MAX_UPSTREAM_ATTEMPTS, RETRYABLE_STATUSES, SLOT_RETRY_AF
 
 
 NATIVE_PROVIDERS = frozenset({"grok", "ollama", "openrouter"})
+
+#: Ceiling for an Ollama Responses request that names no output limit. Codex
+#: never sends max_output_tokens and the Ollama daemon's own default is to
+#: generate until the context window is full, so one degenerate response can
+#: overrun the window in a single step: the Pokémon race's gemma4:31b-cloud
+#: seat (27 Sep 2026) repeated one sentence for 90,083 tokens, from 172K to
+#: 262,134 of 262,144, and every later request was over the limit.
+OLLAMA_DEFAULT_OUTPUT_CAP = 32768
+
+
+def ollama_output_cap(spec):
+    """The output limit for an Ollama request that carries none.
+
+    Bounded by the headroom the Codex catalogue leaves above its automatic
+    compaction threshold (codex_catalogue: 85% of the window), so a response
+    started just below that threshold still ends inside the window and Codex
+    compacts before the next request instead of sending an oversized one.
+    """
+    context = spec.get("runtime_context") or spec.get("context")
+    if type(context) is not int or context <= 0:
+        options = [value for value in (spec.get("context_options") or []) if type(value) is int and value > 0]
+        context = max(options) if options else None
+    cap = OLLAMA_DEFAULT_OUTPUT_CAP
+    if type(context) is int:
+        max_input = spec.get("max_input")
+        window = min(context, max_input) if type(max_input) is int and max_input > 0 else context
+        cap = min(cap, max(1, context - int(window * .85)))
+    if type(spec.get("max_output")) is int and spec["max_output"] > 0:
+        cap = min(cap, spec["max_output"])
+    return cap
+
+
+# A provider (or the hub's own Messages gateway, for a translated route)
+# refusing a request because the conversation no longer fits the window.
+_CONTEXT_OVERFLOW = re.compile(
+    r"context_length_exceeded|prompt is too long|maximum context length"
+    r"|context (?:length|window) (?:is )?exceeded"
+    r"|exceeds? (?:the )?(?:model'?s? )?(?:maximum )?context (?:length|window)"
+    r"|above the [\d,]+-token context limit", re.I)
+
+
+def is_context_overflow(message):
+    """True when a 400's text says the conversation is over the context window."""
+    return isinstance(message, str) and bool(_CONTEXT_OVERFLOW.search(message))
 MAX_BODY = 32 * 1024 * 1024
 REQUEST_FIELDS = frozenset({
     "model", "input", "instructions", "tools", "tool_choice", "parallel_tool_calls",
@@ -769,6 +814,8 @@ def prepare_native(runtime, payload):
     elif provider_id == "ollama":
         if body.get("previous_response_id") or body.get("store"):
             raise BridgeError("Ollama Responses is stateless. Send the full input history with store:false.")
+        if "max_output_tokens" not in body:
+            body["max_output_tokens"] = ollama_output_cap(spec)
         text_format = body.get("text")
         text_format = text_format.get("format") if isinstance(text_format, dict) else None
         if isinstance(text_format, dict) and isinstance(text_format.get("schema"), dict):
@@ -1114,6 +1161,36 @@ def handle_responses(handler):
                 # words are renamed. Which endpoint a request arrived on is
                 # no reason for it to be protected or not.
                 message = mask_effort_rejection(message)
+            if status == 400 and is_context_overflow(message):
+                # Codex treats an HTTP 400 as a fatal invalid request. Only a
+                # response.failed carrying context_length_exceeded makes it
+                # mark the window full, so the next turn compacts first (and
+                # compaction trims the oldest items until it fits). Relayed
+                # as a plain 400, the race's Gemma thread could never take
+                # another turn: every retry re-sent the same oversized input.
+                error = {"code": "context_length_exceeded", "message": message}
+                if not plan["body"].get("stream"):
+                    handler.json_response(400, {"type": "error", "error": {
+                        "type": "invalid_request_error", **error}})
+                    return
+                handler.send_response(200)
+                handler.send_header("Content-Type", "text/event-stream")
+                handler.send_header("Cache-Control", "no-store")
+                handler.send_header("Transfer-Encoding", "chunked")
+                handler.send_header("Connection", "close")
+                handler.end_headers()
+                streaming = True
+                emit({"type": "response.failed", "sequence_number": 0, "response": {
+                    "id": "resp_" + uuid.uuid4().hex, "object": "response", "created_at": int(time.time()),
+                    "status": "failed", "model": plan["requested"], "output": [], "error": error,
+                    "incomplete_details": None, "usage": None}})
+                terminal = "response.failed"
+                closed.set()
+                with write_lock:
+                    handler.wfile.write(b"0\r\n\r\n")
+                    handler.wfile.flush()
+                handler.close_connection = True
+                return
             handler.error(status, message, headers=terminal_headers)
             return
         if not plan["body"]["stream"]:

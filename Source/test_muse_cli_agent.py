@@ -57,10 +57,12 @@ class FakeSession:
         return False
 
     def events(self, timeout=None):
+        # Consumes like the real session's queue: run_turn polls events() in
+        # short windows, and a replaying fake would feed each line forever.
         if self._events_exc is not None:
             raise self._events_exc
-        for line in self.lines:
-            yield line
+        while self.lines:
+            yield self.lines.pop(0)
 
     def close(self):
         pass
@@ -661,6 +663,133 @@ class RunTurnTests(unittest.TestCase):
         fake.events = events
         result, _, _ = self._run({"model": "m", "messages": [{"role": "user", "content": "hi"}]}, fake)
         self.assertEqual(result[-1], {"type": "message_stop", "stop_reason": "completed"})
+
+
+class _Clock:
+    """A monotonic clock the fake session advances instead of sleeping."""
+
+    def __init__(self):
+        self.now = 1000.0
+
+    def __call__(self):
+        return self.now
+
+
+def _approval_wait(run_id, tool="bash"):
+    # Session-log vocabulary of Muse 1.4.0 (approval_wait.effect.*), scoped to
+    # the owning run the way the exec stream scopes run.output.delta.
+    return {"payload_type": "approval_wait.effect.started",
+            "stream": {"kind": "session", "id": "session"},
+            "payload": {"kind": "approval_wait_effect", "run_id": run_id,
+                        "record": {"kind": "started", "pending_action_id": "pa-1",
+                                   "run_stream": {"kind": "run", "id": run_id},
+                                   "tool_name": tool}}}
+
+
+def _approval_done(run_id):
+    return {"payload_type": "approval_wait.effect.terminal",
+            "stream": {"kind": "session", "id": "session"},
+            "payload": {"kind": "approval_wait_effect", "run_id": run_id,
+                        "record": {"kind": "terminal", "pending_action_id": "pa-1",
+                                   "outcome": {"kind": "denied"}}}}
+
+
+class QuietSession(FakeSession):
+    """A live CLI that prints the scripted records, then nothing at all.
+
+    ``script`` holds one list of records per events() window; once it runs
+    out every window is quiet. Each window advances ``clock`` by its full
+    length, as a real quiet poll would, and ``_eof`` stays False because the
+    child never exits on its own - exactly the race's hung muse runs.
+    """
+
+    def __init__(self, clock, script=()):
+        super().__init__([])
+        self.clock = clock
+        self.script = [list(window) for window in script]
+        self._eof = False
+        self.returncode = None
+        self.windows = []
+
+    def events(self, timeout=None):
+        self.windows.append(timeout)
+        records = self.script.pop(0) if self.script else []
+        for record in records:
+            yield record
+        self.clock.now += float(timeout)
+
+
+class MuseStallTests(unittest.TestCase):
+    """A headless muse run that waits on something nobody will provide.
+
+    Six race turns (26-27 Sep 2026) had muse call its native bash tool, ask
+    for a human approval (presentation human_pending) and wait until the
+    hub's 1140 s turn limit SIGTERMed it (exit 143). A normal run on the same
+    seats never went quiet for more than 105 s and never lasted 240 s.
+    """
+
+    REQUEST = {"model": "m", "messages": [{"role": "user", "content": "hi"}]}
+
+    def _run(self, fake, *, timeout=1140):
+        def factory(argv, **kwargs):
+            fake.argv = list(argv)
+            return fake
+
+        with mock.patch.object(m, "StdioSession", side_effect=factory), \
+                mock.patch.object(m, "_resolve_binary", return_value="/fake/muse"), \
+                mock.patch.object(m, "_monotonic", fake.clock):
+            started = fake.clock.now
+            events = list(m.run_turn(self.REQUEST, timeout=timeout))
+        return events, fake.clock.now - started
+
+    def test_a_silent_cli_is_stopped_long_before_the_turn_limit(self):
+        clock = _Clock()
+        events, elapsed = self._run(QuietSession(clock, [[_linked("run-1")]]))
+        self.assertEqual([e["type"] for e in events], ["error"])
+        self.assertIn("printed nothing", events[0]["message"])
+        self.assertNotIn("code 143", events[0]["message"])
+        self.assertGreaterEqual(elapsed, m.STALL_SECONDS)
+        self.assertLess(elapsed, m.STALL_SECONDS + 2 * m.POLL_SECONDS)
+
+    def test_an_unanswered_approval_ends_the_turn_within_the_grace(self):
+        clock = _Clock()
+        events, elapsed = self._run(QuietSession(clock, [[_linked("run-1"), _approval_wait("run-1")]]))
+        self.assertEqual([e["type"] for e in events], ["error"])
+        self.assertIn("approval", events[0]["message"])
+        self.assertIn("bash", events[0]["message"])
+        self.assertLess(elapsed, m.APPROVAL_GRACE_SECONDS + 2 * m.POLL_SECONDS)
+
+    def test_an_approval_that_resolves_is_not_a_failure(self):
+        clock = _Clock()
+        fake = QuietSession(clock, [[_linked("run-1"), _approval_wait("run-1")],
+                                    [_approval_done("run-1")],
+                                    # Well past the grace: the denied call's
+                                    # model step keeps muse busy but quiet.
+                                    [], [], [], [], [], [],
+                                    [_scoped(_delta("done"), "run-1"),
+                                     _scoped(_terminal("completed", text="done"), "run-1")]])
+        events, _ = self._run(fake)
+        self.assertEqual([e["type"] for e in events], ["text_delta", "message_stop"])
+
+    def test_another_runs_approval_does_not_stop_this_turn(self):
+        # Muse's reminder observer runs as its own run and raises (and at once
+        # cancels) an approval for submit_reminder_decision on every turn.
+        clock = _Clock()
+        fake = QuietSession(clock, [[_linked("run-1"), _approval_wait("reminder", "submit_reminder_decision")],
+                                    [], [], [], [], [], [], [],
+                                    [_scoped(_terminal("completed", text="ok"), "run-1")]])
+        events, _ = self._run(fake)
+        self.assertEqual([e["type"] for e in events], ["text_delta", "message_stop"])
+
+    def test_the_turn_limit_is_reported_as_the_hubs_stop(self):
+        clock = _Clock()
+        busy = [[_linked("run-1")]] + [[{"payload_type": "task.lifecycle.started",
+                                          "payload": {"kind": "task_lifecycle"}}]] * 40
+        events, elapsed = self._run(QuietSession(clock, busy), timeout=60)
+        self.assertEqual([e["type"] for e in events], ["error"])
+        self.assertIn("did not finish within 60s", events[0]["message"])
+        self.assertNotIn("code 143", events[0]["message"])
+        self.assertLessEqual(elapsed, 60 + m.POLL_SECONDS)
 
 
 if __name__ == "__main__":
