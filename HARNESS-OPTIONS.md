@@ -586,6 +586,25 @@ account and usage pages are unchanged, and an update that redraws the icon
 brings the banner back with no other effect. Off by default, and only
 reachable through the helper, since the stylesheet is the helper's.
 
+The same switch hides the referral upsell ("Get 250 credits", "Invite a
+friend to ChatGPT Desktop", with Add Credits and Refer). That card is a
+backend banner, the usage status's `rate_limit_upsell`, whose title,
+copy and button labels come from the server. While sending is blocked the
+app draws it in its recovery layout (an `aside role="status"` with a
+hashed CSS-module class and no icon), which the gauge rule cannot see.
+The recovery layout is shared with ChatGPT chat's hard-block banners, so
+the layout alone is too broad. Read from the 26.924.22138 bundle, the app
+calls a backend banner a referral banner when its `ctas` include a
+`refer` or `invite` action. The watcher applies the same test to the
+props of the component that renders the banner (the one given `behavior`
+beside `banner`), reached through the aside's React fiber, and marks the
+aside `data-provider-hub-referral="1"`; the stylesheet's second selector,
+`aside[data-provider-hub-referral="1"]`, hides it. Fallback content under
+the provider above that renderer stops the walk, so it is never marked,
+and an aside that stops being the referral banner loses the mark. The
+usage status and the referral data are untouched. If an update renames
+those props, the card comes back with no other effect.
+
 **Composer send lock (opt-in, with the accents)**
 
 With the account shown, the app also disables the composer's send button

@@ -16,7 +16,8 @@ Ultra, which the app paints with its
 purple token, takes a more saturated cut of the same provider hue instead;
 native Codex keeps #705AFF. Its word gets a shimmer sweep in both cases.
 With the Codex tab's banner switch on,
-the same stylesheet also hides the app's ChatGPT usage banner. With its
+the same stylesheet also hides the app's ChatGPT usage banner and the
+referral upsell the app shows in its place. With its
 composer switch on, the watcher also keeps the composer's send button usable
 for hub routes once the ChatGPT plan's usage is exhausted: the app decodes
 the plan's usage status through the global ``JSON.parse``, and the watcher
@@ -123,6 +124,11 @@ ULTRA_SWEEP = "3.2s"
 # the gauge icon, whose path starts with this; nothing else in the app puts
 # that icon inside an <aside>.
 USAGE_BANNER_ICON = "M10.8343 12.0693"
+# The referral upsell ("Get 250 credits: invite a friend to ChatGPT
+# Desktop") is a backend usage banner. While sending is blocked the app draws
+# it in its recovery layout, which has no icon, and its copy is the server's
+# localised text. The watcher marks it with this attribute instead.
+REFERRAL_MARK = "data-provider-hub-referral"
 _LAUNCH_SWITCH = "--remote-debugging-pipe"
 _APP_ORIGIN = "app://-/"
 _AUTO_ATTACH = {"autoAttach": True, "waitForDebuggerOnStart": False, "flatten": True}
@@ -421,8 +427,10 @@ def usage_banner_selector() -> str:
     """The ChatGPT usage banners: the app's generic banner (an ``aside``)
     carrying the gauge icon. The account-wide banner and the per-model one
     both draw it; the icon's other uses are slash-command rows, not banners.
+    The referral upsell has no icon in its recovery layout, so it is matched
+    by the mark the watcher gives it.
     """
-    return f'aside:has(svg path[d^="{USAGE_BANNER_ICON}"])'
+    return f'aside:has(svg path[d^="{USAGE_BANNER_ICON}"]),aside[{REFERRAL_MARK}="1"]'
 
 
 def usage_banner_css() -> str:
@@ -466,6 +474,7 @@ _WATCHER = r"""
     const ULTRA_ACCENT_PROPERTY = "__HUB_ULTRA_ACCENT_PROPERTY__";
     const ULTRA_MARK = "__HUB_ULTRA_MARK__";
     const USAGE_SELECTOR = __HUB_USAGE_SELECTOR__;
+    const REFERRAL_MARK = "__HUB_REFERRAL_MARK__";
     const UNLOCK_COMPOSER = __HUB_UNLOCK_COMPOSER__;
     const HUES = __HUB_HUES__;
     const HUE_PROPERTY = "__HUB_HUE_PROPERTY__";
@@ -892,10 +901,43 @@ _WATCHER = r"""
       schedule();
       return next.size;
     }
+    // The referral upsell is recognised by the banner its renderer was given,
+    // with the app's own test: a `refer` or `invite` call to action. Only the
+    // renderer's props count (it gets `behavior` beside `banner`); the
+    // provider above it passes `banner` with `fallbackContent`, and an aside
+    // reaching that first is fallback content, so the walk stops there.
+    const referrals = new Set();
+    function referralBanner(element) {
+      const fiberKey = Object.keys(element).find(name => name.startsWith("__reactFiber$"));
+      let fiber = fiberKey ? element[fiberKey] : null;
+      for (let depth = 0; fiber && depth < 16; depth += 1, fiber = fiber.return) {
+        const props = fiber.memoizedProps;
+        const banner = props && typeof props === "object" ? props.banner : null;
+        if (!banner || typeof banner !== "object") { continue; }
+        if (!props.behavior || typeof props.behavior !== "object" || !Array.isArray(banner.ctas)) { return false; }
+        return banner.ctas.some(cta => !!cta && (cta.action === "refer" || cta.action === "invite"));
+      }
+      return false;
+    }
+    function applyReferrals() {
+      if (!USAGE_SELECTOR) { return; }
+      const found = new Set();
+      for (const element of document.querySelectorAll("aside")) {
+        try { if (referralBanner(element)) { found.add(element); } } catch (error) {}
+      }
+      for (const element of referrals) {
+        if (!found.has(element)) { element.removeAttribute(REFERRAL_MARK); referrals.delete(element); }
+      }
+      for (const element of found) {
+        if (!referrals.has(element)) { element.setAttribute(REFERRAL_MARK, "1"); referrals.add(element); }
+      }
+      if (found.size) { installStyles(); }
+    }
     function apply() {
       try { applyMenu(); } catch (error) {}
       try { applyPills(); } catch (error) {}
       try { applySidebar(); } catch (error) {}
+      try { applyReferrals(); } catch (error) {}
     }
     let scheduled = false;
     function schedule() {
@@ -957,6 +999,7 @@ def watcher_script(accents: dict, property_name: str = PROPERTY, hide_usage_bann
             .replace("__HUB_ULTRA__", json.dumps(ultras, ensure_ascii=False))
             .replace("__HUB_STYLE_CSS__", json.dumps(css))
             .replace("__HUB_USAGE_SELECTOR__", json.dumps(usage_banner_selector() if hide_usage_banner else ""))
+            .replace("__HUB_REFERRAL_MARK__", REFERRAL_MARK)
             .replace("__HUB_UNLOCK_COMPOSER__", json.dumps(bool(unlock_composer)))
             .replace("__HUB_HUES__", json.dumps(hue_map(table)))
             .replace("__HUB_HUE_PROPERTY__", HUE_PROPERTY)

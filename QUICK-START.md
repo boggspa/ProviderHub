@@ -158,10 +158,12 @@ switch) makes the same watcher hide the "You're out of Codex and Work
 usage" banner, and its per-model "out of usage" variant, above the
 composer. The banner appears only with **Show your ChatGPT account in
 Codex** on, reports that account's plan usage, and hub traffic does not
-spend it. It is recognised by its gauge icon, so an app update that redraws
-the icon brings the banner back and changes nothing else; the account and
-usage pages, and the rate-limit prompt Codex may open on submit, are
-untouched. Save, then launch.
+spend it. The same switch hides the "Get 250 credits" referral card
+(Add Credits, Refer) that can appear there instead. The usage banner is
+recognised by its gauge icon and the referral card by the banner data
+behind it, so an app update that changes either brings that card back and
+changes nothing else; the account and usage pages, and the rate-limit
+prompt Codex may open on submit, are untouched. Save, then launch.
 
 **Keep sending when ChatGPT usage runs out** (off by default; needs the
 power-slider switch) keeps the composer's send button usable for hub models

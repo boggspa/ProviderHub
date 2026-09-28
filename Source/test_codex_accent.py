@@ -138,9 +138,9 @@ class AccentMapTests(unittest.TestCase):
         self.assertIn("[data-model-picker-power-slider]", script)  # the slider's fill reads the same token
         self.assertNotIn("__HUB_", script)
 
-    def test_usage_banner_rule_is_opt_in_and_keys_on_the_gauge_icon(self):
+    def test_usage_banner_rule_is_opt_in_and_keys_on_the_gauge_icon_or_referral_mark(self):
         selector = usage_banner_selector()
-        self.assertEqual(selector, 'aside:has(svg path[d^="M10.8343 12.0693"])')
+        self.assertEqual(selector, 'aside:has(svg path[d^="M10.8343 12.0693"]),aside[data-provider-hub-referral="1"]')
         self.assertEqual(usage_banner_css(), selector + "{display:none}")
         plain = watcher_script({"Kimi for Coding": "#0073E6"})
         self.assertNotIn("aside:has(", plain)
@@ -149,6 +149,8 @@ class AccentMapTests(unittest.TestCase):
         self.assertIn(json.dumps(usage_banner_css())[1:-1], hiding)  # inside the adopted stylesheet
         self.assertIn(f"const USAGE_SELECTOR = {json.dumps(selector)};", hiding)
         self.assertIn("document.querySelectorAll(USAGE_SELECTOR).length", hiding)  # the status reports matches
+        self.assertIn('const REFERRAL_MARK = "data-provider-hub-referral";', hiding)
+        self.assertIn("if (!USAGE_SELECTOR) { return; }", plain)  # nothing is marked with the switch off
         self.assertNotIn("__HUB_", hiding)
 
     def test_composer_unlock_is_opt_in_and_keys_on_the_usage_status_shape(self):
