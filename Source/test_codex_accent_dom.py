@@ -80,6 +80,13 @@ const cases = {
     await publishSidebar(page, {});
     assert.equal(await colour(page, 'a-spin'), colours.grey);
   },
+  async sidebar_status_reports_rows_spinners_and_paint(page) {
+    await mount(page, '<nav>' + sidebarRow('a', 1) + sidebarRow('b', 2) + sidebarRow('host', 3, 'other-host') + '</nav>' + spinner('outside-spin'));
+    const status = await page.evaluate(data => window.__providerHubAccent.setSidebarAccents(data), {[threadId(1)]: '#D44404'});
+    assert.deepEqual(status, {colours: 1, rows: 3, local: 2, matched: 1, spinners: 4, rowSpinners: 3, painted: 1,
+      sample: [['local:' + threadId(1), 'local', 'local'], ['local:' + threadId(2), 'local', 'local'], ['local:' + threadId(3), 'other-host', 'local']]});
+    assert.equal(await colour(page, 'a-spin'), colours.mistral);
+  },
   async sidebar_client_keyed_rows_resolve_through_their_own_row_props(page) {
     // The window that started a thread keys its row by the client id; only
     // the row component's props (same dataAttributes) carry the thread id.

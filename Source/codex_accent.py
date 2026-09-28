@@ -901,8 +901,24 @@ _WATCHER = r"""
         }
       }
       sidebar.colours = next;
+      // Paint now rather than on the next frame, so the reply reports what
+      // this palette actually reached: the helper logs it when it changes.
+      try { applySidebar(); } catch (error) {}
       schedule();
-      return next.size;
+      return sidebarStatus();
+    }
+    // Counts and attribute values only (thread ids, host ids, row kinds),
+    // never titles: enough to say which link failed when a spinner stays grey.
+    function sidebarStatus() {
+      const all = Array.from(document.querySelectorAll("[" + SIDEBAR_ROW + "]"));
+      const rows = sidebarRows();
+      const spinners = document.querySelectorAll(SIDEBAR_SPINNER);
+      let inRows = 0;
+      for (const element of spinners) { if (element.closest("[" + SIDEBAR_ROW + "]")) { inRows += 1; } }
+      return { colours: sidebar.colours.size, rows: all.length, local: rows.length,
+               matched: rows.filter(row => sidebar.colours.has(row.id)).length,
+               spinners: spinners.length, rowSpinners: inRows, painted: sidebar.targets.size,
+               sample: all.slice(0, 3).map(element => [element.getAttribute(SIDEBAR_ID), element.getAttribute(SIDEBAR_HOST), element.getAttribute(SIDEBAR_KIND)]) };
     }
     // A usage banner is recognised by the component that rendered it, found
     // through the aside's React fiber: the server-banner renderer (given
@@ -959,10 +975,11 @@ _WATCHER = r"""
     observer.observe(document, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ["data-explicit-model", "data-accent", "data-maximum", "data-selected-reasoning-effort", "data-tab-id", "data-app-shell-tab-panel-controller", SIDEBAR_ROW, SIDEBAR_ID, SIDEBAR_HOST, SIDEBAR_KIND, "role", "inert", "hidden"] });
     if (document.readyState === "loading") { document.addEventListener("DOMContentLoaded", schedule, { once: true }); }
     window.__providerHubAccent = {
-      version: 16,
+      version: 17,
       accents: Object.keys(ACCENTS).length,
       sidebarThreadIds: () => Array.from(new Set(sidebarRows().map(row => row.id))),
       setSidebarAccents: setSidebarAccents,
+      sidebarStatus: sidebarStatus,
       check: () => ({ container: !!document.querySelector('[data-explicit-model="true"]'), label: state.label, colour: state.colour, ultra: state.ultra, targets: state.targets.length,
                       pills: state.words.map((entry) => entry.colour), ultraPills: state.pills.map((entry) => entry.colour), marks: state.marks.length,
                       shimmer: state.accent ? state.accent + ":" + state.theme : "", hue: state.hue,
@@ -1134,6 +1151,12 @@ class AccentBridge:
         self.sidebar_accents = sidebar_accents
         self.sidebar_next_poll = 0.0
         self.pending: dict[int, tuple[str, str | None]] = {}
+        # When each sidebar request went out, so one lost reply cannot stop a
+        # window's polling for the rest of the session; and the last status
+        # each window reported, so only a change is logged.
+        self.sidebar_sent: dict[int, float] = {}
+        self.sidebar_status: dict[str, str] = {}
+        self.sidebar_requested: dict[str, int | None] = {}
         self.injected: set[str] = set()
 
     def start(self) -> None:
@@ -1166,6 +1189,7 @@ class AccentBridge:
         if identifier not in self.pending:
             return
         kind, session_id = self.pending.pop(identifier)
+        self.sidebar_sent.pop(identifier, None)
         if message.get("error"):
             if kind == "autoattach":
                 # A protocol without the target filter: attach to everything
@@ -1191,7 +1215,17 @@ class AccentBridge:
                 colours = self.sidebar_accents(identifiers) if self.sidebar_accents else {}
             except Exception:
                 colours = {}
+            self.sidebar_requested[session_id] = len(identifiers) if isinstance(identifiers, list) else None
             self._sidebar_evaluate(session_id, "setSidebarAccents", json.dumps(colours), "sidebar-write")
+        elif kind == "sidebar-write" and session_id in self.injected:
+            status = ((message.get("result") or {}).get("result") or {}).get("value")
+            if isinstance(status, dict):
+                event = {"event": "sidebar", "session": session_id,
+                         "requested": self.sidebar_requested.get(session_id), **status}
+                key = json.dumps(event, sort_keys=True)
+                if self.sidebar_status.get(session_id) != key:
+                    self.sidebar_status[session_id] = key
+                    self.emit(event)
 
     def _sidebar_evaluate(self, session_id, method, argument, kind):
         # Repeat the origin/frame guard for each poll: an attached page can
@@ -1201,12 +1235,19 @@ class AccentBridge:
         identifier = self.pipe.send("Runtime.evaluate", {"expression": expression,
                                     "returnByValue": True, "timeout": 1000}, session_id=session_id)
         self.pending[identifier] = (kind, session_id)
+        self.sidebar_sent[identifier] = time.monotonic()
 
     def refresh_sidebar(self):
         now = time.monotonic()
         if self.sidebar_accents is None or now < self.sidebar_next_poll:
             return
         self.sidebar_next_poll = now + 2.0
+        for identifier, sent in list(self.sidebar_sent.items()):
+            if now - sent > 10.0:
+                kind, session_id = self.pending.pop(identifier, (None, None))
+                del self.sidebar_sent[identifier]
+                if kind is not None:
+                    self.emit({"event": "error", "stage": kind, "session": session_id, "message": "no reply in 10 s; polling again"})
         for session_id in self.injected:
             if any(kind.startswith("sidebar-") and owner == session_id for kind, owner in self.pending.values()):
                 continue

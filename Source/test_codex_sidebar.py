@@ -127,6 +127,35 @@ class SidebarPipeTests(unittest.TestCase):
         self.reply(self.transport.sent[-1], [tid(1)])
         self.assertEqual(len(self.transport.sent), count)
 
+    def test_lost_reply_expires_and_polling_resumes(self):
+        events = []
+        self.bridge.emit = events.append
+        with patch("codex_accent.time.monotonic", return_value=1):
+            self.bridge.refresh_sidebar()
+        count = len(self.transport.sent)
+        with patch("codex_accent.time.monotonic", return_value=5):
+            self.bridge.refresh_sidebar()
+        self.assertEqual(len(self.transport.sent), count)  # still waiting
+        with patch("codex_accent.time.monotonic", return_value=12):
+            self.bridge.refresh_sidebar()
+        self.assertEqual(len(self.transport.sent), count + 1)
+        self.assertIn("sidebarThreadIds", self.transport.sent[-1]["params"]["expression"])
+        self.assertEqual(events, [{"event": "error", "stage": "sidebar-read", "session": "app",
+                                   "message": "no reply in 10 s; polling again"}])
+
+    def test_write_status_is_logged_only_when_it_changes(self):
+        events = []
+        self.bridge.emit = events.append
+        status = {"colours": 1, "rows": 2, "local": 2, "matched": 1, "spinners": 1, "rowSpinners": 1, "painted": 1,
+                  "sample": [["local:" + tid(1), "local", "local"]]}
+        for now in (1, 4, 7):
+            with patch("codex_accent.time.monotonic", return_value=now):
+                self.bridge.refresh_sidebar()
+            self.reply(self.transport.sent[-1], [tid(1), tid(2)])
+            self.reply(self.transport.sent[-1], dict(status, painted=0) if now == 7 else status)
+        self.assertEqual(events, [{"event": "sidebar", "session": "app", "requested": 2, **status},
+                                  {"event": "sidebar", "session": "app", "requested": 2, **dict(status, painted=0)}])
+
     def test_failed_metadata_read_clears_previous_colours_and_keeps_bridge_alive(self):
         def unavailable(ids):
             raise RuntimeError("database unavailable")
