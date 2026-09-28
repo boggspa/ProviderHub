@@ -38,7 +38,8 @@ CLAUDE_MODEL_LABELS = {
     "claude-opus-4-8": "Claude Opus 4.8 (Legacy)",
     "claude-opus-4-7": "Claude Opus 4.7 (Legacy)",
     "claude-opus-4-6": "Claude Opus 4.6 (Legacy)",
-    "claude-sonnet-5": "Claude Sonnet 5",
+    "claude-sonnet-5-5": "Claude Sonnet 5.5",
+    "claude-sonnet-5": "Claude Sonnet 5 (Legacy)",
     "claude-sonnet-4-6": "Claude Sonnet 4.6 (Legacy)",
     "claude-haiku-4-5": "Claude Haiku 4.5",
 }
@@ -48,7 +49,7 @@ CLAUDE_MODEL_LABELS = {
 CLAUDE_CLI_ALIASES = {
     "fable": "claude-fable-5-1",
     "opus": "claude-opus-5-5",
-    "sonnet": "claude-sonnet-5",
+    "sonnet": "claude-sonnet-5-5",
     "haiku": "claude-haiku-4-5",
 }
 

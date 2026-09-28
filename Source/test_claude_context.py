@@ -86,6 +86,8 @@ class ClaudeContextTests(unittest.TestCase):
             ("claude", "claude-opus-5-5", 1_000_000),
             ("claude", "claude-opus-5", 1_000_000),
             ("claude", "sonnet", 1_000_000),
+            ("claude", "claude-sonnet-5-5", 1_000_000),
+            ("claude", "claude-sonnet-5", 1_000_000),
             ("claude", "claude-fable-5", 1_000_000),
             ("claude", "claude-haiku-4-5", 200_000),
             ("deepseek", "deepseek-v4-pro", 1_048_576),
