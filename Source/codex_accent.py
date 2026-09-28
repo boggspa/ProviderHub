@@ -16,8 +16,8 @@ Ultra, which the app paints with its
 purple token, takes a more saturated cut of the same provider hue instead;
 native Codex keeps #705AFF. Its word gets a shimmer sweep in both cases.
 With the Codex tab's banner switch on,
-the same stylesheet also hides the app's ChatGPT usage banner and the
-referral upsell the app shows in its place. With its
+the same stylesheet also hides the app's ChatGPT usage banners, the
+server-sent ones (the referral upsell among them) included. With its
 composer switch on, the watcher also keeps the composer's send button usable
 for hub routes once the ChatGPT plan's usage is exhausted: the app decodes
 the plan's usage status through the global ``JSON.parse``, and the watcher
@@ -124,11 +124,13 @@ ULTRA_SWEEP = "3.2s"
 # the gauge icon, whose path starts with this; nothing else in the app puts
 # that icon inside an <aside>.
 USAGE_BANNER_ICON = "M10.8343 12.0693"
-# The referral upsell ("Get 250 credits: invite a friend to ChatGPT
-# Desktop") is a backend usage banner. While sending is blocked the app draws
-# it in its recovery layout, which has no icon, and its copy is the server's
-# localised text. The watcher marks it with this attribute instead.
-REFERRAL_MARK = "data-provider-hub-referral"
+# Server-sent usage banners (the usage status's `rate_limit_upsell`: "You're
+# out of Codex and Work usage", the "Get 250 credits" referral upsell) carry
+# the server's copy, and while sending is blocked the app draws them, like
+# its own banners, in a recovery layout with no icon. That layout is shared
+# with ChatGPT chat's hard-block notices, so the watcher marks the usage
+# banners by the component that rendered them instead.
+USAGE_MARK = "data-provider-hub-usage-banner"
 _LAUNCH_SWITCH = "--remote-debugging-pipe"
 _APP_ORIGIN = "app://-/"
 _AUTO_ATTACH = {"autoAttach": True, "waitForDebuggerOnStart": False, "flatten": True}
@@ -427,10 +429,11 @@ def usage_banner_selector() -> str:
     """The ChatGPT usage banners: the app's generic banner (an ``aside``)
     carrying the gauge icon. The account-wide banner and the per-model one
     both draw it; the icon's other uses are slash-command rows, not banners.
-    The referral upsell has no icon in its recovery layout, so it is matched
-    by the mark the watcher gives it.
+    The recovery layout, used while sending is blocked and by every
+    server-sent banner then, has no icon, so it is matched by the mark the
+    watcher gives it.
     """
-    return f'aside:has(svg path[d^="{USAGE_BANNER_ICON}"]),aside[{REFERRAL_MARK}="1"]'
+    return f'aside:has(svg path[d^="{USAGE_BANNER_ICON}"]),aside[{USAGE_MARK}="1"]'
 
 
 def usage_banner_css() -> str:
@@ -474,7 +477,7 @@ _WATCHER = r"""
     const ULTRA_ACCENT_PROPERTY = "__HUB_ULTRA_ACCENT_PROPERTY__";
     const ULTRA_MARK = "__HUB_ULTRA_MARK__";
     const USAGE_SELECTOR = __HUB_USAGE_SELECTOR__;
-    const REFERRAL_MARK = "__HUB_REFERRAL_MARK__";
+    const USAGE_MARK = "__HUB_USAGE_MARK__";
     const UNLOCK_COMPOSER = __HUB_UNLOCK_COMPOSER__;
     const HUES = __HUB_HUES__;
     const HUE_PROPERTY = "__HUB_HUE_PROPERTY__";
@@ -901,35 +904,41 @@ _WATCHER = r"""
       schedule();
       return next.size;
     }
-    // The referral upsell is recognised by the banner its renderer was given,
-    // with the app's own test: a `refer` or `invite` call to action. Only the
-    // renderer's props count (it gets `behavior` beside `banner`); the
-    // provider above it passes `banner` with `fallbackContent`, and an aside
-    // reaching that first is fallback content, so the walk stops there.
-    const referrals = new Set();
-    function referralBanner(element) {
+    // A usage banner is recognised by the component that rendered it, found
+    // through the aside's React fiber: the server-banner renderer (given
+    // `behavior` beside a `banner` with `ctas`), the app's rate-limit banner
+    // (`rateLimitStatus` with the image-generation impression ref) or its
+    // per-model banner (`modelName` and `resetAt`). The provider above the
+    // server-banner renderer passes `banner` with `fallbackContent`; an aside
+    // reaching that first is other fallback content, so the walk stops there.
+    const own = (props, name) => Object.prototype.hasOwnProperty.call(props, name);
+    const usageBanners = new Set();
+    function usageBanner(element) {
       const fiberKey = Object.keys(element).find(name => name.startsWith("__reactFiber$"));
       let fiber = fiberKey ? element[fiberKey] : null;
       for (let depth = 0; fiber && depth < 16; depth += 1, fiber = fiber.return) {
         const props = fiber.memoizedProps;
-        const banner = props && typeof props === "object" ? props.banner : null;
-        if (!banner || typeof banner !== "object") { continue; }
-        if (!props.behavior || typeof props.behavior !== "object" || !Array.isArray(banner.ctas)) { return false; }
-        return banner.ctas.some(cta => !!cta && (cta.action === "refer" || cta.action === "invite"));
+        if (!props || typeof props !== "object") { continue; }
+        const banner = props.banner;
+        if (banner && typeof banner === "object") {
+          return !!props.behavior && typeof props.behavior === "object" && Array.isArray(banner.ctas);
+        }
+        if (own(props, "rateLimitStatus") && own(props, "lastImageGenerationImpressionKeyRef")) { return true; }
+        if (own(props, "modelName") && own(props, "resetAt")) { return true; }
       }
       return false;
     }
-    function applyReferrals() {
+    function applyUsageBanners() {
       if (!USAGE_SELECTOR) { return; }
       const found = new Set();
       for (const element of document.querySelectorAll("aside")) {
-        try { if (referralBanner(element)) { found.add(element); } } catch (error) {}
+        try { if (usageBanner(element)) { found.add(element); } } catch (error) {}
       }
-      for (const element of referrals) {
-        if (!found.has(element)) { element.removeAttribute(REFERRAL_MARK); referrals.delete(element); }
+      for (const element of usageBanners) {
+        if (!found.has(element)) { element.removeAttribute(USAGE_MARK); usageBanners.delete(element); }
       }
       for (const element of found) {
-        if (!referrals.has(element)) { element.setAttribute(REFERRAL_MARK, "1"); referrals.add(element); }
+        if (!usageBanners.has(element)) { element.setAttribute(USAGE_MARK, "1"); usageBanners.add(element); }
       }
       if (found.size) { installStyles(); }
     }
@@ -937,7 +946,7 @@ _WATCHER = r"""
       try { applyMenu(); } catch (error) {}
       try { applyPills(); } catch (error) {}
       try { applySidebar(); } catch (error) {}
-      try { applyReferrals(); } catch (error) {}
+      try { applyUsageBanners(); } catch (error) {}
     }
     let scheduled = false;
     function schedule() {
@@ -999,7 +1008,7 @@ def watcher_script(accents: dict, property_name: str = PROPERTY, hide_usage_bann
             .replace("__HUB_ULTRA__", json.dumps(ultras, ensure_ascii=False))
             .replace("__HUB_STYLE_CSS__", json.dumps(css))
             .replace("__HUB_USAGE_SELECTOR__", json.dumps(usage_banner_selector() if hide_usage_banner else ""))
-            .replace("__HUB_REFERRAL_MARK__", REFERRAL_MARK)
+            .replace("__HUB_USAGE_MARK__", USAGE_MARK)
             .replace("__HUB_UNLOCK_COMPOSER__", json.dumps(bool(unlock_composer)))
             .replace("__HUB_HUES__", json.dumps(hue_map(table)))
             .replace("__HUB_HUE_PROPERTY__", HUE_PROPERTY)

@@ -270,45 +270,49 @@ const cases = {
     assert.equal(await page.locator('#side [data-provider-hub-ultra]').count(), 1);
     assert.equal(await page.locator('main [data-provider-hub-ultra]').count(), 0);
   },
-  async usage_banner_switch_hides_the_referral_upsell_by_its_renderer_props(page) {
-    // The referral upsell's recovery layout has no icon and server copy; the
-    // banner handed to its renderer is what names it.
-    const aside = id => `<aside id="${id}" role="status" aria-live="polite"><h3>Get 250 credits</h3><button>Add Credits</button><button>Refer</button></aside>`;
+  async usage_banner_switch_hides_recovery_layout_banners_by_their_renderer(page) {
+    // The recovery layout (sending blocked) has no icon and server copy; the
+    // component that rendered the aside is what names it a usage banner.
+    const aside = id => `<aside id="${id}" role="status" aria-live="polite"><h3>Banner ${id}</h3><button>Add Credits</button></aside>`;
     const gauge = '<aside id="gauge"><svg><path d="M10.8343 12.0693C10 12.5 9 12 8.5 11.4Z"></path></svg>Out of usage</aside>';
-    await page.setContent(styles + main() + aside('referral') + aside('invite') + aside('plain') + aside('fallback') + aside('bare') + gauge);
+    await page.setContent(styles + main() + ['referral', 'exhausted', 'own', 'model', 'fallback', 'notice', 'bare'].map(aside).join('') + gauge);
     await page.evaluate(() => {
-      const renderer = (actions) => ({memoizedProps: {Icon: null, variant: 'recovery'}, return: {memoizedProps: {banner: {banner_type: 'free_or_go_rate_limit_reached', ctas: actions.map(action => ({action, label: action}))}, behavior: {actions: {}}}, return: null}});
+      const layout = parent => ({memoizedProps: {Icon: null, variant: 'recovery'}, return: parent});
+      const server = actions => layout({memoizedProps: {banner: {banner_type: 'free_or_go_rate_limit_reached', ctas: actions.map(action => ({action, label: action}))}, behavior: {actions: {}}}, return: null});
       const host = (id, fiber) => { document.getElementById(id).__reactFiber$test = {memoizedProps: {role: 'status'}, return: fiber}; };
-      host('referral', renderer(['add_credits', 'refer']));
-      host('invite', renderer(['invite', 'buy_credits']));
-      host('plain', renderer(['add_credits', 'upgrade']));
-      // Fallback content under the provider must not borrow its banner.
-      host('fallback', {memoizedProps: {title: 'x'}, return: {memoizedProps: {banner: {ctas: [{action: 'refer'}]}, fallbackContent: null}, return: renderer(['refer'])}});
+      host('referral', server(['add_credits', 'refer']));
+      host('exhausted', server(['add_credits']));
+      host('own', layout({memoizedProps: {rateLimitStatus: {plan_type: 'free'}, imageGenerationLimit: null, lastImageGenerationImpressionKeyRef: {current: null}}, return: null}));
+      host('model', layout({memoizedProps: {modelName: 'gpt-6-astra', resetAt: null}, return: null}));
+      // Other content under the provider must not borrow its banner, and a
+      // chat hard-block notice in the same layout stays.
+      host('fallback', {memoizedProps: {title: 'x'}, return: {memoizedProps: {banner: {ctas: [{action: 'refer'}]}, fallbackContent: null}, return: server(['refer'])}});
+      host('notice', layout({memoizedProps: {bannerInfo: {call_to_action: ['new_chat']}, sendBlocked: true}, return: null}));
     });
     const installed = await page.evaluate(input.bannerScript.replace('String(location.href)', '"app://-/"'));
     assert.equal(installed.usageBanner, true);
     await flush(page);
     const display = id => page.locator('#' + id).evaluate(el => getComputedStyle(el).display);
-    for (const id of ['referral', 'invite', 'gauge']) { assert.equal(await display(id), 'none', id); }
-    for (const id of ['plain', 'fallback', 'bare']) { assert.equal(await display(id), 'block', id); }
-    assert.equal(await page.evaluate(() => window.__providerHubAccent.check().banners), 3);
-    // A reused aside that stops being the referral banner comes back.
+    for (const id of ['referral', 'exhausted', 'own', 'model', 'gauge']) { assert.equal(await display(id), 'none', id); }
+    for (const id of ['fallback', 'notice', 'bare']) { assert.equal(await display(id), 'block', id); }
+    assert.equal(await page.evaluate(() => window.__providerHubAccent.check().banners), 5);
+    // A reused aside that stops being a usage banner comes back.
     await page.evaluate(() => {
       const el = document.getElementById('referral');
-      el.__reactFiber$test.return.return.memoizedProps.banner.ctas = [{action: 'add_credits'}];
-      el.querySelector('h3').textContent = 'Out of credits';
+      el.__reactFiber$test.return = {memoizedProps: {bannerInfo: {}}, return: null};
+      el.querySelector('h3').textContent = 'Something else';
     });
     await flush(page);
     assert.equal(await display('referral'), 'block');
-    assert.equal(await page.locator('#referral').getAttribute('data-provider-hub-referral'), null);
+    assert.equal(await page.locator('#referral').getAttribute('data-provider-hub-usage-banner'), null);
   },
-  async referral_upsell_stays_without_the_usage_banner_switch(page) {
-    await page.setContent(styles + main() + '<aside id="off" role="status">Get 250 credits</aside>');
+  async recovery_banners_stay_without_the_usage_banner_switch(page) {
+    await page.setContent(styles + main() + '<aside id="off" role="status">Out of usage</aside>');
     await page.evaluate(() => { document.getElementById('off').__reactFiber$test = {memoizedProps: {}, return: {memoizedProps: {banner: {ctas: [{action: 'refer'}]}, behavior: {}}, return: null}}; });
     await page.evaluate(fixtureScript);
     await flush(page);
     assert.equal(await page.locator('#off').evaluate(el => getComputedStyle(el).display), 'block');
-    assert.equal(await page.locator('#off').getAttribute('data-provider-hub-referral'), null);
+    assert.equal(await page.locator('#off').getAttribute('data-provider-hub-usage-banner'), null);
   },
   async composer_unlock_frees_only_the_core_limit_of_the_usage_status(page) {
     await page.setContent(styles + main());

@@ -510,7 +510,7 @@ struct CodexConfigPane: View {
                     summary: model.settings.codex_accent_slider
                         ? "Hide plan-usage banners above the composer while using provider models."
                         : "Requires provider accent colours to be enabled above.",
-                    details: "The accent helper hides the ChatGPT plan’s out-of-usage banner, its per-model variant and the “Get 250 credits” referral card; hub traffic does not spend that plan. Account and usage pages, and any rate-limit prompt on submit, stay visible. If a Codex update changes the banner’s icon or the referral card’s structure, they may reappear. This preference takes effect when the accent helper is enabled and the app is launched from here. Save, then launch.")
+                    details: "The accent helper hides the ChatGPT plan’s out-of-usage banner, its per-model variant and the server-sent versions, including the “Get 250 credits” referral card; hub traffic does not spend that plan. Account and usage pages, and any rate-limit prompt on submit, stay visible. If a Codex update changes the banners’ icon or structure, they may reappear. This preference takes effect when the accent helper is enabled and the app is launched from here. Save, then launch.")
                 Divider()
                 CodexPreference(isOn: $model.settings.codex_unlock_composer, disabled: model.busy || !model.settings.codex_accent_slider,
                     title: "Keep sending when ChatGPT usage runs out",
