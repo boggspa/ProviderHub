@@ -549,6 +549,50 @@ class ParseToolStreamTest(unittest.TestCase):
         self.assertIn("nothing else in that response was executed", note)
         self.assertEqual(len(request["messages"]), 1)
 
+    def test_a_native_approval_stop_is_redirected_once_to_host_tools(self):
+        requests = []
+
+        def adapter_turn(request, *, timeout=300):
+            requests.append(request)
+            if len(requests) == 1:
+                yield {"type": "text_delta", "text": "Let me curl that myself."}
+                yield {"type": "error", "code": "cli_native_approval", "tool": "bash",
+                       "message": "muse is waiting for a human approval of its native bash call"}
+                return
+            yield {"type": "text_delta", "text": OPEN_SENTINEL
+                   + '{"name": "exec_command", "input": {"cmd": "curl -s 127.0.0.1:8787/agent/observe"}}'
+                   + CLOSE_SENTINEL}
+            yield {"type": "message_stop", "stop_reason": "end_turn"}
+
+        cli_routes._cache["muse"] = types.SimpleNamespace(run_turn=adapter_turn)
+        request = {"tools": [{"name": "exec_command", "input_schema": {"type": "object"}}],
+                   "messages": [{"role": "user", "content": "keep playing"}]}
+        events = [event for event in run_turn("muse", request, parse_tool_calls=True) if event["type"] != "ping"]
+        self.assertEqual([event["type"] for event in events], ["tool_call", "message_stop"])
+        self.assertEqual(events[0]["input"], {"cmd": "curl -s 127.0.0.1:8787/agent/observe"})
+        self.assertEqual(len(requests), 2)
+        note = requests[1]["messages"][-1]["content"]
+        self.assertIn("built-in shell", note)
+        self.assertIn("nothing in that response ran", note)
+        self.assertNotIn("curl that myself", "".join(event.get("text", "") for event in events))
+        self.assertEqual(len(request["messages"]), 1)
+
+    def test_a_second_native_approval_stop_is_reported_not_retried(self):
+        requests = []
+
+        def adapter_turn(request, *, timeout=300):
+            requests.append(request)
+            yield {"type": "error", "code": "cli_native_approval", "tool": "bash",
+                   "message": "muse is waiting for a human approval of its native bash call"}
+
+        cli_routes._cache["muse"] = types.SimpleNamespace(run_turn=adapter_turn)
+        request = {"tools": [{"name": "exec_command", "input_schema": {"type": "object"}}],
+                   "messages": [{"role": "user", "content": "keep playing"}]}
+        events = list(run_turn("muse", request, parse_tool_calls=True))
+        self.assertEqual(len(requests), 2)
+        self.assertEqual(events[-1]["type"], "error")
+        self.assertEqual(events[-1]["code"], "cli_native_approval")
+
     def test_narration_split_by_a_search_keeps_its_paragraphs(self):
         def adapter_turn(request, *, timeout=300):
             yield {"type": "text_delta", "text": "Route 34 is the live map."}

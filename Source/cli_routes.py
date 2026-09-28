@@ -618,6 +618,10 @@ def _tool_turn(adapter, request, *, timeout):
     deadline = time.monotonic() + timeout
     native = getattr(adapter, "HOST_TOOL_TRANSPORT", None) == "dynamic"
     corrections = 0 if native else 1
+    # One redirect for a CLI stopped on its own tool's approval (muse's native
+    # bash on 26-27 Sep 2026). Host calls are released only at message_stop,
+    # so the stopped attempt executed nothing the host can see.
+    approval_redirects = 0 if native else 1
     current = request
     while True:
         parser = cli_structured_reply.parse_stream if request.get("host_tool_schema") else _parse_tool_stream
@@ -636,6 +640,10 @@ def _tool_turn(adapter, request, *, timeout):
                 if event.get("code") == "invalid_cli_tool_call" and corrections \
                         and time.monotonic() < deadline:
                     restart = "protocol"
+                    break
+                if event.get("code") == "cli_native_approval" and approval_redirects \
+                        and time.monotonic() < deadline:
+                    restart = "native_approval"
                     break
                 kind = event.get("type")
                 if kind == "web_search" and not native and current.get("web_search") is not None:
@@ -689,6 +697,14 @@ def _tool_turn(adapter, request, *, timeout):
                     "complete: do not perform that work again or restate its outcome as new. Continue "
                     "from those results and issue only the call that comes next - or the final answer "
                     "if no call remains - " + convention + "Never simulate a result.")
+        elif restart == "native_approval":
+            approval_redirects -= 1
+            note = ("Your previous response tried to run a command with your own built-in shell tool. That "
+                    "tool is switched off in this host and waited for an approval nobody can give, so the "
+                    "host stopped it; nothing in that response ran. Do not call your built-in shell, file or "
+                    "web tools again. Every host tool result already in this conversation is real and "
+                    "complete. Run commands only by requesting the host's own tool (for example "
+                    "exec_command) " + convention + "Continue with the next step. Never simulate a result.")
         else:
             current = {key: value for key, value in current.items() if key != "web_search"}
             note = (f"The host stopped your previous response after {CLI_SEARCH_BUDGET} web searches. "

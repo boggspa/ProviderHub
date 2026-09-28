@@ -18,6 +18,21 @@ from unittest import mock
 import muse_cli_agent as m
 
 
+_TRACE_TMP = tempfile.TemporaryDirectory()
+
+
+def setUpModule():
+    # Never read the real ~/.local/share/muse trace directory from a test.
+    global _trace_patch
+    _trace_patch = mock.patch.object(m, "TRACE_DIR", m.Path(_TRACE_TMP.name))
+    _trace_patch.start()
+
+
+def tearDownModule():
+    _trace_patch.stop()
+    _TRACE_TMP.cleanup()
+
+
 class _FakeStdin:
     def write(self, data):
         pass
@@ -790,6 +805,96 @@ class MuseStallTests(unittest.TestCase):
         self.assertIn("did not finish within 60s", events[0]["message"])
         self.assertNotIn("code 143", events[0]["message"])
         self.assertLessEqual(elapsed, 60 + m.POLL_SECONDS)
+
+
+
+def _trace_line(event, run_id, **fields):
+    extra = " ".join(f'{key}="{value}"' for key, value in fields.items())
+    return (f'2026-09-27T14:23:16.785212Z INFO tbh.local.approval approval/src/x.rs:11 '
+            f'event="{event}" pending_action_id=pa-9 task_id=pa-9 run_id={run_id} {extra}\n')
+
+
+class TracedSession(QuietSession):
+    """A quiet muse that writes its approval wait only to its local trace."""
+
+    def __init__(self, clock, directory, trace_lines, script=()):
+        super().__init__(clock, script)
+        self.directory = directory
+        self.trace_lines = list(trace_lines)
+        self.path = None
+
+    def events(self, timeout=None):
+        if self.path is None:
+            self.path = os.path.join(self.directory, "cli-test.log")
+            with open(self.path, "w", encoding="utf-8") as handle:
+                handle.write('2026-09-27T14:22:54Z INFO tbh.local.bootstrap x event="process.identity" mode="exec"\n')
+        if self.trace_lines:
+            with open(self.path, "a", encoding="utf-8") as handle:
+                handle.write(self.trace_lines.pop(0))
+        yield from super().events(timeout=timeout)
+
+
+class MuseTraceApprovalTests(unittest.TestCase):
+    """muse 1.4 prints no approval record on exec stdout; the trace has it."""
+
+    REQUEST = MuseStallTests.REQUEST
+    _run = MuseStallTests._run
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        patcher = mock.patch.object(m, "TRACE_DIR", m.Path(self.dir.name))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_a_traced_human_pending_approval_ends_the_turn_within_the_grace(self):
+        clock = _Clock()
+        lines = [_trace_line("runtime.run.lifecycle", "run-1"),
+                 _trace_line("approval.requested", "run-1", tool_name="bash",
+                             approval_mode="on_request", presentation="human_pending")]
+        events, elapsed = self._run(TracedSession(clock, self.dir.name, lines, [[_linked("run-1")]]))
+        self.assertEqual([e["type"] for e in events], ["error"])
+        self.assertEqual(events[0]["code"], m.NATIVE_APPROVAL_CODE)
+        self.assertIn("native bash call", events[0]["message"])
+        self.assertLess(elapsed, m.APPROVAL_GRACE_SECONDS + 3 * m.POLL_SECONDS)
+
+    def test_another_runs_traced_approval_is_ignored(self):
+        clock = _Clock()
+        lines = [_trace_line("runtime.run.lifecycle", "run-1"),
+                 _trace_line("approval.requested", "reminder", tool_name="submit_reminder_decision",
+                             presentation="human_pending")]
+        fake = TracedSession(clock, self.dir.name, lines,
+                             [[_linked("run-1")], [], [], [], [], [], [], [],
+                              [_scoped(_terminal("completed", text="ok"), "run-1")]])
+        events, _ = self._run(fake)
+        self.assertEqual([e["type"] for e in events], ["text_delta", "message_stop"])
+
+    def test_a_traced_approval_that_is_decided_is_not_a_failure(self):
+        clock = _Clock()
+        lines = [_trace_line("runtime.run.lifecycle", "run-1"),
+                 _trace_line("approval.requested", "run-1", tool_name="bash", presentation="human_pending"),
+                 _trace_line("approval.decided", "run-1", tool_name="bash", decision="denied")]
+        fake = TracedSession(clock, self.dir.name, lines,
+                             [[_linked("run-1")], [], [], [], [], [], [], [],
+                              [_scoped(_terminal("completed", text="ok"), "run-1")]])
+        events, _ = self._run(fake)
+        self.assertEqual([e["type"] for e in events], ["text_delta", "message_stop"])
+
+    def test_a_trace_from_before_the_spawn_is_never_bound(self):
+        with open(os.path.join(self.dir.name, "cli-old.log"), "w", encoding="utf-8") as handle:
+            handle.write('x event="process.identity" mode="exec"\n')
+            handle.write(_trace_line("approval.requested", "run-1", tool_name="bash",
+                                     presentation="human_pending"))
+        clock = _Clock()
+        fake = QuietSession(clock, [[_linked("run-1")], [], [], [], [], [], [], [],
+                                    [_scoped(_terminal("completed", text="ok"), "run-1")]])
+        events, _ = self._run(fake)
+        self.assertEqual([e["type"] for e in events], ["text_delta", "message_stop"])
+
+    def test_the_stall_report_names_the_stdout_record_types(self):
+        clock = _Clock()
+        events, _ = self._run(QuietSession(clock, [[_linked("run-1")]]))
+        self.assertIn("stdout records: session.run.linked x1", events[0]["message"])
 
 
 if __name__ == "__main__":

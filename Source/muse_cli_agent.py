@@ -267,6 +267,101 @@ POLL_SECONDS = 5.0
 # Indirection so tests can drive a fake clock instead of sleeping.
 _monotonic = time.monotonic
 
+#: Error code for a turn stopped on a native-tool approval. cli_routes retries
+#: such a turn once with a note, because nothing the host can see has run.
+NATIVE_APPROVAL_CODE = "cli_native_approval"
+
+#: Where muse 1.4 writes its per-process local trace (one cli-<uuid>.log per
+#: process). The exec --json stdout never carried the approval: on 27 Sep
+#: 2026 three turns stopped by the stall timer each have an
+#: ``approval.requested ... tool_name="bash" presentation="human_pending"``
+#: line in this log 363-366 s earlier, and the stdout check above never
+#: fired. The log is a private diagnostic surface, so reading it is best
+#: effort: a missing or reshaped log leaves the stall timer as the backstop.
+TRACE_DIR = Path("~/.local/share/muse/local-tracing/bootstrap").expanduser()
+
+_TRACE_FIELD = re.compile(r'(\w+)=(?:"([^"]*)"|(\S+))')
+
+#: Longest chunk of the trace read per poll; a runaway log cannot stall the hub.
+_TRACE_READ_LIMIT = 256 * 1024
+
+
+class _TraceWatch:
+    """Follow this turn's muse trace for approval waits on the turn's run.
+
+    The file is bound by content, not by name or time: muse writes
+    ``run_id=<command UUID>`` on every run record, and that id is the one the
+    stdout ``session.run.linked`` announces, so a concurrent muse process (a
+    second seat, the TUI) can never be mistaken for this one.
+    """
+
+    def __init__(self, directory: Path | None = None) -> None:
+        self.directory = directory if directory is not None else TRACE_DIR
+        try:
+            self.before = set(os.listdir(self.directory))
+        except OSError:
+            self.before = None  # No trace directory: stay inert.
+        self.path: Path | None = None
+        self.offset = 0
+        self.partial = ""
+        self.next_poll = 0.0
+
+    def poll(self, run_id: str | None, state: "_TurnState") -> None:
+        if self.before is None or not run_id:
+            return
+        # At most once a second: a burst of stdout deltas must not become a
+        # burst of directory scans while the file is still unbound.
+        now = _monotonic()
+        if now < self.next_poll:
+            return
+        self.next_poll = now + 1.0
+        try:
+            if self.path is None:
+                self._bind(run_id)
+                if self.path is None:
+                    return
+            with self.path.open("r", encoding="utf-8", errors="replace") as handle:
+                handle.seek(self.offset)
+                chunk = handle.read(_TRACE_READ_LIMIT)
+                self.offset = handle.tell()
+        except OSError:
+            return
+        lines = (self.partial + chunk).split("\n")
+        self.partial = lines.pop()
+        for line in lines:
+            _trace_approval(line, run_id, state)
+
+    def _bind(self, run_id: str) -> None:
+        needle = f"run_id={run_id}"
+        for name in sorted(set(os.listdir(self.directory)) - self.before):
+            candidate = self.directory / name
+            try:
+                with candidate.open("r", encoding="utf-8", errors="replace") as handle:
+                    head = handle.read(_TRACE_READ_LIMIT)
+            except OSError:
+                continue
+            if needle in head and 'mode="exec"' in head:
+                self.path = candidate
+                return
+
+
+def _trace_approval(line: str, run_id: str, state: "_TurnState") -> None:
+    """Fold one trace line into the turn's approval wait, like _approval_record."""
+    if 'event="approval.' not in line:
+        return
+    fields = {key: quoted if quoted else bare for key, quoted, bare in _TRACE_FIELD.findall(line)}
+    if fields.get("run_id") != run_id:
+        return
+    action = fields.get("pending_action_id") or ""
+    if fields.get("event") == "approval.requested" and fields.get("presentation") == "human_pending":
+        if state.approval_wait is None:
+            state.approval_since = _monotonic()
+        state.approval_wait = (fields.get("tool_name") or "a native tool", action)
+    elif fields.get("event") == "approval.decided" and state.approval_wait is not None \
+            and (not action or action == state.approval_wait[1]):
+        state.approval_wait = None
+        state.approval_since = None
+
 
 def _validate_model(model: Any) -> str:
     if not isinstance(model, str) or not model.strip():
@@ -724,6 +819,8 @@ class _TurnState:
         # this turn's run, and when the hub first saw it.
         self.approval_wait: tuple[str, str] | None = None
         self.approval_since: float | None = None
+        # payload_type -> count, so a stall report shows what stdout DID say.
+        self.record_types: dict[str, int] = {}
 
     def accepts_run(self, body: dict) -> bool:
         """Correlate the body run stream, never the enclosing session stream.
@@ -781,12 +878,21 @@ class _TurnState:
             return " | cli said: " + tail[-_MAX_STDERR_CHARS:]
         return ""
 
+    def record_summary(self) -> str:
+        if not self.record_types:
+            return ""
+        top = sorted(self.record_types.items(), key=lambda item: (-item[1], item[0]))[:12]
+        return " | stdout records: " + ", ".join(f"{name} x{count}" for name, count in top)
+
 
 def _translate(payload: Any, state: _TurnState) -> list[dict]:
     """Convert one muse exec JSONL record into zero or more route events."""
     if not isinstance(payload, dict):
         return []
     payload_type = str(payload.get("payload_type") or "")
+    record_key = payload_type or "?"
+    if len(state.record_types) < 64 or record_key in state.record_types:
+        state.record_types[record_key] = state.record_types.get(record_key, 0) + 1
     body = payload.get("payload")
     if not isinstance(body, dict):
         body = {}
@@ -1106,6 +1212,9 @@ def run_turn(request, *, spawner=None, timeout=300) -> Iterator[dict]:
             argv += ["--image", image_path]
 
         state.stderr_handle = tempfile.TemporaryFile(mode="w+", encoding="utf-8")
+        # Snapshot the trace directory BEFORE the spawn, so the child's own
+        # trace file is one of the names that appear afterwards.
+        trace = _TraceWatch()
         session = StdioSession(
             argv,
             env=minimal_env(),
@@ -1133,10 +1242,12 @@ def run_turn(request, *, spawner=None, timeout=300) -> Iterator[dict]:
                     return
                 if kind != "quiet":
                     last_output = _monotonic()
+                # stdout never carried muse 1.4's approval waits; its trace does.
+                trace.poll(state.run_id, state)
                 if state.approval_wait is not None and state.approval_since is not None \
                         and _monotonic() - state.approval_since >= APPROVAL_GRACE_SECONDS:
                     tool = state.approval_wait[0]
-                    yield {"type": "error", "message":
+                    yield {"type": "error", "code": NATIVE_APPROVAL_CODE, "tool": tool, "message":
                            f"muse is waiting for a human approval of its native {tool} call, which this "
                            f"headless route cannot answer; Provider Hub stopped the turn after "
                            f"{APPROVAL_GRACE_SECONDS:.0f}s instead of waiting out the {timeout:.0f}s turn limit"
@@ -1148,7 +1259,7 @@ def run_turn(request, *, spawner=None, timeout=300) -> Iterator[dict]:
                                f"the muse CLI printed nothing for {stall:.0f}s; Provider Hub stopped it instead "
                                f"of waiting out the {timeout:.0f}s turn limit (a native tool call waiting on an "
                                f"approval nobody can give is the known cause)"
-                               + state.diagnostics() + state.stderr_tail()}
+                               + state.diagnostics() + state.record_summary() + state.stderr_tail()}
                         return
                     continue
                 if kind == "raw":
