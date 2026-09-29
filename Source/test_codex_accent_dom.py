@@ -94,8 +94,12 @@ const cases = {
     await mount(page, '<nav>' + client('own') + client('borrowed') + client('bare') + sidebarRow('plain', 1) + '</nav>');
     await page.evaluate(() => {
       const key = el => el.getAttribute('data-app-action-sidebar-thread-id');
+      // Layout wrappers above the row carry its dataAttributes without the
+      // thread id (26.924, 26 Sep rebuild); the id sits two components up.
       const own = document.getElementById('own');
-      own.__reactFiber$test = {memoizedProps: {className: 'row'}, return: {memoizedProps: {dataAttributes: {'data-app-action-sidebar-thread-id': key(own)}, conversationId: '00000000-0000-4000-8000-000000000007'}, return: null}};
+      const naming = {dataAttributes: {'data-app-action-sidebar-thread-id': key(own)}, isActive: false};
+      own.__reactFiber$test = {memoizedProps: {className: 'row'}, return: {memoizedProps: naming, return: {memoizedProps: {...naming, hostId: 'local'},
+        return: {memoizedProps: {...naming, conversationId: '00000000-0000-4000-8000-000000000007'}, return: null}}}};
       // A parent for another row must never lend its thread id.
       const borrowed = document.getElementById('borrowed');
       borrowed.__reactFiber$test = {memoizedProps: {}, return: {memoizedProps: {dataAttributes: {'data-app-action-sidebar-thread-id': 'local:someone-else'}, conversationId: '00000000-0000-4000-8000-000000000008'}, return: null}};

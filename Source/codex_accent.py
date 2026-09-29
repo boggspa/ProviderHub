@@ -831,18 +831,23 @@ _WATCHER = r"""
     // The window that starts a thread keeps its row keyed by the renderer's
     // own client id (local:client-new-thread:<uuid>) for as long as the
     // window lives; every other window keys it by the real thread id. Only
-    // the row component knows both: its props carry the same dataAttributes
-    // the row was rendered with and the conversationId. Accept it only from
-    // the component whose dataAttributes name this exact row, so a parent
-    // showing another thread can never lend its id.
+    // the row's own components know both: their props carry the same
+    // dataAttributes the row was rendered with and the conversationId.
+    // Accept it only from a component whose dataAttributes name this exact
+    // row, so a parent showing another thread can never lend its id. The
+    // dataAttributes pass down through layout wrappers that never see the
+    // conversationId (ChatGPT 26.924's 26 Sep rebuild put two of them
+    // directly above the row element), so a naming component without the
+    // id is stepped over, not taken as the answer.
     function clientRowThreadId(element, key) {
       const fiberKey = Object.keys(element).find(name => name.startsWith("__reactFiber$"));
       let fiber = fiberKey ? element[fiberKey] : null;
       for (let depth = 0; fiber && depth < 24; depth += 1, fiber = fiber.return) {
         const props = fiber.memoizedProps;
         const attributes = props && typeof props === "object" ? props.dataAttributes : null;
-        if (attributes && typeof attributes === "object" && attributes[SIDEBAR_ID] === key) {
-          return typeof props.conversationId === "string" && THREAD_UUID.test(props.conversationId) ? props.conversationId : null;
+        if (attributes && typeof attributes === "object" && attributes[SIDEBAR_ID] === key
+            && typeof props.conversationId === "string" && THREAD_UUID.test(props.conversationId)) {
+          return props.conversationId;
         }
       }
       return null;
@@ -975,7 +980,7 @@ _WATCHER = r"""
     observer.observe(document, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ["data-explicit-model", "data-accent", "data-maximum", "data-selected-reasoning-effort", "data-tab-id", "data-app-shell-tab-panel-controller", SIDEBAR_ROW, SIDEBAR_ID, SIDEBAR_HOST, SIDEBAR_KIND, "role", "inert", "hidden"] });
     if (document.readyState === "loading") { document.addEventListener("DOMContentLoaded", schedule, { once: true }); }
     window.__providerHubAccent = {
-      version: 17,
+      version: 18,
       accents: Object.keys(ACCENTS).length,
       sidebarThreadIds: () => Array.from(new Set(sidebarRows().map(row => row.id))),
       setSidebarAccents: setSidebarAccents,
