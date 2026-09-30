@@ -9,7 +9,7 @@ surface, and provider entitlement; a catalogue entry cannot grant access.
 
 | Provider route | Model IDs | Picker and request behavior | Evidence |
 | --- | --- | --- | --- |
-| OpenAI API or Codex CLI | `gpt-5.5`, `gpt-5.6-luna`, `gpt-5.6-terra`, `gpt-5.6-sol`, `gpt-6-astra`, `gpt-6-luna`, `gpt-6-sol` | Codex/ChatGPT Fast control via `service_tiers`; API requests use `service_tier: "fast"`, CLI turns use `serviceTier: "fast"`. | [ChatGPT Work/Codex speed](https://learn.chatgpt.com/docs/agent-configuration/speed), [OpenAI API Fast mode](https://developers.openai.com/api/docs/guides/fast-mode), [API pricing](https://developers.openai.com/api/docs/pricing) |
+| OpenAI API or Codex CLI | `gpt-5.5`, `gpt-5.6-luna`, `gpt-5.6-terra`, `gpt-5.6-sol`, `gpt-6-astra`, `gpt-6-luna`, `gpt-6-sol`, `gpt-6.1-sol` (added 2026-09-30) | Codex/ChatGPT Fast control via `service_tiers`; API requests use `service_tier: "fast"`, CLI turns use `serviceTier: "fast"`. | [ChatGPT Work/Codex speed](https://learn.chatgpt.com/docs/agent-configuration/speed), [OpenAI API Fast mode](https://developers.openai.com/api/docs/guides/fast-mode), [API pricing](https://developers.openai.com/api/docs/pricing) |
 | Anthropic API or Claude Code CLI | `claude-opus-5-5`, `claude-opus-5`, `claude-opus-4-8` | Fast requests use `speed: "fast"` plus the `fast-mode-2026-02-01` beta header. The CLI receives a per-turn `--settings '{"fastMode":true}'`; Standard sends `false` so saved CLI settings cannot override the Desktop choice. | [Anthropic Fast mode](https://platform.claude.com/docs/en/build-with-claude/fast-mode), [Claude Code Fast mode](https://code.claude.com/docs/en/fast-mode) |
 
 Claude Opus 4.7 is excluded because Anthropic rejects Fast requests for it.
