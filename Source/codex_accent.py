@@ -550,8 +550,9 @@ _WATCHER = r"""
     // The pill names the selected level by id; the popover's title is
     // localised text, so it is only read when there is no pill to ask.
     function ultraSelected(container) {
-      const triggers = document.querySelectorAll("[data-codex-intelligence-trigger][data-selected-reasoning-effort]");
-      if (triggers.length) { return Array.prototype.some.call(triggers, (trigger) => norm(trigger.getAttribute("data-selected-reasoning-effort")) === "ultra"); }
+      // A retained page's pill (see drawn) says nothing about this popover.
+      const triggers = Array.prototype.filter.call(document.querySelectorAll("[data-codex-intelligence-trigger][data-selected-reasoning-effort]"), drawn);
+      if (triggers.length) { return triggers.some((trigger) =>norm(trigger.getAttribute("data-selected-reasoning-effort")) === "ultra"); }
       const title = container.querySelector('[data-maximum="true"]');
       return !!title && norm(title.textContent) === "ultra";
     }
@@ -658,6 +659,18 @@ _WATCHER = r"""
     // token name and mark the Ultra span for the sweep; anything else the
     // app already colours purple is left alone. The older two-part pill
     // (model span + effort span) is handled the same way as a fallback.
+    //
+    // The app keeps the pages it has left mounted for some minutes (ChatGPT
+    // 26.928 retains visited threads and destinations), hidden by a React
+    // Activity: display:none on the page's host elements, and for a thread
+    // page a wrapper marked data-app-shell-active-page="false". Their
+    // composers stay in the document, ahead of the page on screen when they
+    // were opened first, so only a composer that is drawn may name the
+    // document's accent.
+    function drawn(element) {
+      if (element.closest('[data-app-shell-active-page="false"]')) { return false; }
+      try { return typeof element.checkVisibility !== "function" || element.checkVisibility(); } catch (error) { return true; }
+    }
     function pillWords() {
       const words = [];
       const pills = [];
@@ -686,8 +699,9 @@ _WATCHER = r"""
                            hue: Object.prototype.hasOwnProperty.call(HUES, model.key) ? String(HUES[model.key]) : "" };
         models.push(selected);
         // A child composer can precede the main one in DOM order. Only the
-        // main conversation supplies the document's default accent.
-        if (!accent && !trigger.closest(TAB_PANEL_SELECTOR)) { accent = selected.colour; theme = surface; hue = selected.hue; }
+        // main conversation supplies the document's default accent, and only
+        // from the page on screen.
+        if (!accent && !trigger.closest(TAB_PANEL_SELECTOR) && drawn(trigger)) { accent = selected.colour; theme = surface; hue = selected.hue; }
         if (!effort) { continue; }
         if (effort === "ultra") {
           const ultra = ultraColour(model.key, surface);
@@ -914,15 +928,20 @@ _WATCHER = r"""
     }
     // Counts and attribute values only (thread ids, host ids, row kinds),
     // never titles: enough to say which link failed when a spinner stays grey.
+    // The document's accent rides along, with how many composers the
+    // document holds against how many are drawn, so glyphs in the wrong
+    // colour can be told from the log as well.
     function sidebarStatus() {
       const all = Array.from(document.querySelectorAll("[" + SIDEBAR_ROW + "]"));
       const rows = sidebarRows();
       const spinners = document.querySelectorAll(SIDEBAR_SPINNER);
       let inRows = 0;
       for (const element of spinners) { if (element.closest("[" + SIDEBAR_ROW + "]")) { inRows += 1; } }
+      const composers = Array.from(document.querySelectorAll("[data-codex-intelligence-trigger]"));
       return { colours: sidebar.colours.size, rows: all.length, local: rows.length,
                matched: rows.filter(row => sidebar.colours.has(row.id)).length,
                spinners: spinners.length, rowSpinners: inRows, painted: sidebar.targets.size,
+               accent: state.accent, composers: [composers.length, composers.filter(drawn).length],
                sample: all.slice(0, 3).map(element => [element.getAttribute(SIDEBAR_ID), element.getAttribute(SIDEBAR_HOST), element.getAttribute(SIDEBAR_KIND)]) };
     }
     // A usage banner is recognised by the component that rendered it, found
@@ -977,10 +996,10 @@ _WATCHER = r"""
     }
     // Observe the document node: at document start there is no root element yet.
     const observer = new MutationObserver(schedule);
-    observer.observe(document, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ["data-explicit-model", "data-accent", "data-maximum", "data-selected-reasoning-effort", "data-tab-id", "data-app-shell-tab-panel-controller", SIDEBAR_ROW, SIDEBAR_ID, SIDEBAR_HOST, SIDEBAR_KIND, "role", "inert", "hidden"] });
+    observer.observe(document, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ["data-explicit-model", "data-accent", "data-maximum", "data-selected-reasoning-effort", "data-tab-id", "data-app-shell-tab-panel-controller", "data-app-shell-active-page", SIDEBAR_ROW, SIDEBAR_ID, SIDEBAR_HOST, SIDEBAR_KIND, "role", "inert", "hidden"] });
     if (document.readyState === "loading") { document.addEventListener("DOMContentLoaded", schedule, { once: true }); }
     window.__providerHubAccent = {
-      version: 18,
+      version: 19,
       accents: Object.keys(ACCENTS).length,
       sidebarThreadIds: () => Array.from(new Set(sidebarRows().map(row => row.id))),
       setSidebarAccents: setSidebarAccents,

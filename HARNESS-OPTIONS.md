@@ -480,6 +480,18 @@ the same resolved catalogue presentation as picker labels, including custom
 branding and hosted model brands; native Codex names keep the existing
 punctuation matching. The optional localised effort suffix is ignored.
 
+A page the app has left is not unmounted at once. ChatGPT 26.928 keeps
+visited thread pages and sidebar destinations mounted for some minutes (a
+server-configured page count and TTL), each hidden by a React `Activity`:
+`display:none` on the page's host elements, and for a thread page a
+`display:contents` wrapper the app marks `data-app-shell-active-page="false"`.
+Their composers stay in the document, and one opened earlier precedes the
+page on screen, so the root's accent is taken only from a composer that is
+drawn (not under an inactive page wrapper, and `checkVisibility()` true).
+Without that every thread's glyphs took the colour of the oldest retained
+page. The wrapper attribute is observed, since going back to a retained
+page adds and removes no nodes.
+
 The child values stay inside that panel, including when a Side Chat moves
 to the bottom panel. Model changes, tab reuse and panel removal refresh or
 restore only the watcher's own values. An unknown or loading child keeps

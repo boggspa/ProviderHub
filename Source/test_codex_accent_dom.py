@@ -83,7 +83,7 @@ const cases = {
   async sidebar_status_reports_rows_spinners_and_paint(page) {
     await mount(page, '<nav>' + sidebarRow('a', 1) + sidebarRow('b', 2) + sidebarRow('host', 3, 'other-host') + '</nav>' + spinner('outside-spin'));
     const status = await page.evaluate(data => window.__providerHubAccent.setSidebarAccents(data), {[threadId(1)]: '#D44404'});
-    assert.deepEqual(status, {colours: 1, rows: 3, local: 2, matched: 1, spinners: 4, rowSpinners: 3, painted: 1,
+    assert.deepEqual(status, {colours: 1, rows: 3, local: 2, matched: 1, spinners: 4, rowSpinners: 3, painted: 1, accent: '', composers: [0, 0],
       sample: [['local:' + threadId(1), 'local', 'local'], ['local:' + threadId(2), 'local', 'local'], ['local:' + threadId(3), 'other-host', 'local']]});
     assert.equal(await colour(page, 'a-spin'), colours.mistral);
   },
@@ -254,6 +254,33 @@ const cases = {
     await page.locator('#side').evaluate(el => el.setAttribute('data-app-shell-tab-panel-controller', 'bottom'));
     await flush(page);
     assert.equal(await colour(page, 'side-glyph'), colours.kimi);
+    assert.equal(await colour(page, 'main-glyph'), colours.parent);
+  },
+  async retained_hidden_pages_cannot_supply_the_main_accent(page) {
+    // The app keeps the pages it has left mounted, hidden by a React
+    // Activity (display:none on the page's hosts) under a wrapper naming
+    // the page inactive (26.928). One opened earlier precedes the page on
+    // screen in DOM order, composer and all.
+    const retained = (id, active, model) => `<div id="${id}" class="contents" data-app-shell-active-page="${active}"><section${active ? '' : ' style="display:none !important"'}>${glyph(id + '-glyph')}${composer(id + '-model', model)}</section></div>`;
+    await mount(page, retained('first', false, 'GPT-6 Astra') + retained('second', true, 'Kimi for Coding'));
+    assert.equal(await colour(page, 'second-glyph'), colours.kimi);
+    const status = await page.evaluate(() => window.__providerHubAccent.sidebarStatus());
+    assert.deepEqual([status.accent, status.composers], ['#0073E6', [2, 1]]);
+    // Going back shows the retained page again: no node is added or removed.
+    await page.evaluate(() => {
+      for (const [id, active] of [['first', true], ['second', false]]) {
+        const wrapper = document.getElementById(id);
+        wrapper.setAttribute('data-app-shell-active-page', String(active));
+        if (active) { wrapper.firstElementChild.style.removeProperty('display'); }
+        else { wrapper.firstElementChild.style.setProperty('display', 'none', 'important'); }
+      }
+    });
+    await flush(page);
+    assert.equal(await colour(page, 'first-glyph'), colours.parent);
+  },
+  async retained_destinations_hidden_without_a_wrapper_cannot_supply_it_either(page) {
+    // A retained sidebar destination has no wrapper, only the hidden hosts.
+    await mount(page, `<section style="display:none !important">${composer('hidden-model', 'Qwen 3')}</section>` + main());
     assert.equal(await colour(page, 'main-glyph'), colours.parent);
   },
   async panel_mount_close_and_header_changes_follow_the_observer(page) {
