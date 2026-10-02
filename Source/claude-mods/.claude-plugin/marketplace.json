@@ -1,0 +1,12 @@
+{
+  "name": "provider-hub-local",
+  "owner": { "name": "Provider Hub" },
+  "metadata": { "description": "Local presentation mods for Provider Hub sessions." },
+  "plugins": [
+    {
+      "name": "provider-hub-accents",
+      "source": "./provider-hub-accents",
+      "description": "A subtle provider accent above the Claude Code composer."
+    }
+  ]
+}
