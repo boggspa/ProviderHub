@@ -3,10 +3,12 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from branding import resolve_presentation
+from bridge_core import ClaudeProfile, SLOTS
 from claude_accent import CATALOGUE_FILE, accent_catalogue, refresh_accents
-from hub_config import claude_catalogue_rows
+from hub_config import claude_catalogue_rows, defaults
 
 
 class ClaudeAccentTests(unittest.TestCase):
@@ -58,6 +60,37 @@ class ClaudeAccentTests(unittest.TestCase):
             target.symlink_to(other)
             self.assertFalse(refresh_accents(root, self.settings(), active=False))
             self.assertTrue(json.loads(other.read_text())["active"])
+
+    def test_profile_refreshes_opted_in_catalogue_and_clears_it_on_restore(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            root = home / 'hub'
+            root.mkdir()
+            target = root / CATALOGUE_FILE
+            target.write_text('{}')
+            profile = ClaudeProfile(root, home / 'support', home / 'claude')
+            settings = {**defaults(SLOTS, 'mistral-small-2603'), **self.settings()}
+            result = profile.activate(settings, 'private-token', require_closed=False)
+            self.assertEqual(result['claude_accents'], 'refreshed')
+            self.assertTrue(json.loads(target.read_text())['active'])
+            self.assertNotIn('private-token', target.read_text())
+            result = profile.restore(require_closed=False)
+            self.assertEqual(result['claude_accents'], 'inactive')
+            self.assertEqual(json.loads(target.read_text())['models'], {})
+            self.assertFalse(json.loads(target.read_text())['active'])
+
+    def test_accent_write_failure_does_not_block_profile_transaction(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            profile = ClaudeProfile(home / 'hub', home / 'support', home / 'claude')
+            settings = defaults(SLOTS, 'mistral-small-2603')
+            with patch('claude_accent.refresh_accents', side_effect=OSError('disk error')):
+                result = profile.activate(settings, 'private-token', require_closed=False)
+                self.assertTrue(result['active'])
+                self.assertTrue(result['claude_accents'].startswith('skipped:'))
+                result = profile.restore(require_closed=False)
+                self.assertTrue(result['restored'])
+                self.assertFalse(profile.journal.exists())
 
 
 if __name__ == '__main__':

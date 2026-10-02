@@ -1,0 +1,3 @@
+# Claude Code writes version-specific declarations for --plugin-dir previews.
+.claude-plugin/types/
+tsconfig.json

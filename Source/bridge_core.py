@@ -22,6 +22,7 @@ import uuid
 from model_names import friendly_model_name, label_catalog
 from catalogue import build_catalogue, read_observations, route_specs
 from cli_routes import cli_credential_mode, discover_via_cli
+from claude_accent import profile_accents
 from hub_config import (CLAUDE_TIER_MODELS, SLOTS, claude_picker_rows, claude_routes, cli_account_dir, connection_signature,
                         defaults as hub_defaults, normalize as normalize_hub_settings,
                         project_catalogue, provider_display_name, provider_presentations,
@@ -495,6 +496,9 @@ class ClaudeProfile:
             result["claude_code_settings"] = "written"
         elif code_note:
             result["claude_code_settings"] = "skipped: " + code_note
+        accent_status = profile_accents(self.root, settings, active=True)
+        if accent_status:
+            result["claude_accents"] = accent_status
         return result
 
     def restore_code_settings(self, data: dict, op: dict) -> bool:
@@ -583,7 +587,11 @@ class ClaudeProfile:
                 else:
                     atomic_json(path, data)
         self.journal.unlink()
-        return {"restored": True, "preserved_external_changes": len(skipped)}
+        result = {"restored": True, "preserved_external_changes": len(skipped)}
+        accent_status = profile_accents(self.root, None, active=False)
+        if accent_status:
+            result["claude_accents"] = accent_status
+        return result
 
 
 def inspect_state(root: Path) -> dict:

@@ -21,11 +21,19 @@ xcrun swiftc -swift-version 5 -parse-as-library -O -target arm64-apple-macosx14.
   -framework AppKit -framework SwiftUI -framework Security \
   "${SWIFT_SOURCES[@]}" \
   -o "$APP_DIR/Contents/MacOS/MistralBridge"
-for module in bridge_core protocol gateway model_names fast_models catalogue hub_config providers provider_registry provider_discovery provider_requests devin_agent qwen_provider minimax_provider openrouter_provider gemini_provider branding cerebras_replay catalogue_lifecycle responses_native responses_tools responses_bridge responses_compact codex_catalogue codex_profile codex_token codex_runtime codex_accent effort_map chat_tool_order rate_limit spawn_depth subagent_catalogue ollama_lifecycle cli_session cli_lifecycle codex_session_pool cli_routes cli_auth_probe cli_tool_call cli_host_mcp cli_host_bridge cli_live_session host_tools_mcp cli_structured_reply cli_images cli_image_history claude_cli_agent codex_cli_agent agy_cli_agent agy_context muse_cli_agent grok_cli_agent claude_context; do
+for module in bridge_core protocol gateway model_names fast_models catalogue hub_config providers provider_registry provider_discovery provider_requests devin_agent qwen_provider minimax_provider openrouter_provider gemini_provider branding cerebras_replay catalogue_lifecycle responses_native responses_tools responses_bridge responses_compact codex_catalogue codex_profile codex_token codex_runtime codex_accent claude_accent effort_map chat_tool_order rate_limit spawn_depth subagent_catalogue ollama_lifecycle cli_session cli_lifecycle codex_session_pool cli_routes cli_auth_probe cli_tool_call cli_host_mcp cli_host_bridge cli_live_session host_tools_mcp cli_structured_reply cli_images cli_image_history claude_cli_agent codex_cli_agent agy_cli_agent agy_context muse_cli_agent grok_cli_agent claude_context; do
   cp "$SOURCE_DIR/$module.py" "$APP_DIR/Contents/Resources/worker/"
 done
 cp "$SOURCE_DIR/provider_branding.json" "$APP_DIR/Contents/Resources/worker/"
 cp -R "$SOURCE_DIR/provider-logos" "$APP_DIR/Contents/Resources/worker/"
+# Copy only runtime assets; --plugin-dir previews generate local type stubs.
+CLAUDE_MODS_DIR="$APP_DIR/Contents/Resources/worker/claude-mods"
+for asset in .claude-plugin/marketplace.json \
+  provider-hub-accents/.claude-plugin/plugin.json \
+  provider-hub-accents/hooks/hooks.json provider-hub-accents/hooks/register.js; do
+  mkdir -p "$(dirname "$CLAUDE_MODS_DIR/$asset")"
+  cp "$SOURCE_DIR/claude-mods/$asset" "$CLAUDE_MODS_DIR/$asset"
+done
 cp -R "$SOURCE_DIR/vendor" "$APP_DIR/Contents/Resources/worker/"
 # Bytecode caches never ship: the worker writes its own cache into the hub's
 # state directory at run time, and a cache inside Resources would be sealed

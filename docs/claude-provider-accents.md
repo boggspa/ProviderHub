@@ -29,6 +29,41 @@ the last model as a fallback. An unknown model, another gateway, absent file,
 invalid JSON or inactive catalogue leaves native rendering intact. No colour
 state is shared between conversations.
 
+## Install and refresh
+
+Select the actual Hub app so its `BridgeStateName`, profile ID and port are
+used together. Installation is explicit; merely launching a newer Hub does
+not install or enable a plugin for anyone.
+
+```sh
+uv run --python 3.13 python Source/claude_accent.py install \
+  --app '/Applications/Provider Hub Preview.app'
+```
+
+This validates the plugin, keeps a local marketplace in the selected Hub's
+Application Support directory, installs through Claude's official CLI, and
+sets its `cataloguePath`. It can be repeated to update the same installation;
+it refuses to replace a marketplace with that name owned by another source.
+Increment the plugin manifest's version when changing installed hook code;
+Claude's cache and updater identify plugin releases by version.
+Claude owns its plugin settings and cache. An existing session needs
+`/reload-plugins`; new sessions load the installed plugin normally.
+
+Hub's profile activation refreshes an existing accent catalogue, and restore
+deactivates it and clears its model map. A presentation-data failure cannot
+block either profile operation. This integration takes effect when running a
+Hub build containing these changes. For a prototype on an older Hub build,
+refresh after changing its selected models or branding:
+
+```sh
+uv run --python 3.13 python Source/claude_accent.py refresh \
+  --app '/Applications/Provider Hub Preview.app'
+```
+
+To stop drawing, disable the plugin in Claude's plugin manager, or run
+`claude plugin disable provider-hub-accents@provider-hub-local`. The catalogue
+contains no secrets and can remain in place for a later re-enable.
+
 ## Validation
 
 ```sh
@@ -43,6 +78,10 @@ switches, context suffixes, preservation of other mods, survey ownership,
 different gateways, missing files and malformed/inactive catalogues. The
 Python tests check route identity, shared branding, opt-in refresh and the
 absence of credentials. Tree tests cannot verify the app's actual painting.
+
+On 2026-10-02 the installed 2.1.287 CLI drew `● K3` and updated it to
+`● Mistral Medium 3.5` after a model switch, without an inference request.
+Desktop's Plugins page showed the mod installed and enabled at 0.1.0.
 
 ## Other accents and runtime requirements
 
