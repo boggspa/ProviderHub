@@ -51,7 +51,9 @@ class FastModelTests(unittest.TestCase):
             rows = project_catalogue("codex", cached_inventory("codex", model), config)
             self.assertEqual(rows[0]["fast_mode"], model in OPENAI_FAST_MODELS)
             projected = project_codex(config, {"models": rows})["models"][0]
-            self.assertEqual(bool(projected["service_tiers"]), model in OPENAI_FAST_MODELS)
+            # Codex sends Fast as wire "priority" only when a row advertises that id.
+            self.assertEqual([tier["id"] for tier in projected["service_tiers"]],
+                             ["priority"] if model in OPENAI_FAST_MODELS else [])
 
     def test_discovery_and_old_cache_gate_claude_opus_fast_rows(self):
         listed = ["claude-opus-5-5", "claude-opus-5", "claude-opus-4-8",
@@ -75,10 +77,12 @@ class FastModelTests(unittest.TestCase):
                                   "claude-opus-5-5", spec)
         self.assertEqual(request["body"]["speed"], "fast")
         self.assertEqual(request["headers"]["anthropic-beta"], "fast-mode-2026-02-01")
-        via_codex = prepare_request("claude", None, "key", prompt(service_tier="fast"),
-                                    "claude-opus-5-5", spec)
-        self.assertEqual(via_codex["body"]["speed"], "fast")
-        self.assertNotIn("service_tier", via_codex["body"])
+        # The Codex app sends its Fast tier as "priority"; older rows sent "fast".
+        for tier in ("fast", "priority"):
+            via_codex = prepare_request("claude", None, "key", prompt(service_tier=tier),
+                                        "claude-opus-5-5", spec)
+            self.assertEqual(via_codex["body"]["speed"], "fast")
+            self.assertNotIn("service_tier", via_codex["body"])
         standard = prepare_request("claude", None, "key", prompt(speed="standard"),
                                    "claude-opus-5-5", spec)
         self.assertNotIn("speed", standard["body"])
@@ -89,9 +93,10 @@ class FastModelTests(unittest.TestCase):
                                 model, {"fast_mode": False, "context": 1_000_000})
 
     def test_openai_fast_reaches_service_tier_only_on_supported_model(self):
-        fast = prepare_request("codex", None, "key", prompt(service_tier="fast"),
-                               "gpt-6-sol", {"fast_mode": True})
-        self.assertEqual(fast["body"]["service_tier"], "fast")
+        for tier in ("fast", "priority"):
+            fast = prepare_request("codex", None, "key", prompt(service_tier=tier),
+                                   "gpt-6-sol", {"fast_mode": True})
+            self.assertEqual(fast["body"]["service_tier"], "fast")
         standard = prepare_request("codex", None, "key", prompt(service_tier="standard"),
                                    "gpt-6-sol", {"fast_mode": True})
         self.assertEqual(standard["body"]["service_tier"], "default")
@@ -141,9 +146,13 @@ class FastModelTests(unittest.TestCase):
         claude_standard = plan_turn("claude", "opus", {**message, "speed": "standard"},
                                     {"fast_mode": True}, wanted_output=100)["body"]
         self.assertIs(claude_standard["fast_mode"], False)
-        codex_fast = plan_turn("codex", "gpt-6-sol", {**message, "service_tier": "fast"},
-                               {"fast_mode": True}, wanted_output=100)["body"]
-        self.assertEqual(codex_fast["service_tier"], "fast")
+        for tier in ("fast", "priority"):
+            claude_fast = plan_turn("claude", "opus", {**message, "service_tier": tier},
+                                    {"fast_mode": True}, wanted_output=100)["body"]
+            self.assertIs(claude_fast["fast_mode"], True)
+            codex_fast = plan_turn("codex", "gpt-6-sol", {**message, "service_tier": tier},
+                                   {"fast_mode": True}, wanted_output=100)["body"]
+            self.assertEqual(codex_fast["service_tier"], "fast")
         with self.assertRaises(CliRouteError):
             plan_turn("claude", "claude-opus-4-7", {**message, "speed": "fast"},
                       {"fast_mode": False}, wanted_output=100)

@@ -35,6 +35,15 @@ They have no `service_tiers` Fast switch. This avoids offering a Standard
 position that cannot change the actual route.
 
 The Codex/ChatGPT catalogue receives `service_tiers` for switchable models.
+Their Fast entry uses the id `priority`, as OpenAI's own catalogue does: Codex
+(verified on codex-cli 0.159) turns a selected Fast into wire
+`service_tier: "priority"` and silently omits it unless the row advertises that
+exact id. Rows that advertised `fast` therefore showed a working toggle while
+every request ran at Standard. Each hub planner reads `priority` as Fast. The
+desktop app ignores the entry's description and always labels Fast "1.5x
+speed, increased usage"; OpenAI lists 2x for GPT-6.1 Sol and GPT-6 Astra.
+A toggle applies from the next message in the same thread. Ultrafast
+(`service_tier: "ultrafast"`, GPT-6 Astra) is not offered.
 Claude Desktop's `/v1/models` response carries `fast_mode` and fixed-route
 `speed_tier` metadata, while its subtitle remains context-only. The native
 client may ignore those extra fields. Both the API and CLI planners validate

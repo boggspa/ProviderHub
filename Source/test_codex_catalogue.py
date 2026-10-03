@@ -500,7 +500,7 @@ class EffortAndFastProjectionTests(unittest.TestCase):
             [entry["effort"] for entry in rows["muse/muse-spark-1.3"]["supported_reasoning_levels"]],
             ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"],
         )
-        self.assertEqual(rows["muse/muse-spark-1.3"]["service_tiers"][0]["id"], "fast")
+        self.assertEqual(rows["muse/muse-spark-1.3"]["service_tiers"][0]["id"], "priority")
         self.assertEqual(
             [entry["effort"] for entry in rows["ollama/thinker:latest"]["supported_reasoning_levels"]],
             ["none", "high", "ultra"],

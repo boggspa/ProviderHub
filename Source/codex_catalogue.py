@@ -170,7 +170,10 @@ def _service_tiers(provider_id, entry):
     if provider_id == "grok":
         return [{"id": "priority", "name": "Fast · xAI Priority",
                  "description": "Higher scheduling priority at xAI's premium token rates."}]
-    return [{"id": "fast", "name": "Fast",
+    # Codex maps a selected Fast to wire service_tier "priority" and omits it,
+    # silently, unless the row advertises that exact id (codex-cli 0.159).
+    # OpenAI's own rows use it; every hub planner reads it as Fast.
+    return [{"id": "priority", "name": "Fast",
              "description": "Same-model Fast processing advertised by this provider."}]
 
 
