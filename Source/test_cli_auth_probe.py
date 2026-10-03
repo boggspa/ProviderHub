@@ -25,7 +25,7 @@ CODEX_VERSION = "codex-cli 0.153.0"
 CLAUDE_VERSION = "2.1.276 (Claude Code)"
 MUSE_VERSION = "Muse Code 1.3.0 (1.3.0-R3401.1)"
 GROK_VERSION = "grok 1.0.34 (3736acbc8658) [stable]"
-AGY_VERSION = "1.2.7"
+AGY_VERSION = "1.2.16"
 CODEX_LOGIN_STATUS = "Logged in using ChatGPT"
 
 #: ``claude auth status`` answers with pretty-printed JSON. Placeholders stand
@@ -50,8 +50,8 @@ CLAUDE_AUTH_SIGNED_OUT = '{"loggedIn": false, "authMethod": "", "apiProvider": "
 AGY_MODELS_TABLE = (
     "gemini-3.8-flash-high\tGemini 3.8 Flash (High)\n"
     "gemini-3.1-pro-high\tGemini 3.1 Pro (High)\n"
-    "claude-sonnet-4-6\tClaude Sonnet 4.6 (Thinking)\n"
-    "claude-opus-4-6-thinking\tClaude Opus 4.6 (Thinking)\n"
+    "claude-opus-5-5-high\tClaude Opus 5.5 (High)\n"
+    "claude-sonnet-5-5-high\tClaude Sonnet 5.5 (High)\n"
     "gpt-oss-120b-medium\tGPT-OSS 120B (Medium)\n"
 )
 AGY_MODELS_STDOUT = "Fetching available models...\n" + AGY_MODELS_TABLE
@@ -117,7 +117,7 @@ class VersionNormalizationTests(unittest.TestCase):
         self.assertEqual(normalize_version(CLAUDE_VERSION), "2.1.276")
         self.assertEqual(normalize_version(MUSE_VERSION), "1.3.0")
         self.assertEqual(normalize_version(GROK_VERSION), "1.0.34")
-        self.assertEqual(normalize_version(AGY_VERSION), "1.2.7")
+        self.assertEqual(normalize_version(AGY_VERSION), "1.2.16")
 
     def test_the_first_version_wins_over_a_build_id_in_parentheses(self):
         # Muse prints both the release and the build; the release is the fact.
@@ -293,11 +293,11 @@ class AntigravityProbeTests(unittest.TestCase):
         probe = probe_provider("antigravity", capture=capture)
         self.assertEqual(probe["binary"], "agy")
         self.assertTrue(probe["installed"])
-        self.assertEqual(probe["version"], "1.2.7")
+        self.assertEqual(probe["version"], "1.2.16")
         self.assertEqual(probe["auth_state"], "unknown")
         self.assertEqual([model["id"] for model in probe["models"]],
-                         ["gemini-3.8-flash-high", "gemini-3.1-pro-high", "claude-sonnet-4-6",
-                          "claude-opus-4-6-thinking", "gpt-oss-120b-medium"])
+                         ["gemini-3.8-flash-high", "gemini-3.1-pro-high", "claude-opus-5-5-high",
+                          "claude-sonnet-5-5-high", "gpt-oss-120b-medium"])
         self.assertEqual(probe["models"][0],
                          {"id": "gemini-3.8-flash-high", "display_name": "Gemini 3.8 Flash (High)"})
 
@@ -319,14 +319,14 @@ class AntigravityProbeTests(unittest.TestCase):
                  "a line with no tab at all\n"
                  "\t\n"
                  "   \n"
-                 "claude-sonnet-4-6\tClaude Sonnet 4.6 (Thinking)\n"
+                 "claude-sonnet-5-5-high\tClaude Sonnet 5.5 (High)\n"
                  "trailing prose\n")
         capture = FakeCapture({"--version": (0, AGY_VERSION, ""),
                                "auth status": (2, "", "unexpected argument"),
                                "models": (0, noisy, "")})
         probe = probe_provider("antigravity", capture=capture)
         self.assertEqual([model["id"] for model in probe["models"]],
-                         ["gemini-3.8-flash-high", "claude-sonnet-4-6"])
+                         ["gemini-3.8-flash-high", "claude-sonnet-5-5-high"])
 
     def test_a_repeated_model_is_listed_once(self):
         capture = FakeCapture({"--version": (0, AGY_VERSION, ""),
@@ -604,7 +604,7 @@ class SummarizeTests(unittest.TestCase):
     def test_model_count_totals_every_provider(self):
         summary = summarize(self.healthy(
             antigravity=self.row("antigravity", auth_state="unknown",
-                                 models=("gemini-3.8-flash-high", "claude-sonnet-4-6")),
+                                 models=("gemini-3.8-flash-high", "claude-sonnet-5-5-high")),
             grok=self.row("grok", models=("grok-4.6", "grok-4.5"))))
         self.assertEqual(summary["model_count"], 4)
 

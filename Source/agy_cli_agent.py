@@ -116,7 +116,7 @@ READ_ONLY_FLAGS = (
 # ---------------------------------------------------------------------------
 
 # agy --effort accepts these three on adjustable models (agy 1.2.7).
-# Claude's fixed-thinking rows reject the flag entirely.
+# Claude 5.5 rows accept it too (agy 1.2.16); the 4.6 rows rejected it.
 AGY_EFFORTS = ["low", "medium", "high"]
 AGY_EFFORT_ALIASES = {
     "none": "low",
@@ -138,7 +138,7 @@ _EFFORT_SUFFIXES = ("low", "medium", "high")
 _EFFORT_RANK = {"low": 0, "medium": 1, "high": 2}
 
 # ---------------------------------------------------------------------------
-# Model family collapse: 14 agy rows -> 7 model families
+# Model family collapse: 18 agy rows -> 7 model families
 # ---------------------------------------------------------------------------
 
 # agy row id -> (family_id, canonical_display_name, provider_effort_rung)
@@ -161,21 +161,23 @@ _AGY_ROW_MAP: dict[str, tuple[str, str, str]] = {
     # Gemini 3.1 Pro: 2 rungs (low, high) - note: no "medium" row exists
     "gemini-3.1-pro-low":  ("gemini-3.1-pro", "Gemini 3.1 Pro", "low"),
     "gemini-3.1-pro-high": ("gemini-3.1-pro", "Gemini 3.1 Pro", "high"),
-    # Claude Sonnet 4.6: 1 rung (thinking)
-    "claude-sonnet-4-6":     ("claude-sonnet-4.6", "Claude Sonnet 4.6", "thinking"),
-    # Claude Opus 4.6: 1 rung
-    "claude-opus-4-6-thinking": ("claude-opus-4.6", "Claude Opus 4.6", "thinking"),
+    # Claude Opus 5.5: 3 rungs (agy 1.2.16 replaced the Opus 4.6 thinking row)
+    "claude-opus-5-5-low":    ("claude-opus-5.5", "Claude Opus 5.5", "low"),
+    "claude-opus-5-5-medium": ("claude-opus-5.5", "Claude Opus 5.5", "medium"),
+    "claude-opus-5-5-high":   ("claude-opus-5.5", "Claude Opus 5.5", "high"),
+    # Claude Sonnet 5.5: 3 rungs (replaced the Sonnet 4.6 thinking row)
+    "claude-sonnet-5-5-low":    ("claude-sonnet-5.5", "Claude Sonnet 5.5", "low"),
+    "claude-sonnet-5-5-medium": ("claude-sonnet-5.5", "Claude Sonnet 5.5", "medium"),
+    "claude-sonnet-5-5-high":   ("claude-sonnet-5.5", "Claude Sonnet 5.5", "high"),
     # GPT-OSS: 1 rung (medium)
     "gpt-oss-120b-medium":   ("gpt-oss-120b", "GPT-OSS 120B", "medium"),
 }
 
-# Map native rung labels to canonical catalogue defaults. "thinking" is a
-# fixed mode, not a value that can be passed via --effort.
+# Map native rung labels to canonical catalogue defaults.
 _AGY_RUNG_TO_CANONICAL: dict[str, str] = {
     "low": "low",
     "medium": "medium",
     "high": "high",
-    "thinking": "high",  # Claude families: thinking -> high
 }
 
 # Reverse: canonical rank -> agy-native rung for each family.
@@ -196,14 +198,12 @@ _FAMILY_CANONICAL_TO_RUNG: dict[str, dict[str, str]] = {
                         "medium": "high",  # medium -> high (nearest above)
                         "high": "high",
                         "xhigh": "high", "max": "high", "ultra": "high"},
-    "claude-sonnet-4.6": {"none": "thinking", "minimal": "thinking",
-                           "low": "thinking", "medium": "thinking",
-                           "high": "thinking", "xhigh": "thinking",
-                           "max": "thinking", "ultra": "thinking"},
-    "claude-opus-4.6": {"none": "thinking", "minimal": "thinking",
-                         "low": "thinking", "medium": "thinking",
-                         "high": "thinking", "xhigh": "thinking",
-                         "max": "thinking", "ultra": "thinking"},
+    "claude-opus-5.5": {"none": "low", "minimal": "low", "low": "low",
+                        "medium": "medium", "high": "high",
+                        "xhigh": "high", "max": "high", "ultra": "high"},
+    "claude-sonnet-5.5": {"none": "low", "minimal": "low", "low": "low",
+                          "medium": "medium", "high": "high",
+                          "xhigh": "high", "max": "high", "ultra": "high"},
     "gpt-oss-120b": {"none": "medium", "minimal": "medium", "low": "medium",
                       "medium": "medium", "high": "medium",
                       "xhigh": "medium", "max": "medium", "ultra": "medium"},
@@ -215,8 +215,8 @@ _FAMILY_EFFORT_MODES: dict[str, list[str]] = {
     "gemini-3.7-flash": ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"],
     "gemini-3.6-flash": ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"],
     "gemini-3.1-pro": ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"],
-    "claude-sonnet-4.6": ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"],
-    "claude-opus-4.6": ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"],
+    "claude-opus-5.5": ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"],
+    "claude-sonnet-5.5": ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"],
     "gpt-oss-120b": ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"],
 }
 
@@ -226,8 +226,8 @@ _FAMILY_DEFAULT_EFFORT: dict[str, str] = {
     "gemini-3.7-flash": "medium",
     "gemini-3.6-flash": "medium",
     "gemini-3.1-pro": "high",
-    "claude-sonnet-4.6": "high",
-    "claude-opus-4.6": "high",
+    "claude-opus-5.5": "high",
+    "claude-sonnet-5.5": "high",
     "gpt-oss-120b": "medium",
 }
 
@@ -237,13 +237,13 @@ _FAMILY_PROVIDER_EFFORT_MODES: dict[str, list[str]] = {
     "gemini-3.7-flash": ["low", "medium", "high"],
     "gemini-3.6-flash": ["low", "medium", "high"],
     "gemini-3.1-pro": ["low", "high"],
-    "claude-sonnet-4.6": ["thinking"],
-    "claude-opus-4.6": ["thinking"],
+    "claude-opus-5.5": ["low", "medium", "high"],
+    "claude-sonnet-5.5": ["low", "medium", "high"],
     "gpt-oss-120b": ["medium"],
 }
 
 # A single native row already selects all the reasoning the provider exposes.
-# Claude rejects --effort; GPT-OSS only has Medium on this AntiGravity route.
+# GPT-OSS only has Medium on this AntiGravity route.
 # Keep the full UI ladder but carry its preference in the prompt instead.
 _FIXED_EFFORT_ROWS = frozenset(
     row_id for row_id, (family, _, _) in _AGY_ROW_MAP.items()
@@ -498,7 +498,7 @@ GEMINI_CONTEXT = 1_000_000
 
 
 def _collapse_models(raw_models: list[dict]) -> list[dict]:
-    """Collapse 14 agy row ids into 7 model families for the hub picker.
+    """Collapse 18 agy row ids into 7 model families for the hub picker.
 
     Each family card carries:
     - id: the family id (e.g., "gemini-3.8-flash")

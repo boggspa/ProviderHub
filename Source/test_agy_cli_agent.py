@@ -12,8 +12,8 @@ from unittest import mock
 class TestAgyCliAgent(unittest.TestCase):
     """Tests for agy_cli_agent.py - model collapse and effort routing."""
 
-    def test_parse_models_raw_14_rows(self):
-        """Test that _parse_models correctly parses the 14 raw agy model rows."""
+    def test_parse_models_raw_18_rows(self):
+        """Test that _parse_models correctly parses the 18 raw agy model rows."""
         from agy_cli_agent import _parse_models
         
         raw_output = """Fetching available models...
@@ -28,15 +28,19 @@ gemini-3.6-flash-medium	Gemini 3.6 Flash (Medium)
 gemini-3.6-flash-low	Gemini 3.6 Flash (Low)
 gemini-3.1-pro-high	Gemini 3.1 Pro (High)
 gemini-3.1-pro-low	Gemini 3.1 Pro (Low)
-claude-sonnet-4-6	Claude Sonnet 4.6 (Thinking)
-claude-opus-4-6-thinking	Claude Opus 4.6 (Thinking)
+claude-opus-5-5-low	Claude Opus 5.5 (Low)
+claude-opus-5-5-medium	Claude Opus 5.5 (Medium)
+claude-opus-5-5-high	Claude Opus 5.5 (High)
+claude-sonnet-5-5-low	Claude Sonnet 5.5 (Low)
+claude-sonnet-5-5-medium	Claude Sonnet 5.5 (Medium)
+claude-sonnet-5-5-high	Claude Sonnet 5.5 (High)
 gpt-oss-120b-medium	GPT-OSS 120B (Medium)
 """
         
         models = _parse_models(raw_output)
         
-        # Should parse all 14 rows
-        self.assertEqual(len(models), 14)
+        # Should parse all 18 rows
+        self.assertEqual(len(models), 18)
         
         # Check all expected ids are present
         expected_ids = {
@@ -44,14 +48,15 @@ gpt-oss-120b-medium	GPT-OSS 120B (Medium)
             "gemini-3.7-flash-high", "gemini-3.7-flash-medium", "gemini-3.7-flash-low",
             "gemini-3.6-flash-high", "gemini-3.6-flash-medium", "gemini-3.6-flash-low",
             "gemini-3.1-pro-high", "gemini-3.1-pro-low",
-            "claude-sonnet-4-6", "claude-opus-4-6-thinking",
+            "claude-opus-5-5-low", "claude-opus-5-5-medium", "claude-opus-5-5-high",
+            "claude-sonnet-5-5-low", "claude-sonnet-5-5-medium", "claude-sonnet-5-5-high",
             "gpt-oss-120b-medium"
         }
         actual_ids = {m["id"] for m in models}
         self.assertEqual(actual_ids, expected_ids)
 
-    def test_collapse_models_14_to_7(self):
-        """Test that _collapse_models collapses 14 rows into 7 families."""
+    def test_collapse_models_18_to_7(self):
+        """Test that _collapse_models collapses 18 rows into 7 families."""
         from agy_cli_agent import _parse_models, _collapse_models
         
         raw_output = """Fetching available models...
@@ -66,8 +71,12 @@ gemini-3.6-flash-medium	Gemini 3.6 Flash (Medium)
 gemini-3.6-flash-low	Gemini 3.6 Flash (Low)
 gemini-3.1-pro-high	Gemini 3.1 Pro (High)
 gemini-3.1-pro-low	Gemini 3.1 Pro (Low)
-claude-sonnet-4-6	Claude Sonnet 4.6 (Thinking)
-claude-opus-4-6-thinking	Claude Opus 4.6 (Thinking)
+claude-opus-5-5-low	Claude Opus 5.5 (Low)
+claude-opus-5-5-medium	Claude Opus 5.5 (Medium)
+claude-opus-5-5-high	Claude Opus 5.5 (High)
+claude-sonnet-5-5-low	Claude Sonnet 5.5 (Low)
+claude-sonnet-5-5-medium	Claude Sonnet 5.5 (Medium)
+claude-sonnet-5-5-high	Claude Sonnet 5.5 (High)
 gpt-oss-120b-medium	GPT-OSS 120B (Medium)
 """
         
@@ -80,7 +89,7 @@ gpt-oss-120b-medium	GPT-OSS 120B (Medium)
         # Check family ids
         expected_families = {
             "gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash",
-            "gemini-3.1-pro", "claude-sonnet-4.6", "claude-opus-4.6", "gpt-oss-120b"
+            "gemini-3.1-pro", "claude-sonnet-5.5", "claude-opus-5.5", "gpt-oss-120b"
         }
         actual_families = {c["id"] for c in collapsed}
         self.assertEqual(actual_families, expected_families)
@@ -97,7 +106,7 @@ gpt-oss-120b-medium	GPT-OSS 120B (Medium)
 gemini-3.8-flash-high	Gemini 3.8 Flash (High)
 gemini-3.8-flash-medium	Gemini 3.8 Flash (Medium)
 gemini-3.8-flash-low	Gemini 3.8 Flash (Low)
-claude-sonnet-4-6	Claude Sonnet 4.6 (Thinking)
+claude-sonnet-5-5-high	Claude Sonnet 5.5 (High)
 """
         
         raw_models = _parse_models(raw_output)
@@ -161,21 +170,24 @@ gemini-3.1-pro-low	Gemini 3.1 Pro (Low)
         self.assertNotIn("medium", g31["provider_effort_modes"])
 
     def test_claude_sonnet_card(self):
-        """Test claude-sonnet-4.6 has thinking rung mapped to high."""
+        """Test claude-sonnet-5.5 folds its three native rungs into one family."""
         from agy_cli_agent import _parse_models, _collapse_models
         
-        raw_output = """claude-sonnet-4-6	Claude Sonnet 4.6 (Thinking)
+        raw_output = """claude-sonnet-5-5-low	Claude Sonnet 5.5 (Low)
+claude-sonnet-5-5-medium	Claude Sonnet 5.5 (Medium)
+claude-sonnet-5-5-high	Claude Sonnet 5.5 (High)
 """
         
         raw_models = _parse_models(raw_output)
         collapsed = _collapse_models(raw_models)
         
-        sonnet = [c for c in collapsed if c["id"] == "claude-sonnet-4.6"][0]
+        sonnet = [c for c in collapsed if c["id"] == "claude-sonnet-5.5"][0]
         
-        self.assertEqual(sonnet["display_name"], "Claude Sonnet 4.6")
+        self.assertEqual(sonnet["display_name"], "Claude Sonnet 5.5")
         self.assertEqual(sonnet["default_effort"], "high")
-        self.assertEqual(sonnet["provider_effort_modes"], ["thinking"])
-        self.assertIn("claude-sonnet-4-6", sonnet["aliases"])
+        self.assertEqual(sonnet["provider_effort_modes"], ["low", "medium", "high"])
+        self.assertEqual(sonnet["aliases"], ["claude-sonnet-5-5-low", "claude-sonnet-5-5-medium",
+                                             "claude-sonnet-5-5-high"])
 
     def test_gpt_oss_card(self):
         """Test gpt-oss-120b has medium rung."""
@@ -221,9 +233,9 @@ gemini-3.1-pro-low	Gemini 3.1 Pro (Low)
         result = _resolve_native_row("gemini-3.1-pro", None)
         self.assertEqual(result, "gemini-3.1-pro-high")
         
-        # claude-sonnet-4.6 with no effort -> default is high, maps to thinking
-        result = _resolve_native_row("claude-sonnet-4.6", None)
-        self.assertEqual(result, "claude-sonnet-4-6")
+        # claude-sonnet-5.5 with no effort -> default is high
+        result = _resolve_native_row("claude-sonnet-5.5", None)
+        self.assertEqual(result, "claude-sonnet-5-5-high")
 
     def test_resolve_native_row_above_range(self):
         """Test _resolve_native_row caps above-range efforts."""
@@ -254,8 +266,8 @@ gemini-3.1-pro-low	Gemini 3.1 Pro (Low)
         result = _resolve_native_row("gemini-3.8-flash-high", "medium")
         self.assertEqual(result, "gemini-3.8-flash-high")
         
-        result = _resolve_native_row("claude-sonnet-4-6", "low")
-        self.assertEqual(result, "claude-sonnet-4-6")
+        result = _resolve_native_row("claude-sonnet-5-5-low", "high")
+        self.assertEqual(result, "claude-sonnet-5-5-low")
 
     def test_validate_model_family_id(self):
         """Test _validate_model resolves family ids to default native rows."""
@@ -268,8 +280,8 @@ gemini-3.1-pro-low	Gemini 3.1 Pro (Low)
         result = _validate_model("gemini-3.1-pro")
         self.assertEqual(result, "gemini-3.1-pro-high")
         
-        result = _validate_model("claude-sonnet-4.6")
-        self.assertEqual(result, "claude-sonnet-4-6")
+        result = _validate_model("claude-sonnet-5.5")
+        self.assertEqual(result, "claude-sonnet-5-5-high")
 
     def test_validate_model_native_id(self):
         """Test _validate_model passes through native row ids."""
@@ -278,8 +290,8 @@ gemini-3.1-pro-low	Gemini 3.1 Pro (Low)
         result = _validate_model("gemini-3.8-flash-high")
         self.assertEqual(result, "gemini-3.8-flash-high")
         
-        result = _validate_model("claude-opus-4-6-thinking")
-        self.assertEqual(result, "claude-opus-4-6-thinking")
+        result = _validate_model("claude-opus-5-5-medium")
+        self.assertEqual(result, "claude-opus-5-5-medium")
 
     def test_validate_effort(self):
         """Test _validate_effort maps canonical ranks to agy-native rungs."""
@@ -320,7 +332,10 @@ gemini-3.1-pro-low	Gemini 3.1 Pro (Low)
         for model, effort, row, rung in [
                 ("gemini-3.1-pro", "low", "gemini-3.1-pro-low", "low"),
                 ("gemini-3.1-pro", "medium", "gemini-3.1-pro-high", "high"),
-                ("gemini-3.8-flash-high", "low", "gemini-3.8-flash-high", "high")]:
+                ("gemini-3.8-flash-high", "low", "gemini-3.8-flash-high", "high"),
+                ("claude-opus-5.5", "ultra", "claude-opus-5-5-high", "high"),
+                ("claude-sonnet-5.5", "minimal", "claude-sonnet-5-5-low", "low"),
+                ("claude-sonnet-5-5-medium", "max", "claude-sonnet-5-5-medium", "medium")]:
             argv = build_argv(model, effort=effort)
             self.assertEqual(argv[argv.index("--model") + 1], row)
             self.assertEqual(argv[argv.index("--effort") + 1], rung)
@@ -329,9 +344,7 @@ gemini-3.1-pro-low	Gemini 3.1 Pro (Low)
         from agy_cli_agent import build_argv
         from effort_map import EFFORT_ORDER
 
-        for family, row in (("claude-opus-4.6", "claude-opus-4-6-thinking"),
-                            ("claude-sonnet-4.6", "claude-sonnet-4-6"),
-                            ("gpt-oss-120b", "gpt-oss-120b-medium")):
+        for family, row in (("gpt-oss-120b", "gpt-oss-120b-medium"),):
             for model in (family, row):
                 for effort in (*EFFORT_ORDER, None):
                     with self.subTest(model=model, effort=effort):
@@ -346,8 +359,8 @@ gemini-3.1-pro-low	Gemini 3.1 Pro (Low)
         from effort_map import EFFORT_ORDER
 
         rows = _collapse_models(_parse_models(
-            "claude-opus-4-6-thinking\tClaude Opus 4.6 (Thinking)\n"
-            "claude-sonnet-4-6\tClaude Sonnet 4.6 (Thinking)\n"
+            "claude-opus-5-5-high\tClaude Opus 5.5 (High)\n"
+            "claude-sonnet-5-5-high\tClaude Sonnet 5.5 (High)\n"
             "gpt-oss-120b-medium\tGPT-OSS 120B (Medium)\n"))
         self.assertEqual(len(rows), 3)
         for row in rows:
@@ -370,7 +383,7 @@ gemini-3.8-flash-medium	Gemini 3.8 Flash (Medium)
 gemini-3.8-flash-low	Gemini 3.8 Flash (Low)
 gemini-3.1-pro-high	Gemini 3.1 Pro (High)
 gemini-3.1-pro-low	Gemini 3.1 Pro (Low)
-claude-sonnet-4-6	Claude Sonnet 4.6 (Thinking)
+claude-sonnet-5-5-high	Claude Sonnet 5.5 (High)
 gpt-oss-120b-medium	GPT-OSS 120B (Medium)
 """
                 stderr = ""

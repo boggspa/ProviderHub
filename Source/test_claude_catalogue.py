@@ -128,17 +128,17 @@ class ClaudeCatalogueTests(unittest.TestCase):
 
     def test_antigravity_keeps_its_metadata_and_identifies_its_transport(self):
         inventory = {"provider_id": "antigravity", "source": "cli", "models": [
-            {"id": "claude-opus-4.6", "display_name": "Claude Opus 4.6", "tools": True,
+            {"id": "claude-opus-5.5", "display_name": "Claude Opus 5.5", "tools": True,
              "context": 200000, "reasoning": True, "effort_modes": ["high"]}]}
         rows = project_catalogue("antigravity", inventory, self.config)
         self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0]["display_name"], "Claude Opus 4.6")
-        self.assertEqual(rows[0]["model_id"], "claude-opus-4.6")
+        self.assertEqual(rows[0]["display_name"], "Claude Opus 5.5")
+        self.assertEqual(rows[0]["model_id"], "claude-opus-5.5")
         self.config["claude_catalogue"] = [{"route": rows[0]["id"], "tier": "opus", "tier_default": True}]
         self.config["_model_specs"] = route_specs({"models": rows})
-        self.assertEqual(model_catalog(self.config)["data"][0]["display_name"], "Claude Opus 4.6 · AntiGravity")
+        self.assertEqual(model_catalog(self.config)["data"][0]["display_name"], "Claude Opus 5.5 · AntiGravity")
         self.assertEqual(project_codex(self.config, {"models": rows})["models"][0]["display_name"],
-                         "Claude Opus 4.6 · AntiGravity")
+                         "Claude Opus 5.5 · AntiGravity")
 
 
 if __name__ == "__main__":

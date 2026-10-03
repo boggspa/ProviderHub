@@ -125,13 +125,13 @@ class CliRoutesTest(unittest.TestCase):
         self.assertEqual(result["effective_context_window_percent"], 100)
 
     def test_hub_row_passes_through_hub_shaped_family_cards(self):
-        card = {"id": "claude-sonnet-4.6", "display_name": "Claude Sonnet 4.6",
+        card = {"id": "claude-sonnet-5.5", "display_name": "Claude Sonnet 5.5",
                 "reasoning": True, "effort_modes": ["high"], "default_effort": "high",
-                "provider_effort_modes": ["thinking"], "aliases": ["claude-sonnet-4-6-thinking"]}
+                "provider_effort_modes": ["high"], "aliases": ["claude-sonnet-5-5-high"]}
         result = cli_routes._hub_row("antigravity", card)
         self.assertEqual(result["effort_modes"], ["high"])
         self.assertEqual(result["default_effort"], "high")
-        self.assertEqual(result["provider_effort_modes"], ["thinking"])
+        self.assertEqual(result["provider_effort_modes"], ["high"])
         self.assertTrue(result["reasoning"])
 
     def test_seed_rows_apply_verified_effort_ladders(self):

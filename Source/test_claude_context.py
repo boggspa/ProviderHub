@@ -207,7 +207,7 @@ model_context_window = 800_000
 
     def test_other_models_and_codex_api_routes_keep_their_metadata(self):
         self.configure("model_context_window = 1_000_000\n")
-        for provider, model in (("antigravity", "claude-opus-4.6"),
+        for provider, model in (("antigravity", "claude-opus-5.5"),
                                 ("antigravity", "gpt-oss-120b"),
                                 ("antigravity", "gemini-future"),
                                 ("gemini", "gemini-3.8-flash")):
