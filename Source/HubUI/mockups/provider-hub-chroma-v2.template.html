@@ -1,0 +1,458 @@
+<meta charset="utf-8">
+<title>Provider Hub Chroma</title>
+<style>
+/* Layout: a taller mac window (sidebar rail + one task pane) on a chroma-washed stage. Guided = one job per
+   step; Expert = same data, denser. Curation uses TaskWraith's combined picker geometry inline: provider tab
+   rail | model list | tier-ladder sidecar. */
+:root{
+  color-scheme:dark;
+  --stage:#121216; --surface-1:#1c1c20; --surface-2:#24242a; --surface-3:#2e2e36;
+  --border:rgba(255,255,255,.06); --border-strong:rgba(255,255,255,.12);
+  --fg:#ececf1; --fg-2:#a3a3ad; --fg-3:#6f6f7a;
+  --chroma-1:#5a8cff; --chroma-2:#bf7cff; --chroma-3:#41c7e5;
+  --brand:#ff6e2e; --ink:#fff; --ok:#3ecf8e; --warn:#f5b642; --bad:#ff5d5d;
+  --glass:rgba(22,22,22,.65); --sheen:rgba(196,200,208,.14); --logo-bg:rgba(255,255,255,.06);
+  --font:-apple-system,"SF Pro Text",system-ui,"Helvetica Neue",sans-serif; --mono:"SF Mono",ui-monospace,Menlo,monospace;
+  --r-sm:7px; --r-md:11px; --r-lg:16px;
+}
+@media (prefers-color-scheme: light){ :root:not([data-theme="dark"]){
+  color-scheme:light; --stage:#e9e9ee; --surface-1:#f7f7fa; --surface-2:#ffffff; --surface-3:#ededf2;
+  --border:rgba(0,0,0,.08); --border-strong:rgba(0,0,0,.16); --fg:#17171c; --fg-2:#5a5a66; --fg-3:#8a8a96;
+  --glass:rgba(255,255,255,.7); --sheen:rgba(255,255,255,.6); --logo-bg:rgba(0,0,0,.05)}}
+:root[data-theme="light"]{
+  color-scheme:light; --stage:#e9e9ee; --surface-1:#f7f7fa; --surface-2:#ffffff; --surface-3:#ededf2;
+  --border:rgba(0,0,0,.08); --border-strong:rgba(0,0,0,.16); --fg:#17171c; --fg-2:#5a5a66; --fg-3:#8a8a96;
+  --glass:rgba(255,255,255,.7); --sheen:rgba(255,255,255,.6); --logo-bg:rgba(0,0,0,.05)}
+.logo-light{display:none}.logo-dark{display:block}
+@media (prefers-color-scheme: light){ :root:not([data-theme="dark"]) .logo-light{display:block} :root:not([data-theme="dark"]) .logo-dark{display:none}}
+:root[data-theme="light"] .logo-light{display:block} :root[data-theme="light"] .logo-dark{display:none}
+*{box-sizing:border-box}
+body{margin:0;background:var(--stage);color:var(--fg);font:13px/1.45 var(--font);padding-block:28px;padding-inline:16px;min-height:100%;
+  background-image:radial-gradient(ellipse at 13% -8%,color-mix(in srgb,var(--chroma-1) 22%,transparent),transparent 42%),
+  radial-gradient(ellipse at 92% 6%,color-mix(in srgb,var(--chroma-2) 18%,transparent),transparent 44%),
+  linear-gradient(135deg,color-mix(in srgb,var(--chroma-3) 10%,transparent),transparent 58%);background-attachment:fixed}
+h1,h2,h3{margin:0;text-wrap:balance} button{font:inherit;color:inherit;cursor:pointer} input[type=search],input[type=password]{font:inherit}
+.meta{max-width:1000px;margin:0 auto 18px;display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+.meta h1{font-size:15px;font-weight:600}.meta p{margin:0;color:var(--fg-2);flex:1 1 320px;min-width:0}
+.seg{display:inline-flex;background:var(--surface-2);border:1px solid var(--border);border-radius:999px;padding:3px;gap:2px}
+.seg button{border:0;background:transparent;border-radius:999px;padding:4px 12px;color:var(--fg-2);font-weight:500}
+.seg button[aria-pressed="true"]{background:var(--surface-3);color:var(--fg);box-shadow:inset 0 0 0 1px var(--border-strong)}
+.sw{display:inline-flex;align-items:center;gap:8px;color:var(--fg-2);font-weight:500}
+.tg{appearance:none;width:30px;height:18px;border-radius:999px;background:var(--surface-3);border:1px solid var(--border-strong);position:relative;margin:0;cursor:pointer;flex:none}
+.tg::after{content:"";position:absolute;top:2px;left:2px;width:12px;height:12px;border-radius:50%;background:var(--fg-2);transition:.15s}
+.tg:checked{background:var(--acc,var(--chroma-1));border-color:transparent}.tg:checked::after{left:14px;background:#fff}
+
+/* logos */
+.logo{width:var(--s,28px);height:var(--s,28px);border-radius:7px;background:var(--logo-bg);display:grid;place-items:center;overflow:hidden;flex:none;position:relative}
+.logo img{width:72%;height:72%;object-fit:contain;display:block}
+.logo.wide img{height:60%;width:auto;max-width:none;object-fit:cover;object-position:left center}
+.logo.wide{justify-items:start}.logo.wide img{margin-left:14%}
+.logo .code{font:700 calc(var(--s,28px)*.33)/1 var(--font);color:var(--acc);letter-spacing:.02em}
+.logo.tpl img{filter:brightness(0) invert(1);opacity:.85}
+@media (prefers-color-scheme: light){:root:not([data-theme="dark"]) .logo.tpl img{filter:none;opacity:.8}} :root[data-theme="light"] .logo.tpl img{filter:none;opacity:.8}
+
+/* window */
+.win{max-width:1000px;margin:0 auto;background:var(--surface-1);border:1px solid var(--border-strong);border-radius:var(--r-lg);
+  box-shadow:0 30px 80px rgba(0,0,0,.45),0 0 0 1px rgba(0,0,0,.3);overflow:hidden;display:grid;grid-template-columns:200px minmax(0,1fr);min-height:680px}
+.rail{background:var(--glass);backdrop-filter:blur(22px) saturate(0%);border-right:1px solid var(--border);padding:12px 10px 14px;display:flex;flex-direction:column;gap:6px;position:relative}
+.rail::before{content:"";position:absolute;inset:0 0 auto;height:1px;background:linear-gradient(90deg,transparent,var(--sheen),transparent)}
+.lights{display:flex;gap:7px;padding:2px 4px 10px}.lights i{width:12px;height:12px;border-radius:50%}
+.lights i:nth-child(1){background:#ff5f57}.lights i:nth-child(2){background:#febc2e}.lights i:nth-child(3){background:#28c840}
+.rail .app{display:flex;align-items:center;gap:8px;padding:4px 6px 12px;font-weight:600}
+.mark{width:18px;height:18px;border-radius:5px;background:linear-gradient(135deg,var(--chroma-1),var(--chroma-2));position:relative;flex:none}
+.mark::after{content:"";position:absolute;inset:5px;border-radius:2px;background:var(--surface-1);opacity:.9}
+.step{display:grid;grid-template-columns:22px 1fr auto;align-items:center;gap:8px;border:0;background:transparent;text-align:left;padding:7px 8px;border-radius:var(--r-sm);color:var(--fg-2);width:100%}
+.step:hover{background:color-mix(in srgb,var(--fg) 5%,transparent)}.step[aria-current="step"]{background:color-mix(in srgb,var(--fg) 9%,transparent);color:var(--fg)}
+.step .n{width:20px;height:20px;border-radius:50%;border:1.5px solid var(--border-strong);display:grid;place-items:center;font-size:11px;font-weight:600;color:var(--fg-3)}
+.step.done .n{border-color:var(--ok);background:color-mix(in srgb,var(--ok) 22%,transparent);color:var(--ok)}
+.step[aria-current="step"] .n{border-color:var(--chroma-1);color:var(--chroma-1);box-shadow:0 0 0 3px color-mix(in srgb,var(--chroma-1) 25%,transparent)}
+.step .lbl{font-weight:500}.step small{display:block;color:var(--fg-3);font-weight:400;font-size:11px}
+.step .pill{font-size:10px;padding:1px 6px;border-radius:999px;background:var(--surface-3);color:var(--fg-2);font-variant-numeric:tabular-nums}
+.step[hidden]{display:none}.rail .spacer{flex:1}
+.gw{border-top:1px solid var(--border);padding-top:10px;display:grid;gap:6px;font-size:11px;color:var(--fg-2)}.gw .row{display:flex;align-items:center;gap:7px}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--ok);box-shadow:0 0 0 3px color-mix(in srgb,var(--ok) 22%,transparent);flex:none}.dot.off{background:var(--fg-3);box-shadow:none}
+.gw code{font:11px var(--mono);color:var(--fg-3)}
+.pane{padding:22px 24px 20px;display:flex;flex-direction:column;gap:16px;min-width:0}.pane[hidden]{display:none}
+.head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;flex-wrap:wrap}
+.head h2{font-size:19px;font-weight:600;letter-spacing:-.01em}.head p{margin:3px 0 0;color:var(--fg-2);max-width:60ch}
+.eyebrow{font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--fg-3);font-weight:600}
+.btn{border:1px solid var(--border-strong);background:var(--surface-2);border-radius:var(--r-sm);padding:6px 12px;font-weight:500;display:inline-flex;align-items:center;gap:6px}
+.btn:hover{background:var(--surface-3)}.btn.primary{background:var(--brand);border-color:transparent;color:var(--ink);box-shadow:0 1px 0 rgba(255,255,255,.15) inset,0 6px 18px color-mix(in srgb,var(--brand) 35%,transparent)}
+.btn.primary:hover{filter:brightness(1.06)}.btn.ghost{background:transparent;border-color:transparent;color:var(--fg-2)}.btn.big{padding:9px 16px;font-size:14px;font-weight:600}
+.btn.sm{padding:3px 9px;font-size:11.5px}
+:is(.btn,.step,.tile,.choice,.ptab,.mrow,.ladder-track):focus-visible{outline:2px solid var(--chroma-1);outline-offset:2px}
+.foot{margin-top:auto;display:flex;justify-content:space-between;align-items:center;gap:10px;border-top:1px solid var(--border);padding-top:14px;flex-wrap:wrap}.foot .hint{color:var(--fg-3);font-size:12px;min-width:0}
+.sect{display:grid;gap:8px}.sect .sh{display:flex;align-items:baseline;justify-content:space-between;gap:10px}.sect .sh span{color:var(--fg-3);font-size:11.5px}
+
+/* model choices */
+.choices{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px}
+.choice{border:1px solid var(--border);background:var(--surface-2);border-radius:var(--r-lg);padding:14px 14px 12px;text-align:left;display:grid;gap:6px;align-content:start;position:relative}
+.choice h3{font-size:14px;font-weight:600}.choice p{margin:0;color:var(--fg-2);font-size:12px}.choice .k{font:11px var(--mono);color:var(--fg-3)}
+.choice[aria-pressed="true"]{border-color:color-mix(in srgb,var(--chroma-2) 55%,var(--border));background:linear-gradient(160deg,color-mix(in srgb,var(--chroma-1) 12%,var(--surface-2)),color-mix(in srgb,var(--chroma-2) 10%,var(--surface-2)))}
+.choice[aria-pressed="true"]::after{content:"Selected";position:absolute;top:11px;right:12px;font-size:10px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--chroma-2)}
+
+/* ===== TaskWraith combined picker, inline ===== */
+.picker{--tab:28px;--tabgap:3px;display:grid;grid-template-columns:calc(var(--tab) + 16px) minmax(0,1fr) 190px;grid-template-rows:minmax(0,1fr);height:376px;
+  padding:6px;border-radius:10px;background:var(--glass);border:1px solid var(--border-strong);backdrop-filter:blur(22px) saturate(0%);
+  box-shadow:0 18px 40px rgba(0,0,0,.35),inset 0 1px 0 var(--sheen);font-size:12.5px;position:relative;isolation:isolate;overflow:hidden}
+.picker::after{content:"";position:absolute;inset:0;border-radius:inherit;pointer-events:none;background:linear-gradient(180deg,var(--sheen),transparent 28%);opacity:.35;z-index:1}
+.picker>*{position:relative;z-index:2}
+.ptabs{position:relative;display:flex;flex-direction:column;align-items:center;gap:var(--tabgap);margin-right:4px;padding:4px 0;border-right:1px solid var(--border);overflow-y:auto;scrollbar-width:none}
+.ptabs::-webkit-scrollbar{display:none}
+.pind{position:absolute;top:4px;left:50%;width:var(--tab);height:var(--tab);margin-left:calc(var(--tab)/-2);border-radius:7px;background:color-mix(in srgb,var(--acc,var(--chroma-1)) 17%,transparent);
+  box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--acc,var(--chroma-1)) 28%,transparent),inset 0 1px 0 rgba(255,255,255,.07);pointer-events:none;
+  transform:translateY(calc(var(--i,0)*(var(--tab) + var(--tabgap))));transition:transform 180ms cubic-bezier(.22,1,.36,1),background-color 180ms,box-shadow 180ms}
+.ptab{position:relative;z-index:1;width:var(--tab);height:var(--tab);flex:none;border:0;border-radius:7px;background:transparent;display:grid;place-items:center;padding:0;transition:background-color 120ms}
+.ptab .logo{--s:17px;background:transparent;border-radius:0;opacity:.85;transition:opacity 120ms}.ptab:hover .logo,.ptab.is-active .logo{opacity:1}
+.ptab:hover:not(.is-active){background:color-mix(in srgb,var(--acc) 9%,transparent)}
+.ptab.off .logo{opacity:.3;filter:grayscale(1)}
+.ptab.has::before{content:"";position:absolute;left:-6px;top:50%;width:4px;height:4px;margin-top:-2px;border-radius:50%;background:var(--acc);box-shadow:0 0 6px var(--acc)}
+.plist{display:flex;flex-direction:column;min-width:0;min-height:0;padding:2px 0 0}
+.psearch{margin:2px 4px 4px;background:color-mix(in srgb,var(--fg) 6%,transparent);border:1px solid var(--border);border-radius:6px;padding:5px 9px;color:var(--fg);font-size:12px;width:auto}
+.psearch::placeholder{color:var(--fg-3)}
+.colhdr{padding:6px 10px 8px;display:flex;justify-content:space-between;align-items:baseline;gap:8px}.colhdr .pn{font-weight:700;font-size:12px;color:var(--acc)}.colhdr .pd{font-size:11px;color:var(--fg-3);margin-left:6px}
+.colhdr .ct{font-size:11px;color:var(--fg-3);font-variant-numeric:tabular-nums;white-space:nowrap}
+.rows{overflow-y:auto;min-height:0;display:flex;flex-direction:column;gap:1px;padding-right:2px}
+.mrow{--racc:var(--acc);display:flex;align-items:center;gap:8px;padding:6px 10px;border:0;border-radius:6px;background:transparent;color:var(--fg);text-align:left;width:100%;font-size:14px}
+.mrow:hover,.mrow.is-focused{background:color-mix(in srgb,var(--racc) 18%,transparent)}
+.mrow.is-selected{font-weight:500}.mrow:not(.is-selected){color:var(--fg-2)}
+.mrow .lab{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.mrow .bolt{width:12px;height:12px;color:var(--racc);opacity:.8;flex:none}
+.mrow .apps{display:inline-flex;gap:3px;flex:none}
+.mrow .ap{font-size:9.5px;font-weight:700;letter-spacing:.04em;padding:1px 5px;border-radius:4px;background:color-mix(in srgb,var(--fg) 8%,transparent);color:var(--fg-3)}
+.mrow .ap.on{background:color-mix(in srgb,var(--apc) 22%,transparent);color:var(--apc)}
+.mrow .tierdot{font-size:10px;font-weight:600;color:var(--fg-3);flex:none;width:54px;text-align:right;white-space:nowrap}
+.mrow.is-selected .tierdot{color:color-mix(in srgb,var(--racc) 80%,var(--fg))}
+.mrow .chk{width:14px;flex:none;text-align:center;color:var(--racc);opacity:0;font-size:12px}.mrow.is-selected .chk{opacity:1}.mrow .tierdot{font-size:10.5px}
+.rows .empty{padding:18px 12px;color:var(--fg-3);font-size:12px;text-align:center}
+.rows .empty .btn{margin-top:8px}
+.side{border-left:1px solid var(--border);margin-left:4px;padding:4px 0 4px 6px;display:flex;flex-direction:column;min-height:0;overflow:hidden}
+.side .focus{padding:2px 8px 6px;display:grid;gap:2px}.side .focus b{font-size:12.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.side .focus code{font:10.5px var(--mono);color:var(--fg-3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.side .meta2{font-size:10.5px;color:var(--fg-3)}
+.side .opts{display:grid;gap:7px;padding:8px 8px 2px;border-top:1px solid var(--border);margin-top:6px}
+.tiers{display:grid;gap:4px;padding:4px 8px 6px}.tiers .eyebrow{margin-bottom:2px}
+.tierpills{display:flex;flex-wrap:wrap;gap:4px}.tp{border:1px solid var(--border-strong);background:var(--surface-2);border-radius:999px;padding:2px 9px;font-size:11px;font-weight:600;color:var(--fg-2)}
+.tp:hover{background:var(--surface-3)}.tp[aria-pressed="true"]{background:color-mix(in srgb,var(--acc) 22%,transparent);border-color:color-mix(in srgb,var(--acc) 55%,transparent);color:color-mix(in srgb,var(--acc) 80%,var(--fg))}
+.tp.off[aria-pressed="true"]{background:var(--surface-3);border-color:var(--border-strong);color:var(--fg)}
+.side .meta3{font-size:11px;color:var(--fg-3);padding:0 8px 4px;line-height:1.5}
+.opt{display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:11.5px;color:var(--fg-2)}
+.opt .tg{width:26px;height:16px}.opt .tg::after{width:11px;height:11px;top:1.5px}.opt .tg:checked::after{left:12px}
+.stp{display:inline-flex;align-items:center;gap:4px}.stp button{width:18px;height:18px;border:1px solid var(--border-strong);background:var(--surface-2);border-radius:4px;padding:0;font-size:11px;line-height:1}
+.stp b{min-width:14px;text-align:center;font-variant-numeric:tabular-nums}
+.slots{border:1px solid var(--border);border-radius:var(--r-md);overflow:hidden}
+.slot{display:grid;grid-template-columns:150px 1fr;gap:10px;align-items:center;padding:7px 12px;border-top:1px solid var(--border)}.slot:first-child{border-top:0;background:var(--surface-2)}
+.slot .sel{border:1px solid var(--border-strong);background:var(--surface-2);border-radius:6px;padding:4px 9px;display:flex;align-items:center;gap:7px;justify-content:space-between}
+.slot .sel::after{content:"⌄";color:var(--fg-3)}
+
+/* providers shell */
+.picker.prov{height:420px}
+.ptabs .sep{width:16px;height:1px;background:var(--border-strong);margin:4px 0;flex:none}
+.ptab .st{position:absolute;right:-1px;bottom:-1px;width:7px;height:7px;border-radius:50%;border:1.5px solid var(--surface-1);background:var(--fg-3)}
+.ptab[data-state="on"] .st,.ptab[data-state="local"] .st{background:var(--ok)}.ptab[data-state="key"] .st{background:var(--warn)}
+.pmain{display:flex;flex-direction:column;min-width:0;min-height:0;padding:2px 2px 0 0;overflow-y:auto}
+.phead{display:flex;align-items:baseline;gap:8px;padding:8px 10px 6px}.phead .pn{font-weight:700;font-size:15px}.phead .pd{font-size:11.5px;color:var(--fg-3);flex:1;min-width:0}
+.state{font-size:10.5px;font-weight:600;padding:2px 8px;border-radius:999px;background:var(--surface-3);color:var(--fg-2);white-space:nowrap}
+.state.on{background:color-mix(in srgb,var(--ok) 20%,transparent);color:var(--ok)}.state.key{background:color-mix(in srgb,var(--warn) 20%,transparent);color:var(--warn)}
+.cred{display:grid;gap:8px;padding:6px 10px 10px;border-bottom:1px solid var(--border)}
+.cred .lbl{font-size:11px;color:var(--fg-3);font-weight:600;letter-spacing:.04em;text-transform:uppercase}
+.cred .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.cred input[type=password],.cred input[type=text]{flex:1 1 200px;min-width:0;background:var(--surface-1);border:1px solid var(--border-strong);border-radius:var(--r-sm);padding:6px 9px;color:var(--fg);font:12.5px var(--mono)}
+.cred .seg{padding:2px}.cred .seg button{padding:3px 10px;font-size:12px}
+.cred .note{font-size:11.5px;color:var(--fg-2)}.cred .note a{color:var(--chroma-3);text-decoration:none}
+.sel2{border:1px solid var(--border-strong);background:var(--surface-2);border-radius:6px;padding:4px 9px;display:inline-flex;align-items:center;gap:8px;font-size:12px}.sel2::after{content:"⌄";color:var(--fg-3)}
+.acct{display:flex;align-items:center;gap:8px;padding:5px 8px;border:1px solid var(--border);border-radius:6px;background:var(--surface-2);font-size:12px}
+.acct .rad{width:12px;height:12px;border-radius:50%;border:1.5px solid var(--border-strong);flex:none}.acct.active .rad{border-color:var(--acc);background:color-mix(in srgb,var(--acc) 40%,transparent);box-shadow:inset 0 0 0 2px var(--surface-2)}
+.acct .nm{flex:1;min-width:0}.acct small{color:var(--fg-3)}
+.found{padding:6px 10px 4px;display:flex;justify-content:space-between;align-items:baseline}.found .lbl{font-size:11px;color:var(--fg-3);font-weight:600;letter-spacing:.04em;text-transform:uppercase}.found .ct{font-size:11px;color:var(--fg-3)}
+.frow{display:flex;align-items:center;gap:8px;padding:4px 10px;font-size:13px;color:var(--fg)}.frow code{font:10.5px var(--mono);color:var(--fg-3);margin-left:auto;white-space:nowrap}
+.frow .ctx{font-size:10.5px;color:var(--fg-3);white-space:nowrap}
+.side .stat{display:grid;gap:4px;padding:4px 8px 8px}.side .stat .big{font-size:20px;font-weight:600;letter-spacing:-.01em;font-variant-numeric:tabular-nums}.side .stat .l{font-size:11px;color:var(--fg-3)}
+.side .acts{display:grid;gap:5px;padding:8px 8px 2px;border-top:1px solid var(--border)}.side .acts .btn{justify-content:center;font-size:12px;padding:5px 10px}
+.side .acts .btn.danger{color:var(--bad);border-color:color-mix(in srgb,var(--bad) 40%,var(--border-strong))}
+.overview{display:flex;gap:6px;flex-wrap:wrap;align-items:center;font-size:12px;color:var(--fg-2)}.overview b{color:var(--fg)}
+.overview .chipstate{display:inline-flex;align-items:center;gap:5px;padding:2px 8px;border-radius:999px;background:var(--surface-2);border:1px solid var(--border)}
+.overview .chipstate i{width:7px;height:7px;border-radius:50%;background:var(--fg-3)}.overview .chipstate.on i{background:var(--ok)}.overview .chipstate.key i{background:var(--warn)}
+.win.expert .picker.prov{height:470px}
+
+/* launch */
+.apps{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.app-card{border:1px solid var(--border);background:var(--surface-2);border-radius:var(--r-lg);padding:14px 16px;display:grid;gap:10px;align-content:start}
+.app-card .t{display:flex;align-items:center;gap:9px}.app-card h3{font-size:14px}.app-card .t small{display:block;color:var(--fg-3);font-size:11px}
+.app-card ul{margin:0;padding:0;list-style:none;display:grid;gap:4px;color:var(--fg-2);font-size:12px}.app-card li::before{content:"·";color:var(--fg-3);margin-right:6px}
+.app-card .opts{display:grid;gap:6px;border-top:1px solid var(--border);padding-top:8px}.app-card .opt{font-size:12px}
+.app-card .act{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.app-card .btn.primary{background:var(--acc);box-shadow:0 6px 18px color-mix(in srgb,var(--acc) 35%,transparent)}.app-card .ready{font-size:11px;color:var(--ok);display:flex;align-items:center;gap:5px}
+
+/* audit */
+.counters{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}
+.ct2{border:1px solid var(--border);border-radius:var(--r-md);padding:9px 11px;background:var(--surface-2)}.ct2 .v{font-size:19px;font-weight:600;font-variant-numeric:tabular-nums}.ct2 .l{font-size:11px;color:var(--fg-3)}
+table{width:100%;border-collapse:collapse;font-size:12px}th{text-align:left;font-size:10.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--fg-3);font-weight:600;padding:6px 10px;background:var(--surface-2)}
+td{padding:6px 10px;border-top:1px solid var(--border);font-variant-numeric:tabular-nums;white-space:nowrap}td code{font:11px var(--mono);color:var(--fg-2)}
+.s200{color:var(--ok)}.s4{color:var(--warn)}.s5{color:var(--bad)}.tbl{overflow-x:auto;border:1px solid var(--border);border-radius:var(--r-md)}
+
+/* expert density */
+.win.expert .pane{gap:12px;padding:16px 18px}.win.expert .head p,.win.expert .choice p,.win.expert .step small{display:none}
+
+.win.expert .choice{padding:9px 12px;border-radius:var(--r-md)}.win.expert .picker{height:440px}.win.expert .mrow{font-size:13px;padding:4px 10px}
+.toast{position:fixed;left:50%;bottom:22px;transform:translateX(-50%) translateY(20px);opacity:0;background:var(--glass);backdrop-filter:blur(16px);border:1px solid var(--border-strong);padding:8px 14px;border-radius:999px;font-weight:500;transition:.2s;pointer-events:none;z-index:5}
+.toast.show{opacity:1;transform:translateX(-50%)}
+@media (max-width:760px){.win{grid-template-columns:1fr;min-height:0}.rail{flex-direction:row;flex-wrap:wrap;align-items:center;border-right:0;border-bottom:1px solid var(--border)}.rail .spacer,.lights,.gw{display:none}
+  .step{width:auto;grid-template-columns:22px auto}.step small,.step .pill{display:none}.choices,.apps,.counters{grid-template-columns:1fr}
+  .picker{grid-template-columns:calc(var(--tab) + 12px) minmax(0,1fr);height:auto}.side{grid-column:1/-1;border-left:0;border-top:1px solid var(--border);margin:6px 0 0;padding:8px 0 0}.ladder{flex-direction:row;align-items:flex-end}}
+@media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+</style>
+
+<div class="meta">
+  <h1>Provider Hub Chroma</h1>
+  <p>Fourth pass. One shell for both setup steps: TaskWraith's provider icon rail picks the provider, the middle column holds its sign-in or catalogue controls, and the right column holds status and per-item settings.</p>
+  <div class="seg" role="group" aria-label="Density"><button id="mGuided" aria-pressed="true">Guided</button><button id="mExpert" aria-pressed="false">Expert</button></div>
+  <label class="sw"><input class="tg" type="checkbox" id="dbg"> Debug build</label>
+</div>
+
+<div class="win" id="win">
+  <nav class="rail" aria-label="Steps">
+    <div class="lights"><i></i><i></i><i></i></div>
+    <div class="app"><span class="mark"></span>Provider Hub</div>
+    <button class="step done" data-step="1" aria-current="step"><span class="n">1</span><span class="lbl">Providers<small>Sign in to what you have</small></span><span class="pill" id="pillProv">4</span></button>
+    <button class="step" data-step="2"><span class="n">2</span><span class="lbl">Models<small>Pick what the apps see</small></span><span class="pill" id="pillModels">0</span></button>
+    <button class="step" data-step="3"><span class="n">3</span><span class="lbl">Launch<small>Configure and open an app</small></span><span class="pill">2</span></button>
+    <button class="step" data-step="4" id="stepAudit" hidden><span class="n">4</span><span class="lbl">Audit<small>Debug build only</small></span><span class="pill">30</span></button>
+    <div class="spacer"></div>
+    <div class="gw"><div class="row"><span class="dot"></span>Gateway running</div><div class="row"><code>127.0.0.1:8899</code></div><div class="row"><span class="dot off"></span>Claude closed · Codex closed</div></div>
+  </nav>
+
+  <section class="pane" data-pane="1">
+    <div class="head"><div><div class="eyebrow">Step 1 of 3</div><h2>Which accounts do you have?</h2>
+      <p>Pick a provider in the rail, paste its key or sign in, and its models appear. Keys go in your Mac's Keychain. Skip anything you don't use.</p></div>
+      <button class="btn ghost" id="refreshAll">↻ Refresh all</button></div>
+    <div class="overview" id="overview"></div>
+    <div class="picker prov" role="group" aria-label="Provider setup">
+      <div class="ptabs" id="ptabsProv"><div class="pind" id="pindProv"></div></div>
+      <div class="pmain" id="pmain"></div>
+      <aside class="side" id="pside"></aside>
+    </div>
+    <div class="foot"><span class="hint" id="provHint"></span><button class="btn primary big" data-go="2">Continue →</button></div>
+  </section>
+
+  <section class="pane" data-pane="2" hidden>
+    <div class="head"><div><div class="eyebrow">Step 2 of 3</div><h2>What should the apps see?</h2>
+      <p>Most people want everything. The picker below shows what will be published; changing any row switches you to Curate, and your choices are kept.</p></div></div>
+    <div class="choices">
+      <button class="choice" id="chAll" aria-pressed="true"><h3>Use everything</h3><p>Every compatible model in both apps. Tier defaults are picked for you.</p><span class="k">codex: all_compatible · claude: curated(auto)</span></button>
+      <button class="choice" id="chCurate" aria-pressed="false"><h3>Curate</h3><p>Choose per model which app lists it, its Claude tier, and subagent priority.</p><span class="k">codex: custom · claude: curated</span></button>
+      <button class="choice" id="chSlots" aria-pressed="false"><h3>Five Claude slots</h3><p>One provider model behind each of Claude's own picker rows. Kept for existing setups.</p><span class="k">claude: mappings</span></button>
+    </div>
+    <div class="picker" id="picker" role="group" aria-label="Catalogue picker">
+      <div class="ptabs" id="ptabs"><div class="pind" id="pind"></div></div>
+      <div class="plist">
+        <input class="psearch" id="psearch" type="search" placeholder="Find a model" aria-label="Find a model">
+        <div class="colhdr"><span><span class="pn" id="colName">Model</span><span class="pd" id="colDesc"></span></span><span class="ct" id="colCount"></span></div>
+        <div class="rows" id="rows"></div>
+      </div>
+      <aside class="side" id="side">
+        <div class="focus"><div class="eyebrow">Selected</div><b id="fName">—</b><code id="fId"></code><span class="meta2" id="fMeta"></span></div>
+        <div class="tiers"><div class="eyebrow">Claude tier</div><div class="tierpills" id="tierpills"></div></div>
+        <div class="meta3" id="tierNote">Plays this tier in Claude's picker and answers Claude Code's requests for it.</div>
+        <div class="opts">
+          <label class="opt">Default for this tier<input class="tg" type="checkbox" id="oDefault"></label>
+          <label class="opt">Listed in Claude<input class="tg" type="checkbox" id="oClaude" style="--acc:#d97b3a"></label>
+          <label class="opt">Listed in Codex<input class="tg" type="checkbox" id="oCodex" style="--acc:#705aff"></label>
+          <div class="opt">Subagent priority<span class="stp"><button id="rkDn" aria-label="Lower priority">−</button><b id="rk">3</b><button id="rkUp" aria-label="Raise priority">+</button></span></div>
+        </div>
+      </aside>
+    </div>
+    <div class="slots" id="slots" hidden></div>
+    <div class="foot"><span class="hint" id="modelHint"></span><span><button class="btn ghost" data-go="1">← Back</button> <button class="btn primary big" data-go="3">Continue →</button></span></div>
+  </section>
+
+  <section class="pane" data-pane="3" hidden>
+    <div class="head"><div><div class="eyebrow">Step 3 of 3</div><h2>Open an app</h2>
+      <p>Provider Hub swaps only the model settings of the app you launch and puts them back when you quit it.</p></div>
+      <label class="opt" style="gap:10px"><span>Stop gateway when both apps close</span><input class="tg" type="checkbox" checked id="autoStop"></label></div>
+    <div class="apps">
+      <div class="app-card" style="--acc:#d97b3a">
+        <div class="t"><span class="logo" data-logo="claude" style="--s:30px"></span><div><h3>Claude Desktop</h3><small>Installed · not running · profile “Provider Hub”</small></div></div>
+        <ul><li id="lcC"></li><li>Claude Code learns the catalogue ids while the profile is active</li><li>Previous profile restored on quit</li></ul>
+        <div class="opts">
+          <label class="opt">Teach Claude Code the catalogue ids<input class="tg" type="checkbox" checked></label>
+          <label class="opt">Enable dynamic workflows for Ultracode<input class="tg" type="checkbox"></label>
+          <label class="opt">Auto mode (approval classifier)<input class="tg" type="checkbox"></label>
+          <label class="opt">Browser, dictation, Cowork tab<input class="tg" type="checkbox"></label>
+        </div>
+        <div class="act"><button class="btn primary big" data-launch="Claude">Launch Claude</button><span class="ready"><span class="dot"></span>Ready</span></div>
+      </div>
+      <div class="app-card" style="--acc:#705aff">
+        <div class="t"><span class="logo" data-logo="codex" style="--s:30px"></span><div><h3>Codex / ChatGPT</h3><small>Installed · not running · 26.930</small></div></div>
+        <ul><li id="lcX"></li><li>Subagents use the top-ranked provider model</li><li>Catalogue validated in a throwaway home first</li></ul>
+        <div class="opts">
+          <label class="opt">Show your ChatGPT account<input class="tg" type="checkbox"></label>
+          <label class="opt">Unlock composer when quota is hit<input class="tg" type="checkbox" checked></label>
+          <label class="opt">Quick composer (floating window)<input class="tg" type="checkbox" checked></label>
+          <label class="opt">Apply patches without asking<input class="tg" type="checkbox"></label>
+        </div>
+        <div class="act"><button class="btn primary big" data-launch="Codex">Launch Codex</button><button class="btn ghost">Restore previous setup</button></div>
+      </div>
+    </div>
+    <div class="foot"><span class="hint">Launching restarts the app if it is already open. Finish current work first.</span><button class="btn ghost" data-go="2">← Back</button></div>
+  </section>
+
+  <section class="pane" data-pane="4" hidden>
+    <div class="head"><div><div class="eyebrow">Debug build</div><h2>Process audit</h2><p>Counters cover this gateway run; usage is reported by each provider. Last 30 events from activity.jsonl.</p></div><button class="btn ghost">Open data folder</button></div>
+    <div class="counters"><div class="ct2"><div class="v">184</div><div class="l">requests this run</div></div><div class="ct2"><div class="v">3</div><div class="l">provider errors</div></div><div class="ct2"><div class="v">2.4 s</div><div class="l">median first byte</div></div><div class="ct2"><div class="v">1 / 8</div><div class="l">in flight / limit</div></div></div>
+    <div class="tbl"><table><thead><tr><th>Time</th><th>Event</th><th>Model</th><th>Provider</th><th>Status</th></tr></thead><tbody>
+      <tr><td>22:04:11</td><td>messages</td><td><code>claude-sonnet-5-kimi-k3</code></td><td>Kimi Code</td><td class="s200">200</td></tr>
+      <tr><td>22:03:58</td><td>responses → messages</td><td><code>deepseek-flash</code></td><td>DeepSeek</td><td class="s200">200</td></tr>
+      <tr><td>22:03:40</td><td>count_tokens</td><td><code>gpt-oss-120b</code></td><td>Cerebras</td><td class="s200">200</td></tr>
+      <tr><td>22:02:07</td><td>messages</td><td><code>grok-4.6</code></td><td>Grok</td><td class="s4">402 balance</td></tr>
+      <tr><td>22:01:52</td><td>codex-accent</td><td><code>—</code></td><td>Codex Desktop</td><td class="s200">applied</td></tr>
+      <tr><td>22:01:30</td><td>keepalive</td><td><code>qwen3.6-coder</code></td><td>Qwen Token Plan</td><td class="s200">ping</td></tr>
+      <tr><td>21:59:14</td><td>messages</td><td><code>spark-1.3</code></td><td>Muse</td><td class="s5">502 upstream shape</td></tr>
+    </tbody></table></div>
+  </section>
+</div>
+<div class="toast" id="toast" role="status"></div>
+
+<script>
+const LOGOS=/*LOGOS*/{};
+// Provider roster: hub branding accents, logo file keys, crop ratios from provider_branding.json.
+const P=[
+ {id:'mistral',desc:'API key · Vibe',n:'Mistral',acc:'#ff6e2e',st:'on',logo:'mistral',hint:'Uses the key saved by Vibe, or paste one.',models:[['Mistral Large 3','mistral-large-3',256,'opus',1],['Devstral 2','devstral-2',256,'sonnet',1],['Magistral Medium','magistral-medium',128,'sonnet',0],['Codestral 2','codestral-2',256,'sonnet',1],['Ministral 8B','ministral-8b',128,'haiku',0],['Pixtral Large','pixtral-large',128,'opus',0]]},
+ {id:'kimi',desc:'Kimi Code subscription key',n:'Kimi Code',acc:'#0073e6',st:'on',logo:'kimi',hint:'Subscription key from the Kimi Code console.',models:[['Kimi K3','kimi-k3',256,'fable',1],['Kimi K3 Thinking','kimi-k3-thinking',256,'opus',0],['Kimi K2.5','kimi-k2.5',256,'sonnet',1],['Kimi K2.5 Turbo','kimi-k2.5-turbo',128,'haiku',1]]},
+ {id:'deepseek',desc:'Platform API key',n:'DeepSeek',acc:'#4e6aee',st:'on',logo:'deepseek',hint:'Platform API key.',models:[['DeepSeek V4','deepseek-v4',256,'opus',0],['DeepSeek Flash','deepseek-flash',128,'sonnet',1],['DeepSeek Reasoner','deepseek-reasoner',128,'opus',0]]},
+ {id:'ollama',desc:'Local daemon',n:'Ollama',acc:'#976c52',st:'local',logo:'ollama',dark:'ollama-on-dark',hint:'Local daemon. Nothing to paste.',models:[['gpt-oss 120b','gpt-oss:120b',128,'sonnet',0],['Qwen3.6 Coder 30B','qwen3.6-coder:30b',256,'sonnet',0],['GLM 5 Flash','glm-5-flash',128,'haiku',1],['Gemma 4 27B','gemma4:27b',128,'haiku',0],['DeepSeek V4 Cloud','deepseek-v4:cloud',256,'opus',0]]},
+ {id:'openrouter',desc:'API key · shortlist',n:'OpenRouter',acc:'#e02948',st:'on',logo:'openrouter',hint:'OpenRouter API key.',models:[['Qwen3.6 Coder','qwen/qwen3.6-coder',256,'sonnet',1],['GLM 5','z-ai/glm-5',200,'opus',0],['Llama 5 405B','meta-llama/llama-5-405b',128,'opus',0],['MiniMax M3','minimax/minimax-m3',1000,'sonnet',0],['Grok 4.6 Fast','x-ai/grok-4.6-fast',2000,'haiku',1],['Kimi K3 (OR)','moonshotai/kimi-k3',256,'fable',0]]},
+ {id:'cerebras',desc:'API key',n:'Cerebras',acc:'#bb584a',st:'key',logo:'cerebras-on-light',dark:'cerebras-on-dark',hint:'API key from the Cerebras cloud console.',models:[['gpt-oss 120b','gpt-oss-120b',128,'sonnet',1],['Qwen3.6 235B','qwen-3.6-235b',128,'opus',1]]},
+ {id:'muse',desc:'Meta Model API',n:'Muse',acc:'#1671ea',st:'key',logo:'meta',hint:'Meta Model API key, pay as you go.',models:[['Spark 1.3','spark-1.3',256,'opus',0]]},
+ {id:'grok',desc:'xAI API',n:'Grok',acc:'#9a9aa3',st:'key',logo:'grok-on-light',dark:'grok-on-dark',hint:'xAI API key, pay as you go.',models:[['Grok 4.6','grok-4.6',256,'opus',1],['Grok 4.6 Fast','grok-4.6-fast',2000,'haiku',1]]},
+ {id:'qwen',desc:'Token Plan',n:'Qwen Token Plan',acc:'#8c52ef',st:'key',logo:'qwen',hint:'Dedicated Token Plan key.',models:[['Qwen3.6 Max','qwen3.6-max',256,'opus',0],['Qwen3.6 Coder Plus','qwen3.6-coder-plus',1000,'sonnet',0]]},
+ {id:'gemini',desc:'AI Studio key',n:'Gemini API',acc:'#346eec',st:'key',logo:'gemini',hint:'Google AI Studio key.',models:[['Gemini 3.5 Pro','gemini-3.5-pro',1000,'fable',0],['Gemini 3.5 Flash','gemini-3.5-flash',1000,'haiku',1]]},
+ {id:'mimo',desc:'Token Plan',n:'MiMo Token Plan',acc:'#008844',st:'key',code:'MIM',hint:'Token Plan key; choose CN, Singapore or Amsterdam.',models:[['MiMo V2 Pro','mimo-v2-pro',256,'sonnet',0]]},
+ {id:'minimax',desc:'API key',n:'MiniMax',acc:'#c044a4',st:'key',logo:'minimax',hint:'Platform API key.',models:[['MiniMax M3','minimax-m3',1000,'sonnet',0]]},
+];
+const CLI=[
+ {id:'claude',n:'Claude Code',acc:'#b16105',st:'on',logo:'claude',sub:'Signed in · 2 accounts · Max'},
+ {id:'codex',n:'Codex CLI',acc:'#705aff',st:'on',logo:'codex',sub:'Signed in · ChatGPT Pro'},
+ {id:'antigravity',n:'Antigravity',acc:'#308713',st:'off',logo:'antigravity',sub:'Not signed in · ban-risk opt-in'},
+ {id:'devin',n:'Devin',acc:'#4878ae',st:'off',logo:'devin',tpl:true,sub:'Agent sessions only'},
+];
+const TIERS=['Off','Haiku','Sonnet','Opus','Fable'];
+const ST={on:'Connected',key:'Needs key',local:'Local daemon',off:'Not signed in'};
+function logoEl(p,s){const d=document.createElement('span');d.className='logo'+(p.wide?' wide':'')+(p.tpl?' tpl':'');d.style.setProperty('--s',(s||28)+'px');d.style.setProperty('--acc',p.acc);
+ if(!p.logo){d.innerHTML=`<span class="code">${p.code||p.n.slice(0,3).toUpperCase()}</span>`;return d}
+ const L=LOGOS[p.logo],D=p.dark?LOGOS[p.dark]:null;
+ d.innerHTML=D?`<img class="logo-light" src="${L}" alt=""><img class="logo-dark" src="${D}" alt="">`:`<img src="${L}" alt="">`;return d}
+document.querySelectorAll('[data-logo]').forEach(el=>{const p=CLI.find(x=>x.id===el.dataset.logo);el.replaceWith(logoEl(p,30))});
+// ===== providers shell =====
+const ALLP=[...P,...CLI];let provTab=0;
+const ptabsProv=document.getElementById('ptabsProv'),pindProv=document.getElementById('pindProv'),pmain=document.getElementById('pmain'),pside=document.getElementById('pside');
+function buildProvTabs(){ptabsProv.querySelectorAll('.ptab,.sep').forEach(e=>e.remove());let idx=0;
+ ALLP.forEach((p,i)=>{if(i===P.length){const s=document.createElement('div');s.className='sep';ptabsProv.appendChild(s)}
+  const b=document.createElement('button');b.className='ptab'+(i===provTab?' is-active':'');b.dataset.state=p.st;b.style.setProperty('--acc',p.acc);b.title=p.n;b.setAttribute('aria-label',p.n);
+  b.appendChild(logoEl(p,17));b.insertAdjacentHTML('beforeend','<span class="st"></span>');b.onclick=()=>{provTab=i;buildProvTabs();renderProv()};ptabsProv.appendChild(b)});
+ const extra=provTab>=P.length?9:0;pindProv.style.setProperty('--i',provTab);pindProv.style.transform=`translateY(calc(${provTab} * (var(--tab) + var(--tabgap)) + ${extra}px))`;pindProv.style.setProperty('--acc',ALLP[provTab].acc)}
+function renderProv(){const p=ALLP[provTab];const cli=provTab>=P.length;const on=p.st==='on'||p.st==='local';
+ let cred='';
+ if(cli){cred=`<div class="cred"><div class="lbl">Accounts</div>
+   ${p.st==='on'?`<div class="acct active" style="--acc:${p.acc}"><span class="rad"></span><span class="nm">${p.id==='claude'?'chris@…co.uk':'chris@…co.uk'} <small>· ${p.id==='claude'?'Max 20x':'Pro'}</small></span><span class="state on">Signed in</span></div>${p.id==='claude'?'<div class="acct"><span class="rad"></span><span class="nm">second-account <small>· Max 5x</small></span><span class="state">Signed in</span></div>':''}`:`<div class="note">No account yet. Sign in opens the ${p.n} CLI's own browser login; nothing is pasted here.</div>`}
+   <div class="row"><button class="btn primary" data-act="signin">${p.st==='on'?'Add account…':'Sign in…'}</button><button class="btn" data-act="check">Check sign-in</button>${p.id==='antigravity'?'<label class="opt" style="margin-left:auto;gap:8px">Accept ban-risk opt-in<input class="tg" type="checkbox"></label>':''}</div>
+   <div class="note">Routes this subscription's CLI through the hub as a model source. See the policy note before relying on it.</div></div>`}
+ else if(p.id==='ollama'){cred=`<div class="cred"><div class="lbl">Daemon</div><div class="row"><input type="text" value="http://127.0.0.1:11434" aria-label="Daemon address"><button class="btn" data-act="reconnect">Reconnect</button></div>
+   <div class="row"><span class="note">Unload a finished model after</span><span class="sel2">90 seconds</span></div><div class="note">Ollama manages its own models, downloads and cloud sign-in.</div></div>`}
+ else{cred=`<div class="cred"><div class="lbl">Credential</div>
+   ${p.id==='mistral'?`<div class="row"><div class="seg" role="group"><button aria-pressed="true">Vibe saved key</button><button aria-pressed="false">Paste a key</button></div><span class="note">Found the key Vibe saved · workspace billing applies</span></div>`:''}
+   ${p.id==='mimo'?`<div class="row"><span class="note">Account region</span><span class="sel2">Singapore</span></div>`:''}
+   <div class="row"><input id="kfInput" type="password" placeholder="${on?'Key saved in Keychain ••••••••':'Paste your '+p.n+' API key'}" aria-label="API key" ${on?'disabled':''}><button class="btn primary" data-act="save" ${on?'disabled':''}>Save key</button></div>
+   <div class="note">${p.hint} <a href="#" data-act="setup">Account setup ↗</a></div></div>`}
+ let found='';
+ if(on&&!cli){found=`<div class="found"><span class="lbl">Models found</span><span class="ct">${p.models.length} · refreshed just now</span></div>`+p.models.map(m=>`<div class="frow">${m[0]}<span class="ctx">${m[2]>=1000?(m[2]/1000)+'M':m[2]+'K'}</span><code>${m[1]}</code></div>`).join('')}
+ else if(on&&cli){found=`<div class="found"><span class="lbl">Routes</span><span class="ct">from the CLI's own catalogue</span></div>`+(p.id==='claude'?['Fable 5.1','Opus 5.5','Sonnet 5.5','Haiku 4.5']:p.id==='codex'?['GPT-6-Astra','GPT-6.1-Sol','GPT-6-Sol','GPT-5.6-Terra']:[]).map(n=>`<div class="frow">${n}</div>`).join('')}
+ else found=`<div class="rows"><div class="empty">${cli?'Sign in to list this subscription\'s routes.':'Save a key to fetch this provider\'s model list.'}</div></div>`;
+ pmain.innerHTML=`<div class="phead"><span class="pn" style="color:${p.acc}">${p.n}</span><span class="pd">${cli?p.sub:p.desc||''}</span><span class="state ${p.st==='on'||p.st==='local'?'on':p.st==='key'?'key':''}">${ST[p.st]}</span></div>${cred}${found}`;
+ pside.style.setProperty('--acc',p.acc);
+ pside.innerHTML=`<div class="focus"><div class="eyebrow">Status</div></div><div class="stat"><div class="big">${on?(cli?(p.id==='claude'?'2':p.id==='codex'?'1':'1')+' account'+(p.id==='claude'?'s':''):p.models.length+' models'):'—'}</div><div class="l">${on?(cli?'signed in':'in catalogue · '+p.models.filter(m=>CAT.get(m[1])?.claude||CAT.get(m[1])?.codex).length+' listed'):ST[p.st]}</div></div>
+  <div class="acts"><button class="btn" data-act="refresh" ${on&&!cli?'':'disabled'}>Refresh catalogue</button>${!cli?`<button class="btn" data-act="setup">Account setup ↗</button>`:''}${on&&!cli&&p.id!=='ollama'?`<button class="btn danger" data-act="remove">Remove key</button>`:''}</div>
+  <div class="meta3" style="margin-top:auto">${cli?'Own-account use of a subscription; the hub never relays tokens.':'Billed by the provider on this key.'}</div>`;
+ pmain.querySelectorAll('[data-act]').forEach(b=>b.onclick=e=>act(b.dataset.act,p,e));pside.querySelectorAll('[data-act]').forEach(b=>b.onclick=e=>act(b.dataset.act,p,e));
+ if(!on&&!cli)pmain.querySelector('#kfInput')?.focus()}
+function act(a,p,e){e?.preventDefault?.();
+ if(a==='save'){const v=pmain.querySelector('#kfInput').value.trim();if(!v){toast('Paste a key first');return}p.st='on';p.models.forEach(m=>{if(!CAT.has(m[1]))CAT.set(m[1],{claude:true,codex:true,tier:m[3],def:false,rank:3})});buildProvTabs();renderProv();buildProvTabs();renderProv();buildTabs();renderRows();sum();toast(`${p.n} connected · ${p.models.length} models fetched`)}
+ if(a==='signin'){p.st='on';p.sub='Signed in just now';buildProvTabs();renderProv();sum();toast(`${p.n} signed in through its own CLI`)}
+ if(a==='check')toast(p.st==='on'?`${p.n}: sign-in valid`:`${p.n}: not signed in`);
+ if(a==='refresh'||a==='reconnect')toast(`${p.n}: catalogue refreshed`);
+ if(a==='setup')toast(`Opens ${p.n}'s account page in your browser`);
+ if(a==='remove'){p.st='key';p.models.forEach(m=>CAT.delete(m[1]));buildProvTabs();renderProv();buildTabs();renderRows();sum();toast(`${p.n} key removed from Keychain`)}}
+document.getElementById('refreshAll').onclick=()=>toast('Refreshing catalogues in the background');
+
+// ===== catalogue state =====
+const CAT=new Map();let mode='all';
+P.filter(p=>p.st==='on'||p.st==='local').forEach(p=>p.models.forEach(m=>CAT.set(m[1],{claude:true,codex:true,tier:m[3],def:false,rank:3})));
+// one default per tier: first model found on that tier
+['fable','opus','sonnet','haiku'].forEach(t=>{for(const [id,c] of CAT){if(c.tier===t){c.def=true;break}}});
+function connected(){return P.filter(p=>p.st==='on'||p.st==='local')}
+function published(){let c=0,x=0;for(const v of CAT.values()){if(v.claude)c++;if(v.codex)x++}return{c,x,n:CAT.size}}
+function sum(){const on=connected();const pub=published();const n=Math.max(pub.c,pub.x);
+ document.getElementById('pillProv').textContent=on.length;document.getElementById('pillModels').textContent=n;
+ document.getElementById('provHint').textContent=`${on.length} connected · ${CAT.size} models found. That's enough to continue.`;
+ const needKey=P.filter(p=>p.st==='key').length,subs=CLI.filter(p=>p.st==='on').length;document.getElementById('overview').innerHTML=`<span class="chipstate on"><i></i><b>${on.length}</b> connected</span><span class="chipstate key"><i></i><b>${needKey}</b> need a key</span><span class="chipstate on"><i></i><b>${subs}</b> subscriptions signed in</span><span>· ${CAT.size} models found</span>`;
+ const start=[...CAT.entries()].find(([id,c])=>c.tier==='fable'&&c.def);
+ document.getElementById('modelHint').textContent=mode==='slots'?'Five slots mapped · Claude starts on its own Fable row':`Claude lists ${pub.c} models, Codex ${pub.x}. Starting model: Kimi K3 · Claude starts on the Fable default.`;
+ document.getElementById('lcC').textContent=`${pub.c} models in the picker, one default per tier`;document.getElementById('lcX').textContent=`Picker gets ${pub.x} models, default Kimi K3`}
+
+// ===== picker =====
+let activeTab=0,focused=null,query='';
+const ptabs=document.getElementById('ptabs'),pind=document.getElementById('pind'),rows=document.getElementById('rows');
+function buildTabs(){ptabs.querySelectorAll('.ptab').forEach(e=>e.remove());
+ P.forEach((p,i)=>{const b=document.createElement('button');b.className='ptab'+(i===activeTab?' is-active':'')+((p.st==='on'||p.st==='local')?'':' off');b.style.setProperty('--acc',p.acc);b.title=p.n;b.setAttribute('aria-label',p.n);
+  const l=logoEl(p,17);if(p.models.some(m=>CAT.get(m[1])?.def))b.classList.add('has');b.appendChild(l);b.onclick=()=>{activeTab=i;buildTabs();renderRows()};ptabs.appendChild(b)});
+ pind.style.setProperty('--i',activeTab);pind.style.setProperty('--acc',P[activeTab].acc)}
+function renderRows(){const p=P[activeTab];rows.innerHTML='';const on=p.st==='on'||p.st==='local';
+ document.getElementById('colName').textContent=p.n;document.getElementById('colName').style.color=p.acc;document.getElementById('colDesc').textContent=p.desc||'';
+ if(!on){rows.innerHTML=`<div class="empty">${p.n} isn't connected yet.<br><button class="btn sm" data-go="1">Add its key in Providers</button></div>`;document.getElementById('colCount').textContent='';wireGo();return}
+ const list=p.models.filter(m=>!query||m[0].toLowerCase().includes(query)||m[1].includes(query));
+ document.getElementById('colCount').textContent=`${p.models.filter(m=>CAT.get(m[1])?.claude||CAT.get(m[1])?.codex).length} of ${p.models.length} listed`;
+ list.forEach(m=>{const c=CAT.get(m[1]);const sel=c&&(c.claude||c.codex);const r=document.createElement('button');r.className='mrow'+(sel?' is-selected':'')+(focused===m[1]?' is-focused':'');r.style.setProperty('--racc',p.acc);
+  r.innerHTML=`<span class="lab">${m[0]}</span><span class="tierdot">${c&&c.tier!=='off'?TIERS[['off','haiku','sonnet','opus','fable'].indexOf(c.tier)]+(c.def?' ★':''):''}</span><span class="apps"><span class="ap ${c?.claude?'on':''}" style="--apc:#d97b3a">CL</span><span class="ap ${c?.codex?'on':''}" style="--apc:#705aff">CX</span></span>${m[4]?'<svg class="bolt" viewBox="0 0 12 12" fill="currentColor"><path d="M7 .5 2 7h3.2L5 11.5 10 5H6.8z"/></svg>':'<span class="bolt"></span>'}<span class="chk">✓</span>`;
+  r.onclick=e=>{if(e.target.closest('.ap')){const which=e.target.textContent==='CL'?'claude':'codex';toggleApp(m,which);return}focus(m)};rows.appendChild(r)});
+ if(!list.length)rows.innerHTML='<div class="empty">No models match.</div>';
+ if(focused&&!p.models.some(m=>m[1]===focused))focused=null;if(!focused&&list.length)focus(list[0],true)}
+function ensure(m){if(!CAT.has(m[1]))CAT.set(m[1],{claude:false,codex:false,tier:m[3],def:false,rank:3});return CAT.get(m[1])}
+function materialise(){if(mode==='all'){mode='curate';setChoice('chCurate');toast('Switched to Curate. Your “everything” selection is kept as the starting point.')}}
+function toggleApp(m,which){materialise();const c=ensure(m);c[which]=!c[which];renderRows();renderSide();sum();buildTabs()}
+function focus(m,quiet){focused=m[1];ensure(m);if(!quiet)renderRows();renderSide()}
+function renderSide(){const p=P[activeTab];const m=p.models.find(x=>x[1]===focused);const side=document.getElementById('side');if(!m){side.style.opacity=.4;return}side.style.opacity=1;const c=CAT.get(m[1]);
+ document.getElementById('fName').textContent=m[0];document.getElementById('fId').textContent=m[1];document.getElementById('fMeta').textContent=`${p.n} · ${m[2]>=1000?(m[2]/1000)+'M':m[2]+'K'} context${m[4]?' · Fast':''}`;
+ document.getElementById('side').style.setProperty('--acc',p.acc);renderPills(c.tier);
+ document.getElementById('oDefault').checked=c.def;document.getElementById('oClaude').checked=c.claude;document.getElementById('oCodex').checked=c.codex;document.getElementById('rk').textContent=c.rank}
+const TKEYS=['off','haiku','sonnet','opus','fable'];const pillsEl=document.getElementById('tierpills');
+function renderPills(cur){pillsEl.innerHTML='';TKEYS.forEach((k,i)=>{const b=document.createElement('button');b.className='tp'+(k==='off'?' off':'');b.textContent=TIERS[i];b.setAttribute('aria-pressed',k===cur);b.onclick=()=>commitTier(i);pillsEl.appendChild(b)});
+ document.getElementById('tierNote').textContent=cur==='off'?'Not listed in Claude. Codex can still use it.':`Plays the ${TIERS[TKEYS.indexOf(cur)]} tier in Claude's picker and answers Claude Code's requests for it.`}
+function commitTier(i){const c=CAT.get(focused);if(!c)return;materialise();c.tier=TKEYS[i];if(i===0){c.claude=false;c.def=false}else c.claude=true;renderRows();renderSide();sum();buildTabs()}
+document.getElementById('oDefault').onchange=e=>{const c=CAT.get(focused);materialise();if(e.target.checked){for(const v of CAT.values())if(v.tier===c.tier)v.def=false;c.def=true;c.claude=true}else c.def=false;renderRows();renderSide();buildTabs()};
+document.getElementById('oClaude').onchange=e=>{const c=CAT.get(focused);materialise();c.claude=e.target.checked;if(!c.claude){c.def=false;c.tier='off'}else if(c.tier==='off')c.tier='sonnet';renderRows();renderSide();sum();buildTabs()};
+document.getElementById('oCodex').onchange=e=>{const c=CAT.get(focused);materialise();c.codex=e.target.checked;renderRows();renderSide();sum()};
+document.getElementById('rkUp').onclick=()=>{const c=CAT.get(focused);materialise();c.rank=Math.max(1,c.rank-1);renderSide()};
+document.getElementById('rkDn').onclick=()=>{const c=CAT.get(focused);materialise();c.rank=Math.min(9,c.rank+1);renderSide()};
+document.getElementById('psearch').oninput=e=>{query=e.target.value.trim().toLowerCase();renderRows()};
+
+// choices
+function setChoice(id){['chAll','chCurate','chSlots'].forEach(o=>document.getElementById(o).setAttribute('aria-pressed',o===id));document.getElementById('picker').hidden=id==='chSlots';document.getElementById('slots').hidden=id!=='chSlots';sum()}
+document.getElementById('chAll').onclick=()=>{mode='all';for(const [id,c] of CAT){c.claude=true;c.codex=true;if(c.tier==='off')c.tier='sonnet'}setChoice('chAll');renderRows();renderSide();buildTabs();toast('Everything published again. Tier defaults re-derived.')};
+document.getElementById('chCurate').onclick=()=>{mode='curate';setChoice('chCurate')};
+document.getElementById('chSlots').onclick=()=>{mode='slots';setChoice('chSlots')};
+const slots=document.getElementById('slots');[['Claude row','Provider model behind it'],['Fable 5.1','Kimi K3'],['Opus 5.5','Mistral Large 3'],['Sonnet 5.5','DeepSeek Flash'],['Haiku 4.5','Kimi K2.5 Turbo'],['Sonnet 5.5 [1m]','Qwen3.6 Coder (OpenRouter)']].forEach(([a,b],i)=>{
+ const d=document.createElement('div');d.className='slot';d.innerHTML=i?`<span>${a}</span><span class="sel">${b}</span>`:`<span class="eyebrow">${a}</span><span class="eyebrow">${b}</span>`;slots.appendChild(d)});
+
+// nav
+const steps=[...document.querySelectorAll('.step')],panes=[...document.querySelectorAll('.pane')];
+function go(n){steps.forEach(s=>{s.toggleAttribute('aria-current',false);if(s.dataset.step==n)s.setAttribute('aria-current','step');if(+s.dataset.step<n)s.classList.add('done')});panes.forEach(p=>p.hidden=p.dataset.pane!=n)}
+function wireGo(){document.querySelectorAll('[data-go]').forEach(b=>b.onclick=()=>go(b.dataset.go))}
+steps.forEach(s=>s.onclick=()=>go(s.dataset.step));wireGo();
+document.querySelectorAll('[data-launch]').forEach(b=>b.onclick=()=>{const a=b.dataset.launch;b.textContent=`Opening ${a}…`;setTimeout(()=>{b.textContent=`Launch ${a}`;toast(`${a} opened with the hub catalogue. Quit it to restore the previous setup.`)},900)});
+const win=document.getElementById('win');document.getElementById('mGuided').onclick=()=>modeUI(false);document.getElementById('mExpert').onclick=()=>modeUI(true);
+function modeUI(x){win.classList.toggle('expert',x);document.getElementById('mGuided').setAttribute('aria-pressed',!x);document.getElementById('mExpert').setAttribute('aria-pressed',x)}
+document.getElementById('dbg').onchange=e=>{document.getElementById('stepAudit').hidden=!e.target.checked;if(!e.target.checked&&!panes[3].hidden)go(3)};
+let tt;function toast(m){const t=document.getElementById('toast');t.textContent=m;t.classList.add('show');clearTimeout(tt);tt=setTimeout(()=>t.classList.remove('show'),2800)}
+buildTabs();renderRows();sum();
+try{const h=location.hash.replace('#','');if(/^[1-4]$/.test(h)){if(h==='4'){document.getElementById('dbg').checked=true;document.getElementById('stepAudit').hidden=false}go(h)}}catch(e){}
+</script>

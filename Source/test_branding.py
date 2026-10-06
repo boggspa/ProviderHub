@@ -134,6 +134,8 @@ class BrandingTests(unittest.TestCase):
         self.assertEqual(branded_logo["logo"], {
             "light": "provider-logos/provider-logo-deepseek.png",
             "dark": "provider-logos/provider-logo-deepseek.png",
+            # The catalogue's crop ratio for the wordmark rides along unchanged.
+            "leadingMarkAspectRatio": 294 / 217,
         })
 
     def test_ollama_brand_table_covers_the_taskwraith_roster_local_and_cloud(self):

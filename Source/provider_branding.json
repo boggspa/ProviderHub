@@ -95,7 +95,8 @@
       "hueKey": "deepseek",
       "shortCode": "DSK",
       "logo": {
-        "light": "provider-logos/provider-logo-deepseek.png"
+        "light": "provider-logos/provider-logo-deepseek.png",
+        "leadingMarkAspectRatio": 1.3548387096774193
       }
     },
     "cerebras": {
@@ -104,7 +105,8 @@
       "shortCode": "CBR",
       "logo": {
         "light": "provider-logos/provider-logo-cerebras-on-light.png",
-        "dark": "provider-logos/provider-logo-cerebras-on-dark.png"
+        "dark": "provider-logos/provider-logo-cerebras-on-dark.png",
+        "leadingMarkAspectRatio": 0.54
       }
     },
     "grok": {

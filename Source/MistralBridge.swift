@@ -1374,10 +1374,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         window.titlebarAppearsTransparent = true
         window.isReleasedWhenClosed = false
         window.delegate = self
-        window.contentView = NSHostingView(rootView: BridgeWindow(model: model))
+        applyDesign()
         window.center()
         showWindow()
     }
+
+    /// "compact" is the glass shell (CompactShell.swift); "classic" is the
+    /// original pages. Both drive the same model, so switching mid-edit keeps
+    /// unsaved changes. The choice persists in UserDefaults.
+    var design: String { UserDefaults.standard.string(forKey: "hubDesign") ?? "compact" }
+    func applyDesign() {
+        if design == "classic" {
+            window.styleMask.remove(.fullSizeContentView)
+            window.titleVisibility = .visible
+            window.isOpaque = true; window.backgroundColor = .windowBackgroundColor
+            window.contentView = NSHostingView(rootView: BridgeWindow(model: model))
+            window.minSize = NSSize(width: 870, height: 680)
+            window.setContentSize(NSSize(width: 1200, height: 820))
+        } else {
+            window.styleMask.insert(.fullSizeContentView)
+            window.titleVisibility = .hidden
+            window.isOpaque = false; window.backgroundColor = .clear
+            window.contentView = NSHostingView(rootView: CompactShell(model: model))
+            window.minSize = NSSize(width: 760, height: 500)
+            window.setContentSize(NSSize(width: 840, height: 560))
+        }
+    }
+    @objc func chooseCompact() { UserDefaults.standard.set("compact", forKey: "hubDesign"); applyDesign() }
+    @objc func chooseClassic() { UserDefaults.standard.set("classic", forKey: "hubDesign"); applyDesign() }
 
     @objc func showWindow() {
         // The app lives in the menu bar (LSUIElement). While its window is
@@ -1408,6 +1432,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         add(menu, "Launch Claude…", #selector(launchClaude), "l")
         add(menu, "Launch Codex / ChatGPT…", #selector(launchCodex), "")
         add(menu, "Models & Settings…", #selector(showWindow), ",")
+        let designItem = NSMenuItem(title: "Design", action: nil, keyEquivalent: "")
+        let designMenu = NSMenu(title: "Design")
+        for (title, key, action) in [("Compact", "compact", #selector(chooseCompact)), ("Classic", "classic", #selector(chooseClassic))] {
+            let item = NSMenuItem(title: title, action: action, keyEquivalent: ""); item.target = self
+            item.state = design == key ? .on : .off; designMenu.addItem(item)
+        }
+        designItem.submenu = designMenu; menu.addItem(designItem)
         add(menu, "Open Mistral Vibe", #selector(openVibe), "")
         menu.addItem(.separator())
         add(menu, model.running ? "Stop Gateway" : "Start Gateway", #selector(toggleGateway), "")
