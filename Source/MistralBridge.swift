@@ -80,6 +80,9 @@ final class BridgeModel: ObservableObject {
     @Published var activity: [ActivityEntry] = []
     @Published var notice = ""
     @Published var noticeIsError = false
+    /// A launch that went ahead but left something out; the banner shows it
+    /// and the menu bar launchers open the window so it is not missed.
+    @Published var noticeIsWarning = false
     @Published var secretDraft = ""
     @Published var selectedProvider = "mistral"
     @Published var providerDefinitions: [ProviderDefinition] = []
@@ -483,8 +486,21 @@ final class BridgeModel: ObservableObject {
         return (try JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
     }
 
-    func tell(_ message: String, error: Bool = false) {
-        notice = message; noticeIsError = error
+    func tell(_ message: String, error: Bool = false, warning: Bool = false) {
+        notice = message; noticeIsError = error; noticeIsWarning = warning && !error
+    }
+
+    /// One sentence naming what a launch left out, from the prepare step's
+    /// `launch_omissions`, or nil when everything selected was served.
+    func omissionSummary(_ result: [String: Any]) -> String? {
+        guard let items = result["launch_omissions"] as? [[String: Any]], !items.isEmpty else { return nil }
+        let parts = items.map { item -> String in
+            let label = item["label"] as? String ?? item["route"] as? String ?? "a model"
+            var detail = item["reason"] as? String ?? "not available"
+            if let replacement = item["replacement"] as? String { detail += "; \(replacement) stands in" }
+            return "\(label): \(detail)"
+        }
+        return "Left out \(items.count == 1 ? "one model" : "\(items.count) models") that cannot be served right now: \(parts.joined(separator: " · ")). The saved selection keeps them for when they return."
     }
 
     func reconnect(recover: Bool = false) async {
@@ -877,7 +893,8 @@ final class BridgeModel: ObservableObject {
                 }
             }
             lastLaunchTime = Date(); hasObservedOwnedClaude = false
-            tell("Claude is opening with your provider profile. Its previous configuration will be restored after Claude quits.")
+            let base = "Claude is opening with your provider profile. Its previous configuration will be restored after Claude quits."
+            if let omitted = omissionSummary(prepared) { tell(base + " " + omitted, warning: true) } else { tell(base) }
         } catch {
             updateClaudeRunning()
             if !claudeRunning && recoveryNeeded {
@@ -1243,7 +1260,8 @@ struct BridgeWindow: View {
                 if model.page == .models || model.page == .config { settingsSaveBar }
                 if !model.notice.isEmpty {
                     HStack(alignment: .top, spacing: 10) {
-                        Image(systemName: model.noticeIsError ? "exclamationmark.circle" : "checkmark.circle").foregroundStyle(model.noticeIsError ? Color.orange : .green)
+                        Image(systemName: model.noticeIsError ? "exclamationmark.circle" : (model.noticeIsWarning ? "exclamationmark.triangle" : "checkmark.circle"))
+                            .foregroundStyle(model.noticeIsError ? Color.orange : (model.noticeIsWarning ? Color.yellow : .green))
                         Text(model.notice).font(.system(size: 12)).lineSpacing(3).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
                         Button { model.notice = "" } label: { Image(systemName: "xmark").font(.system(size: 10)) }.buttonStyle(.plain).foregroundStyle(.secondary)
                     }.padding(16).background(Color.white.opacity(0.045)).overlay(alignment: .top) { Divider() }
@@ -1361,9 +1379,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         showWindow()
     }
 
-    @objc func showWindow() { window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true) }
-    @objc func launchClaude() { Task { await model.launchClaude(); if model.noticeIsError { showWindow() } } }
-    @objc func launchCodex() { Task { await model.launchCodex(); if model.noticeIsError { showWindow() } } }
+    @objc func showWindow() {
+        // The app lives in the menu bar (LSUIElement). While its window is
+        // open it joins the Dock with the real icon; closing the window
+        // returns it to the menu bar only. windowWillClose does the reverse.
+        NSApp.setActivationPolicy(.regular)
+        window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
+    }
+    func windowWillClose(_ notification: Notification) {
+        guard (notification.object as? NSWindow) === window else { return }
+        NSApp.setActivationPolicy(.accessory)
+    }
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
+        if !hasVisibleWindows { showWindow() }
+        return true
+    }
+    @objc func launchClaude() { Task { await model.launchClaude(); if model.noticeIsError || model.noticeIsWarning { showWindow() } } }
+    @objc func launchCodex() { Task { await model.launchCodex(); if model.noticeIsError || model.noticeIsWarning { showWindow() } } }
     @objc func toggleGateway() { Task { await model.toggleGateway() } }
     @objc func openVibe() { model.openVibe() }
     @objc func quit() { NSApp.terminate(nil) }

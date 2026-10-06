@@ -263,7 +263,7 @@ class CatalogueLifecycleTests(unittest.TestCase):
             self.assertEqual(issue["slots"], sorted(slot[0] for slot in SLOTS))
             self.assertIn("deepseek/deepseek-chat", issue["message"])
 
-    def test_successful_refresh_that_removed_model_reports_exact_route_and_slots(self):
+    def test_successful_refresh_that_removed_model_omits_it_and_stays_ready(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             settings = settings_for("deepseek/deepseek-removed")
@@ -281,14 +281,21 @@ class CatalogueLifecycleTests(unittest.TestCase):
                 discover_fn=discover,
             )
 
-            issue = result["errors"][0]
-            self.assertFalse(result["ready"])
+            # A sunset route no longer blocks the launch: it is left out,
+            # reported as a warning, and the saved selection keeps it.
+            issue = result["warnings"][0]
+            self.assertTrue(result["ready"])
+            self.assertEqual(result["errors"], [])
             self.assertEqual(issue["code"], "route_not_advertised")
             self.assertEqual(issue["provider_id"], "deepseek")
             self.assertEqual(issue["routes"], ["deepseek/deepseek-removed"])
             self.assertEqual(issue["slots"], sorted(slot[0] for slot in SLOTS))
             self.assertIn("deepseek/deepseek-removed", issue["message"])
+            self.assertIn("left out", issue["message"])
             self.assertNotIn("deepseek/deepseek-chat", issue["message"])
+            self.assertEqual(result["providers"]["deepseek"]["status"], "refreshed")
+            self.assertEqual(result["providers"]["deepseek"]["omitted_routes"], ["deepseek/deepseek-removed"])
+            self.assertEqual(result["omitted_routes"], ["deepseek/deepseek-removed"])
             self.assertEqual(settings["mappings"], {
                 slot_id: "deepseek/deepseek-removed" for slot_id, *_ in SLOTS
             })
@@ -318,12 +325,12 @@ class CatalogueLifecycleTests(unittest.TestCase):
                     credentials_fn=credentials_ok, discover_fn=discover,
                 )
 
-                issue = prepared["errors"][0]
+                issue = prepared["warnings"][0]
                 self.assertEqual(issue["code"], "route_not_advertised")
                 self.assertEqual(issue["provider_name"], name)
                 self.assertTrue(issue["message"].startswith(
                     f"{name} catalogue does not contain selected route codex/gpt-6-luna "))
-                self.assertTrue(validated["errors"][0]["message"].startswith(
+                self.assertTrue(validated["warnings"][0]["message"].startswith(
                     f"{name} catalogue does not contain selected route codex/gpt-6-luna."))
                 self.assertEqual(refreshed["providers"]["codex"]["provider_name"], name)
 

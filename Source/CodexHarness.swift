@@ -78,7 +78,8 @@ extension BridgeModel {
             observedOwnedCodex = false; codexLaunchTime = Date()
             if savedSettings.codex_accent_slider || savedSettings.codex_quick_composer {
                 try await launchCodexWithAccentBridge(appPath: appPath)
-                tell("Codex / ChatGPT is opening with your provider catalogue and desktop preferences. Its previous configuration will be restored after it quits.")
+                let base = "Codex / ChatGPT is opening with your provider catalogue and desktop preferences. Its previous configuration will be restored after it quits."
+                if let omitted = omissionSummary(prepared) { tell(base + " " + omitted, warning: true) } else { tell(base) }
             } else {
                 let configuration = NSWorkspace.OpenConfiguration()
                 configuration.activates = true
@@ -87,7 +88,8 @@ extension BridgeModel {
                         if let error { continuation.resume(throwing: error) } else { continuation.resume() }
                     }
                 }
-                tell("Codex / ChatGPT is opening with your provider catalogue. Its previous configuration will be restored after it quits.")
+                let base = "Codex / ChatGPT is opening with your provider catalogue. Its previous configuration will be restored after it quits."
+                if let omitted = omissionSummary(prepared) { tell(base + " " + omitted, warning: true) } else { tell(base) }
             }
         } catch {
             updateCodexRunning()
@@ -319,7 +321,7 @@ struct CodexModelsPane: View {
                     VStack(alignment: .leading, spacing: 10) { catalogueActions }
                 }
                 if !missingSelections.isEmpty {
-                    Text("\(missingSelections.count) selected \(missingSelections.count == 1 ? "model is" : "models are") not currently advertised. Refresh the provider catalogue or expand the model to remove it.")
+                    Text("\(missingSelections.count) selected \(missingSelections.count == 1 ? "model is" : "models are") not currently advertised and will be left out of the next launch. Refresh the provider catalogue, or expand the model to remove it.")
                         .font(.caption).foregroundStyle(.orange)
                 }
                 Text("Compaction follows each model’s effective input window automatically. Unknown limits stay unknown.")

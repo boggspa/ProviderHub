@@ -32,6 +32,7 @@ from catalogue_lifecycle import (CataloguePreparationError, catalogue_fingerprin
                                  validate_prepared_launch)
 from catalogue import build_catalogue, read_observations
 from hub_config import claude_routes, cli_account_dir, connection_signature, provider_presentations, qualify, split_route
+from launch_selection import apply_plan, effective_launch_settings, require_launchable, servable_shortfall, usable_providers, write_plan
 from ollama_lifecycle import http_transport, lease_seconds, release as release_resident_model
 from providers import PROVIDERS, prepare_request, ProviderError
 from rate_limit import (MAX_UPSTREAM_ATTEMPTS, RETRYABLE_STATUSES, SLOT_RETRY_AFTER, SLOT_WAIT_TIMEOUT,
@@ -98,7 +99,11 @@ BUILD_IDENTITY = build_identity()
 class Runtime:
     def __init__(self, root: Path, upstream_url=None, key=None, request_planner=None):
         self.root = root
-        self.settings, self.catalogue = attach_model_specs(load_settings(root), root)
+        # Serve the selection the prepare step projected (launch-plan.json),
+        # so the snapshot matches what activation handed the desktop app.
+        saved = load_settings(root)
+        planned, _ = apply_plan(saved, cached_catalogue(saved, root), root)
+        self.settings, self.catalogue = attach_model_specs(planned, root)
         # Runtime deliberately snapshots model planning metadata at startup.
         # Activation checks this fingerprint after launch preparation so a
         # newly refreshed selected route cannot be served by an older snapshot.
@@ -1434,27 +1439,30 @@ def main():
         # Freshness-scoped preparation only: an unconditional refresh-all here
         # would drift the catalogue digest away from a gateway already running
         # for the other desktop harness.
-        lifecycle = require_prepared(prepare_launch(codex_launch_settings(settings), root))
+        lifecycle = require_launchable(prepare_launch(codex_launch_settings(settings), root))
         inventory = cached_catalogue(settings, root)
-        available = codex_choices(settings, inventory)
-        available_ids = {model["id"] for model in available}
-        missing = [route for route in settings.get("codex_catalogue") or []
-                   if route not in available_ids]
-        if missing:
-            raise BridgeError("The Codex catalogue selection is not fully advertised: "
-                              + ", ".join(missing)
-                              + ". Refresh those providers or remove the routes from the Codex catalogue.")
-        if settings.get("codex_model") not in available_ids:
-            raise BridgeError("The selected model is not available in the Codex catalogue. Refresh its provider metadata or choose another listed model.")
+        # Routes no provider advertises and routes of a provider that could
+        # not be prepared are left out of this launch and reported, as long
+        # as something usable remains. The saved selection is untouched.
+        _, blocked = usable_providers(lifecycle)
+        settings, omissions = effective_launch_settings(settings, inventory, blocked=blocked)
+        shortfall = servable_shortfall(settings, inventory, blocked=blocked, surface="codex")
+        if shortfall or not settings.get("codex_model"):
+            raise BridgeError("No selected model is available for Codex right now"
+                              + (": " + ", ".join(shortfall) if shortfall else "")
+                              + ". Refresh its provider or choose another listed model.")
+        write_plan(root, "codex", lifecycle, omissions, lifecycle.get("checked_at", ""))
         qualification = qualify_runtime(settings, inventory)
         prepared = {"catalogue_digest": catalogue_digest(settings, inventory), "model": settings["codex_model"],
                     "runtime_signature": qualification["runtime_signature"]}
         atomic_json(root / "codex-prepared.json", prepared)
-        result = {**catalogue_command_result(settings, root, lifecycle), **prepared}
+        result = {**catalogue_command_result(settings, root, lifecycle), **prepared,
+                  "launch_omissions": omissions}
     elif args.command == "codex-activate":
         settings = load_settings(root)
-        require_prepared(validate_prepared_launch(codex_launch_settings(settings), root))
         inventory = cached_catalogue(settings, root)
+        settings, _ = apply_plan(settings, inventory, root)
+        require_prepared(validate_prepared_launch(codex_launch_settings(settings), root))
         expected = catalogue_digest(settings, inventory)
         prepared = read_json(root / "codex-prepared.json")
         if prepared != {"catalogue_digest": expected, "model": settings["codex_model"], "runtime_signature": runtime_signature()}:
@@ -1496,11 +1504,26 @@ def main():
         settings = load_settings(root)
         lifecycle = (refresh_all(settings, root) if args.command == "refresh-all"
                      else prepare_launch(settings, root))
+        omissions = []
         if args.command == "prepare-launch":
-            require_prepared(lifecycle)
+            require_launchable(lifecycle)
+            inventory = cached_catalogue(settings, root)
+            _, blocked = usable_providers(lifecycle)
+            saved = settings
+            settings, omissions = effective_launch_settings(settings, inventory, blocked=blocked)
+            shortfall = servable_shortfall(settings, inventory, blocked=blocked, surface="claude", saved=saved)
+            if shortfall:
+                raise BridgeError("No selected model is available for Claude right now: "
+                                  + ", ".join(shortfall)
+                                  + ". Refresh its provider or choose other models.")
+            write_plan(root, "claude", lifecycle, omissions, lifecycle.get("checked_at", ""))
+            lifecycle["catalogue_fingerprint"] = catalogue_fingerprint(settings, root)
         result = catalogue_command_result(settings, root, lifecycle)
+        if args.command == "prepare-launch":
+            result["launch_omissions"] = omissions
     elif args.command == "activate":
         settings = load_settings(root)
+        settings, _ = apply_plan(settings, cached_catalogue(settings, root), root)
         lifecycle = require_prepared(validate_prepared_launch(settings, root))
         token = gateway_token(root)
         # Authenticate the readiness probe so an unrelated process on this port

@@ -105,8 +105,10 @@ selected: either all compatible models, or your curated list. OpenRouter supplie
 a curated shortlist with distinct context choices.
 
 If you switch to **Custom selection**, only the routes you add are offered in
-Codex. Missing curated routes (e.g., after a provider refresh) are shown on the
-page and must be refreshed or removed before launching.
+Codex. A curated route that a provider no longer advertises, or whose provider
+could not be prepared, is left out of that launch and named in the launch
+notice; your selection keeps it for when it returns. Only a selection with
+nothing left to serve still blocks the launch.
 
 Provider Hub uses the same installed desktop app. Its catalogue temporarily
 replaces the normal model catalogue. This is not a second simultaneous app or

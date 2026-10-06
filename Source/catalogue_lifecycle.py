@@ -249,6 +249,9 @@ def _result(mode: str, provider_results: dict, current: datetime, *, ready=None)
         "cached_provider_ids": sorted(
             provider_id for provider_id, value in provider_results.items()
             if value.get("status") in {"current", "cached_after_transient_error"}),
+        "omitted_routes": sorted({
+            route for value in provider_results.values()
+            for route in value.get("omitted_routes", [])}),
     }
     if ready is not None:
         result["ready"] = ready
@@ -518,22 +521,28 @@ def prepare_launch(
             discover_fn(settings, provider_id, root)
         except Exception as exc:
             detail = _clean_error(exc)
+            cached_routes = [route for route in provider["routes"] if route in before["specs"]]
             usable_cache = (
                 before["signature_valid"]
-                and exact_routes
+                and bool(cached_routes)
                 and before["age_seconds"] is not None
                 and before["age_seconds"] <= STALE_FALLBACK_SECONDS
             )
             can_fallback = usable_cache and _cache_eligible_error(detail)
             provider.update(_state_fields(before))
             if can_fallback:
+                missing = [route for route in provider["routes"] if route not in before["specs"]]
                 issue = _issue(
                     "using_recent_cache", provider,
                     f"{provider['provider_name']} catalogue refresh failed for "
                     f"{_route_description(provider)}; using same-connection metadata "
-                    f"from {before['fetched_at']}: {detail}",
+                    f"from {before['fetched_at']}: {detail}"
+                    + (f" Not in that metadata and left out of this launch: {', '.join(missing)}."
+                       if missing else ""),
                 )
                 provider.update(status="cached_after_transient_error", warning=issue)
+                if missing:
+                    provider["omitted_routes"] = sorted(missing)
                 return provider
             # Name the blocker that actually applies.  Reporting the stale
             # window for a cache that is well inside it sends the reader after
@@ -573,7 +582,10 @@ def prepare_launch(
             return provider
         missing = [route for route in provider["routes"]
                    if route not in after["specs"]]
+        provider["status"] = "refreshed"
         if missing:
+            # Not a blocker any more: the route is left out of this launch and
+            # reported, while the saved selection keeps it for when it returns.
             missing_rows = [row for row in mappings if row["route_id"] in missing]
             missing_provider = _base_provider_result(settings, provider_id, missing_rows)
             issue = _issue(
@@ -581,12 +593,9 @@ def prepare_launch(
                 f"{provider['provider_name']} catalogue does not contain selected "
                 f"{'route' if len(missing) == 1 else 'routes'} {', '.join(missing)} "
                 f"({'selection' if len(missing_provider['slots']) == 1 else 'selections'} "
-                f"{', '.join(missing_provider['slots'])}). Choose an exact model ID "
-                "advertised for this account.",
+                f"{', '.join(missing_provider['slots'])}); left out of this launch.",
             )
-            provider.update(status="blocked", error=issue)
-            return provider
-        provider["status"] = "refreshed"
+            provider.update(warning=issue, omitted_routes=sorted(missing))
         return provider
 
     items = sorted(selected.items())
@@ -683,10 +692,9 @@ def validate_prepared_launch(
                 "route_not_advertised", missing_provider,
                 f"{provider['provider_name']} catalogue does not contain selected "
                 f"{'route' if len(missing) == 1 else 'routes'} {', '.join(missing)}. "
-                "Prepare the exact selected routes before starting the gateway.",
+                "Left out of this launch.",
             )
-            provider.update(status="blocked", error=issue)
-            return provider
+            provider.update(warning=issue, omitted_routes=sorted(missing))
         age = state["age_seconds"]
         if age is None or age > STALE_FALLBACK_SECONDS:
             issue = _issue(
