@@ -208,7 +208,7 @@ provider-specific reasoning history.
 
 ## What has been checked
 
-The 0.5.6 release passes 1,604 automated tests under the bundled runtime
+The 0.5.6 release passes 1,614 automated tests under the bundled runtime
 (`unittest discover -s Source -p 'test_*.py'`). The
 installed Codex engine completed live read/edit/read cycles using Ollama's
 DeepSeek V4 Flash cloud route and Cerebras GPT OSS 120B. Their reported context
