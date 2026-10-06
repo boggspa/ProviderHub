@@ -641,6 +641,16 @@ class WebSearchRequestTests(unittest.TestCase):
 
 
 class RunTurnTests(unittest.TestCase):
+    def setUp(self):
+        # build_argv resolves a real runtime before the fake session is ever
+        # consulted. Pin it, as RunTurnFallbackTests and the pool tests do:
+        # on a machine with neither the Codex CLI nor a desktop app (CI)
+        # every turn would otherwise end in "No Codex runtime was found"
+        # before any scripted event is read.
+        patcher = mock.patch.object(codex, "runtime_binary", return_value="/fake/codex")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def _run(self, request, fake, *, spawner="spawner-stub"):
         sessions = []
 
@@ -1400,7 +1410,8 @@ class HandoffTelemetryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "turns.jsonl")
             with mock.patch.dict(os.environ, {codex._TURN_LOG_ENV: path}):
-                with mock.patch.object(codex, "StdioSession", side_effect=lambda argv, **kw: fake):
+                with mock.patch.object(codex, "runtime_binary", return_value="/fake/codex"), \
+                        mock.patch.object(codex, "StdioSession", side_effect=lambda argv, **kw: fake):
                     list(codex.run_turn(request, spawner="stub"))
             with open(path, encoding="utf-8") as handle:
                 record = json.loads(handle.read().strip())

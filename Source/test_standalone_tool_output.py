@@ -12,6 +12,14 @@ from test_codex_cli_agent import FakeCodexSession, _completed_turn
 
 
 class StandaloneToolOutputTests(unittest.TestCase):
+    def setUp(self):
+        # run_turn resolves a real Codex runtime before touching the fake
+        # session; pin it so the test does not need the Codex CLI or a desktop
+        # app installed (CI has neither).
+        patcher = mock.patch.object(codex, "runtime_binary", return_value="/fake/codex")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def notification(self, **extra):
         # Same shape as send_message_to_thread in the failing saved task.
         item = {"type": "function_call_output", "id": "fco-notification",

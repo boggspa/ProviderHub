@@ -389,7 +389,10 @@ gpt-oss-120b-medium	GPT-OSS 120B (Medium)
                 stderr = ""
             return Result()
         
-        models, warnings = catalogue(capture=fake_capture)
+        # catalogue() resolves the agy binary before it uses ``capture``; pin it
+        # so the test does not need AntiGravity installed (CI does not have it).
+        with mock.patch("agy_cli_agent._resolve_binary", return_value="/fake/agy"):
+            models, warnings = catalogue(capture=fake_capture)
         
         # Should be 4 families
         self.assertEqual(len(models), 4)
