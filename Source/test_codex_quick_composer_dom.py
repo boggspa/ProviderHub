@@ -82,8 +82,27 @@ const shell='[data-provider-hub-quick-composer]';
  assert.deepEqual(await place(),afterDrag);
  // A narrower app window keeps the whole floating window reachable.
  await page.setViewportSize({width:700,height:600});await flush(page);
- const squeezed=await place();assert(squeezed.left<=700-440-8&&squeezed.top<=600-160,JSON.stringify(squeezed));
+ const squeezed=await place();assert(squeezed.left<=700-80&&squeezed.top<=600-160,JSON.stringify(squeezed));
+ // The relaxed clamp lets the window reach within ~80px of the right edge
+ // (so the heading stays grabbable on a near-fullscreen Codex window) but
+ // not be lost off-screen. Drag the heading off the right and verify.
  await page.setViewportSize({width:1000,height:900});await flush(page);
+ const grip2=await page.locator(shell+' .heading span').boundingBox();
+ await page.mouse.move(grip2.x+20,grip2.y+grip2.height/2);await page.mouse.down();
+ await page.mouse.move(960,grip2.y+grip2.height/2+80,{steps:4});await page.mouse.up();
+ await flush(page);
+ const afterRightDrag=await place();
+ assert(afterRightDrag.left<=1000-80,JSON.stringify(afterRightDrag));
+ // A window left off-screen is pulled back inside the viewport when it next
+ // opens. Its close button is out of reach then, as it would be for a user,
+ // so the launcher toggle closes it.
+ const beforeLost=await place();
+ await page.locator(shell).evaluate(el=>el.style.left='-10000px');
+ await page.locator('[data-provider-hub-quick-launcher]').click();await flush(page);
+ assert.equal(await page.evaluate(()=>window.__providerHubQuickComposer.isOpen()),false);
+ await page.locator('[data-provider-hub-quick-launcher]').click();await flush(page);
+ const afterLost=await place();
+ assert.deepEqual(afterLost,{left:8,top:beforeLost.top},JSON.stringify({beforeLost,afterLost}));
  // Unrelated page churn and preview updates patch rows in place.
  await page.locator(shell+' .item').first().evaluate(el=>{el.__kept=true;});
  await page.evaluate(()=>document.body.appendChild(document.createElement('div')));await flush(page);
@@ -98,6 +117,11 @@ const shell='[data-provider-hub-quick-composer]';
  await page.evaluate(()=>window.__providerHubDesktopActions={send:async()=>{throw Error('private failure payload');}});
  await page.locator(shell+' .send').click();assert.equal(await capsule.inputValue(),'draft one');assert.match(await page.locator(shell+' .status').textContent(),/draft is kept/);
  assert.doesNotMatch(await page.locator(shell+' .status').textContent(),/private failure/);
+ // An unverified Desktop build is named, so a refused send can be diagnosed.
+ await page.evaluate(()=>window.__providerHubDesktopActions={send:async()=>{throw Object.assign(Error('unverified'),{code:'app-version'});},diagnostics:()=>({observedBundle:'app-initial-0123abcd.js',approvedBundles:[{hash:'app-initial-f9b16fbf8fc7.js'}]})});
+ await page.locator(shell+' .send').click();assert.equal(await capsule.inputValue(),'draft one');
+ const unverified=await page.locator(shell+' .status').textContent();
+ assert.ok(unverified.includes('this Desktop build (app-initial-0123abcd.js) is not in the verified list (verified: app-initial-f9b16fbf8fc7.js)'),unverified);
  // Pending send must not clear another selected chat or a newer typed draft.
  await page.evaluate(()=>window.__providerHubDesktopActions={send:request=>new Promise(resolve=>{window.finishQuickSend=()=>resolve({sent:true,mode:'native',threadId:request.threadId});})});
  await page.locator(shell+' .send').click();await page.locator(shell+' .item').nth(2).click();await capsule.fill('newer three');

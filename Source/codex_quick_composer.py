@@ -195,12 +195,20 @@ _SCRIPT = r"""
     if(!state.open)return;
     state.targets=collect();render();
   }
+  // The window is a renderer-side DOM surface, so position:fixed is clipped
+  // by Codex's BrowserWindow content area. We can only relax how close the
+  // user can drag it to the visible edge; we cannot make it leave the app.
+  // Keep 80px on the right and 160px on the bottom so the heading stays
+  // grabbable and the launcher remains anchorable on next open.
   function place(x,y){
-    const width=state.host.offsetWidth||440;x=Math.max(8,Math.min(x,innerWidth-width-8));y=Math.max(8,Math.min(y,innerHeight-160));
+    const width=state.host.offsetWidth||440;x=Math.max(8,Math.min(x,innerWidth-80));y=Math.max(8,Math.min(y,innerHeight-160));
     state.host.style.left=Math.round(x)+'px';state.host.style.top=Math.round(y)+'px';dialog.style.maxHeight=Math.max(120,innerHeight-y-8)+'px';
   }
   // Anchor below the launcher only until the user moves the window; after
-  // that it reopens where it was left and is only kept inside the viewport.
+  // that it reopens where it was left. The bounds are Codex's BrowserWindow
+  // content rect, not our choice: position:fixed in the renderer cannot
+  // composite outside Codex's window, so we keep the user's last x/y rather
+  // than re-snapping to the launcher.
   function position(){
     if(!state.host)return;
     const box=state.button?.isConnected?state.button.getBoundingClientRect():null;
@@ -225,7 +233,32 @@ _SCRIPT = r"""
       if(result?.sent!==true||result.threadId!==t.threadId)throw new Error('unverified-result');
       if(state.drafts.get(k)===prompt)state.drafts.set(k,'');
       state.statuses.set(k,'Sent. Desktop handles steering or starting the next turn.');
-    }catch(error){state.statuses.set(k,'Send failed. Your draft is kept.');}
+    }catch(error){
+      // An unverified Desktop build is the most common cause and is otherwise
+      // indistinguishable from a generic native failure. Surface the native
+      // adapter's diagnostics so the user can tell the difference and tell
+      // us which bundle they are on. Errors reading diagnostics stay silent:
+      // the user still sees the generic reason.
+      let reason='Send failed. Your draft is kept.';
+      try{
+        const adapterDiagnostics=adapter.diagnostics?.();
+        const observedBundle=adapterDiagnostics?.observedBundle;
+        const approvedBundles=adapterDiagnostics?.approvedBundles;
+        if(error?.code==='app-version'&&observedBundle){
+          const known=Array.isArray(approvedBundles)?approvedBundles.map(b=>b.hash).join(', '):'';
+          reason=`Send failed: this Desktop build (${observedBundle}) is not in the verified list${known?' (verified: '+known+')':''}. Update the helper to send again.`;
+        }else if(error?.code==='exports'){
+          reason='Send failed: Desktop\'s native send binding is no longer exported. Update the helper to send again.';
+        }else if(error?.code==='native-binding'){
+          reason='Send failed: Desktop\'s native send binding did not match the expected shape. Update the helper to send again.';
+        }else if(error?.code==='native-result'){
+          reason='Send failed: Desktop did not confirm the sent thread. Your draft is kept.';
+        }else if(error?.code==='native'){
+          reason='Send failed: Desktop rejected the send. Your draft is kept.';
+        }
+      }catch(diagnosticError){}
+      state.statuses.set(k,reason);
+    }
     finally{state.pending.delete(k);if(state.selected===k)input.value=state.drafts.get(k)||'';updateComposer();}
   }
   function previews(records){

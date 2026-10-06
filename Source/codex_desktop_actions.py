@@ -21,11 +21,26 @@ def desktop_actions_script() -> str:
   if (window.__providerHubDesktopActions) return { skipped: "installed" };
 
   const UUID = /^[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$/;
+  // Each Desktop build we have verified the native send binding against.
+  // The pinned set is the contract: every approved hash has been hand-
+  // checked for Lv/Iv shape and source signature; an unknown bundle
+  // fail-closes with an app-version code that names the observed hash.
+  // Adding a new hash means verifying Lv/Iv semantics, then updating
+  // this allowlist, the desktop_actions browser test, docs/codex-quick-
+  // composer.md and the Swift preference copy together. The verified
+  // date lives next to the hash so reviewers can see what was checked.
+  const APPROVED_BUNDLES = Object.freeze([
+    { hash: 'app-initial-f9b16fbf8fc7.js', version: '26.930.51102', verified: '2026-10-05' },
+    { hash: 'app-initial-69cd8dbddec5.js', version: '26.930.61225 build 13232', verified: '2026-10-06' },
+  ]);
+  const APPROVED_HASHES = Object.freeze(APPROVED_BUNDLES.map(entry => entry.hash));
   const state = {
     module: null,
     scope: null,
     moduleError: null,
     scopeError: null,
+    observedBundle: null,
+    approvedBundles: APPROVED_BUNDLES,
     sends: 0,
     errors: 0,
     inFlight: new Set(),
@@ -163,8 +178,12 @@ def desktop_actions_script() -> str:
       // The verified execution module calls Iv (M3s) before using Lv (k3s).
       // Calling the action alone can leave its lazy dependencies unset.
       // Aliases are build-specific, so require the inspected module mapping.
-      if (new URL(moduleUrl).pathname.split('/').at(-1) !== 'app-initial-f9b16fbf8fc7.js') {
-        throw actionError('app-version', 'Native sending has not been verified for this Desktop build.');
+      const observedBundle = new URL(moduleUrl).pathname.split('/').at(-1);
+      state.observedBundle = observedBundle;
+      if (!APPROVED_HASHES.includes(observedBundle)) {
+        throw actionError('app-version',
+          `Native sending has not been verified for this Desktop build (observed ${observedBundle}).`,
+          { observedBundle, approvedBundles: APPROVED_BUNDLES });
       }
       const module = await import(moduleUrl);
       const nativeSend = module.Lv, rootScope = module.W;
@@ -242,6 +261,8 @@ def desktop_actions_script() -> str:
       scope: !!state.scope,
       moduleError: state.moduleError,
       scopeError: state.scopeError,
+      observedBundle: state.observedBundle,
+      approvedBundles: state.approvedBundles,
       sends: state.sends,
       errors: state.errors,
     }),

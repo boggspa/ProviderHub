@@ -21,6 +21,20 @@ class DesktopActionScriptTests(unittest.TestCase):
         self.assertIn('turnTrigger: "composer"', script)
         self.assertIn("hostId: \"local\"", script)
 
+    def test_script_lists_approved_bundles_and_diagnostics(self):
+        script = desktop_actions_script()
+        # Both bundles the helper is verified against must be named explicitly.
+        self.assertIn('app-initial-f9b16fbf8fc7.js', script)
+        self.assertIn('app-initial-69cd8dbddec5.js', script)
+        # Diagnostics must surface the observed hash so unapproved builds are
+        # diagnosable without rerunning the helper under a debugger.
+        self.assertIn("observedBundle: state.observedBundle", script)
+        self.assertIn("approvedBundles: state.approvedBundles", script)
+        # Fail-closed error must include the observed hash so the operator can
+        # tell which Desktop build tripped the guard.
+        self.assertIn("app-version", script)
+        self.assertIn("(observed ${observedBundle})", script)
+
     def test_script_rejects_unverified_modes_and_preserves_settings(self):
         script = desktop_actions_script()
         # The only mode string emitted is native; send/steer/queue classification
@@ -68,8 +82,15 @@ export const Lv = async ({scope,threadId,sourceThreadId,prompt,turnTrigger}) => 
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'provider-hub-actions-'));
   const assets = path.join(root, 'assets');
   fs.mkdirSync(assets);
-  fs.writeFileSync(path.join(assets, 'app-initial-f9b16fbf8fc7.js'), appModule);
-  fs.writeFileSync(path.join(root, 'index.html'), `<!doctype html><html><head><script type="module" src="./assets/app-initial-f9b16fbf8fc7.js"></script></head><body><div id="root"></div></body></html>`);
+  const APPROVED = ['app-initial-f9b16fbf8fc7.js', 'app-initial-69cd8dbddec5.js'];
+  const UNAPPROVED = 'app-initial-deadbeef0000.js';
+  // The adapter needs exactly one app-initial module URL on the page, so each
+  // fixture page serves an index that loads only the bundle under test.
+  const indexFor = hash => `<!doctype html><html><head><script type="module" src="./assets/${hash}"></script></head><body><div id="root"></div></body></html>`;
+  fs.writeFileSync(path.join(assets, APPROVED[0]), appModule);
+  fs.writeFileSync(path.join(assets, APPROVED[1]), appModule);
+  fs.writeFileSync(path.join(assets, UNAPPROVED), appModule);
+  fs.writeFileSync(path.join(root, 'index.html'), indexFor(APPROVED[0]));
   const browser = await chromium.launch();
   const page = await browser.newPage();
   page.on('pageerror', error => console.error('pageerror', error));
@@ -77,8 +98,8 @@ export const Lv = async ({scope,threadId,sourceThreadId,prompt,turnTrigger}) => 
   await page.route('http://fixture.local/', route => route.fulfill({ path: path.join(root, 'index.html') }));
   await page.route('http://fixture.local/assets/**', route => route.fulfill({ path: path.join(root, route.request().url().replace('http://fixture.local/', '')) }));
   await page.goto('http://fixture.local/');
-  const installed = await page.evaluate(async ({ script }) => {
-    window.__testRootScope = await import('./assets/app-initial-f9b16fbf8fc7.js').then(module => module.W);
+  const installed = await page.evaluate(async ({ script, hash }) => {
+    window.__testRootScope = await import('./assets/' + hash).then(module => module.W);
     const scope = { scope: window.__testRootScope, get(){}, set(){}, watch(){}, when(){} };
     scope.scope = window.__testRootScope;
     const current = { memoizedState: { memoizedState: { current: scope }, next: null }, child: null, sibling: null, return: null, alternate: null };
@@ -98,7 +119,7 @@ export const Lv = async ({scope,threadId,sourceThreadId,prompt,turnTrigger}) => 
     element.textContent = expression;
     document.body.append(element);
     return { queued: true };
-  }, { script });
+  }, { script, hash: APPROVED[0] });
   await page.waitForFunction(() => window.__providerHubDesktopActions?.send instanceof Function, null, { timeout: 3000 });
   await page.waitForTimeout(100);
   assert.deepEqual(installed, { queued: true });
@@ -122,7 +143,73 @@ export const Lv = async ({scope,threadId,sourceThreadId,prompt,turnTrigger}) => 
   await assert.rejects(page.evaluate(request => window.__providerHubDesktopActions.send(request), request), /native Desktop send failed/);
   await page.evaluate(() => { window.__testReject = false; });
   const diagnostics = await page.evaluate(() => window.__providerHubDesktopActions.diagnostics());
-  assert.deepEqual(diagnostics, { ready: true, module: true, scope: true, moduleError: null, scopeError: null, sends: 1, errors: 3 });
+  assert.equal(diagnostics.ready, true);
+  assert.equal(diagnostics.module, true);
+  assert.equal(diagnostics.scope, true);
+  assert.equal(diagnostics.moduleError, null);
+  assert.equal(diagnostics.scopeError, null);
+  assert.equal(diagnostics.observedBundle, APPROVED[0]);
+  assert.equal(diagnostics.approvedBundles.length, APPROVED.length);
+  assert.deepEqual(diagnostics.approvedBundles.map(b => b.hash), APPROVED);
+  assert.equal(diagnostics.sends, 1);
+  assert.equal(diagnostics.errors, 3);
+  // Each approved bundle must import, prepare, and complete a native call.
+  for (const hash of APPROVED.slice(1)) {
+    const approvedPage = await browser.newPage();
+    approvedPage.on('pageerror', error => console.error('pageerror', error));
+    approvedPage.on('console', message => console.error('console', message.type(), message.text()));
+    await approvedPage.route('http://fixture.local/', route => route.fulfill({ contentType: 'text/html', body: indexFor(hash) }));
+    await approvedPage.route('http://fixture.local/assets/**', route => route.fulfill({ path: path.join(root, route.request().url().replace('http://fixture.local/', '')) }));
+    await approvedPage.goto('http://fixture.local/');
+    await approvedPage.evaluate(async ({ script, hash }) => {
+      window.__testRootScope = await import('./assets/' + hash).then(module => module.W);
+      const scope = { scope: window.__testRootScope, get(){}, set(){}, watch(){}, when(){} };
+      scope.scope = window.__testRootScope;
+      const current = { memoizedState: { memoizedState: { current: scope }, next: null }, child: null, sibling: null, return: null };
+      const container = { stateNode: { current }, memoizedState: null, child: null, sibling: null, return: null };
+      document.getElementById('root')['__reactContainer$test'] = container;
+      const originPattern = String.raw`!/^app:\/\/-\//.test(String(location.href))`;
+      const expression = script.replace(originPattern, 'false');
+      const element = document.createElement('script');
+      element.type = 'module';
+      element.textContent = expression;
+      document.body.append(element);
+      return true;
+    }, { script, hash });
+    await approvedPage.waitForFunction(() => window.__providerHubDesktopActions?.send instanceof Function, null, { timeout: 3000 });
+    assert.equal(await approvedPage.evaluate(() => window.__providerHubDesktopActions.ready()), true);
+    assert.deepEqual(await approvedPage.evaluate(request => window.__providerHubDesktopActions.send(request), request),
+                     { sent: true, mode: 'native', threadId: request.threadId });
+    const observed = await approvedPage.evaluate(() => window.__providerHubDesktopActions.diagnostics());
+    assert.equal(observed.observedBundle, hash);
+    await approvedPage.close();
+  }
+  // An unapproved bundle fail-closes with app-version and the observed hash
+  // in both the message and diagnostics.
+  const rejectedPage = await browser.newPage();
+  rejectedPage.on('pageerror', error => console.error('pageerror', error));
+  await rejectedPage.route('http://fixture.local/', route => route.fulfill({ contentType: 'text/html', body: indexFor(UNAPPROVED) }));
+  await rejectedPage.route('http://fixture.local/assets/**', route => route.fulfill({ path: path.join(root, route.request().url().replace('http://fixture.local/', '')) }));
+  await rejectedPage.goto('http://fixture.local/');
+  await rejectedPage.evaluate(async ({ script, hash }) => {
+    const originPattern = String.raw`!/^app:\/\/-\//.test(String(location.href))`;
+    const expression = script.replace(originPattern, 'false');
+    const element = document.createElement('script');
+    element.type = 'module';
+    element.textContent = expression;
+    document.body.append(element);
+    return true;
+  }, { script, hash: UNAPPROVED });
+  await rejectedPage.waitForFunction(() => window.__providerHubDesktopActions?.ready instanceof Function, null, { timeout: 3000 });
+  assert.equal(await rejectedPage.evaluate(() => window.__providerHubDesktopActions.ready()), false);
+  const rejectedDiagnostics = await rejectedPage.evaluate(() => window.__providerHubDesktopActions.diagnostics());
+  assert.equal(rejectedDiagnostics.observedBundle, UNAPPROVED);
+  assert.equal(rejectedDiagnostics.scopeError, 'app-version');
+  assert.equal(rejectedDiagnostics.module, false);
+  assert.equal(rejectedDiagnostics.scope, false);
+  await assert.rejects(rejectedPage.evaluate(request => window.__providerHubDesktopActions.send(request), request),
+                       /observed app-initial-deadbeef0000.js/);
+  await rejectedPage.close();
   // A root remount replaces HostRoot.current. The next send must resolve the
   // new tree's scope; it cannot reuse the detached wrapper from the old root.
   const remounted = await page.evaluate(() => {
