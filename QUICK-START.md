@@ -1,4 +1,4 @@
-# Provider Hub Preview 0.5.5
+# Provider Hub Preview 0.5.6
 
 Use your model accounts inside Claude Desktop or the Codex coding workspace in Codex / ChatGPT Desktop.
 
@@ -206,7 +206,7 @@ provider-specific reasoning history.
 
 ## What has been checked
 
-The 0.5.5 release passes 1,344 automated tests under the bundled runtime
+The 0.5.6 release passes 1,604 automated tests under the bundled runtime
 (`unittest discover -s Source -p 'test_*.py'`). The
 installed Codex engine completed live read/edit/read cycles using Ollama's
 DeepSeek V4 Flash cloud route and Cerebras GPT OSS 120B. Their reported context
@@ -215,7 +215,7 @@ tests; not every advertised model has been live-tested.
 
 Live Messages and streaming Responses read/edit/read cycles also passed on the
 0.5.0 build for OpenRouter North Mini Code Free and Gemini 3.8 Flash; they have
-not been re-run against 0.5.5. Qwen Token Plan
+not been re-run against 0.5.6. Qwen Token Plan
 returned its exhausted weekly quota response, so its live tool cycle remains
 for verification after quota returns.
 

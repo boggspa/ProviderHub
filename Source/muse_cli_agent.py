@@ -53,7 +53,7 @@ Live evidence (Muse Code 1.3.0, ``1.3.0-R3401.1``, binary at ``~/.local/bin/muse
   tools at PATH"). muse defaults its workspace root to cwd and derives a
   process-lifetime tool-output root from ``$TMPDIR``
   (``$TMPDIR/tbh-process-lifetime-memory-<random>``). With cwd == TMPDIR root
-  (``/var/folders/ps/xkcdv54x39q36bbkvsbhwtvr0000gn/T``) a turn fails rc 1 with
+  (``/var/folders/<xx>/<id>/T``) a turn fails rc 1 with
   exactly ``runtime host failed to start: TMPDIR '...' produced process-lifetime
   tool-output root '.../tbh-process-lifetime-memory-LW4UHV' inside the
   configured workspace or repository``, because the output root is a child of

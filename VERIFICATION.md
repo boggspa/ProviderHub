@@ -177,7 +177,7 @@ flags):
 - The same tools through `cli_routes.plan_turn` and `run_turn`
   (`cli_host_tools: mcp`, search on): Sonnet said it would check the branch
   and called `exec_command` with
-  `git -C "/Users/chrisizatt/Documents/Mistral Bridge" branch --show-current`.
+  `git -C "<checkout>" branch --show-current`.
   The route ended with `stop_reason: tool_use` in 4.6 s. The follow-up request,
   with Codex's result `main` in history, answered "It's on `main`." in 2.7 s.
 - Without a manifest and without MCP, the same Codex-style prompt got "I don't
@@ -207,7 +207,7 @@ on grok 1.0.41:
 - Codex's 111 tools through `cli_routes.plan_turn` and `run_turn`
   (`grok-4.7-build-fast`, `cli_host_tools: use_tool`, search on): the route
   handed Codex `exec_command` with
-  `git -C "/Users/chrisizatt/Documents/Mistral Bridge" rev-parse --abbrev-ref HEAD && …`
+  `git -C "<checkout>" rev-parse --abbrev-ref HEAD && …`
   and ended with `stop_reason: tool_use` in 4.9 s. The follow-up request, with
   Codex's result in history, answered that the repository is on the main
   branch (`end_turn`, 4.2 s).
@@ -897,9 +897,9 @@ still treats `xhigh` as `high` and never mentions `max`; Hub follows the current
 Apple accepted **0.5.0 build 13** submission
 `67958106-b904-473c-b5cb-be84743be4ae`, created at
 `2026-09-13T17:00:25.830Z`. It is signed with a Developer ID Application
-identity (signer name and team ID withheld; certificate SHA-1
-`A5D4019DBFEDE7727487D49BD08257C46A72E7E0`). All twelve embedded native
-components and the app use hardened runtime. The notarization ticket was
+identity (signer name, team ID and certificate fingerprint withheld). All
+twelve embedded native components and the app use hardened runtime. The
+notarization ticket was
 stapled successfully. The recipient archive was created after stapling and
 extracted into a fresh directory. Strict deep signature verification, ticket
 validation and Gatekeeper assessment all passed; Gatekeeper reported

@@ -11,6 +11,9 @@ __pycache__/
 *.pyc
 work/
 
+# GNU screen session logs (`screen -L`) written to the working directory.
+screenlog.*
+
 # Credentials. python-dotenv is an optional dependency and bridge_core.py will
 # read a .env when one is present, so make sure one can never be staged.
 .env

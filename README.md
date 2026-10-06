@@ -1,6 +1,6 @@
 # Provider Hub Preview
 
-**Version 0.5.5 (build 26).** Licensed Apache-2.0 — see [LICENSE](LICENSE),
+**Version 0.5.6 (build 48).** Licensed Apache-2.0 — see [LICENSE](LICENSE),
 with attributions in [NOTICE](NOTICE).
 
 A native macOS menu bar app that connects Claude Desktop and the Codex coding workspace to eleven model API connections: Mistral, Kimi Code, MiMo Token Plan, Ollama, DeepSeek, Cerebras, Muse, Grok, Qwen Token Plan, OpenRouter, and the Gemini API. Claude uses the local Messages endpoint. Codex uses Responses: Grok, Ollama, and OpenRouter retain native Responses transports, while the other eight use the local Messages bridge and their provider adapters.
@@ -214,4 +214,4 @@ python3 Source/build_provenance.py verify --require-clean \
 
 **Qualification**
 
-The [verification record](VERIFICATION.md) and the [Codex harness guide](HARNESS-OPTIONS.md) are **historical records**: dated logs of what was tested against the build named inside them, kept for provenance and deliberately not updated. They are not maintained against 0.5.5. Each result qualifies only the model, account and build recorded there, and catalogue discovery alone does not establish inference access. For the current test total see [`QUICK-START.md`](QUICK-START.md).
+The [verification record](VERIFICATION.md) and the [Codex harness guide](HARNESS-OPTIONS.md) are **historical records**: dated logs of what was tested against the build named inside them, kept for provenance and deliberately not updated. They are not maintained against 0.5.6. Each result qualifies only the model, account and build recorded there, and catalogue discovery alone does not establish inference access. For the current test total see [`QUICK-START.md`](QUICK-START.md).
