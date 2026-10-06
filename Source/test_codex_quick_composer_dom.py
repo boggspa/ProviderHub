@@ -28,13 +28,69 @@ const shell='[data-provider-hub-quick-composer]';
  assert.deepEqual(await page.evaluate(input.script),{skipped:'origin'});
  assert.deepEqual(await page.evaluate(script),{installed:true});await flush(page);
  assert.equal(await page.locator('#bar [data-provider-hub-quick-launcher]').count(),1);
+ const launcher=page.locator('[data-provider-hub-quick-launcher]');
+ assert.equal(await launcher.evaluate(el=>el.querySelector('svg').getAttribute('width')),'14');
+ assert.equal(await launcher.evaluate(el=>el.querySelector('svg').getAttribute('height')),'14');
+ await page.evaluate(()=>document.documentElement.style.setProperty('--color-text-secondary','rgb(150, 151, 152)'));
+ assert.equal(await launcher.evaluate(el=>getComputedStyle(el).color),'rgb(150, 151, 152)');
+ await page.evaluate(()=>document.documentElement.style.removeProperty('--color-text-secondary'));
+ // Running rows carry the sidebar's own spinner shape: accented, bare, an
+ // invalid accent, and one nested under another row element.
+ await page.evaluate(()=>{const rows=Array.from(document.querySelectorAll('#recent [data-app-action-sidebar-thread-row]'));const spin=inner=>`<span role="status" class="text-text/70"><span class="motion-safe:animate-spin">${inner}</span></span>`;rows[0].insertAdjacentHTML('beforeend',spin('<svg data-provider-hub-sidebar="1" style="--provider-hub-sidebar-accent:#D44404"></svg>'));rows[2].insertAdjacentHTML('beforeend',spin('<svg></svg>'));rows[3].insertAdjacentHTML('beforeend',spin('<svg data-provider-hub-sidebar="1" style="--provider-hub-sidebar-accent:not-a-colour"></svg>'));rows[9].insertAdjacentHTML('beforeend','<div data-app-action-sidebar-thread-row>'+spin('<svg data-provider-hub-sidebar="1" style="--provider-hub-sidebar-accent:#0073E6"></svg>')+'</div>');});
  assert.equal(await page.evaluate(()=>window.__providerHubQuickComposer.recentThreadTargets().length),0);
  await page.locator('[data-provider-hub-quick-launcher]').click();
  let targets=await page.evaluate(()=>window.__providerHubQuickComposer.recentThreadTargets());
  assert.equal(targets.length,10);assert.equal(targets[0].threadId,id(1));assert.equal(targets[1].supported,false);assert.equal(targets[9].threadId,id(10));
  assert.equal(await page.locator(shell+' .item').count(),10);
+ assert.equal(targets[0].active,true);assert.equal(targets[0].activeAccent,'#D44404');
+ assert.equal(targets[2].active,true);assert.equal(targets[2].activeAccent,null);
+ assert.equal(targets[3].active,true);assert.equal(targets[3].activeAccent,null);
+ assert.equal(targets[9].active,false);
+ assert.equal(await page.locator(shell+' .item.live').count(),3);
+ assert.equal(await page.locator(shell+' .item.live .spin').count(),3);
+ assert.equal(await page.locator(shell+' .item.live .spin').first().evaluate(el=>getComputedStyle(el).color),'rgb(212, 68, 4)');
+ assert.equal(await page.locator(shell+' .item.live .spin svg').count(),3);
+ // Outside interaction no longer dismisses the floating window.
+ await page.mouse.click(900,850);await flush(page);
+ assert.equal(await page.evaluate(()=>window.__providerHubQuickComposer.isOpen()),true);
+ // Escape elsewhere in the app is neither consumed nor a dismissal.
+ await page.evaluate(()=>{window.__escapes=[];window.addEventListener('keydown',e=>{if(e.key==='Escape')window.__escapes.push(e.defaultPrevented);});});
+ await page.locator('#bell').focus();await page.keyboard.press('Escape');
+ assert.equal(await page.evaluate(()=>window.__providerHubQuickComposer.isOpen()),true);
+ assert.deepEqual(await page.evaluate(()=>window.__escapes),[false]);
+ // The heading drags the window under pointer capture (the pointer leaves the
+ // heading mid-drag); later syncs must not re-anchor it.
+ const place=()=>page.locator(shell).evaluate(el=>({left:parseFloat(el.style.left),top:parseFloat(el.style.top)}));
+ const beforeDrag=await place();assert.equal(await page.evaluate(()=>window.__providerHubQuickComposer.check().dragged),false);
+ const grip=await page.locator(shell+' .heading span').boundingBox();
+ await page.mouse.move(grip.x+20,grip.y+grip.height/2);await page.mouse.down();
+ await page.mouse.move(grip.x+140,grip.y+grip.height/2+80,{steps:4});await page.mouse.up();
+ const afterDrag=await place();
+ assert(Math.abs(afterDrag.left-beforeDrag.left-120)<2,JSON.stringify([beforeDrag,afterDrag]));assert(Math.abs(afterDrag.top-beforeDrag.top-80)<2,JSON.stringify([beforeDrag,afterDrag]));
+ assert.equal(await page.evaluate(()=>window.__providerHubQuickComposer.check().dragged),true);
+ await page.evaluate(()=>document.getElementById('recent').setAttribute('data-app-action-sidebar-section-collapsed','false'));await flush(page);
+ assert.deepEqual(await place(),afterDrag);
+ // A finished spinner clears its indicator without touching drafts.
+ await page.evaluate(()=>document.querySelector('[data-app-action-sidebar-thread-id="local:00000000-0000-7000-8000-000000000001"] [role="status"]').remove());await flush(page);
+ assert.equal(await page.locator(shell+' .item.live').count(),2);
+ // The close button and launcher toggle still dismiss and reopen, and the
+ // window reopens where it was left.
+ await page.locator(shell+' .close').click();
+ assert.equal(await page.evaluate(()=>window.__providerHubQuickComposer.isOpen()),false);
+ await page.locator('[data-provider-hub-quick-launcher]').click();
+ assert.equal(await page.evaluate(()=>window.__providerHubQuickComposer.isOpen()),true);
+ assert.deepEqual(await place(),afterDrag);
+ // A narrower app window keeps the whole floating window reachable.
+ await page.setViewportSize({width:700,height:600});await flush(page);
+ const squeezed=await place();assert(squeezed.left<=700-440-8&&squeezed.top<=600-160,JSON.stringify(squeezed));
+ await page.setViewportSize({width:1000,height:900});await flush(page);
+ // Unrelated page churn and preview updates patch rows in place.
+ await page.locator(shell+' .item').first().evaluate(el=>{el.__kept=true;});
+ await page.evaluate(()=>document.body.appendChild(document.createElement('div')));await flush(page);
+ assert.equal(await page.locator(shell+' .item').first().evaluate(el=>el.__kept===true),true);
  await page.evaluate(t=>window.__providerHubQuickComposer.setThreadPreviews([{...t,preview:'latest\nassistant response'},{threadId:'wrong',hostId:'local',kind:'local',preview:'intruder'}]),targets[0]);
  assert.equal((await page.locator(shell+' .preview').first().textContent()).trim(),'latest assistant response');
+ assert.equal(await page.locator(shell+' .item').first().evaluate(el=>el.__kept===true),true);
  const capsule=page.locator(shell+' input');await capsule.fill('draft one');
  await page.locator(shell+' .item').nth(2).click();assert.equal(await capsule.inputValue(),'');await capsule.fill('draft three');
  await page.locator(shell+' .item').first().click();assert.equal(await capsule.inputValue(),'draft one');
@@ -63,7 +119,12 @@ const shell='[data-provider-hub-quick-composer]';
  // A replaced masthead recovers the launcher without duplicate UI or state loss.
  await page.evaluate(()=>{const old=document.getElementById('bar');old.outerHTML='<div id="bar"><b>Codex</b><button id="bell">Bell</button><button id="search">Search</button></div>';document.querySelector('#search').__reactFiber$test={memoizedProps:{uniform:true,onClick:function(){return 'chat-search-command-menu';}},return:null};});await flush(page);
  assert.equal(await page.locator('[data-provider-hub-quick-launcher]').count(),1);
+ // Plain keystrokes stay in the window; other Command shortcuts reach the app.
+ await page.evaluate(()=>{window.__keys=[];window.addEventListener('keydown',e=>window.__keys.push(e.key));});
+ await capsule.press('q');await capsule.press('Meta+a');await capsule.press('Meta+k');
+ assert.deepEqual(await page.evaluate(()=>window.__keys.filter(k=>k!=='Meta')),['k']);
  await capsule.press('Escape');assert.equal(await page.evaluate(()=>window.__providerHubQuickComposer.isOpen()),false);
+ assert.deepEqual(await page.evaluate(()=>window.__escapes),[false]);
  assert.equal(await page.evaluate(()=>window.__providerHubQuickComposer.recentThreadTargets().length),0);
  assert.equal(await page.evaluate(()=>window.__providerHubQuickComposer.setThreadPreviews([{threadId:'a'}]).applied),0);
  await page.evaluate(()=>window.__providerHubQuickComposer.uninstall());await flush(page);
@@ -78,7 +139,7 @@ const shell='[data-provider-hub-quick-composer]';
  await page.evaluate(()=>{window.__providerHubQuickComposer.uninstall();delete document.querySelector('#search').__reactFiber$test;});
  await page.evaluate(script);await flush(page);assert.equal(await page.locator('[data-provider-hub-quick-launcher]').count(),0);
  await browser.close();process.stdout.write('quick composer browser checks passed');
-})().catch(error=>{process.stderr.write(String(error.stack||error));process.exitCode=1;});
+})().catch(error=>{process.stderr.write(String(error.stack||error),()=>process.exit(1));});
 """
 
 

@@ -1,4 +1,4 @@
-"""Recent-thread popover using the Desktop's authored sidebar identities."""
+"""Recent-thread floating window using the Desktop's authored sidebar identities."""
 from __future__ import annotations
 
 
@@ -14,8 +14,12 @@ _SCRIPT = r"""
   const HOST='data-app-action-sidebar-thread-host-id', KIND='data-app-action-sidebar-thread-kind';
   const TITLE='data-app-action-sidebar-thread-title', SECTION='data-app-action-sidebar-section';
   const UUID=/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
+  const SPINNER='[role="status"][class~="text-text/70"] > [class~="motion-safe:animate-spin"] > svg';
+  const MARK='data-provider-hub-sidebar', ACCENT='--provider-hub-sidebar-accent';
+  const HEX=/^#[0-9a-f]{6}$/i;
+  const EDIT=/^(?:[acvxyz]|Enter|Backspace|Delete|Arrow(?:Left|Right|Up|Down)|Home|End)$/i;
   const key=t=>JSON.stringify([t.kind,t.hostId,t.threadId]);
-  const state={open:false,targets:[],selected:null,drafts:new Map(),previews:new Map(),statuses:new Map(),pending:new Set(),button:null,host:null,root:null,frame:0,reason:'waiting',disposed:false};
+  const state={open:false,dragged:false,targets:[],selected:null,shown:undefined,drafts:new Map(),previews:new Map(),statuses:new Map(),pending:new Set(),button:null,host:null,root:null,frame:0,reason:'waiting',disposed:false};
   const fibres=element=>{
     const name=Object.keys(element).find(k=>k.startsWith('__reactFiber$'));
     let node=name?element[name]:null; const result=[];
@@ -39,7 +43,19 @@ _SCRIPT = r"""
       }
       if(!threadId) return null;
     }
-    return {threadId,hostId,kind,title:row.getAttribute(TITLE)||'Untitled chat',supported:kind==='local'&&hostId==='local'&&UUID.test(threadId)};
+    let active=false,activeAccent=null;
+    try{
+      for(const glyph of row.querySelectorAll(SPINNER)){
+        if(glyph.closest('['+ROW+']')!==row)continue;
+        active=true;
+        if(glyph.getAttribute(MARK)==='1'){
+          const paint=glyph.style.getPropertyValue(ACCENT).trim();
+          if(HEX.test(paint))activeAccent=paint.toUpperCase();
+        }
+        break;
+      }
+    }catch(error){}
+    return {threadId,hostId,kind,title:row.getAttribute(TITLE)||'Untitled chat',supported:kind==='local'&&hostId==='local'&&UUID.test(threadId),active,activeAccent};
   }
   function collect() {
     const section=group(); if(!section) {state.reason='recents-unavailable';return [];}
@@ -64,18 +80,22 @@ _SCRIPT = r"""
     }
     return null;
   }
-  const icon='<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M5 4h14a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2h-9l-5 3v-3a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2Z"/><path d="M7 8h10M7 12h7"/></svg>';
-  let list,input,send,status,dialog,close;
+  const icon='<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M5 4h14a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2h-9l-5 3v-3a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2Z"/><path d="M7 8h10M7 12h7"/></svg>';
+  // Same 25% arc over a faint track as the sidebar's running indicator.
+  const spinGlyph='<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" aria-hidden="true"><circle cx="12" cy="12" r="8" opacity=".25"/><path d="M12 4a8 8 0 0 1 8 8" stroke-linecap="round"/></svg>';
+  let list,input,send,status,dialog,close,heading;
   function create() {
     const host=document.createElement('div');host.setAttribute('data-provider-hub-quick-composer','');
-    host.style.cssText='position:fixed;z-index:2147483000;left:16px;top:72px;display:none;color-scheme:inherit';
+    // A host the page discarded is rebuilt where, and as open as, it was.
+    host.style.cssText=state.host?state.host.style.cssText:'position:fixed;z-index:2147483000;left:16px;top:72px;display:none;color-scheme:inherit';
     const root=host.attachShadow({mode:'open'});
     root.innerHTML=`<style>
       :host{font-family:var(--font-sans,system-ui,sans-serif);color:var(--color-text,#eee)}
       *{box-sizing:border-box}button,input{font:inherit;color:inherit}button{cursor:pointer}
       .glass{width:min(440px,calc(100vw - 32px));max-height:calc(100vh - 96px);display:flex;flex-direction:column;border:1px solid color-mix(in srgb,currentColor 15%,transparent);border-radius:22px;background:color-mix(in srgb,var(--color-background,var(--color-surface,#202022)) 83%,transparent);backdrop-filter:blur(28px) saturate(1.3);box-shadow:0 18px 70px #0005;overflow:hidden}
-      .heading{display:flex;align-items:center;padding:14px 16px 8px;font-size:13px;font-weight:600;gap:12px}.heading span{flex:1}.close{border:0;background:none;border-radius:8px;font-size:18px;padding:2px 7px}
+      .heading{display:flex;align-items:center;padding:14px 16px 8px;font-size:13px;font-weight:600;gap:12px;cursor:move;touch-action:none;user-select:none}.heading span{flex:1}.close{border:0;background:none;border-radius:8px;font-size:18px;padding:2px 7px;cursor:pointer}
       .list{overflow:auto;padding:4px 8px;min-height:0}.item{display:block;width:100%;text-align:left;padding:8px 10px;border:0;background:none;border-radius:10px;margin:2px 0}.item:hover,.item:focus-visible{background:color-mix(in srgb,currentColor 7%,transparent)}.item[aria-selected=true]{background:color-mix(in srgb,var(--color-chart-blue,#705aff) 16%,transparent)}
+      .item{position:relative}.item.live .title,.item.live .preview{padding-right:24px}.spin{position:absolute;right:10px;top:50%;width:14px;height:14px;margin-top:-7px;color:var(--color-text-secondary,currentColor);animation:ph-qc-spin 2s steps(60,end) infinite}.spin svg{display:block}@keyframes ph-qc-spin{to{transform:rotate(360deg)}}@media(prefers-reduced-motion:reduce){.spin{animation:none}}
       .title,.preview{display:block;white-space:nowrap;text-overflow:ellipsis;overflow:hidden}.title{font-size:13px;line-height:19px}.preview{font-size:12px;line-height:18px;opacity:.6}.item[aria-disabled=true]{opacity:.45;cursor:default}
       .composer{display:flex;align-items:center;gap:8px;margin:10px 12px 4px;border-radius:24px;padding:6px 6px 6px 16px;border:1px solid color-mix(in srgb,currentColor 12%,transparent);background:var(--color-background-secondary, color-mix(in srgb,currentColor 5%,transparent))}
       input{width:0;flex:1;min-width:0;border:0;outline:none;background:none;font-size:14px;line-height:24px}input::placeholder{color:inherit;opacity:.5}.send{width:32px;height:32px;border:0;border-radius:50%;background:var(--color-text,#eee);color:var(--color-background,#222);font-size:20px}.send:disabled{opacity:.3;cursor:default}
@@ -83,13 +103,23 @@ _SCRIPT = r"""
       @media(prefers-color-scheme:light){:host{color:var(--color-text,#252525)}.glass{background:color-mix(in srgb,var(--color-background,var(--color-surface,#f7f7f8)) 85%,transparent)}.send{background:var(--color-text,#222);color:var(--color-background,#fff)}}
       @media(prefers-reduced-transparency:reduce){.glass{background:var(--color-background,#202022);backdrop-filter:none}}
     </style><section class="glass" role="dialog" aria-label="Recent chats quick composer"><div class="heading"><span>Recent chats</span><button class="close" aria-label="Close quick composer">×</button></div><div class="list" role="listbox" aria-label="Recent chats"></div><div class="composer"><input aria-label="Message selected chat" placeholder="Message selected chat…" maxlength="65536"><button class="send" aria-label="Send message">↑</button></div><div class="status" role="status" aria-live="polite"></div></section>`;
-    state.host=host;state.root=root;document.body.appendChild(host);
-    list=root.querySelector('.list');input=root.querySelector('input');send=root.querySelector('.send');status=root.querySelector('.status');dialog=root.querySelector('.glass');close=root.querySelector('.close');
+    state.host=host;state.root=root;state.shown=undefined;document.body.appendChild(host);
+    list=root.querySelector('.list');input=root.querySelector('input');send=root.querySelector('.send');status=root.querySelector('.status');dialog=root.querySelector('.glass');close=root.querySelector('.close');heading=root.querySelector('.heading');
     close.addEventListener('click',()=>setOpen(false));send.addEventListener('click',submit);
+    heading.addEventListener('pointerdown',startDrag);heading.addEventListener('pointermove',dragMove);
+    for(const type of ['pointerup','pointercancel','lostpointercapture'])heading.addEventListener(type,dragEnd);
     input.addEventListener('input',()=>{if(state.selected)state.drafts.set(state.selected,input.value);updateComposer();});
     input.addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.isComposing){e.preventDefault();submit();}});
+    // Keys typed here belong to this window. Document-level handlers only see
+    // the host as the target, so plain and editing keystrokes, clipboard
+    // events and Escape stop at the shadow root; other Command/Control
+    // shortcuts still reach the app.
+    const isolate=e=>{if(!(e.metaKey||e.ctrlKey)||EDIT.test(e.key))e.stopPropagation();};
+    for(const type of ['keyup','keypress'])root.addEventListener(type,isolate);
+    for(const type of ['copy','cut','paste'])root.addEventListener(type,e=>e.stopPropagation());
     root.addEventListener('keydown',e=>{
-      if(e.key==='Escape'){e.preventDefault();setOpen(false);return;}
+      isolate(e);
+      if(e.key==='Escape'&&!e.isComposing){e.preventDefault();setOpen(false);return;}
       if(e.key==='Tab'){
         const controls=Array.from(root.querySelectorAll('button:not(:disabled),input:not(:disabled)')).filter(el=>!el.hidden);
         const pos=controls.indexOf(root.activeElement);
@@ -104,13 +134,13 @@ _SCRIPT = r"""
   }
   function attach() {
     if(state.disposed||!document.body)return;
-    if(!state.host?.isConnected)create();
+    if(!state.host?.isConnected){create();if(state.open)position();}
     const bar=actionBar();if(!bar){state.reason='masthead-unavailable';return;}
     if(state.button?.parentElement===bar)return;
     state.button?.remove();
     const button=document.createElement('button');button.setAttribute('data-provider-hub-quick-launcher','');
     button.setAttribute('aria-label','Recent chats quick composer');button.setAttribute('title','Recent chats quick composer');button.setAttribute('aria-haspopup','dialog');button.setAttribute('aria-expanded',String(state.open));
-    button.style.cssText='display:flex;align-items:center;justify-content:center;width:28px;height:28px;flex-shrink:0;border:0;border-radius:8px;background:transparent;color:inherit;cursor:pointer;-webkit-app-region:no-drag';
+    button.style.cssText='display:flex;align-items:center;justify-content:center;width:28px;height:28px;flex-shrink:0;border:0;border-radius:8px;background:transparent;color:var(--color-text-secondary,inherit);cursor:pointer;-webkit-app-region:no-drag';
     button.innerHTML=icon;button.addEventListener('click',()=>setOpen(!state.open));bar.appendChild(button);state.button=button;
   }
   function updateComposer() {
@@ -119,32 +149,69 @@ _SCRIPT = r"""
     input.placeholder=t?.supported?'Message '+t.title+'…':'Select a local Codex chat';
     status.textContent=state.statuses.get(state.selected)||(!t?.supported?'Remote and ChatGPT chats are unavailable here.':'');
   }
+  const rows=new Map();
+  const setAttr=(el,name,value)=>{if(el.getAttribute(name)!==value)el.setAttribute(name,value);};
+  const setText=(el,value)=>{if(el.textContent!==value)el.textContent=value;};
+  function choose(k){if(!state.targets.find(t=>key(t)===k)?.supported)return;state.selected=k;render();input.focus();}
+  function item(k){
+    let row=rows.get(k);if(row)return row;
+    row=document.createElement('button');row.className='item';row.setAttribute('data-key',k);row.setAttribute('role','option');
+    const title=document.createElement('span');title.className='title';const preview=document.createElement('span');preview.className='preview';
+    row.append(title,preview);row.addEventListener('click',()=>choose(k));rows.set(k,row);return row;
+  }
+  function paint(row,t,k){
+    setAttr(row,'aria-selected',String(k===state.selected));setAttr(row,'aria-disabled',String(!t.supported));
+    setText(row.querySelector('.title'),t.title);
+    setText(row.querySelector('.preview'),t.supported?(state.previews.get(k)||'No response preview available'):'Unavailable in this popover');
+    let spin=row.querySelector('.spin');row.classList.toggle('live',t.active);
+    if(t.active&&!spin){spin=document.createElement('span');spin.className='spin';spin.setAttribute('aria-hidden','true');spin.innerHTML=spinGlyph;row.prepend(spin);}
+    else if(!t.active&&spin){spin.remove();spin=null;}
+    if(spin&&spin.__accent!==t.activeAccent){spin.__accent=t.activeAccent;spin.style.color=t.activeAccent||'';}
+  }
   function render() {
     if(!list)return;
-    const selected=state.targets.find(t=>key(t)===state.selected);
-    if(!selected)state.selected=state.targets.find(t=>t.supported)?key(state.targets.find(t=>t.supported)):null;
-    const focused=state.root.activeElement?.getAttribute('data-key');
-    list.replaceChildren();
-    if(!state.targets.length){const empty=document.createElement('div');empty.className='empty';empty.textContent='No recent chats are available in the sidebar.';list.appendChild(empty);}
-    for(const t of state.targets){
-      const k=key(t),row=document.createElement('button');row.className='item';row.setAttribute('data-key',k);row.setAttribute('role','option');row.setAttribute('aria-selected',String(k===state.selected));row.setAttribute('aria-disabled',String(!t.supported));
-      const title=document.createElement('span');title.className='title';title.textContent=t.title;
-      const preview=document.createElement('span');preview.className='preview';preview.textContent=t.supported?(state.previews.get(k)||'No response preview available'):'Unavailable in this popover';
-      row.append(title,preview);row.addEventListener('click',()=>{if(!t.supported)return;state.selected=k;render();input.focus();});list.appendChild(row);
-      if(focused===k)row.focus();
-    }
-    input.value=state.drafts.get(state.selected)||'';updateComposer();
+    if(!state.targets.some(t=>key(t)===state.selected)){const first=state.targets.find(t=>t.supported);state.selected=first?key(first):null;}
+    // Rows are keyed and patched in place: streaming updates never replace
+    // the row under a press, and unrelated sidebar churn writes nothing.
+    const keys=state.targets.map(key),focused=state.root.activeElement;
+    for(const [k,row] of rows)if(!keys.includes(k)){row.remove();rows.delete(k);}
+    const wanted=keys.map(item);state.targets.forEach((t,i)=>paint(wanted[i],t,keys[i]));
+    const empty=list.querySelector('.empty');
+    if(wanted.length)empty?.remove();
+    else if(!empty){const note=document.createElement('div');note.className='empty';note.textContent='No recent chats are available in the sidebar.';list.appendChild(note);}
+    const order=Array.from(list.querySelectorAll('.item'));
+    if(order.length!==wanted.length||order.some((row,i)=>row!==wanted[i])){list.append(...wanted);if(focused?.isConnected&&state.root.activeElement!==focused)focused.focus();}
+    if(state.shown!==state.selected){state.shown=state.selected;input.value=state.drafts.get(state.selected)||'';}
+    updateComposer();
   }
+  let drag=null;
+  // Pointer capture keeps a fast drag attached to the heading after the
+  // pointer leaves it; a press without movement leaves the anchor alone.
+  function startDrag(e){if(!state.host||e.button!==0||e.target.closest('.close'))return;e.preventDefault();const box=state.host.getBoundingClientRect();drag={id:e.pointerId,cx:e.clientX,cy:e.clientY,x:box.left,y:box.top,moved:false};try{heading.setPointerCapture(e.pointerId);}catch(error){}}
+  function dragMove(e){if(!drag||e.pointerId!==drag.id)return;const dx=e.clientX-drag.cx,dy=e.clientY-drag.cy;if(!drag.moved&&Math.hypot(dx,dy)<3)return;drag.moved=true;state.dragged=true;place(drag.x+dx,drag.y+dy);}
+  function dragEnd(e){if(drag&&e.pointerId===drag.id)drag=null;}
   function sync() {
     if(state.disposed)return;attach();
     if(!state.open)return;
-    state.targets=collect();render();position();
+    state.targets=collect();render();
   }
-  function position(){if(!state.button||!state.host)return;const box=state.button.getBoundingClientRect();state.host.style.left=Math.max(12,Math.min(box.left,innerWidth-452))+'px';state.host.style.top=Math.min(box.bottom+10,Math.max(12,innerHeight-300))+'px';}
+  function place(x,y){
+    const width=state.host.offsetWidth||440;x=Math.max(8,Math.min(x,innerWidth-width-8));y=Math.max(8,Math.min(y,innerHeight-160));
+    state.host.style.left=Math.round(x)+'px';state.host.style.top=Math.round(y)+'px';dialog.style.maxHeight=Math.max(120,innerHeight-y-8)+'px';
+  }
+  // Anchor below the launcher only until the user moves the window; after
+  // that it reopens where it was left and is only kept inside the viewport.
+  function position(){
+    if(!state.host)return;
+    const box=state.button?.isConnected?state.button.getBoundingClientRect():null;
+    if(!state.dragged&&box&&(box.width||box.height))return place(box.left,box.bottom+10);
+    const x=parseFloat(state.host.style.left),y=parseFloat(state.host.style.top),own=state.host.getBoundingClientRect();
+    place(Number.isFinite(x)?x:own.left,Number.isFinite(y)?y:own.top);
+  }
   function setOpen(value){
     state.open=Boolean(value);attach();if(!state.host)return;
     state.host.style.display=state.open?'block':'none';state.button?.setAttribute('aria-expanded',String(state.open));
-    if(state.open){sync();input.focus();}else state.button?.focus();
+    if(state.open){position();sync();input.focus();}else{drag=null;state.button?.focus();}
   }
   async function submit(){
     state.targets=collect();const t=state.targets.find(t=>key(t)===state.selected);
@@ -176,14 +243,13 @@ _SCRIPT = r"""
     if(mutations.every(m=>m.target===state.host||m.target===state.button||state.host?.contains(m.target)||state.button?.contains(m.target)))return;
     schedule();
   });
-  observer.observe(document.documentElement,{childList:true,subtree:true,attributes:true,attributeFilter:[ID,HOST,KIND,TITLE,'data-app-action-sidebar-section-heading','data-app-action-sidebar-section-collapsed']});
-  const escape=e=>{if(e.key==='Escape'&&state.open){e.preventDefault();setOpen(false);}};
-  const outside=e=>{if(state.open&&!e.composedPath().includes(state.host)&&!e.composedPath().includes(state.button))setOpen(false);};
-  document.addEventListener('keydown',escape);document.addEventListener('pointerdown',outside);window.addEventListener('resize',position);
+  observer.observe(document.documentElement,{childList:true,subtree:true,attributes:true,attributeFilter:[ID,HOST,KIND,TITLE,MARK,'data-app-action-sidebar-section-heading','data-app-action-sidebar-section-collapsed']});
+  const resize=()=>{if(state.open)position();};
+  window.addEventListener('resize',resize);
   window.__providerHubQuickComposer={
     recentThreadTargets:()=>state.open?collect():[],setThreadPreviews:previews,isOpen:()=>state.open,
-    check:()=>({installed:true,open:state.open,button:Boolean(state.button?.isConnected),reason:state.reason,targets:state.open?collect().length:0}),
-    uninstall:()=>{state.disposed=true;observer.disconnect();if(state.frame)cancelAnimationFrame(state.frame);document.removeEventListener('keydown',escape);document.removeEventListener('pointerdown',outside);window.removeEventListener('resize',position);state.button?.remove();state.host?.remove();delete window.__providerHubQuickComposer;}
+    check:()=>{const live=state.open?collect():[];return {installed:true,open:state.open,button:Boolean(state.button?.isConnected),reason:state.reason,targets:live.length,active:live.filter(t=>t.active).length,dragged:state.dragged};},
+    uninstall:()=>{state.disposed=true;drag=null;observer.disconnect();if(state.frame)cancelAnimationFrame(state.frame);window.removeEventListener('resize',resize);state.button?.remove();state.host?.remove();delete window.__providerHubQuickComposer;}
   };
   attach();return {installed:true};
 })()

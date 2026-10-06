@@ -6,11 +6,24 @@ Hub. It uses the existing private DevTools pipe and works independently of
 provider accent colours. It does not modify the installed Desktop bundle.
 
 The launcher sits in the sidebar masthead beside the native search and
-notification controls. Its floating in-app glass popover contains the first
-ten native recent-chat rows, in sidebar order, each with a one-line title and
-a one-line latest assistant response preview. The single-row capsule follows
-Desktop's composer proportions and theme tokens. It is not a separate macOS
-window. Each chat retains its own draft while the popover remains mounted.
+notification controls. Its 14px glyph uses the app's secondary text token,
+so it tracks native light/dark transitions like its neighbours. Dragging
+the window heading moves the floating in-app glass surface, which stays
+open until dismissed with its close button, the launcher toggle, or Escape
+while focus is inside it; clicking elsewhere or pressing Escape elsewhere in
+the app does not close it. It opens below the launcher, and once moved it
+reopens where it was left, kept inside the app window when that is resized.
+It contains the first ten native recent-chat rows, in sidebar order, each
+with a one-line title and a one-line latest assistant response preview.
+Rows whose threads are running show a spinning indicator in the thread's
+provider accent, or the default gray when accents are unavailable; dormant
+rows show none. Rows are updated in place rather than rebuilt, so streaming
+updates do not swallow a click. The single-row capsule follows Desktop's
+composer proportions and theme tokens. Plain and editing keystrokes,
+clipboard events and Escape typed in the window do not reach the app's
+document-level shortcuts; other Command/Control shortcuts still do. It is
+not a separate macOS window and cannot float above other apps. Each chat
+retains its own draft while the window remains mounted.
 
 Only local Codex chats can send in this version. Remote-host and ChatGPT
 rows keep their position among the first ten and show as unavailable. The
@@ -43,6 +56,7 @@ module build must be qualified before sending is enabled again.
 These are observed implementation hooks in ChatGPT Desktop 26.930.51102
 (13100), not a public extension API. App updates can disable the launcher or
 native action. Rendered fixtures cover authored identities, first-ten order,
-unsupported hosts, drafts, asynchronous sends, remounts and keyboard behavior.
+activity indicators, unsupported hosts, drafts, asynchronous sends, drag and
+persistence, remounts and keyboard behavior.
 No live Desktop send was performed: this task's runtime blocks computer use
 of the Codex app. A live in-app acceptance check remains outstanding.
