@@ -287,11 +287,29 @@ class BrandingTests(unittest.TestCase):
                     catalogue=self.catalogue)
                 self.assertEqual(plain["logo"], {"light": "custom.png", "dark": "custom.png"})
 
+    def test_trailing_mark_crop_rides_along_like_the_leading_one(self):
+        """MiMo's ring sits at the end of its wordmark, so the crop setting
+        mirrors leadingMarkAspectRatio and survives resolution unchanged."""
+        logo = {"light": "provider-logos/wordmark.png", "trailingMarkAspectRatio": 0.97}
+        normalized = validate_overrides({"muse": {"logo": logo}}, self.catalogue)
+        presentation = resolve_presentation(
+            "muse", "muse-spark-1.3", normalized, catalogue=self.catalogue)
+        self.assertEqual(presentation["logo"], {**logo, "dark": logo["light"]})
+        mimo = resolve_presentation("mimo", catalogue=self.catalogue)
+        self.assertEqual(mimo["logo"], {
+            "light": "provider-logos/provider-logo-mimo-on-light.png",
+            "dark": "provider-logos/provider-logo-mimo-on-dark.png",
+            "trailingMarkAspectRatio": 127 / 131,
+        })
+
     def test_invalid_logo_display_options_fail_closed(self):
         invalid = [
-            {"leadingMarkAspectRatio": value}
+            {key: value}
+            for key in ("leadingMarkAspectRatio", "trailingMarkAspectRatio")
             for value in (True, "1.5", 0, -1, 0.49, 2.01, float("nan"), float("inf"))
-        ] + [{"template": value} for value in (0, 1, "true", None)]
+        ] + [{"template": value} for value in (0, 1, "true", None)] + [
+            {"leadingMarkAspectRatio": 1.0, "trailingMarkAspectRatio": 1.0},
+        ]
         for options in invalid:
             with self.subTest(options=options), self.assertRaises(BrandingError):
                 validate_overrides(

@@ -79,7 +79,12 @@
     "mimo": {
       "displayProvider": "MiMo",
       "hueKey": "xiaomi",
-      "shortCode": "MIM"
+      "shortCode": "MIM",
+      "logo": {
+        "light": "provider-logos/provider-logo-mimo-on-light.png",
+        "dark": "provider-logos/provider-logo-mimo-on-dark.png",
+        "trailingMarkAspectRatio": 0.9694656488549618
+      }
     },
     "ollama": {
       "displayProvider": "Ollama",

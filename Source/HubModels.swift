@@ -43,6 +43,7 @@ struct BrandLogo: Codable, Equatable {
     var dark: String?
     var scale: Double?
     var leadingMarkAspectRatio: Double?
+    var trailingMarkAspectRatio: Double?
     var template: Bool?
 }
 struct BrandOverride: Codable, Equatable {
@@ -211,12 +212,13 @@ struct ProviderMark: View {
     private func artwork(_ image: NSImage, logo: BrandLogo) -> some View {
         let artwork = Image(nsImage: image).resizable()
             .renderingMode(logo.template == true ? .template : .original)
-        if let markRatio = logo.leadingMarkAspectRatio {
+        if let markRatio = logo.leadingMarkAspectRatio ?? logo.trailingMarkAspectRatio {
             // Keep the source wordmark intact and show its complete leading
-            // glyph, fitting wide marks such as Meta's loop inside the slot.
+            // (or trailing, for MiMo's ring) glyph, fitting wide marks such
+            // as Meta's loop inside the slot.
             let height = size / max(markRatio, 1)
             artwork.frame(width: height * image.size.width / image.size.height, height: height)
-                .frame(width: height * markRatio, height: height, alignment: .leading)
+                .frame(width: height * markRatio, height: height, alignment: logo.leadingMarkAspectRatio != nil ? .leading : .trailing)
                 .clipped()
         } else {
             artwork.scaledToFit()

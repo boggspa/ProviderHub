@@ -30,7 +30,7 @@ PROVIDER_KEYS = {"displayProvider", "hueKey", "shortCode", "logo"}
 USER_OVERRIDE_KEYS = {
     "displayProvider", "hueKey", "accent", "shortCode", "modelLabels", "logo",
 }
-LOGO_KEYS = {"light", "dark", "scale", "leadingMarkAspectRatio", "template"}
+LOGO_KEYS = {"light", "dark", "scale", "leadingMarkAspectRatio", "trailingMarkAspectRatio", "template"}
 RULE_KEYS = {
     "runtimeProvider", "id", "providerLabel", "providerClass", "needles",
     "fallbackModelLabel",
@@ -112,13 +112,18 @@ def _logo(value, label: str) -> dict:
         if not math.isfinite(scale) or not 0.5 <= scale <= 2.0:
             raise BrandingError(f"{label}.scale must be a finite number from 0.5 to 2.0.")
         result["scale"] = scale
-    if "leadingMarkAspectRatio" in logo:
-        ratio = logo["leadingMarkAspectRatio"]
+    for key in ("leadingMarkAspectRatio", "trailingMarkAspectRatio"):
+        if key not in logo:
+            continue
+        ratio = logo[key]
         if (isinstance(ratio, bool) or not isinstance(ratio, (int, float))
                 or not math.isfinite(ratio) or not 0.5 <= ratio <= 2.0):
             raise BrandingError(
-                f"{label}.leadingMarkAspectRatio must be a finite number from 0.5 to 2.0.")
-        result["leadingMarkAspectRatio"] = float(ratio)
+                f"{label}.{key} must be a finite number from 0.5 to 2.0.")
+        result[key] = float(ratio)
+    if "leadingMarkAspectRatio" in result and "trailingMarkAspectRatio" in result:
+        raise BrandingError(
+            f"{label} may crop a leading or a trailing mark, not both.")
     if "template" in logo:
         if not isinstance(logo["template"], bool):
             raise BrandingError(f"{label}.template must be a boolean.")

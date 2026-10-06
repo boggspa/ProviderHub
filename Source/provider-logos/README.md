@@ -14,6 +14,8 @@ The following PNGs are copied verbatim from Limit Counter's
 | `provider-logo-devin.png` | `ProviderDevinLogo.imageset/logo.png` | Devin |
 | `provider-logo-meta.png` | `ProviderMetaLogo.imageset/logo.png` | Muse and Meta display branding |
 | `provider-logo-minimax.png` | `ProviderMiniMaxLogo.imageset/logo.png` | MiniMax |
+| `provider-logo-mimo-on-light.png` | `ProviderMiMoLogo.imageset/logo-light.png` | MiMo (light appearance) |
+| `provider-logo-mimo-on-dark.png` | `ProviderMiMoLogo.imageset/logo-dark.png` | MiMo (dark appearance) |
 
 Both source checkouts remain read-only. The display palette and logo settings
 are recorded in `../provider_branding.json`.
@@ -23,6 +25,9 @@ glyph of a wordmark, preserving its proportions and centering the complete
 glyph in the icon slot. Qwen uses the first 239 pixels of its 1024 × 235 source;
 Meta uses the first 340 pixels of its 1024 × 237 source. This follows Limit
 Counter's leading-glyph presentation without modifying the source PNGs.
+`trailingMarkAspectRatio` is the mirror image for marks that end a wordmark:
+MiMo shows the ring that closes "Xiaomi MIMO", the last 127 pixels of its
+1024 × 131 source. A logo may set one crop or the other, not both.
 The optional `template` setting renders a monochrome asset in the UI's primary
 foreground color; Devin uses it so the black source glyph remains visible on
 the hub's dark surface. Both settings are supported in user logo overrides;
