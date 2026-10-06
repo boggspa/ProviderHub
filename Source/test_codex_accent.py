@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import plistlib
 import re
+import sqlite3
 import stat
 import subprocess
 import sys
@@ -23,6 +24,7 @@ from hub_config import defaults
 
 def fixture():
     settings = defaults(SLOTS, "mistral-medium-latest", 11438)
+    settings["codex_accent_slider"] = True
     settings["codex_model"] = "kimi/kimi-for-coding"
     inventory = {"models": [
         {"id": "kimi/kimi-for-coding", "display_name": "Kimi for Coding", "provider_id": "kimi",
@@ -262,6 +264,46 @@ class UltraTests(unittest.TestCase):
         css_bundle = json.loads(re.search(r"const STYLE_CSS = (.+);", script).group(1))
         self.assertIn(shimmer_css() + activity_glyph_css() + ultra_css(), css_bundle)
         self.assertIn(codex_accent.sidebar_spinner_css(), css_bundle)
+
+
+class ChildMetadataTests(unittest.TestCase):
+    def test_child_uses_own_model_even_when_parent_is_different_or_missing(self):
+        with tempfile.TemporaryDirectory() as folder:
+            home = Path(folder)
+            database = home / "state_5.sqlite"
+            with sqlite3.connect(database) as connection:
+                connection.execute("CREATE TABLE threads (id TEXT PRIMARY KEY, model TEXT)")
+                connection.execute("CREATE TABLE thread_spawn_edges (child_thread_id TEXT, parent_thread_id TEXT)")
+                parent = "00000000-0000-4000-8000-000000000001"
+                child = "00000000-0000-4000-8000-000000000002"
+                connection.executemany("INSERT INTO threads VALUES (?,?)", [(parent, "kimi/model"), (child, "mistral/model")])
+                connection.execute("INSERT INTO thread_spawn_edges VALUES (?,?)", (child, parent))
+            palette = codex_accent.ChildAccents({"kimi/model": "#0073E6", "mistral/model": "#D44404"}, config_home=home)
+            before = database.read_bytes()
+            self.assertEqual(palette([child]), {child: "#D44404"})
+            self.assertEqual(database.read_bytes(), before)
+            with sqlite3.connect(database) as connection:
+                connection.execute("DELETE FROM threads WHERE id=?", (parent,))
+                connection.execute("UPDATE threads SET model='gpt-6-astra' WHERE id=?", (child,))
+            palette.native.add("gpt 6 astra")
+            self.assertEqual(palette([child]), {child: "#705AFF"})
+            self.assertEqual(palette([None] * 32 + [child]), {})
+            (home / "state_6.sqlite").write_text("unknown schema")
+            self.assertEqual(palette([child]), {})
+
+    def test_selected_child_transport_and_preview_routes_are_independent(self):
+        pipe = FakeTransport()
+        selected = "00000000-0000-4000-8000-000000000002"
+        reader = mock.Mock(return_value={selected: "#D44404"})
+        bridge = AccentBridge(pipe, "SCRIPT", child_accents=reader)
+        bridge.injected.add("app")
+        bridge.refresh_extras()
+        request = pipe.sent[-1]
+        self.assertIn("childThreadIds", request["params"]["expression"])
+        bridge.handle({"id": request["id"], "result": {"result": {"value": [selected]}}})
+        reader.assert_called_once_with([selected])
+        self.assertIn("setChildAccents", pipe.sent[-1]["params"]["expression"])
+        self.assertIn("#D44404", pipe.sent[-1]["params"]["expression"])
 
 
 class EnvironmentTests(unittest.TestCase):
@@ -527,6 +569,31 @@ class LaunchTests(unittest.TestCase):
                 self.assertEqual(bridge_command(str(app), unlocking, inventory, emit=events.append, log_path=log), 0)
             self.assertEqual(events, [{"event": "accents", "count": 2, "usage_banner": "shown", "composer": "unlocked"}])
             self.assertIn("const UNLOCK_COMPOSER = true;", scripts[-1])
+
+    def test_quick_composer_launch_does_not_enable_provider_colours_or_usage_overrides(self):
+        settings, inventory = fixture()
+        settings.update(codex_quick_composer=True, codex_accent_slider=False,
+                        codex_unlock_composer=True, codex_hide_usage_banner=True)
+        captured = []
+        modules = {
+            "codex_desktop_actions": mock.Mock(desktop_actions_script=lambda: "(() => ({actions:true}))()"),
+            "codex_quick_composer": mock.Mock(quick_composer_script=lambda: "(() => ({composer:true}))()"),
+            "codex_recent_threads": mock.Mock(RecentThreadPreviews=mock.Mock(return_value="preview-reader")),
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            app = demo_bundle(Path(directory))
+            with mock.patch.dict(sys.modules, modules), \
+                    mock.patch.object(codex_accent, "already_running", return_value=False), \
+                    mock.patch.object(codex_accent, "run", side_effect=lambda binary, script, **options: captured.append((script, options)) or 0):
+                self.assertEqual(bridge_command(str(app), settings, inventory), 0)
+        script, options = captured[0]
+        self.assertIn("composer:true", script)
+        self.assertIn("actions:true", script)
+        self.assertNotIn("__providerHubAccent", script)
+        self.assertNotIn("UNLOCK_COMPOSER", script)
+        self.assertNotIn("sidebar_accents", options)
+        self.assertNotIn("child_accents", options)
+        self.assertEqual(options["recent_previews"], "preview-reader")
 
     def test_executable_path_reads_the_bundle_plist(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -125,6 +125,9 @@ struct RouteSettings: Codable, Equatable {
     // Codex tab: launch the desktop app through the DevTools-pipe helper
     // that tints its power slider per model (see codex_accent.py).
     var codex_accent_slider = false
+    // Add a recent-thread prompt popover to the desktop masthead. Uses the
+    // same private helper independently of provider colouring.
+    var codex_quick_composer = false
     // With that helper on, also hide the app's ChatGPT usage banner
     // ("You're out of Codex and Work usage") in its windows.
     var codex_hide_usage_banner = false

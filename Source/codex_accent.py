@@ -90,6 +90,11 @@ CHILD_PANEL_SELECTOR = (TAB_PANEL_SELECTOR + ':is([data-tab-id^="sidechat:"],'
 # not hashed module names or the user's transcript text.
 SUBAGENT_MODEL_SELECTOR = ('div[class~="h-12"][class~="border-b"][class~="border-strong"]'
                            ' > span[class~="max-w-1/2"][class~="text-tertiary"]')
+# The current shell renders subagent-detail through headerRows. Its metadata
+# span remains distinctive, but the header no longer owns a border or height.
+SUBAGENT_DETAIL_SELECTOR = ('div[class~="h-full"][class~="items-center"][class~="px-4"]'
+                            ' > span[class~="max-w-1/2"][class~="text-tertiary"]'
+                            '[class~="select-none"]')
 # Authored sidebar action hooks, observed in ChatGPT 26.917.62051. The row
 # key is local:<thread UUID>; a remote host may use the same key, so its host
 # and kind must agree before consulting the local database.
@@ -265,6 +270,48 @@ class SidebarAccents:
                     if colour:
                         result[identifier] = colour
                     break
+            return result
+        except (OSError, sqlite3.Error):
+            return {}
+        finally:
+            if connection is not None:
+                connection.close()
+
+
+class ChildAccents(SidebarAccents):
+    """Resolve selected children by their own saved model, without spawn edges."""
+
+    def __call__(self, identifiers) -> dict:
+        if not isinstance(identifiers, list):
+            return {}
+        requested = {value for value in identifiers[:32]
+                     if isinstance(value, str) and _THREAD_ID.fullmatch(value)}
+        if not requested:
+            return {}
+        connection = None
+        try:
+            candidates = [(int(match.group(1)), path) for path in self.home.glob("state_*.sqlite")
+                          if (match := re.fullmatch(r"state_(\d+)\.sqlite", path.name))]
+            if not candidates:
+                return {}
+            database = max(candidates)[1].resolve()
+            connection = sqlite3.connect(database.as_uri() + "?mode=ro", uri=True, timeout=0.05)
+            deadline = time.monotonic() + 0.2
+            connection.set_progress_handler(lambda: int(time.monotonic() > deadline), 1000)
+            placeholders = ",".join("?" for _ in requested)
+            rows = connection.execute(f"SELECT id, model FROM threads WHERE id IN ({placeholders})",
+                                      tuple(requested)).fetchall()
+            result = {}
+            for identifier, model in rows:
+                if not isinstance(model, str):
+                    continue
+                key = _label_key(model)
+                colour = self.routes.get(key)
+                native_key = re.sub(r"[-\s]+", " ", key.removeprefix("codex/"))
+                if not colour and native_key in self.native:
+                    colour = NATIVE_CODEX_ACCENT
+                if colour:
+                    result[identifier] = colour
             return result
         except (OSError, sqlite3.Error):
             return {}
@@ -487,6 +534,8 @@ _WATCHER = r"""
     const TAB_PANEL_SELECTOR = __HUB_TAB_PANEL_SELECTOR__;
     const CHILD_PANEL_SELECTOR = __HUB_CHILD_PANEL_SELECTOR__;
     const SUBAGENT_MODEL_SELECTOR = __HUB_SUBAGENT_MODEL_SELECTOR__;
+    const SUBAGENT_DETAIL_SELECTOR = __HUB_SUBAGENT_DETAIL_SELECTOR__;
+    const PALETTE_HUES = __HUB_PALETTE_HUES__;
     const SIDEBAR_ROW = "__HUB_SIDEBAR_ROW__";
     const SIDEBAR_ID = "__HUB_SIDEBAR_ID__";
     const SIDEBAR_HOST = "__HUB_SIDEBAR_HOST__";
@@ -495,6 +544,7 @@ _WATCHER = r"""
     const SIDEBAR_PROPERTY = "__HUB_SIDEBAR_PROPERTY__";
     const SIDEBAR_SPINNER = __HUB_SIDEBAR_SPINNER__;
     const sidebar = { colours: new Map(), targets: new Map() };
+    const child = { colours: new Map() };
     const state = { targets: [], label: "", colour: "", purple: "", ultra: "", title: null, words: [], pills: [], marks: [], sheet: null, accent: "", theme: "", hue: "", panels: new Map() };
     // The composer's send lock. Once the ChatGPT plan's core usage is
     // exhausted the app disables the send button for every model, hub routes
@@ -737,10 +787,64 @@ _WATCHER = r"""
       }
       state.accent = accent; state.theme = theme; state.hue = hue;
     }
+    function childHeader(panel) {
+      for (const element of panel.querySelectorAll(SUBAGENT_MODEL_SELECTOR + ',' + SUBAGENT_DETAIL_SELECTOR)) {
+        if (element.closest(TAB_PANEL_SELECTOR) === panel) { return element; }
+      }
+      return null;
+    }
+    function selectedChild(panel) {
+      if (!panel.getAttribute('data-tab-id')?.startsWith('subagents:')) { return null; }
+      const header = childHeader(panel);
+      if (!header) { return null; }
+      const fiberKey = Object.keys(header).find(name => name.startsWith('__reactFiber$'));
+      let fiber = fiberKey ? header[fiberKey] : null;
+      let seed = null;
+      // The shared SubagentPanelHeader receives seed + onBack; its caller
+      // receives the same conversationId + hostId. Both must agree. Never
+      // borrow the tab ID: subagents:<id> identifies the parent conversation.
+      for (let depth = 0; fiber && depth < 24; depth += 1, fiber = fiber.return) {
+        const props = fiber.memoizedProps;
+        if (!props || typeof props !== 'object') { continue; }
+        if (!seed && typeof props.onBack === 'function' && typeof props.seed === 'string' && THREAD_UUID.test(props.seed)) {
+          seed = props.seed;
+        }
+        if (seed && props.conversationId === seed && typeof props.onBack === 'function' && typeof props.hostId === 'string') {
+          return { threadId: seed, hostId: props.hostId, element: header };
+        }
+      }
+      return null;
+    }
+    function childThreadIds() {
+      const result = [];
+      for (const panel of document.querySelectorAll(CHILD_PANEL_SELECTOR)) {
+        if (!drawn(panel) || panel.closest('[inert],[hidden]')) { continue; }
+        const selected = selectedChild(panel);
+        if (selected?.hostId === 'local' && !result.includes(selected.threadId)) { result.push(selected.threadId); }
+        if (result.length >= 32) { break; }
+      }
+      return result;
+    }
+    function setChildAccents(entries) {
+      const next = new Map();
+      if (entries && typeof entries === 'object' && !Array.isArray(entries)) {
+        for (const [id, colour] of Object.entries(entries).slice(0, 32)) {
+          if (THREAD_UUID.test(id) && typeof colour === 'string' && /^#[0-9a-f]{6}$/i.test(colour)) { next.set(id, colour.toUpperCase()); }
+        }
+      }
+      child.colours = next;
+      applyPills();
+      return { children: next.size, panels: state.panels.size };
+    }
     function headerModel(panel) {
       if (!panel.getAttribute("data-tab-id").startsWith("subagents:")) { return null; }
-      const element = panel.querySelector(SUBAGENT_MODEL_SELECTOR);
+      const element = childHeader(panel);
       if (!element || element.closest(TAB_PANEL_SELECTOR) !== panel) { return null; }
+      const selected = selectedChild(panel);
+      const colour = selected?.hostId === 'local' ? child.colours.get(selected.threadId) : null;
+      if (colour) {
+        return { colour, theme: themeOf(element), hue: PALETTE_HUES[colour] ?? '' };
+      }
       const text = norm(element.textContent);
       // Try the whole value before removing the final effort suffix, since
       // a Hub display label may itself contain a middle dot.
@@ -999,11 +1103,13 @@ _WATCHER = r"""
     observer.observe(document, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ["data-explicit-model", "data-accent", "data-maximum", "data-selected-reasoning-effort", "data-tab-id", "data-app-shell-tab-panel-controller", "data-app-shell-active-page", SIDEBAR_ROW, SIDEBAR_ID, SIDEBAR_HOST, SIDEBAR_KIND, "role", "inert", "hidden"] });
     if (document.readyState === "loading") { document.addEventListener("DOMContentLoaded", schedule, { once: true }); }
     window.__providerHubAccent = {
-      version: 19,
+      version: 20,
       accents: Object.keys(ACCENTS).length,
       sidebarThreadIds: () => Array.from(new Set(sidebarRows().map(row => row.id))),
       setSidebarAccents: setSidebarAccents,
       sidebarStatus: sidebarStatus,
+      childThreadIds: childThreadIds,
+      setChildAccents: setChildAccents,
       check: () => ({ container: !!document.querySelector('[data-explicit-model="true"]'), label: state.label, colour: state.colour, ultra: state.ultra, targets: state.targets.length,
                       pills: state.words.map((entry) => entry.colour), ultraPills: state.pills.map((entry) => entry.colour), marks: state.marks.length,
                       shimmer: state.accent ? state.accent + ":" + state.theme : "", hue: state.hue,
@@ -1041,10 +1147,13 @@ def watcher_script(accents: dict, property_name: str = PROPERTY, hide_usage_bann
     for key in table:
         if re.sub(r"[-\s]+", " ", key) in native and table[key].upper() == NATIVE_CODEX_ACCENT:
             ultras[key] = {"dark": NATIVE_CODEX_ACCENT, "light": NATIVE_CODEX_ACCENT}
+    palette_hues = {colour.upper(): str(hue) for colour, hue in
+                    hue_map({value: value for value in [*table.values(), *routes.values()]}).items()}
     css = shimmer_css() + activity_glyph_css() + ultra_css() + sidebar_spinner_css() + (usage_banner_css() if hide_usage_banner else "")
     return (_WATCHER.replace("__HUB_ACCENTS__", json.dumps(table, ensure_ascii=False))
             .replace("__HUB_ROUTE_ACCENTS__", json.dumps(routes, ensure_ascii=False))
             .replace("__HUB_ROUTE_HUES__", json.dumps(hue_map(routes)))
+            .replace("__HUB_PALETTE_HUES__", json.dumps(palette_hues))
             .replace("__HUB_NATIVE_LABELS__", json.dumps(native, ensure_ascii=False))
             .replace("__HUB_ULTRA__", json.dumps(ultras, ensure_ascii=False))
             .replace("__HUB_STYLE_CSS__", json.dumps(css))
@@ -1057,6 +1166,7 @@ def watcher_script(accents: dict, property_name: str = PROPERTY, hide_usage_bann
             .replace("__HUB_TAB_PANEL_SELECTOR__", json.dumps(TAB_PANEL_SELECTOR))
             .replace("__HUB_CHILD_PANEL_SELECTOR__", json.dumps(CHILD_PANEL_SELECTOR))
             .replace("__HUB_SUBAGENT_MODEL_SELECTOR__", json.dumps(SUBAGENT_MODEL_SELECTOR))
+            .replace("__HUB_SUBAGENT_DETAIL_SELECTOR__", json.dumps(SUBAGENT_DETAIL_SELECTOR))
             .replace("__HUB_SIDEBAR_ROW__", SIDEBAR_ROW)
             .replace("__HUB_SIDEBAR_ID__", SIDEBAR_ID)
             .replace("__HUB_SIDEBAR_HOST__", SIDEBAR_HOST)
@@ -1168,11 +1278,18 @@ class AccentBridge:
     outside sites, workers) is detached again at once.
     """
 
-    def __init__(self, pipe: DevToolsPipe, script: str, emit=None, *, sidebar_accents=None):
+    def __init__(self, pipe: DevToolsPipe, script: str, emit=None, *, sidebar_accents=None,
+                 child_accents=None, recent_previews=None):
         self.pipe = pipe
         self.script = script
         self.emit = emit or (lambda event: None)
         self.sidebar_accents = sidebar_accents
+        self.child_accents = child_accents
+        self.child_next_poll = 0.0
+        self.quick = None
+        if recent_previews is not None:
+            from codex_quick_bridge import QuickComposerBridge
+            self.quick = QuickComposerBridge(pipe, recent_previews, self.emit)
         self.sidebar_next_poll = 0.0
         self.pending: dict[int, tuple[str, str | None]] = {}
         # When each sidebar request went out, so one lost reply cannot stop a
@@ -1193,6 +1310,8 @@ class AccentBridge:
         return info.get("type") == "page" and (url in ("", "about:blank") or url.startswith(_APP_ORIGIN))
 
     def handle(self, message: dict) -> None:
+        if self.quick is not None and self.quick.handle(message):
+            return
         method = message.get("method")
         params = message.get("params") or {}
         if method == "Target.attachedToTarget":
@@ -1250,6 +1369,13 @@ class AccentBridge:
                 if self.sidebar_status.get(session_id) != key:
                     self.sidebar_status[session_id] = key
                     self.emit(event)
+        elif kind == "child-read" and session_id in self.injected:
+            identifiers = ((message.get("result") or {}).get("result") or {}).get("value")
+            try:
+                colours = self.child_accents(identifiers) if self.child_accents else {}
+            except Exception:
+                colours = {}
+            self._sidebar_evaluate(session_id, "setChildAccents", json.dumps(colours), "child-write")
 
     def _sidebar_evaluate(self, session_id, method, argument, kind):
         # Repeat the origin/frame guard for each poll: an attached page can
@@ -1276,6 +1402,22 @@ class AccentBridge:
             if any(kind.startswith("sidebar-") and owner == session_id for kind, owner in self.pending.values()):
                 continue
             self._sidebar_evaluate(session_id, "sidebarThreadIds", "", "sidebar-read")
+
+    def refresh_extras(self):
+        if self.quick is not None:
+            self.quick.refresh(self.injected)
+        now = time.monotonic()
+        if self.child_accents is None or now < self.child_next_poll:
+            return
+        self.child_next_poll = now + 2.0
+        for identifier, sent in list(self.sidebar_sent.items()):
+            if now - sent > 10.0 and self.pending.get(identifier, ("", None))[0].startswith("child-"):
+                self.pending.pop(identifier, None)
+                self.sidebar_sent.pop(identifier, None)
+        for session_id in self.injected:
+            if any(kind.startswith("child-") and owner == session_id for kind, owner in self.pending.values()):
+                continue
+            self._sidebar_evaluate(session_id, "childThreadIds", "", "child-read")
 
     def _evaluate(self, session_id: str) -> None:
         self.pending[self.pipe.send("Runtime.evaluate", {"expression": self.script, "returnByValue": True}, session_id=session_id)] = ("evaluate", session_id)
@@ -1351,7 +1493,8 @@ def already_running(binary: Path) -> bool:
     return False
 
 
-def run(binary: Path, script: str, *, emit=None, arguments=(), environment=None, sidebar_accents=None, poll_interval=0.25,
+def run(binary: Path, script: str, *, emit=None, arguments=(), environment=None, sidebar_accents=None,
+        child_accents=None, recent_previews=None, poll_interval=0.25,
         launch_timeout=45.0) -> int:
     """Launch the app, install the watcher, then stay attached until it exits.
 
@@ -1373,7 +1516,8 @@ def run(binary: Path, script: str, *, emit=None, arguments=(), environment=None,
     emit({"event": "launched", "pid": pid})
     for signum in (signal.SIGTERM, signal.SIGHUP):
         signal.signal(signum, signal.SIG_IGN)
-    bridge = AccentBridge(pipe, script, emit, sidebar_accents=sidebar_accents)
+    bridge = AccentBridge(pipe, script, emit, sidebar_accents=sidebar_accents,
+                          child_accents=child_accents, recent_previews=recent_previews)
     started = time.monotonic()
     status = None
     try:
@@ -1398,6 +1542,7 @@ def run(binary: Path, script: str, *, emit=None, arguments=(), environment=None,
                     emit({"event": "error", "stage": "handle", "message": f"{type(exc).__name__}: {exc}"})
             try:
                 bridge.refresh_sidebar()
+                bridge.refresh_extras()
             except Exception as exc:
                 emit({"event": "error", "stage": "sidebar", "message": f"{type(exc).__name__}: {exc}"})
             done, raw = os.waitpid(pid, os.WNOHANG)
@@ -1456,17 +1601,30 @@ def bridge_command(app_path: str, settings: dict, inventory: dict, emit=None, lo
         if already_running(binary):
             emit({"event": "error", "stage": "launch", "message": "The app is already running; quit it first."})
             return 2
-        accents = accent_map(settings, inventory)
-        routes = accent_map(settings, inventory, by_route=True)
-        native_labels = native_codex_labels(inventory)
-        hide_banner = settings.get("codex_hide_usage_banner") is True
-        unlock = settings.get("codex_unlock_composer") is True
+        colour_enabled = settings.get("codex_accent_slider", True) is True
+        quick_enabled = settings.get("codex_quick_composer") is True
+        accents = accent_map(settings, inventory) if colour_enabled else {}
+        routes = accent_map(settings, inventory, by_route=True) if colour_enabled else {}
+        native_labels = native_codex_labels(inventory) if colour_enabled else []
+        hide_banner = colour_enabled and settings.get("codex_hide_usage_banner") is True
+        unlock = colour_enabled and settings.get("codex_unlock_composer") is True
         emit({"event": "accents", "count": len(accents), "usage_banner": "hidden" if hide_banner else "shown",
               "composer": "unlocked" if unlock else "app"})
         run_options.setdefault("environment", child_environment(bundle))
-        run_options.setdefault("sidebar_accents", SidebarAccents(routes, native_labels))
-        return run(binary, watcher_script(accents, hide_usage_banner=hide_banner, unlock_composer=unlock,
-                                         native_labels=native_labels, route_accents=routes),
+        if colour_enabled:
+            run_options.setdefault("sidebar_accents", SidebarAccents(routes, native_labels))
+            run_options.setdefault("child_accents", ChildAccents(routes, native_labels))
+        script = watcher_script(accents, hide_usage_banner=hide_banner, unlock_composer=unlock,
+                                native_labels=native_labels, route_accents=routes) if colour_enabled else "({ installed: true, colours: false })"
+        if quick_enabled:
+            from codex_desktop_actions import desktop_actions_script
+            from codex_quick_composer import quick_composer_script
+            from codex_recent_threads import RecentThreadPreviews
+            run_options.setdefault("recent_previews", RecentThreadPreviews())
+            script = ("(() => { const accent = " + script + "; "
+                      + desktop_actions_script() + "; " + quick_composer_script()
+                      + "; return { installed: true, accent, quickComposer: true }; })()")
+        return run(binary, script,
                    emit=emit, **run_options)
     finally:
         if stream is not None:

@@ -21,7 +21,7 @@ xcrun swiftc -swift-version 5 -parse-as-library -O -target arm64-apple-macosx14.
   -framework AppKit -framework SwiftUI -framework Security \
   "${SWIFT_SOURCES[@]}" \
   -o "$APP_DIR/Contents/MacOS/MistralBridge"
-for module in bridge_core protocol gateway model_names fast_models catalogue hub_config providers provider_registry provider_discovery provider_requests devin_agent qwen_provider minimax_provider openrouter_provider gemini_provider branding cerebras_replay catalogue_lifecycle responses_native responses_tools responses_bridge responses_compact codex_catalogue codex_profile codex_token codex_runtime codex_accent claude_accent effort_map chat_tool_order rate_limit spawn_depth subagent_catalogue ollama_lifecycle cli_session cli_lifecycle codex_session_pool cli_routes cli_auth_probe cli_tool_call cli_host_mcp cli_host_bridge cli_live_session host_tools_mcp cli_structured_reply cli_images cli_image_history claude_cli_agent codex_cli_agent agy_cli_agent agy_context muse_cli_agent grok_cli_agent claude_context; do
+for module in bridge_core protocol gateway model_names fast_models catalogue hub_config providers provider_registry provider_discovery provider_requests devin_agent qwen_provider minimax_provider openrouter_provider gemini_provider branding cerebras_replay catalogue_lifecycle responses_native responses_tools responses_bridge responses_compact codex_catalogue codex_profile codex_token codex_runtime codex_accent codex_quick_composer codex_recent_threads codex_desktop_actions codex_quick_bridge claude_accent effort_map chat_tool_order rate_limit spawn_depth subagent_catalogue ollama_lifecycle cli_session cli_lifecycle codex_session_pool cli_routes cli_auth_probe cli_tool_call cli_host_mcp cli_host_bridge cli_live_session host_tools_mcp cli_structured_reply cli_images cli_image_history claude_cli_agent codex_cli_agent agy_cli_agent agy_context muse_cli_agent grok_cli_agent claude_context; do
   cp "$SOURCE_DIR/$module.py" "$APP_DIR/Contents/Resources/worker/"
 done
 cp "$SOURCE_DIR/provider_branding.json" "$APP_DIR/Contents/Resources/worker/"
@@ -73,8 +73,8 @@ cat > "$APP_DIR/Contents/Info.plist" <<'PLIST'
   <key>CFBundleIdentifier</key><string>com.mistralbridge.providerhub</string>
   <key>CFBundleExecutable</key><string>MistralBridge</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>0.5.5</string>
-  <key>CFBundleVersion</key><string>46</string>
+  <key>CFBundleShortVersionString</key><string>0.5.6</string>
+  <key>CFBundleVersion</key><string>47</string>
   <key>BridgeStateName</key><string>Provider Hub Preview</string>
   <key>BridgeProfileID</key><string>14c58c94-d7e8-4a15-96b8-81668956e474</string>
   <key>BridgeDefaultPort</key><integer>11438</integer>

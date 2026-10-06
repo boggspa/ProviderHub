@@ -222,6 +222,16 @@ class SettingsMigrationTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 normalize({"codex_chatgpt_account": value}, SLOTS, "mistral-test")
 
+    def test_quick_composer_migrates_off_and_is_independent_of_accents(self):
+        self.assertIs(defaults(SLOTS, "mistral-test")["codex_quick_composer"], False)
+        self.assertIs(normalize({}, SLOTS, "mistral-test")["codex_quick_composer"], False)
+        settings = normalize({"codex_quick_composer": True, "codex_accent_slider": False}, SLOTS, "mistral-test")
+        self.assertIs(settings["codex_quick_composer"], True)
+        self.assertIs(settings["codex_accent_slider"], False)
+        for value in (1, "yes", None, [], {}):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                normalize({"codex_quick_composer": value}, SLOTS, "mistral-test")
+
     def test_codex_apply_patch_is_optional_deduped_and_defaults_off(self):
         self.assertNotIn("codex_apply_patch", defaults(SLOTS, "mistral-test"))
         self.assertNotIn("codex_apply_patch", normalize({}, SLOTS, "mistral-test"))

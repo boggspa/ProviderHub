@@ -76,9 +76,9 @@ extension BridgeModel {
             readCodexState(try await command("codex-activate"))
             codexRecoveryNeeded = true; codexProfileActive = true
             observedOwnedCodex = false; codexLaunchTime = Date()
-            if savedSettings.codex_accent_slider {
+            if savedSettings.codex_accent_slider || savedSettings.codex_quick_composer {
                 try await launchCodexWithAccentBridge(appPath: appPath)
-                tell("Codex / ChatGPT is opening with your provider catalogue and a provider-coloured power slider. Its previous configuration will be restored after it quits.")
+                tell("Codex / ChatGPT is opening with your provider catalogue and desktop preferences. Its previous configuration will be restored after it quits.")
             } else {
                 let configuration = NSWorkspace.OpenConfiguration()
                 configuration.activates = true
@@ -504,6 +504,11 @@ struct CodexConfigPane: View {
                     title: "Use provider accent colours",
                     summary: "Match the slider, activity and sidebar spinners to the provider.",
                     details: "Provider Hub launches Codex through a DevTools pipe held only by its helper; no network port listens. This is unsupported by OpenAI and an app update may disable the colouring. A Codex self-relaunch runs without it until launched here again. In this mode, macOS attributes Codex’s privacy prompts—including microphone, camera, folders and automation—to Provider Hub. The pipe is a full control channel into Codex. Its helper outlives Provider Hub and stays until Codex quits; killing the helper closes the pipe and asks Codex to quit. Save, then launch.")
+                Divider()
+                CodexPreference(isOn: $model.settings.codex_quick_composer, disabled: model.busy,
+                    title: "Show the recent-thread quick composer",
+                    summary: "Message or steer recent local Codex chats from a floating popover.",
+                    details: "Adds a button beside search and notifications in Codex’s sidebar showing the first ten Recents rows. Choose a local Codex chat, read its latest response preview and send from a compact prompt capsule. Each chat keeps its own draft. Previews are read while the popover is open; sends use the chat’s existing settings and Desktop’s normal queue and steering behavior. Remote-host and ChatGPT chats are unavailable in this version. This preference uses the same private desktop helper as provider colours and can be enabled independently. Unsupported by OpenAI; an app update may disable the button or sending. Save, then launch.")
                 Divider()
                 CodexPreference(isOn: $model.settings.codex_hide_usage_banner, disabled: model.busy || !model.settings.codex_accent_slider,
                     title: "Hide the ChatGPT usage banner",

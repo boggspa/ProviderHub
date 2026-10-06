@@ -55,6 +55,43 @@ const publishSidebar = async (page, entries) => {
   await flush(page);
 };
 const cases = {
+  async current_shell_header_rows_resolve_identity_and_survive_dock_switches(page) {
+    const currentHeader = `<div class="flex h-full min-w-0 items-center gap-2 px-4"><button>Back</button><span>Agent name</span><span id="agent-model" class="max-w-1/2 min-w-0 truncate text-xs text-tertiary select-none">Unlisted display label</span></div>`;
+    await mount(page, main() + tab('agent', 'subagents:parent', currentHeader + glyph('agent-glyph')));
+    const bind = async (n, host='local') => page.locator('#agent-model').evaluate((element, value) => {
+      element.__reactFiber$fixture = { memoizedProps: { children: element.textContent }, return: {
+        memoizedProps: { seed: value.id, label: 'Agent', onBack(){} }, return: {
+          memoizedProps: { conversationId: value.id, hostId: value.host, onBack(){} }, return: null
+        }
+      }};
+    }, {id:threadId(n), host});
+    await bind(2);
+    assert.deepEqual(await page.evaluate(() => window.__providerHubAccent.childThreadIds()), [threadId(2)]);
+    await page.evaluate(data => window.__providerHubAccent.setChildAccents(data), {[threadId(2)]:'#D44404'});
+    assert.equal(await colour(page, 'agent-glyph'), colours.mistral);
+    assert.equal(await colour(page, 'main-glyph'), colours.parent);
+    await page.locator('#agent').evaluate(element => element.setAttribute('data-app-shell-tab-panel-controller', 'bottom'));
+    await flush(page);
+    assert.equal(await colour(page, 'agent-glyph'), colours.mistral);
+    await bind(3);
+    await page.evaluate(data => window.__providerHubAccent.setChildAccents(data), {[threadId(2)]:'#D44404'});
+    assert.equal(await colour(page, 'agent-glyph'), colours.grey);
+    await page.evaluate(data => window.__providerHubAccent.setChildAccents(data), {[threadId(3)]:'#0073E6'});
+    assert.equal(await colour(page, 'agent-glyph'), colours.kimi);
+    await bind(3, 'remote-host');
+    assert.deepEqual(await page.evaluate(() => window.__providerHubAccent.childThreadIds()), []);
+    await page.evaluate(data => window.__providerHubAccent.setChildAccents(data), {[threadId(3)]:'#0073E6'});
+    assert.equal(await colour(page, 'agent-glyph'), colours.grey);
+    await page.locator('#agent-model').evaluate(element => element.textContent='ollama/qwen3:cloud · Ultra');
+    await flush(page);
+    assert.equal(await colour(page, 'agent-glyph'), colours.qwen);
+    for (const id of ['agent-glyph-label','agent-glyph-warning','agent-glyph-identicon']) {
+      assert.equal(await colour(page, id), id.endsWith('label') ? colours.grey : id.endsWith('warning') ? 'rgb(255, 150, 0)' : 'rgb(10, 20, 30)');
+    }
+    await bind(3);
+    await page.locator('#agent').evaluate(element => {element.hidden=true;});
+    assert.deepEqual(await page.evaluate(() => window.__providerHubAccent.childThreadIds()), []);
+  },
   async sidebar_spinners_keep_each_owner_colour_in_both_themes(page) {
     await mount(page, main() + '<nav>' + sidebarRow('a', 1) + sidebarRow('b', 2) + sidebarRow('unknown', 3) + sidebarRow('host', 1, 'other-host') + sidebarRow('cloud', 1, 'local', 'remote') + '</nav>' + spinner('outside-spin'));
     assert.deepEqual(await page.evaluate(() => window.__providerHubAccent.sidebarThreadIds()), [threadId(1), threadId(2), threadId(3)]);
