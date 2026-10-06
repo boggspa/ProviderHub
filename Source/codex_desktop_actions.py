@@ -6,6 +6,16 @@ the live app scope from React's rendered fibers, and invokes Desktop's own
 native follow-up function.  That path resolves the host/thread, resumes the
 conversation, and delegates send-versus-steer-versus-queue to the native turn
 coordinator while preserving the thread's existing settings.
+
+The live scope is a handle Desktop's shared runtime builds for React
+components (its ``useScope`` keeps one in a ref).  A handle carries the
+level's descriptor as ``scope``, the level's ``node``, the ``chain`` Map
+from descriptor id to node, and the ``get``/``set``/``watch``/``when``
+operations the native send calls.  The app level is the descriptor branded
+``AppScope`` with no parent; every token the native send reads is declared
+there.  The app module does not export that descriptor (its ``W`` export is
+an unrelated selector), so the adapter recognises the handle by the
+agreement of its own links rather than by an export identity.
 """
 from __future__ import annotations
 
@@ -34,6 +44,15 @@ def desktop_actions_script() -> str:
     { hash: 'app-initial-69cd8dbddec5.js', version: '26.930.61225 build 13232', verified: '2026-10-06' },
   ]);
   const APPROVED_HASHES = Object.freeze(APPROVED_BUNDLES.map(entry => entry.hash));
+  // The brand Desktop's shared runtime gives its root dependency scope
+  // (verified in app-shared-122c56612a72.js, ChatGPT 26.930.61225). The
+  // thread and route levels are branded ThreadScope and RouteScope and
+  // carry a parent; neither qualifies.
+  const APP_SCOPE_BRAND = "AppScope";
+  // Fibers inspected before the scope search gives up. The sidebar, the
+  // active page and up to five retained pages fit comfortably; the limit
+  // only bounds a runaway walk.
+  const FIBER_LIMIT = 60000;
   const state = {
     module: null,
     scope: null,
@@ -41,6 +60,8 @@ def desktop_actions_script() -> str:
     scopeError: null,
     observedBundle: null,
     approvedBundles: APPROVED_BUNDLES,
+    scopeSearch: null,
+    lastError: null,
     sends: 0,
     errors: 0,
     inFlight: new Set(),
@@ -78,11 +99,42 @@ def desktop_actions_script() -> str:
     return urls.values().next().value;
   }
 
-  function looksLikeScope(value, rootScope) {
-    return !!value && typeof value === "object"
-      && value.scope === rootScope
-      && typeof value.get === "function" && typeof value.set === "function"
-      && typeof value.watch === "function" && typeof value.when === "function";
+  function looksLikeScope(value) {
+    // A handle qualifies only when all of its links agree: the descriptor is
+    // the parentless app level, the node points back at that descriptor, and
+    // the chain maps the descriptor's id to that very node. A stray object
+    // with the four method names, a thread- or route-level handle, or a
+    // handle detached from its chain cannot pass.
+    if (!value || typeof value !== "object") return false;
+    for (const name of ["get", "set", "watch", "when"]) {
+      if (typeof value[name] !== "function") return false;
+    }
+    const descriptor = value.scope, node = value.node, chain = value.chain;
+    if (!descriptor || typeof descriptor !== "object") return false;
+    if (descriptor.__scopeBrand !== APP_SCOPE_BRAND || descriptor.parent != null) return false;
+    if (typeof descriptor.id !== "symbol") return false;
+    if (!node || typeof node !== "object" || node.token !== descriptor) return false;
+    if (!(chain instanceof Map) || chain.get(descriptor.id) !== node) return false;
+    return true;
+  }
+
+  function inspect(current) {
+    // Hook state is a linked list whose entries hold the hook's value in
+    // memoizedState; a useRef hook keeps `{ current }` there, which is where
+    // Desktop's useScope stores its handle. Props and class instances are
+    // checked for a direct or `.value` / `.current` handle as well.
+    if (looksLikeScope(current)) return current;
+    if (looksLikeScope(current.current)) return current.current;
+    if (looksLikeScope(current.value)) return current.value;
+    const hook = current.memoizedState;
+    if (looksLikeScope(hook)) return hook;
+    if (hook && typeof hook === "object" && looksLikeScope(hook.current)) return hook.current;
+    if (current.current && typeof current.current === "object") {
+      for (const key of Object.keys(current.current).slice(0, 64)) {
+        if (looksLikeScope(current.current[key])) return current.current[key];
+      }
+    }
+    return null;
   }
 
   function verifyNativeBinding(nativeSend) {
@@ -103,7 +155,7 @@ def desktop_actions_script() -> str:
     }
   }
 
-  function findScope(rootScope) {
+  function findScope() {
     const root = document.getElementById("root");
     if (!root) throw actionError("root", "The app root element is missing.");
     const fiberKey = Object.keys(root).find(name => name.startsWith("__reactContainer$"));
@@ -116,44 +168,33 @@ def desktop_actions_script() -> str:
       ? container.stateNode.current : container;
     const seen = new Set();
     const queue = [current];
-    let visited = 0;
+    const search = { fibers: 0, truncated: false };
+    state.scopeSearch = search;
     while (queue.length) {
       const fiber = queue.shift();
       if (!fiber || seen.has(fiber)) continue;
       seen.add(fiber);
-      if (++visited > 20000) break;
+      if (search.fibers >= FIBER_LIMIT) { search.truncated = true; break; }
+      search.fibers += 1;
 
       // Search the committed current tree only. An alternate may retain an
       // obsolete scope from the previous render and cannot prove liveness.
-      // React hook state is a linked list and refs are `{ current }`.
-      for (const node of [fiber]) {
-        if (++visited > 20000) break;
-        for (const holder of [node.memoizedState, node.memoizedProps, node.stateNode]) {
-          let current = holder;
-          for (let depth = 0; current && depth < 128; depth += 1, current = current.next) {
-            if (!current || typeof current !== "object") break;
-            if (looksLikeScope(current, rootScope)) return current;
-            if (looksLikeScope(current.current, rootScope)) return current.current;
-            if (looksLikeScope(current.value, rootScope)) return current.value;
-            if (looksLikeScope(current.memoizedState, rootScope)) return current.memoizedState;
-            if (looksLikeScope(current.memoizedState && current.memoizedState.current, rootScope)) {
-              return current.memoizedState.current;
-            }
-            if (current.current && typeof current.current === "object") {
-              for (const key of Object.keys(current.current).slice(0, 64)) {
-                const value = current.current[key];
-                if (looksLikeScope(value, rootScope)) return value;
-              }
-            }
-          }
+      for (const holder of [fiber.memoizedState, fiber.memoizedProps, fiber.stateNode]) {
+        let entry = holder;
+        for (let depth = 0; entry && depth < 128; depth += 1, entry = entry.next) {
+          if (typeof entry !== "object") break;
+          const found = inspect(entry);
+          if (found) return found;
         }
       }
-      if (fiber.return) queue.push(fiber.return);
       if (Array.isArray(fiber.child)) queue.push(...fiber.child);
       else if (fiber.child) queue.push(fiber.child);
       if (fiber.sibling) queue.push(fiber.sibling);
     }
-    throw actionError("scope", "The live Desktop app scope could not be found.");
+    throw actionError("scope", search.truncated
+      ? `The live Desktop app scope was not found within ${FIBER_LIMIT} fibers.`
+      : `The live Desktop app scope could not be found (${search.fibers} fibers inspected).`,
+      { ...search });
   }
 
   async function prepare() {
@@ -162,7 +203,7 @@ def desktop_actions_script() -> str:
       // root under the same exported module and a cached wrapper would then
       // be detached from the current tree.
       try {
-        const scope = findScope(state.module.W);
+        const scope = findScope();
         state.scope = scope;
         state.scopeError = null;
         return state;
@@ -186,13 +227,13 @@ def desktop_actions_script() -> str:
           { observedBundle, approvedBundles: APPROVED_BUNDLES });
       }
       const module = await import(moduleUrl);
-      const nativeSend = module.Lv, rootScope = module.W;
-      if (typeof nativeSend !== "function" || typeof module.Iv !== 'function' || !rootScope) {
+      const nativeSend = module.Lv;
+      if (typeof nativeSend !== "function" || typeof module.Iv !== 'function') {
         throw actionError("exports", "The app module no longer exports the native send binding.");
       }
       verifyNativeBinding(nativeSend);
       module.Iv();
-      const scope = findScope(rootScope);
+      const scope = findScope();
       state.module = module;
       state.scope = scope;
       state.moduleError = null;
@@ -217,12 +258,30 @@ def desktop_actions_script() -> str:
     }
   }
 
+  function remember(error) {
+    const code = error && error.code ? String(error.code) : "unknown";
+    const message = error && error.message ? String(error.message).slice(0, 300) : "";
+    state.lastError = { code, message, at: Date.now() };
+    return error;
+  }
+
   async function send(request) {
-    validate(request);
-    const { module, scope } = await prepare();
+    try {
+      validate(request);
+    } catch (error) {
+      throw remember(error);
+    }
+    let prepared;
+    try {
+      prepared = await prepare();
+    } catch (error) {
+      state.errors += 1;
+      throw remember(error);
+    }
+    const { module, scope } = prepared;
     const key = `${request.hostId}:${request.threadId}`;
     if (state.inFlight.has(key)) {
-      throw actionError("in-flight", "A send is already in progress for this thread.");
+      throw remember(actionError("in-flight", "A send is already in progress for this thread."));
     }
     state.inFlight.add(key);
     try {
@@ -244,7 +303,7 @@ def desktop_actions_script() -> str:
       return { sent: true, mode: "native", threadId: result.threadId };
     } catch (error) {
       state.errors += 1;
-      throw error && error.code ? error : actionError("native", "The native Desktop send failed.");
+      throw remember(error && error.code ? error : actionError("native", "The native Desktop send failed."));
     } finally {
       state.inFlight.delete(key);
     }
@@ -263,6 +322,8 @@ def desktop_actions_script() -> str:
       scopeError: state.scopeError,
       observedBundle: state.observedBundle,
       approvedBundles: state.approvedBundles,
+      scopeSearch: state.scopeSearch,
+      lastError: state.lastError,
       sends: state.sends,
       errors: state.errors,
     }),

@@ -117,6 +117,25 @@ const shell='[data-provider-hub-quick-composer]';
  await page.evaluate(()=>window.__providerHubDesktopActions={send:async()=>{throw Error('private failure payload');}});
  await page.locator(shell+' .send').click();assert.equal(await capsule.inputValue(),'draft one');assert.match(await page.locator(shell+' .status').textContent(),/draft is kept/);
  assert.doesNotMatch(await page.locator(shell+' .status').textContent(),/private failure/);
+ // Every adapter code is named. The scope code is the one a wrong export
+ // pin produced in the field; the report keeps the code and the adapter's
+ // diagnostics for the worker's log, never the draft or the error text.
+ await page.evaluate(()=>window.__providerHubDesktopActions={send:async()=>{throw Object.assign(Error('secret scope text'),{code:'scope'});},diagnostics:()=>({observedBundle:'app-initial-69cd8dbddec5.js',moduleError:'DesktopActionError',scopeError:'scope',scopeSearch:{fibers:1234,truncated:false},approvedBundles:[]})});
+ await page.locator(shell+' .send').click();assert.equal(await capsule.inputValue(),'draft one');
+ const scopeStatus=await page.locator(shell+' .status').textContent();
+ assert.ok(scopeStatus.includes('the live Desktop app scope was not found'),scopeStatus);assert.doesNotMatch(scopeStatus,/secret scope/);
+ const selected=(await page.evaluate(()=>window.__providerHubQuickComposer.recentThreadTargets()))[0].threadId;
+ const report=await page.evaluate(()=>window.__providerHubQuickComposer.takeSendReport());
+ assert.deepEqual({...report,at:typeof report.at},{outcome:'failed',code:'scope',at:'number',threadId:selected,observedBundle:'app-initial-69cd8dbddec5.js',moduleError:'DesktopActionError',scopeError:'scope',scopeSearch:{fibers:1234,truncated:false}});
+ assert.doesNotMatch(JSON.stringify(report),/draft one|secret/);
+ assert.equal(await page.evaluate(()=>window.__providerHubQuickComposer.takeSendReport()),null);
+ await page.evaluate(()=>window.__providerHubDesktopActions={send:async()=>{throw Object.assign(Error('x'),{code:'in-flight'});}});
+ await page.locator(shell+' .send').click();assert.match(await page.locator(shell+' .status').textContent(),/already in progress/);
+ await page.evaluate(()=>window.__providerHubDesktopActions={send:async()=>{throw Object.assign(Error('x'),{code:'something-new'});}});
+ await page.locator(shell+' .send').click();assert.match(await page.locator(shell+' .status').textContent(),/^Send failed \(something-new\)\. Your draft is kept\.$/);
+ await page.evaluate(()=>window.__providerHubDesktopActions={send:async()=>({sent:true,mode:'native',threadId:'wrong'})});
+ await page.locator(shell+' .send').click();assert.match(await page.locator(shell+' .status').textContent(),/did not confirm the sent thread/);
+ assert.equal((await page.evaluate(()=>window.__providerHubQuickComposer.takeSendReport())).code,'native-result');
  // An unverified Desktop build is named, so a refused send can be diagnosed.
  await page.evaluate(()=>window.__providerHubDesktopActions={send:async()=>{throw Object.assign(Error('unverified'),{code:'app-version'});},diagnostics:()=>({observedBundle:'app-initial-0123abcd.js',approvedBundles:[{hash:'app-initial-f9b16fbf8fc7.js'}]})});
  await page.locator(shell+' .send').click();assert.equal(await capsule.inputValue(),'draft one');
@@ -126,6 +145,7 @@ const shell='[data-provider-hub-quick-composer]';
  await page.evaluate(()=>window.__providerHubDesktopActions={send:request=>new Promise(resolve=>{window.finishQuickSend=()=>resolve({sent:true,mode:'native',threadId:request.threadId});})});
  await page.locator(shell+' .send').click();await page.locator(shell+' .item').nth(2).click();await capsule.fill('newer three');
  await page.evaluate(()=>window.finishQuickSend());await flush(page);assert.equal(await capsule.inputValue(),'newer three');
+ assert.deepEqual((({outcome,code})=>({outcome,code}))(await page.evaluate(()=>window.__providerHubQuickComposer.takeSendReport())),{outcome:'sent',code:null});
  await page.locator(shell+' .item').first().click();assert.equal(await capsule.inputValue(),'');await capsule.fill('submit one');
  await page.locator(shell+' .send').click();await capsule.fill('newer one');await page.evaluate(()=>window.finishQuickSend());await flush(page);assert.equal(await capsule.inputValue(),'newer one');
  // Reordering, removal and recycled identity keep native order and exact target.

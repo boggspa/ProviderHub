@@ -77,6 +77,44 @@ class QuickComposerBridgeTests(unittest.TestCase):
         self.assertEqual(len(pipe.sent), 2)
         self.assertNotIn(old, bridge.pending)
 
+    def test_send_report_is_logged_once_without_content_and_targets_still_read(self):
+        pipe, events = FakeTransport(), []
+        reader = mock.Mock(return_value=[])
+        bridge = QuickComposerBridge(pipe, reader, events.append)
+        bridge.refresh({"window"})
+        expression = pipe.sent[-1]["params"]["expression"]
+        self.assertIn("recentThreadTargets", expression)
+        self.assertIn("takeSendReport", expression)
+        report = {"outcome": "failed", "code": "scope", "at": 1700000000000.0, "threadId": target()["threadId"],
+                  "observedBundle": "app-initial-69cd8dbddec5.js", "moduleError": "DesktopActionError",
+                  "scopeError": "scope", "scopeSearch": {"fibers": 4242, "truncated": False},
+                  "prompt": "secret prompt", "message": "secret text", "extra": {"nested": "secret"}}
+        bridge.handle(reply(pipe, {"targets": [target()], "report": report}))
+        reader.assert_called_once_with([target()])
+        self.assertEqual(events, [{"event": "quick-composer", "stage": "send", "session": "window",
+                                   "outcome": "failed", "code": "scope", "observedBundle": "app-initial-69cd8dbddec5.js",
+                                   "moduleError": "DesktopActionError", "scopeError": "scope",
+                                   "threadId": target()["threadId"],
+                                   "scopeSearch": {"fibers": 4242, "truncated": False}, "at": 1700000000000}])
+        self.assertNotIn("secret", json.dumps(events))
+        # A bare list (older composer) and a cycle without a report log nothing.
+        bridge.next_poll = 0
+        bridge.refresh({"window"})
+        bridge.handle(reply(pipe, [target()]))
+        bridge.next_poll = 0
+        bridge.refresh({"window"})
+        bridge.handle(reply(pipe, {"targets": [], "report": None}))
+        self.assertEqual(len(events), 1)
+        # An invalid outcome or a non-UUID thread id is dropped, never logged.
+        bridge.next_poll = 0
+        bridge.refresh({"window"})
+        bridge.handle(reply(pipe, {"targets": [], "report": {"outcome": "weird", "code": "x"}}))
+        bridge.next_poll = 0
+        bridge.refresh({"window"})
+        bridge.handle(reply(pipe, {"targets": [], "report": {"outcome": "sent", "threadId": "not-a-uuid"}}))
+        self.assertEqual(len(events), 2)
+        self.assertEqual(events[-1], {"event": "quick-composer", "stage": "send", "session": "window", "outcome": "sent"})
+
     def test_renderer_exception_is_content_free_and_does_not_end_polling(self):
         pipe, reader, events = FakeTransport(), mock.Mock(), []
         bridge = QuickComposerBridge(pipe, reader, events.append)

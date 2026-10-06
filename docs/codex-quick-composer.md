@@ -24,6 +24,15 @@ constraint of being a renderer-side surface, not a clamp the helper
 enforces; the helper keeps the heading reachable on next open so the
 launcher remains anchorable.
 
+A genuinely independent window is possible, but not from the renderer.
+Probed on 26.930.61225 (2026-10-07): `window.open` from the app page
+returns null (Desktop's window-open handler refuses popups), while
+`Target.createTarget` with `newWindow: true` over the private DevTools pipe
+creates a separate page target, which is its own macOS window. A future
+version could have the worker own such a window, inject the popover there,
+and relay rows, previews and sends to the main session over the pipe. That
+is a worker-driven design, not a change to this overlay.
+
 It contains the first ten native recent-chat rows, in sidebar order, each
 with a one-line title and a one-line latest assistant response preview.
 Rows whose threads are running show a spinning indicator in the thread's
@@ -62,7 +71,37 @@ text typed while sending. Failures preserve the draft.
 The adapter verifies the module URL and function shape before invoking it,
 and calls the native action's idempotent module initializer. The `Iv`/`Lv`
 export mapping is qualified per Desktop build; sending is only enabled for
-hashes on the small allowlist the helper ships. Currently verified builds:
+hashes on the small allowlist the helper ships.
+
+The native action needs Desktop's live app-level dependency scope. Desktop's
+shared runtime builds a handle for React components (its `useScope` keeps
+one in a ref) that carries the level's descriptor as `scope`, the level's
+`node`, the `chain` map from descriptor id to node, and the `get`, `set`,
+`watch` and `when` operations the native action calls. The app level is the
+descriptor branded `AppScope` with no parent, and every token the native
+action reads is declared there. The app module does not export that
+descriptor: its `W` export is an unrelated selector, which is why helper
+builds 47 to 49 failed every send with the generic reason (they required
+`handle.scope === module.W`, which no live handle satisfies). The adapter
+now walks the committed React tree from the host root and accepts a handle
+only when its links agree with each other: the brand and missing parent on
+the descriptor, a symbol id, the node pointing back at the descriptor, and
+the chain mapping that id to that node. Thread- and route-level handles, a
+handle detached from its chain, or an object that merely has the four method
+names are skipped. The search is capped at 60,000 fibers and its extent is
+reported.
+
+Every adapter failure code has its own reason in the popover (`scope`,
+`module-url`, `root`, `fiber`, `prepare`, `in-flight`, `exports`,
+`native-binding`, `native-result`, `native`, the request validators and the
+version guard), and an unknown code is shown verbatim. The adapter's
+`diagnostics()` adds `scopeSearch` and `lastError`. The popover keeps a
+content-free report of the last send (outcome, code, thread id, observed
+bundle, module and scope errors, search extent) which the worker takes on
+its next two-second read and logs as a `quick-composer` event with stage
+`send`; prompts and previews never enter that report.
+
+Currently verified builds:
 
 - `app-initial-f9b16fbf8fc7.js` — ChatGPT Desktop 26.930.51102 (verified 2026-10-05)
 - `app-initial-69cd8dbddec5.js` — ChatGPT Desktop 26.930.61225 build 13232 (verified 2026-10-06)
@@ -81,6 +120,12 @@ sends with a diagnostic that names the bundle the user is running.
 
 Rendered fixtures cover authored identities, first-ten order,
 activity indicators, unsupported hosts, drafts, asynchronous sends, drag and
-persistence, remounts and keyboard behavior.
-No live Desktop send was performed: this task's runtime blocks computer use
-of the Codex app. A live in-app acceptance check remains outstanding.
+persistence, remounts, keyboard behavior, every failure reason and the send
+report. The adapter fixture models the real handle shape with decoys (a
+thread-level handle, a detached handle, a methods-only object) ahead of the
+app-scope handle, and a decoy-only tree that must fail with `scope`.
+
+Live check on ChatGPT Desktop 26.930.61225 (2026-10-07, helper scripts from
+this tree over the pipe): `ready()` returned true with the module verified
+and the app scope found after 26 fibers. No message was sent; a live send
+remains to be confirmed by a user from the popover.

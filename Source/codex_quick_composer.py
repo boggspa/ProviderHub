@@ -19,7 +19,7 @@ _SCRIPT = r"""
   const HEX=/^#[0-9a-f]{6}$/i;
   const EDIT=/^(?:[acvxyz]|Enter|Backspace|Delete|Arrow(?:Left|Right|Up|Down)|Home|End)$/i;
   const key=t=>JSON.stringify([t.kind,t.hostId,t.threadId]);
-  const state={open:false,dragged:false,targets:[],selected:null,shown:undefined,drafts:new Map(),previews:new Map(),statuses:new Map(),pending:new Set(),button:null,host:null,root:null,frame:0,reason:'waiting',disposed:false};
+  const state={open:false,dragged:false,targets:[],selected:null,shown:undefined,drafts:new Map(),previews:new Map(),statuses:new Map(),pending:new Set(),button:null,host:null,root:null,frame:0,reason:'waiting',disposed:false,lastSend:null};
   const fibres=element=>{
     const name=Object.keys(element).find(k=>k.startsWith('__reactFiber$'));
     let node=name?element[name]:null; const result=[];
@@ -226,37 +226,61 @@ _SCRIPT = r"""
     if(!t?.supported||state.pending.has(state.selected))return;
     const k=key(t),prompt=input.value;if(!prompt.trim())return;state.drafts.set(k,prompt);
     const adapter=window.__providerHubDesktopActions;
-    if(typeof adapter?.send!=='function'){state.statuses.set(k,'Sending is unavailable in this Desktop version. Draft kept.');updateComposer();return;}
+    if(typeof adapter?.send!=='function'){
+      state.lastSend={outcome:'failed',code:'adapter-missing',at:Date.now(),threadId:t.threadId};
+      state.statuses.set(k,'Sending is unavailable in this Desktop version. Draft kept.');updateComposer();return;
+    }
     state.pending.add(k);state.statuses.set(k,'Sending…');updateComposer();
     try{
       const result=await adapter.send({threadId:t.threadId,hostId:t.hostId,kind:t.kind,prompt});
-      if(result?.sent!==true||result.threadId!==t.threadId)throw new Error('unverified-result');
+      if(result?.sent!==true||result.threadId!==t.threadId)throw Object.assign(new Error('unverified-result'),{code:'native-result'});
       if(state.drafts.get(k)===prompt)state.drafts.set(k,'');
+      state.lastSend={outcome:'sent',code:null,at:Date.now(),threadId:t.threadId};
       state.statuses.set(k,'Sent. Desktop handles steering or starting the next turn.');
     }catch(error){
-      // An unverified Desktop build is the most common cause and is otherwise
-      // indistinguishable from a generic native failure. Surface the native
-      // adapter's diagnostics so the user can tell the difference and tell
-      // us which bundle they are on. Errors reading diagnostics stay silent:
-      // the user still sees the generic reason.
+      // Every adapter code gets its own reason, so a refused send can be
+      // told apart from a native failure, and the code plus the adapter's
+      // diagnostics (never the prompt) are kept for the worker's log.
+      // Errors reading diagnostics stay silent: the user still sees the
+      // generic reason.
+      const code=typeof error?.code==='string'&&error.code?error.code:null;
       let reason='Send failed. Your draft is kept.';
+      const report={outcome:'failed',code:code||'unknown',at:Date.now(),threadId:t.threadId};
       try{
         const adapterDiagnostics=adapter.diagnostics?.();
         const observedBundle=adapterDiagnostics?.observedBundle;
         const approvedBundles=adapterDiagnostics?.approvedBundles;
-        if(error?.code==='app-version'&&observedBundle){
+        for(const field of ['observedBundle','moduleError','scopeError'])if(typeof adapterDiagnostics?.[field]==='string')report[field]=adapterDiagnostics[field];
+        const search=adapterDiagnostics?.scopeSearch;
+        if(search&&typeof search==='object')report.scopeSearch={fibers:Number(search.fibers)||0,truncated:search.truncated===true};
+        if(code==='app-version'&&observedBundle){
           const known=Array.isArray(approvedBundles)?approvedBundles.map(b=>b.hash).join(', '):'';
           reason=`Send failed: this Desktop build (${observedBundle}) is not in the verified list${known?' (verified: '+known+')':''}. Update the helper to send again.`;
-        }else if(error?.code==='exports'){
+        }else if(code==='exports'){
           reason='Send failed: Desktop\'s native send binding is no longer exported. Update the helper to send again.';
-        }else if(error?.code==='native-binding'){
+        }else if(code==='native-binding'){
           reason='Send failed: Desktop\'s native send binding did not match the expected shape. Update the helper to send again.';
-        }else if(error?.code==='native-result'){
+        }else if(code==='scope'){
+          reason='Send failed: the live Desktop app scope was not found. Update the helper to send again.';
+        }else if(code==='module-url'){
+          reason='Send failed: Desktop\'s app module could not be identified. Update the helper to send again.';
+        }else if(code==='root'||code==='fiber'){
+          reason='Send failed: Desktop\'s app root is unavailable. Your draft is kept.';
+        }else if(code==='prepare'){
+          reason='Send failed: Desktop native sending is unavailable. Your draft is kept.';
+        }else if(code==='in-flight'){
+          reason='A send is already in progress for this chat. Your draft is kept.';
+        }else if(code==='thread'||code==='unsupported'||code==='prompt'||code==='arguments'){
+          reason='Send failed: this chat cannot be messaged from here. Your draft is kept.';
+        }else if(code==='native-result'){
           reason='Send failed: Desktop did not confirm the sent thread. Your draft is kept.';
-        }else if(error?.code==='native'){
+        }else if(code==='native'){
           reason='Send failed: Desktop rejected the send. Your draft is kept.';
+        }else if(code){
+          reason=`Send failed (${code}). Your draft is kept.`;
         }
       }catch(diagnosticError){}
+      state.lastSend=report;
       state.statuses.set(k,reason);
     }
     finally{state.pending.delete(k);if(state.selected===k)input.value=state.drafts.get(k)||'';updateComposer();}
@@ -281,6 +305,9 @@ _SCRIPT = r"""
   window.addEventListener('resize',resize);
   window.__providerHubQuickComposer={
     recentThreadTargets:()=>state.open?collect():[],setThreadPreviews:previews,isOpen:()=>state.open,
+    // The last send's outcome and adapter code, handed over once so the
+    // worker can log it. It never carries the prompt or any preview text.
+    takeSendReport:()=>{const report=state.lastSend;state.lastSend=null;return report;},
     check:()=>{const live=state.open?collect():[];return {installed:true,open:state.open,button:Boolean(state.button?.isConnected),reason:state.reason,targets:live.length,active:live.filter(t=>t.active).length,dragged:state.dragged};},
     uninstall:()=>{state.disposed=true;drag=null;observer.disconnect();if(state.frame)cancelAnimationFrame(state.frame);window.removeEventListener('resize',resize);state.button?.remove();state.host?.remove();delete window.__providerHubQuickComposer;}
   };

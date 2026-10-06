@@ -35,6 +35,21 @@ class DesktopActionScriptTests(unittest.TestCase):
         self.assertIn("app-version", script)
         self.assertIn("(observed ${observedBundle})", script)
 
+    def test_script_identifies_the_app_scope_by_its_own_links_not_an_export(self):
+        script = desktop_actions_script()
+        # The app module's W export is an unrelated selector; the descriptor
+        # itself is never exported, so no export identity may be required.
+        self.assertNotIn("module.W", script)
+        self.assertNotIn("rootScope", script)
+        self.assertIn('const APP_SCOPE_BRAND = "AppScope";', script)
+        for check in ('descriptor.__scopeBrand !== APP_SCOPE_BRAND', 'descriptor.parent != null',
+                      'typeof descriptor.id !== "symbol"', 'node.token !== descriptor',
+                      'chain.get(descriptor.id) !== node'):
+            self.assertIn(check, script)
+        # The search reports how far it looked and the last failure's code.
+        self.assertIn("scopeSearch: state.scopeSearch", script)
+        self.assertIn("lastError: state.lastError", script)
+
     def test_script_rejects_unverified_modes_and_preserves_settings(self):
         script = desktop_actions_script()
         # The only mode string emitted is native; send/steer/queue classification
@@ -67,11 +82,16 @@ const { chromium } = require('playwright');
   const start = source.indexOf(marker);
   const finish = source.indexOf(end, start + marker.length);
   const script = source.slice(start + marker.length, finish);
-  const appModule = `export const W = { root: true };
+  // Like the real bundle, the fake exports an unrelated selector as W and
+  // never exports the app-scope descriptor. The native send accepts only
+  // the handle the fixture tree holds, which is shaped like the one
+  // Desktop's useScope keeps in a ref.
+  const appModule = `export const W = { unrelatedSelector: true };
 export const Iv = () => { window.__nativeInitialized = true; };
 export const Lv = async ({scope,threadId,sourceThreadId,prompt,turnTrigger}) => { const send_message_to_thread = true;
   if (!window.__nativeInitialized) throw Error('native initializer was omitted');
-  if (scope.scope !== W) throw Error('wrong scope ' + JSON.stringify(scope));
+  if (scope !== window.__testHandle) throw Error('wrong scope');
+  if (scope.scope.__scopeBrand !== 'AppScope' || scope.node.token !== scope.scope || !(scope.chain instanceof Map)) throw Error('malformed scope');
   if (typeof threadId !== 'string' || prompt !== prompt.trim() || prompt.length === 0) throw Error('wrong native request');
   if (turnTrigger !== 'composer') throw Error('wrong turn trigger');
   if (window.__testReject) throw Error('native private failure text');
@@ -82,6 +102,24 @@ export const Lv = async ({scope,threadId,sourceThreadId,prompt,turnTrigger}) => 
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'provider-hub-actions-'));
   const assets = path.join(root, 'assets');
   fs.mkdirSync(assets);
+  const treeSource = String(function makeTree(withHandle = true) {
+    const descriptor = { __scopeBrand: 'AppScope', id: Symbol('AppScope'), parent: undefined };
+    const node = { token: descriptor, store: {} };
+    const chain = new Map([[descriptor.id, node]]);
+    const handle = { scope: descriptor, node, chain, get(){}, set(){}, watch(){}, when(){} };
+    const thread = { __scopeBrand: 'ThreadScope', id: Symbol('ThreadScope'), parent: descriptor };
+    const threadNode = { token: thread };
+    const threadHandle = { scope: thread, node: threadNode, chain: new Map([[descriptor.id, node], [thread.id, threadNode]]), get(){}, set(){}, watch(){}, when(){} };
+    const detached = { scope: descriptor, node: { token: descriptor }, chain: new Map(), get(){}, set(){}, watch(){}, when(){} };
+    const bare = { scope: { __scopeBrand: 'AppScope', id: Symbol('AppScope'), parent: undefined }, get(){}, set(){}, watch(){}, when(){} };
+    const decoy = { memoizedState: { memoizedState: { current: threadHandle }, next: { memoizedState: { current: detached }, next: null } },
+                    memoizedProps: { value: bare }, stateNode: null, child: null, sibling: null, return: null };
+    const holder = { memoizedState: { memoizedState: { current: handle }, next: null }, memoizedProps: null, stateNode: null, child: null, sibling: null, return: null };
+    if (withHandle) decoy.sibling = holder;
+    const current = { memoizedState: null, memoizedProps: null, stateNode: null, child: decoy, sibling: null, return: null, alternate: null };
+    window.__testHandle = withHandle ? handle : null;
+    return current;
+  });
   const APPROVED = ['app-initial-f9b16fbf8fc7.js', 'app-initial-69cd8dbddec5.js'];
   const UNAPPROVED = 'app-initial-deadbeef0000.js';
   // The adapter needs exactly one app-initial module URL on the page, so each
@@ -98,11 +136,9 @@ export const Lv = async ({scope,threadId,sourceThreadId,prompt,turnTrigger}) => 
   await page.route('http://fixture.local/', route => route.fulfill({ path: path.join(root, 'index.html') }));
   await page.route('http://fixture.local/assets/**', route => route.fulfill({ path: path.join(root, route.request().url().replace('http://fixture.local/', '')) }));
   await page.goto('http://fixture.local/');
-  const installed = await page.evaluate(async ({ script, hash }) => {
-    window.__testRootScope = await import('./assets/' + hash).then(module => module.W);
-    const scope = { scope: window.__testRootScope, get(){}, set(){}, watch(){}, when(){} };
-    scope.scope = window.__testRootScope;
-    const current = { memoizedState: { memoizedState: { current: scope }, next: null }, child: null, sibling: null, return: null, alternate: null };
+  const installed = await page.evaluate(async ({ script, hash, treeSource }) => {
+    window.__testMakeTree = new Function('return (' + treeSource + ')')();
+    const current = window.__testMakeTree();
     const alternate = { ...current, memoizedState: null };
     current.alternate = alternate;
     alternate.alternate = current;
@@ -119,7 +155,7 @@ export const Lv = async ({scope,threadId,sourceThreadId,prompt,turnTrigger}) => 
     element.textContent = expression;
     document.body.append(element);
     return { queued: true };
-  }, { script, hash: APPROVED[0] });
+  }, { script, hash: APPROVED[0], treeSource });
   await page.waitForFunction(() => window.__providerHubDesktopActions?.send instanceof Function, null, { timeout: 3000 });
   await page.waitForTimeout(100);
   assert.deepEqual(installed, { queued: true });
@@ -161,11 +197,9 @@ export const Lv = async ({scope,threadId,sourceThreadId,prompt,turnTrigger}) => 
     await approvedPage.route('http://fixture.local/', route => route.fulfill({ contentType: 'text/html', body: indexFor(hash) }));
     await approvedPage.route('http://fixture.local/assets/**', route => route.fulfill({ path: path.join(root, route.request().url().replace('http://fixture.local/', '')) }));
     await approvedPage.goto('http://fixture.local/');
-    await approvedPage.evaluate(async ({ script, hash }) => {
-      window.__testRootScope = await import('./assets/' + hash).then(module => module.W);
-      const scope = { scope: window.__testRootScope, get(){}, set(){}, watch(){}, when(){} };
-      scope.scope = window.__testRootScope;
-      const current = { memoizedState: { memoizedState: { current: scope }, next: null }, child: null, sibling: null, return: null };
+    await approvedPage.evaluate(async ({ script, hash, treeSource }) => {
+      window.__testMakeTree = new Function('return (' + treeSource + ')')();
+      const current = window.__testMakeTree();
       const container = { stateNode: { current }, memoizedState: null, child: null, sibling: null, return: null };
       document.getElementById('root')['__reactContainer$test'] = container;
       const originPattern = String.raw`!/^app:\/\/-\//.test(String(location.href))`;
@@ -175,7 +209,7 @@ export const Lv = async ({scope,threadId,sourceThreadId,prompt,turnTrigger}) => 
       element.textContent = expression;
       document.body.append(element);
       return true;
-    }, { script, hash });
+    }, { script, hash, treeSource });
     await approvedPage.waitForFunction(() => window.__providerHubDesktopActions?.send instanceof Function, null, { timeout: 3000 });
     assert.equal(await approvedPage.evaluate(() => window.__providerHubDesktopActions.ready()), true);
     assert.deepEqual(await approvedPage.evaluate(request => window.__providerHubDesktopActions.send(request), request),
@@ -209,14 +243,44 @@ export const Lv = async ({scope,threadId,sourceThreadId,prompt,turnTrigger}) => 
   assert.equal(rejectedDiagnostics.scope, false);
   await assert.rejects(rejectedPage.evaluate(request => window.__providerHubDesktopActions.send(request), request),
                        /observed app-initial-deadbeef0000.js/);
+  assert.equal((await rejectedPage.evaluate(() => window.__providerHubDesktopActions.diagnostics())).lastError.code, 'app-version');
   await rejectedPage.close();
+  // A tree holding only look-alikes (a thread-level handle, a handle detached
+  // from its chain, a methods-only object) must fail closed with the scope
+  // code and report how far the search went, never pass a decoy to Desktop.
+  const decoyPage = await browser.newPage();
+  decoyPage.on('pageerror', error => console.error('pageerror', error));
+  await decoyPage.route('http://fixture.local/', route => route.fulfill({ contentType: 'text/html', body: indexFor(APPROVED[1]) }));
+  await decoyPage.route('http://fixture.local/assets/**', route => route.fulfill({ path: path.join(root, route.request().url().replace('http://fixture.local/', '')) }));
+  await decoyPage.goto('http://fixture.local/');
+  await decoyPage.evaluate(async ({ script, treeSource }) => {
+    const makeTree = new Function('return (' + treeSource + ')')();
+    const current = makeTree(false);
+    const container = { stateNode: { current }, memoizedState: null, child: null, sibling: null, return: null };
+    document.getElementById('root')['__reactContainer$test'] = container;
+    const originPattern = String.raw`!/^app:\/\/-\//.test(String(location.href))`;
+    const element = document.createElement('script');
+    element.type = 'module';
+    element.textContent = script.replace(originPattern, 'false');
+    document.body.append(element);
+    return true;
+  }, { script, treeSource });
+  await decoyPage.waitForFunction(() => window.__providerHubDesktopActions?.send instanceof Function, null, { timeout: 3000 });
+  assert.equal(await decoyPage.evaluate(() => window.__providerHubDesktopActions.ready()), false);
+  await assert.rejects(decoyPage.evaluate(request => window.__providerHubDesktopActions.send(request), request),
+                       /app scope could not be found \(2 fibers inspected\)/);
+  const decoyDiagnostics = await decoyPage.evaluate(() => window.__providerHubDesktopActions.diagnostics());
+  assert.equal(decoyDiagnostics.scopeError, 'scope');
+  assert.equal(decoyDiagnostics.lastError.code, 'scope');
+  assert.deepEqual(decoyDiagnostics.scopeSearch, { fibers: 2, truncated: false });
+  assert.equal(decoyDiagnostics.errors, 1);
+  await decoyPage.close();
   // A root remount replaces HostRoot.current. The next send must resolve the
   // new tree's scope; it cannot reuse the detached wrapper from the old root.
   const remounted = await page.evaluate(() => {
     const root = document.getElementById('root');
     const container = root['__reactContainer$test'];
-    const scope = { scope: window.__testRootScope, get(){}, set(){}, watch(){}, when(){} };
-    const current = { memoizedState: { memoizedState: { current: scope }, next: null }, child: null, sibling: null, return: null };
+    const current = window.__testMakeTree();
     container.stateNode = { current };
     return true;
   });
