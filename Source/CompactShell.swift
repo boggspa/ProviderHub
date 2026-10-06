@@ -171,8 +171,7 @@ struct CompactShell: View {
             Text("127.0.0.1:\(String(model.savedSettings.port))").font(.system(size: 10.5, design: .monospaced)).foregroundStyle(.secondary)
             Button(model.running ? "Stop" : "Start") { Task { await model.toggleGateway() } }
                 .buttonStyle(.bordered).controlSize(.mini).disabled(model.busy)
-            Circle().fill(model.claudeRunning || model.codexRunning ? Chroma.ok : Color.secondary.opacity(0.5)).frame(width: 7, height: 7).padding(.leading, 6)
-            Text("Claude \(model.claudeRunning ? "running" : "closed") · Codex \(model.codexRunning ? "running" : "closed")").font(.system(size: 10.5)).foregroundStyle(.secondary)
+            launchCluster.padding(.leading, 10)
             if model.changed {
                 Button { Task { await model.saveFromUI() } } label: { Text("Save").foregroundStyle(HubTheme.Control.ink) }
                     .buttonStyle(.borderedProminent).controlSize(.mini).tint(HubTheme.Accent.brand)
@@ -186,11 +185,47 @@ struct CompactShell: View {
                 if tab == .settings { tab = tabBeforeSettings } else { tabBeforeSettings = tab; tab = .settings }
             } label: {
                 Image(systemName: "gearshape.fill").font(.system(size: 12)).foregroundStyle(tab == .settings ? Color.primary : Color.secondary)
-                    .frame(width: 22, height: 22).background(Circle().fill(tab == .settings ? Color.white.opacity(0.12) : .clear))
+                    .frame(width: 22, height: 22).background(Circle().fill(Color.white.opacity(tab == .settings ? 0.12 : 0)))
+                    .contentShape(Circle())
             }.buttonStyle(.plain).help(tab == .settings ? "Back" : "Settings").padding(.leading, 4)
             if model.busy { ProgressView().controlSize(.mini) }
         }
         .padding(.leading, 78).padding(.trailing, 12).frame(height: 36)
+    }
+
+    /// "Launch" plus the two app marks, each with its own LED: green while
+    /// the app runs on the hub profile, amber when it runs on another one,
+    /// grey when closed. One click launches (or shows) the app with the
+    /// current catalogue, same as the app tab's button.
+    private var launchCluster: some View {
+        HStack(spacing: 4) {
+            Text("Launch").font(.system(size: 10.5)).foregroundStyle(.secondary).padding(.trailing, 2)
+            launchMark(.claude)
+            launchMark(.codex)
+        }
+    }
+
+    private func launchMark(_ which: ShellTab) -> some View {
+        let isClaude = which == .claude
+        let presentation = model.providerDefinitions.first { $0.id == (isClaude ? "claude" : "codex") }?.presentation
+        let running = isClaude ? model.claudeRunning : model.codexRunning
+        let live = running && (isClaude ? model.profileActive : model.codexProfileActive)
+        let led: Color = live ? Chroma.ok : (running ? Chroma.warn : Color.secondary.opacity(0.5))
+        let blocked = model.busy || (isClaude ? !model.claudeInstalled : (model.codexAppPath == nil || model.settings.codex_model == nil))
+        return Button { Task { if isClaude { await model.launchClaude() } else { await model.launchCodex() } } } label: {
+            ZStack(alignment: .bottomTrailing) {
+                Group {
+                    if let presentation { ProviderMark(presentation: presentation, size: 16) }
+                    else { Image(systemName: "app.dashed").font(.system(size: 12)) }
+                }.frame(width: 22, height: 22)
+                Circle().fill(led).frame(width: 6, height: 6).overlay(Circle().stroke(Color.black.opacity(0.6), lineWidth: 1))
+                    .shadow(color: live ? Chroma.ok.opacity(0.6) : .clear, radius: 2).offset(x: 1, y: 1)
+            }
+            .background(RoundedRectangle(cornerRadius: 6).fill(Color.white.opacity(0.07)))
+            .contentShape(RoundedRectangle(cornerRadius: 6))
+            .opacity(blocked ? 0.45 : 1)
+        }.buttonStyle(.plain).disabled(blocked)
+            .help((isClaude ? "Claude Desktop" : "Codex / ChatGPT") + (live ? " · running on the hub profile" : (running ? " · running on another profile" : " · closed")))
     }
 
     // MARK: rail
@@ -622,10 +657,10 @@ private struct ProviderSide: View {
             SectionLabel(text: "Status")
             Text(models.isEmpty ? "—" : "\(models.count) models").font(.system(size: 18, weight: .semibold))
             Text(models.isEmpty ? state.text : "\(models.filter { model.claudeEntry($0.id) != nil || (model.settings.codex_catalogue?.contains($0.id) ?? false) }.count) listed").font(.system(size: 10.5)).foregroundStyle(.secondary)
-            VStack(spacing: 4) {
-                Button("Refresh") { Task { await model.discover() } }.disabled(model.busy || model.catalogueRefreshing || !state.on).frame(maxWidth: .infinity)
-                Button("Account ↗") { if let url = URL(string: provider.setup_url) { NSWorkspace.shared.open(url) } }.frame(maxWidth: .infinity)
-                Button("Reconnect") { Task { await model.reconnect() } }.disabled(model.busy).frame(maxWidth: .infinity)
+            VStack(alignment: .leading, spacing: 4) {
+                Button("Refresh") { Task { await model.discover() } }.disabled(model.busy || model.catalogueRefreshing || !state.on)
+                Button("Account ↗") { if let url = URL(string: provider.setup_url) { NSWorkspace.shared.open(url) } }
+                Button("Reconnect") { Task { await model.reconnect() } }.disabled(model.busy)
             }.controlSize(.small)
             if let route = focused, let entry = model.modelEntry(route), entry.provider_id == provider.id {
                 Divider().padding(.vertical, 2)
@@ -790,7 +825,7 @@ private struct AppSide: View {
                 Text(running ? (isClaude ? "Show Claude" : "Show Codex") : (isClaude ? "Launch Claude" : "Launch Codex")).foregroundStyle(HubTheme.Control.ink).frame(maxWidth: .infinity)
             }.buttonStyle(.borderedProminent).tint(accent).controlSize(.regular)
                 .disabled(model.busy || (isClaude ? !model.claudeInstalled : (model.codexAppPath == nil || model.settings.codex_model == nil)))
-            Button("Restore") { Task { if isClaude { await model.restore() } else { await model.restoreCodex() } } }.controlSize(.small).frame(maxWidth: .infinity)
+            Button("Restore") { Task { if isClaude { await model.restore() } else { await model.restoreCodex() } } }.controlSize(.small)
                 .disabled(model.busy || (isClaude ? (!model.recoveryNeeded || model.claudeRunning) : (!model.codexRecoveryNeeded || model.codexRunning)))
             if isClaude && model.claudeRunning && !model.profileActive {
                 Text("Claude is open with another profile. Quit it first.").font(.system(size: 10.5)).foregroundStyle(Chroma.warn)
