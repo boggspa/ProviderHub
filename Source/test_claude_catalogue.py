@@ -23,7 +23,8 @@ EXPECTED = {
     "claude-sonnet-5-5": "Claude Sonnet 5.5",
     "claude-sonnet-5": "Claude Sonnet 5 (Legacy)",
     "claude-sonnet-4-6": "Claude Sonnet 4.6 (Legacy)",
-    "claude-haiku-4-5": "Claude Haiku 4.5",
+    "claude-haiku-5-5": "Claude Haiku 5.5",
+    "claude-haiku-4-5": "Claude Haiku 4.5 (Legacy)",
 }
 
 
@@ -50,7 +51,7 @@ class ClaudeCatalogueTests(unittest.TestCase):
         self.adapter.start()
         self.addCleanup(self.adapter.stop)
 
-    def test_repeated_discovery_offers_eleven_versions_without_alias_rows(self):
+    def test_repeated_discovery_offers_twelve_versions_without_alias_rows(self):
         with patch.object(claude_cli_agent, "auth_state", return_value={"state": "authenticated"}):
             for _ in range(2):
                 inventory = cli_routes.discover_via_cli("claude")
@@ -61,7 +62,7 @@ class ClaudeCatalogueTests(unittest.TestCase):
 
     def test_saved_aliases_request_the_displayed_version(self):
         for alias, version in (("fable", "claude-fable-5-1"), ("opus", "claude-opus-5-5"),
-                               ("sonnet", "claude-sonnet-5-5"), ("haiku", "claude-haiku-4-5"),
+                               ("sonnet", "claude-sonnet-5-5"), ("haiku", "claude-haiku-5-5"),
                                ("claude-fable-5", "claude-fable-5"),
                                ("claude-future", "claude-future")):
             with self.subTest(model=alias):
@@ -76,11 +77,13 @@ class ClaudeCatalogueTests(unittest.TestCase):
         self.assertEqual({row["model_id"]: row["display_name"] for row in projected}, EXPECTED)
         specs = route_specs({"models": projected})
         for alias, version in (("fable", "claude-fable-5-1"), ("opus", "claude-opus-5-5"),
-                               ("sonnet", "claude-sonnet-5-5"), ("haiku", "claude-haiku-4-5")):
+                               ("sonnet", "claude-sonnet-5-5"), ("haiku", "claude-haiku-5-5")):
             self.assertIs(specs["claude/" + alias], specs["claude/" + version])
         self.assertIsNot(specs["claude/fable"], specs["claude/claude-fable-5"])
-        self.assertFalse(specs["claude/haiku"]["reasoning"])
-        self.assertEqual(specs["claude/haiku"]["effort_modes"], [])
+        self.assertTrue(specs["claude/haiku"]["reasoning"])
+        self.assertEqual(specs["claude/haiku"]["effort_modes"], ["low", "medium", "high", "xhigh", "max"])
+        self.assertFalse(specs["claude/claude-haiku-4-5"]["reasoning"])
+        self.assertEqual(specs["claude/claude-haiku-4-5"]["effort_modes"], [])
 
     def test_saved_aliases_and_exact_versions_share_rows_in_both_desktops(self):
         for default in ("claude/opus", "claude/claude-opus-5"):
@@ -112,7 +115,7 @@ class ClaudeCatalogueTests(unittest.TestCase):
             {"id": identifier, "display_name": "Claude Haiku 4.5", "context": 200000}]}
         rows = project_catalogue("claude", inventory, self.config)
         self.assertEqual({row["model_id"]: row["display_name"] for row in rows}, {
-            "claude-opus-4-6": "Claude Opus 4.6 (Legacy)", identifier: "Claude Haiku 4.5"})
+            "claude-opus-4-6": "Claude Opus 4.6 (Legacy)", identifier: "Claude Haiku 4.5 (Legacy)"})
 
     def test_custom_labels_exact_metadata_and_unknown_models_survive(self):
         inventory = old_inventory()

@@ -144,7 +144,7 @@ struct ClaudeModelsPane: View {
             DisclosureGroup("Family, effort and context") {
                 VStack(alignment: .leading, spacing: 8) {
                     Text("A family’s default also answers Claude Code’s requests for that family. Missing families use the nearest available tier.")
-                    Text("Fable, Opus and Sonnet offer Claude’s effort ladder, including Ultracode. Haiku has no effort control. Enable catalogue models and workflows in Config.")
+                    Text("Fable, Opus, Sonnet and Haiku 5.5 offer Claude’s effort ladder, including Ultracode. Haiku 4.5 has no effort control. Enable catalogue models and workflows in Config.")
                     Text("Context follows provider metadata. A blank compaction threshold uses 85% of the known catalogue window. Unknown windows remain provider-managed.")
                     Text("Fast uses a provider’s same-model capability; it never silently changes the selected model.")
                 }.font(.caption).foregroundStyle(.secondary).padding(.top, 8)
