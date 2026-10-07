@@ -110,6 +110,7 @@ struct CompactShell: View {
     @State private var focusedRoute: String?
     @State private var search = ""
     @State private var showAudit = false
+    @State private var noticeHovered = false
     @State private var tabBeforeSettings: ShellTab = .provider("mistral")
     @Namespace private var rail
 
@@ -126,7 +127,7 @@ struct CompactShell: View {
                 HStack(spacing: 0) {
                     railView.frame(width: railOpen ? 176 : 52)
                     mainPane.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                    sidePane.frame(width: 196)
+                    sidePane.frame(width: 224)
                 }
             }
         }
@@ -324,8 +325,13 @@ struct CompactShell: View {
                     }
                 }.padding(.horizontal, 10).padding(.vertical, 6).frame(maxWidth: .infinity, alignment: .topLeading)
             }
-            if !model.notice.isEmpty { noticeBar }
         }
+        // The notice floats over the top of the pane instead of taking a band
+        // off the bottom; it leaves on its own after ten seconds.
+        .overlay(alignment: .top) {
+            if !model.notice.isEmpty { noticeBanner.transition(.move(edge: .top).combined(with: .opacity)) }
+        }
+        .animation(.spring(duration: 0.3, bounce: 0.1), value: model.notice.isEmpty)
     }
 
     private func jump(_ route: String) {
@@ -333,13 +339,33 @@ struct CompactShell: View {
         tab = .provider(provider); DispatchQueue.main.async { focusedRoute = route }
     }
 
-    private var noticeBar: some View {
-        HStack(alignment: .top, spacing: 8) {
-            Image(systemName: model.noticeIsError ? "exclamationmark.circle" : (model.noticeIsWarning ? "exclamationmark.triangle" : "checkmark.circle"))
-                .foregroundStyle(model.noticeIsError ? Chroma.warn : (model.noticeIsWarning ? Color.yellow : Chroma.ok))
+    private var noticeTone: Color { model.noticeIsError ? Chroma.bad : (model.noticeIsWarning ? Chroma.warn : Chroma.ok) }
+
+    /// Floating status card with a rim in the status colour. It dismisses
+    /// itself after ten seconds; hovering holds it open until the pointer
+    /// leaves, and the close button still works at any time.
+    private var noticeBanner: some View {
+        let tone = noticeTone
+        return HStack(alignment: .top, spacing: 8) {
+            Image(systemName: model.noticeIsError ? "exclamationmark.circle.fill" : (model.noticeIsWarning ? "exclamationmark.triangle.fill" : "checkmark.circle.fill"))
+                .font(.system(size: 12)).foregroundStyle(tone)
             Text(model.notice).font(.system(size: 11)).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
-            Button { model.notice = "" } label: { Image(systemName: "xmark").font(.system(size: 9)) }.buttonStyle(.plain).foregroundStyle(.secondary)
-        }.padding(10).background(Semantic.raisedSurface)
+            Button { model.notice = "" } label: { Image(systemName: "xmark").font(.system(size: 9, weight: .semibold)) }.buttonStyle(.plain).foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 10).padding(.vertical, 8)
+        .background(RoundedRectangle(cornerRadius: 9).fill(tone.opacity(0.12)))
+        .background(RoundedRectangle(cornerRadius: 9).fill(Semantic.surface))
+        .overlay(RoundedRectangle(cornerRadius: 9).stroke(tone.opacity(0.65), lineWidth: 1))
+        .shadow(color: tone.opacity(0.3), radius: 10, y: 2)
+        .shadow(color: .black.opacity(0.22), radius: 8, y: 4)
+        .padding(.horizontal, 10).padding(.top, 6)
+        .onHover { noticeHovered = $0 }
+        .task(id: "\(model.notice)|\(noticeHovered)") {
+            guard !noticeHovered else { return }
+            try? await Task.sleep(for: .seconds(10))
+            guard !Task.isCancelled else { return }
+            model.notice = ""
+        }
     }
 
     // MARK: side pane
@@ -699,35 +725,47 @@ private struct ProviderSide: View {
     }
 
     private func tierPills(_ entry: ModelEntry, _ claude: ClaudeCatalogueEntry?) -> some View {
-        let current = claude?.tier
-        let accent = provider.presentation.color
-        return FlowRow(spacing: 4) {
-            pill("Off", current == nil, accent) { model.removeClaudeRoute(entry.id) }
-            ForEach(tierOrder, id: \.self) { tier in
-                pill(claudeTiers.first { $0.id == tier }?.label ?? tier, current == tier, accent) {
-                    if model.settings.claude_catalogue == nil { model.settings.claude_catalogue = model.claudeCatalogue }
-                    if model.claudeEntry(entry.id) == nil { model.addClaudeRoute(entry.id, tier: tier) } else { model.claudeTier(for: entry.id).wrappedValue = tier }
-                }
-            }
+        TierStrip(current: claude?.tier) { tier in
+            guard let tier else { model.removeClaudeRoute(entry.id); return }
+            if model.settings.claude_catalogue == nil { model.settings.claude_catalogue = model.claudeCatalogue }
+            if model.claudeEntry(entry.id) == nil { model.addClaudeRoute(entry.id, tier: tier) } else { model.claudeTier(for: entry.id).wrappedValue = tier }
         }
-    }
-    private func pill(_ text: String, _ on: Bool, _ accent: Color, _ action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Text(text).font(.system(size: 10, weight: .semibold)).foregroundStyle(on ? .primary : .secondary)
-                .padding(.horizontal, 7).padding(.vertical, 2)
-                .background(Capsule().fill(on ? accent.opacity(0.22) : Semantic.raisedSurface))
-                .overlay(Capsule().stroke(on ? accent.opacity(0.55) : Semantic.hairline, lineWidth: 1))
-        }.buttonStyle(.plain)
     }
 }
 
-/// Wrapping row of small controls.
-private struct FlowRow<Content: View>: View {
-    var spacing: CGFloat = 4
-    @ViewBuilder var content: Content
+/// One-line segmented picker for a route's Claude tier. The five names sit as
+/// plain labels in a single raised track and the active one is filled with its
+/// tier colour (the same tint the route list uses), so nothing is chipped and
+/// nothing wraps or truncates at the side column's width.
+private struct TierStrip: View {
+    var current: String?
+    var select: (String?) -> Void
     var body: some View {
-        // Five pills fit on one line at the side column's width; a plain HStack keeps layout simple.
-        HStack(spacing: spacing) { content }.frame(maxWidth: .infinity, alignment: .leading)
+        HStack(spacing: 0) {
+            segment("Off", id: nil, tint: Color.secondary)
+            ForEach(tierOrder, id: \.self) { tier in
+                Spacer(minLength: 0)
+                segment(claudeTiers.first { $0.id == tier }?.label ?? tier, id: tier, tint: Chroma.tiers[tier] ?? Chroma.claude)
+            }
+        }
+        .padding(3)
+        .frame(maxWidth: .infinity)
+        .background(RoundedRectangle(cornerRadius: 8).fill(Semantic.raisedSurface))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Semantic.hairline, lineWidth: 1))
+        .animation(.easeOut(duration: 0.16), value: current)
+    }
+    private func segment(_ text: String, id: String?, tint: Color) -> some View {
+        let on = current == id
+        return Button { select(id) } label: {
+            Text(text)
+                .font(.system(size: 10.5, weight: on ? .semibold : .medium))
+                .foregroundStyle(on ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
+                .lineLimit(1).fixedSize()
+                .padding(.horizontal, 5).padding(.vertical, 3)
+                .background(RoundedRectangle(cornerRadius: 5).fill(on ? tint.opacity(id == nil ? 0.18 : 0.3) : .clear))
+                .overlay(RoundedRectangle(cornerRadius: 5).stroke(on ? tint.opacity(id == nil ? 0.35 : 0.55) : .clear, lineWidth: 1))
+                .contentShape(RoundedRectangle(cornerRadius: 5))
+        }.buttonStyle(.plain).help(id == nil ? "Remove this route from Claude Desktop" : "List this route under the \(text) tier in Claude Desktop")
     }
 }
 
