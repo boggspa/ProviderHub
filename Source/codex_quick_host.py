@@ -22,6 +22,7 @@ import json
 import os
 import re
 import select
+import time
 
 from codex_quick_window import send_from_host_expression
 
@@ -99,6 +100,7 @@ class QuickHost:
         self.composer_session: str | None = None
         self.pending: dict[int, tuple[str, str]] = {}
         self.last_rows: str | None = None
+        self.last_open = float("-inf")
 
     # -- wiring from the accent bridge -------------------------------------
     def attach_main(self, session_id: str) -> None:
@@ -113,9 +115,17 @@ class QuickHost:
         return self.connected and self.watching
 
     def request_open(self) -> bool:
-        """The launcher was clicked: the Hub shows its panel if it is there."""
+        """The launcher was clicked: the Hub shows its panel if it is there.
+
+        One click reaches the helper twice (the binding, then the poll's
+        flag), so a repeat within two seconds is the same request.
+        """
         if not self.connected:
             return False
+        now = time.monotonic()
+        if now - self.last_open < 2.0:
+            return True
+        self.last_open = now
         self.emit({"event": "quick-open"})
         return True
 

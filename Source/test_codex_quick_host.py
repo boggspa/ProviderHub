@@ -86,6 +86,10 @@ class QuickHostTests(unittest.TestCase):
         self.assertEqual(self.events[-1], {"event": "quick-rows", "rows": []})
         self.assertTrue(self.host.request_open())
         self.assertEqual(self.events[-1], {"event": "quick-open"})
+        # The launcher reaches the helper twice per click; one event results.
+        self.assertTrue(self.host.request_open())
+        self.assertEqual(len([e for e in self.events if e["event"] == "quick-open"]), 1)
+        self.host.last_open = float("-inf")
         # Re-watching resends the current rows once, even if unchanged.
         self.host.command({"command": "quick-watch", "active": False})
         self.assertFalse(self.host.is_watching())

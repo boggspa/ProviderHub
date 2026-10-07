@@ -35,8 +35,16 @@ struct QuickRow: Identifiable, Equatable {
 @MainActor
 final class QuickPanelModel: ObservableObject {
     @Published var rows: [QuickRow] = []
-    @Published var selected: String?
-    @Published var drafts: [String: String] = [:]
+    @Published var selected: String? {
+        didSet {
+            // Each chat keeps its own draft; the text field only ever binds
+            // to `draft`, so row updates never rebuild it mid-keystroke.
+            if let oldValue, oldValue != selected { drafts[oldValue] = draft }
+            draft = selected.flatMap { drafts[$0] } ?? ""
+        }
+    }
+    @Published var draft = ""
+    private var drafts: [String: String] = [:]
     @Published var statuses: [String: String] = [:]
     @Published var pending: Set<String> = []
     @Published var helperConnected = false
@@ -62,13 +70,19 @@ final class QuickPanelModel: ObservableObject {
         case "quick-rows":
             let incoming = (event["rows"] as? [[String: Any]] ?? []).prefix(10).compactMap(QuickRow.init)
             var seen = Set<String>()
-            rows = incoming.filter { seen.insert($0.id).inserted }
+            let next = incoming.filter { seen.insert($0.id).inserted }
+            // Previews change while a thread streams; only a real change
+            // re-renders the list, and the selection and draft are untouched.
+            if next != rows { rows = next }
             if selectedRow == nil || selectedRow?.supported == false { selected = rows.first { $0.supported }?.id }
         case "quick-result":
             guard let requestId = event["requestId"] as? String, let id = requests.removeValue(forKey: requestId) else { return }
             pending.remove(id)
             let ok = event["ok"] as? Bool == true
-            if ok, drafts[id] == sentPrompts[id] { drafts[id] = "" }
+            if ok {
+                if id == selected, draft == sentPrompts[id] { draft = "" }
+                else if drafts[id] == sentPrompts[id] { drafts[id] = "" }
+            }
             sentPrompts[id] = nil
             statuses[id] = (event["reason"] as? String).flatMap { $0.isEmpty ? nil : $0 }
                 ?? (ok ? "Sent." : "Send failed. Your draft is kept.")
@@ -90,11 +104,6 @@ final class QuickPanelModel: ObservableObject {
         guard let data = try? JSONSerialization.data(withJSONObject: object),
               let line = String(data: data, encoding: .utf8) else { return }
         send?(line + "\n")
-    }
-
-    var draft: String {
-        get { selected.flatMap { drafts[$0] } ?? "" }
-        set { if let selected { drafts[selected] = newValue } }
     }
 
     var status: String {
@@ -123,10 +132,12 @@ final class QuickPanelModel: ObservableObject {
 
     func show() {
         let panel = self.panel ?? makePanel()
+        if visible && panel.isKeyWindow { return }  // a repeated request must not disturb typing
+        let wasVisible = visible
         visible = true
         panel.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
-        command(["command": "quick-watch", "active": true])
+        if !wasVisible { command(["command": "quick-watch", "active": true]) }
     }
 
     func hide() {
@@ -222,7 +233,7 @@ struct QuickComposerView: View {
                 .padding(.horizontal, 8).padding(.vertical, 4)
             }
             HStack(spacing: 8) {
-                TextField(placeholder, text: Binding(get: { model.draft }, set: { model.draft = $0 }))
+                TextField(placeholder, text: $model.draft)
                     .textFieldStyle(.plain).font(.system(size: 14)).foregroundStyle(Semantic.ink)
                     .focused($composing).disabled(model.selectedRow?.supported != true)
                     .onSubmit { model.submit() }
