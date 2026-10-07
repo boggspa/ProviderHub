@@ -862,6 +862,23 @@ private struct AppSide: View {
     }
 }
 
+/// Sun / moon / screen: Light, Dark or System (the default). Writes the same
+/// preference as the status menu's Appearance submenu and applies it at once.
+private struct AppearanceToggle: View {
+    @AppStorage(HubTheme.Appearance.defaultsKey) private var stored = HubTheme.Appearance.Mode.system.rawValue
+    private var mode: Binding<HubTheme.Appearance.Mode> {
+        Binding(get: { HubTheme.Appearance.Mode(rawValue: stored) ?? .system },
+                set: { stored = $0.rawValue; HubTheme.Appearance.apply() })
+    }
+    var body: some View {
+        Picker("", selection: mode) {
+            Image(systemName: "sun.max").tag(HubTheme.Appearance.Mode.light).help("Light")
+            Image(systemName: "moon").tag(HubTheme.Appearance.Mode.dark).help("Dark")
+            Image(systemName: "display").tag(HubTheme.Appearance.Mode.system).help("System")
+        }.pickerStyle(.segmented).labelsHidden().controlSize(.small).fixedSize()
+    }
+}
+
 // MARK: - Settings page (the cog)
 
 /// Every desktop-app preference and the gateway settings, on their own page
@@ -902,6 +919,8 @@ private struct SettingsPage: View {
                         TextField("", value: $model.settings.port, format: .number.grouping(.never)).textFieldStyle(.roundedBorder).controlSize(.small).frame(width: 80)
                         Spacer() }
                     Text("Changing shared settings while a desktop app is live requires quitting both apps first.").font(.system(size: 10.5)).foregroundStyle(.tertiary).fixedSize(horizontal: false, vertical: true)
+                    SectionLabel(text: "Hub")
+                    HStack { Text("Appearance").foregroundStyle(.secondary); Spacer(); AppearanceToggle() }
                 }.frame(maxWidth: .infinity, alignment: .topLeading)
             }.padding(14)
         }

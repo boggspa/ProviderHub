@@ -30,10 +30,11 @@ enum HubTheme {
 
         static let defaultsKey = "hubAppearance"
 
-        /// The default stays dark: that is what every existing surface was
-        /// tuned for, and a user who never chooses sees no change.
+        /// The default follows macOS: the compact shell and the classic pages
+        /// both resolve their colours per appearance, so a user who never
+        /// chooses gets the hub in whatever their Mac is wearing.
         static var mode: Mode {
-            get { Mode(rawValue: UserDefaults.standard.string(forKey: defaultsKey) ?? "") ?? .dark }
+            get { Mode(rawValue: UserDefaults.standard.string(forKey: defaultsKey) ?? "") ?? .system }
             set { UserDefaults.standard.set(newValue.rawValue, forKey: defaultsKey) }
         }
 
