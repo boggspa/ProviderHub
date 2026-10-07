@@ -23,15 +23,27 @@ enum Chroma {
 }
 
 /// Window vibrancy behind the shell: the desktop shows through the glass.
+/// The material follows the effective appearance (HubTheme.Appearance): HUD
+/// glass on dark, popover glass on light, so the window re-tints on a change
+/// without any SwiftUI state.
 struct VibrancyBackground: NSViewRepresentable {
-    var material: NSVisualEffectView.Material = .hudWindow
+    final class AppearanceGlass: NSVisualEffectView {
+        override func viewDidChangeEffectiveAppearance() {
+            super.viewDidChangeEffectiveAppearance()
+            material = effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? .hudWindow : .popover
+        }
+    }
     func makeNSView(context: Context) -> NSVisualEffectView {
-        let view = NSVisualEffectView()
-        view.material = material; view.blendingMode = .behindWindow; view.state = .active
+        let view = AppearanceGlass()
+        view.blendingMode = .behindWindow; view.state = .active
+        view.viewDidChangeEffectiveAppearance()
         return view
     }
-    func updateNSView(_ view: NSVisualEffectView, context: Context) { view.material = material }
+    func updateNSView(_ view: NSVisualEffectView, context: Context) {}
 }
+
+/// Shorthands for the semantic colours the shell lays over the glass.
+private typealias Semantic = HubTheme.Semantic
 
 private let subscriptionProviders: Set<String> = ["claude", "codex", "antigravity", "devin"]
 private let cliAccountProviders: Set<String> = ["codex", "claude"]
@@ -151,11 +163,13 @@ struct CompactShell: View {
         .accentColor(HubTheme.Accent.brand)
     }
 
+    @Environment(\.colorScheme) private var colorScheme
     private var chromaWash: some View {
-        ZStack {
-            RadialGradient(colors: [Chroma.one.opacity(0.22), .clear], center: UnitPoint(x: 0.15, y: 0.05), startRadius: 0, endRadius: 520)
-            RadialGradient(colors: [Chroma.two.opacity(0.18), .clear], center: UnitPoint(x: 0.9, y: 0.15), startRadius: 0, endRadius: 460)
-            RadialGradient(colors: [Chroma.three.opacity(0.12), .clear], center: UnitPoint(x: 0.55, y: 1.0), startRadius: 0, endRadius: 420)
+        let strength = colorScheme == .dark ? 1.0 : 0.45
+        return ZStack {
+            RadialGradient(colors: [Chroma.one.opacity(0.22 * strength), .clear], center: UnitPoint(x: 0.15, y: 0.05), startRadius: 0, endRadius: 520)
+            RadialGradient(colors: [Chroma.two.opacity(0.18 * strength), .clear], center: UnitPoint(x: 0.9, y: 0.15), startRadius: 0, endRadius: 460)
+            RadialGradient(colors: [Chroma.three.opacity(0.12 * strength), .clear], center: UnitPoint(x: 0.55, y: 1.0), startRadius: 0, endRadius: 420)
         }.allowsHitTesting(false)
     }
 
@@ -185,7 +199,7 @@ struct CompactShell: View {
                 if tab == .settings { tab = tabBeforeSettings } else { tabBeforeSettings = tab; tab = .settings }
             } label: {
                 Image(systemName: "gearshape.fill").font(.system(size: 12)).foregroundStyle(tab == .settings ? Color.primary : Color.secondary)
-                    .frame(width: 22, height: 22).background(Circle().fill(Color.white.opacity(tab == .settings ? 0.12 : 0)))
+                    .frame(width: 22, height: 22).background(Circle().fill(tab == .settings ? Semantic.selection : Color.clear))
                     .contentShape(Circle())
             }.buttonStyle(.plain).help(tab == .settings ? "Back" : "Settings").padding(.leading, 4)
             if model.busy { ProgressView().controlSize(.mini) }
@@ -218,10 +232,10 @@ struct CompactShell: View {
                     if let presentation { ProviderMark(presentation: presentation, size: 16) }
                     else { Image(systemName: "app.dashed").font(.system(size: 12)) }
                 }.frame(width: 22, height: 22)
-                Circle().fill(led).frame(width: 6, height: 6).overlay(Circle().stroke(Color.black.opacity(0.6), lineWidth: 1))
+                Circle().fill(led).frame(width: 6, height: 6).overlay(Circle().stroke(Semantic.surface, lineWidth: 1))
                     .shadow(color: live ? Chroma.ok.opacity(0.6) : .clear, radius: 2).offset(x: 1, y: 1)
             }
-            .background(RoundedRectangle(cornerRadius: 6).fill(Color.white.opacity(0.07)))
+            .background(RoundedRectangle(cornerRadius: 6).fill(Semantic.raisedSurface))
             .contentShape(RoundedRectangle(cornerRadius: 6))
             .opacity(blocked ? 0.45 : 1)
         }.buttonStyle(.plain).disabled(blocked)
@@ -258,7 +272,7 @@ struct CompactShell: View {
 
     @ViewBuilder private func railSeparator(_ group: String) -> some View {
         if railOpen { railGroup(group).padding(.top, 6) }
-        else { Rectangle().fill(Color.white.opacity(0.12)).frame(width: 16, height: 1).padding(.vertical, 5) }
+        else { Rectangle().fill(Semantic.hairline).frame(width: 16, height: 1).padding(.vertical, 5) }
     }
 
     private func railTab(_ provider: ProviderDefinition) -> some View {
@@ -268,7 +282,7 @@ struct CompactShell: View {
             HStack(spacing: 8) {
                 ZStack(alignment: .bottomTrailing) {
                     ProviderMark(presentation: provider.presentation, size: 24).opacity(state.on ? 1 : 0.62)
-                    Circle().fill(state.color).frame(width: 6, height: 6).overlay(Circle().stroke(Color.black.opacity(0.6), lineWidth: 1)).offset(x: 1, y: 1)
+                    Circle().fill(state.color).frame(width: 6, height: 6).overlay(Circle().stroke(Semantic.surface, lineWidth: 1)).offset(x: 1, y: 1)
                 }.frame(width: 24, height: 24)
                 if railOpen {
                     Text(provider.presentation.displayProvider).font(.system(size: 11.5, weight: .medium)).lineLimit(1).foregroundStyle(active ? .primary : .secondary)
@@ -292,7 +306,7 @@ struct CompactShell: View {
                         if let presentation { ProviderMark(presentation: presentation, size: 20) }
                         else { Text(logo == "claude" ? "C" : "⌘").font(.system(size: 12, weight: .bold)).foregroundStyle(accent) }
                     }.frame(width: 30, height: 30)
-                    if live { Circle().fill(Chroma.ok).frame(width: 7, height: 7).overlay(Circle().stroke(Color.black.opacity(0.6), lineWidth: 1)).offset(x: 2, y: -2) }
+                    if live { Circle().fill(Chroma.ok).frame(width: 7, height: 7).overlay(Circle().stroke(Semantic.surface, lineWidth: 1)).offset(x: 2, y: -2) }
                 }
                 if railOpen {
                     Text(title).font(.system(size: 11.5, weight: .medium)).lineLimit(1).foregroundStyle(active ? .primary : .secondary)
@@ -345,7 +359,7 @@ struct CompactShell: View {
                 .foregroundStyle(model.noticeIsError ? Chroma.warn : (model.noticeIsWarning ? Color.yellow : Chroma.ok))
             Text(model.notice).font(.system(size: 11)).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
             Button { model.notice = "" } label: { Image(systemName: "xmark").font(.system(size: 9)) }.buttonStyle(.plain).foregroundStyle(.secondary)
-        }.padding(10).background(Color.white.opacity(0.05))
+        }.padding(10).background(Semantic.raisedSurface)
     }
 
     // MARK: side pane
@@ -391,7 +405,7 @@ struct CompactShell: View {
 
     private func auditTile(_ value: String, _ label: String) -> some View {
         VStack(alignment: .leading, spacing: 2) { Text(value).font(.system(size: 16, weight: .semibold, design: .rounded)); Text(label).font(.system(size: 10)).foregroundStyle(.secondary) }
-            .padding(8).frame(maxWidth: .infinity, alignment: .leading).background(Color.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 8))
+            .padding(8).frame(maxWidth: .infinity, alignment: .leading).background(Semantic.raisedSurface, in: RoundedRectangle(cornerRadius: 8))
     }
 }
 
@@ -438,8 +452,8 @@ private struct ModeCard: View {
                 HStack { Text(title).font(.system(size: 11.5, weight: .semibold)); Spacer(); if selected { Image(systemName: "checkmark").font(.system(size: 9, weight: .bold)).foregroundStyle(accent) } }
                 Text(code).font(.system(size: 9.5, design: .monospaced)).foregroundStyle(.tertiary)
             }.padding(8).frame(maxWidth: .infinity, alignment: .leading)
-            .background(RoundedRectangle(cornerRadius: 9).fill(selected ? accent.opacity(0.14) : Color.white.opacity(0.05)))
-            .overlay(RoundedRectangle(cornerRadius: 9).stroke(selected ? accent.opacity(0.55) : Color.white.opacity(0.08), lineWidth: 1))
+            .background(RoundedRectangle(cornerRadius: 9).fill(selected ? accent.opacity(0.14) : Semantic.raisedSurface))
+            .overlay(RoundedRectangle(cornerRadius: 9).stroke(selected ? accent.opacity(0.55) : Semantic.hairline, lineWidth: 1))
         }.buttonStyle(.plain)
     }
 }
@@ -489,7 +503,7 @@ private struct ModelRow: View {
             Text(text).font(.system(size: 8.5, weight: .bold)).tracking(0.4)
                 .foregroundStyle(on ? color : Color.secondary.opacity(0.7))
                 .padding(.horizontal, 4).padding(.vertical, 1)
-                .background(RoundedRectangle(cornerRadius: 4).fill(on ? color.opacity(0.22) : Color.white.opacity(0.08)))
+                .background(RoundedRectangle(cornerRadius: 4).fill(on ? color.opacity(0.22) : Semantic.selection))
         }.buttonStyle(.plain)
     }
 }
@@ -721,8 +735,8 @@ private struct ProviderSide: View {
         Button(action: action) {
             Text(text).font(.system(size: 10, weight: .semibold)).foregroundStyle(on ? .primary : .secondary)
                 .padding(.horizontal, 7).padding(.vertical, 2)
-                .background(Capsule().fill(on ? accent.opacity(0.22) : Color.white.opacity(0.06)))
-                .overlay(Capsule().stroke(on ? accent.opacity(0.55) : Color.white.opacity(0.12), lineWidth: 1))
+                .background(Capsule().fill(on ? accent.opacity(0.22) : Semantic.raisedSurface))
+                .overlay(Capsule().stroke(on ? accent.opacity(0.55) : Semantic.hairline, lineWidth: 1))
         }.buttonStyle(.plain)
     }
 }
@@ -774,7 +788,7 @@ private struct ClaudeShellPane: View {
                         } else {
                             Text("none · nearest tier stands in").foregroundStyle(.tertiary); Spacer()
                         }
-                    }.padding(.horizontal, 8).padding(.vertical, 4).background(Color.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 6))
+                    }.padding(.horizontal, 8).padding(.vertical, 4).background(Semantic.raisedSurface, in: RoundedRectangle(cornerRadius: 6))
                 }
             }
         }
