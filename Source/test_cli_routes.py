@@ -1020,7 +1020,10 @@ class GatewayCliTurnTest(unittest.TestCase):
 
     def test_error_after_idle_keepalive_uses_one_sse_error_and_no_success(self):
         def quiet_failure(request, *, timeout=300):
-            time.sleep(.08)
+            # The keepalive ping (patched to 10 ms below) must commit the
+            # stream before this error arrives; on a loaded CI runner the
+            # ping thread can miss a 70 ms window, so leave it half a second.
+            time.sleep(.5)
             yield {"type": "error", "message": "provider unavailable"}
 
         cli_routes._cache["claude"] = _fake_adapter(run_turn=quiet_failure)

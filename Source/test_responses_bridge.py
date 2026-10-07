@@ -4,6 +4,7 @@ import http.client
 import json
 from pathlib import Path
 import tempfile
+import time
 import unittest
 
 import test_gateway_hub as fixtures
@@ -38,6 +39,14 @@ class ResponsesBridgeTests(unittest.TestCase):
                 response = client.getresponse()
                 status, raw = response.status, response.read()
                 client.close()
+                # The gateway flushes the terminal chunk before it records
+                # the turn as completed, so the client can see the body end
+                # while the server thread is still bookkeeping. Wait for the
+                # active count to settle, as the hub fixture's own helper does,
+                # before any assertion reads runtime.status().
+                deadline = time.monotonic() + 2
+                while fixture.runtime.status()["active"] and time.monotonic() < deadline:
+                    time.sleep(.01)
                 return status, raw
 
             body = {"model": route, "input": [{"role": "user", "content": fixtures.LOCAL_REQUEST_TEXT}],
