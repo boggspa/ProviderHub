@@ -182,6 +182,43 @@ const shell='[data-provider-hub-quick-composer]';
  // No native search binding => never attach by the unrelated English search label.
  await page.evaluate(()=>{window.__providerHubQuickComposer.uninstall();delete document.querySelector('#search').__reactFiber$test;});
  await page.evaluate(script);await flush(page);assert.equal(await page.locator('[data-provider-hub-quick-launcher]').count(),0);
+ // Window mode: the launcher asks the worker for the separate window instead
+ // of opening the overlay, the worker's poll collects rows while that window
+ // is open, and sends on the window's behalf share the overlay's outcomes.
+ await page.evaluate(()=>{window.__providerHubQuickComposer?.uninstall?.();document.querySelector('#search').__reactFiber$test={memoizedProps:{uniform:true,onClick:function(){return 'chat-search-command-menu';}},return:null};document.getElementById('recent').__reactFiber$test={memoizedProps:{sectionKey:'chats'},return:null};window.__hostCalls=[];window.__providerHubHost=p=>window.__hostCalls.push(JSON.parse(p));});
+ const windowScript=input.windowScript.replace('String(location.href)','"app://-/"');
+ assert.deepEqual(await page.evaluate(windowScript),{installed:true});await flush(page);
+ await page.locator('[data-provider-hub-quick-launcher]').click();await flush(page);
+ assert.equal(await page.evaluate(()=>window.__providerHubQuickComposer.isOpen()),false);
+ assert.deepEqual(await page.evaluate(()=>window.__hostCalls),[{type:'open-window'}]);
+ assert.equal(await page.evaluate(()=>window.__providerHubQuickComposer.recentThreadTargets().length),0);
+ let poll=await page.evaluate(()=>window.__providerHubQuickComposer.pollHost({windowOpen:false}));
+ assert.equal(poll.windowRequest,true);assert.equal(poll.windowMode,true);assert.equal(poll.targets.length,0);assert.equal(poll.report,null);
+ poll=await page.evaluate(()=>window.__providerHubQuickComposer.pollHost({windowOpen:true}));
+ assert.equal(poll.windowRequest,false);assert.equal(poll.targets.length,9);assert.equal(poll.targets[0].threadId,id(3));assert.equal(poll.targets[0].title,'Chat 3');
+ assert.equal(await page.evaluate(t=>window.__providerHubQuickComposer.setThreadPreviews([{...t,preview:'window preview'}]).applied,poll.targets[0]),1);
+ // A missing adapter, an unknown target, a rejected send and a confirmed send.
+ await page.evaluate(()=>{delete window.__providerHubDesktopActions;});
+ let outcome=await page.evaluate(t=>window.__providerHubQuickComposer.sendFromHost({threadId:t,prompt:'hi'}),id(3));
+ assert.deepEqual(outcome,{ok:false,reason:'Sending is unavailable in this Desktop version. Draft kept.'});
+ outcome=await page.evaluate(()=>window.__providerHubQuickComposer.sendFromHost({threadId:'00000000-0000-7000-8000-000000000099',prompt:'hi'}));
+ assert.equal(outcome.ok,false);assert.match(outcome.reason,/no longer among the first ten/);
+ outcome=await page.evaluate(t=>window.__providerHubQuickComposer.sendFromHost({threadId:t,prompt:'   '}),id(3));
+ assert.deepEqual(outcome,{ok:false,reason:'Type a message first.'});
+ await page.evaluate(()=>window.__providerHubDesktopActions={send:async()=>{throw Object.assign(Error('secret'),{code:'native'});},diagnostics:()=>({observedBundle:'app-initial-69cd8dbddec5.js'})});
+ outcome=await page.evaluate(t=>window.__providerHubQuickComposer.sendFromHost({threadId:t,prompt:'from the window'}),id(3));
+ assert.deepEqual(outcome,{ok:false,reason:'Send failed: Desktop rejected the send. Your draft is kept.'});
+ const hostReport=await page.evaluate(()=>window.__providerHubQuickComposer.pollHost({windowOpen:true}).report);
+ assert.equal(hostReport.code,'native');assert.equal(hostReport.threadId,id(3));assert.doesNotMatch(JSON.stringify(hostReport),/from the window|secret/);
+ await page.evaluate(()=>window.__providerHubDesktopActions={send:r=>new Promise(resolve=>{window.finishHostSend=()=>resolve({sent:true,mode:'native',threadId:r.threadId});})});
+ const pendingSend=page.evaluate(t=>window.__providerHubQuickComposer.sendFromHost({threadId:t,prompt:'from the window'}),id(3));
+ await flush(page);
+ outcome=await page.evaluate(t=>window.__providerHubQuickComposer.sendFromHost({threadId:t,prompt:'again'}),id(3));
+ assert.match(outcome.reason,/already in progress/);
+ await page.evaluate(()=>window.finishHostSend());
+ assert.deepEqual(await pendingSend,{ok:true,reason:'Sent. Desktop handles steering or starting the next turn.'});
+ assert.equal((await page.evaluate(()=>window.__providerHubQuickComposer.pollHost({windowOpen:true}).report)).outcome,'sent');
+ await page.evaluate(()=>window.__providerHubQuickComposer.uninstall());
  await browser.close();process.stdout.write('quick composer browser checks passed');
 })().catch(error=>{process.stderr.write(String(error.stack||error),()=>process.exit(1));});
 """
@@ -192,7 +229,7 @@ class QuickComposerBrowserTests(unittest.TestCase):
         node = shutil.which("node")
         if not node or not os.environ.get("NODE_PATH"):
             self.skipTest("Bundled Node and Playwright are required")
-        payload = {"script": quick_composer_script()}
+        payload = {"script": quick_composer_script(), "windowScript": quick_composer_script(window_mode=True)}
         if os.environ.get("PROVIDER_HUB_QUICK_SCREENSHOT"):
             payload["screenshot"] = os.environ["PROVIDER_HUB_QUICK_SCREENSHOT"]
         result = subprocess.run([node, "-e", BROWSER], input=json.dumps(payload), text=True,

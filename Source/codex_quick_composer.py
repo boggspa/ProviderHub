@@ -2,14 +2,21 @@
 from __future__ import annotations
 
 
-def quick_composer_script() -> str:
-    return _SCRIPT
+def quick_composer_script(window_mode: bool = False) -> str:
+    """The in-app script.
+
+    With ``window_mode`` the sidebar launcher asks the worker for the separate
+    window (see codex_quick_window) instead of opening the overlay, and the
+    worker's poll collects rows while that window is open.
+    """
+    return _SCRIPT.replace("__WINDOW_MODE__", "true" if window_mode else "false")
 
 
 _SCRIPT = r"""
 (() => {
   if (window !== window.top || !/^app:\/\/-\//.test(String(location.href))) return {skipped:'origin'};
   if (window.__providerHubQuickComposer) return {skipped:'installed'};
+  const WINDOW_MODE=__WINDOW_MODE__;
   const ROW='data-app-action-sidebar-thread-row', ID='data-app-action-sidebar-thread-id';
   const HOST='data-app-action-sidebar-thread-host-id', KIND='data-app-action-sidebar-thread-kind';
   const TITLE='data-app-action-sidebar-thread-title', SECTION='data-app-action-sidebar-section';
@@ -19,7 +26,7 @@ _SCRIPT = r"""
   const HEX=/^#[0-9a-f]{6}$/i;
   const EDIT=/^(?:[acvxyz]|Enter|Backspace|Delete|Arrow(?:Left|Right|Up|Down)|Home|End)$/i;
   const key=t=>JSON.stringify([t.kind,t.hostId,t.threadId]);
-  const state={open:false,dragged:false,targets:[],selected:null,shown:undefined,drafts:new Map(),previews:new Map(),statuses:new Map(),pending:new Set(),button:null,host:null,root:null,frame:0,reason:'waiting',disposed:false,lastSend:null};
+  const state={open:false,dragged:false,targets:[],selected:null,shown:undefined,drafts:new Map(),previews:new Map(),statuses:new Map(),pending:new Set(),button:null,host:null,root:null,frame:0,reason:'waiting',disposed:false,lastSend:null,windowOpen:false,windowRequest:false};
   const fibres=element=>{
     const name=Object.keys(element).find(k=>k.startsWith('__reactFiber$'));
     let node=name?element[name]:null; const result=[];
@@ -141,7 +148,7 @@ _SCRIPT = r"""
     const button=document.createElement('button');button.setAttribute('data-provider-hub-quick-launcher','');
     button.setAttribute('aria-label','Recent chats quick composer');button.setAttribute('title','Recent chats quick composer');button.setAttribute('aria-haspopup','dialog');button.setAttribute('aria-expanded',String(state.open));
     button.style.cssText='display:flex;align-items:center;justify-content:center;width:28px;height:28px;flex-shrink:0;border:0;border-radius:8px;background:transparent;color:var(--color-text-secondary,inherit);cursor:pointer;-webkit-app-region:no-drag';
-    button.innerHTML=icon;button.addEventListener('click',()=>setOpen(!state.open));bar.appendChild(button);state.button=button;
+    button.innerHTML=icon;button.addEventListener('click',()=>{if(WINDOW_MODE)requestWindow();else setOpen(!state.open);});bar.appendChild(button);state.button=button;
   }
   function updateComposer() {
     const t=state.targets.find(t=>key(t)===state.selected);
@@ -221,22 +228,27 @@ _SCRIPT = r"""
     state.host.style.display=state.open?'block':'none';state.button?.setAttribute('aria-expanded',String(state.open));
     if(state.open){position();sync();input.focus();}else{drag=null;state.button?.focus();}
   }
-  async function submit(){
-    state.targets=collect();const t=state.targets.find(t=>key(t)===state.selected);
-    if(!t?.supported||state.pending.has(state.selected))return;
-    const k=key(t),prompt=input.value;if(!prompt.trim())return;state.drafts.set(k,prompt);
+  // The worker opens the separate window on request. The binding is the
+  // fast path; the flag reaches the worker with its next poll otherwise.
+  function requestWindow(){
+    state.windowRequest=true;
+    try{if(typeof window.__providerHubHost==='function')window.__providerHubHost(JSON.stringify({type:'open-window'}));}catch(error){}
+  }
+  // One send, shared by the overlay and the separate window: the adapter
+  // call, the reason for its outcome and the content-free report.
+  async function perform(t,prompt){
+    const k=key(t);
     const adapter=window.__providerHubDesktopActions;
     if(typeof adapter?.send!=='function'){
       state.lastSend={outcome:'failed',code:'adapter-missing',at:Date.now(),threadId:t.threadId};
-      state.statuses.set(k,'Sending is unavailable in this Desktop version. Draft kept.');updateComposer();return;
+      return {ok:false,reason:'Sending is unavailable in this Desktop version. Draft kept.'};
     }
-    state.pending.add(k);state.statuses.set(k,'Sending…');updateComposer();
+    state.pending.add(k);
     try{
       const result=await adapter.send({threadId:t.threadId,hostId:t.hostId,kind:t.kind,prompt});
       if(result?.sent!==true||result.threadId!==t.threadId)throw Object.assign(new Error('unverified-result'),{code:'native-result'});
-      if(state.drafts.get(k)===prompt)state.drafts.set(k,'');
       state.lastSend={outcome:'sent',code:null,at:Date.now(),threadId:t.threadId};
-      state.statuses.set(k,'Sent. Desktop handles steering or starting the next turn.');
+      return {ok:true,reason:'Sent. Desktop handles steering or starting the next turn.'};
     }catch(error){
       // Every adapter code gets its own reason, so a refused send can be
       // told apart from a native failure, and the code plus the adapter's
@@ -281,12 +293,33 @@ _SCRIPT = r"""
         }
       }catch(diagnosticError){}
       state.lastSend=report;
-      state.statuses.set(k,reason);
+      return {ok:false,reason};
     }
-    finally{state.pending.delete(k);if(state.selected===k)input.value=state.drafts.get(k)||'';updateComposer();}
+    finally{state.pending.delete(k);}
+  }
+  async function submit(){
+    state.targets=collect();const t=state.targets.find(t=>key(t)===state.selected);
+    if(!t?.supported||state.pending.has(state.selected))return;
+    const k=key(t),prompt=input.value;if(!prompt.trim())return;state.drafts.set(k,prompt);
+    state.statuses.set(k,'Sending…');
+    const run=perform(t,prompt);updateComposer();
+    const outcome=await run;
+    if(outcome.ok&&state.drafts.get(k)===prompt)state.drafts.set(k,'');
+    state.statuses.set(k,outcome.reason);
+    if(state.selected===k)input.value=state.drafts.get(k)||'';updateComposer();
+  }
+  // A send on behalf of the separate window. The target must still be among
+  // the sidebar's first ten rows; the outcome carries the same reasons.
+  async function sendFromHost(request){
+    const threadId=request?.threadId,prompt=typeof request?.prompt==='string'?request.prompt:'';
+    const t=collect().find(t=>t.threadId===threadId&&t.supported);
+    if(!t)return {ok:false,reason:'This chat is no longer among the first ten recent chats.'};
+    if(!prompt.trim())return {ok:false,reason:'Type a message first.'};
+    if(state.pending.has(key(t)))return {ok:false,reason:'A send is already in progress for this chat. Your draft is kept.'};
+    return perform(t,prompt);
   }
   function previews(records){
-    if(!state.open||!Array.isArray(records))return {applied:0};
+    if(!(state.open||state.windowOpen)||!Array.isArray(records))return {applied:0};
     const wanted=new Set(collect().filter(t=>t.supported).map(key));let applied=0;
     for(const record of records.slice(0,10)){
       if(!record||typeof record!=='object'||!wanted.has(key(record)))continue;
@@ -308,6 +341,16 @@ _SCRIPT = r"""
     // The last send's outcome and adapter code, handed over once so the
     // worker can log it. It never carries the prompt or any preview text.
     takeSendReport:()=>{const report=state.lastSend;state.lastSend=null;return report;},
+    // The worker's poll: rows while the overlay or the separate window is
+    // open, the last send report, and whether the launcher asked for the
+    // window since the last poll.
+    pollHost:(options)=>{
+      state.windowOpen=options?.windowOpen===true;
+      const report=state.lastSend;state.lastSend=null;
+      const windowRequest=state.windowRequest;state.windowRequest=false;
+      return {targets:(state.open||state.windowOpen)?collect():[],report,windowRequest,windowMode:WINDOW_MODE};
+    },
+    sendFromHost,
     check:()=>{const live=state.open?collect():[];return {installed:true,open:state.open,button:Boolean(state.button?.isConnected),reason:state.reason,targets:live.length,active:live.filter(t=>t.active).length,dragged:state.dragged};},
     uninstall:()=>{state.disposed=true;drag=null;observer.disconnect();if(state.frame)cancelAnimationFrame(state.frame);window.removeEventListener('resize',resize);state.button?.remove();state.host?.remove();delete window.__providerHubQuickComposer;}
   };

@@ -1279,7 +1279,7 @@ class AccentBridge:
     """
 
     def __init__(self, pipe: DevToolsPipe, script: str, emit=None, *, sidebar_accents=None,
-                 child_accents=None, recent_previews=None):
+                 child_accents=None, recent_previews=None, quick_window=None):
         self.pipe = pipe
         self.script = script
         self.emit = emit or (lambda event: None)
@@ -1287,9 +1287,15 @@ class AccentBridge:
         self.child_accents = child_accents
         self.child_next_poll = 0.0
         self.quick = None
+        # The separate quick-composer window (codex_quick_window) shares the
+        # pipe; it is created before the pipe exists, so it is bound here.
+        self.window = quick_window
+        if self.window is not None:
+            self.window.pipe = pipe
+            self.window.emit = self.emit
         if recent_previews is not None:
             from codex_quick_bridge import QuickComposerBridge
-            self.quick = QuickComposerBridge(pipe, recent_previews, self.emit)
+            self.quick = QuickComposerBridge(pipe, recent_previews, self.emit, window=self.window)
         self.sidebar_next_poll = 0.0
         self.pending: dict[int, tuple[str, str | None]] = {}
         # When each sidebar request went out, so one lost reply cannot stop a
@@ -1310,6 +1316,8 @@ class AccentBridge:
         return info.get("type") == "page" and (url in ("", "about:blank") or url.startswith(_APP_ORIGIN))
 
     def handle(self, message: dict) -> None:
+        if self.window is not None and self.window.handle(message):
+            return
         if self.quick is not None and self.quick.handle(message):
             return
         method = message.get("method")
@@ -1319,6 +1327,8 @@ class AccentBridge:
             return
         if method == "Target.detachedFromTarget":
             self.injected.discard(params.get("sessionId") or "")
+            if self.window is not None:
+                self.window.detach(params.get("sessionId") or "")
             return
         if method in ("Page.domContentEventFired", "Page.loadEventFired"):
             # The evaluate sent at attach time can land before the first
@@ -1425,6 +1435,10 @@ class AccentBridge:
     def _attached(self, session_id, info: dict) -> None:
         if not session_id or session_id in self.injected:
             return
+        if self.window is not None and self.window.wants_target(info):
+            # Our own window: it gets Provider Hub's document, never the watcher.
+            self.window.attached(session_id, info)
+            return
         if not self.wanted(info):
             self.pipe.send("Target.detachFromTarget", {"sessionId": session_id})
             return
@@ -1432,6 +1446,8 @@ class AccentBridge:
         self.pipe.send("Page.enable", session_id=session_id)
         self.pipe.send("Page.addScriptToEvaluateOnNewDocument", {"source": self.script, "runImmediately": True}, session_id=session_id)
         self._evaluate(session_id)
+        if self.window is not None:
+            self.window.attach_main(session_id)
 
 
 def _parked(fd: int) -> int:
@@ -1494,7 +1510,7 @@ def already_running(binary: Path) -> bool:
 
 
 def run(binary: Path, script: str, *, emit=None, arguments=(), environment=None, sidebar_accents=None,
-        child_accents=None, recent_previews=None, poll_interval=0.25,
+        child_accents=None, recent_previews=None, quick_window=None, poll_interval=0.25,
         launch_timeout=45.0) -> int:
     """Launch the app, install the watcher, then stay attached until it exits.
 
@@ -1517,7 +1533,8 @@ def run(binary: Path, script: str, *, emit=None, arguments=(), environment=None,
     for signum in (signal.SIGTERM, signal.SIGHUP):
         signal.signal(signum, signal.SIG_IGN)
     bridge = AccentBridge(pipe, script, emit, sidebar_accents=sidebar_accents,
-                          child_accents=child_accents, recent_previews=recent_previews)
+                          child_accents=child_accents, recent_previews=recent_previews,
+                          quick_window=quick_window)
     started = time.monotonic()
     status = None
     try:
@@ -1569,7 +1586,7 @@ def _print_event(event: dict) -> None:
 
 
 def bridge_command(app_path: str, settings: dict, inventory: dict, emit=None, log_path: Path | None = None,
-                   **run_options) -> int:
+                   state_root: Path | None = None, **run_options) -> int:
     """Worker entry point: `gateway.py codex-accent --app <bundle>`.
 
     Events go to stdout as JSON lines and, when a log path is given, to that
@@ -1603,13 +1620,15 @@ def bridge_command(app_path: str, settings: dict, inventory: dict, emit=None, lo
             return 2
         colour_enabled = settings.get("codex_accent_slider", True) is True
         quick_enabled = settings.get("codex_quick_composer") is True
+        window_enabled = quick_enabled and settings.get("codex_quick_composer_window") is True
         accents = accent_map(settings, inventory) if colour_enabled else {}
         routes = accent_map(settings, inventory, by_route=True) if colour_enabled else {}
         native_labels = native_codex_labels(inventory) if colour_enabled else []
         hide_banner = colour_enabled and settings.get("codex_hide_usage_banner") is True
         unlock = colour_enabled and settings.get("codex_unlock_composer") is True
         emit({"event": "accents", "count": len(accents), "usage_banner": "hidden" if hide_banner else "shown",
-              "composer": "unlocked" if unlock else "app"})
+              "composer": "unlocked" if unlock else "app",
+              "quick_composer": "window" if window_enabled else ("overlay" if quick_enabled else "off")})
         run_options.setdefault("environment", child_environment(bundle))
         if colour_enabled:
             run_options.setdefault("sidebar_accents", SidebarAccents(routes, native_labels))
@@ -1621,8 +1640,12 @@ def bridge_command(app_path: str, settings: dict, inventory: dict, emit=None, lo
             from codex_quick_composer import quick_composer_script
             from codex_recent_threads import RecentThreadPreviews
             run_options.setdefault("recent_previews", RecentThreadPreviews())
+            if window_enabled:
+                from codex_quick_window import QuickWindowBridge
+                bounds_path = state_root / "quick-window.json" if state_root is not None else None
+                run_options.setdefault("quick_window", QuickWindowBridge(state_path=bounds_path))
             script = ("(() => { const accent = " + script + "; "
-                      + desktop_actions_script() + "; " + quick_composer_script()
+                      + desktop_actions_script() + "; " + quick_composer_script(window_mode=window_enabled)
                       + "; return { installed: true, accent, quickComposer: true }; })()")
         return run(binary, script,
                    emit=emit, **run_options)

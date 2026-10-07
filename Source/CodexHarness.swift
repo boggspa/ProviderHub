@@ -512,6 +512,11 @@ struct CodexConfigPane: View {
                     summary: "Message or steer recent local Codex chats from a floating popover.",
                     details: "Adds a button beside search and notifications in Codex’s sidebar showing the first ten Recents rows. Choose a local Codex chat, read its latest response preview and send from a compact prompt capsule. Each chat keeps its own draft. Previews are read while the popover is open; sends use the chat’s existing settings and Desktop’s normal queue and steering behavior. Remote-host and ChatGPT chats are unavailable in this version. This preference uses the same private desktop helper as provider colours and can be enabled independently. The popover is a renderer-side overlay inside Codex’s window — it can sit anywhere within the Codex window but cannot float over other apps or onto a different display. Sending is enabled only for the Desktop builds the helper has been verified against (currently 26.930.51102 and 26.930.61225); an unverified build fails sends with a diagnostic that names the bundle. Unsupported by OpenAI; an app update may disable the button or sending. Save, then launch.")
                 Divider()
+                CodexPreference(isOn: $model.settings.codex_quick_composer_window, disabled: model.busy || !model.settings.codex_quick_composer,
+                    title: "Open the quick composer in its own window",
+                    summary: "A separate window you can move to any display, instead of an overlay inside Codex.",
+                    details: "The sidebar button opens a separate macOS window owned by Provider Hub’s helper (Codex’s in-app browser panel showing Provider Hub’s own page) rather than the floating overlay. It can sit on any display and over other apps, and reopens where you left it. The helper relays the same recent-chat rows, previews and sends through the DevTools pipe; sending is unchanged. Closing the window, pressing Escape in it, or navigating its address bar anywhere else closes it. Save, then launch.")
+                Divider()
                 CodexPreference(isOn: $model.settings.codex_hide_usage_banner, disabled: model.busy || !model.settings.codex_accent_slider,
                     title: "Hide the ChatGPT usage banner",
                     summary: model.settings.codex_accent_slider

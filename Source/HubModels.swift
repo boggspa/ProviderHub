@@ -145,6 +145,9 @@ struct RouteSettings: Codable, Equatable {
     // Add a recent-thread prompt popover to the desktop masthead. Uses the
     // same private helper independently of provider colouring.
     var codex_quick_composer = false
+    // Open that popover as a separate window the helper owns over the pipe
+    // (codex_quick_window.py) instead of an overlay inside Codex's window.
+    var codex_quick_composer_window = false
     // With that helper on, also hide the app's ChatGPT usage banner
     // ("You're out of Codex and Work usage") in its windows.
     var codex_hide_usage_banner = false

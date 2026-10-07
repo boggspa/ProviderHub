@@ -313,6 +313,7 @@ final class BridgeModel: ObservableObject {
         mine.codex_apply_patch_exclude = savedSettings.codex_apply_patch_exclude
         mine.codex_accent_slider = savedSettings.codex_accent_slider
         mine.codex_quick_composer = savedSettings.codex_quick_composer
+        mine.codex_quick_composer_window = savedSettings.codex_quick_composer_window
         mine.codex_hide_usage_banner = savedSettings.codex_hide_usage_banner
         mine.codex_unlock_composer = savedSettings.codex_unlock_composer
         mine.codex_goal_budget = savedSettings.codex_goal_budget
@@ -339,6 +340,7 @@ final class BridgeModel: ObservableObject {
             || settings.codex_apply_patch_exclude != savedSettings.codex_apply_patch_exclude
             || settings.codex_accent_slider != savedSettings.codex_accent_slider
             || settings.codex_quick_composer != savedSettings.codex_quick_composer
+            || settings.codex_quick_composer_window != savedSettings.codex_quick_composer_window
             || settings.codex_hide_usage_banner != savedSettings.codex_hide_usage_banner
             || settings.codex_unlock_composer != savedSettings.codex_unlock_composer
             || settings.codex_goal_budget != savedSettings.codex_goal_budget

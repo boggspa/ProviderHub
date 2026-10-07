@@ -545,7 +545,7 @@ class LaunchTests(unittest.TestCase):
             events.clear()
             with mock.patch.object(codex_accent, "already_running", lambda path: False):
                 self.assertEqual(bridge_command(str(app), settings, inventory, emit=events.append, log_path=log, poll_interval=0.05), 0)
-            self.assertEqual(events[0], {"event": "accents", "count": 2, "usage_banner": "shown", "composer": "app"})
+            self.assertEqual(events[0], {"event": "accents", "count": 2, "usage_banner": "shown", "composer": "app", "quick_composer": "off"})
             self.assertEqual([event["event"] for event in events[1:]], ["launched", "exited"])
             self.assertEqual(len(log.read_text().splitlines()), 3)
             events.clear()
@@ -555,7 +555,7 @@ class LaunchTests(unittest.TestCase):
                     mock.patch.object(codex_accent, "run", lambda binary, script, **options: scripts.append(script) or 0):
                 hiding = dict(settings, codex_hide_usage_banner=True)
                 self.assertEqual(bridge_command(str(app), hiding, inventory, emit=events.append, log_path=log), 0)
-            self.assertEqual(events, [{"event": "accents", "count": 2, "usage_banner": "hidden", "composer": "app"}])
+            self.assertEqual(events, [{"event": "accents", "count": 2, "usage_banner": "hidden", "composer": "app", "quick_composer": "off"}])
             self.assertIn("aside:has(", scripts[0])
             native_names.assert_called_once_with(inventory)
             self.assertIn('"gpt-6-astra": "#705AFF"', scripts[0])
@@ -567,7 +567,7 @@ class LaunchTests(unittest.TestCase):
                     mock.patch.object(codex_accent, "run", lambda binary, script, **options: scripts.append(script) or 0):
                 unlocking = dict(settings, codex_unlock_composer=True)
                 self.assertEqual(bridge_command(str(app), unlocking, inventory, emit=events.append, log_path=log), 0)
-            self.assertEqual(events, [{"event": "accents", "count": 2, "usage_banner": "shown", "composer": "unlocked"}])
+            self.assertEqual(events, [{"event": "accents", "count": 2, "usage_banner": "shown", "composer": "unlocked", "quick_composer": "off"}])
             self.assertIn("const UNLOCK_COMPOSER = true;", scripts[-1])
 
     def test_quick_composer_launch_does_not_enable_provider_colours_or_usage_overrides(self):
@@ -577,7 +577,7 @@ class LaunchTests(unittest.TestCase):
         captured = []
         modules = {
             "codex_desktop_actions": mock.Mock(desktop_actions_script=lambda: "(() => ({actions:true}))()"),
-            "codex_quick_composer": mock.Mock(quick_composer_script=lambda: "(() => ({composer:true}))()"),
+            "codex_quick_composer": mock.Mock(quick_composer_script=lambda window_mode=False: "(() => ({composer:true,windowMode:%s}))()" % ("true" if window_mode else "false")),
             "codex_recent_threads": mock.Mock(RecentThreadPreviews=mock.Mock(return_value="preview-reader")),
         }
         with tempfile.TemporaryDirectory() as directory:
@@ -594,6 +594,36 @@ class LaunchTests(unittest.TestCase):
         self.assertNotIn("sidebar_accents", options)
         self.assertNotIn("child_accents", options)
         self.assertEqual(options["recent_previews"], "preview-reader")
+        self.assertIn("windowMode:false", script)
+        self.assertNotIn("quick_window", options)
+
+    def test_quick_composer_window_needs_the_popover_and_keeps_its_bounds_in_the_state_root(self):
+        from codex_quick_window import QuickWindowBridge
+        settings, inventory = fixture()
+        settings.update(codex_quick_composer=True, codex_quick_composer_window=True, codex_accent_slider=False)
+        captured, events = [], []
+        modules = {
+            "codex_desktop_actions": mock.Mock(desktop_actions_script=lambda: "(() => ({actions:true}))()"),
+            "codex_quick_composer": mock.Mock(quick_composer_script=lambda window_mode=False: "(() => ({windowMode:%s}))()" % ("true" if window_mode else "false")),
+            "codex_recent_threads": mock.Mock(RecentThreadPreviews=mock.Mock(return_value="preview-reader")),
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            app = demo_bundle(Path(directory))
+            root = Path(directory) / "state"
+            with mock.patch.dict(sys.modules, modules), \
+                    mock.patch.object(codex_accent, "already_running", return_value=False), \
+                    mock.patch.object(codex_accent, "run", side_effect=lambda binary, script, **options: captured.append((script, options)) or 0):
+                self.assertEqual(bridge_command(str(app), settings, inventory, emit=events.append, state_root=root), 0)
+                # The window is only meaningful with the popover on.
+                off = dict(settings, codex_quick_composer=False)
+                self.assertEqual(bridge_command(str(app), off, inventory, emit=events.append, state_root=root), 0)
+            script, options = captured[0]
+            self.assertIn("windowMode:true", script)
+            self.assertIsInstance(options["quick_window"], QuickWindowBridge)
+            self.assertEqual(options["quick_window"].state_path, root / "quick-window.json")
+            self.assertEqual(events[0]["quick_composer"], "window")
+            self.assertNotIn("quick_window", captured[1][1])
+            self.assertEqual(events[1]["quick_composer"], "off")
 
     def test_executable_path_reads_the_bundle_plist(self):
         with tempfile.TemporaryDirectory() as directory:

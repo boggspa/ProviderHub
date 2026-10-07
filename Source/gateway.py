@@ -1425,7 +1425,8 @@ def main():
             raise BridgeError("codex-accent needs --app <bundle path>.")
         settings = load_settings(root)
         private_directory(root)
-        sys.exit(codex_accent_bridge(args.app, settings, cached_catalogue(settings, root), log_path=root / "codex-accent.log"))
+        sys.exit(codex_accent_bridge(args.app, settings, cached_catalogue(settings, root), log_path=root / "codex-accent.log",
+                                     state_root=root))
     if args.command == "inspect":
         result = inspect_state(root)
         settings = load_settings(root)

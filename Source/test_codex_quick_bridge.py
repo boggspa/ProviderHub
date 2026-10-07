@@ -115,6 +115,44 @@ class QuickComposerBridgeTests(unittest.TestCase):
         self.assertEqual(len(events), 2)
         self.assertEqual(events[-1], {"event": "quick-composer", "stage": "send", "session": "window", "outcome": "sent"})
 
+    def test_window_mode_polls_with_the_window_state_opens_on_request_and_relays_rows(self):
+        pipe, events = FakeTransport(), []
+        reader = mock.Mock(return_value=[{**target(1), "preview": "latest reply"}])
+        window = mock.Mock()
+        window.is_open.return_value = False
+        bridge = QuickComposerBridge(pipe, reader, events.append, window=window)
+        bridge.refresh({"window"})
+        expression = pipe.sent[-1]["params"]["expression"]
+        self.assertIn("pollHost({ windowOpen: false })", expression)
+        self.assertIn("recentThreadTargets", expression)
+        # The launcher asked for the window; nothing was open, so no rows went anywhere.
+        bridge.handle(reply(pipe, {"targets": [], "report": None, "windowRequest": True}))
+        window.open.assert_called_once_with()
+        window.update.assert_not_called()
+        reader.assert_not_called()
+        # With the window open, the poll says so, previews are read for the rows
+        # and the window gets the rows with their titles, activity and previews.
+        window.is_open.return_value = True
+        bridge.next_poll = 0
+        bridge.refresh({"window"})
+        self.assertIn("pollHost({ windowOpen: true })", pipe.sent[-1]["params"]["expression"])
+        rows = [{**target(1), "title": "First", "supported": True, "active": True, "activeAccent": "#705aff"},
+                {**target(2, hostId="box", kind="remote"), "title": "Remote", "supported": False},
+                {**target(3), "title": "", "supported": True, "activeAccent": "red"}]
+        bridge.handle(reply(pipe, {"targets": rows, "report": None, "windowRequest": False}))
+        reader.assert_called_once_with([target(1), target(3)])
+        window.update.assert_called_once_with("window", [
+            {**target(1), "title": "First", "supported": True, "active": True, "activeAccent": "#705aff", "preview": "latest reply"},
+            {**target(2, hostId="box", kind="remote"), "title": "Remote", "supported": False, "active": False, "activeAccent": None, "preview": None},
+            {**target(3), "title": "Untitled chat", "supported": True, "active": False, "activeAccent": None, "preview": None}])
+        self.assertNotIn("latest reply", json.dumps(events))
+        # An empty sidebar while the window is open clears the window too.
+        bridge.handle(reply(pipe, {"applied": 2}))  # the previews write
+        bridge.next_poll = 0
+        bridge.refresh({"window"})
+        bridge.handle(reply(pipe, {"targets": [], "report": None}))
+        self.assertEqual(window.update.call_args_list[-1], mock.call("window", []))
+
     def test_renderer_exception_is_content_free_and_does_not_end_polling(self):
         pipe, reader, events = FakeTransport(), mock.Mock(), []
         bridge = QuickComposerBridge(pipe, reader, events.append)

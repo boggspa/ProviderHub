@@ -24,14 +24,58 @@ constraint of being a renderer-side surface, not a clamp the helper
 enforces; the helper keeps the heading reachable on next open so the
 launcher remains anchorable.
 
-A genuinely independent window is possible, but not from the renderer.
-Probed on 26.930.61225 (2026-10-07): `window.open` from the app page
-returns null (Desktop's window-open handler refuses popups), while
-`Target.createTarget` with `newWindow: true` over the private DevTools pipe
-creates a separate page target, which is its own macOS window. A future
-version could have the worker own such a window, inject the popover there,
-and relay rows, previews and sends to the main session over the pipe. That
-is a worker-driven design, not a change to this overlay.
+## The separate window
+
+A second preference, **Open the quick composer in its own window**
+(`codex_quick_composer_window`, only meaningful with the popover on), gives
+the composer a genuinely independent macOS window. The renderer cannot do
+this: `window.open` from the app page returns null because Desktop's
+window-open handler refuses popups. The private DevTools pipe can:
+`Target.createTarget` with `newWindow: true` makes Desktop open a separate
+window, its in-app browser panel, whose page the worker then owns
+(`codex_quick_window.py`). Probed and confirmed on 26.930.61225 on
+2026-10-07: the requested size is honoured (Desktop's panel has a minimum
+width of about 500px), `Browser.getWindowForTarget` and
+`Browser.setWindowBounds` position it, the document title names the tab,
+`Runtime.addBinding` delivers calls from the page, `Target.activateTarget`
+focuses it, and closing it fires `Target.detachedFromTarget`.
+
+How it works:
+
+- The sidebar launcher, in window mode, asks the worker for the window
+  through a binding on the app page (`__providerHubHost`, installed with
+  `Runtime.enable` on Desktop's own windows only in this mode) and sets a
+  flag the worker's two-second poll also reads, so the request is not lost
+  if the binding is missing. The overlay does not open.
+- The worker creates the target, fills it with Provider Hub's own document
+  via `Page.setDocumentContent` (no Codex code, no external resources, no
+  scripts loaded from anywhere), restores the last saved bounds from
+  `quick-window.json` in the helper's state directory, and focuses it.
+  Opening again focuses the existing window.
+- The window page reaches the worker only through one binding
+  (`__providerHubWindowHost`) with four message types: `ready`, `send`,
+  `bounds` and `close`. The worker evaluates only `setState` and
+  `sendResult` in it.
+- Rows come from the same poll that feeds the overlay: `pollHost` collects
+  the sidebar's first ten rows while the window is open, the worker reads
+  previews as before, and pushes rows with title, activity, accent and
+  preview to the window. Nothing in the window is read from Desktop.
+- A send travels window → worker → `sendFromHost` on the app page, which
+  performs the same native send as the overlay with the same reasons and the
+  same content-free report, so the worker log records it as before. Prompts
+  stay in memory; the worker never writes them.
+- Closing the window (its close button, Escape inside it, or the worker on
+  request) ends the session. If the page is ever navigated away from
+  `about:blank` (the address bar is Desktop's), the worker closes the window
+  at once and ignores its binding, so no outside document can ask the worker
+  to send.
+- Drafts live in the window page for as long as it is open; each chat keeps
+  its own.
+
+Known limits: the window carries Desktop's browser-panel chrome (a tab strip
+and an address bar) above our page; it cannot be made always-on-top through
+the pipe; the first ten rows come from the sidebar in the Codex window that
+most recently answered the poll.
 
 It contains the first ten native recent-chat rows, in sidebar order, each
 with a one-line title and a one-line latest assistant response preview.
@@ -120,8 +164,11 @@ sends with a diagnostic that names the bundle the user is running.
 
 Rendered fixtures cover authored identities, first-ten order,
 activity indicators, unsupported hosts, drafts, asynchronous sends, drag and
-persistence, remounts, keyboard behavior, every failure reason and the send
-report. The adapter fixture models the real handle shape with decoys (a
+persistence, remounts, keyboard behavior, every failure reason, the send
+report, and window mode (launcher request, `pollHost`, `sendFromHost`). The
+window page has its own rendered fixture (rows, drafts, sends, outcomes,
+Escape, bounds) and the window bridge has unit tests for lifecycle, bounds,
+relay, validation and the navigation guard. The adapter fixture models the real handle shape with decoys (a
 thread-level handle, a detached handle, a methods-only object) ahead of the
 app-scope handle, and a decoy-only tree that must fail with `scope`.
 
