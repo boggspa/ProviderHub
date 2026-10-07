@@ -571,8 +571,9 @@ private struct ProviderShellPane: View {
                 }
                 switch connection?.credential_mode {
                 case "keychain":
+                    if keyAccountProviders.contains(provider.id) { KeyAccountsSection(model: model, provider: provider.id).controlSize(.small) }
                     HStack(spacing: 8) {
-                        SecureField(model.providerStates[provider.id]?.credential_found == true ? "Key saved in Keychain ••••••••" : "Paste your \(provider.presentation.displayProvider) API key", text: $model.secretDraft)
+                        SecureField(keyPlaceholder, text: $model.secretDraft)
                             .textFieldStyle(.roundedBorder).controlSize(.small).font(.system(size: 11.5, design: .monospaced))
                         Button { Task { await model.saveKey() } } label: { Text("Save key").foregroundStyle(HubTheme.Control.ink) }
                             .buttonStyle(.borderedProminent).tint(HubTheme.Accent.brand).controlSize(.small).disabled(model.busy || model.secretDraft.isEmpty)
@@ -591,6 +592,15 @@ private struct ProviderShellPane: View {
 
     private func field(_ key: WritableKeyPath<ProviderConnection, String>) -> Binding<String> {
         Binding(get: { model.settings.providers[provider.id]?[keyPath: key] ?? "" }, set: { model.settings.providers[provider.id]?[keyPath: key] = $0 })
+    }
+    /// Names the slot a pasted key lands in, and whether it already holds one.
+    private var keyPlaceholder: String {
+        let active = connection?.key_account
+        let label = connection?.key_accounts?.first { $0.id == active }?.label
+        let found = model.keyAccountStates[provider.id].map { states in states.first { $0.id == active }?.found ?? false }
+            ?? (model.providerStates[provider.id]?.credential_found == true)
+        let suffix = label.map { " for \($0)" } ?? ""
+        return found ? "Key saved\(suffix) ••••••••  (paste to replace)" : "Paste your \(provider.presentation.displayProvider) API key\(suffix)"
     }
     private func idleLabel(_ seconds: Int) -> String {
         if seconds < 0 { return "Keep in memory" }; if seconds == 0 { return "At turn end" }

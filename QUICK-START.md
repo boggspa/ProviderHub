@@ -19,6 +19,11 @@ settings, or conversations from its developer.
 - **Mistral:** use the API key already saved by Vibe, or enter your Mistral API
   key directly. Starting Vibe is optional when using an API key directly.
 - **Kimi, MiMo, DeepSeek, Cerebras, Muse, Grok, Qwen Token Plan, OpenRouter, or Gemini:** configure the corresponding account/key in its card.
+- **Several keys for one provider** (say, work and personal): under **Paste a
+  key**, **Add account** makes another slot, each with its own Keychain item.
+  The slot chosen in **Account** is the one a pasted key lands in and the one
+  the gateway uses; Save applies a switch. Subscriptions, Devin and Muse keep a
+  single login.
 - **Ollama:** run your existing Ollama app or daemon. It manages its own models,
   downloads, and cloud sign-in.
 

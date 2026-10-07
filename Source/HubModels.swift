@@ -23,6 +23,22 @@ struct ProviderConnection: Codable, Equatable {
     /// Both stay omitted until used, like idle_unload_seconds.
     var cli_accounts: [CliAccount]?
     var cli_account: String?
+    /// Extra API keys for one provider (work, personal…): each is its own
+    /// Keychain item named `<credential_account>.<id>`; `key_account` names
+    /// the active one and nil is the pre-accounts item. Omitted until used.
+    var key_accounts: [KeyAccount]?
+    var key_account: String?
+}
+struct KeyAccount: Codable, Equatable, Identifiable {
+    var id: String
+    var label: String
+}
+/// One row of the worker's `key-accounts` answer: whether Keychain holds a key.
+struct KeyAccountState: Identifiable {
+    var id: String?
+    var label: String
+    var active: Bool
+    var found: Bool
 }
 struct CliAccount: Codable, Equatable, Identifiable {
     var id: String

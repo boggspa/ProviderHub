@@ -9,6 +9,9 @@ import SwiftUI
 /// Local-only and opt-in per provider — there is no master flag. Choosing
 /// "Installed CLI login" *is* turning the experiment on for that one provider.
 fileprivate let cliAuthProviders: Set<String> = ["codex", "claude", "muse", "grok", "antigravity"]
+/// Mirrors hub_config.KEY_ACCOUNT_PROVIDERS: API-key providers that may hold
+/// several keys. Subscriptions and Muse's minted key stay single.
+let keyAccountProviders: Set<String> = ["mistral", "kimi", "mimo", "deepseek", "cerebras", "gemini", "grok", "qwen-token-plan", "minimax", "openrouter"]
 /// CLI providers that can hold several logins side by side, one config folder
 /// each. Mirrors `hub_config.CLI_ACCOUNT_PROVIDERS`.
 fileprivate let cliAccountProviders: Set<String> = ["codex", "claude"]
@@ -95,6 +98,7 @@ struct ProviderPage: View {
                             if modes.contains("cli") { Text("Installed CLI").tag("cli") }
                         }.pickerStyle(.segmented)
                         if connection.credential_mode == "keychain" {
+                            if keyAccountProviders.contains(provider.id) { KeyAccountsSection(model: model, provider: provider.id) }
                             HStack {
                                 SecureField(provider.id == "muse" ? "Meta Model API key" : (provider.id == "devin" ? "Devin API key (cog_ / pat_ / apk_)" : "Provider API key"), text: $model.secretDraft).textFieldStyle(.roundedBorder)
                                 Button("Save key") { Task { await model.saveKey() } }.disabled(model.busy || model.secretDraft.isEmpty)
@@ -265,6 +269,64 @@ struct ProviderPage: View {
         }
         if model.inference_status == "responded" { values.append("Previously responded") }
         return values.joined(separator: " · ")
+    }
+}
+
+/// A provider's API-key slots: the default one plus any extra accounts
+/// (work, personal…). The active slot is where "Save key" writes and what
+/// the gateway reads; Save applies a switch, restarting the gateway.
+struct KeyAccountsSection: View {
+    @ObservedObject var model: BridgeModel
+    var provider: String
+    var accounts: [KeyAccount] { model.settings.providers[provider]?.key_accounts ?? [] }
+    var active: String? { model.settings.providers[provider]?.key_account }
+    func state(_ id: String?) -> KeyAccountState? { model.keyAccountStates[provider]?.first { $0.id == id } }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Text("Account").foregroundStyle(.secondary)
+                Picker("", selection: Binding(
+                    get: { active ?? "" },
+                    set: { model.settings.providers[provider]?.key_account = $0.isEmpty ? nil : $0 })) {
+                    Text("Default").tag("")
+                    ForEach(accounts) { Text($0.label).tag($0.id) }
+                }.labelsHidden().fixedSize()
+                Button("Add account") { model.addKeyAccount(provider) }.disabled(accounts.count >= 8)
+                if model.keyAccountsChecking.contains(provider) { ProgressView().controlSize(.mini) }
+                Spacer()
+            }
+            if !accounts.isEmpty {
+                row(id: nil, label: "Default")
+                ForEach(accounts) { row(id: $0.id, label: $0.label) }
+            }
+        }
+        .onAppear { if model.keyAccountStates[provider] == nil { Task { await model.checkKeyAccounts(provider) } } }
+    }
+
+    @ViewBuilder func row(id: String?, label: String) -> some View {
+        let probe = state(id)
+        HStack(spacing: 8) {
+            Circle().fill(probe.map { $0.found ? Color.green : Color.orange } ?? Color.gray.opacity(0.4)).frame(width: 7, height: 7)
+            if let id {
+                TextField("Account name", text: Binding(
+                    get: { accounts.first { $0.id == id }?.label ?? label },
+                    set: { value in
+                        guard let index = model.settings.providers[provider]?.key_accounts?.firstIndex(where: { $0.id == id }) else { return }
+                        model.settings.providers[provider]?.key_accounts?[index].label = value
+                    })).textFieldStyle(.plain).font(.system(size: 12, weight: .medium)).frame(maxWidth: 160)
+            } else {
+                Text(label).font(.system(size: 12, weight: .medium))
+            }
+            Text(probe.map { $0.found ? "Key saved" : "No key yet" } ?? "").font(.system(size: 10.5)).foregroundStyle(.secondary)
+            if id == active { Text("active").font(.system(size: 9.5, weight: .semibold)).foregroundStyle(.secondary)
+                .padding(.horizontal, 6).padding(.vertical, 1).background(Color.secondary.opacity(0.15), in: Capsule()) }
+            Spacer()
+            if let id {
+                Button(role: .destructive) { model.removeKeyAccount(provider, id: id) } label: { Image(systemName: "minus.circle") }
+                    .buttonStyle(.borderless).help("Remove this account and delete its key from Keychain.")
+            }
+        }
     }
 }
 

@@ -57,6 +57,8 @@ final class BridgeModel: ObservableObject {
     /// Last sign-in probe per CLI provider: the default login, then each extra account.
     @Published var cliAccountStates: [String: [CliAccountState]] = [:]
     @Published var cliAccountsChecking: Set<String> = []
+    @Published var keyAccountStates: [String: [KeyAccountState]] = [:]
+    @Published var keyAccountsChecking: Set<String> = []
     var catalogueRefreshTask: Task<Void, Never>?
     @Published var claudeInstalled = false
     @Published var claudeRunning = false
@@ -1067,8 +1069,11 @@ final class BridgeModel: ObservableObject {
     }
 
     func saveKey() async {
-        guard !busy, let provider = providerDefinitions.first(where: { $0.id == selectedProvider }), let account = provider.credential_account else { return }
+        guard !busy, let provider = providerDefinitions.first(where: { $0.id == selectedProvider }), provider.credential_account != nil else { return }
         let providerID = provider.id
+        // The active extra account gets its own Keychain item; nil keeps
+        // the item every earlier build wrote (see hub_config.keychain_account).
+        let account = keychainAccount(providerID, id: settings.providers[providerID]?.key_account)
         let key = secretDraft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !key.isEmpty else { tell("Enter the provider API key first.", error: true); return }
         busy = true; defer { busy = false }
@@ -1102,6 +1107,7 @@ final class BridgeModel: ObservableObject {
             secretDraft = ""; settings = proposed
             try await save()
             if let info = try? await command("inspect") { readCatalogue(info, modelsKey: "catalog") }
+            if keyAccountStates[providerID] != nil { await checkKeyAccounts(providerID) }
             do {
                 let catalogue = try await command("discover", provider: providerID)
                 readCatalogue(catalogue, modelsKey: "models")
@@ -1123,6 +1129,58 @@ final class BridgeModel: ObservableObject {
         var error: NSDictionary?
         NSAppleScript(source: source)?.executeAndReturnError(&error)
         if error != nil { tell("Terminal could not open Vibe. Start Vibe normally, then reconnect.", error: true) }
+    }
+
+    // MARK: extra API keys
+
+    /// Keychain account name for one of a provider's key slots; nil id is the
+    /// default slot. Mirrors hub_config.keychain_account so the gateway reads
+    /// the item the app wrote.
+    func keychainAccount(_ provider: String, id: String?) -> String {
+        let base = providerDefinitions.first { $0.id == provider }?.credential_account ?? provider.uppercased() + "_API_KEY"
+        return id.map { base + "." + $0 } ?? base
+    }
+
+    /// Ask Keychain which of a provider's key slots hold a key. Sends the
+    /// pane's current settings, so a just-added account shows up unsaved.
+    func checkKeyAccounts(_ provider: String) async {
+        guard !keyAccountsChecking.contains(provider) else { return }
+        keyAccountsChecking.insert(provider); defer { keyAccountsChecking.remove(provider) }
+        do {
+            let result = try await command("key-accounts", provider: provider, input: try JSONEncoder().encode(settings))
+            keyAccountStates[provider] = (result["accounts"] as? [[String: Any]] ?? []).map {
+                KeyAccountState(id: $0["id"] as? String, label: $0["label"] as? String ?? "",
+                                active: $0["active"] as? Bool ?? false, found: $0["found"] as? Bool ?? false)
+            }
+        } catch { tell(error.localizedDescription, error: true) }
+    }
+
+    /// Add an empty key slot and make it active, so the next pasted key
+    /// lands in it. The name is edited inline.
+    func addKeyAccount(_ provider: String) {
+        var accounts = settings.providers[provider]?.key_accounts ?? []
+        guard accounts.count < 8 else { return }
+        var number = accounts.count + 2
+        while accounts.contains(where: { $0.id == "account-\(number)" }) { number += 1 }
+        let account = KeyAccount(id: "account-\(number)", label: "Account \(number)")
+        accounts.append(account)
+        settings.providers[provider]?.key_accounts = accounts
+        settings.providers[provider]?.key_account = account.id
+        keyAccountStates[provider]?.append(KeyAccountState(id: account.id, label: account.label, active: true, found: false))
+    }
+
+    /// Forget an extra key slot and delete its Keychain item; the default
+    /// slot cannot be removed.
+    func removeKeyAccount(_ provider: String, id: String) {
+        let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: hubKeychainService,
+                                    kSecAttrAccount as String: keychainAccount(provider, id: id)]
+        let status = SecItemDelete(query as CFDictionary)
+        guard status == errSecSuccess || status == errSecItemNotFound else { tell("Keychain could not remove that key (\(status)).", error: true); return }
+        var accounts = settings.providers[provider]?.key_accounts ?? []
+        accounts.removeAll { $0.id == id }
+        settings.providers[provider]?.key_accounts = accounts.isEmpty ? nil : accounts
+        if settings.providers[provider]?.key_account == id { settings.providers[provider]?.key_account = nil }
+        keyAccountStates[provider]?.removeAll { $0.id == id }
     }
 
     /// Ask each of a provider's CLI logins whether it is signed in. Sends the

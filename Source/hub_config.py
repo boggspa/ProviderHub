@@ -108,6 +108,64 @@ def _cli_accounts(provider_id: str, value) -> list[dict]:
     return accounts
 
 
+#: API-key providers that may hold several keys side by side (say, a work
+#: and a personal account). Each extra key is its own Keychain item under the
+#: hub's service, named ``<credential_account>.<id>``; the default slot keeps
+#: the bare ``credential_account`` name, so settings written before this
+#: field existed keep reading the same item. Subscriptions (Claude, Codex,
+#: AntiGravity, Devin) and Muse's minted key are deliberately left out.
+KEY_ACCOUNT_PROVIDERS = frozenset({
+    "mistral", "kimi", "mimo", "deepseek", "cerebras", "gemini", "grok",
+    "qwen-token-plan", "minimax", "openrouter"})
+MAX_KEY_ACCOUNTS = 8
+
+
+def _key_accounts(provider_id: str, value) -> list[dict]:
+    """Validate a provider's extra API-key accounts: [{id, label}]."""
+    if value in (None, []):
+        return []
+    if provider_id not in KEY_ACCOUNT_PROVIDERS:
+        raise ValueError(f"{PROVIDERS[provider_id]['name']} does not support extra API keys.")
+    if not isinstance(value, list) or len(value) > MAX_KEY_ACCOUNTS:
+        raise ValueError(f"API-key accounts must be a list of at most {MAX_KEY_ACCOUNTS} entries.")
+    accounts, ids = [], set()
+    for entry in value:
+        if not isinstance(entry, dict) or set(entry) - {"id", "label"}:
+            raise ValueError("An API-key account needs only an id and a label; the key itself lives in Keychain.")
+        account_id, label = entry.get("id"), entry.get("label")
+        if not isinstance(account_id, str) or not _CLI_ACCOUNT_ID.match(account_id):
+            raise ValueError("An API-key account id must be 1-32 lowercase letters, digits or hyphens.")
+        if not isinstance(label, str) or not label.strip() or len(label.strip()) > 60:
+            raise ValueError("Give each API-key account a name of at most 60 characters.")
+        if account_id in ids:
+            raise ValueError("Each API-key account needs its own id.")
+        ids.add(account_id)
+        accounts.append({"id": account_id, "label": label.strip()})
+    return accounts
+
+
+def keychain_account(connection: dict, provider_id: str, account_id: str | None = None) -> str | None:
+    """The Keychain account name holding this provider's key.
+
+    ``account_id`` picks an extra account; by default the connection's active
+    one. None (no extra account) is the provider's bare credential_account.
+    """
+    base = PROVIDERS[provider_id].get("credential_account")
+    if base is None:
+        return None
+    active = connection.get("key_account") if account_id is None else account_id
+    if active is None:
+        return base
+    return f"{base}.{active}"
+
+
+def key_account_label(connection: dict) -> str | None:
+    """The active extra API-key account's label, or None for the default slot."""
+    active = connection.get("key_account")
+    return next((account["label"] for account in connection.get("key_accounts") or ()
+                 if account.get("id") == active), None)
+
+
 def cli_account_dir(settings: dict, provider_id: str) -> str | None:
     """The config folder of the provider's active CLI account; None is the CLI's default."""
     connection = (settings.get("providers") or {}).get(provider_id) or {}
@@ -249,9 +307,14 @@ def connection_signature(provider_id: str, connection: dict) -> str:
     mode = _credential_mode(
         provider_id, connection.get("credential_mode", _default_credential_mode(provider_id)))
     revision = _credential_revision(connection.get("credential_revision", 0))
-    value = json.dumps(
-        [provider_id, normalized, mode, revision], sort_keys=True, separators=(",", ":")
-    ).encode()
+    # An active extra API-key account joins the signature: a work key and a
+    # personal key may not see the same models, so switching re-discovers.
+    # The default slot adds nothing, so catalogues cached before accounts
+    # existed stay valid.
+    parts = [provider_id, normalized, mode, revision]
+    if connection.get("key_account") is not None:
+        parts.append(connection["key_account"])
+    value = json.dumps(parts, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(value).hexdigest()[:20]
 
 
@@ -606,6 +669,16 @@ def normalize(value: dict, slots, vibe_model: str, port: int = 11436) -> dict:
             connection["cli_accounts"] = accounts
         if active is not None:
             connection["cli_account"] = active
+        # Same shape for extra API keys: a list plus one active id, both
+        # omitted until used. The keys themselves never enter this file.
+        key_accounts = _key_accounts(provider_id, requested.get("key_accounts"))
+        key_active = requested.get("key_account")
+        if key_active is not None and key_active not in {account["id"] for account in key_accounts}:
+            raise ValueError("The active API-key account is not in this provider's account list.")
+        if key_accounts:
+            connection["key_accounts"] = key_accounts
+        if key_active is not None:
+            connection["key_account"] = key_active
         result["providers"][provider_id] = connection
     result["branding_overrides"] = validate_overrides(value.get("branding_overrides", {}))
     if value.get("codex_model") is not None:

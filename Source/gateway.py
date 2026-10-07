@@ -25,7 +25,7 @@ import urllib.request
 
 import cli_routes
 from bridge_core import (BridgeError, ClaudeProfile, atomic_json, attach_model_specs, bootstrap_metadata, cached_catalogue, credentials, discover_provider, gateway_token,
-                         inspect_state, load_settings, model_labels, private_directory, private_token, read_json, ssl_context, state_root, validate_settings)
+                         inspect_state, key_account_states, load_settings, model_labels, private_directory, private_token, read_json, ssl_context, state_root, validate_settings)
 from catalogue_lifecycle import (CataloguePreparationError, catalogue_fingerprint,
                                  prepare_launch, refresh_all, require_prepared,
                                  runtime_fingerprint_error,
@@ -1407,7 +1407,7 @@ def catalogue_command_result(settings, root, lifecycle):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=["inspect", "validate", "save", "discover", "refresh-all", "prepare-launch", "activate", "restore", "serve", "codex-status", "codex-prepare", "codex-activate", "codex-restore", "codex-accent", "cli-accounts"])
+    parser.add_argument("command", choices=["inspect", "validate", "save", "discover", "refresh-all", "prepare-launch", "activate", "restore", "serve", "codex-status", "codex-prepare", "codex-activate", "codex-restore", "codex-accent", "cli-accounts", "key-accounts"])
     parser.add_argument("--provider", choices=list(PROVIDERS), default="mistral")
     parser.add_argument("--parent-pipe", action="store_true")
     parser.add_argument("--app", help="App bundle to launch for codex-accent")
@@ -1493,6 +1493,11 @@ def main():
         # just-added account can be checked before it is saved.
         settings = validate_settings(json.load(sys.stdin))
         result = {"accounts": cli_routes.account_states(settings, args.provider)}
+    elif args.command == "key-accounts":
+        # Same contract as cli-accounts: unsaved settings on stdin, one row
+        # per key slot saying whether Keychain holds a key for it.
+        settings = validate_settings(json.load(sys.stdin))
+        result = {"accounts": key_account_states(settings, args.provider)}
     elif args.command == "discover":
         settings = load_settings(root)
         source = discover_provider(settings, args.provider, root)
