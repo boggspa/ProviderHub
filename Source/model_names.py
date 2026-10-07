@@ -41,7 +41,8 @@ CLAUDE_MODEL_LABELS = {
     "claude-sonnet-5-5": "Claude Sonnet 5.5",
     "claude-sonnet-5": "Claude Sonnet 5 (Legacy)",
     "claude-sonnet-4-6": "Claude Sonnet 4.6 (Legacy)",
-    "claude-haiku-4-5": "Claude Haiku 4.5",
+    "claude-haiku-5-5": "Claude Haiku 5.5",
+    "claude-haiku-4-5": "Claude Haiku 4.5 (Legacy)",
 }
 
 # Compatibility for selections saved before the versioned CLI catalogue.
@@ -50,7 +51,7 @@ CLAUDE_CLI_ALIASES = {
     "fable": "claude-fable-5-1",
     "opus": "claude-opus-5-5",
     "sonnet": "claude-sonnet-5-5",
-    "haiku": "claude-haiku-4-5",
+    "haiku": "claude-haiku-5-5",
 }
 
 

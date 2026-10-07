@@ -540,8 +540,8 @@ _GROK_MODEL_METADATA = {
 
 _CLAUDE_CONTEXT_DOCS = "https://platform.claude.com/docs/en/build-with-claude/context-windows"
 # Exact published model ceilings, checked 2026-09-19; claude-opus-5-5 added
-# 2026-09-22, claude-sonnet-5-5 2026-09-28. These are model capacities, not a
-# claim that a particular subscription grants access.
+# 2026-09-22, claude-sonnet-5-5 2026-09-28, claude-haiku-5-5 2026-10-07. These
+# are model capacities, not a claim that a particular subscription grants access.
 _CLAUDE_CONTEXT_WINDOWS = {
     "claude-fable-5-1": 1000000,
     "claude-fable-5": 1000000,
@@ -553,6 +553,7 @@ _CLAUDE_CONTEXT_WINDOWS = {
     "claude-sonnet-5-5": 1000000,
     "claude-sonnet-5": 1000000,
     "claude-sonnet-4-6": 1000000,
+    "claude-haiku-5-5": 1000000,
     "claude-haiku-4-5": 200000,
     "claude-haiku-4-5-20251001": 200000,
 }

@@ -10,8 +10,9 @@ baseline notices remain available as metadata rather than subtitle text.
 
 | Route | Published model ceiling (tokens) | Evidence |
 | --- | ---: | --- |
-| Claude Fable 5.1, Fable 5, Opus 5, Sonnet 5 | 1,000,000 | [Anthropic context windows](https://platform.claude.com/docs/en/build-with-claude/context-windows) |
+| Claude Fable 5.1, Fable 5, Opus 5.5, Opus 5, Sonnet 5.5, Sonnet 5 | 1,000,000 | [Anthropic context windows](https://platform.claude.com/docs/en/build-with-claude/context-windows) |
 | Claude Opus 4.8, 4.7, 4.6 and Sonnet 4.6 | 1,000,000 | Same Anthropic context-window table |
+| Claude Haiku 5.5 | 1,000,000 | Same Anthropic context-window table (added 2026-10-07) |
 | Claude Haiku 4.5 | 200,000 | Same Anthropic context-window table |
 | Grok 4.7, Grok 4.7 Fast (`grok-4.7-build-fast`) | 500,000 | [xAI model documentation](https://docs.x.ai/developers/grok-4-7) |
 | Grok 4.6 | 500,000 | [xAI model documentation](https://docs.x.ai/developers/grok-4-6) |

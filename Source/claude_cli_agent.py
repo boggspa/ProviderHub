@@ -214,6 +214,7 @@ CLAUDE_EFFORT_ALIASES = {
 # model list. Publish explicit versions so a picker selection stays on that
 # version and older releases can be labelled Legacy. Account availability and
 # limits remain provider-managed; the CLI's error is surfaced at turn time.
+# Haiku 4.5 is the one row without an effort ladder; Haiku 5.5 has one.
 KNOWN_MODELS = tuple(
     {"id": identifier, "display_name": label,
      "reasoning_levels": [] if identifier == "claude-haiku-4-5" else list(CLAUDE_EFFORTS),
