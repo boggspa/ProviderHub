@@ -23,7 +23,7 @@ from model_names import friendly_model_name, label_catalog
 from catalogue import build_catalogue, read_observations, route_specs
 from cli_routes import cli_credential_mode, discover_via_cli
 from claude_accent import profile_accents
-from hub_config import (CLAUDE_TIER_MODELS, SLOTS, claude_picker_rows, claude_routes, cli_account_dir, connection_signature,
+from hub_config import (CLAUDE_TIER_MODELS, SLOTS, claude_picker_rows, claude_routes, cli_account_dir, connection_signature, key_account_label, keychain_account,
                         defaults as hub_defaults, normalize as normalize_hub_settings,
                         project_catalogue, provider_display_name, provider_presentations,
                         qualify, split_route)
@@ -199,10 +199,30 @@ def credentials(settings: dict, provider_id="mistral") -> tuple[str, str]:
         if name and os.environ.get(name):
             return os.environ[name], name
         raise BridgeError(f"{name or 'The provider credential'} is not set in this app's environment.")
-    key = keychain_read(keychain_service(), provider["credential_account"])
+    key = keychain_read(keychain_service(), keychain_account(connection, provider_id))
+    label = key_account_label(connection)
     if key:
-        return key, "macOS Keychain"
+        return key, "macOS Keychain" + (f" · {label}" if label else "")
+    if label:
+        raise BridgeError(f"Add the {provider['name']} API key for the {label} account in Providers to use this connection.")
     raise BridgeError(f"Add the {provider['name']} API key in Providers to use this connection.")
+
+
+def key_account_states(settings: dict, provider_id: str) -> list[dict]:
+    """Which of a provider's API-key accounts hold a key: the default slot
+    first, then each extra account. Reads Keychain, never returns a key."""
+    if provider_id not in PROVIDERS:
+        raise BridgeError("Unknown inference provider.")
+    connection = settings["providers"][provider_id]
+    rows = [{"id": None, "label": "Default"}] + [dict(account) for account in connection.get("key_accounts") or ()]
+    active = connection.get("key_account")
+    service = keychain_service()
+    states = []
+    for row in rows:
+        account = keychain_account(connection, provider_id, row["id"]) if row["id"] else keychain_account({}, provider_id)
+        found = bool(account) and keychain_read(service, account) is not None
+        states.append({"id": row["id"], "label": row["label"], "active": row["id"] == active, "found": found})
+    return states
 
 
 def default_settings() -> dict:

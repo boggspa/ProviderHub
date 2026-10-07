@@ -13,7 +13,7 @@ SWIFT_SOURCES=(
   "$SOURCE_DIR/CatalogueSelection.swift" "$SOURCE_DIR/HubModels.swift"
   "$SOURCE_DIR/HubLayout.swift" "$SOURCE_DIR/ProviderViews.swift"
   "$SOURCE_DIR/DevinAgentsView.swift" "$SOURCE_DIR/CodexHarness.swift"
-  "$SOURCE_DIR/HubTheme.swift"
+  "$SOURCE_DIR/HubTheme.swift" "$SOURCE_DIR/CompactShell.swift"
   "$SOURCE_DIR/MistralBridge.swift"
 )
 xcrun swiftc -swift-version 5 -parse-as-library -O -target arm64-apple-macosx14.0 \

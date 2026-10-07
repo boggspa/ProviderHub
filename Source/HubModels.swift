@@ -23,6 +23,22 @@ struct ProviderConnection: Codable, Equatable {
     /// Both stay omitted until used, like idle_unload_seconds.
     var cli_accounts: [CliAccount]?
     var cli_account: String?
+    /// Extra API keys for one provider (work, personal…): each is its own
+    /// Keychain item named `<credential_account>.<id>`; `key_account` names
+    /// the active one and nil is the pre-accounts item. Omitted until used.
+    var key_accounts: [KeyAccount]?
+    var key_account: String?
+}
+struct KeyAccount: Codable, Equatable, Identifiable {
+    var id: String
+    var label: String
+}
+/// One row of the worker's `key-accounts` answer: whether Keychain holds a key.
+struct KeyAccountState: Identifiable {
+    var id: String?
+    var label: String
+    var active: Bool
+    var found: Bool
 }
 struct CliAccount: Codable, Equatable, Identifiable {
     var id: String
@@ -43,6 +59,7 @@ struct BrandLogo: Codable, Equatable {
     var dark: String?
     var scale: Double?
     var leadingMarkAspectRatio: Double?
+    var trailingMarkAspectRatio: Double?
     var template: Bool?
 }
 struct BrandOverride: Codable, Equatable {
@@ -211,12 +228,13 @@ struct ProviderMark: View {
     private func artwork(_ image: NSImage, logo: BrandLogo) -> some View {
         let artwork = Image(nsImage: image).resizable()
             .renderingMode(logo.template == true ? .template : .original)
-        if let markRatio = logo.leadingMarkAspectRatio {
+        if let markRatio = logo.leadingMarkAspectRatio ?? logo.trailingMarkAspectRatio {
             // Keep the source wordmark intact and show its complete leading
-            // glyph, fitting wide marks such as Meta's loop inside the slot.
+            // (or trailing, for MiMo's ring) glyph, fitting wide marks such
+            // as Meta's loop inside the slot.
             let height = size / max(markRatio, 1)
             artwork.frame(width: height * image.size.width / image.size.height, height: height)
-                .frame(width: height * markRatio, height: height, alignment: .leading)
+                .frame(width: height * markRatio, height: height, alignment: logo.leadingMarkAspectRatio != nil ? .leading : .trailing)
                 .clipped()
         } else {
             artwork.scaledToFit()
