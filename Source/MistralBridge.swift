@@ -1410,7 +1410,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
-        NSApp.appearance = NSAppearance(named: .darkAqua)
+        HubTheme.Appearance.apply()
         let mainMenu = NSMenu()
         let appItem = NSMenuItem()
         let appMenu = NSMenu(title: hubName)
@@ -1463,6 +1463,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     @objc func chooseCompact() { UserDefaults.standard.set("compact", forKey: "hubDesign"); applyDesign() }
     @objc func chooseClassic() { UserDefaults.standard.set("classic", forKey: "hubDesign"); applyDesign() }
 
+    /// System, Light or Dark. The choice persists beside the design choice and
+    /// takes effect at once: NSApp.appearance drives every window and every
+    /// dynamic colour in HubTheme.Semantic.
+    @objc func chooseSystemAppearance() { chooseAppearance(.system) }
+    @objc func chooseLightAppearance() { chooseAppearance(.light) }
+    @objc func chooseDarkAppearance() { chooseAppearance(.dark) }
+    func chooseAppearance(_ mode: HubTheme.Appearance.Mode) {
+        HubTheme.Appearance.mode = mode
+        HubTheme.Appearance.apply()
+    }
+
     @objc func showWindow() {
         // The app lives in the menu bar (LSUIElement). While its window is
         // open it joins the Dock with the real icon; closing the window
@@ -1499,6 +1510,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             item.state = design == key ? .on : .off; designMenu.addItem(item)
         }
         designItem.submenu = designMenu; menu.addItem(designItem)
+        let appearanceItem = NSMenuItem(title: "Appearance", action: nil, keyEquivalent: "")
+        let appearanceMenu = NSMenu(title: "Appearance")
+        for (mode, action) in [(HubTheme.Appearance.Mode.system, #selector(chooseSystemAppearance)),
+                               (.light, #selector(chooseLightAppearance)), (.dark, #selector(chooseDarkAppearance))] {
+            let item = NSMenuItem(title: mode.title, action: action, keyEquivalent: ""); item.target = self
+            item.state = HubTheme.Appearance.mode == mode ? .on : .off; appearanceMenu.addItem(item)
+        }
+        appearanceItem.submenu = appearanceMenu; menu.addItem(appearanceItem)
         add(menu, "Open Mistral Vibe", #selector(openVibe), "")
         menu.addItem(.separator())
         add(menu, model.running ? "Stop Gateway" : "Start Gateway", #selector(toggleGateway), "")

@@ -1,12 +1,90 @@
 import AppKit
 import SwiftUI
 
-/// A snapshot of existing UI values, with filled-button label ink applied.
-/// It performs no appearance setup.
+/// A snapshot of existing UI values, with filled-button label ink applied,
+/// plus the appearance preference and the semantic colours that follow it.
 enum HubTheme {
+    /// The user's appearance choice. "system" follows macOS; the others pin
+    /// the app. Persisted in UserDefaults beside the design choice and applied
+    /// through NSApp.appearance, which every window and dynamic colour obeys.
     enum Appearance {
-        // MistralBridge.swift:1249; the app remains dark-only.
-        static let name: NSAppearance.Name = .darkAqua
+        enum Mode: String, CaseIterable {
+            case system, light, dark
+
+            var title: String {
+                switch self {
+                case .system: return "System"
+                case .light: return "Light"
+                case .dark: return "Dark"
+                }
+            }
+
+            var name: NSAppearance.Name? {
+                switch self {
+                case .system: return nil
+                case .light: return .aqua
+                case .dark: return .darkAqua
+                }
+            }
+        }
+
+        static let defaultsKey = "hubAppearance"
+
+        /// The default stays dark: that is what every existing surface was
+        /// tuned for, and a user who never chooses sees no change.
+        static var mode: Mode {
+            get { Mode(rawValue: UserDefaults.standard.string(forKey: defaultsKey) ?? "") ?? .dark }
+            set { UserDefaults.standard.set(newValue.rawValue, forKey: defaultsKey) }
+        }
+
+        /// The appearance the app pins today, kept for callers that read it.
+        static var name: NSAppearance.Name { mode.name ?? .darkAqua }
+
+        /// Apply the stored choice to the app. Call at launch and after a change.
+        @MainActor static func apply() {
+            NSApp.appearance = mode.name.map { NSAppearance(named: $0) } ?? nil
+        }
+
+        /// Whether the effective appearance is dark, for code that cannot use
+        /// a dynamic colour (for example a view that paints its own material).
+        @MainActor static var isDark: Bool {
+            let effective = NSApp.effectiveAppearance
+            return effective.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        }
+    }
+
+    /// Colours that resolve per appearance. Each is a dynamic NSColor, so a
+    /// SwiftUI view that uses it re-renders when the appearance changes
+    /// without any state of its own. The dark values are today's constants;
+    /// the light values are their counterparts on a light window.
+    enum Semantic {
+        /// The window or page background.
+        static let surface = dynamic(light: NSColor(red: 0.965, green: 0.965, blue: 0.97, alpha: 1),
+                                     dark: NSColor(red: 0.095, green: 0.098, blue: 0.102, alpha: 1))
+        /// A card, row or panel lifted off the surface.
+        static let raisedSurface = dynamic(light: NSColor.black.withAlphaComponent(0.045),
+                                           dark: NSColor.white.withAlphaComponent(0.045))
+        /// A selected navigation row or an active control background.
+        static let selection = dynamic(light: NSColor.black.withAlphaComponent(0.09),
+                                       dark: NSColor.white.withAlphaComponent(0.09))
+        /// The one-point rule between panes and rows.
+        static let hairline = dynamic(light: NSColor.black.withAlphaComponent(0.09),
+                                      dark: NSColor.white.withAlphaComponent(0.07))
+        /// Primary text.
+        static let ink = dynamic(light: NSColor(white: 0.11, alpha: 1), dark: NSColor(white: 0.93, alpha: 1))
+        /// Secondary text and glyphs.
+        static let secondaryInk = dynamic(light: NSColor(white: 0.11, alpha: 0.6), dark: NSColor(white: 0.93, alpha: 0.6))
+        /// The brand accent as it should sit on the surface of each appearance.
+        static let accentOnSurface = dynamic(light: NSColor(red: 0.87, green: 0.34, blue: 0.1, alpha: 1),
+                                             dark: NSColor(red: 1.0, green: 0.43, blue: 0.18, alpha: 1))
+        /// Label ink for text drawn on `accentOnSurface`.
+        static let inkOnAccent = Color.white
+
+        static func dynamic(light: NSColor, dark: NSColor) -> Color {
+            Color(nsColor: NSColor(name: nil) { appearance in
+                appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? dark : light
+            })
+        }
     }
 
     enum Surface {
