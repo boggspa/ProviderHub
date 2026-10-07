@@ -142,9 +142,9 @@ class QuickComposerBridgeTests(unittest.TestCase):
         bridge.handle(reply(pipe, {"targets": rows, "report": None, "windowRequest": False}))
         reader.assert_called_once_with([target(1), target(3)])
         window.update.assert_called_once_with("window", [
-            {**target(1), "title": "First", "supported": True, "active": True, "activeAccent": "#705aff", "preview": "latest reply"},
-            {**target(2, hostId="box", kind="remote"), "title": "Remote", "supported": False, "active": False, "activeAccent": None, "preview": None},
-            {**target(3), "title": "Untitled chat", "supported": True, "active": False, "activeAccent": None, "preview": None}])
+            {**target(1), "title": "First", "supported": True, "active": True, "activeAccent": "#705aff", "preview": "latest reply", "accent": None},
+            {**target(2, hostId="box", kind="remote"), "title": "Remote", "supported": False, "active": False, "activeAccent": None, "preview": None, "accent": None},
+            {**target(3), "title": "Untitled chat", "supported": True, "active": False, "activeAccent": None, "preview": None, "accent": None}])
         self.assertNotIn("latest reply", json.dumps(events))
         # An empty sidebar while the window is open clears the window too.
         bridge.handle(reply(pipe, {"applied": 2}))  # the previews write
@@ -167,7 +167,7 @@ class QuickComposerBridgeTests(unittest.TestCase):
         host.request_open.assert_called_once_with()
         window.open.assert_not_called()
         host.update.assert_called_once_with("window", [{**target(1), "title": "First", "supported": True, "active": False,
-                                                        "activeAccent": None, "preview": None}])
+                                                        "activeAccent": None, "preview": None, "accent": None}])
         window.update.assert_not_called()
         # With no hub listening the helper's own window takes the request.
         host.is_watching.return_value = False
@@ -178,6 +178,26 @@ class QuickComposerBridgeTests(unittest.TestCase):
         self.assertIn("pollHost({ windowOpen: false })", pipe.sent[-1]["params"]["expression"])
         bridge.handle(reply(pipe, {"targets": [], "report": None, "windowRequest": True}))
         window.open.assert_called_once_with()
+
+    def test_rows_carry_the_providers_accent_from_the_sidebar_lookup(self):
+        pipe = FakeTransport()
+        reader = mock.Mock(return_value=[])
+        host = mock.Mock(); host.is_watching.return_value = True
+        accents = mock.Mock(return_value={target(1)["threadId"]: "#0073E6"})
+        bridge = QuickComposerBridge(pipe, reader, None, host=host, accents=accents)
+        bridge.refresh({"main"})
+        rows = [{**target(1), "title": "Kimi", "supported": True}, {**target(2, hostId="box", kind="remote"), "title": "Remote", "supported": False}]
+        bridge.handle(reply(pipe, {"targets": rows, "report": None}))
+        accents.assert_called_once_with([target(1)["threadId"]])
+        relayed = host.update.call_args_list[-1][0][1]
+        self.assertEqual([row["accent"] for row in relayed], ["#0073E6", None])
+        # A failing lookup leaves the rows without accents rather than without rows.
+        accents.side_effect = RuntimeError("database busy")
+        bridge.handle(reply(pipe, {"applied": 1}))
+        bridge.next_poll = 0
+        bridge.refresh({"main"})
+        bridge.handle(reply(pipe, {"targets": rows, "report": None}))
+        self.assertEqual([row["accent"] for row in host.update.call_args_list[-1][0][1]], [None, None])
 
     def test_only_the_page_that_supplied_rows_may_clear_them(self):
         pipe, events = FakeTransport(), []

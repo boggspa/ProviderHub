@@ -595,7 +595,7 @@ class LaunchTests(unittest.TestCase):
 
     def test_quick_composer_launch_does_not_enable_provider_colours_or_usage_overrides(self):
         settings, inventory = fixture()
-        settings.update(codex_quick_composer=True, codex_accent_slider=False,
+        settings.update(codex_quick_composer=True, codex_quick_composer_window=False, codex_accent_slider=False,
                         codex_unlock_composer=True, codex_hide_usage_banner=True)
         captured = []
         modules = {

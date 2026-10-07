@@ -15,6 +15,8 @@ struct QuickRow: Identifiable, Equatable {
     let supported: Bool
     let active: Bool
     let activeAccent: String?
+    /// The provider colour of the thread's model, from the helper's lookup.
+    let accent: String?
     let preview: String?
     var id: String { kind + "|" + hostId + "|" + threadId }
 
@@ -27,6 +29,7 @@ struct QuickRow: Identifiable, Equatable {
         supported = object["supported"] as? Bool == true
         active = object["active"] as? Bool == true
         activeAccent = object["activeAccent"] as? String
+        accent = object["accent"] as? String
         let preview = object["preview"] as? String
         self.preview = (preview?.isEmpty == false) ? preview : nil
     }
@@ -273,6 +276,9 @@ private struct QuickRowView: View {
     var body: some View {
         Button(action: choose) {
             HStack(spacing: 8) {
+                if let dot = color(row.accent) {
+                    Circle().fill(dot).frame(width: 6, height: 6)
+                }
                 VStack(alignment: .leading, spacing: 1) {
                     Text(row.title).font(.system(size: 13)).foregroundStyle(Semantic.ink).lineLimit(1)
                     Text(row.supported ? (row.preview ?? "No response preview available") : "Unavailable in this window")
@@ -280,7 +286,7 @@ private struct QuickRowView: View {
                 }
                 Spacer(minLength: 0)
                 if row.active {
-                    ProgressView().controlSize(.small).tint(accent)
+                    ProgressView().controlSize(.small).tint(color(row.accent) ?? color(row.activeAccent) ?? Semantic.secondaryInk)
                 }
             }
             .padding(.horizontal, 10).padding(.vertical, 7)
@@ -290,9 +296,8 @@ private struct QuickRowView: View {
         .buttonStyle(.plain).opacity(row.supported ? 1 : 0.45)
     }
 
-    private var accent: Color {
-        guard let hex = row.activeAccent, hex.count == 7, hex.hasPrefix("#"),
-              let value = UInt32(hex.dropFirst(), radix: 16) else { return Semantic.secondaryInk }
+    private func color(_ hex: String?) -> Color? {
+        guard let hex, hex.count == 7, hex.hasPrefix("#"), let value = UInt32(hex.dropFirst(), radix: 16) else { return nil }
         return Color(red: Double((value >> 16) & 0xff) / 255, green: Double((value >> 8) & 0xff) / 255, blue: Double(value & 0xff) / 255)
     }
 }

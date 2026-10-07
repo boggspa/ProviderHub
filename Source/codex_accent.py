@@ -1301,7 +1301,8 @@ class AccentBridge:
             self.window.host = self.host
         if recent_previews is not None:
             from codex_quick_bridge import QuickComposerBridge
-            self.quick = QuickComposerBridge(pipe, recent_previews, self.emit, window=self.window, host=self.host)
+            self.quick = QuickComposerBridge(pipe, recent_previews, self.emit, window=self.window, host=self.host,
+                                             accents=sidebar_accents)
         self.sidebar_next_poll = 0.0
         self.pending: dict[int, tuple[str, str | None]] = {}
         # When each sidebar request went out, so one lost reply cannot stop a

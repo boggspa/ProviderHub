@@ -103,10 +103,13 @@ def _report(value):
 
 
 class QuickComposerBridge:
-    def __init__(self, pipe, previews, emit=None, window=None, host=None):
+    def __init__(self, pipe, previews, emit=None, window=None, host=None, accents=None):
         self.pipe = pipe
         self.previews = previews
         self.emit = emit or (lambda event: None)
+        # The sidebar accent lookup (thread id -> provider colour, from the
+        # thread's model); the panel colours its spinner with it.
+        self.accents = accents
         self.window = window
         # The Hub's own panel (codex_quick_host) and the helper's fallback
         # window (codex_quick_window) both show the same rows.
@@ -134,6 +137,14 @@ class QuickComposerBridge:
                 or (self.host is not None and self.host.is_watching()))
 
     def _relay(self, session_id, rows):
+        colours = {}
+        if self.accents is not None and rows:
+            try:
+                colours = self.accents([row["threadId"] for row in rows if row.get("supported")]) or {}
+            except Exception:
+                colours = {}
+        rows = [{**row, "accent": colours.get(row["threadId"]) if isinstance(colours.get(row["threadId"]), str) else None}
+                for row in rows]
         if self.host is not None and self.host.is_watching():
             self.host.update(session_id, rows)
         if self.window is not None and self.window.is_open():
