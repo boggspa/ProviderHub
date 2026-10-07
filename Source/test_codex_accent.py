@@ -467,6 +467,29 @@ class LaunchTests(unittest.TestCase):
             self.assertEqual(record["env"], {"OPENAI_API_KEY": "leak-check", "HOME": os.environ["HOME"], "DEMO_LS": "1"})
             self.assertTrue(record["stdout_is_null"])
 
+    def test_run_reads_the_hubs_commands_from_stdin_and_notices_the_hub_leaving(self):
+        from codex_quick_host import HostInput, QuickHost
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            (base / "fake_browser.py").write_text(FAKE_BROWSER)
+            wrapper = base / "browser.sh"
+            wrapper.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{base / "fake_browser.py"}" "{base / "seen.json"}" "$@"\n')
+            wrapper.chmod(wrapper.stat().st_mode | stat.S_IXUSR)
+            read_fd, write_fd = os.pipe()
+            try:
+                os.write(write_fd, b'{"command":"hello"}\n{"command":"quick-watch","active":true}\n')
+                os.close(write_fd)  # the hub quits before the app does
+                events = []
+                host = QuickHost()
+                status = run(wrapper, "SCRIPT", emit=events.append, environment=child_environment(),
+                             quick_host=host, host_input=HostInput(read_fd), poll_interval=0.05)
+            finally:
+                os.close(read_fd)
+            self.assertEqual(status, 7)
+            self.assertIn({"event": "host", "connected": True}, events)
+            self.assertIn({"event": "host", "connected": False}, events)
+            self.assertFalse(host.connected)
+
     def test_run_survives_a_failing_status_sink(self):
         with tempfile.TemporaryDirectory() as directory:
             script = Path(directory) / "exit.sh"
@@ -596,6 +619,8 @@ class LaunchTests(unittest.TestCase):
         self.assertEqual(options["recent_previews"], "preview-reader")
         self.assertIn("windowMode:false", script)
         self.assertNotIn("quick_window", options)
+        # Imported inside the patched module table, so compare by name.
+        self.assertEqual(type(options["quick_host"]).__name__, "QuickHost")
 
     def test_quick_composer_window_needs_the_popover_and_keeps_its_bounds_in_the_state_root(self):
         from codex_quick_window import QuickWindowBridge

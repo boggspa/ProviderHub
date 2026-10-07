@@ -232,11 +232,11 @@ class SettingsMigrationTests(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 normalize({"codex_quick_composer": value}, SLOTS, "mistral-test")
 
-    def test_quick_composer_window_defaults_off_and_must_be_boolean(self):
-        self.assertIs(defaults(SLOTS, "mistral-test")["codex_quick_composer_window"], False)
-        self.assertIs(normalize({}, SLOTS, "mistral-test")["codex_quick_composer_window"], False)
-        settings = normalize({"codex_quick_composer_window": True}, SLOTS, "mistral-test")
-        self.assertIs(settings["codex_quick_composer_window"], True)
+    def test_quick_composer_window_defaults_on_and_must_be_boolean(self):
+        self.assertIs(defaults(SLOTS, "mistral-test")["codex_quick_composer_window"], True)
+        self.assertIs(normalize({}, SLOTS, "mistral-test")["codex_quick_composer_window"], True)
+        settings = normalize({"codex_quick_composer_window": False}, SLOTS, "mistral-test")
+        self.assertIs(settings["codex_quick_composer_window"], False)
         for value in (1, "yes", None, [], {}):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 normalize({"codex_quick_composer_window": value}, SLOTS, "mistral-test")

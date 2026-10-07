@@ -153,6 +153,32 @@ class QuickComposerBridgeTests(unittest.TestCase):
         bridge.handle(reply(pipe, {"targets": [], "report": None}))
         self.assertEqual(window.update.call_args_list[-1], mock.call("window", []))
 
+    def test_the_hub_panel_takes_precedence_over_the_helper_window(self):
+        pipe, events = FakeTransport(), []
+        reader = mock.Mock(return_value=[])
+        window, host = mock.Mock(), mock.Mock()
+        window.is_open.return_value = False
+        host.is_watching.return_value = True
+        host.request_open.return_value = True
+        bridge = QuickComposerBridge(pipe, reader, events.append, window=window, host=host)
+        bridge.refresh({"window"})
+        self.assertIn("pollHost({ windowOpen: true })", pipe.sent[-1]["params"]["expression"])
+        bridge.handle(reply(pipe, {"targets": [{**target(1), "title": "First", "supported": True}], "report": None, "windowRequest": True}))
+        host.request_open.assert_called_once_with()
+        window.open.assert_not_called()
+        host.update.assert_called_once_with("window", [{**target(1), "title": "First", "supported": True, "active": False,
+                                                        "activeAccent": None, "preview": None}])
+        window.update.assert_not_called()
+        # With no hub listening the helper's own window takes the request.
+        host.is_watching.return_value = False
+        host.request_open.return_value = False
+        bridge.handle(reply(pipe, {"applied": 1}))
+        bridge.next_poll = 0
+        bridge.refresh({"window"})
+        self.assertIn("pollHost({ windowOpen: false })", pipe.sent[-1]["params"]["expression"])
+        bridge.handle(reply(pipe, {"targets": [], "report": None, "windowRequest": True}))
+        window.open.assert_called_once_with()
+
     def test_renderer_exception_is_content_free_and_does_not_end_polling(self):
         pipe, reader, events = FakeTransport(), mock.Mock(), []
         bridge = QuickComposerBridge(pipe, reader, events.append)

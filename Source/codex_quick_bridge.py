@@ -103,25 +103,37 @@ def _report(value):
 
 
 class QuickComposerBridge:
-    def __init__(self, pipe, previews, emit=None, window=None):
+    def __init__(self, pipe, previews, emit=None, window=None, host=None):
         self.pipe = pipe
         self.previews = previews
         self.emit = emit or (lambda event: None)
         self.window = window
+        # The Hub's own panel (codex_quick_host) and the helper's fallback
+        # window (codex_quick_window) both show the same rows.
+        self.host = host
         self.pending = {}
         self.sessions = set()
         self.next_poll = 0.0
 
     def _evaluate(self, session_id, method, argument, kind):
         if kind == "read":
-            window_open = self.window is not None and self.window.is_open()
-            body = _READ % ("true" if window_open else "false")
+            body = _READ % ("true" if self._showing() else "false")
         else:
             body = f"return window.__providerHubQuickComposer?.{method}?.({argument}); "
         expression = "(() => { " + _GUARD + body + "})()"
         identifier = self.pipe.send("Runtime.evaluate", {"expression": expression,
                                     "returnByValue": True, "timeout": 1000}, session_id=session_id)
         self.pending[identifier] = (kind, session_id, time.monotonic())
+
+    def _showing(self) -> bool:
+        return ((self.window is not None and self.window.is_open())
+                or (self.host is not None and self.host.is_watching()))
+
+    def _relay(self, session_id, rows):
+        if self.host is not None and self.host.is_watching():
+            self.host.update(session_id, rows)
+        if self.window is not None and self.window.is_open():
+            self.window.update(session_id, rows)
 
     def refresh(self, sessions):
         self.sessions = set(sessions)
@@ -157,12 +169,13 @@ class QuickComposerBridge:
         report = _report(value)
         if report is not None:
             self.emit({"event": "quick-composer", "stage": "send", "session": session_id, **report})
-        if self.window is not None and isinstance(value, dict) and value.get("windowRequest") is True:
-            self.window.open()
+        if isinstance(value, dict) and value.get("windowRequest") is True:
+            if not (self.host is not None and self.host.request_open()) and self.window is not None:
+                self.window.open()
         targets = _targets(value)
         if not targets:
-            if self.window is not None and self.window.is_open() and isinstance(value, dict):
-                self.window.update(session_id, [])
+            if self._showing() and isinstance(value, dict):
+                self._relay(session_id, [])
             return True  # Closed or no supported recent rows: no content read.
         records = []
         try:
@@ -182,10 +195,11 @@ class QuickComposerBridge:
         payload = [{**item, "preview": found.get((item["kind"], item["hostId"], item["threadId"]))}
                    for item in targets]
         self._evaluate(session_id, "setThreadPreviews", json.dumps(payload), "write")
-        if self.window is not None and self.window.is_open():
-            # The window shows the same rows with their titles and activity,
-            # which only the page knows; the previews come from the worker.
+        if self._showing():
+            # The panel and the window show the same rows with their titles
+            # and activity, which only the page knows; the previews come from
+            # the worker.
             rows = _rows(value)
-            self.window.update(session_id, [{**row, "preview": found.get((row["kind"], row["hostId"], row["threadId"]))}
-                                             for row in rows])
+            self._relay(session_id, [{**row, "preview": found.get((row["kind"], row["hostId"], row["threadId"]))}
+                                     for row in rows])
         return True

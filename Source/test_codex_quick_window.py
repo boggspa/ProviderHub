@@ -206,6 +206,16 @@ class QuickWindowBridgeTests(unittest.TestCase):
         self.assertFalse(self.bridge.handle(binding("main", "__somethingElse", "{}")))
         self.assertFalse(self.bridge.handle({"method": "Target.attachedToTarget", "params": {"sessionId": "x", "targetInfo": {}}}))
 
+    def test_the_launcher_binding_prefers_a_listening_hub(self):
+        host = type("Host", (), {"request_open": lambda self: True})()
+        self.bridge.host = host
+        self.bridge.attach_main("main")
+        self.bridge.handle(binding("main", HOST_BINDING, {"type": "open-window"}))
+        self.assertEqual(sent(self.pipe, "Target.createTarget"), [])
+        self.bridge.host = type("Host", (), {"request_open": lambda self: False})()
+        self.bridge.handle(binding("main", HOST_BINDING, {"type": "open-window"}))
+        self.assertEqual(len(sent(self.pipe, "Target.createTarget")), 1)
+
     def test_navigating_away_closes_the_window_and_ignores_its_binding(self):
         self.bridge.attach_main("main")
         self.open_window()

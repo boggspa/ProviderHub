@@ -1279,7 +1279,7 @@ class AccentBridge:
     """
 
     def __init__(self, pipe: DevToolsPipe, script: str, emit=None, *, sidebar_accents=None,
-                 child_accents=None, recent_previews=None, quick_window=None):
+                 child_accents=None, recent_previews=None, quick_window=None, quick_host=None):
         self.pipe = pipe
         self.script = script
         self.emit = emit or (lambda event: None)
@@ -1287,15 +1287,21 @@ class AccentBridge:
         self.child_accents = child_accents
         self.child_next_poll = 0.0
         self.quick = None
-        # The separate quick-composer window (codex_quick_window) shares the
-        # pipe; it is created before the pipe exists, so it is bound here.
+        # The Hub's panel channel (codex_quick_host) and the separate
+        # quick-composer window (codex_quick_window) share the pipe; both are
+        # created before the pipe exists, so they are bound here.
+        self.host = quick_host
+        if self.host is not None:
+            self.host.pipe = pipe
+            self.host.emit = self.emit
         self.window = quick_window
         if self.window is not None:
             self.window.pipe = pipe
             self.window.emit = self.emit
+            self.window.host = self.host
         if recent_previews is not None:
             from codex_quick_bridge import QuickComposerBridge
-            self.quick = QuickComposerBridge(pipe, recent_previews, self.emit, window=self.window)
+            self.quick = QuickComposerBridge(pipe, recent_previews, self.emit, window=self.window, host=self.host)
         self.sidebar_next_poll = 0.0
         self.pending: dict[int, tuple[str, str | None]] = {}
         # When each sidebar request went out, so one lost reply cannot stop a
@@ -1316,6 +1322,8 @@ class AccentBridge:
         return info.get("type") == "page" and (url in ("", "about:blank") or url.startswith(_APP_ORIGIN))
 
     def handle(self, message: dict) -> None:
+        if self.host is not None and self.host.handle(message):
+            return
         if self.window is not None and self.window.handle(message):
             return
         if self.quick is not None and self.quick.handle(message):
@@ -1329,6 +1337,8 @@ class AccentBridge:
             self.injected.discard(params.get("sessionId") or "")
             if self.window is not None:
                 self.window.detach(params.get("sessionId") or "")
+            if self.host is not None:
+                self.host.detach(params.get("sessionId") or "")
             return
         if method in ("Page.domContentEventFired", "Page.loadEventFired"):
             # The evaluate sent at attach time can land before the first
@@ -1448,6 +1458,8 @@ class AccentBridge:
         self._evaluate(session_id)
         if self.window is not None:
             self.window.attach_main(session_id)
+        if self.host is not None:
+            self.host.attach_main(session_id)
 
 
 def _parked(fd: int) -> int:
@@ -1510,8 +1522,8 @@ def already_running(binary: Path) -> bool:
 
 
 def run(binary: Path, script: str, *, emit=None, arguments=(), environment=None, sidebar_accents=None,
-        child_accents=None, recent_previews=None, quick_window=None, poll_interval=0.25,
-        launch_timeout=45.0) -> int:
+        child_accents=None, recent_previews=None, quick_window=None, quick_host=None, host_input=None,
+        poll_interval=0.25, launch_timeout=45.0) -> int:
     """Launch the app, install the watcher, then stay attached until it exits.
 
     Returns the app's exit status. SIGTERM and SIGHUP are ignored once the
@@ -1534,7 +1546,13 @@ def run(binary: Path, script: str, *, emit=None, arguments=(), environment=None,
         signal.signal(signum, signal.SIG_IGN)
     bridge = AccentBridge(pipe, script, emit, sidebar_accents=sidebar_accents,
                           child_accents=child_accents, recent_previews=recent_previews,
-                          quick_window=quick_window)
+                          quick_window=quick_window, quick_host=quick_host)
+    # The hub's commands arrive on this helper's stdin as JSON lines. A
+    # closed stdin (an older hub, /dev/null, or a hub that has quit) simply
+    # means no hub is listening.
+    if quick_host is not None and host_input is None:
+        from codex_quick_host import HostInput
+        host_input = HostInput(0)
     started = time.monotonic()
     status = None
     try:
@@ -1557,6 +1575,14 @@ def run(binary: Path, script: str, *, emit=None, arguments=(), environment=None,
                     bridge.handle(message)
                 except Exception as exc:  # a surprise in the protocol must not end the helper
                     emit({"event": "error", "stage": "handle", "message": f"{type(exc).__name__}: {exc}"})
+            if quick_host is not None and host_input is not None and not host_input.closed:
+                try:
+                    for command in host_input.poll():
+                        quick_host.command(command)
+                    if host_input.closed:
+                        quick_host.disconnected()
+                except Exception as exc:
+                    emit({"event": "error", "stage": "host", "message": f"{type(exc).__name__}: {exc}"})
             try:
                 bridge.refresh_sidebar()
                 bridge.refresh_extras()
@@ -1585,6 +1611,10 @@ def _print_event(event: dict) -> None:
         pass  # stdout is gone with the hub; the app must not follow
 
 
+# Chat titles, previews and send outcomes go to the hub over stdout only.
+_PRIVATE_EVENTS = frozenset({"quick-rows", "quick-result"})
+
+
 def bridge_command(app_path: str, settings: dict, inventory: dict, emit=None, log_path: Path | None = None,
                    state_root: Path | None = None, **run_options) -> int:
     """Worker entry point: `gateway.py codex-accent --app <bundle>`.
@@ -1605,7 +1635,7 @@ def bridge_command(app_path: str, settings: dict, inventory: dict, emit=None, lo
             base_emit(event)
         except Exception:
             pass
-        if stream is not None:
+        if stream is not None and event.get("event") not in _PRIVATE_EVENTS:
             try:
                 stream.write(json.dumps(event) + "\n")
                 stream.flush()
@@ -1639,7 +1669,9 @@ def bridge_command(app_path: str, settings: dict, inventory: dict, emit=None, lo
             from codex_desktop_actions import desktop_actions_script
             from codex_quick_composer import quick_composer_script
             from codex_recent_threads import RecentThreadPreviews
+            from codex_quick_host import QuickHost
             run_options.setdefault("recent_previews", RecentThreadPreviews())
+            run_options.setdefault("quick_host", QuickHost())
             if window_enabled:
                 from codex_quick_window import QuickWindowBridge
                 bounds_path = state_root / "quick-window.json" if state_root is not None else None

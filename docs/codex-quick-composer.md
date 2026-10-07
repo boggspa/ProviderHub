@@ -27,13 +27,39 @@ launcher remains anchorable.
 ## The separate window
 
 A second preference, **Open the quick composer in its own window**
-(`codex_quick_composer_window`, only meaningful with the popover on), gives
-the composer a genuinely independent macOS window. The renderer cannot do
-this: `window.open` from the app page returns null because Desktop's
-window-open handler refuses popups. The private DevTools pipe can:
-`Target.createTarget` with `newWindow: true` makes Desktop open a separate
-window, its in-app browser panel, whose page the worker then owns
-(`codex_quick_window.py`). Probed and confirmed on 26.930.61225 on
+(`codex_quick_composer_window`, on by default, only meaningful with the
+popover on), gives the composer a genuinely independent macOS window;
+turning it off keeps the in-window overlay. There are two such windows,
+and the helper picks the right one:
+
+- **Provider Hub's own panel** (`QuickComposerPanel.swift`), whenever the
+  Hub that launched Codex is still running. A floating glass window in the
+  compact shell's material and colours, movable to any display, over other
+  apps while pinned, reopening where it was left. The sidebar launcher opens
+  it; so does **Recent chats…** in the Hub's menu bar menu, with or without
+  the preference. Escape or the close button hides it.
+- **Codex's in-app browser panel** (`codex_quick_window.py`), when the Hub
+  has quit while Codex keeps running (the helper outlives the Hub by
+  design). The rest of this section describes that fallback.
+
+The Hub panel is fed over the helper's own stdio (`codex_quick_host.py`):
+the Hub writes JSON-line commands on the helper's stdin (`hello`,
+`quick-watch` while the panel shows, `quick-send` with a request id, thread
+id and prompt) and reads JSON-line events on its stdout (`host`,
+`quick-open` when the launcher is clicked, `quick-rows` with the first ten
+rows and their previews, `quick-result` for each send). Rows and results are
+private events: the helper writes them to stdout only, never to
+`codex-accent.log`, and prompts travel inwards only. The panel itself holds
+no Desktop code; the helper performs the send through the same
+`sendFromHost` path the overlay uses, so reasons and the send report are
+unchanged. A helper launched by an older Hub, or by hand, sees a closed
+stdin and behaves as if no Hub were listening.
+
+The renderer cannot open a window on its own: `window.open` from the app
+page returns null because Desktop's window-open handler refuses popups. The
+private DevTools pipe can: `Target.createTarget` with `newWindow: true`
+makes Desktop open a separate window, its in-app browser panel, whose page
+the worker then owns (`codex_quick_window.py`). Probed and confirmed on 26.930.61225 on
 2026-10-07: the requested size is honoured (Desktop's panel has a minimum
 width of about 500px), `Browser.getWindowForTarget` and
 `Browser.setWindowBounds` position it, the document title names the tab,
@@ -42,11 +68,12 @@ focuses it, and closing it fires `Target.detachedFromTarget`.
 
 How it works:
 
-- The sidebar launcher, in window mode, asks the worker for the window
+- The sidebar launcher, in window mode, asks the worker for a window
   through a binding on the app page (`__providerHubHost`, installed with
   `Runtime.enable` on Desktop's own windows only in this mode) and sets a
   flag the worker's two-second poll also reads, so the request is not lost
-  if the binding is missing. The overlay does not open.
+  if the binding is missing. The overlay does not open. The Hub's panel
+  takes the request when the Hub is listening; otherwise this window does.
 - The worker creates the target, fills it with Provider Hub's own document
   via `Page.setDocumentContent` (no Codex code, no external resources, no
   scripts loaded from anywhere), restores the last saved bounds from
@@ -72,10 +99,11 @@ How it works:
 - Drafts live in the window page for as long as it is open; each chat keeps
   its own.
 
-Known limits: the window carries Desktop's browser-panel chrome (a tab strip
-and an address bar) above our page; it cannot be made always-on-top through
-the pipe; the first ten rows come from the sidebar in the Codex window that
-most recently answered the poll.
+Known limits of the fallback window: it carries Desktop's browser-panel
+chrome (a tab strip and an address bar) above our page, and it cannot be
+made always-on-top through the pipe. For both windows the first ten rows
+come from the sidebar in the Codex window that most recently answered the
+poll.
 
 It contains the first ten native recent-chat rows, in sidebar order, each
 with a one-line title and a one-line latest assistant response preview.

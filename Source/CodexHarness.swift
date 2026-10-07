@@ -113,13 +113,22 @@ extension BridgeModel {
         process.executableURL = URL(fileURLWithPath: python)
         process.arguments = [helper.path, "codex-accent", "--app", appPath]
         process.environment = workerEnvironment
-        let output = Pipe(), errors = Pipe()
+        let output = Pipe(), errors = Pipe(), input = Pipe()
         process.standardOutput = output; process.standardError = errors
-        process.standardInput = FileHandle.nullDevice
+        // The helper reads the hub's commands for the quick-composer panel on
+        // its stdin (codex_quick_host.py); nothing else travels that way.
+        process.standardInput = input
         try process.run()
         codexAccentProcess = process
+        codexAccentInput = input
+        quickPanel.send = { [weak self] line in
+            guard let handle = self?.codexAccentInput?.fileHandleForWriting, let data = line.data(using: .utf8) else { return }
+            try? handle.write(contentsOf: data)
+        }
         // The helper reports the app's spawn as a JSON line; an early exit
         // means the app never started (or handed off to a running copy).
+        // The same reader then relays the panel's events for as long as the
+        // helper lives, so its output never blocks on a full pipe.
         let launched = await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
             let lock = NSLock()
             var finished = false
@@ -127,27 +136,40 @@ extension BridgeModel {
                 lock.lock(); defer { lock.unlock() }
                 if !finished { finished = true; continuation.resume(returning: value) }
             }
-            DispatchQueue.global(qos: .userInitiated).async {
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
                 var buffer = Data()
                 while true {
                     let chunk = output.fileHandleForReading.availableData
-                    if chunk.isEmpty { finish(false); return }
+                    if chunk.isEmpty { break }
                     buffer.append(chunk)
-                    if String(decoding: buffer, as: UTF8.self).contains("\"launched\"") { finish(true); return }
+                    while let newline = buffer.firstIndex(of: UInt8(ascii: "\n")) {
+                        let line = buffer[buffer.startIndex..<newline]
+                        buffer.removeSubrange(buffer.startIndex...newline)
+                        guard let object = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any],
+                              let event = object["event"] as? String else { continue }
+                        if event == "launched" { finish(true) }
+                        if event == "host" || event.hasPrefix("quick-") {
+                            DispatchQueue.main.async { self?.quickPanel.handle(event: object) }
+                        }
+                    }
+                }
+                finish(false)
+                DispatchQueue.main.async {
+                    guard let self, self.codexAccentInput === input else { return }
+                    self.codexAccentInput = nil
+                    self.quickPanel.helperGone()
                 }
             }
+            DispatchQueue.global(qos: .utility).async { _ = errors.fileHandleForReading.readDataToEndOfFile() }
             DispatchQueue.global().asyncAfter(deadline: .now() + 20) { finish(false) }
-        }
-        DispatchQueue.global(qos: .utility).async {
-            // Drain the helper's remaining output so it never blocks on a full pipe.
-            _ = output.fileHandleForReading.readDataToEndOfFile()
-            _ = errors.fileHandleForReading.readDataToEndOfFile()
         }
         guard launched else {
             if process.isRunning { process.terminate() }
             codexAccentProcess = nil
+            codexAccentInput = nil
             throw WorkerError(message: "Codex / ChatGPT did not start through the accent helper. Turn the power-slider colour switch off to launch it the usual way.")
         }
+        quickPanel.send?("{\"command\":\"hello\"}\n")
     }
 
     func restoreCodex() async {
@@ -515,7 +537,7 @@ struct CodexConfigPane: View {
                 CodexPreference(isOn: $model.settings.codex_quick_composer_window, disabled: model.busy || !model.settings.codex_quick_composer,
                     title: "Open the quick composer in its own window",
                     summary: "A separate window you can move to any display, instead of an overlay inside Codex.",
-                    details: "The sidebar button opens a separate macOS window owned by Provider Hub’s helper (Codex’s in-app browser panel showing Provider Hub’s own page) rather than the floating overlay. It can sit on any display and over other apps, and reopens where you left it. The helper relays the same recent-chat rows, previews and sends through the DevTools pipe; sending is unchanged. Closing the window, pressing Escape in it, or navigating its address bar anywhere else closes it. Save, then launch.")
+                    details: "The sidebar button opens Provider Hub’s own floating glass window instead of the overlay: it can sit on any display, stays over other apps while pinned, and reopens where you left it. The helper relays the same recent-chat rows, previews and sends through the DevTools pipe; sending is unchanged, and prompts never enter the helper’s log. Recent chats… in the menu bar opens the same window. If Provider Hub has quit while Codex keeps running, the helper opens Codex’s in-app browser panel with the same composer instead. Save, then launch.")
                 Divider()
                 CodexPreference(isOn: $model.settings.codex_hide_usage_banner, disabled: model.busy || !model.settings.codex_accent_slider,
                     title: "Hide the ChatGPT usage banner",

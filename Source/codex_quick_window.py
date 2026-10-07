@@ -159,6 +159,14 @@ button:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
 """.replace("__SPIN__", _SPIN)
 
 
+def send_from_host_expression(thread_id: str, prompt: str) -> str:
+    """The app-page call that performs one send for a window or the Hub."""
+    argument = json.dumps({"threadId": thread_id, "prompt": prompt})
+    return ("(async () => { if (window !== window.top || !/^app:\\/\\/-\\//.test(String(location.href))) return null; "
+            "const composer = window.__providerHubQuickComposer; if (!composer?.sendFromHost) return null; "
+            f"return await composer.sendFromHost({argument}); }})()")
+
+
 def _load_bounds(path: Path | None) -> dict | None:
     if path is None:
         return None
@@ -188,10 +196,13 @@ def _bounds(raw) -> dict | None:
 class QuickWindowBridge:
     """Own the separate quick-composer window over the DevTools pipe."""
 
-    def __init__(self, pipe=None, emit=None, state_path: Path | None = None):
+    def __init__(self, pipe=None, emit=None, state_path: Path | None = None, host=None):
         self.pipe = pipe
         self.emit = emit or (lambda event: None)
         self.state_path = state_path
+        # The Hub's own panel (codex_quick_host) takes precedence when the
+        # Hub is listening; this window is the fallback once it is gone.
+        self.host = host
         self.bounds = _load_bounds(state_path)
         self.pending: dict[int, tuple[str, object]] = {}
         self.main_sessions: set[str] = set()
@@ -344,6 +355,8 @@ class QuickWindowBridge:
     def _host_request(self, payload):
         request = _parse(payload)
         if request.get("type") == "open-window":
+            if self.host is not None and self.host.request_open():
+                return
             self.open()
 
     def _window_request(self, payload):
@@ -376,12 +389,9 @@ class QuickWindowBridge:
             self._evaluate_window("sendResult", {"threadId": thread_id, "ok": False,
                                                  "reason": "Codex's window is not available. Your draft is kept."}, "push")
             return
-        argument = json.dumps({"threadId": thread_id, "prompt": prompt})
-        expression = ("(async () => { if (window !== window.top || !/^app:\\/\\/-\\//.test(String(location.href))) return null; "
-                      f"const composer = window.__providerHubQuickComposer; if (!composer?.sendFromHost) return null; "
-                      f"return await composer.sendFromHost({argument}); }})()")
-        identifier = self.pipe.send("Runtime.evaluate", {"expression": expression, "returnByValue": True,
-                                                         "awaitPromise": True, "timeout": 60000}, session_id=session)
+        identifier = self.pipe.send("Runtime.evaluate", {"expression": send_from_host_expression(thread_id, prompt),
+                                                         "returnByValue": True, "awaitPromise": True, "timeout": 60000},
+                                    session_id=session)
         self.pending[identifier] = ("send", thread_id)
 
     def _push(self):
@@ -428,4 +438,4 @@ def _parse(payload) -> dict:
     return value if isinstance(value, dict) else {}
 
 
-__all__ = ["QuickWindowBridge", "quick_window_html", "WINDOW_BINDING", "HOST_BINDING", "DEFAULT_BOUNDS"]
+__all__ = ["QuickWindowBridge", "quick_window_html", "send_from_host_expression", "WINDOW_BINDING", "HOST_BINDING", "DEFAULT_BOUNDS"]

@@ -65,6 +65,10 @@ final class BridgeModel: ObservableObject {
     /// The codex-accent helper holding the DevTools pipe into a Codex session
     /// launched with the power-slider colour switch on.
     var codexAccentProcess: Process?
+    /// The helper's stdin, carrying the quick-composer panel's commands.
+    var codexAccentInput: Pipe?
+    /// The floating recent-chat composer (QuickComposerPanel.swift).
+    let quickPanel = QuickPanelModel()
     @Published var profileActive = false
     @Published var recoveryNeeded = false
     @Published var codexModels: [CodexModelOption] = []
@@ -1466,6 +1470,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     /// System, Light or Dark. The choice persists beside the design choice and
     /// takes effect at once: NSApp.appearance drives every window and every
     /// dynamic colour in HubTheme.Semantic.
+    @objc func showQuickComposer() { model.quickPanel.show() }
+
     @objc func chooseSystemAppearance() { chooseAppearance(.system) }
     @objc func chooseLightAppearance() { chooseAppearance(.light) }
     @objc func chooseDarkAppearance() { chooseAppearance(.dark) }
@@ -1502,6 +1508,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         menu.addItem(.separator())
         add(menu, "Launch Claude…", #selector(launchClaude), "l")
         add(menu, "Launch Codex / ChatGPT…", #selector(launchCodex), "")
+        if model.settings.codex_quick_composer && model.codexAccentInput != nil {
+            add(menu, "Recent chats…", #selector(showQuickComposer), "")
+        }
         add(menu, "Models & Settings…", #selector(showWindow), ",")
         let designItem = NSMenuItem(title: "Design", action: nil, keyEquivalent: "")
         let designMenu = NSMenu(title: "Design")
