@@ -114,6 +114,10 @@ class QuickComposerBridge:
         self.pending = {}
         self.sessions = set()
         self.next_poll = 0.0
+        # Desktop has several pages with the script installed (the main
+        # window and hidden app pages). Only the one that last supplied rows
+        # may clear them; an empty answer from any other page means nothing.
+        self.rows_session = None
 
     def _evaluate(self, session_id, method, argument, kind):
         if kind == "read":
@@ -174,9 +178,11 @@ class QuickComposerBridge:
                 self.window.open()
         targets = _targets(value)
         if not targets:
-            if self._showing() and isinstance(value, dict):
+            if self._showing() and isinstance(value, dict) and session_id == self.rows_session:
+                self.rows_session = None
                 self._relay(session_id, [])
             return True  # Closed or no supported recent rows: no content read.
+        self.rows_session = session_id
         records = []
         try:
             records = self.previews(targets)

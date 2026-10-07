@@ -179,6 +179,32 @@ class QuickComposerBridgeTests(unittest.TestCase):
         bridge.handle(reply(pipe, {"targets": [], "report": None, "windowRequest": True}))
         window.open.assert_called_once_with()
 
+    def test_only_the_page_that_supplied_rows_may_clear_them(self):
+        pipe, events = FakeTransport(), []
+        reader = mock.Mock(return_value=[])
+        host = mock.Mock()
+        host.is_watching.return_value = True
+        host.request_open.return_value = True
+        bridge = QuickComposerBridge(pipe, reader, events.append, window=None, host=host)
+        bridge.refresh({"main", "hidden"})
+        sent = {m["sessionId"]: m["id"] for m in pipe.sent}
+        bridge.handle({"id": sent["main"], "result": {"result": {"value": {"targets": [target(1)], "report": None}}}})
+        self.assertEqual(host.update.call_args_list[-1][0][0], "main")
+        self.assertEqual(len(host.update.call_args_list[-1][0][1]), 1)
+        # A page without a sidebar answers with nothing: the rows stay.
+        bridge.handle({"id": sent["hidden"], "result": {"result": {"value": {"targets": [], "report": None}}}})
+        self.assertEqual(len(host.update.call_args_list), 1)
+        # The sidebar page itself reporting nothing does clear them.
+        bridge.handle(reply(pipe, {"applied": 1}))  # the previews write for main
+        bridge.next_poll = 0
+        bridge.refresh({"main", "hidden"})
+        sent = {m["sessionId"]: m["id"] for m in pipe.sent[-2:]}
+        bridge.handle({"id": sent["main"], "result": {"result": {"value": {"targets": [], "report": None}}}})
+        self.assertEqual(host.update.call_args_list[-1], mock.call("main", []))
+        self.assertEqual(len(host.update.call_args_list), 2)
+        bridge.handle({"id": sent["hidden"], "result": {"result": {"value": {"targets": [], "report": None}}}})
+        self.assertEqual(len(host.update.call_args_list), 2)
+
     def test_renderer_exception_is_content_free_and_does_not_end_polling(self):
         pipe, reader, events = FakeTransport(), mock.Mock(), []
         bridge = QuickComposerBridge(pipe, reader, events.append)
