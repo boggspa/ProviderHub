@@ -33,8 +33,24 @@ files can be attached, at 8 MiB per file and 20 MiB per message. Originals are
 copied into private Chat storage so saved thumbnails do not depend on the
 source staying in place. Removing a draft attachment does not delete its source.
 
-There is no message queue: drafts stay in the composer during a turn. Direct
-steering/session-recall behaviour is deferred; Stop remains immediate.
+There is no message queue. During a turn, type an update and press Return or
+**Interrupt and send update**. Chat cancels the active request, waits for local
+tool cleanup, records its real result, then starts a fresh request with the
+update as user input. Partial output stays visible. An update is never disguised
+as a tool result. A second update cannot queue behind an interruption; keep it in
+the composer until the new turn starts. Stop also cancels an impending restart.
+If the app closes during interruption, the saved update is recovered without
+automatically executing it.
+
+The header's unboxed Git indicator shows changed files, tracked added/deleted
+lines, and gold/blue ahead/behind counts against the cached upstream. It never
+fetches a remote. With no upstream, only a positive local-commit count appears;
+its tooltip labels that distinction. Git inspection runs separately from the
+conversation loop so it cannot block Stop.
+
+The small gear at the bottom-left of the chat rail offers Theme, Glass/Solid,
+System/Monospaced font, and Small/Default/Large text. Theme and surface reuse the
+Hub's existing preferences. Text choices affect the transcript and composer.
 
 ## Files and commands
 

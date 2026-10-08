@@ -66,6 +66,15 @@ struct ChatApproval: Decodable, Identifiable {
     var workspace: String
     var detail: String?
 }
+struct ChatGitStatus: Decodable {
+    var files: Int
+    var added: Int
+    var deleted: Int
+    var ahead: Int
+    var behind: Int?
+    var upstream: String?
+    var branch: String
+}
 
 /// One local worker owns Chat's transcript and execution loop. Its transport
 /// contains no provider credentials; the existing authenticated gateway owns them.
@@ -78,6 +87,7 @@ final class ChatModel: ObservableObject {
     @Published var draft = ""
     @Published var attachments: [ChatAttachment] = []
     @Published var busy = false
+    @Published var interrupting = false
     @Published var notice = ""
     @Published var connected = false
     @Published var approval: ChatApproval?
@@ -85,7 +95,9 @@ final class ChatModel: ObservableObject {
     @Published var recentFolders: [String] = []
     @Published var tokenUsage: Int?
     @Published var contextLimit: Int?
+    @Published var gitStatus: ChatGitStatus?
     var onActivity: ((Bool) -> Void)?
+    var onSurfaceChange: (() -> Void)?
     private weak var bridge: BridgeModel?
     private var process: Process?
     private var input: Pipe?
@@ -106,6 +118,7 @@ final class ChatModel: ObservableObject {
     var activeAccent: Color { selectedRoute?.accent ?? .secondary }
     var approvalMode: String { selected?.approvalMode ?? "manual" }
     var canSend: Bool { connected && !busy && selectedRoute != nil && (!draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty) }
+    var canInterrupt: Bool { connected && busy && !interrupting && pendingSend == nil && selectedRoute != nil && (!draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty) }
     func accent(for route: String) -> Color { models.first { $0.route == route }?.accent ?? .secondary }
 
     func start() async {
@@ -152,6 +165,9 @@ final class ChatModel: ObservableObject {
         input = nil
     }
     func refresh() { write(["command": "refresh"]) }
+    func refreshGitStatus() {
+        if connected, let selectedID { write(["command": "git_status", "id": selectedID]) }
+    }
     func newChat() {
         guard !busy else { return }
         let choice = selectedRoute ?? models.first
@@ -163,14 +179,16 @@ final class ChatModel: ObservableObject {
         write(["command": "select", "id": id])
     }
     func send() {
-        guard canSend, let selectedID else { return }
+        guard canSend || canInterrupt, let selectedID else { return }
+        let command = busy ? "steer" : "send"
         let text = draft; draft = ""; drafts[selectedID] = ""; notice = ""
         let files = attachments; attachments = []; attachmentDrafts[selectedID] = []
         pendingSend = (selectedID, text, files)
-        setBusy(true); status = "Connecting…"
-        if !write(["command": "send", "id": selectedID, "text": text, "attachments": files.map(\.request)]) { restorePendingSend(); setBusy(false) }
+        setBusy(true); interrupting = command == "steer"
+        status = interrupting ? "Interrupting for your update…" : "Connecting…"
+        if !write(["command": command, "id": selectedID, "text": text, "attachments": files.map(\.request)]) { restorePendingSend(); setBusy(false); interrupting = false }
     }
-    func stop() { write(["command": "stop"]); status = "Stopping…" }
+    func stop() { guard busy else { return }; write(["command": "stop"]); interrupting = true; status = "Stopping…" }
     func retry() {
         guard !busy, let selectedID else { return }
         notice = ""; setBusy(true); write(["command": "retry", "id": selectedID])
@@ -231,7 +249,7 @@ final class ChatModel: ObservableObject {
     func rename(_ id: String, title: String) { guard !busy else { return }; write(["command": "rename", "id": id, "title": title]) }
     func delete(_ id: String) { guard !busy else { return }; write(["command": "delete", "id": id]) }
 
-    private func setBusy(_ value: Bool) { busy = value; onActivity?(value) }
+    private func setBusy(_ value: Bool) { busy = value; if !value { interrupting = false }; onActivity?(value) }
     private func restorePendingSend() {
         guard let pendingSend else { return }
         if selectedID == pendingSend.chat {
@@ -251,7 +269,7 @@ final class ChatModel: ObservableObject {
         catch { notice = "Chat disconnected. Your saved transcript is kept."; connected = false; return false }
     }
     private func decode<T: Decodable>(_ type: T.Type, _ raw: Any?) -> T? {
-        guard let raw, let data = try? JSONSerialization.data(withJSONObject: raw) else { return nil }
+        guard let raw, JSONSerialization.isValidJSONObject(raw), let data = try? JSONSerialization.data(withJSONObject: raw) else { return nil }
         return try? JSONDecoder().decode(type, from: data)
     }
     func consume(_ data: Data) {
@@ -270,6 +288,7 @@ final class ChatModel: ObservableObject {
                 if id != selectedID {
                     if let selectedID { drafts[selectedID] = draft; attachmentDrafts[selectedID] = attachments }
                     draft = id.flatMap { drafts[$0] } ?? ""; attachments = id.flatMap { attachmentDrafts[$0] } ?? []
+                    gitStatus = nil
                 }
                 selectedID = id; entries = decode([ChatEntry].self, event["entries"]) ?? []
                 tokenUsage = event["usage"] as? Int; contextLimit = selectedRoute?.context
@@ -286,10 +305,16 @@ final class ChatModel: ObservableObject {
             case "approval": approval = decode(ChatApproval.self, event["approval"]); status = "Needs approval"
             case "state":
                 setBusy(event["busy"] as? Bool ?? false); status = event["status"] as? String ?? "Ready"
+                interrupting = event["interrupting"] as? Bool ?? (busy && interrupting)
                 tokenUsage = event["usage"] as? Int ?? tokenUsage
                 if !busy { approval = nil }
             case "error": restorePendingSend(); notice = event["message"] as? String ?? "Chat failed."; setBusy(false); approval = nil
+            case "rejected":
+                restorePendingSend(); notice = event["message"] as? String ?? "The update was not accepted."
+                setBusy(event["busy"] as? Bool ?? false); interrupting = event["interrupting"] as? Bool ?? false
             case "notice": notice = event["message"] as? String ?? ""
+            case "git_status":
+                if event["chat"] as? String == selectedID { gitStatus = decode(ChatGitStatus.self, event["status"]) }
             default: break
             }
         }

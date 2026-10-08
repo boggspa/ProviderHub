@@ -25,6 +25,7 @@ from bridge_core import gateway_token, load_settings, private_directory, state_r
 from chat_tools import ChatToolRunner, TOOL_DEFINITIONS
 from chat_attachments import prepare_attachments, bound_image_history
 from chat_history import portable_history
+from chat_git import git_status
 from protocol import compact_conversation, estimated_tokens
 
 MAX_ROUNDS = 24
@@ -119,11 +120,13 @@ opaque thinking/signatures are kept intact and are never rendered as text.
 
     def save(self, chat):
         target = self.path(chat["id"])
-        metadata = {key: value for key, value in chat.items() if key not in {"entries", "messages", "archives"}}
+        metadata = {key: value for key, value in chat.items() if key not in {"entries", "messages", "archives", "pending_update"}}
         rows = [{"type": "metadata", "value": metadata}]
         rows += [{"type": "entry", "value": value} for value in chat["entries"]]
         rows += [{"type": "message", "value": value} for value in chat["messages"]]
         rows += [{"type": "archive", "value": value} for value in chat.get("archives", [])]
+        if chat.get("pending_update"):
+            rows.append({"type": "pending_update", "value": chat["pending_update"]})
         temp = self.root / ("." + uuid.uuid4().hex + ".tmp")
         try:
             fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
@@ -148,6 +151,8 @@ opaque thinking/signatures are kept intact and are never rendered as text.
         chat["entries"] = [row["value"] for row in rows[1:] if row.get("type") == "entry"]
         chat["messages"] = [row["value"] for row in rows[1:] if row.get("type") == "message"]
         chat["archives"] = [row["value"] for row in rows[1:] if row.get("type") == "archive"]
+        pending = [row["value"] for row in rows[1:] if row.get("type") == "pending_update"]
+        if pending: chat["pending_update"] = pending[-1]
         return chat
 
     def all(self):
@@ -331,6 +336,9 @@ class ChatService:
         self.cancel = threading.Event()
         self.thread = None
         self._working = False
+        self._git_working = False
+        self._steering = False
+        self._resume_after_interrupt = False
         self.approval = None
         self.approval_event = threading.Event()
         self.approval_allowed = False
@@ -357,8 +365,9 @@ class ChatService:
     def initialize(self):
         chats = self.store.all()
         for chat in chats:
-            if chat.get("status") == "working":
+            if chat.get("status") == "working" or chat.get("pending_update"):
                 self.settle(chat, "Chat was interrupted before a recorded result. Inspect the workspace before retrying.")
+                self.apply_pending_update(chat)
                 chat["entries"].append(entry("notice", "Interrupted when Chat closed. Recorded changes and output are kept.", chat["route"]))
                 for item in chat["entries"]:
                     if item.get("kind") == "tool" and item.get("detail") == "Running…":
@@ -398,17 +407,96 @@ class ChatService:
         self.store.save(self.chat); self.publish()
 
     def add(self, item):
-        self.chat["entries"].append(item)
-        self.emit({"event": "entry", "chat": self.chat["id"], "entry": item})
+        with self._mutex:
+            self.chat["entries"].append(item)
+            self.emit({"event": "entry", "chat": self.chat["id"], "entry": item})
         return item
 
     def save(self):
-        self.chat["updated"] = now(); self.store.save(self.chat)
+        with self._mutex:
+            self.chat["updated"] = now(); self.store.save(self.chat)
+
+    def prepare_update(self, command):
+        text = command.get("text", "")
+        inputs = command.get("attachments", [])
+        if not isinstance(text, str) or (not text.strip() and not inputs) or len(text) > MAX_TEXT:
+            raise ValueError("Enter a message of at most 100,000 characters.")
+        attached, blocks = prepare_attachments(inputs, self.store.root / self.chat["id"], vision=self.choice().get("vision") is not False)
+        visible = entry("user", text, self.chat["route"], attachments=attached)
+        content = [{"type": "text", "text": text if text.strip() else "Please review the attached files."}, *blocks]
+        return {"entry": visible, "content": content}
+
+    @staticmethod
+    def apply_pending_update(chat):
+        pending = chat.pop("pending_update", None)
+        if pending:
+            chat["messages"].append({"role": "user", "content": pending["content"]})
+        return pending
+
+    def interrupt_with_update(self, command):
+        if not self.chat or command.get("id") != self.chat["id"]:
+            raise ValueError("Select the active chat before sending an update.")
+        if not self.busy:
+            return self.handle({**command, "command": "send"})
+        with self._mutex:
+            if not self.busy:
+                return self.handle({**command, "command": "send"})
+            if self._steering:
+                raise ValueError("The previous update is interrupting the turn. Keep the next draft in the composer.")
+            pending = self.prepare_update(command)
+            self.chat["pending_update"] = pending
+            self.chat["entries"].append(pending["entry"])
+            try: self.save()
+            except Exception:
+                self.chat.pop("pending_update", None)
+                self.chat["entries"] = [row for row in self.chat["entries"] if row["id"] != pending["entry"]["id"]]
+                raise
+            self._steering = True; self._working = True; self._resume_after_interrupt = True
+            previous = self.thread
+            self.cancel.set(); self.transport.cancel(); self.approval_event.set()
+            self.emit({"event": "entry", "chat": self.chat["id"], "entry": pending["entry"]})
+            self.emit({"event": "state", "busy": True, "interrupting": True, "status": "Interrupting for your update…"})
+        # The old turn must finish cleanup and record real tool outcomes before
+        # the next request starts. This one interruption is never a task queue.
+        def restart():
+            if previous is not None: previous.join()
+            with self._mutex:
+                self.apply_pending_update(self.chat)
+                resume = self._resume_after_interrupt
+                self._steering = False; self._resume_after_interrupt = False
+                self.chat["status"] = "working" if resume else "stopped"
+                try: self.save(); self.publish()
+                except Exception:
+                    resume = False
+                    self.emit({"event": "error", "message": "The update was saved but Chat could not restart. Reopen Chat to recover it."})
+                if resume:
+                    self.cancel.clear(); self.approval_event.clear()
+                    self.thread = threading.Thread(target=self.run, name="provider-hub-chat", daemon=True)
+                    self.thread.start()
+                else:
+                    self._working = False
+                    self.emit({"event": "state", "busy": False, "interrupting": False, "status": "Stopped"})
+        threading.Thread(target=restart, name="chat-interrupt", daemon=True).start()
 
     def handle(self, command):
         action = command.get("command")
+        if action == "git_status":
+            if not self.chat or command.get("id") != self.chat["id"] or self._git_working:
+                return
+            self._git_working = True
+            identifier, workspace = self.chat["id"], self.chat["workspace"]
+            def report_git():
+                try: self.emit({"event": "git_status", "chat": identifier, "status": git_status(workspace)})
+                finally: self._git_working = False
+            threading.Thread(target=report_git, name="chat-git-status", daemon=True).start()
+            return
         if action == "stop":
-            self.cancel.set(); self.transport.cancel(); self.approval_event.set(); return
+            with self._mutex:
+                self._resume_after_interrupt = False
+                self.cancel.set(); self.transport.cancel(); self.approval_event.set()
+            return
+        if action == "steer":
+            return self.interrupt_with_update(command)
         if action == "approve":
             with self._mutex:
                 if self.approval is None or command.get("id") != self.approval["id"]:
@@ -459,18 +547,14 @@ class ChatService:
             if not self.chat or command.get("id") != self.chat["id"]:
                 raise ValueError("Select a chat before sending.")
             choice = self.choice()
-            text = command.get("text", "")
             if action == "send":
-                attachment_inputs = command.get("attachments", [])
-                if not isinstance(text, str) or (not text.strip() and not attachment_inputs) or len(text) > MAX_TEXT:
-                    raise ValueError("Enter a message of at most 100,000 characters.")
-                attached, blocks = prepare_attachments(attachment_inputs, self.store.root / self.chat["id"], vision=choice.get("vision") is not False)
-                prompt = text if text.strip() else "Please review the attached files."
-                self.chat["messages"].append({"role": "user", "content": [{"type": "text", "text": prompt}, *blocks]})
-                accepted_entry = entry("user", text, self.chat["route"], attachments=attached)
+                update = self.prepare_update(command)
+                accepted_entry = update["entry"]
+                self.chat["messages"].append({"role": "user", "content": update["content"]})
                 self.chat["entries"].append(accepted_entry)
                 if self.chat["title"] == "New chat":
-                    self.chat["title"] = " ".join(text.split())[:64] if text.strip() else attached[0]["name"]
+                    text = accepted_entry["text"]
+                    self.chat["title"] = " ".join(text.split())[:64] if text.strip() else accepted_entry["attachments"][0]["name"]
             elif self.chat.get("status") not in {"error", "interrupted", "stopped"} or not self.chat["messages"]:
                 raise ValueError("There is no interrupted turn to retry.")
             self.chat["status"] = "working"; self.save()
@@ -561,7 +645,7 @@ class ChatService:
             runner = self.runner_type(chat["workspace"], cancel_event=self.cancel)
             for _ in range(MAX_ROUNDS):
                 if self.cancel.is_set(): raise InterruptedError("Stopped")
-                self.emit({"event": "state", "busy": True, "status": "Thinking…"})
+                self.emit({"event": "state", "busy": True, "interrupting": False, "status": "Thinking…"})
                 current = self.add(entry("assistant", route=chat["route"]))
                 def delta(text):
                     current["text"] += text
@@ -638,8 +722,10 @@ class ChatService:
             except Exception:
                 self.emit({"event": "error", "message": "Chat could not save its latest result. Inspect the workspace before retrying."})
             status = {"stopped": "Stopped", "error": "Request failed"}.get(chat["status"], "Ready")
-            self._working = False
-            self.emit({"event": "state", "busy": False, "status": status, "usage": chat.get("usage")})
+            with self._mutex:
+                if not self._steering:
+                    self._working = False
+                    self.emit({"event": "state", "busy": False, "interrupting": False, "status": status, "usage": chat.get("usage")})
 
 
 def main():
@@ -653,13 +739,15 @@ def main():
         service = ChatService(ChatStore(root), GatewayClient(root), emit)
         service.initialize()
         for line in sys.stdin:
+            command = None
             try:
                 if len(line) > 2_000_000: raise ValueError("Chat command is too large.")
                 command = json.loads(line)
                 if not isinstance(command, dict): raise ValueError("Chat command must be an object.")
                 service.handle(command)
             except Exception as exc:
-                emit({"event": "notice" if service.busy else "error", "message": str(exc)})
+                kind = "rejected" if isinstance(command, dict) and command.get("command") in {"send", "steer"} else "notice" if service.busy else "error"
+                emit({"event": kind, "message": str(exc), "busy": service.busy, "interrupting": service._steering})
     except Exception as exc:
         emit({"event": "error", "message": str(exc)})
     finally:
