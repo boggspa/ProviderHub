@@ -21,11 +21,14 @@ struct ChatChange: Decodable, Identifiable {
 struct ChatChanges: Decodable { var files: [ChatChange]; var truncated: Bool }
 struct ChatBranch: Decodable, Identifiable {
     var name: String; var current: Bool; var worktree: String?
-    var id: String { name }
+    var nameBytes: String?
+    var id: String { nameBytes ?? name }
 }
 struct ChatWorktree: Decodable, Identifiable {
     var path: String; var branch: String?; var current: Bool; var locked: Bool?; var prunable: Bool?
-    var id: String { path }
+    var pathBytes: String?
+    var selectable: Bool?
+    var id: String { pathBytes ?? path }
 }
 struct ChatBranchesSnapshot: Decodable {
     var root: String; var current: String?; var branches: [ChatBranch]; var worktrees: [ChatWorktree]
@@ -55,22 +58,29 @@ struct ChatSide: Decodable, Identifiable {
         inspectorTab = tab; inspectorVisible = true
     }
     func refreshChanges() {
-        guard connected, let selectedID, !gitChangesLoading else { return }
+        guard connected, let selectedID else { return }
+        if gitChangesLoading { changesRefreshPending = true; return }
+        let request = UUID().uuidString; changesRequest = request; changesRefreshPending = false
         gitChangesLoading = true; inspectorNotice = ""
-        if !inspectorCommand(["command": "inspect_git", "id": selectedID]) { gitChangesLoading = false }
+        if !inspectorCommand(["command": "inspect_git", "id": selectedID, "request": request]) { gitChangesLoading = false; changesRequest = nil }
     }
     func refreshBranches() {
-        guard connected, let selectedID, !branchesLoading, !branchBusy else { return }
+        guard connected, let selectedID, !branchBusy else { return }
+        if branchesLoading { branchesRefreshPending = true; return }
+        let request = UUID().uuidString; branchesRequest = request; branchesRefreshPending = false
         branchesLoading = true; branchNotice = ""
-        if !inspectorCommand(["command": "branches", "id": selectedID]) { branchesLoading = false }
+        if !inspectorCommand(["command": "branches", "id": selectedID, "request": request]) { branchesLoading = false; branchesRequest = nil }
     }
-    func branchAction(_ action: String, branch: String? = nil, path: String? = nil) {
+    func branchAction(_ action: String, branch: String? = nil, path: String? = nil, branchBytes: String? = nil) {
         guard canChangeBranch, let selectedID else { return }
         var command: [String: Any] = ["command": "branch_action", "id": selectedID, "action": action]
         if let branch { command["branch"] = branch }
         if let path { command["path"] = path }
+        if let branchBytes { command["branchBytes"] = branchBytes }
+        let request = UUID().uuidString; command["request"] = request
+        branchRequest = request; branchesRequest = request; branchesRefreshPending = false; branchesLoading = false
         branchBusy = true; branchNotice = ""
-        if !inspectorCommand(command) { branchBusy = false; branchNotice = "Chat is disconnected." }
+        if !inspectorCommand(command) { branchBusy = false; branchRequest = nil; branchesRequest = nil; branchNotice = "Chat is disconnected." }
     }
     func openSideChat(choice: String, effort: String) {
         guard connected, let selectedID, !branchBusy, !sideOpening, sideChat == nil else { return }
@@ -111,6 +121,7 @@ struct ChatSide: Decodable, Identifiable {
         if let selectedID { sideDrafts[selectedID] = sideDraft }
         if clearSessions { sideRequests = [:]; sideDrafts = [:] }
         gitChanges = nil; gitChangesLoading = false; branches = nil; branchesLoading = false; branchBusy = false
+        changesRequest = nil; changesRefreshPending = false; branchesRequest = nil; branchesRefreshPending = false; branchRequest = nil
         inspectorNotice = ""; branchNotice = ""; agents = []; inspectedAgentID = nil
         sideChat = nil; sideDraft = ""; sideNotice = ""; sideOpening = false; pendingSideText = nil
     }
@@ -123,16 +134,23 @@ struct ChatSide: Decodable, Identifiable {
         switch event["event"] as? String {
         case "git_changes":
             if let workspace = event["workspace"] as? String, workspace != selected?.workspace { return }
+            guard event["request"] as? String == changesRequest else { return }
+            if changesRefreshPending { gitChangesLoading = false; refreshChanges(); return }
             gitChanges = decoded(event["changes"], as: ChatChanges.self); gitChangesLoading = false
+            changesRequest = nil
             inspectorNotice = event["notice"] as? String ?? ""
         case "branches":
             if let workspace = event["workspace"] as? String, workspace != selected?.workspace { return }
+            guard event["request"] as? String == branchesRequest else { return }
+            if branchesRefreshPending && !branchBusy { branchesLoading = false; refreshBranches(); return }
             branches = decoded(event["branches"], as: ChatBranchesSnapshot.self); branchesLoading = false
+            branchesRequest = nil; branchesRefreshPending = false
             if let notice = event["notice"] as? String { branchNotice = notice }
         case "branch_state":
+            guard event["request"] as? String == branchRequest else { return }
             branchBusy = event["busy"] as? Bool ?? false
             branchNotice = event["notice"] as? String ?? ""
-            if !branchBusy { refreshGitStatus(); if inspectorVisible && inspectorTab == .changes { refreshChanges() } }
+            if !branchBusy { branchRequest = nil; refreshGitStatus(); if inspectorVisible && inspectorTab == .changes { refreshChanges() } }
         case "agents":
             agents = decoded(event["agents"], as: [ChatAgent].self) ?? []
         case "agent_entry":

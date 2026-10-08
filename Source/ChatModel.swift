@@ -103,8 +103,13 @@ final class ChatModel: ObservableObject {
     @Published var inspectorTab: ChatInspectorTab = .changes
     @Published var gitChanges: ChatChanges?
     @Published var gitChangesLoading = false
+    var changesRequest: String?
+    var changesRefreshPending = false
     @Published var branches: ChatBranchesSnapshot?
     @Published var branchesLoading = false
+    var branchesRequest: String?
+    var branchesRefreshPending = false
+    var branchRequest: String?
     @Published var branchBusy = false
     @Published var inspectorNotice = ""
     @Published var branchNotice = ""
@@ -329,6 +334,8 @@ final class ChatModel: ObservableObject {
                 chats = decode([ChatSummary].self, event["chats"]) ?? []
                 if previousWorkspace != selected?.workspace {
                     gitStatus = nil; gitChanges = nil; gitChangesLoading = false; branches = nil; branchesLoading = false
+                    changesRequest = nil; changesRefreshPending = false; branchesRefreshPending = false
+                    if !branchBusy { branchesRequest = nil }
                 }
             case "selected":
                 let id = event["id"] as? String

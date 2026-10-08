@@ -1,6 +1,7 @@
 """Delegation and temporary discussions exercise the real host tool loop."""
 import copy
 import json
+import os
 from pathlib import Path
 import tempfile
 import threading
@@ -381,6 +382,23 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(len(states), 2)
         self.assertEqual(states[-1]["notice"], "Dirty checkout")
         self.assertFalse(states[-1]["busy"])
+
+    def test_inspections_and_branch_changes_echo_generation_and_exact_ref(self):
+        parent = self.service([], [])
+        identifier = parent.chat["id"]
+        with patch("chat_inspector.git_changes", return_value={"files":[], "truncated":False}):
+            parent.handle({"command":"inspect_git", "id":identifier, "request":"changes-1"})
+            self.wait_for(lambda: any(e.get("request") == "changes-1" for e in self.events))
+        with patch("chat_inspector.git_branches", return_value={"current":"main"}):
+            parent.handle({"command":"branches", "id":identifier, "request":"branches-1"})
+            self.wait_for(lambda: any(e.get("request") == "branches-1" for e in self.events))
+        raw = b"topic-\xff"
+        with patch("chat_inspector.switch_branch", return_value={"current":"topic-\\xff"}) as switch:
+            parent.handle({"command":"branch_action", "id":identifier, "request":"switch-1", "action":"switch", "branch":"topic-\\xff", "branchBytes":raw.hex()})
+            self.wait_for(lambda: not parent._branch_working)
+            self.assertEqual(os.fsencode(switch.call_args.args[1]), raw)
+        states = [e for e in self.events if e.get("event") == "branch_state"]
+        self.assertTrue(all(e["request"] == "switch-1" for e in states))
 
 
 if __name__ == "__main__": unittest.main()
