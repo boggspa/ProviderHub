@@ -55,6 +55,64 @@ const publishSidebar = async (page, entries) => {
   await flush(page);
 };
 const cases = {
+  async visible_child_model_wins_during_reuse_and_late_worker_replies(page) {
+    await mount(page, main() + agent('codex/gpt-6-astra · High'));
+    await page.locator('#agent-model').evaluate((element, id) => {
+      // React can keep the DOM node's original fiber after an update. Its
+      // owner props still name the previously selected Codex child.
+      element.__reactFiber$fixture = { memoizedProps: {}, return: {
+        memoizedProps: { seed: id, onBack(){} }, return: {
+          memoizedProps: { conversationId: id, hostId: 'local', onBack(){} }, return: null
+        }
+      }};
+    }, threadId(2));
+    await page.evaluate(data => window.__providerHubAccent.setChildAccents(data), {[threadId(2)]:'#705AFF'});
+    assert.equal(await colour(page, 'agent-glyph'), colours.parent);
+    await page.locator('#agent-model').evaluate(element => { element.firstChild.data = 'claude/fable · High'; });
+    await flush(page);
+    assert.equal(await colour(page, 'agent-glyph'), 'rgb(217, 119, 87)');
+    // A reply already in flight must not undo the displayed model's accent.
+    await page.evaluate(data => window.__providerHubAccent.setChildAccents(data), {[threadId(2)]:'#705AFF'});
+    assert.equal(await colour(page, 'agent-glyph'), 'rgb(217, 119, 87)');
+    assert.equal(await colour(page, 'main-glyph'), colours.parent);
+    assert.notEqual(await custom(page, 'agent-glyph', hue), await custom(page, 'main-glyph', hue));
+    await page.locator('#agent-model').evaluate(element => { element.firstChild.data = 'codex/gpt-6-astra · High'; });
+    await flush(page);
+    await page.evaluate(data => window.__providerHubAccent.setChildAccents(data), {[threadId(2)]:'#D97757'});
+    assert.equal(await colour(page, 'agent-glyph'), colours.parent);
+  },
+  async ambiguous_reused_child_identity_cannot_borrow_previous_metadata(page) {
+    await mount(page, main() + agent('Unlisted display label'));
+    await page.locator('#agent-model').evaluate((element, ids) => {
+      const branch = (id, hostId='local') => ({ memoizedProps: {}, return: {
+        memoizedProps: { seed: id, onBack(){} }, return: {
+          memoizedProps: { conversationId: id, hostId, onBack(){} }, return: null
+        }
+      }});
+      const previous = branch(ids[0]);
+      const next = branch(ids[1]);
+      previous.alternate = next;
+      next.alternate = previous;
+      element.__reactFiber$fixture = previous;
+    }, [threadId(2), threadId(3)]);
+    assert.deepEqual(await page.evaluate(() => window.__providerHubAccent.childThreadIds()), []);
+    await page.evaluate(data => window.__providerHubAccent.setChildAccents(data), {[threadId(2)]:'#705AFF'});
+    assert.equal(await colour(page, 'agent-glyph'), colours.grey);
+    await page.locator('#agent-model').evaluate(element => {
+      const original = element.__reactFiber$fixture;
+      original.return.memoizedProps.seed = original.alternate.return.memoizedProps.seed;
+      original.return.return.memoizedProps.conversationId = original.alternate.return.return.memoizedProps.conversationId;
+    });
+    assert.deepEqual(await page.evaluate(() => window.__providerHubAccent.childThreadIds()), [threadId(3)]);
+    await page.evaluate(data => window.__providerHubAccent.setChildAccents(data), {[threadId(3)]:'#D97757'});
+    assert.equal(await colour(page, 'agent-glyph'), 'rgb(217, 119, 87)');
+    await page.locator('#agent-model').evaluate(element => {
+      element.__reactFiber$fixture.alternate.return.return.memoizedProps.hostId = 'remote-host';
+    });
+    assert.deepEqual(await page.evaluate(() => window.__providerHubAccent.childThreadIds()), []);
+    await page.evaluate(data => window.__providerHubAccent.setChildAccents(data), {[threadId(3)]:'#D97757'});
+    assert.equal(await colour(page, 'agent-glyph'), colours.grey);
+  },
   async current_shell_header_rows_resolve_identity_and_survive_dock_switches(page) {
     const currentHeader = `<div class="flex h-full min-w-0 items-center gap-2 px-4"><button>Back</button><span>Agent name</span><span id="agent-model" class="max-w-1/2 min-w-0 truncate text-xs text-tertiary select-none">Unlisted display label</span></div>`;
     await mount(page, main() + tab('agent', 'subagents:parent', currentHeader + glyph('agent-glyph')));
@@ -475,6 +533,7 @@ class PaneAccentBrowserTests(unittest.TestCase):
         }
         options = dict(native_labels=["GPT-6-Astra", "gpt-6-astra"], route_accents={
             "mistral/mistral-vibe-cli-latest": "#D44404", "ollama/qwen3:cloud": "#8C52EF",
+            "claude/fable": "#D97757",
         })
         script = watcher_script(accents, **options)
         unlock = watcher_script(accents, unlock_composer=True, **options)

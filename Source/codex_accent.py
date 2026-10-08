@@ -793,12 +793,7 @@ _WATCHER = r"""
       }
       return null;
     }
-    function selectedChild(panel) {
-      if (!panel.getAttribute('data-tab-id')?.startsWith('subagents:')) { return null; }
-      const header = childHeader(panel);
-      if (!header) { return null; }
-      const fiberKey = Object.keys(header).find(name => name.startsWith('__reactFiber$'));
-      let fiber = fiberKey ? header[fiberKey] : null;
+    function childIdentity(fiber) {
       let seed = null;
       // The shared SubagentPanelHeader receives seed + onBack; its caller
       // receives the same conversationId + hostId. Both must agree. Never
@@ -810,10 +805,27 @@ _WATCHER = r"""
           seed = props.seed;
         }
         if (seed && props.conversationId === seed && typeof props.onBack === 'function' && typeof props.hostId === 'string') {
-          return { threadId: seed, hostId: props.hostId, element: header };
+          return { threadId: seed, hostId: props.hostId };
         }
       }
       return null;
+    }
+    function selectedChild(panel) {
+      if (!panel.getAttribute('data-tab-id')?.startsWith('subagents:')) { return null; }
+      const header = childHeader(panel);
+      if (!header) { return null; }
+      const fiberKey = Object.keys(header).find(name => name.startsWith('__reactFiber$'));
+      const fiber = fiberKey ? header[fiberKey] : null;
+      const selected = childIdentity(fiber);
+      if (!selected) { return null; }
+      // A reused DOM node can keep its original fiber while React commits
+      // the alternate. Do not send either child's ID to the worker when
+      // those owner chains disagree; the visible model remains usable.
+      if (fiber.alternate) {
+        const alternate = childIdentity(fiber.alternate);
+        if (!alternate || alternate.threadId !== selected.threadId || alternate.hostId !== selected.hostId) { return null; }
+      }
+      return { ...selected, element: header };
     }
     function childThreadIds() {
       const result = [];
@@ -840,12 +852,10 @@ _WATCHER = r"""
       if (!panel.getAttribute("data-tab-id").startsWith("subagents:")) { return null; }
       const element = childHeader(panel);
       if (!element || element.closest(TAB_PANEL_SELECTOR) !== panel) { return null; }
-      const selected = selectedChild(panel);
-      const colour = selected?.hostId === 'local' ? child.colours.get(selected.threadId) : null;
-      if (colour) {
-        return { colour, theme: themeOf(element), hue: PALETTE_HUES[colour] ?? '' };
-      }
       const text = norm(element.textContent);
+      // The displayed model updates with the transcript. Metadata polling
+      // and a reused header's React identity can still describe the previous
+      // child, so neither may override a recognised model already on screen.
       // Try the whole value before removing the final effort suffix, since
       // a Hub display label may itself contain a middle dot.
       for (const candidate of [text, text.replace(/\s+·\s+[^·]+$/, "")]) {
@@ -855,6 +865,11 @@ _WATCHER = r"""
         }
         const key = lookup(candidate.startsWith("codex/") ? candidate.slice(6) : candidate);
         if (key) { return { colour: ACCENTS[key], theme: themeOf(element), hue: Object.prototype.hasOwnProperty.call(HUES, key) ? String(HUES[key]) : "" }; }
+      }
+      const selected = selectedChild(panel);
+      const colour = selected?.hostId === 'local' ? child.colours.get(selected.threadId) : null;
+      if (colour) {
+        return { colour, theme: themeOf(element), hue: PALETTE_HUES[colour] ?? '' };
       }
       return null;
     }
@@ -1103,7 +1118,7 @@ _WATCHER = r"""
     observer.observe(document, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ["data-explicit-model", "data-accent", "data-maximum", "data-selected-reasoning-effort", "data-tab-id", "data-app-shell-tab-panel-controller", "data-app-shell-active-page", SIDEBAR_ROW, SIDEBAR_ID, SIDEBAR_HOST, SIDEBAR_KIND, "role", "inert", "hidden"] });
     if (document.readyState === "loading") { document.addEventListener("DOMContentLoaded", schedule, { once: true }); }
     window.__providerHubAccent = {
-      version: 20,
+      version: 21,
       accents: Object.keys(ACCENTS).length,
       sidebarThreadIds: () => Array.from(new Set(sidebarRows().map(row => row.id))),
       setSidebarAccents: setSidebarAccents,
