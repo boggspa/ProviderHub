@@ -1,8 +1,11 @@
 import os
+from datetime import datetime, timedelta, timezone
+import json
 from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from chat_inspector import (git_changes, git_branches, switch_branch, create_branch,
                             create_worktree, switch_worktree)
@@ -138,6 +141,73 @@ class InspectorTests(unittest.TestCase):
         self.git("add", "new")
         (self.root / "new").unlink()
         self.assertEqual(git_changes(self.root)["files"], [])
+
+    def claim(self, text, name=".WORK-IN-PROGRESS-peer.md"):
+        (self.root / ".git/info/exclude").write_text(".WORK-IN-PROGRESS*\n.work-guard/\n")
+        marker = self.root / name
+        marker.write_text("---\n" + text + "\n---\nDo not remove this claim.\n")
+        self.assertEqual(self.git("status", "--porcelain"), b"")
+        return marker
+
+    def test_live_claim_blocks_every_branch_mutation_even_with_clean_files(self):
+        (self.root / "file").write_text("untouched\n"); self.commit()
+        self.git("branch", "other")
+        now = datetime.now(timezone.utc)
+        marker = self.claim(f"pid: {os.getpid()}\nstarted: {now.isoformat()}\nexpires: {(now + timedelta(minutes=10)).isoformat()}\npaths:\n  - file")
+        before = self.git("rev-parse", "HEAD")
+        destination = self.root.parent / "peer-tree"
+        for action in [lambda: switch_branch(self.root, "other"), lambda: create_branch(self.root, "new"),
+                       lambda: create_worktree(self.root, "new-tree", destination)]:
+            with self.assertRaisesRegex(ValueError, "Active work claim"): action()
+        self.assertEqual(self.git("rev-parse", "HEAD"), before)
+        self.assertEqual(self.git("branch", "--show-current").strip(), b"main")
+        self.assertTrue(marker.exists()); self.assertFalse(destination.exists())
+        self.assertEqual((self.root / "file").read_text(), "untouched\n")
+
+    def test_expired_manual_claim_decays_but_runtime_projection_stays_blocked(self):
+        (self.root / "file").write_text("base\n"); self.commit()
+        now = datetime.now(timezone.utc)
+        started = now - timedelta(minutes=21)
+        marker = self.claim(f"pid: {os.getpid()}\nstarted: {started.isoformat()}\nexpires: {(now + timedelta(hours=2)).isoformat()}")
+        self.assertEqual(create_branch(self.root, "manual-expired")["current"], "manual-expired")
+        self.assertTrue(marker.exists())
+        runtime = self.claim("pid: 99999999\nexpires: 2000-01-01T00:00:00Z", ".WORK-IN-PROGRESS-taskwraith-runtime-incomplete.md")
+        with self.assertRaisesRegex(ValueError, "Active work claim"): switch_branch(self.root, "main")
+        self.assertTrue(runtime.exists())
+
+    def test_owner_only_claim_heartbeat_and_declared_worktree_scope(self):
+        (self.root / "file").write_text("base\n"); self.commit()
+        now = datetime.now(timezone.utc)
+        lease = f"started: '{now.isoformat()}'\nexpires: '{(now + timedelta(minutes=10)).isoformat()}'"
+        marker = self.claim(lease + '\nlockOwnerId: "owner-from-host"')
+        with self.assertRaisesRegex(ValueError, "Active work claim"): create_branch(self.root, "new")
+        marker.write_text("---\n" + lease + "\npid: 99999999\n---\n")
+        heartbeat = self.root / ".work-guard/heartbeat.json"
+        heartbeat.parent.mkdir()
+        heartbeat.write_text(json.dumps({"schemaVersion": 2, "markers": {marker.name: {"lastSeen": now.timestamp() * 1000}}}))
+        with self.assertRaisesRegex(ValueError, "Active work claim"): create_branch(self.root, "new")
+        marker.write_text("---\n" + lease + f"\npid: {os.getpid()}\nworktree: {self.root.parent / 'different'}\n---\n")
+        self.assertEqual(create_branch(self.root, "new")["current"], "new")
+
+    def test_non_utf8_paths_stay_lossless_for_git_and_valid_for_json(self):
+        seen = []
+        raw_names = [b"bad-\xff", b"bad-\\xff"]
+        def git(root, *args, **kwargs):
+            if "--raw" in args:
+                return b"".join(b":100644 100644 a b M\0" + path + b"\0" for path in raw_names), False, 0
+            if args[0] == "ls-files": return b"", False, 0
+            if "--numstat" in args: return b"1\t1\t" + os.fsencode(args[-1]) + b"\0", False, 0
+            if "--unified=3" in args:
+                seen.append(os.fsencode(args[-1]))
+                return b"@@ -1 +1 @@\n-before\n+after\n", False, 0
+            return b"", False, 0
+        with patch("chat_inspector._root", return_value=str(self.root)), patch("chat_inspector._git", side_effect=git):
+            result = git_changes(self.root)
+        self.assertEqual(seen, raw_names)
+        wire = json.dumps(result, ensure_ascii=False).encode("utf-8")
+        self.assertEqual(len(json.loads(wire)["files"]), 2)
+        self.assertEqual(len({row["path"] for row in result["files"]}), 2)
+        self.assertTrue(all(row["added"] == row["deleted"] == 1 for row in result["files"]))
 
 
 if __name__ == "__main__":

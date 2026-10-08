@@ -4,8 +4,11 @@ All returned paths are repository-relative except root/worktree paths. Counts
 describe the combined HEAD-to-working-tree diff, not a sum of index changes.
 """
 import difflib
+from datetime import datetime, timezone
+import json
 import os
 from pathlib import Path
+import re
 import selectors
 import subprocess
 import time
@@ -69,6 +72,14 @@ def _complete(workspace, *args):
 
 def _text(data):
     return os.fsdecode(data)
+
+
+def _display_path(path):
+    # Git paths remain lossless surrogateescaped strings until all Git/file
+    # operations finish. Only presentation uses escaped byte spelling. Escape
+    # literal backslashes too, keeping two different paths distinct in Swift.
+    return "".join(f"\\x{ord(char) - 0xdc00:02x}" if 0xdc80 <= ord(char) <= 0xdcff
+                   else "\\\\" if char == "\\" else char for char in path)
 
 
 def _root(workspace):
@@ -158,6 +169,8 @@ def git_changes(workspace):
         clipped = clipped or len(encoded) > cap
         suffix = "\n[Diff truncated]" if clipped else ""
         row["diff"] = encoded[:max(0, cap - len(suffix))].decode("utf-8", "ignore") + suffix[:cap]
+        row["path"] = _display_path(row["path"])
+        if "oldPath" in row: row["oldPath"] = _display_path(row["oldPath"])
         used += len(row["diff"].encode("utf-8")); truncated |= clipped
         files.append(row)
     return {"files": files, "truncated": truncated}
@@ -188,10 +201,72 @@ def git_branches(workspace):
     return {"root": root, "current": current, "branches": branches, "worktrees": worktrees}
 
 
+def _claim_guard(root):
+    """Inspect claim data only; never execute a workspace's guard script.
+
+    Leases mirror the shared lifecycle: manual/contribution leases expire and
+    cap at twenty minutes; durable runtime projections always require recovery.
+    A clean status cannot establish that another session is about to be idle.
+    """
+    now = time.time()
+    try:
+        path = Path(root) / ".work-guard/heartbeat.json"
+        with path.open("rb") as stream: sidecar = json.loads(stream.read(1_000_001))
+        heartbeats = sidecar.get("markers", {}) if sidecar.get("schemaVersion") == 2 else sidecar
+    except (OSError, ValueError, AttributeError): heartbeats = {}
+    def timestamp(value):
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            return parsed.replace(tzinfo=timezone.utc).timestamp() if parsed.tzinfo is None else parsed.timestamp()
+        except (ValueError, AttributeError, OverflowError): return None
+    for path in Path(root).iterdir():
+        if not path.name.startswith((".WORK-IN-PROGRESS", "SHIP-HOLD", "SESSION-IN-PROGRESS")): continue
+        if path.is_symlink() or not path.is_file():
+            raise ValueError("Cannot verify work claim " + _display_path(path.name) + ". Resolve it before changing branches.")
+        with path.open("rb") as stream: content = stream.read(65_537)
+        if len(content) > 65_536: raise ValueError("Work claim is too large to inspect: " + _display_path(path.name))
+        lines = content.decode("utf-8", "replace").splitlines()
+        fields = {}
+        if lines and lines[0].strip() == "---":
+            for line in lines[1:]:
+                if line.strip() == "---": break
+                match = re.match(r"^(\w+):[ \t]*(.*)$", line)
+                if match:
+                    key, value = match.groups()
+                    value = value.strip()
+                    if value.startswith('"'):
+                        try: value = str(json.loads(value))
+                        except ValueError: value = value.strip('"')
+                    else: value = value.strip("'")
+                    fields[key] = value
+        target = fields.get("worktree")
+        if target and (Path(root) / target).resolve() != Path(root).resolve(): continue
+        contribution = path.name.startswith(".WORK-IN-PROGRESS-taskwraith-contribution-") or fields.get("agent") == "taskwraith-contribution"
+        runtime = not contribution and (path.name.startswith(".WORK-IN-PROGRESS-taskwraith-runtime-")
+                    or fields.get("derived", "").lower() == "true" or fields.get("agent") == "taskwraith-runtime")
+        expires, started = timestamp(fields.get("expires")), timestamp(fields.get("started"))
+        expiry = min(expires, started + 1200) if expires is not None and started is not None else expires
+        if started is None and expiry is not None and expiry > now + 1200: expiry = None
+        alive = False
+        pid = fields.get("pid", "")
+        if pid.isdigit() and int(pid) > 1:
+            try: os.kill(int(pid), 0); alive = True
+            except ProcessLookupError: pass
+            except PermissionError: alive = True
+            except (OSError, OverflowError): pass
+        heartbeat = heartbeats.get(path.name, {}) if isinstance(heartbeats, dict) else {}
+        seen = heartbeat.get("lastSeen") if isinstance(heartbeat, dict) else None
+        fresh = isinstance(seen, (int, float)) and 0 <= now - seen / 1000 < 1200
+        held = bool(fields.get("lockOwnerId")) if contribution else alive or bool(fields.get("lockOwnerId")) or fresh
+        if runtime or (expiry is not None and now <= expiry and held):
+            raise ValueError("Active work claim " + _display_path(path.name) + ". Wait for its owner to finish before changing branches or creating a worktree.")
+
+
 def _clean(workspace):
     root = _root(workspace)
     if _complete(root, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignore-submodules=none"):
         raise ValueError("Workspace has uncommitted changes. Commit or resolve them before changing branches.")
+    _claim_guard(root)
     return root
 
 
@@ -206,12 +281,14 @@ def _branch(root, branch, *, new):
 
 def switch_branch(workspace, branch):
     root = _clean(workspace); _branch(root, branch, new=False)
+    _clean(root)
     _complete(root, "switch", "--no-guess", "--", branch)
     return git_branches(root)
 
 
 def create_branch(workspace, branch):
     root = _clean(workspace); _branch(root, branch, new=True)
+    _clean(root)
     _complete(root, "switch", "--no-guess", "-c", branch)
     return git_branches(root)
 
@@ -223,6 +300,7 @@ def create_worktree(workspace, branch, path):
         raise ValueError("Choose a destination that does not exist.")
     if not destination.parent.is_dir():
         raise ValueError("The destination's parent folder must already exist.")
+    _clean(root)
     _complete(root, "worktree", "add", "-b", branch, "--", str(destination), "HEAD")
     return git_branches(root)
 
