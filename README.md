@@ -29,6 +29,7 @@ Provider Hub Preview retains the Preview label while additional provider account
 | [Close-out cards](CLOSEOUT_CARDS.md) | File-editing tool projection and desktop diff cards |
 | [Claude picker context](docs/claude-picker-context.md) | Context metadata and picker presentation |
 | [Codex provider subagents](docs/codex-provider-subagents.md) | Host delegation, runtime probes, and activation limits |
+| [Chat in Provider Hub](docs/chat.md) | Lightweight native chat, local file/shell tools, approvals, and saved conversations |
 | [AntiGravity tool handoff](docs/antigravity-host-handoff.md) | Native tool requests and desktop dispatch |
 | [Repository doctrine](AGENTS.md) | Shared-checkout ownership, testing, and commit rules |
 | [Contributing](CONTRIBUTING.md) | Development setup, tests, scratch files, and pull-request rules |

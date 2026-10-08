@@ -54,6 +54,22 @@ enum HubTheme {
         }
     }
 
+    /// The main window's surface, independent of its Light/Dark/System choice.
+    /// Glass preserves the existing shell; Solid uses an opaque macOS neutral.
+    enum WindowStyle {
+        enum Mode: String, CaseIterable {
+            case glass, solid
+
+            var title: String { self == .glass ? "Glass" : "Solid" }
+            var icon: String { self == .glass ? "square.on.square" : "square.fill" }
+        }
+
+        static let defaultsKey = "hubWindowStyle"
+        static var mode: Mode {
+            Mode(rawValue: UserDefaults.standard.string(forKey: defaultsKey) ?? "") ?? .glass
+        }
+    }
+
     /// Colours that resolve per appearance. Each is a dynamic NSColor, so a
     /// SwiftUI view that uses it re-renders when the appearance changes
     /// without any state of its own. The dark values are today's constants;
