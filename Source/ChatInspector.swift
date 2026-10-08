@@ -115,7 +115,7 @@ private struct ChatAgentsPane: View {
                                         Text(agent.status.capitalized).font(.system(size: 10)).foregroundStyle(.secondary)
                                     }
                                     Spacer(minLength: 0)
-                                    if agent.busy { ProgressView().controlSize(.mini) }
+                                    if agent.busy { ProgressView().controlSize(.mini).accessibilityHidden(true) }
                                     else { Image(systemName: "chevron.right").font(.system(size: 9)).foregroundStyle(.secondary) }
                                 }.padding(8).frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
                             }.buttonStyle(.plain)
@@ -277,7 +277,7 @@ struct ChatParallelLanes: View {
             .accessibilityLabel(agent.label + ": " + agent.task + ", " + agent.status)
     }
     @ViewBuilder private func activity(_ agent: ChatAgent) -> some View {
-        if agent.busy { ProgressView().controlSize(.mini) }
+        if agent.busy { ProgressView().controlSize(.mini).accessibilityHidden(true) }
         else { Image(systemName: agent.status == "ready" ? "checkmark" : "exclamationmark.circle").font(.system(size: 10)).foregroundStyle(.secondary) }
     }
 }

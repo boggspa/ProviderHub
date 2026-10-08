@@ -516,7 +516,7 @@ struct ToolRow: View {
                 Text(entry.summary ?? entry.text).font(HubTheme.Typography.detail).foregroundStyle(Semantic.secondaryInk)
                     .lineLimit(1).truncationMode(.middle)
                 Spacer(minLength: 0)
-                if running { ProgressView().controlSize(.mini) }
+                if running { ProgressView().controlSize(.mini).accessibilityHidden(true) }
                 if !entry.changedFiles.isEmpty {
                     Text(entry.changedFiles.count == 1 ? "1 file" : "\(entry.changedFiles.count) files")
                         .font(HubTheme.Typography.detail).foregroundStyle(Semantic.secondaryInk)
@@ -529,7 +529,7 @@ struct ToolRow: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel("Tool \(entry.tool ?? ""), \(entry.summary ?? entry.text)")
-        .accessibilityValue(expanded ? "Expanded" : "Collapsed")
+        .accessibilityValue((expanded ? "Expanded" : "Collapsed") + (running ? ", Working" : ""))
     }
 
     @ViewBuilder private var body_: some View {
