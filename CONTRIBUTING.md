@@ -30,7 +30,7 @@ bash scripts/hooks_install.sh    # installs the pre-commit guard
 bash Source/build.sh             # ad-hoc signed development build
 ```
 
-`Source/build.sh` writes `Provider Hub Preview.app` beside the checkout and
+`Source/build.sh` writes `Provider Hub.app` beside the checkout and
 ad-hoc signs it, which is enough to run locally. Developer ID signing and
 notarization are maintainer-only steps and are not needed to contribute.
 

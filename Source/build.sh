@@ -2,7 +2,7 @@
 set -euo pipefail
 SOURCE_DIR="$(cd "$(dirname "$0")" && pwd)"
 PACKAGE_DIR="$(dirname "$SOURCE_DIR")"
-APP_DIR="$PACKAGE_DIR/Provider Hub Preview.app"
+APP_DIR="$PACKAGE_DIR/Provider Hub.app"
 BUILD_DIR="${MISTRAL_BRIDGE_BUILD_DIR:-$SOURCE_DIR/.build}"
 mkdir -p "$APP_DIR/Contents/MacOS" "$BUILD_DIR"
 # This directory contains generated app content only. Start fresh so removed
@@ -70,13 +70,13 @@ cat > "$APP_DIR/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
-  <key>CFBundleName</key><string>Provider Hub Preview</string>
-  <key>CFBundleDisplayName</key><string>Provider Hub Preview</string>
+  <key>CFBundleName</key><string>Provider Hub</string>
+  <key>CFBundleDisplayName</key><string>Provider Hub</string>
   <key>CFBundleIdentifier</key><string>com.mistralbridge.providerhub</string>
   <key>CFBundleExecutable</key><string>MistralBridge</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>0.5.6</string>
-  <key>CFBundleVersion</key><string>57</string>
+  <key>CFBundleVersion</key><string>58</string>
   <key>BridgeStateName</key><string>Provider Hub Preview</string>
   <key>BridgeProfileID</key><string>14c58c94-d7e8-4a15-96b8-81668956e474</string>
   <key>BridgeDefaultPort</key><integer>11438</integer>

@@ -1,11 +1,11 @@
-# Provider Hub Preview 0.5.6
+# Provider Hub 0.5.6
 
 Use your model accounts inside Claude Desktop, the Codex coding workspace, or Provider Hub's lightweight **Chat with Model…** window. See [Chat in Provider Hub](docs/chat.md) for its tools, attachments, approvals and model switching.
 
 ## Install
 
 1. Unzip the Apple Silicon download.
-2. Drag **Provider Hub Preview.app** into **Applications**, then open it.
+2. Drag **Provider Hub.app** into **Applications**, then open it.
 3. Open **Models & Settings…** from its menu bar icon whenever you need it.
 
 Requires an Apple Silicon Mac (M1 or newer) with macOS 14 or newer. This distribution is Developer ID signed and Apple-notarized, and includes its own Python runtime. You do not need to install Python or run terminal commands. Install the desktop app you want to use separately.
@@ -227,7 +227,7 @@ for verification after quota returns.
 
 The active development Codex app was not restarted during those checks. A full
 GUI launch/picker/context-meter/quit/restore cycle remains a final user check.
-The preview label reflects these remaining account and desktop qualifications.
+These remaining account and desktop qualifications still need verification.
 
 Gemini replies currently appear after generation finishes so its continuation
 signatures can be preserved. The connection stays active while it waits.

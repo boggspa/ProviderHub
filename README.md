@@ -1,11 +1,11 @@
-# Provider Hub Preview
+# Provider Hub
 
-**Version 0.5.6 (build 56).** Licensed Apache-2.0 — see [LICENSE](LICENSE),
+**Version 0.5.6 (build 58).** Licensed Apache-2.0 — see [LICENSE](LICENSE),
 with attributions in [NOTICE](NOTICE).
 
 A native macOS menu bar app that connects Claude Desktop and the Codex coding workspace to eleven model API connections: Mistral, Kimi Code, MiMo Token Plan, Ollama, DeepSeek, Cerebras, Muse, Grok, Qwen Token Plan, OpenRouter, and the Gemini API. Claude uses the local Messages endpoint. Codex uses Responses: Grok, Ollama, and OpenRouter retain native Responses transports, while the other eight use the local Messages bridge and their provider adapters.
 
-Provider Hub Preview retains the Preview label while additional provider accounts and desktop integration paths complete live qualification. An earlier Mistral Bridge 0.2 prototype is maintained separately and is not distributed from this repository. The two never share state: they have separate bundle IDs, settings directories, Keychain namespaces, gateway ports, and Claude profile IDs, so installing or building the preview cannot disturb the prototype.
+Additional provider accounts and desktop integration paths still need live qualification. An earlier Mistral Bridge 0.2 prototype is maintained separately and is not distributed from this repository. The two never share state: they have separate bundle IDs, settings directories, Keychain namespaces, gateway ports, and Claude profile IDs, so installing or building Provider Hub cannot disturb the prototype.
 
 > **Not affiliated with any provider.** All provider and model names, logos and
 > marks referenced here — including Anthropic, Claude, OpenAI, Codex, ChatGPT,
@@ -38,10 +38,10 @@ Provider Hub Preview retains the Preview label while additional provider account
 
 Provider implementation is split between [registry and connections](Source/provider_registry.py), [model discovery](Source/provider_discovery.py), and [request preparation](Source/provider_requests.py). [providers.py](Source/providers.py) preserves existing imports, including private helpers.
 
-**Start using the preview**
+**Start using Provider Hub**
 
-1. Move **Provider Hub Preview.app** to Applications and open it. It requires an Apple Silicon Mac and macOS 14 or newer. The shareable bundle includes Python 3.13.13; no separate Python installation is needed. A lightweight source build can use Python 3.11 or newer, including a runtime installed with Vibe.
-2. Select a provider in **Providers**. Mistral can use the API key configured in Vibe. **Save key** stores an API key in the preview's macOS Keychain namespace and immediately fetches that provider's models. Ollama connects to the existing local daemon. MiMo's account region selects its official Token Plan endpoint.
+1. Move **Provider Hub.app** to Applications and open it. It requires an Apple Silicon Mac and macOS 14 or newer. The shareable bundle includes Python 3.13.13; no separate Python installation is needed. A lightweight source build can use Python 3.11 or newer, including a runtime installed with Vibe.
+2. Select a provider in **Providers**. Mistral can use the API key configured in Vibe. **Save key** stores an API key in Provider Hub's macOS Keychain namespace and immediately fetches that provider's models. Ollama connects to the existing local daemon. MiMo's account region selects its official Token Plan endpoint.
 3. Catalogues refresh in the background when the app opens. **Refresh all** and the provider card's **Refresh catalogue** remain available for retrying. Refreshes fetch metadata without generating a chat completion. Each provider reports its own errors; an unrelated provider's failed refresh does not discard other catalogues. Kimi, MiMo, and Qwen Token Plan use documented catalogues because an account-scoped list endpoint has not been established.
 4. **Models** shows independent curated catalogues: Codex / ChatGPT on the left, Claude Desktop on the right. A client selector provides a full-width view and is used automatically in smaller windows. Search a catalogue, add or remove models, and expand a row for its controls. Claude rows expose the family, family default, inference test, and compaction threshold. Codex rows show subagent priority and automatic compaction at 85% of the effective input window; starting-model and default-subagent controls follow the list. Context limits remain metadata-driven and unknown limits stay unknown.
 5. Existing catalogues are preserved. Legacy Claude mappings and Codex’s all-compatible selection are displayed without changing settings; the first catalogue edit materializes that selection. Legacy Claude thresholds survive migration, using the lowest explicit threshold when multiple slots share one route. The original slot mappings remain saved.
@@ -50,7 +50,7 @@ Provider implementation is split between [registry and connections](Source/provi
 8. Quitting a launched desktop app restores that harness's prior selection. The shared gateway stays available while either owned harness remains open and normally stops after both have closed. The menu bar app remains available.
 9. While one desktop harness is live, you can still change the *other* harness's model selection (e.g., edit the Codex catalogue while Claude is running). Save writes the change without stopping the gateway; launching the second app briefly restarts the gateway so both share the new snapshot, and the running app reconnects automatically. Changing shared provider settings (keys, regions, port, branding) while either app is live still requires quitting both desktop apps first.
 
-Build from the repository root with `bash Source/build.sh` to create `Provider Hub Preview.app` beside the checkout. `Source/build.sh` is the source of truth for both the version and the build stamp; no number is restated here, because it goes stale between releases. Building from source applies an ad-hoc development signature, which is enough to run locally; distribution builds are signed with an Apple Developer ID and notarized on the maintainer's machine, and those credentials are never committed. See [`CONTRIBUTING.md`](CONTRIBUTING.md) for setup and tests, and [`SECURITY.md`](SECURITY.md) for the signing and threat model. A shorter end-user guide is in `QUICK-START.md`.
+Build from the repository root with `bash Source/build.sh` to create `Provider Hub.app` beside the checkout. `Source/build.sh` is the source of truth for both the version and the build stamp. Building from source applies an ad-hoc development signature, which is enough to run locally; distribution builds are signed with an Apple Developer ID and notarized on the maintainer's machine, and those credentials are never committed. See [`CONTRIBUTING.md`](CONTRIBUTING.md) for setup and tests, and [`SECURITY.md`](SECURITY.md) for the signing and threat model. A shorter end-user guide is in `QUICK-START.md`.
 
 **Provider connections**
 
@@ -168,7 +168,7 @@ For Codex / ChatGPT Desktop, Provider Hub edits its owned root model, reasoning,
 
 **Local data and privacy**
 
-Preview state lives under `~/Library/Application Support/Provider Hub Preview/`. Its default port is 11438; its profile ID is `14c58c94-d7e8-4a15-96b8-81668956e474`. Stable Mistral Bridge 0.2 continues to use its original state directory, port 11436, Keychain namespace, and profile ID.
+State remains under `~/Library/Application Support/Provider Hub Preview/` after the app rename, preserving existing settings and profiles. Its default port is 11438; its profile ID is `14c58c94-d7e8-4a15-96b8-81668956e474`. Stable Mistral Bridge 0.2 continues to use its original state directory, port 11436, Keychain namespace, and profile ID.
 
 - `settings.json`: provider connections, credential-source modes/revisions, model mappings, per-slot omit-system/omit-tools flags, appearance overrides, and preferences; no API keys.
 - `catalogues/*.json`: metadata scoped to the provider connection and credential revision. Key replacement invalidates that provider's catalogue.
@@ -210,7 +210,7 @@ Validate the installed worker contents against the intended clean commit:
 
 ```bash
 python3 Source/build_provenance.py verify --require-clean \
-  --app-dir '/Applications/Provider Hub Preview.app' --revision '<full commit SHA>'
+  --app-dir '/Applications/Provider Hub.app' --revision '<full commit SHA>'
 ```
 
 **Qualification**
