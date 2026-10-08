@@ -140,5 +140,24 @@ class FanoutTests(unittest.TestCase):
         self.assertTrue(all(record["status"] != "working" for record in parent.chat["agents"]))
         self.assertFalse(parent.lanes)
 
+    def test_batch_budget_survives_steering_and_allows_only_the_remaining_slot(self):
+        starts = [threading.Event() for _ in range(3)]
+        def lane(index):
+            def stream(payload, cancel, delta):
+                starts[index].set(); cancel.wait(2); raise InterruptedError("Stopped")
+            return stream
+        replies = [fixtures.call("delegate", self.tasks(3), "first-batch"),
+                   fixtures.call("delegate", self.tasks(), "excess-batch"),
+                   fixtures.call("delegate", {"task":"Use last slot"}, "last-slot"), response("Budget held")]
+        parent = self.service(replies, [[lane(i)] for i in range(3)] + [[response("Last result")]])
+        self.send(parent); self.assertTrue(all(event.wait(2) for event in starts))
+        parent.handle({"command":"steer", "id":parent.chat["id"], "text":"Change direction"})
+        self.wait_for(lambda: not parent.busy)
+        self.assertEqual(parent.chat["entries"][-1]["text"], "Budget held")
+        self.assertEqual(len(parent.chat["agents"]), 4)
+        self.assertEqual(parent.chat["delegationsThisTurn"], 4)
+        self.assertEqual(self.store.load(parent.chat["id"])["delegationsThisTurn"], 4)
+        self.assertEqual([len(child.requests) for child in self.children], [1, 1, 1, 1])
+
 
 if __name__ == "__main__": unittest.main()
