@@ -60,7 +60,10 @@ conversation loop so it cannot block Stop.
 
 The **branch/worktree** chip beside the folder picker lists local branches and
 worktrees and can create either. Branch switching and creation require a clean
-repository; Chat never stashes or forces a checkout. Creating a worktree leaves
+repository and no live work claims; Chat never stashes or forces a checkout.
+Manual claims expire under the shared twenty-minute lease contract; runtime
+lock projections continue blocking until their owner resolves them.
+Creating a worktree leaves
 the current selection in place until you choose the new one. Choosing a
 worktree keeps this chat, records the workspace change, archives its old provider
 context and starts fresh portable context for the new directory. Changes are
