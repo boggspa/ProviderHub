@@ -230,7 +230,7 @@ class AgentTests(unittest.TestCase):
         parent = self.service([], [[]]); side = self.open_side(parent)
         entered, release = threading.Event(), threading.Event()
         def switch(workspace, branch): entered.set(); release.wait(2); return {"current": branch}
-        with patch("chat_inspector.switch_branch", switch), patch("chat_inspector.repository_root", return_value=str(self.root)):
+        with patch("chat_inspector.switch_branch", switch), patch("chat_inspector.repository_root", return_value=str(self.root)), patch("chat_inspector.require_branch_workspace"):
             parent.handle({"command": "branch_action", "id": parent.chat["id"], "action": "switch", "branch": "topic"})
             self.assertTrue(entered.wait(2))
             with self.assertRaises(ValueError): self.send(parent)
@@ -444,7 +444,7 @@ class AgentTests(unittest.TestCase):
         third = self.open_side(parent)
         untouched = copy.deepcopy(third.chat["messages"])
         parent.handle({"command":"select", "id":owner})
-        with patch("chat_inspector.repository_root", return_value=str(self.root)), patch("chat_inspector.switch_branch", return_value={"current":"topic", "root":str(self.root)}):
+        with patch("chat_inspector.repository_root", return_value=str(self.root)), patch("chat_inspector.require_branch_workspace"), patch("chat_inspector.switch_branch", return_value={"current":"topic", "root":str(self.root)}):
             parent.handle({"command":"branch_action", "id":owner, "action":"switch", "branch":"topic"})
             self.wait_for(lambda: not parent._branch_working)
         for side in [first, second]:
@@ -452,6 +452,16 @@ class AgentTests(unittest.TestCase):
             self.assertIn("previous branch", side.chat["messages"][-1]["content"][0]["text"])
             self.assertFalse(self.store.path(side.chat["id"]).exists())
         self.assertEqual(third.chat["messages"], untouched)
+
+    def test_side_subfolder_is_validated_before_parent_checkout(self):
+        parent = self.service([], [[]])
+        side = self.open_side(parent)
+        with patch("chat_inspector.repository_root", return_value=str(self.root)), patch("chat_inspector.require_branch_workspace", side_effect=ValueError("Side folder missing on target branch")) as validate, patch("chat_inspector.switch_branch") as switch:
+            parent.handle({"command":"branch_action", "id":parent.chat["id"], "action":"switch", "branch":"topic"})
+            self.wait_for(lambda: not parent._branch_working)
+            validate.assert_called_once_with(side.chat["workspace"], "topic")
+            switch.assert_not_called()
+        self.assertIn("Side folder missing", self.events[-1]["notice"])
 
 
 if __name__ == "__main__": unittest.main()

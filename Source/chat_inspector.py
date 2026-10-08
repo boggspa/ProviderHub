@@ -315,8 +315,24 @@ def _branch(root, branch, *, new):
         raise ValueError("Choose a new branch name." if new else "Choose an existing local branch.")
 
 
+def _require_branch_directory(workspace, root, branch):
+    relative = Path(workspace).resolve().relative_to(Path(root).resolve())
+    if not relative.parts: return
+    tree, truncated, code = _git(root, "cat-file", "-t", "refs/heads/" + branch + ":" + relative.as_posix(), allow_failure=True)
+    if code or truncated or tree.strip() != b"tree":
+        raise ValueError("The target branch has no workspace directory " + _display_path(str(relative)) +
+                         ". Choose the worktree root or close Side Chats using this directory before switching.")
+
+
+def require_branch_workspace(workspace, branch):
+    root = _root(workspace)
+    _branch(root, branch, new=False)
+    _require_branch_directory(workspace, root, branch)
+
+
 def switch_branch(workspace, branch):
     root = _clean(workspace); _branch(root, branch, new=False)
+    _require_branch_directory(workspace, root, branch)
     _clean(root)
     _complete(root, "switch", "--no-guess", "--", branch)
     return git_branches(root)

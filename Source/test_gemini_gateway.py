@@ -2,6 +2,7 @@
 import copy
 import http.client
 import json
+import time
 import unittest
 from unittest.mock import patch
 
@@ -61,6 +62,14 @@ class GeminiGatewayTests(unittest.TestCase):
     start_gateway = fixtures.GatewayHubHTTPTests.start_gateway
     request = fixtures.GatewayHubHTTPTests.request
 
+    def assert_completed(self, expected):
+        # The HTTP terminator is flushed before calibration/accounting runs.
+        # Receiving it is not a barrier for the server thread's finalizer.
+        deadline = time.monotonic() + 2
+        while self.runtime.status()["completed"] < expected and time.monotonic() < deadline:
+            time.sleep(.01)
+        self.assertEqual(self.runtime.status()["completed"], expected)
+
     def claude_cycle(self, stream):
         self.start_gateway("gemini", "gemini-3.8-flash", model_spec())
         body = {"model": "claude-fable-5", "max_tokens": 512, "stream": stream,
@@ -86,7 +95,7 @@ class GeminiGatewayTests(unittest.TestCase):
         self.assertEqual(assistant["tool_calls"][0]["extra_content"]["google"]["thought_signature"], "opaque-google-tool-state")
         last_assistant = [row for row in calls[2]["messages"] if row["role"] == "assistant"][-1]
         self.assertEqual(last_assistant["extra_content"]["google"]["thought_signature"], "opaque-google-text-state")
-        self.assertEqual(self.runtime.status()["completed"], 3)
+        self.assert_completed(3)
         for headers in fixtures.MockProvider.request_headers:
             self.assertEqual(headers["authorization"], "Bearer " + fixtures.PROVIDER_KEY)
             self.assertIn("x-goog-api-client", headers)
@@ -124,7 +133,7 @@ class GeminiGatewayTests(unittest.TestCase):
             self.assertEqual(status, 200, raw)
             last = fixtures.parse_sse(raw)[-1]["response"] if stream else json.loads(raw)
             self.assertEqual(last["status"], "completed")
-        self.assertEqual(self.runtime.status()["completed"], 4)
+        self.assert_completed(4)
 
     def test_missing_signature_and_quota_errors_are_explicit_and_private(self):
         self.start_gateway("gemini", "gemini-3.8-flash", model_spec())

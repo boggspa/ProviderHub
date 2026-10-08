@@ -63,6 +63,9 @@ worktrees and can create either. Branch switching and creation require a clean
 repository and no live work claims; Chat never stashes or forces a checkout.
 Manual claims expire under the shared twenty-minute lease contract; runtime
 lock projections continue blocking until their owner resolves them.
+If a target branch lacks the selected subfolder, choose the worktree root first;
+Chat refuses that checkout before it can remove the working directory. The same
+check protects open Side Chats rooted in repository subfolders.
 Creating a worktree leaves
 the current selection in place until you choose the new one. Choosing a
 worktree keeps this chat, records the workspace change, archives its old provider
