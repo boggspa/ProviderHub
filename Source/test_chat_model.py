@@ -229,6 +229,17 @@ import SwiftUI
         check(!model.canSend, "main send raced branch mutation")
         try send(["event":"branch_state", "chat":"A", "busy":false, "notice":"Workspace has uncommitted changes"])
         check(model.branchNotice.contains("uncommitted") && model.canSend, "branch failure lost or left chat disabled")
+        let agentEntry: [String: Any] = ["id":"lane-reply", "kind":"assistant", "text":"", "route":"ollama/test", "isError":false, "changedFiles":[]]
+        let agentRows = ["lane-a", "lane-b"].map { id -> [String: Any] in
+            ["id":id, "route":"ollama/test", "account":"", "label":"Test", "task":id, "status":"working", "readOnly":true, "changedFiles":[], "entries":[agentEntry]]
+        }
+        try send(["event":"agents", "chat":"A", "agents":agentRows])
+        try send(["event":"agent_delta", "chat":"A", "agent":"lane-b", "id":"lane-reply", "text":"Only B"])
+        check(model.agents[0].entries[0].text.isEmpty && model.agents[1].entries[0].text == "Only B", "parallel lane text crossed identities")
+        try send(["event":"agent_delta", "chat":"B", "agent":"lane-b", "id":"lane-reply", "text":"Wrong chat"])
+        check(model.agents[1].entries[0].text == "Only B" && model.agents[1].readOnly == true, "parallel state escaped parent")
+        try send(["event":"entry", "chat":"A", "entry":["id":"fanout-row", "kind":"tool", "text":"", "route":"ollama/test", "isError":false, "changedFiles":[], "tool":"delegate", "agentIDs":["lane-a","lane-b"]]])
+        check(model.entries.last?.agentIDs == ["lane-a", "lane-b"], "lane chips lost their tool-call identity")
         print("ChatModel state transitions passed")
     }
 }

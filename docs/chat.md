@@ -76,7 +76,9 @@ The right-hand **inspector** has three views, each using the whole pane:
   changes. Reads use the local checkout and never fetch a remote.
 - **Subagents** lists delegated tasks by model and task. Choose one to read its
   transcript and tool results. There is no child composer; it reports back to
-  the parent. Child approvals identify the requesting model in the normal strip.
+  the parent. Parallel read-only tasks also appear as model/task chips beside
+  their originating delegate row in the main transcript. Child approvals for
+  serial helpers identify the requesting model in the normal strip.
 - **Side Chat** forks the visible conversation at that point with any enabled
   model. It has its own composer and Stop/interrupt controls, with read/search
   tools only. Provider reasoning stays isolated. Side Chats remain in memory
@@ -102,7 +104,11 @@ The local tools are read file, search files, apply patch, and run shell. The
 parent also has **delegate**, which runs one helper at a time and returns its
 recorded result. Helpers inherit the workspace and approval mode, get the four
 local tools and cannot delegate. A turn can launch at most four helpers, with
-twelve model/tool rounds per helper. See [Subagents](chat-subagents.md). File
+twelve model/tool rounds per serial helper. Its alternative `tasks` form runs
+two or three read-only lanes together, with eight rounds per lane; all count
+toward the same four-helper limit. Read-only lanes have read/search tools only,
+even in YOLO. Stop and steering cancel every lane and wait for cleanup before
+the parent continues. See [Subagents](chat-subagents.md). File
 tools stay inside the chosen workspace and reject symlink paths. A small menu
 below the composer selects one of three modes, saved per chat:
 
@@ -149,9 +155,9 @@ routes and account identities continue to govern requests.
 Provider marks use the Hub's existing icon assets. The four tool glyphs reuse
 TaskWraith's file/search/patch/shell paths as cached native vectors.
 
-Chat is a coding harness with attachments, local tools and serial delegation.
-It has no parallel agent teams, schedules, connector catalogue, browser
-automation, or separate IDE.
+Chat is a coding harness with attachments, local tools and bounded delegation.
+It has no writable parallel teams, agent mailboxes, schedules, connector
+catalogue, browser automation, or separate IDE.
 
 ## Implementation and verification
 

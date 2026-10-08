@@ -188,6 +188,11 @@ def delegate(parent, args, call_id):
         if any(thread.is_alive() for thread in threads):
             for child in children: child.handle({"command": "stop"})
             for thread in threads: thread.join()
+        for child in children:
+            if child.chat["status"] == "working":
+                child.chat["status"] = "interrupted"
+                child.chat["entries"].append(entry("notice", "Lane stopped before it could finish.", child.chat["route"]))
+                child.store.on_save()
         with parent._mutex: parent.child = None; parent.lanes = []
         parent.save(); publish_agents(parent)
     if errors: raise ValueError("A helper could not save its result; inspect the recorded activity before continuing.") from errors[0]

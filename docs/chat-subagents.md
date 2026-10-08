@@ -1,8 +1,8 @@
 # Subagents in Chat
 
-Chat supports one serial delegated task at a time. This implementation follows
-Fable 5.1's design review and Astra's runtime review. Parallel lanes remain a
-separate follow-up.
+Chat supports serial helpers and small batches of read-only parallel lanes.
+This follows Fable 5.1's design review and Astra's runtime review. It uses the
+same gateway, run loop and inspector for both forms.
 
 ## First scope
 
@@ -58,7 +58,7 @@ Git counts already cover the workspace and need no separate child view.
   Recovery leaves uncertain work stopped for inspection. Launching another
   child is a new, visible invocation, not an implicit resume.
 
-## Parallel lanes: follow-up scope
+## Parallel read-only lanes
 
 The parent `ChatService` has one active chat, cancel event, approval slot and
 worker thread. A delegate reuses that loop in its own service with isolated
@@ -66,15 +66,38 @@ messages and a separate cancellable `GatewayClient`. The repository's
 `subagent_catalogue.py` and `spawn_depth.py` adapt desktop-owned agent tools;
 they are not a Chat supervisor.
 
-Fable's follow-up review proposes at most three read-only lanes in the same
-transcript, still blocking the parent until all settle. Each lane would reuse
-the isolated service, with read/search tools only and no recursion. The existing
-inspector could show lane model/task/status and open each transcript. No lane
-composers, mailboxes, queued messages, second synthesis engine or writable
-parallelism are proposed. Parent Stop and steering would cancel every lane and
-wait for their cleanup before continuation. This is not implemented here.
+Use the `tasks` form of `delegate` for two or three self-contained tasks. Every
+lane is validated before any starts, including the shared four-helper-per-turn
+budget. Each defaults to the parent's model/account or selects an exact enabled
+catalogue choice. A provider that refuses concurrent requests reports a failure
+for that lane; the harness does not retry it silently.
 
-Fixture tests exercise denial, cancellation, steer during delegation, interrupted
+```json
+{"tasks": [{"task": "Review the cancellation path"}, {"task": "Check the persistence boundary", "choice": "provider/model|account"}]}
+```
+
+Each lane has a separate cancellable client, history and eight-round limit. Only
+`read_file` and `search_files` are offered; host dispatch also rejects mutation,
+shell and recursive delegation. The parent is blocked until all lanes settle.
+Successful results survive a sibling failure. The parent receives bounded,
+identified recorded output through normal tool-result continuation, without an
+extra synthesis prompt. Native reasoning stays within the owning lane's saved
+record and is never forwarded as a parent's or sibling's model history.
+
+Compact provider/task chips in the originating transcript row show live lane
+activity and open the existing inspector. There are no lane composers,
+mailboxes, queued messages, writable lanes or separate orchestration dashboard.
+The parent header's time/context remain its own.
+
+Stop and steering cancel every lane and wait for their cleanup before the next
+parent request. Registration is saved before dispatch, and each lane replaces
+its own stored snapshot under the parent's persistence lock. Crash recovery
+settles incomplete calls without relaunching lanes. Retry continues from the
+recorded outcomes; another delegation is a new explicit model tool call.
+
+Fixture tests prove overlapping execution, sibling/account isolation, all-or-none
+admission, denied writes, partial failure, eight-round limits and thread-start
+failure recovery. They also exercise denial, cancellation, steer during delegation, interrupted
 recovery, route/account overrides, depth and round limits, Side Chat generations
 and opaque-history isolation. No live-provider concurrency guarantee is implied.
 The header's

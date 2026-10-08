@@ -407,7 +407,14 @@ private struct ChatTranscript: View {
             AssistantRow(entry: entry, label: model.label(for: entry.route), accent: model.accent(for: entry.route),
                          presentation: model.route(named: entry.route)?.presentation, streaming: model.busy && last)
         case "tool":
-            if let agentID = entry.agentID {
+            if let ids = entry.agentIDs, !ids.isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    ToolRow(entry: entry, expanded: expandedBinding(entry.id), workspace: entry.workspace ?? model.selected?.workspace, onInspect: {
+                        model.inspectedAgentID = nil; model.showInspector(.agents)
+                    }, running: model.agents.contains { ids.contains($0.id) && $0.busy })
+                    ChatParallelLanes(model: model, agentIDs: ids).padding(.leading, 18)
+                }
+            } else if let agentID = entry.agentID {
                 ToolRow(entry: entry, expanded: expandedBinding(entry.id), workspace: model.selected?.workspace, onInspect: {
                     model.inspectedAgentID = agentID; model.showInspector(.agents)
                 }, running: model.agents.first { $0.id == agentID }?.busy == true)
