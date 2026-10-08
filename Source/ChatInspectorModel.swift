@@ -38,6 +38,7 @@ struct ChatAgent: Decodable, Identifiable {
     var entries: [ChatEntry]; var usage: Int?; var changedFiles: [String]
     var workspace: String?
     var truncated: Bool?
+    var readOnly: Bool?
     var busy: Bool { ["working", "running", "approval"].contains(status) }
 }
 struct ChatSide: Decodable, Identifiable {

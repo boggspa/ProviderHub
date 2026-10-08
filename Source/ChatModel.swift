@@ -45,6 +45,7 @@ struct ChatEntry: Decodable, Identifiable {
     var changedFiles: [String]
     var attachments: [ChatAttachment]?
     var agentID: String?
+    var agentIDs: [String]?
     var workspace: String?
 }
 

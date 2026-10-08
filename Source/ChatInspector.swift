@@ -99,7 +99,7 @@ private struct ChatAgentsPane: View {
                 Text(selected.task).font(.system(size: 11.5)).foregroundStyle(.secondary).lineLimit(3).padding(.horizontal, 14).padding(.bottom, 8)
                 InspectorTranscript(model: model, entries: selected.entries, busy: selected.busy, workspace: selected.workspace, userTitle: "Parent task")
                 if selected.truncated == true { Text("Recent activity shown; full transcript is saved.").font(.system(size: 10)).foregroundStyle(.secondary).padding(.horizontal, 14) }
-                Text(selected.status.capitalized + (selected.changedFiles.isEmpty ? "" : " · \(selected.changedFiles.count) files changed"))
+                Text(selected.status.capitalized + (selected.readOnly == true ? " · Read only" : "") + (selected.changedFiles.isEmpty ? "" : " · \(selected.changedFiles.count) files changed"))
                     .font(.system(size: 10.5)).foregroundStyle(.secondary).padding(14)
             } else if model.agents.isEmpty { inspectorEmpty("Delegated tasks appear here.") }
             else {
@@ -115,7 +115,7 @@ private struct ChatAgentsPane: View {
                                         Text(agent.status.capitalized).font(.system(size: 10)).foregroundStyle(.secondary)
                                     }
                                     Spacer(minLength: 0)
-                                    if agent.busy { ProgressView().controlSize(.mini) }
+                                    if agent.busy { ProgressView().controlSize(.mini).accessibilityHidden(true) }
                                     else { Image(systemName: "chevron.right").font(.system(size: 9)).foregroundStyle(.secondary) }
                                 }.padding(8).frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
                             }.buttonStyle(.plain)
@@ -243,6 +243,43 @@ private struct InspectorTranscript: View {
 private struct InspectorBottomKey: PreferenceKey {
     static var defaultValue: CGFloat = 0
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
+}
+
+/// Parallel activity lives with its originating tool call. These quiet links
+/// reuse the existing inspector; they never create another composer or tab.
+struct ChatParallelLanes: View {
+    @ObservedObject var model: ChatModel
+    var agentIDs: [String]
+    private var agents: [ChatAgent] {
+        agentIDs.compactMap { id in model.agents.first { $0.id == id } }
+    }
+    var body: some View {
+        LazyVGrid(columns: [GridItem(.adaptive(minimum: 125), alignment: .topLeading)], alignment: .leading, spacing: 9) {
+            ForEach(agents) { agent in lane(agent) }
+        }
+    }
+    private func lane(_ agent: ChatAgent) -> some View {
+        let route = model.models.first { $0.route == agent.route && $0.account == agent.account }
+        return Button {
+            model.inspectedAgentID = agent.id; model.showInspector(.agents)
+        } label: {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 5) {
+                    ChatProviderIcon(presentation: route?.presentation, size: 12)
+                    Text(agent.label).font(.system(size: 10.5, weight: .medium)).lineLimit(1)
+                    Spacer(minLength: 0)
+                    activity(agent)
+                }
+                Text(agent.task).font(.system(size: 11.5)).lineLimit(2).foregroundStyle(.secondary)
+            }
+            .padding(.vertical, 5).frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
+        }.buttonStyle(.plain).help(agent.task + " · " + agent.status + " · Read only")
+            .accessibilityLabel(agent.label + ": " + agent.task + ", " + agent.status)
+    }
+    @ViewBuilder private func activity(_ agent: ChatAgent) -> some View {
+        if agent.busy { ProgressView().controlSize(.mini).accessibilityHidden(true) }
+        else { Image(systemName: agent.status == "ready" ? "checkmark" : "exclamationmark.circle").font(.system(size: 10)).foregroundStyle(.secondary) }
+    }
 }
 
 private func inspectorEmpty(_ text: String) -> some View {

@@ -338,6 +338,7 @@ class ChatService:
         self.role = role
         self.child_factory = child_factory or (lambda: GatewayClient(transport.root))
         self.child = None
+        self.lanes = []
         self.sides = {}
         self._branch_working = False
         self.max_rounds = MAX_ROUNDS
@@ -507,6 +508,8 @@ class ChatService:
             self.cancel.set(); self.transport.cancel(); self.approval_event.set()
             if self.child:
                 self.child.cancel.set(); self.child.transport.cancel(); self.child.approval_event.set()
+            for lane in self.lanes:
+                lane.cancel.set(); lane.transport.cancel(); lane.approval_event.set()
             self.emit({"event": "entry", "chat": self.chat["id"], "entry": pending["entry"]})
             self.emit({"event": "state", "busy": True, "interrupting": True, "status": "Interrupting for your update…"})
         # The old turn must finish cleanup and record real tool outcomes before
@@ -555,6 +558,8 @@ class ChatService:
                 self.cancel.set(); self.transport.cancel(); self.approval_event.set()
                 if self.child:
                     self.child.cancel.set(); self.child.transport.cancel(); self.child.approval_event.set()
+                for lane in self.lanes:
+                    lane.cancel.set(); lane.transport.cancel(); lane.approval_event.set()
             return
         if action == "steer":
             return self.interrupt_with_update(command)
@@ -673,7 +678,7 @@ class ChatService:
             self.add(entry("notice", "Older images removed from model context. Their thumbnails and original files are kept here.", chat["route"]))
             self.save()
         tools = list(TOOL_DEFINITIONS) if choice["supportsTools"] else []
-        if self.role == "side":
+        if self.role in {"side", "lane"}:
             tools = [tool for tool in tools if tool["name"] in {"read_file", "search_files"}]
         elif self.role == "parent" and tools:
             from chat_agents import delegate_definition
@@ -691,6 +696,8 @@ class ChatService:
                    "_provider_hub_connection": chat["scope"]}
         if self.role == "side":
             payload["system"] += "\nThis is a temporary Side Chat. Only read_file and search_files are available; do not edit files or run commands. This conversation is held in memory until the app closes."
+        elif self.role == "lane":
+            payload["system"] += "\nThis is a read-only parallel helper lane. Only read_file and search_files are available. Do not edit files, run commands or delegate. Report findings to the parent."
         if chat["effort"]:
             payload["output_config"] = {"effort": chat["effort"]}
         if isinstance(context, int) and context > 0:
@@ -757,11 +764,11 @@ class ChatService:
                     display_id = uuid.uuid4().hex
                     try:
                         if name == "delegate":
-                            from chat_agents import validate_delegate
+                            from chat_agents import validate_delegate, delegate_summary
                             validate_delegate(self, arguments)
-                            description = {"summary": "Delegate: " + arguments["task"][:160], "requires_approval": False}
-                        elif self.role == "side" and name not in {"read_file", "search_files"}:
-                            raise ValueError("Side Chat only has read_file and search_files.")
+                            description = {"summary": delegate_summary(arguments), "requires_approval": False}
+                        elif self.role in {"side", "lane"} and name not in {"read_file", "search_files"}:
+                            raise ValueError("This read-only conversation only has read_file and search_files.")
                         else:
                             description = runner.describe(name, arguments)
                         must_ask = description["requires_approval"] and needs_approval(chat.get("approvalMode", "manual"), name, arguments, chat["workspace"])
@@ -791,6 +798,7 @@ class ChatService:
                     visible = entry("tool", route=chat["route"], tool=name, id=display_id, summary=result["summary"], detail=detail,
                                     isError=result["is_error"], changedFiles=result.get("changed_files") or [], workspace=chat["workspace"])
                     if result.get("agent_id"): visible["agentID"] = result["agent_id"]
+                    if result.get("agent_ids"): visible["agentIDs"] = result["agent_ids"]
                     index = next((i for i, item in enumerate(chat["entries"]) if item["id"] == display_id), None)
                     if index is not None: chat["entries"][index] = visible; self.emit({"event": "entry", "chat": chat["id"], "entry": visible})
                     else: self.add(visible)

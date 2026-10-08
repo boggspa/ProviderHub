@@ -407,7 +407,14 @@ private struct ChatTranscript: View {
             AssistantRow(entry: entry, label: model.label(for: entry.route), accent: model.accent(for: entry.route),
                          presentation: model.route(named: entry.route)?.presentation, streaming: model.busy && last)
         case "tool":
-            if let agentID = entry.agentID {
+            if let ids = entry.agentIDs, !ids.isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    ToolRow(entry: entry, expanded: expandedBinding(entry.id), workspace: entry.workspace ?? model.selected?.workspace, onInspect: {
+                        model.inspectedAgentID = nil; model.showInspector(.agents)
+                    }, running: model.agents.contains { ids.contains($0.id) && $0.busy })
+                    ChatParallelLanes(model: model, agentIDs: ids).padding(.leading, 18)
+                }
+            } else if let agentID = entry.agentID {
                 ToolRow(entry: entry, expanded: expandedBinding(entry.id), workspace: model.selected?.workspace, onInspect: {
                     model.inspectedAgentID = agentID; model.showInspector(.agents)
                 }, running: model.agents.first { $0.id == agentID }?.busy == true)
@@ -509,7 +516,7 @@ struct ToolRow: View {
                 Text(entry.summary ?? entry.text).font(HubTheme.Typography.detail).foregroundStyle(Semantic.secondaryInk)
                     .lineLimit(1).truncationMode(.middle)
                 Spacer(minLength: 0)
-                if running { ProgressView().controlSize(.mini) }
+                if running { ProgressView().controlSize(.mini).accessibilityHidden(true) }
                 if !entry.changedFiles.isEmpty {
                     Text(entry.changedFiles.count == 1 ? "1 file" : "\(entry.changedFiles.count) files")
                         .font(HubTheme.Typography.detail).foregroundStyle(Semantic.secondaryInk)
@@ -522,7 +529,7 @@ struct ToolRow: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel("Tool \(entry.tool ?? ""), \(entry.summary ?? entry.text)")
-        .accessibilityValue(expanded ? "Expanded" : "Collapsed")
+        .accessibilityValue((expanded ? "Expanded" : "Collapsed") + (running ? ", Working" : ""))
     }
 
     @ViewBuilder private var body_: some View {
