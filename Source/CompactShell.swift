@@ -1,7 +1,7 @@
 import AppKit
 import SwiftUI
 
-// The compact design: one glass window whose left rail lists providers,
+// The compact design: one window whose left rail lists providers,
 // subscriptions and the two desktop apps, a middle pane for whichever tab is
 // selected, and a right column for status, actions and the selected model's
 // settings. It binds to the same BridgeModel as the classic pages, so both
@@ -105,6 +105,7 @@ extension BridgeModel {
 
 struct CompactShell: View {
     @ObservedObject var model: BridgeModel
+    @AppStorage(HubTheme.WindowStyle.defaultsKey) private var windowStyle = HubTheme.WindowStyle.Mode.glass
     @State private var tab: ShellTab = .provider("mistral")
     @State private var railOpen = false
     @State private var focusedRoute: String?
@@ -132,15 +133,21 @@ struct CompactShell: View {
             }
         }
         .font(.system(size: 11.5))
-        .background(VibrancyBackground())
-        .background(chromaWash)
+        .background {
+            if windowStyle == .glass {
+                VibrancyBackground().background(chromaWash)
+            } else {
+                Color(nsColor: .windowBackgroundColor)
+            }
+        }
         .frame(minWidth: 760, minHeight: 500)
-        // The hosting view insets content below the hidden title bar; the glass
+        // The hosting view insets content below the hidden title bar; the surface
         // has to reach the traffic lights, so the whole shell owns that band.
         .ignoresSafeArea()
         .sheet(isPresented: $showAudit) { auditSheet }
         .onAppear { if model.providerDefinitions.contains(where: { $0.id == model.selectedProvider }) { tab = .provider(model.selectedProvider) } }
         .onChange(of: tab) { _, new in if case .provider(let id) = new { model.selectedProvider = id; model.secretDraft = "" }; if new != .settings { search = ""; focusedRoute = nil } }
+        .onChange(of: windowStyle) { _, _ in (NSApp.delegate as? AppDelegate)?.applyWindowStyle() }
         .accentColor(HubTheme.Accent.brand)
     }
 
@@ -897,6 +904,18 @@ private struct AppearanceToggle: View {
     }
 }
 
+/// The same compact segmented control as appearance, with a persisted surface.
+private struct WindowStyleToggle: View {
+    @AppStorage(HubTheme.WindowStyle.defaultsKey) private var mode = HubTheme.WindowStyle.Mode.glass
+    var body: some View {
+        Picker("Window style", selection: $mode) {
+            ForEach(HubTheme.WindowStyle.Mode.allCases, id: \.self) { style in
+                Image(systemName: style.icon).tag(style).help(style.title).accessibilityLabel(style.title)
+            }
+        }.pickerStyle(.segmented).labelsHidden().controlSize(.small).fixedSize()
+    }
+}
+
 // MARK: - Settings page (the cog)
 
 /// Every desktop-app preference and the gateway settings, on their own page
@@ -939,6 +958,7 @@ private struct SettingsPage: View {
                     Text("Changing shared settings while a desktop app is live requires quitting both apps first.").font(.system(size: 10.5)).foregroundStyle(.tertiary).fixedSize(horizontal: false, vertical: true)
                     SectionLabel(text: "Hub")
                     HStack { Text("Appearance").foregroundStyle(.secondary); Spacer(); AppearanceToggle() }
+                    HStack { Text("Window style").foregroundStyle(.secondary); Spacer(); WindowStyleToggle() }
                 }.frame(maxWidth: .infinity, alignment: .topLeading)
             }.padding(14)
         }
