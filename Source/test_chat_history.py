@@ -1,5 +1,8 @@
 import copy
 import unittest
+import tempfile
+from pathlib import Path
+from unittest.mock import patch
 
 from chat_history import portable_history
 import test_chat_runtime as fixtures
@@ -49,6 +52,19 @@ class ModelSwitchTests(unittest.TestCase):
         messages = portable_history(entries, vision=False)
         self.assertIn("Pixels excluded", str(messages))
         self.assertIn("Original extracted PDF text", str(messages))
+
+    def test_missing_invalid_and_oversized_images_do_not_prevent_switching(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "picture.png"
+            entries = [fixtures.entry("user", "Keep this text", attachments=[{
+                "kind": "image", "name": "picture.png", "path": str(path)}])]
+            for data in (None, b"invalid", b"\x89PNG\r\n\x1a\n" + b"x" * 100):
+                if data is not None: path.write_bytes(data)
+                with patch("chat_history.MAX_IMAGE_BYTES", 16):
+                    messages = portable_history(entries)
+                self.assertIn("Keep this text", str(messages))
+                self.assertIn("pixels are unavailable or invalid", str(messages))
+                self.assertFalse(any(block["type"] == "image" for msg in messages for block in msg["content"]))
 
 
 if __name__ == "__main__": unittest.main()

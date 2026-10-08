@@ -1,6 +1,6 @@
 # Provider Hub Preview
 
-**Version 0.5.6 (build 54).** Licensed Apache-2.0 — see [LICENSE](LICENSE),
+**Version 0.5.6 (build 55).** Licensed Apache-2.0 — see [LICENSE](LICENSE),
 with attributions in [NOTICE](NOTICE).
 
 A native macOS menu bar app that connects Claude Desktop and the Codex coding workspace to eleven model API connections: Mistral, Kimi Code, MiMo Token Plan, Ollama, DeepSeek, Cerebras, Muse, Grok, Qwen Token Plan, OpenRouter, and the Gemini API. Claude uses the local Messages endpoint. Codex uses Responses: Grok, Ollama, and OpenRouter retain native Responses transports, while the other eight use the local Messages bridge and their provider adapters.

@@ -124,19 +124,21 @@ final class ChatModel: ObservableObject {
             stdout.fileHandleForReading.readabilityHandler = { [weak self] handle in
                 let data = handle.availableData
                 if data.isEmpty { handle.readabilityHandler = nil; return }
-                Task { @MainActor in self?.consume(data) }
+                guard let owner = self else { return }
+                Task { @MainActor in owner.consume(data) }
             }
             stderr.fileHandleForReading.readabilityHandler = { handle in
                 if handle.availableData.isEmpty { handle.readabilityHandler = nil }
             }
             child.terminationHandler = { [weak self] _ in
+                guard let owner = self else { return }
                 Task { @MainActor in
-                    guard let self, self.process === child else { return }
-                    self.connected = false; self.process = nil; self.input = nil
-                    self.restorePendingSend()
-                    self.output?.fileHandleForReading.readabilityHandler = nil; self.output = nil
-                    self.setBusy(false); self.approval = nil
-                    self.notice = "Chat disconnected. Reopen Chat to reconnect; saved work is kept."
+                    guard owner.process === child else { return }
+                    owner.connected = false; owner.process = nil; owner.input = nil
+                    owner.restorePendingSend()
+                    owner.output?.fileHandleForReading.readabilityHandler = nil; owner.output = nil
+                    owner.setBusy(false); owner.approval = nil
+                    owner.notice = "Chat disconnected. Reopen Chat to reconnect; saved work is kept."
                 }
             }
             buffer = Data(); input = stdin; output = stdout; process = child

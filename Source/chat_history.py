@@ -36,12 +36,17 @@ read from the old Messages history. That history stays intact in an archive.
                         content.append({"type": "text", "text": f"[Earlier image: {name}. Pixels excluded for this text-only model; the original is kept in the transcript.]"})
                     else:
                         path = Path(attachment["path"])
-                        with path.open("rb") as stream:
-                            raw = stream.read(MAX_IMAGE_BYTES + 1)
-                        media = ("image/png" if raw.startswith(b"\x89PNG") else "image/jpeg" if raw.startswith(b"\xff\xd8")
-                                 else "image/gif" if raw.startswith(b"GIF") else "image/webp")
-                        image = normalize_image({"type": "image", "source": {"type": "base64", "media_type": media, "data": base64.b64encode(raw).decode()}})
-                        content.extend([{"type": "text", "text": "Earlier image attachment: " + name}, image])
+                        try:
+                            with path.open("rb") as stream:
+                                raw = stream.read(MAX_IMAGE_BYTES + 1)
+                            if len(raw) > MAX_IMAGE_BYTES:
+                                raise ValueError("The saved image exceeds the attachment limit.")
+                            media = ("image/png" if raw.startswith(b"\x89PNG") else "image/jpeg" if raw.startswith(b"\xff\xd8")
+                                     else "image/gif" if raw.startswith(b"GIF") else "image/webp")
+                            image = normalize_image({"type": "image", "source": {"type": "base64", "media_type": media, "data": base64.b64encode(raw).decode()}})
+                            content.extend([{"type": "text", "text": "Earlier image attachment: " + name}, image])
+                        except (OSError, ValueError):
+                            content.append({"type": "text", "text": f"[Earlier image: {name}. Its saved pixels are unavailable or invalid; reattach the image if needed.]"})
                 elif attachment.get("contextText"):
                     content.append({"type": "text", "text": attachment["contextText"]})
                 else:
