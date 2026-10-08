@@ -9,6 +9,28 @@ import test_chat_runtime as fixtures
 
 
 class ModelSwitchTests(unittest.TestCase):
+    def test_reused_provider_call_id_never_overwrites_an_earlier_transcript_row(self):
+        fixture = fixtures.ChatRuntimeTests(); fixture.setUp()
+        try:
+            path = fixture.root / "source.txt"; path.write_text("first result\n")
+            call = {"role": "assistant", "content": [{"type": "tool_use", "id": "reused-call", "name": "read_file", "input": {"path": "source.txt"}}], "stop_reason": "tool_use"}
+            service, transport = fixture.service([call, fixtures.response("First"), call, fixtures.response("Second")])
+            fixture.send(service); fixture.finish(service)
+            service.handle({"command": "configure", "choice": transport.rows[1]["id"]})
+            path.write_text("second result\n")
+            fixture.send(service); fixture.finish(service)
+            rows = [row for row in service.chat["entries"] if row["kind"] == "tool"]
+            self.assertEqual(len(rows), 2)
+            self.assertNotEqual(rows[0]["id"], rows[1]["id"])
+            self.assertIn("first result", rows[0]["detail"])
+            self.assertIn("second result", rows[1]["detail"])
+            self.assertTrue(all(row["detail"] != "Running…" for row in rows))
+            saved = fixture.store.load(service.chat["id"])
+            self.assertEqual(len({row["id"] for row in saved["entries"]}), len(saved["entries"]))
+            results = [block for msg in saved["messages"] for block in msg["content"] if block["type"] == "tool_result"]
+            self.assertEqual(results[0]["tool_use_id"], "reused-call")
+        finally: fixture.doCleanups()
+
     def test_switch_preserves_raw_signed_history_but_sends_no_reasoning_or_tool_calls(self):
         fixture = fixtures.ChatRuntimeTests(); fixture.setUp()
         try:

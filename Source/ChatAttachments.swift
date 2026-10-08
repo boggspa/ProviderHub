@@ -30,7 +30,7 @@ struct ChatAttachmentStrip: View {
                         }.buttonStyle(.plain).help(file.name).accessibilityLabel("Attachment: " + file.name)
                         if file.kind == "image" {
                             Text(file.name).font(.system(size: 10)).foregroundStyle(.secondary)
-                                .lineLimit(1).frame(width: 78, alignment: .leading)
+                                .lineLimit(1).truncationMode(.middle).frame(width: 78, alignment: .leading).help(file.name)
                         }
                     }
                     .overlay(alignment: .topTrailing) {

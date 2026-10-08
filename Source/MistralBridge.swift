@@ -1441,6 +1441,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         model = BridgeModel()
         chatModel = ChatModel(bridge: model)
         chatModel.onActivity = { [weak self] working in self?.model.chatWorking = working }
+        chatModel.onSurfaceChange = { [weak self] in self?.applyWindowStyle() }
         model.openChatWindow = { [weak self] in self?.showChat() }
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         statusItem.button?.image = NSImage(systemSymbolName: "point.3.connected.trianglepath.dotted", accessibilityDescription: hubName)

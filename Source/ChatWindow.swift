@@ -18,6 +18,8 @@ struct ChatWindow: View {
     @ObservedObject var model: ChatModel
     @AppStorage("chatRailVisible") private var railPreferred = true
     @AppStorage(HubTheme.WindowStyle.defaultsKey) private var windowStyle = HubTheme.WindowStyle.Mode.glass
+    @AppStorage("chatMonospacedText") private var monospacedText = false
+    @AppStorage("chatTextSize") private var textSize = 13.0
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var dropTargeted = false
 
@@ -38,6 +40,7 @@ struct ChatWindow: View {
             .animation(reduceMotion ? nil : .easeInOut(duration: 0.18), value: railPreferred)
         }
         .frame(minWidth: 720, minHeight: 500)
+        .environment(\.chatTextStyle, ChatTextStyle(size: textSize, monospaced: monospacedText))
         .background {
             if windowStyle == .glass { VibrancyBackground().ignoresSafeArea() }
             else { Color(nsColor: .windowBackgroundColor).ignoresSafeArea() }
@@ -146,6 +149,7 @@ private struct ChatRail: View {
                 }
                 .padding(.horizontal, 6).padding(.bottom, 8)
             }
+            HStack { ChatSettingsMenu(model: model); Spacer() }.padding(.horizontal, 14).padding(.vertical, 12)
         }
         .confirmationDialog(deleteTitle, isPresented: deleteShown, presenting: pendingDelete) { chat in
             Button("Delete", role: .destructive) { model.delete(chat.id) }
@@ -244,6 +248,7 @@ private struct ChatHeader: View {
             if model.selectedID != nil {
                 modelMenu
                 folderMenu
+                ChatGitIndicator(model: model)
             }
             Spacer(minLength: HubTheme.Spacing.sm)
             usage
@@ -471,11 +476,12 @@ private struct ChatTranscript: View {
 
 private struct UserRow: View {
     var entry: ChatEntry
+    @Environment(\.chatTextStyle) private var textStyle
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             Text("You").font(.system(size: 10.5, weight: .semibold)).foregroundStyle(Semantic.secondaryInk)
             if let attachments = entry.attachments, !attachments.isEmpty { ChatAttachmentStrip(attachments: attachments) }
-            if !entry.text.isEmpty { Text(entry.text).font(HubTheme.Typography.body).foregroundStyle(Semantic.ink).textSelection(.enabled) }
+            if !entry.text.isEmpty { Text(entry.text).font(textStyle.font).foregroundStyle(Semantic.ink).textSelection(.enabled) }
         }
         .padding(.vertical, 5)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -484,6 +490,7 @@ private struct UserRow: View {
 }
 
 private struct AssistantRow: View {
+    @Environment(\.chatTextStyle) private var textStyle
     var entry: ChatEntry
     var label: String
     var accent: Color
@@ -500,7 +507,7 @@ private struct AssistantRow: View {
                 if entry.text.isEmpty, streaming {
                     Text("Thinking…").font(HubTheme.Typography.body).foregroundStyle(Semantic.secondaryInk)
                 } else {
-                    Text(rendered).font(HubTheme.Typography.body).foregroundStyle(Semantic.ink).textSelection(.enabled)
+                    Text(rendered).font(textStyle.font).foregroundStyle(Semantic.ink).textSelection(.enabled)
                 }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -715,7 +722,10 @@ private struct ChatComposer: View {
                 ComposerTextView(text: $model.draft, height: $height, placeholder: placeholder, enabled: editable) { model.send() }
                     .frame(height: height)
                     .accessibilityLabel("Message")
-                if model.busy { stopButton } else { sendButton }
+                if model.busy {
+                    if !model.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !model.attachments.isEmpty { interruptButton }
+                    stopButton
+                } else { sendButton }
             }
             .padding(.leading, 14).padding(.trailing, 7).padding(.vertical, 7)
             .background(RoundedRectangle(cornerRadius: HubTheme.Radius.panel).fill(Semantic.raisedSurface))
@@ -751,6 +761,13 @@ private struct ChatComposer: View {
         .buttonStyle(.plain).keyboardShortcut(".", modifiers: .command)
         .accessibilityLabel("Stop").help("Stop and keep what has arrived (⌘.)")
     }
+    private var interruptButton: some View {
+        Button { model.send() } label: {
+            Image(systemName: "arrow.uturn.forward").font(.system(size: 13, weight: .semibold)).foregroundStyle(model.activeAccent)
+                .frame(width: 28, height: 28).contentShape(Rectangle())
+        }.buttonStyle(.plain).disabled(!model.canInterrupt)
+            .help("Interrupt and send this update (Return)").accessibilityLabel("Interrupt and send update")
+    }
 
     private var footer: some View {
         HStack(alignment: .top) {
@@ -761,7 +778,7 @@ private struct ChatComposer: View {
                 Text(model.notice).font(HubTheme.Typography.detail).foregroundStyle(Semantic.accentOnSurface).textSelection(.enabled)
             }
             Spacer(minLength: 8)
-            Text("Return sends · Shift-Return for a new line").font(.system(size: 10.5)).foregroundStyle(Semantic.secondaryInk.opacity(0.7))
+            Text(model.busy ? "Return interrupts · Shift-Return for a new line" : "Return sends · Shift-Return for a new line").font(.system(size: 10.5)).foregroundStyle(Semantic.secondaryInk.opacity(0.7))
                 .accessibilityHidden(true)
         }
         .lineLimit(2).padding(.horizontal, 6).frame(minHeight: 16)
@@ -790,6 +807,7 @@ private struct ChatComposer: View {
 /// A plain NSTextView: Return and ⌘Return send, Shift-Return and Option-Return
 /// insert a line, and the view grows with its text up to a few lines.
 private struct ComposerTextView: NSViewRepresentable {
+    @Environment(\.chatTextStyle) private var textStyle
     @Binding var text: String
     @Binding var height: CGFloat
     var placeholder: String
@@ -867,6 +885,7 @@ private struct ComposerTextView: NSViewRepresentable {
         guard let view = scroll.documentView as? SendTextView else { return }
         view.onSend = onSend
         view.placeholder = placeholder
+        view.font = textStyle.editorFont
         view.isEditable = enabled
         if view.string != text { view.string = text }
         measure(view)
