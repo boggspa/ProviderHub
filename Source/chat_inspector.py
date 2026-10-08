@@ -82,6 +82,17 @@ def _display_path(path):
                    else "\\\\" if char == "\\" else char for char in path)
 
 
+def _unicode_path(path):
+    try: path.encode("utf-8"); return True
+    except UnicodeError: return False
+
+
+def decode_branch(value):
+    if not isinstance(value, str) or not re.fullmatch(r"(?:[0-9a-fA-F]{2}){1,4096}", value):
+        raise ValueError("Choose a branch from this repository.")
+    return os.fsdecode(bytes.fromhex(value))
+
+
 def _root(workspace):
     path = Path(workspace).expanduser().resolve(strict=True)
     if not path.is_dir():
@@ -192,13 +203,22 @@ def git_branches(workspace):
         elif key == b"branch": row["branch"] = _text(value).removeprefix("refs/heads/")
         elif key in {b"locked", b"prunable"}: row[key.decode()] = True
     branches = []
-    for ref in _complete(root, "for-each-ref", "--format=%(refname)", "refs/heads/").decode().splitlines():
-        name = ref.removeprefix("refs/heads/")
-        branch = {"name": name, "current": name == current}
+    for ref in _complete(root, "for-each-ref", "--format=%(refname)", "refs/heads/").split(b"\n"):
+        if not ref: continue
+        name = _text(ref.removeprefix(b"refs/heads/"))
+        branch = {"name": name if _unicode_path(name) else _display_path(name),
+                  "nameBytes": os.fsencode(name).hex(), "current": name == current}
         tree = next((tree for tree in worktrees if tree.get("branch") == name), None)
-        if tree: branch["worktree"] = tree["path"]
+        if tree: branch["worktree"] = tree["path"] if _unicode_path(tree["path"]) else _display_path(tree["path"])
         branches.append(branch)
-    return {"root": root, "current": current, "branches": branches, "worktrees": worktrees}
+    for tree in worktrees:
+        tree["pathBytes"] = os.fsencode(tree["path"]).hex()
+        tree["selectable"] = _unicode_path(tree["path"])
+        if not tree["selectable"]: tree["path"] = _display_path(tree["path"])
+        if tree.get("branch") and not _unicode_path(tree["branch"]): tree["branch"] = _display_path(tree["branch"])
+    return {"root": root if _unicode_path(root) else _display_path(root),
+            "current": current if current is None or _unicode_path(current) else _display_path(current),
+            "branches": branches, "worktrees": worktrees}
 
 
 def _claim_guard(root):
@@ -274,7 +294,7 @@ def _branch(root, branch, *, new):
     if not isinstance(branch, str) or not branch or branch.startswith("-"):
         raise ValueError("Enter a valid local branch name.")
     _complete(root, "check-ref-format", "refs/heads/" + branch)
-    existing = {item["name"] for item in git_branches(root)["branches"]}
+    existing = {decode_branch(item["nameBytes"]) for item in git_branches(root)["branches"]}
     if (branch in existing) == new:
         raise ValueError("Choose a new branch name." if new else "Choose an existing local branch.")
 
@@ -308,8 +328,10 @@ def create_worktree(workspace, branch, path):
 def switch_worktree(workspace, path):
     destination = Path(path).expanduser().resolve(strict=True)
     trees = git_branches(workspace)["worktrees"]
-    if not any(Path(tree["path"]).resolve() == destination for tree in trees):
+    if not any(tree.get("selectable", True) and Path(os.fsdecode(bytes.fromhex(tree["pathBytes"]))).resolve() == destination for tree in trees):
         raise ValueError("Choose a worktree belonging to this repository.")
+    if not _unicode_path(str(destination)):
+        raise ValueError("This worktree path cannot be represented by macOS. Relocate it with Git before selecting it.")
     if not destination.is_dir() or not os.access(destination, os.R_OK | os.X_OK):
         raise ValueError("This worktree is unavailable or inaccessible.")
     return str(destination)

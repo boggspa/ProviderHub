@@ -224,6 +224,28 @@ import SwiftUI
         check(model.gitChanges == nil, "Git inspection leaked across chats")
         try send(["event":"git_changes", "chat":"A", "workspace":"/wrong", "changes":["files":[], "truncated":false]])
         check(model.gitChanges == nil, "stale workspace inspection displayed")
+        model.refreshChanges()
+        let oldInspection = commands.last?["request"] as! String
+        let beforeRefresh = commands.count; model.refreshChanges()
+        check(commands.count == beforeRefresh && model.changesRefreshPending, "refresh during inspection was lost")
+        try send(["event":"git_changes", "chat":"A", "workspace":"/tmp", "request":oldInspection, "changes":["files":[], "truncated":false]])
+        let newInspection = commands.last?["request"] as! String
+        check(newInspection != oldInspection && model.gitChangesLoading && model.gitChanges == nil, "stale inspection was accepted without follow-up")
+        try send(["event":"git_changes", "chat":"A", "workspace":"/tmp", "request":oldInspection, "notice":"Stale failure"])
+        check(model.gitChangesLoading && model.inspectorNotice.isEmpty, "late result cleared a newer inspection")
+        try send(["event":"git_changes", "chat":"A", "workspace":"/tmp", "request":newInspection, "changes":["files":[], "truncated":false]])
+        check(!model.gitChangesLoading && model.gitChanges != nil, "fresh inspection not accepted")
+        model.refreshBranches()
+        let oldBranches = commands.last?["request"] as! String
+        model.branchAction("switch", branch: "main", branchBytes: "6d61696e")
+        let branchOperation = commands.last?["request"] as! String
+        check(commands.last?["branchBytes"] as? String == "6d61696e", "exact branch identity omitted")
+        let branchRows: [String: Any] = ["root":"/tmp", "current":"main", "branches":[], "worktrees":[]]
+        try send(["event":"branches", "chat":"A", "workspace":"/tmp", "request":oldBranches, "branches":branchRows])
+        check(model.branches == nil, "pre-checkout branch list overwrote active operation")
+        try send(["event":"branches", "chat":"A", "workspace":"/tmp", "request":branchOperation, "branches":branchRows])
+        try send(["event":"branch_state", "chat":"A", "request":branchOperation, "busy":false])
+        check(model.branches?.current == "main" && !model.branchBusy, "checkout result lost its generation")
         try send(["event":"branch_state", "chat":"A", "busy":true])
         model.draft = "Wait for checkout"
         check(!model.canSend, "main send raced branch mutation")

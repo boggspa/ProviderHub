@@ -319,23 +319,23 @@ def handle_auxiliary(parent, command):
     identifier = command.get("id")
     event = {"inspect_git": "git_changes", "branches": "branches", "branch_action": "branch_state"}[action]
     if not parent.chat or identifier != parent.chat["id"]:
-        parent.emit({"event": event, "chat": identifier, "busy": False, "notice": "Select the current chat."}); return True
+        parent.emit({"event": event, "chat": identifier, "request": command.get("request"), "busy": False, "notice": "Select the current chat."}); return True
     workspace = parent.chat["workspace"]
     mutation = action == "branch_action"
     if mutation:
         from pathlib import Path
         active_side = any(side.busy and Path(side.chat["workspace"]).resolve() == Path(workspace).resolve() for side in parent.sides.values())
         if parent.busy or parent._branch_working or active_side:
-            parent.emit({"event": event, "chat": identifier, "busy": parent._branch_working, "notice": "Stop both chats before changing branches or worktrees."}); return True
+            parent.emit({"event": event, "chat": identifier, "request": command.get("request"), "busy": parent._branch_working, "notice": "Stop both chats before changing branches or worktrees."}); return True
         parent._branch_working = True
-        parent.emit({"event": event, "chat": identifier, "busy": True})
+        parent.emit({"event": event, "chat": identifier, "request": command.get("request"), "busy": True})
     def execute():
         notice = None
         try:
             if action == "inspect_git":
-                parent.emit({"event": event, "chat": identifier, "workspace": workspace, "changes": inspector.git_changes(workspace)})
+                parent.emit({"event": event, "chat": identifier, "request": command.get("request"), "workspace": workspace, "changes": inspector.git_changes(workspace)})
             elif action == "branches":
-                parent.emit({"event": event, "chat": identifier, "workspace": workspace, "branches": inspector.git_branches(workspace)})
+                parent.emit({"event": event, "chat": identifier, "request": command.get("request"), "workspace": workspace, "branches": inspector.git_branches(workspace)})
             else:
                 if any(side.busy for side in parent.sides.values()):
                     from pathlib import Path
@@ -343,7 +343,9 @@ def handle_auxiliary(parent, command):
                     if any(side.busy and Path(side.chat["workspace"]).resolve().is_relative_to(root) for side in parent.sides.values()):
                         raise ValueError("Stop Side Chats using this repository before changing branches or worktrees.")
                 operation = command.get("action")
-                if operation == "switch": result = inspector.switch_branch(workspace, command.get("branch"))
+                if operation == "switch":
+                    branch = inspector.decode_branch(command.get("branchBytes")) if command.get("branchBytes") is not None else command.get("branch")
+                    result = inspector.switch_branch(workspace, branch)
                 elif operation == "create": result = inspector.create_branch(workspace, command.get("branch"))
                 elif operation == "worktree": result = inspector.create_worktree(workspace, command.get("branch"), command.get("path"))
                 elif operation == "select_worktree":
@@ -359,18 +361,18 @@ def handle_auxiliary(parent, command):
                 else: raise ValueError("Unknown branch action.")
                 if operation in {"switch", "create"}:
                     from chat_runtime import entry
-                    message = "Switched branch to " + command["branch"] + ". Earlier file and tool results describe the previous branch; inspect the current files before editing."
+                    message = "Switched branch to " + result["current"] + ". Earlier file and tool results describe the previous branch; inspect the current files before editing."
                     parent.add(entry("notice", message, parent.chat["route"]))
                     parent.chat["messages"].append({"role": "user", "content": [{"type": "text", "text": "[Workspace update from Provider Hub] " + message}]})
                     parent.save()
-                parent.emit({"event": "branches", "chat": identifier, "workspace": parent.chat["workspace"], "branches": result})
+                parent.emit({"event": "branches", "chat": identifier, "request": command.get("request"), "workspace": parent.chat["workspace"], "branches": result})
         except Exception as exc:
             notice = str(exc)
             if not mutation:
-                parent.emit({"event": event, "chat": identifier, "workspace": workspace, "busy": False, "notice": notice})
+                parent.emit({"event": event, "chat": identifier, "request": command.get("request"), "workspace": workspace, "busy": False, "notice": notice})
         finally:
             if mutation:
                 parent._branch_working = False
-                parent.emit({"event": "branch_state", "chat": identifier, "workspace": parent.chat["workspace"], "busy": False, "notice": notice})
+                parent.emit({"event": "branch_state", "chat": identifier, "request": command.get("request"), "workspace": parent.chat["workspace"], "busy": False, "notice": notice})
     threading.Thread(target=execute, daemon=True, name="chat-inspector").start()
     return True

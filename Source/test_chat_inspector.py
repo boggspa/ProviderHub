@@ -8,7 +8,7 @@ import unittest
 from unittest.mock import patch
 
 from chat_inspector import (git_changes, git_branches, switch_branch, create_branch,
-                            create_worktree, switch_worktree)
+                            create_worktree, switch_worktree, decode_branch)
 
 
 class InspectorTests(unittest.TestCase):
@@ -208,6 +208,39 @@ class InspectorTests(unittest.TestCase):
         self.assertEqual(len(json.loads(wire)["files"]), 2)
         self.assertEqual(len({row["path"] for row in result["files"]}), 2)
         self.assertTrue(all(row["added"] == row["deleted"] == 1 for row in result["files"]))
+
+    def test_packed_non_utf8_ref_can_be_listed_and_switched_by_exact_bytes(self):
+        (self.root / "file").write_text("base\n"); self.commit()
+        revision = self.git("rev-parse", "HEAD").strip()
+        raw = b"topic-\xff"
+        (self.root / ".git/packed-refs").write_bytes(revision + b" refs/heads/" + raw + b"\n")
+        listing = git_branches(self.root)
+        encoded = next(row for row in listing["branches"] if row["nameBytes"] == raw.hex())
+        self.assertEqual(encoded["name"], "topic-\\xff")
+        json.dumps(listing, ensure_ascii=False).encode("utf-8")
+        result = switch_branch(self.root, decode_branch(encoded["nameBytes"]))
+        self.assertEqual(result["current"], "topic-\\xff")
+        self.assertEqual(self.git("symbolic-ref", "--short", "HEAD").strip(), raw)
+        self.assertEqual(switch_branch(self.root, "main")["current"], "main")
+        for token in [None, "", "0", "not-hex", "00"]:
+            if token == "00":
+                with self.assertRaises(ValueError): switch_branch(self.root, decode_branch(token))
+            else:
+                with self.assertRaises(ValueError): decode_branch(token)
+
+    def test_unrepresentable_worktree_does_not_break_usable_entries(self):
+        root = os.fsencode(str(self.root))
+        def complete(workspace, *args):
+            if args[0] == "worktree": return b"worktree " + root + b"\0branch refs/heads/main\0\0worktree /bad-\xff\0branch refs/heads/topic-\xff\0\0"
+            if args[0] == "for-each-ref": return b"refs/heads/main\nrefs/heads/topic-\xff\n"
+            raise AssertionError(args)
+        with patch("chat_inspector._root", return_value=str(self.root)), patch("chat_inspector._complete", side_effect=complete), patch("chat_inspector._git", return_value=(b"main\n", False, 0)):
+            result = git_branches(self.root)
+        wire = json.dumps(result, ensure_ascii=False).encode("utf-8")
+        self.assertEqual(len(json.loads(wire)["worktrees"]), 2)
+        self.assertTrue(result["worktrees"][0]["selectable"])
+        self.assertFalse(result["worktrees"][1]["selectable"])
+        self.assertEqual(bytes.fromhex(result["worktrees"][1]["pathBytes"]), b"/bad-\xff")
 
 
 if __name__ == "__main__":
