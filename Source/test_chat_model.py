@@ -183,6 +183,52 @@ import SwiftUI
         check(groups[0].chats.map(\.id) == ["newer", "older"], "workspace chats not ordered by recency")
         check(groups[1].chats.isEmpty, "workspace without chats disappeared")
         check(groups[2].chats.map(\.id) == ["other"], "same-name workspace identities merged")
+        try send(["event":"chats", "chats":[summary("A"), summary("B")]])
+        try send(["event":"selected", "id":"A", "entries":[]])
+        model.openSideChat(choice: "ollama/test|", effort: "high")
+        let requestA = commands.last?["request"] as! String
+        func side(_ id: String, _ text: String = "") -> [String: Any] {
+            ["id":id, "route":"ollama/test", "account":"", "label":"Test", "effort":"high", "status":"ready", "busy":false,
+             "entries": text.isEmpty ? [] : [["id":"side-user-1", "kind":"user", "text":text, "route":"ollama/test", "isError":false, "changedFiles":[]]]]
+        }
+        try send(["event":"side", "chat":"A", "request":requestA, "side":side("side-A")])
+        check(model.sideChat?.id == "side-A", "side did not open")
+        model.sideDraft = "A side draft"
+        try send(["event":"selected", "id":"B", "entries":[]])
+        check(model.sideChat == nil && model.sideDraft.isEmpty, "side leaked across parents")
+        try send(["event":"side", "chat":"A", "request":requestA, "side":side("side-A")])
+        check(model.sideChat == nil, "hidden side snapshot reached the wrong parent")
+        try send(["event":"selected", "id":"A", "entries":[]])
+        try send(["event":"side", "chat":"A", "request":requestA, "side":side("side-A")])
+        check(model.sideDraft == "A side draft", "temporary side draft lost across selection")
+        model.sendSide()
+        check(model.pendingSideText == "A side draft" && !model.canSendSide, "side accepted queued input")
+        try send(["event":"side", "chat":"A", "request":requestA, "side":side("side-A", "A side draft")])
+        check(model.pendingSideText == nil && model.sideDraft.isEmpty, "side acknowledgement lost the input")
+        model.closeSideChat()
+        try send(["event":"side", "chat":"A", "request":requestA, "side":side("side-A")])
+        check(model.sideChat == nil, "closed side revived from late snapshot")
+        model.openSideChat(choice: "ollama/test|", effort: "")
+        let requestB = commands.last?["request"] as! String
+        try send(["event":"side", "chat":"A", "request":requestA, "sideID":"side-A", "side":NSNull()])
+        check(model.sideOpening, "old close event cleared a newer fork")
+        try send(["event":"side", "chat":"A", "request":requestB, "side":side("side-B")])
+        check(model.sideChat?.id == "side-B", "replacement side snapshot was dropped")
+        model.sideDraft = String(repeating: "Large question ", count: 1000)
+        model.sendSide()
+        try send(["event":"side_accepted", "chat":"A", "request":requestB, "side":"side-B", "id":"long-question"])
+        check(model.sideDraft.isEmpty && model.pendingSideText == nil, "large accepted side input depended on truncated snapshot text")
+        try send(["event":"side", "chat":"A", "request":requestB, "side":NSNull(), "notice":"Side closed"])
+        check(model.sideNotice == "Side closed", "scoped close notice hidden")
+        try send(["event":"git_changes", "chat":"B", "changes":["files":[], "truncated":false]])
+        check(model.gitChanges == nil, "Git inspection leaked across chats")
+        try send(["event":"git_changes", "chat":"A", "workspace":"/wrong", "changes":["files":[], "truncated":false]])
+        check(model.gitChanges == nil, "stale workspace inspection displayed")
+        try send(["event":"branch_state", "chat":"A", "busy":true])
+        model.draft = "Wait for checkout"
+        check(!model.canSend, "main send raced branch mutation")
+        try send(["event":"branch_state", "chat":"A", "busy":false, "notice":"Workspace has uncommitted changes"])
+        check(model.branchNotice.contains("uncommitted") && model.canSend, "branch failure lost or left chat disabled")
         print("ChatModel state transitions passed")
     }
 }
@@ -194,7 +240,7 @@ import SwiftUI
             binary = root / "chat-model-tests"
             compiled = subprocess.run(["xcrun", "swiftc", "-swift-version", "5", "-parse-as-library",
                 "-module-cache-path", str(root / "cache"), str(root / "Stubs.swift"),
-                str(Path(__file__).with_name("ChatModel.swift")), str(Path(__file__).with_name("ChatWorkspaces.swift")), str(root / "Cases.swift"),
+                str(Path(__file__).with_name("ChatModel.swift")), str(Path(__file__).with_name("ChatInspectorModel.swift")), str(Path(__file__).with_name("ChatWorkspaces.swift")), str(root / "Cases.swift"),
                 "-framework", "AppKit", "-framework", "SwiftUI", "-framework", "PDFKit", "-o", str(binary)], capture_output=True, text=True, timeout=90)
             self.assertEqual(compiled.returncode, 0, compiled.stderr)
             ran = subprocess.run([str(binary)], capture_output=True, text=True, timeout=15)

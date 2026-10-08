@@ -31,15 +31,23 @@ struct ChatWindow: View {
 
     var body: some View {
         GeometryReader { proxy in
-            let narrow = proxy.size.width < Self.narrowWidth
+            let inspectorWidth = min(360, max(290, proxy.size.width * 0.35))
+            let remaining = proxy.size.width - (model.inspectorVisible ? inspectorWidth : 0)
+            let narrow = remaining < Self.narrowWidth
             HStack(spacing: 0) {
                 if railPreferred && !narrow {
                     ChatWorkspaceRail(model: model).frame(width: Self.railWidth)
                     Rectangle().fill(Semantic.hairline).frame(width: HubTheme.Separator.width)
                 }
-                ChatPane(model: model, railVisible: railPreferred && !narrow, railAvailable: !narrow) { railPreferred.toggle() }
+                ChatPane(model: model, railVisible: railPreferred && !narrow, railAvailable: !narrow,
+                         compactHeader: remaining - (railPreferred && !narrow ? Self.railWidth : 0) < 860) { railPreferred.toggle() }
+                if model.inspectorVisible {
+                    Rectangle().fill(Semantic.hairline).frame(width: HubTheme.Separator.width)
+                    ChatInspector(model: model).frame(width: inspectorWidth)
+                }
             }
             .animation(reduceMotion ? nil : .easeInOut(duration: 0.18), value: railPreferred)
+            .animation(reduceMotion ? nil : .easeInOut(duration: 0.18), value: model.inspectorVisible)
         }
         .frame(minWidth: 720, minHeight: 500)
         .environment(\.chatTextStyle, ChatTextStyle(size: textSize,
@@ -66,11 +74,12 @@ struct ChatWindow: View {
     }
 
     private func acceptFolder(_ urls: [URL]) -> Bool {
-        guard !model.busy, model.selectedID != nil else { return false }
+        guard !model.busy, !model.branchBusy, model.connected else { return false }
         var isDirectory: ObjCBool = false
         for url in urls where FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory) {
             if isDirectory.boolValue { model.setFolder(url.path); return true }
         }
+        guard model.selectedID != nil else { return false }
         model.addAttachments(urls)
         return !urls.isEmpty
     }
@@ -111,7 +120,7 @@ private func reveal(_ path: String, in workspace: String?) {
     NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: full)])
 }
 
-private struct ChatProviderIcon: View {
+struct ChatProviderIcon: View {
     var presentation: ProviderPresentation?
     var size: CGFloat = 14
     @ViewBuilder var body: some View {
@@ -126,11 +135,12 @@ private struct ChatPane: View {
     @ObservedObject var model: ChatModel
     var railVisible: Bool
     var railAvailable: Bool
+    var compactHeader: Bool
     var toggleRail: () -> Void
 
     var body: some View {
         VStack(spacing: 0) {
-            ChatHeader(model: model, railVisible: railVisible, railAvailable: railAvailable, toggleRail: toggleRail)
+            ChatHeader(model: model, railVisible: railVisible, railAvailable: railAvailable, compact: compactHeader, toggleRail: toggleRail)
             Rectangle().fill(Semantic.hairline).frame(height: HubTheme.Separator.width)
             if model.selectedID == nil { ChatWelcome(model: model) }
             else { ChatTranscript(model: model) }
@@ -146,23 +156,48 @@ private struct ChatHeader: View {
     @ObservedObject var model: ChatModel
     var railVisible: Bool
     var railAvailable: Bool
+    var compact: Bool
     var toggleRail: () -> Void
     @State private var showingModels = false
 
     var body: some View {
-        HStack(spacing: HubTheme.Spacing.sm) {
-            railButton
-            newChatButton
-            if model.selectedID != nil {
-                modelMenu
-                folderMenu
-                ChatGitIndicator(model: model)
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(spacing: HubTheme.Spacing.sm) {
+                railButton
+                newChatButton
+                if model.selectedID != nil {
+                    modelMenu
+                    if !compact { workspaceControls }
+                }
+                Spacer(minLength: 4)
+                usage
+                connection
+                inspectorButton
             }
-            Spacer(minLength: HubTheme.Spacing.sm)
-            usage
-            connection
+            if compact, model.selectedID != nil { workspaceControls.padding(.leading, 4) }
         }
         .padding(.horizontal, HubTheme.Spacing.md).padding(.vertical, 7)
+    }
+
+    private var workspaceControls: some View {
+        HStack(spacing: 9) {
+            folderMenu
+            ChatBranchChip(model: model)
+            Spacer(minLength: 0)
+            ChatGitIndicator(model: model).contentShape(Rectangle())
+                .onTapGesture { model.showInspector(.changes) }
+                .accessibilityAction(named: Text("Inspect file changes")) { model.showInspector(.changes) }
+        }
+    }
+
+    private var inspectorButton: some View {
+        Button { model.inspectorVisible.toggle() } label: {
+            Image(systemName: "sidebar.right").font(.system(size: 13))
+                .foregroundStyle(model.inspectorVisible ? Semantic.ink : Semantic.secondaryInk)
+                .frame(width: 24, height: 22).contentShape(Rectangle())
+        }.buttonStyle(.plain).keyboardShortcut("i", modifiers: [.command, .control])
+            .accessibilityLabel(model.inspectorVisible ? "Hide inspector" : "Show inspector")
+            .help("Inspector (⌃⌘I)")
     }
 
     private var railButton: some View {
@@ -181,7 +216,7 @@ private struct ChatHeader: View {
             Image(systemName: "square.and.pencil").font(.system(size: 13)).foregroundStyle(Semantic.secondaryInk)
                 .frame(width: 24, height: 22).contentShape(Rectangle())
         }
-        .buttonStyle(.plain).disabled(model.busy || !model.connected)
+        .buttonStyle(.plain).disabled(model.busy || model.branchBusy || !model.connected)
         .keyboardShortcut("n", modifiers: .command)
         .accessibilityLabel("New chat").help("New chat (⌘N)")
     }
@@ -203,11 +238,11 @@ private struct ChatHeader: View {
             }
             .lineLimit(1)
         }
-        .buttonStyle(.plain).fixedSize()
+        .buttonStyle(.plain)
         .popover(isPresented: $showingModels, arrowEdge: .bottom) {
             ChatModelPicker(model: model) { showingModels = false }
         }
-        .disabled(model.busy)
+        .disabled(model.busy || model.branchBusy)
         .accessibilityLabel("Model")
         .help(model.selectedRoute.map { "\(model.providerTitle($0)) · \($0.accountLabel)" } ?? "Choose a model")
     }
@@ -228,8 +263,8 @@ private struct ChatHeader: View {
             Label(path.isEmpty ? "Choose folder" : folderName(path), systemImage: "folder")
                 .font(HubTheme.Typography.detail).foregroundStyle(Semantic.secondaryInk).lineLimit(1)
         }
-        .menuStyle(.button).buttonStyle(.borderless).fixedSize()
-        .disabled(model.busy)
+        .menuStyle(.button).buttonStyle(.borderless).frame(maxWidth: 170, alignment: .leading)
+        .disabled(model.busy || model.branchBusy)
         .accessibilityLabel("Working folder")
         .help(path.isEmpty ? "Choose the folder tools work in" : shortPath(path) + " — drop a folder here to change it")
     }
@@ -275,6 +310,9 @@ private struct ChatWelcome: View {
             Button("New chat") { model.newChat() }
                 .buttonStyle(HubTheme.Control.prominentButton).controlSize(.regular)
                 .disabled(model.busy || !model.connected || model.models.isEmpty)
+            Button("Choose Folder…") { model.chooseFolder() }
+                .buttonStyle(.plain).font(HubTheme.Typography.detail).foregroundStyle(Semantic.secondaryInk)
+                .disabled(model.busy || model.branchBusy || !model.connected || model.models.isEmpty)
             Spacer()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -369,7 +407,11 @@ private struct ChatTranscript: View {
             AssistantRow(entry: entry, label: model.label(for: entry.route), accent: model.accent(for: entry.route),
                          presentation: model.route(named: entry.route)?.presentation, streaming: model.busy && last)
         case "tool":
-            ToolRow(entry: entry, expanded: expandedBinding(entry.id), workspace: model.selected?.workspace)
+            if let agentID = entry.agentID {
+                ToolRow(entry: entry, expanded: expandedBinding(entry.id), workspace: model.selected?.workspace, onInspect: {
+                    model.inspectedAgentID = agentID; model.showInspector(.agents)
+                }, running: model.agents.first { $0.id == agentID }?.busy == true)
+            } else { ToolRow(entry: entry, expanded: expandedBinding(entry.id), workspace: model.selected?.workspace) }
         case "error":
             ErrorRow(entry: entry, canRetry: last && !model.busy && model.connected) { model.retry() }
         default:
@@ -382,12 +424,13 @@ private struct ChatTranscript: View {
     }
 }
 
-private struct UserRow: View {
+struct UserRow: View {
     var entry: ChatEntry
+    var title = "You"
     @Environment(\.chatTextStyle) private var textStyle
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text("You").font(.system(size: 10.5, weight: .semibold)).foregroundStyle(Semantic.secondaryInk)
+            Text(title).font(.system(size: 10.5, weight: .semibold)).foregroundStyle(Semantic.secondaryInk)
             if let attachments = entry.attachments, !attachments.isEmpty { ChatAttachmentStrip(attachments: attachments) }
             if !entry.text.isEmpty { Text(entry.text).font(textStyle.font).foregroundStyle(Semantic.ink).textSelection(.enabled) }
         }
@@ -397,7 +440,7 @@ private struct UserRow: View {
     }
 }
 
-private struct AssistantRow: View {
+struct AssistantRow: View {
     @Environment(\.chatTextStyle) private var textStyle
     var entry: ChatEntry
     var label: String
@@ -430,15 +473,24 @@ private struct AssistantRow: View {
     }
 }
 
-private struct ToolRow: View {
+struct ToolRow: View {
     var entry: ChatEntry
     @Binding var expanded: Bool
     var workspace: String?
+    var onInspect: (() -> Void)? = nil
+    var running = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            header
+            HStack(spacing: 8) {
+                header
+                if let onInspect {
+                    Button(action: onInspect) { Image(systemName: "arrow.up.right").font(.system(size: 10)).frame(width: 20, height: 22) }
+                        .buttonStyle(.plain).foregroundStyle(.secondary).help("Inspect subagent transcript")
+                        .accessibilityLabel("Inspect subagent transcript")
+                }
+            }
             if expanded { body_ }
         }
         .padding(.vertical, 4)
@@ -451,11 +503,13 @@ private struct ToolRow: View {
             HStack(spacing: 8) {
                 Image(systemName: "chevron.right").font(.system(size: 9, weight: .semibold)).foregroundStyle(Semantic.secondaryInk)
                     .rotationEffect(.degrees(expanded ? 90 : 0)).frame(width: 10)
-                ChatToolGlyph(name: entry.tool ?? "read_file").foregroundStyle(Semantic.secondaryInk)
+                if entry.tool == "delegate" { Image(systemName: "person.2").font(.system(size: 12)).foregroundStyle(Semantic.secondaryInk) }
+                else { ChatToolGlyph(name: entry.tool ?? "read_file").foregroundStyle(Semantic.secondaryInk) }
                 Text(entry.tool ?? "tool").font(.system(size: 11.5, weight: .medium, design: .monospaced)).foregroundStyle(Semantic.ink)
                 Text(entry.summary ?? entry.text).font(HubTheme.Typography.detail).foregroundStyle(Semantic.secondaryInk)
                     .lineLimit(1).truncationMode(.middle)
                 Spacer(minLength: 0)
+                if running { ProgressView().controlSize(.mini) }
                 if !entry.changedFiles.isEmpty {
                     Text(entry.changedFiles.count == 1 ? "1 file" : "\(entry.changedFiles.count) files")
                         .font(HubTheme.Typography.detail).foregroundStyle(Semantic.secondaryInk)
@@ -488,7 +542,7 @@ private struct ToolRow: View {
                         Text(path).font(.system(size: 11, design: .monospaced)).foregroundStyle(Semantic.ink)
                             .lineLimit(1).truncationMode(.middle).textSelection(.enabled)
                         Spacer(minLength: 0)
-                        Button("Reveal") { reveal(path, in: workspace) }
+                        Button("Reveal") { reveal(path, in: entry.workspace ?? workspace) }
                             .buttonStyle(.plain).font(HubTheme.Typography.detail).foregroundStyle(Semantic.secondaryInk)
                             .accessibilityLabel("Reveal \(path) in Finder")
                     }
@@ -501,8 +555,9 @@ private struct ToolRow: View {
 
 /// Monospaced output; when it reads as a patch, added and removed lines are
 /// tinted and headers recede. One attributed Text keeps selection and copy plain.
-private struct PatchText: View {
+struct PatchText: View {
     var text: String
+    var onDark = false
     private static let lineLimit = 600
 
     var body: some View {
@@ -516,23 +571,26 @@ private struct PatchText: View {
         var result = AttributedString()
         for (index, line) in lines.prefix(Self.lineLimit).enumerated() {
             var piece = AttributedString(String(line))
-            piece.foregroundColor = isPatch ? colour(line) : Semantic.ink
+            piece.foregroundColor = isPatch ? colour(line) : ink
             result.append(piece)
             if index < lines.count - 1 { result.append(AttributedString("\n")) }
         }
         if lines.count > Self.lineLimit {
             var more = AttributedString("… \(lines.count - Self.lineLimit) more lines")
-            more.foregroundColor = Semantic.secondaryInk
+            more.foregroundColor = secondaryInk
             result.append(more)
         }
         return result
     }
 
+    private var ink: Color { onDark ? .white.opacity(0.88) : Semantic.ink }
+    private var secondaryInk: Color { onDark ? .white.opacity(0.5) : Semantic.secondaryInk }
+
     private func colour(_ line: Substring) -> Color {
-        if line.hasPrefix("+++") || line.hasPrefix("---") || line.hasPrefix("@@") || line.hasPrefix("*** ") { return Semantic.secondaryInk }
+        if line.hasPrefix("+++") || line.hasPrefix("---") || line.hasPrefix("@@") || line.hasPrefix("*** ") { return secondaryInk }
         if line.hasPrefix("+") { return Color(nsColor: .systemGreen) }
         if line.hasPrefix("-") { return Color(nsColor: .systemRed) }
-        return Semantic.ink
+        return ink
     }
 }
 
@@ -556,7 +614,7 @@ private struct ErrorRow: View {
     }
 }
 
-private struct NoticeRow: View {
+struct NoticeRow: View {
     var entry: ChatEntry
     var body: some View {
         Text(entry.text).font(HubTheme.Typography.detail).foregroundStyle(Semantic.secondaryInk)
@@ -713,7 +771,7 @@ private struct ChatComposer: View {
 
 /// A plain NSTextView: Return and ⌘Return send, Shift-Return and Option-Return
 /// insert a line, and the view grows with its text up to a few lines.
-private struct ComposerTextView: NSViewRepresentable {
+struct ComposerTextView: NSViewRepresentable {
     @Environment(\.chatTextStyle) private var textStyle
     @Binding var text: String
     @Binding var height: CGFloat
