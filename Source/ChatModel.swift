@@ -307,7 +307,7 @@ final class ChatModel: ObservableObject {
                 setBusy(event["busy"] as? Bool ?? false); status = event["status"] as? String ?? "Ready"
                 interrupting = event["interrupting"] as? Bool ?? (busy && interrupting)
                 tokenUsage = event["usage"] as? Int ?? tokenUsage
-                if !busy { approval = nil }
+                if !busy || (event["interrupting"] as? Bool == true) { approval = nil }
             case "error": restorePendingSend(); notice = event["message"] as? String ?? "Chat failed."; setBusy(false); approval = nil
             case "rejected":
                 restorePendingSend(); notice = event["message"] as? String ?? "The update was not accepted."

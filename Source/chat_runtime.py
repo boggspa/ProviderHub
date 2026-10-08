@@ -673,6 +673,9 @@ class ChatService:
                 for call in calls:
                     if self.cancel.is_set(): raise InterruptedError("Stopped")
                     name, arguments = call.get("name"), call.get("input")
+                    # Provider call IDs belong to that provider context and may
+                    # repeat after switching routes. Visible row identity is local.
+                    display_id = uuid.uuid4().hex
                     try:
                         description = runner.describe(name, arguments)
                         must_ask = description["requires_approval"] and needs_approval(chat.get("approvalMode", "manual"), name, arguments, chat["workspace"])
@@ -680,7 +683,7 @@ class ChatService:
                         if self.cancel.is_set(): raise InterruptedError("Stopped")
                         if allowed:
                             self.emit({"event": "state", "busy": True, "status": description["summary"]})
-                            self.add(entry("tool", route=chat["route"], tool=name, summary=description["summary"], detail="Running…", id=call["id"]))
+                            self.add(entry("tool", route=chat["route"], tool=name, summary=description["summary"], detail="Running…", id=display_id))
                             # Pending tool + working status are durable before execution.
                             self.save()
                             result = runner.execute(name, arguments)
@@ -695,9 +698,9 @@ class ChatService:
                     results["content"].append({"type": "tool_result", "tool_use_id": call["id"],
                                               "is_error": result["is_error"], "content": result["content"]})
                     detail = "\n".join(part.get("text", "") for part in result["content"] if part.get("type") == "text")
-                    visible = entry("tool", route=chat["route"], tool=name, id=call["id"], summary=result["summary"], detail=detail,
+                    visible = entry("tool", route=chat["route"], tool=name, id=display_id, summary=result["summary"], detail=detail,
                                     isError=result["is_error"], changedFiles=result.get("changed_files") or [])
-                    index = next((i for i, item in enumerate(chat["entries"]) if item["id"] == call["id"]), None)
+                    index = next((i for i, item in enumerate(chat["entries"]) if item["id"] == display_id), None)
                     if index is not None: chat["entries"][index] = visible; self.emit({"event": "entry", "chat": chat["id"], "entry": visible})
                     else: self.add(visible)
                     self.save()
