@@ -34,14 +34,14 @@ struct ChatModelPicker: View {
                 Button { model.refresh() } label: { Image(systemName: "arrow.clockwise") }
                     .buttonStyle(.plain).help("Refresh enabled models from Provider Hub")
                     .accessibilityLabel("Refresh enabled models")
-            }.font(.system(size: 12)).padding(12)
+            }.font(.system(size: 12)).padding(.horizontal, 14).padding(.vertical, 12)
             Divider()
             HStack(spacing: 0) {
-                providerRail.frame(width: 44)
+                providerRail.frame(width: 64)
                 Divider()
                 modelList.frame(maxWidth: .infinity)
                 Divider()
-                reasoning.frame(width: 112)
+                reasoning.frame(width: 120)
             }
             Divider()
             HStack {
@@ -50,9 +50,10 @@ struct ChatModelPicker: View {
                 Button("Use model", action: commit).controlSize(.small)
                     .buttonStyle(.borderedProminent).tint(choice?.accent ?? HubTheme.Accent.brand)
                     .disabled(choice == nil || model.busy).keyboardShortcut(.defaultAction)
-            }.padding(.horizontal, 12).padding(.vertical, 9)
+            }.padding(.horizontal, 14).padding(.vertical, 12)
         }
-        .frame(width: 468, height: 356)
+        .padding(8)
+        .frame(width: 520, height: 388)
         .onAppear {
             let selected = model.selectedRoute ?? model.models.first
             provider = selected?.connectionID ?? ""; choiceID = selected?.id ?? ""
@@ -68,8 +69,8 @@ struct ChatModelPicker: View {
     }
 
     private var providerRail: some View {
-        ScrollView {
-            VStack(spacing: 4) {
+        ScrollView(showsIndicators: false) {
+            VStack(spacing: 6) {
                 ForEach(groups, id: \.self) { group in
                     if let route = model.models.first(where: { $0.connectionID == group }) {
                         Button {
@@ -77,12 +78,12 @@ struct ChatModelPicker: View {
                         } label: {
                             Group {
                                 if let presentation = route.connectionPresentation ?? route.presentation {
-                                    ProviderMark(presentation: presentation, size: 23)
+                                    ProviderMark(presentation: presentation, size: 24)
                                 } else {
                                     Text(String(route.connectionLabel.prefix(2))).font(.system(size: 10, weight: .semibold))
                                 }
                             }
-                            .frame(width: 32, height: 30)
+                            .frame(width: 40, height: 36)
                             .background(RoundedRectangle(cornerRadius: 7).fill(provider == group ? route.connectionAccent.opacity(0.16) : .clear))
                             .contentShape(Rectangle())
                         }.buttonStyle(.plain)
@@ -90,7 +91,7 @@ struct ChatModelPicker: View {
                             .accessibilityAddTraits(provider == group ? .isSelected : [])
                     }
                 }
-            }.padding(.vertical, 8)
+            }.frame(maxWidth: .infinity).padding(.vertical, 10)
         }
     }
 
@@ -98,7 +99,7 @@ struct ChatModelPicker: View {
         VStack(alignment: .leading, spacing: 4) {
             Text(search.isEmpty ? (representative?.connectionLabel ?? "Models") : "Matches")
                 .font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary)
-                .padding(.horizontal, 12).padding(.top, 10)
+                .padding(.horizontal, 14).padding(.top, 12)
             ScrollView {
                 LazyVStack(spacing: 2) {
                     ForEach(visible) { route in modelRow(route) }
@@ -107,7 +108,7 @@ struct ChatModelPicker: View {
                             .font(.system(size: 12)).foregroundStyle(.secondary)
                             .padding(12).frame(maxWidth: .infinity, alignment: .leading)
                     }
-                }.padding(.horizontal, 6).padding(.vertical, 4)
+                }.padding(.horizontal, 8).padding(.vertical, 6)
             }
         }
     }

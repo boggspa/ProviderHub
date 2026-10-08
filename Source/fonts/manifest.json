@@ -1,0 +1,50 @@
+{
+  "license": "SIL Open Font License 1.1",
+  "repository": "https://github.com/google/fonts",
+  "revision": "2eb0b48d5f760f62e286216f0859a8c540dbc1bd",
+  "modified": false,
+  "files": [
+    {
+      "family": "Inter",
+      "file": "inter/Inter[opsz,wght].ttf",
+      "source": "https://raw.githubusercontent.com/google/fonts/2eb0b48d5f760f62e286216f0859a8c540dbc1bd/ofl/inter/Inter%5Bopsz%2Cwght%5D.ttf",
+      "bytes": 876576,
+      "sha256": "29160a80ff49ddcab2c97711247e08b1fab27a484a329ce8b813d820dc559031"
+    },
+    {
+      "family": "Inter",
+      "file": "inter/OFL.txt",
+      "source": "https://raw.githubusercontent.com/google/fonts/2eb0b48d5f760f62e286216f0859a8c540dbc1bd/ofl/inter/OFL.txt",
+      "bytes": 4377,
+      "sha256": "5b9321a4298cfeb6b34354164a1c3afc3db114569984c502b9b35d988fd58c57"
+    },
+    {
+      "family": "Source Serif 4",
+      "file": "sourceserif4/SourceSerif4[opsz,wght].ttf",
+      "source": "https://raw.githubusercontent.com/google/fonts/2eb0b48d5f760f62e286216f0859a8c540dbc1bd/ofl/sourceserif4/SourceSerif4%5Bopsz%2Cwght%5D.ttf",
+      "bytes": 1209508,
+      "sha256": "97b2d4da6e3cb494b5a1e66ae176914d852ccabef49e0c02c0df25f3e39aca0b"
+    },
+    {
+      "family": "Source Serif 4",
+      "file": "sourceserif4/OFL.txt",
+      "source": "https://raw.githubusercontent.com/google/fonts/2eb0b48d5f760f62e286216f0859a8c540dbc1bd/ofl/sourceserif4/OFL.txt",
+      "bytes": 4400,
+      "sha256": "5f94c3fd3a23131a417ab5a0c8452de57e70c3cfb9f604d88241f7065ebf9fd9"
+    },
+    {
+      "family": "JetBrains Mono",
+      "file": "jetbrainsmono/JetBrainsMono[wght].ttf",
+      "source": "https://raw.githubusercontent.com/google/fonts/2eb0b48d5f760f62e286216f0859a8c540dbc1bd/ofl/jetbrainsmono/JetBrainsMono%5Bwght%5D.ttf",
+      "bytes": 187208,
+      "sha256": "48715a42ec242c21e9f02692891e147d022299a52e48d5e413e1a942193ffeda"
+    },
+    {
+      "family": "JetBrains Mono",
+      "file": "jetbrainsmono/OFL.txt",
+      "source": "https://raw.githubusercontent.com/google/fonts/2eb0b48d5f760f62e286216f0859a8c540dbc1bd/ofl/jetbrainsmono/OFL.txt",
+      "bytes": 4399,
+      "sha256": "b2fe5e8987594e9ffd1d2ca52a2f5d73eb8335243893c5d6254b5ad69269591d"
+    }
+  ]
+}

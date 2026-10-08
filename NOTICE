@@ -35,6 +35,17 @@ blocks and degrade gracefully. Provider Hub runs without them.
 file named in the error shown when `cryptography` is missing from a runtime.
 `pyproject.toml` mirrors it for development and CI.
 
+## Chat fonts
+
+Inter (The Inter Project Authors), Source Serif 4 (The Source Serif 4 Project
+Authors / Adobe), and JetBrains Mono (The JetBrains Mono Project Authors) are
+bundled unmodified under the SIL Open Font License 1.1. Each font's copyright
+notice and complete OFL text accompany it in `Source/fonts/` and the packaged
+`Contents/Resources/worker/fonts/` directory. Sources and checksums are recorded
+in `Source/fonts/manifest.json`. These font files are not relicensed under the
+project's Apache-2.0 licence. Custom fonts are loaded from the user's macOS font
+library and are never copied into the distribution.
+
 ## Provider logos
 
 The images in `Source/provider-logos/` are third-party brand assets. Their

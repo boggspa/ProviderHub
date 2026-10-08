@@ -14,6 +14,13 @@ class ChatModelStateTests(unittest.TestCase):
 import AppKit
 import SwiftUI
 struct ProviderPresentation: Decodable { var accent: String; var runtimeProvider: String; var displayProvider: String; var color: Color { .blue } }
+enum HubTheme {
+    enum Semantic { static let ink = Color.primary; static let secondaryInk = Color.secondary; static let selection = Color.gray }
+    enum Typography { static let detail = Font.system(size: 11) }
+    enum Radius { static let row: CGFloat = 6 }
+}
+struct ProviderMark: View { var presentation: ProviderPresentation; var size: CGFloat; var body: some View { Text("provider") } }
+struct ChatSettingsMenu: View { var model: ChatModel; var body: some View { Text("settings") } }
 @MainActor final class BridgeModel {
     var python: String? = nil
     var helper = URL(fileURLWithPath: "/unused/gateway.py")
@@ -27,7 +34,9 @@ import SwiftUI
 @main struct Cases {
     @MainActor static func main() throws {
         var commands: [[String: Any]] = []
-        let model = ChatModel { commands.append($0); return true }
+        var clock: TimeInterval = 100
+        var writable = true
+        let model = ChatModel(sendCommand: { commands.append($0); return writable }, uptime: { clock })
         func send(_ event: [String: Any]) throws {
             model.consume(try JSONSerialization.data(withJSONObject: event) + Data([10]))
         }
@@ -115,6 +124,65 @@ import SwiftUI
         check(model.gitStatus?.files == 3, "stale git status contaminated selected chat")
         try send(["event":"git_status", "chat":"B", "status":NSNull()])
         check(model.gitStatus == nil, "non-repository result should clear the indicator")
+        try send(["event":"state", "busy":false, "status":"Ready"])
+        check(model.turnStartedAt == nil && model.turnTimecode == "00:00", "idle clock was not reset")
+        clock = 600; model.draft = "Clock run"; model.send()
+        check(model.turnStartedAt == 600 && model.turnTimecode == "00:00", "send did not start the monotonic clock")
+        try send(["event":"entry", "chat":"B", "entry":["id":"clock-user", "kind":"user", "text":"Clock run", "route":"ollama/test", "isError":false, "changedFiles":[]]])
+        clock = 670
+        try send(["event":"state", "busy":true, "status":"Working"])
+        check(model.turnTimecode == "01:10", "stream state reset turn time")
+        try send(["event":"approval", "approval":["id":"clock-approval", "summary":"Run echo ok", "workspace":"/tmp"]])
+        clock = 675; model.draft = "Clock steer"; model.send()
+        check(model.turnStartedAt == 600 && model.turnTimecode == "01:15", "steer reset turn time")
+        try send(["event":"state", "busy":true, "interrupting":true, "status":"Interrupting"])
+        try send(["event":"entry", "chat":"B", "entry":["id":"clock-steer", "kind":"user", "text":"Clock steer", "route":"ollama/test", "isError":false, "changedFiles":[]]])
+        clock = 688
+        try send(["event":"state", "busy":true, "interrupting":false, "status":"Working"])
+        check(model.turnTimecode == "01:28", "provider restart reset turn time")
+        clock = 715
+        try send(["event":"rejected", "busy":true, "interrupting":false, "message":"Update rejected"])
+        check(model.turnTimecode == "01:55", "rejected update reset active clock")
+        clock = 4265
+        check(model.turnTimecode == "01:01:05", "hour-long turn did not format correctly")
+        model.stop()
+        check(model.turnStartedAt == 600, "stop reset before worker acknowledged completion")
+        try send(["event":"state", "busy":false, "status":"Stopped"])
+        check(model.turnStartedAt == nil && model.turnTimecode == "00:00", "completed stop left a ticking clock")
+        clock = 5000; model.retry()
+        check(model.turnStartedAt == 5000, "retry did not begin a new clock")
+        clock = 5010
+        try send(["event":"error", "message":"Provider failed"])
+        check(model.turnStartedAt == nil && model.turnTimecode == "00:00", "failed turn left a ticking clock")
+        clock = 7000; model.draft = "Completion"; model.send()
+        try send(["event":"state", "busy":false, "status":"Ready"])
+        check(model.turnTimecode == "00:00", "successful completion did not reset clock")
+        writable = false; model.retry()
+        check(!model.busy && model.turnStartedAt == nil, "failed retry write left a ticking clock")
+        model.draft = "Failed write"; model.send()
+        check(!model.busy && model.turnStartedAt == nil, "failed send write left a ticking clock")
+        writable = true
+        model.newChat(in: "/tmp/another-project")
+        check(commands.last?["workspace"] as? String == "/tmp/another-project", "workspace header created in the wrong folder")
+        try send(["event":"state", "busy":true, "status":"Working"])
+        let beforeBusyNew = commands.count; model.newChat(in: "/tmp/another-project")
+        check(commands.count == beforeBusyNew, "workspace new-chat ignored busy guard")
+        try send(["event":"state", "busy":false, "status":"Ready"])
+        try send(["event":"chats", "chats":[]])
+        try send(["event":"selected", "id":NSNull(), "entries":[]])
+        check(model.selectedID == nil && model.entries.isEmpty, "last-chat deletion left a stale selection")
+        model.newChat()
+        check(commands.last?["workspace"] as? String == "/tmp", "empty sidebar lost recent workspace")
+        let groupedJSON: [[String: Any]] = [
+            ["id":"older", "title":"Older", "updated":"2026-10-08T10:00:00Z", "route":"ollama/test", "account":"", "workspace":"/tmp/one/project", "effort":""],
+            ["id":"newer", "title":"Newer", "updated":"2026-10-08T12:00:00Z", "route":"ollama/test", "account":"", "workspace":"/tmp/one/./project", "effort":""],
+            ["id":"other", "title":"Other", "updated":"2026-10-08T11:00:00Z", "route":"ollama/test", "account":"", "workspace":"/tmp/two/project", "effort":""]]
+        try send(["event":"chats", "chats":groupedJSON])
+        let groups = ChatWorkspaceGroup.groups(chats: model.chats, folders: ["/tmp/one/project", "/tmp/empty", "/tmp/one/./project"])
+        check(groups.count == 3, "aliased workspace duplicated or legacy chat folder lost")
+        check(groups[0].chats.map(\.id) == ["newer", "older"], "workspace chats not ordered by recency")
+        check(groups[1].chats.isEmpty, "workspace without chats disappeared")
+        check(groups[2].chats.map(\.id) == ["other"], "same-name workspace identities merged")
         print("ChatModel state transitions passed")
     }
 }
@@ -126,7 +194,7 @@ import SwiftUI
             binary = root / "chat-model-tests"
             compiled = subprocess.run(["xcrun", "swiftc", "-swift-version", "5", "-parse-as-library",
                 "-module-cache-path", str(root / "cache"), str(root / "Stubs.swift"),
-                str(Path(__file__).with_name("ChatModel.swift")), str(root / "Cases.swift"),
+                str(Path(__file__).with_name("ChatModel.swift")), str(Path(__file__).with_name("ChatWorkspaces.swift")), str(root / "Cases.swift"),
                 "-framework", "AppKit", "-framework", "SwiftUI", "-framework", "PDFKit", "-o", str(binary)], capture_output=True, text=True, timeout=90)
             self.assertEqual(compiled.returncode, 0, compiled.stderr)
             ran = subprocess.run([str(binary)], capture_output=True, text=True, timeout=15)

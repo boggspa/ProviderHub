@@ -27,6 +27,7 @@ class BuildProvenanceTests(unittest.TestCase):
             "test_unrelated.py": "# existing test\n",
             "vendor/library.py": "VALUE = 1\n",
             "provider-logos/icon.txt": "logo\n",
+            "fonts/fixture/OFL.txt": "font license\n",
         }.items():
             path = self.source / name
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -39,7 +40,7 @@ class BuildProvenanceTests(unittest.TestCase):
         self.app = self.root / "Provider Hub.app"
         self.worker = self.app / "Contents/Resources/worker"
         self.worker.mkdir(parents=True)
-        for relative in ("gateway.py", "vendor/library.py", "provider-logos/icon.txt"):
+        for relative in ("gateway.py", "vendor/library.py", "provider-logos/icon.txt", "fonts/fixture/OFL.txt"):
             target = self.worker / relative
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(self.source / relative, target)
@@ -166,6 +167,15 @@ class BuildProvenanceTests(unittest.TestCase):
         manifest = self.build(exported, revision=self.revision, repository=self.repository)
         self.assertTrue(manifest["source"]["dirty"])
         self.assertEqual(manifest["source"]["changed_inputs"], ["Source/vendor/library.py"])
+
+    def test_export_cannot_hide_a_missing_font_license(self):
+        exported = self.root / "export/Source"
+        shutil.copytree(self.source, exported)
+        (exported / "fonts/fixture/OFL.txt").unlink()
+        (self.worker / "fonts/fixture/OFL.txt").unlink()
+        manifest = self.build(exported, revision=self.revision, repository=self.repository)
+        self.assertTrue(manifest["source"]["dirty"])
+        self.assertEqual(manifest["source"]["changed_inputs"], ["Source/fonts/fixture/OFL.txt"])
 
     def test_export_without_reference_repository_does_not_claim_to_be_clean(self):
         exported = self.root / "export/Source"

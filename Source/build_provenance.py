@@ -110,7 +110,7 @@ def _source_identity(source_dir, source_hashes, revision, repository):
     revision = _git(repository, "rev-parse", "--verify", (revision or "HEAD") + "^{commit}").decode().strip()
     # Entire copied resource directories count, including deletions. The
     # explicit file list excludes unrelated tests, documents and local work.
-    paths = sorted(set(source_hashes) | {"Source/vendor", "Source/provider-logos"})
+    paths = sorted(set(source_hashes) | {"Source/vendor", "Source/provider-logos", "Source/fonts"})
     baseline = _git(repository, "ls-tree", "-r", "--name-only", "-z", revision, "--", *paths)
     baseline_paths = {p.decode() for p in baseline.split(b"\0") if p}
     baseline_paths = {p for p in baseline_paths if "__pycache__" not in Path(p).parts
