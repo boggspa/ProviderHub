@@ -88,6 +88,7 @@ final class ChatModel: ObservableObject {
     @Published var attachments: [ChatAttachment] = []
     @Published var busy = false
     @Published var interrupting = false
+    @Published private(set) var turnStartedAt: TimeInterval?
     @Published var notice = ""
     @Published var connected = false
     @Published var approval: ChatApproval?
@@ -108,11 +109,20 @@ final class ChatModel: ObservableObject {
     private var pendingSend: (chat: String, text: String, attachments: [ChatAttachment])?
     private var commandSink: (([String: Any]) -> Bool)?
     private var starting = false
+    private var uptime: () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
 
     init(bridge: BridgeModel) { self.bridge = bridge }
     /// A local transport seam for exercising real UI state transitions without
     /// a gateway process or a provider account.
-    init(sendCommand: @escaping ([String: Any]) -> Bool) { commandSink = sendCommand }
+    init(sendCommand: @escaping ([String: Any]) -> Bool, uptime: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }) {
+        commandSink = sendCommand; self.uptime = uptime
+    }
+    var turnElapsed: TimeInterval { turnStartedAt.map { max(0, uptime() - $0) } ?? 0 }
+    var turnTimecode: String {
+        let seconds = Int(min(turnElapsed, Double(Int.max / 2)))
+        return seconds < 3600 ? String(format: "%02d:%02d", seconds / 60, seconds % 60)
+            : String(format: "%02d:%02d:%02d", seconds / 3600, (seconds / 60) % 60, seconds % 60)
+    }
     var selected: ChatSummary? { chats.first { $0.id == selectedID } }
     var selectedRoute: ChatRoute? { models.first { $0.route == selected?.route && $0.account == selected?.account } }
     var activeAccent: Color { selectedRoute?.accent ?? .secondary }
@@ -169,10 +179,13 @@ final class ChatModel: ObservableObject {
         if connected, let selectedID { write(["command": "git_status", "id": selectedID]) }
     }
     func newChat() {
+        newChat(in: selected?.workspace ?? recentFolders.first ?? NSHomeDirectory())
+    }
+    func newChat(in workspace: String) {
         guard !busy else { return }
         let choice = selectedRoute ?? models.first
         guard let choice else { notice = "Configure a provider and refresh its models in Provider Hub."; return }
-        write(["command": "create", "choice": choice.id, "workspace": selected?.workspace ?? recentFolders.first ?? NSHomeDirectory()])
+        write(["command": "create", "choice": choice.id, "workspace": workspace])
     }
     func select(_ id: String) {
         guard !busy else { return }
@@ -191,7 +204,8 @@ final class ChatModel: ObservableObject {
     func stop() { guard busy else { return }; write(["command": "stop"]); interrupting = true; status = "Stopping…" }
     func retry() {
         guard !busy, let selectedID else { return }
-        notice = ""; setBusy(true); write(["command": "retry", "id": selectedID])
+        notice = ""; setBusy(true)
+        if !write(["command": "retry", "id": selectedID]) { setBusy(false) }
     }
     func setRoute(_ choiceID: String) {
         guard !busy, let choice = models.first(where: { $0.id == choiceID }) else { return }
@@ -249,7 +263,13 @@ final class ChatModel: ObservableObject {
     func rename(_ id: String, title: String) { guard !busy else { return }; write(["command": "rename", "id": id, "title": title]) }
     func delete(_ id: String) { guard !busy else { return }; write(["command": "delete", "id": id]) }
 
-    private func setBusy(_ value: Bool) { busy = value; if !value { interrupting = false }; onActivity?(value) }
+    private func setBusy(_ value: Bool) {
+        // A steer cancels/restarts the provider request while the logical turn
+        // remains busy. Only the idle→working edge starts a new clock.
+        if value && !busy { turnStartedAt = uptime() }
+        if !value { turnStartedAt = nil; interrupting = false }
+        busy = value; onActivity?(value)
+    }
     private func restorePendingSend() {
         guard let pendingSend else { return }
         if selectedID == pendingSend.chat {

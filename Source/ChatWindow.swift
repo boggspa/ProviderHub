@@ -19,6 +19,8 @@ struct ChatWindow: View {
     @AppStorage("chatRailVisible") private var railPreferred = true
     @AppStorage(HubTheme.WindowStyle.defaultsKey) private var windowStyle = HubTheme.WindowStyle.Mode.glass
     @AppStorage("chatMonospacedText") private var monospacedText = false
+    @AppStorage("chatFontChoice") private var fontChoice = ""
+    @AppStorage("chatCustomFontName") private var customFontName = ""
     @AppStorage("chatTextSize") private var textSize = 13.0
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var dropTargeted = false
@@ -32,7 +34,7 @@ struct ChatWindow: View {
             let narrow = proxy.size.width < Self.narrowWidth
             HStack(spacing: 0) {
                 if railPreferred && !narrow {
-                    ChatRail(model: model).frame(width: Self.railWidth)
+                    ChatWorkspaceRail(model: model).frame(width: Self.railWidth)
                     Rectangle().fill(Semantic.hairline).frame(width: HubTheme.Separator.width)
                 }
                 ChatPane(model: model, railVisible: railPreferred && !narrow, railAvailable: !narrow) { railPreferred.toggle() }
@@ -40,7 +42,8 @@ struct ChatWindow: View {
             .animation(reduceMotion ? nil : .easeInOut(duration: 0.18), value: railPreferred)
         }
         .frame(minWidth: 720, minHeight: 500)
-        .environment(\.chatTextStyle, ChatTextStyle(size: textSize, monospaced: monospacedText))
+        .environment(\.chatTextStyle, ChatTextStyle(size: textSize,
+            selection: ChatFonts.selection(fontChoice, legacyMonospaced: monospacedText), customName: customFontName))
         .background {
             if windowStyle == .glass { VibrancyBackground().ignoresSafeArea() }
             else { Color(nsColor: .windowBackgroundColor).ignoresSafeArea() }
@@ -103,15 +106,6 @@ private func tokenCount(_ value: Int) -> String {
     if value >= 1_000 { return String(format: "%.1fK", Double(value) / 1_000) }
     return String(value)
 }
-/// Saved chats carry whatever timestamp the runtime wrote; an ISO-8601 value
-/// reads as a relative time and anything else is shown as written.
-private func whenLabel(_ raw: String) -> String {
-    let iso = ISO8601DateFormatter()
-    let date = iso.date(from: raw) ?? { iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]; return iso.date(from: raw) }()
-    guard let date else { return raw }
-    let formatter = RelativeDateTimeFormatter(); formatter.unitsStyle = .short
-    return formatter.localizedString(for: date, relativeTo: Date())
-}
 private func reveal(_ path: String, in workspace: String?) {
     let full = path.hasPrefix("/") ? path : ((workspace ?? NSHomeDirectory()) as NSString).appendingPathComponent(path)
     NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: full)])
@@ -123,92 +117,6 @@ private struct ChatProviderIcon: View {
     @ViewBuilder var body: some View {
         if let presentation { ProviderMark(presentation: presentation, size: size) }
         else { Image(systemName: "sparkle").font(.system(size: size - 2)).foregroundStyle(.secondary).frame(width: size, height: size) }
-    }
-}
-
-// MARK: - Rail
-
-private struct ChatRail: View {
-    @ObservedObject var model: ChatModel
-    @State private var renaming: String?
-    @State private var renameText = ""
-    @State private var pendingDelete: ChatSummary?
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            Text("Chats").font(.system(size: 11, weight: .semibold)).foregroundStyle(Semantic.secondaryInk)
-                .padding(.horizontal, 14).padding(.top, 12).padding(.bottom, 6)
-            ScrollView {
-                LazyVStack(spacing: 2) {
-                    if model.chats.isEmpty {
-                        Text(model.connected ? "No saved chats yet." : "Connecting…")
-                            .font(HubTheme.Typography.detail).foregroundStyle(Semantic.secondaryInk)
-                            .frame(maxWidth: .infinity).padding(.vertical, 16)
-                    }
-                    ForEach(model.chats) { chat in row(chat) }
-                }
-                .padding(.horizontal, 6).padding(.bottom, 8)
-            }
-            HStack { ChatSettingsMenu(model: model); Spacer() }.padding(.horizontal, 14).padding(.vertical, 12)
-        }
-        .confirmationDialog(deleteTitle, isPresented: deleteShown, presenting: pendingDelete) { chat in
-            Button("Delete", role: .destructive) { model.delete(chat.id) }
-        } message: { _ in
-            Text("The saved transcript is removed from this Mac.")
-        }
-    }
-
-    private var deleteTitle: String { "Delete “\(pendingDelete?.title ?? "")”?" }
-    private var deleteShown: Binding<Bool> {
-        Binding(get: { pendingDelete != nil }, set: { if !$0 { pendingDelete = nil } })
-    }
-
-    @ViewBuilder private func row(_ chat: ChatSummary) -> some View {
-        let selected = chat.id == model.selectedID
-        let route = model.route(named: chat.route)
-        Button {
-            guard renaming != chat.id else { return }
-            model.select(chat.id)
-        } label: {
-            HStack(alignment: .top, spacing: 8) {
-                ChatProviderIcon(presentation: route?.presentation, size: 13).padding(.top, 2)
-                VStack(alignment: .leading, spacing: 2) {
-                    if renaming == chat.id { renameField(chat) }
-                    else { Text(chat.title).font(.system(size: 12.5)).foregroundStyle(Semantic.ink).lineLimit(1) }
-                    Text(subtitle(chat, route: route)).font(.system(size: 10.5)).foregroundStyle(Semantic.secondaryInk).lineLimit(1)
-                }
-                Spacer(minLength: 0)
-            }
-            .padding(.horizontal, 8).padding(.vertical, 6)
-            .background(RoundedRectangle(cornerRadius: HubTheme.Radius.row).fill(selected ? Semantic.selection : Color.clear))
-            .contentShape(RoundedRectangle(cornerRadius: HubTheme.Radius.row))
-        }
-        .buttonStyle(.plain)
-        .disabled(model.busy && !selected)
-        .accessibilityLabel(chat.title)
-        .accessibilityValue(subtitle(chat, route: route))
-        .accessibilityAddTraits(selected ? .isSelected : [])
-        .contextMenu {
-            Button("Rename") { renameText = chat.title; renaming = chat.id }
-            Button("Delete…") { pendingDelete = chat }
-        }
-    }
-
-    private func renameField(_ chat: ChatSummary) -> some View {
-        TextField("Title", text: $renameText)
-            .textFieldStyle(.plain).font(.system(size: 12.5)).foregroundStyle(Semantic.ink)
-            .onSubmit {
-                let title = renameText.trimmingCharacters(in: .whitespacesAndNewlines)
-                if !title.isEmpty, title != chat.title { model.rename(chat.id, title: title) }
-                renaming = nil
-            }
-            .onExitCommand { renaming = nil }
-    }
-
-    private func subtitle(_ chat: ChatSummary, route: ChatRoute?) -> String {
-        let label = route?.label ?? chat.route
-        let when = whenLabel(chat.updated)
-        return when.isEmpty ? label : label + " · " + when
     }
 }
 
@@ -778,8 +686,7 @@ private struct ChatComposer: View {
                 Text(model.notice).font(HubTheme.Typography.detail).foregroundStyle(Semantic.accentOnSurface).textSelection(.enabled)
             }
             Spacer(minLength: 8)
-            Text(model.busy ? "Return interrupts · Shift-Return for a new line" : "Return sends · Shift-Return for a new line").font(.system(size: 10.5)).foregroundStyle(Semantic.secondaryInk.opacity(0.7))
-                .accessibilityHidden(true)
+            ChatTurnTime(model: model)
         }
         .lineLimit(2).padding(.horizontal, 6).frame(minHeight: 16)
     }

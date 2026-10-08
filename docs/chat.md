@@ -20,6 +20,12 @@ Switching back follows the same rule rather than reviving a stale trace. Changed
 connections also start a fresh provider context. Changing workspace opens a new
 chat, leaving the original transcript in the rail.
 
+The sidebar groups chats under their workspace folders. Collapse a group or use
+its **+** to start a chat there. Folders remain in the picker and sidebar after
+restart or after deleting their last chat. Path aliases share one group;
+different folders with the same name show their paths. Disconnected folders
+stay in the list and their saved chats can still be read.
+
 Return sends a message; Shift-Return inserts a newline. Stop cancels the current
 request and local command execution, keeping partial output and recorded
 actions. Closing the window leaves active work running; reopen it from the menu
@@ -42,15 +48,23 @@ the composer until the new turn starts. Stop also cancels an impending restart.
 If the app closes during interruption, the saved update is recovered without
 automatically executing it.
 
+**Turn time** beneath the composer counts the active turn, including tool and
+approval waits. Steering and provider-request restarts keep the same clock;
+completion, failure or an acknowledged Stop resets it to `00:00`.
+
 The header's unboxed Git indicator shows changed files, tracked added/deleted
 lines, and gold/blue ahead/behind counts against the cached upstream. It never
 fetches a remote. With no upstream, only a positive local-commit count appears;
 its tooltip labels that distinction. Git inspection runs separately from the
 conversation loop so it cannot block Stop.
 
-The small gear at the bottom-left of the chat rail offers Theme, Glass/Solid,
-System/Monospaced font, and Small/Default/Large text. Theme and surface reuse the
-Hub's existing preferences. Text choices affect the transcript and composer.
+The small gear at the bottom-left of the sidebar offers Theme, Glass/Solid,
+Font, and Text size. Font choices include System, System Mono, Inter, Source
+Serif 4 and JetBrains Mono. **Custom…** opens the native macOS font panel for
+fonts installed through Font Book. Only the chosen font name is saved; custom
+font files are never copied. An unavailable custom font falls back to System.
+Theme and surface reuse the Hub's existing preferences. Text choices affect
+the transcript and composer; code and diffs keep their monospace treatment.
 
 ## Files and commands
 

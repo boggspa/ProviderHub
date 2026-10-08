@@ -1,25 +1,13 @@
 import AppKit
 import SwiftUI
 
-struct ChatTextStyle {
-    var size: Double = 13
-    var monospaced = false
-    var font: Font { .system(size: size, design: monospaced ? .monospaced : .default) }
-    var editorFont: NSFont { monospaced ? .monospacedSystemFont(ofSize: size + 1, weight: .regular) : .systemFont(ofSize: size + 1) }
-}
-private struct ChatTextStyleKey: EnvironmentKey { static let defaultValue = ChatTextStyle() }
-extension EnvironmentValues {
-    var chatTextStyle: ChatTextStyle {
-        get { self[ChatTextStyleKey.self] }
-        set { self[ChatTextStyleKey.self] = newValue }
-    }
-}
-
 struct ChatSettingsMenu: View {
     @ObservedObject var model: ChatModel
     @AppStorage(HubTheme.Appearance.defaultsKey) private var appearance = HubTheme.Appearance.Mode.system
     @AppStorage(HubTheme.WindowStyle.defaultsKey) private var surface = HubTheme.WindowStyle.Mode.glass
     @AppStorage("chatMonospacedText") private var monospaced = false
+    @AppStorage("chatFontChoice") private var fontChoice = ""
+    @AppStorage("chatCustomFontName") private var customFontName = ""
     @AppStorage("chatTextSize") private var textSize = 13.0
     var body: some View {
         Menu {
@@ -39,8 +27,19 @@ struct ChatSettingsMenu: View {
             }
             Divider()
             Menu("Font") {
-                Button { monospaced = false } label: { if !monospaced { Label("System", systemImage: "checkmark") } else { Text("System") } }
-                Button { monospaced = true } label: { if monospaced { Label("Monospaced", systemImage: "checkmark") } else { Text("Monospaced") } }
+                ForEach(ChatFonts.choices) { choice in
+                    Button { ChatFontPanelController.shared.dismiss(); fontChoice = choice.id } label: {
+                        if selectedFont == choice.id { Label(choice.title, systemImage: "checkmark") }
+                        else { Text(choice.title) }
+                    }
+                }
+                Divider()
+                Button {
+                    ChatFontPanelController.shared.show(selection: selectedFont, customName: customFontName, size: textSize)
+                } label: {
+                    if selectedFont == "custom" { Label(customFontTitle, systemImage: "checkmark") }
+                    else { Text("Custom…") }
+                }
             }
             Menu("Text size") {
                 ForEach([12.0, 13.0, 15.0], id: \.self) { size in
@@ -53,6 +52,11 @@ struct ChatSettingsMenu: View {
         } label: {
             Image(systemName: "gearshape").font(.system(size: 13)).foregroundStyle(.secondary)
         }.menuStyle(.borderlessButton).fixedSize().accessibilityLabel("Chat settings")
+    }
+    private var selectedFont: String { ChatFonts.selection(fontChoice, legacyMonospaced: monospaced) }
+    private var customFontTitle: String {
+        guard !customFontName.isEmpty else { return "Custom…" }
+        return "Custom: " + (NSFont(name: customFontName, size: 13)?.displayName ?? customFontName) + "…"
     }
 }
 

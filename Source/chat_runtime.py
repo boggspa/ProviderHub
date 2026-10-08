@@ -26,6 +26,7 @@ from chat_tools import ChatToolRunner, TOOL_DEFINITIONS
 from chat_attachments import prepare_attachments, bound_image_history
 from chat_history import portable_history
 from chat_git import git_status
+from chat_workspaces import ChatWorkspaces, available_workspace
 from protocol import compact_conversation, estimated_tokens
 
 MAX_ROUNDS = 24
@@ -331,6 +332,7 @@ class GatewayClient:
 class ChatService:
     def __init__(self, store, transport, emit, *, runner=ChatToolRunner):
         self.store, self.transport, self.emit, self.runner_type = store, transport, emit, runner
+        self.workspaces = ChatWorkspaces(store.root, (chat["workspace"] for chat in store.headers()))
         self.models = []
         self.chat = None
         self.cancel = threading.Event()
@@ -356,13 +358,23 @@ class ChatService:
         self.emit({"event": "chats", "chats": self.summaries()})
         if self.chat:
             self.emit({"event": "selected", "id": self.chat["id"], "entries": self.chat["entries"], "usage": self.chat.get("usage")})
+        else:
+            self.emit({"event": "selected", "id": None, "entries": [], "usage": None})
 
     def refresh(self):
         self.models = self.transport.catalogue()
-        folders = list(dict.fromkeys(chat["workspace"] for chat in self.store.headers()))[:5]
-        self.emit({"event": "catalogue", "models": self.models, "folders": folders})
+        self.publish_workspaces()
+
+    def publish_workspaces(self):
+        self.emit({"event": "catalogue", "models": self.models, "folders": self.workspaces.folders[:]})
+
+    def current_workspace(self):
+        if self.chat:
+            return self.chat["workspace"]
+        return self.workspaces.folders[0] if self.workspaces.folders else str(Path.home())
 
     def initialize(self):
+        self.publish_workspaces()
         chats = self.store.all()
         for chat in chats:
             if chat.get("status") == "working" or chat.get("pending_update"):
@@ -381,7 +393,10 @@ class ChatService:
         except Exception as exc:
             self.emit({"event": "notice", "message": "Saved chats are available. The gateway is offline: " + str(exc)})
         if not chats and self.models:
-            self.create(self.models[0]["id"], str(Path.home()))
+            try:
+                self.create(self.models[0]["id"], self.current_workspace())
+            except (ValueError, OSError) as exc:
+                self.emit({"event": "notice", "message": str(exc)})
         self.publish(); self.emit({"event": "ready"})
 
     def choice(self, identifier=None):
@@ -393,13 +408,13 @@ class ChatService:
 
     def create(self, identifier, workspace, effort="", approval_mode="manual"):
         choice = self.choice(identifier)
-        folder = Path(workspace).expanduser().resolve(strict=True)
-        if not folder.is_dir():
-            raise ValueError("Choose an existing workspace folder.")
+        folder = available_workspace(workspace)
         if effort and effort not in choice["efforts"]:
             raise ValueError("Choose one of this model's supported reasoning levels.")
         if approval_mode not in APPROVAL_MODES:
             raise ValueError("Choose Manual, Accept Edits, or YOLO.")
+        self.workspaces.remember(folder)
+        self.publish_workspaces()
         self.chat = {"id": uuid.uuid4().hex, "title": "New chat", "updated": now(),
                      "route": choice["route"], "account": choice["account"], "scope": choice["scope"],
                      "workspace": str(folder), "effort": effort, "approvalMode": approval_mode,
@@ -509,12 +524,19 @@ class ChatService:
         if action == "refresh":
             self.refresh(); self.publish()
         elif action == "create":
-            self.create(command["choice"], command.get("workspace", str(Path.home())))
+            self.create(command["choice"], command.get("workspace", self.current_workspace()))
         elif action == "select":
-            self.chat = self.store.load(command["id"]); self.publish()
+            selected = self.store.load(command["id"])
+            # Reading a saved transcript must also work with a disconnected
+            # drive. New chats and tool execution still require a real folder.
+            self.workspaces.remember(selected["workspace"], require_available=False)
+            self.chat = selected
+            self.publish_workspaces(); self.publish()
         elif action == "configure":
-            choice = self.choice(command.get("choice"))
-            folder = command.get("workspace", self.chat["workspace"] if self.chat else str(Path.home()))
+            choice = self.choice(command.get("choice") or (self.models[0]["id"] if not self.chat and self.models else None))
+            folder = command.get("workspace", self.current_workspace())
+            if "workspace" in command:
+                folder = available_workspace(folder)
             effort = command.get("effort", self.chat["effort"] if self.chat and choice["route"] == self.chat["route"] else "")
             mode = command.get("approvalMode", self.chat.get("approvalMode", "manual") if self.chat else "manual")
             if mode not in APPROVAL_MODES:
@@ -576,7 +598,6 @@ class ChatService:
             self.store.delete(command["id"])
             if self.chat and self.chat["id"] == command["id"]:
                 chats = self.store.all(); self.chat = chats[0] if chats else None
-                if not chats and self.models: self.create(self.models[0]["id"], str(Path.home()))
             self.publish()
         else:
             raise ValueError("Unknown Chat command.")
