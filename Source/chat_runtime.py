@@ -121,11 +121,12 @@ opaque thinking/signatures are kept intact and are never rendered as text.
 
     def save(self, chat):
         target = self.path(chat["id"])
-        metadata = {key: value for key, value in chat.items() if key not in {"entries", "messages", "archives", "pending_update"}}
+        metadata = {key: value for key, value in chat.items() if key not in {"entries", "messages", "archives", "pending_update", "agents"}}
         rows = [{"type": "metadata", "value": metadata}]
         rows += [{"type": "entry", "value": value} for value in chat["entries"]]
         rows += [{"type": "message", "value": value} for value in chat["messages"]]
         rows += [{"type": "archive", "value": value} for value in chat.get("archives", [])]
+        rows += [{"type": "agent", "value": value} for value in chat.get("agents", [])]
         if chat.get("pending_update"):
             rows.append({"type": "pending_update", "value": chat["pending_update"]})
         temp = self.root / ("." + uuid.uuid4().hex + ".tmp")
@@ -152,6 +153,7 @@ opaque thinking/signatures are kept intact and are never rendered as text.
         chat["entries"] = [row["value"] for row in rows[1:] if row.get("type") == "entry"]
         chat["messages"] = [row["value"] for row in rows[1:] if row.get("type") == "message"]
         chat["archives"] = [row["value"] for row in rows[1:] if row.get("type") == "archive"]
+        chat["agents"] = [row["value"] for row in rows[1:] if row.get("type") == "agent"] or chat.get("agents", [])
         pending = [row["value"] for row in rows[1:] if row.get("type") == "pending_update"]
         if pending: chat["pending_update"] = pending[-1]
         return chat
@@ -330,9 +332,16 @@ class GatewayClient:
 
 
 class ChatService:
-    def __init__(self, store, transport, emit, *, runner=ChatToolRunner):
+    def __init__(self, store, transport, emit, *, runner=ChatToolRunner, workspaces=None, child_factory=None, role="parent"):
         self.store, self.transport, self.emit, self.runner_type = store, transport, emit, runner
-        self.workspaces = ChatWorkspaces(store.root, (chat["workspace"] for chat in store.headers()))
+        self.workspaces = workspaces or ChatWorkspaces(store.root, (chat["workspace"] for chat in store.headers()))
+        self.role = role
+        self.child_factory = child_factory or (lambda: GatewayClient(transport.root))
+        self.child = None
+        self.sides = {}
+        self._branch_working = False
+        self.max_rounds = MAX_ROUNDS
+        self._delegations = 0
         self.models = []
         self.chat = None
         self.cancel = threading.Event()
@@ -350,6 +359,17 @@ class ChatService:
     def busy(self):
         return self._working
 
+    @property
+    def side(self):
+        return self.sides.get(self.chat["id"]) if self.chat else None
+
+    @side.setter
+    def side(self, value):
+        if value is not None:
+            self.sides[value.parent_id] = value
+        elif self.chat:
+            self.sides.pop(self.chat["id"], None)
+
     def summaries(self):
         keys = ("id", "title", "updated", "route", "account", "workspace", "effort", "approvalMode", "scope")
         return [{key: chat[key] for key in keys} for chat in self.store.headers()]
@@ -360,6 +380,12 @@ class ChatService:
             self.emit({"event": "selected", "id": self.chat["id"], "entries": self.chat["entries"], "usage": self.chat.get("usage")})
         else:
             self.emit({"event": "selected", "id": None, "entries": [], "usage": None})
+        if self.role == "parent" and self.chat and self.chat.get("agents"):
+            from chat_agents import publish_agents
+            publish_agents(self)
+        if self.role == "parent" and self.side:
+            from chat_agents import publish_side
+            publish_side(self)
 
     def refresh(self):
         self.models = self.transport.catalogue()
@@ -377,6 +403,8 @@ class ChatService:
         self.publish_workspaces()
         chats = self.store.all()
         for chat in chats:
+            from chat_agents import recover_agents
+            if recover_agents(chat, self.settle): self.store.save(chat)
             if chat.get("status") == "working" or chat.get("pending_update"):
                 self.settle(chat, "Chat was interrupted before a recorded result. Inspect the workspace before retrying.")
                 self.apply_pending_update(chat)
@@ -423,6 +451,7 @@ class ChatService:
 
     def add(self, item):
         with self._mutex:
+            if item.get("kind") == "tool": item.setdefault("workspace", self.chat["workspace"])
             self.chat["entries"].append(item)
             self.emit({"event": "entry", "chat": self.chat["id"], "entry": item})
         return item
@@ -430,6 +459,13 @@ class ChatService:
     def save(self):
         with self._mutex:
             self.chat["updated"] = now(); self.store.save(self.chat)
+
+    def reserve_delegations(self, count):
+        with self._mutex:
+            if self.role != "parent" or type(count) is not int or count < 1 or self._delegations + count > 4:
+                raise ValueError("This logical turn has reached its four-helper limit.")
+            self._delegations += count
+            self.chat["delegationsThisTurn"] = self._delegations
 
     def prepare_update(self, command):
         text = command.get("text", "")
@@ -469,6 +505,8 @@ class ChatService:
             self._steering = True; self._working = True; self._resume_after_interrupt = True
             previous = self.thread
             self.cancel.set(); self.transport.cancel(); self.approval_event.set()
+            if self.child:
+                self.child.cancel.set(); self.child.transport.cancel(); self.child.approval_event.set()
             self.emit({"event": "entry", "chat": self.chat["id"], "entry": pending["entry"]})
             self.emit({"event": "state", "busy": True, "interrupting": True, "status": "Interrupting for your update…"})
         # The old turn must finish cleanup and record real tool outcomes before
@@ -495,13 +533,19 @@ class ChatService:
 
     def handle(self, command):
         action = command.get("command")
+        if self.role == "parent":
+            from chat_agents import handle_auxiliary
+            if handle_auxiliary(self, command):
+                return
+        if self._branch_working and action != "stop":
+            raise ValueError("Wait for the branch operation to finish.")
         if action == "git_status":
             if not self.chat or command.get("id") != self.chat["id"] or self._git_working:
                 return
             self._git_working = True
             identifier, workspace = self.chat["id"], self.chat["workspace"]
             def report_git():
-                try: self.emit({"event": "git_status", "chat": identifier, "status": git_status(workspace)})
+                try: self.emit({"event": "git_status", "chat": identifier, "workspace": workspace, "status": git_status(workspace)})
                 finally: self._git_working = False
             threading.Thread(target=report_git, name="chat-git-status", daemon=True).start()
             return
@@ -509,6 +553,8 @@ class ChatService:
             with self._mutex:
                 self._resume_after_interrupt = False
                 self.cancel.set(); self.transport.cancel(); self.approval_event.set()
+                if self.child:
+                    self.child.cancel.set(); self.child.transport.cancel(); self.child.approval_event.set()
             return
         if action == "steer":
             return self.interrupt_with_update(command)
@@ -541,7 +587,7 @@ class ChatService:
             mode = command.get("approvalMode", self.chat.get("approvalMode", "manual") if self.chat else "manual")
             if mode not in APPROVAL_MODES:
                 raise ValueError("Choose Manual, Accept Edits, or YOLO.")
-            if self.chat and not self.chat["messages"]:
+            if self.chat and not self.chat["messages"] and not self.side and not (("effort" in command or "approvalMode" in command) and "choice" not in command and "workspace" not in command):
                 old_id = self.chat["id"]
                 self.create(choice["id"], folder, effort, mode); self.store.delete(old_id); self.publish()
             elif self.chat and ("effort" in command or "approvalMode" in command) and "choice" not in command and "workspace" not in command:
@@ -571,6 +617,7 @@ class ChatService:
             choice = self.choice()
             if action == "send":
                 update = self.prepare_update(command)
+                self.chat["delegationsThisTurn"] = 0
                 accepted_entry = update["entry"]
                 self.chat["messages"].append({"role": "user", "content": update["content"]})
                 self.chat["entries"].append(accepted_entry)
@@ -596,6 +643,8 @@ class ChatService:
             self.publish()
         elif action == "delete":
             self.store.delete(command["id"])
+            from chat_agents import close_side
+            close_side(self, owner=command["id"])
             if self.chat and self.chat["id"] == command["id"]:
                 chats = self.store.all(); self.chat = chats[0] if chats else None
             self.publish()
@@ -623,7 +672,12 @@ class ChatService:
             chat["messages"] = bounded
             self.add(entry("notice", "Older images removed from model context. Their thumbnails and original files are kept here.", chat["route"]))
             self.save()
-        tools = TOOL_DEFINITIONS if choice["supportsTools"] else []
+        tools = list(TOOL_DEFINITIONS) if choice["supportsTools"] else []
+        if self.role == "side":
+            tools = [tool for tool in tools if tool["name"] in {"read_file", "search_files"}]
+        elif self.role == "parent" and tools:
+            from chat_agents import delegate_definition
+            tools.append(delegate_definition(self.models))
         context = choice.get("context")
         output = min(choice.get("max_output") or 4096, 8192)
         if isinstance(context, int) and context > 0:
@@ -635,6 +689,8 @@ class ChatService:
                    "tools": tools, "max_tokens": output,
                    "_provider_hub_surface": "chat", "_provider_hub_account": chat["account"],
                    "_provider_hub_connection": chat["scope"]}
+        if self.role == "side":
+            payload["system"] += "\nThis is a temporary Side Chat. Only read_file and search_files are available; do not edit files or run commands. This conversation is held in memory until the app closes."
         if chat["effort"]:
             payload["output_config"] = {"effort": chat["effort"]}
         if isinstance(context, int) and context > 0:
@@ -661,10 +717,12 @@ class ChatService:
     def run(self):
         chat = self.chat
         current = None
+        used = chat.get("delegationsThisTurn", 0)
+        self._delegations = min(4, max(0, used)) if type(used) is int else 4
         try:
             choice = self.choice()
             runner = self.runner_type(chat["workspace"], cancel_event=self.cancel)
-            for _ in range(MAX_ROUNDS):
+            for _ in range(self.max_rounds):
                 if self.cancel.is_set(): raise InterruptedError("Stopped")
                 self.emit({"event": "state", "busy": True, "interrupting": False, "status": "Thinking…"})
                 current = self.add(entry("assistant", route=chat["route"]))
@@ -698,7 +756,14 @@ class ChatService:
                     # repeat after switching routes. Visible row identity is local.
                     display_id = uuid.uuid4().hex
                     try:
-                        description = runner.describe(name, arguments)
+                        if name == "delegate":
+                            from chat_agents import validate_delegate
+                            validate_delegate(self, arguments)
+                            description = {"summary": "Delegate: " + arguments["task"][:160], "requires_approval": False}
+                        elif self.role == "side" and name not in {"read_file", "search_files"}:
+                            raise ValueError("Side Chat only has read_file and search_files.")
+                        else:
+                            description = runner.describe(name, arguments)
                         must_ask = description["requires_approval"] and needs_approval(chat.get("approvalMode", "manual"), name, arguments, chat["workspace"])
                         allowed = not must_ask or self.approved(description["summary"], arguments.get("patch"))
                         if self.cancel.is_set(): raise InterruptedError("Stopped")
@@ -707,7 +772,11 @@ class ChatService:
                             self.add(entry("tool", route=chat["route"], tool=name, summary=description["summary"], detail="Running…", id=display_id))
                             # Pending tool + working status are durable before execution.
                             self.save()
-                            result = runner.execute(name, arguments)
+                            if name == "delegate":
+                                from chat_agents import delegate
+                                result = delegate(self, arguments, call["id"])
+                            else:
+                                result = runner.execute(name, arguments)
                         else:
                             result = {"content": [{"type": "text", "text": "The user denied this action. It was not executed."}],
                                       "is_error": True, "summary": description["summary"], "changed_files": []}
@@ -720,14 +789,15 @@ class ChatService:
                                               "is_error": result["is_error"], "content": result["content"]})
                     detail = "\n".join(part.get("text", "") for part in result["content"] if part.get("type") == "text")
                     visible = entry("tool", route=chat["route"], tool=name, id=display_id, summary=result["summary"], detail=detail,
-                                    isError=result["is_error"], changedFiles=result.get("changed_files") or [])
+                                    isError=result["is_error"], changedFiles=result.get("changed_files") or [], workspace=chat["workspace"])
+                    if result.get("agent_id"): visible["agentID"] = result["agent_id"]
                     index = next((i for i, item in enumerate(chat["entries"]) if item["id"] == display_id), None)
                     if index is not None: chat["entries"][index] = visible; self.emit({"event": "entry", "chat": chat["id"], "entry": visible})
                     else: self.add(visible)
                     self.save()
                 current = None
             else:
-                raise ValueError("This turn reached its 24-step limit. Send Continue to carry on from recorded results.")
+                raise ValueError(f"This turn reached its {self.max_rounds}-step limit. Send Continue to carry on from recorded results.")
         except Exception as exc:
             stopped = self.cancel.is_set() or isinstance(exc, InterruptedError)
             chat["status"] = "stopped" if stopped else "error"
@@ -776,7 +846,9 @@ def main():
         emit({"event": "error", "message": str(exc)})
     finally:
         if service:
+            from chat_agents import close_all_sides
             service.handle({"command": "stop"})
+            close_all_sides(service)
             if service.thread:
                 service.thread.join(timeout=10)
 

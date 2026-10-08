@@ -67,6 +67,15 @@ class ModelSwitchTests(unittest.TestCase):
         self.assertIn("do not execute again", str(messages))
         self.assertNotIn("tool_use_id", str(messages))
 
+    def test_workspace_notices_survive_model_and_side_context_switches(self):
+        messages = portable_history([fixtures.entry("notice", "Switched branch to topic. Earlier file results describe the previous branch.",
+                                                   thinking="private reasoning", signature="signed-private")])
+        self.assertIn("Earlier recorded harness notice", str(messages))
+        self.assertIn("previous branch", str(messages))
+        self.assertNotIn("private reasoning", str(messages))
+        self.assertNotIn("signed-private", str(messages))
+        self.assertEqual({message["role"] for message in messages}, {"user"})
+
     def test_switch_does_not_require_pixels_for_text_only_models_and_preserves_file_text(self):
         entries = [fixtures.entry("user", "Discuss these", attachments=[
             {"kind": "image", "name": "plot.png", "path": "/not-read-for-text-only-model"},

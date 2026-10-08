@@ -44,6 +44,8 @@ struct ChatEntry: Decodable, Identifiable {
     var isError: Bool
     var changedFiles: [String]
     var attachments: [ChatAttachment]?
+    var agentID: String?
+    var workspace: String?
 }
 
 struct ChatAttachment: Decodable, Identifiable {
@@ -97,6 +99,29 @@ final class ChatModel: ObservableObject {
     @Published var tokenUsage: Int?
     @Published var contextLimit: Int?
     @Published var gitStatus: ChatGitStatus?
+    @Published var inspectorVisible = false
+    @Published var inspectorTab: ChatInspectorTab = .changes
+    @Published var gitChanges: ChatChanges?
+    @Published var gitChangesLoading = false
+    var changesRequest: String?
+    var changesRefreshPending = false
+    @Published var branches: ChatBranchesSnapshot?
+    @Published var branchesLoading = false
+    var branchesRequest: String?
+    var branchesRefreshPending = false
+    var branchRequest: String?
+    @Published var branchBusy = false
+    @Published var inspectorNotice = ""
+    @Published var branchNotice = ""
+    @Published var agents: [ChatAgent] = []
+    @Published var inspectedAgentID: String?
+    @Published var sideChat: ChatSide?
+    @Published var sideDraft = ""
+    @Published var sideNotice = ""
+    @Published var sideOpening = false
+    @Published var pendingSideText: String?
+    var sideRequests: [String: String] = [:]
+    var sideDrafts: [String: String] = [:]
     var onActivity: ((Bool) -> Void)?
     var onSurfaceChange: (() -> Void)?
     private weak var bridge: BridgeModel?
@@ -127,7 +152,7 @@ final class ChatModel: ObservableObject {
     var selectedRoute: ChatRoute? { models.first { $0.route == selected?.route && $0.account == selected?.account } }
     var activeAccent: Color { selectedRoute?.accent ?? .secondary }
     var approvalMode: String { selected?.approvalMode ?? "manual" }
-    var canSend: Bool { connected && !busy && selectedRoute != nil && (!draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty) }
+    var canSend: Bool { connected && !busy && !branchBusy && selectedRoute != nil && (!draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty) }
     var canInterrupt: Bool { connected && busy && !interrupting && pendingSend == nil && selectedRoute != nil && (!draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty) }
     func accent(for route: String) -> Color { models.first { $0.route == route }?.accent ?? .secondary }
 
@@ -160,7 +185,7 @@ final class ChatModel: ObservableObject {
                     owner.connected = false; owner.process = nil; owner.input = nil
                     owner.restorePendingSend()
                     owner.output?.fileHandleForReading.readabilityHandler = nil; owner.output = nil
-                    owner.setBusy(false); owner.approval = nil
+                    owner.setBusy(false); owner.approval = nil; owner.resetInspector(clearSessions: true)
                     owner.notice = "Chat disconnected. Reopen Chat to reconnect; saved work is kept."
                 }
             }
@@ -170,6 +195,8 @@ final class ChatModel: ObservableObject {
     }
 
     func shutdown() {
+        inspectorCommand(["command": "close_side"])
+        resetInspector(clearSessions: true)
         write(["command": "stop"])
         try? input?.fileHandleForWriting.close()
         input = nil
@@ -182,13 +209,13 @@ final class ChatModel: ObservableObject {
         newChat(in: selected?.workspace ?? recentFolders.first ?? NSHomeDirectory())
     }
     func newChat(in workspace: String) {
-        guard !busy else { return }
+        guard !busy, !branchBusy else { return }
         let choice = selectedRoute ?? models.first
         guard let choice else { notice = "Configure a provider and refresh its models in Provider Hub."; return }
         write(["command": "create", "choice": choice.id, "workspace": workspace])
     }
     func select(_ id: String) {
-        guard !busy else { return }
+        guard !busy, !branchBusy else { return }
         write(["command": "select", "id": id])
     }
     func send() {
@@ -203,7 +230,7 @@ final class ChatModel: ObservableObject {
     }
     func stop() { guard busy else { return }; write(["command": "stop"]); interrupting = true; status = "Stopping…" }
     func retry() {
-        guard !busy, let selectedID else { return }
+        guard !busy, !branchBusy, let selectedID else { return }
         notice = ""; setBusy(true)
         if !write(["command": "retry", "id": selectedID]) { setBusy(false) }
     }
@@ -217,7 +244,7 @@ final class ChatModel: ObservableObject {
     }
     func setEffort(_ effort: String) { guard !busy else { return }; write(["command": "configure", "effort": effort]) }
     func setApprovalMode(_ mode: String) { guard !busy else { return }; write(["command": "configure", "approvalMode": mode]) }
-    func setFolder(_ path: String) { guard !busy else { return }; write(["command": "configure", "workspace": path]) }
+    func setFolder(_ path: String) { guard !busy, !branchBusy else { return }; write(["command": "configure", "workspace": path]) }
     func chooseFolder() {
         let picker = NSOpenPanel(); picker.canChooseDirectories = true; picker.canChooseFiles = false
         picker.allowsMultipleSelection = false; picker.prompt = "Use folder"
@@ -302,12 +329,21 @@ final class ChatModel: ObservableObject {
             case "catalogue":
                 models = decode([ChatRoute].self, event["models"]) ?? []; recentFolders = event["folders"] as? [String] ?? []
                 contextLimit = selectedRoute?.context; notice = ""
-            case "chats": chats = decode([ChatSummary].self, event["chats"]) ?? []
+            case "chats":
+                let previousWorkspace = selected?.workspace
+                chats = decode([ChatSummary].self, event["chats"]) ?? []
+                if previousWorkspace != selected?.workspace {
+                    gitStatus = nil; gitChanges = nil; gitChangesLoading = false; branches = nil; branchesLoading = false
+                    changesRequest = nil; changesRefreshPending = false; branchesRefreshPending = false
+                    if !branchBusy { branchesRequest = nil }
+                }
             case "selected":
                 let id = event["id"] as? String
                 if id != selectedID {
+                    resetInspector()
                     if let selectedID { drafts[selectedID] = draft; attachmentDrafts[selectedID] = attachments }
                     draft = id.flatMap { drafts[$0] } ?? ""; attachments = id.flatMap { attachmentDrafts[$0] } ?? []
+                    sideDraft = id.flatMap { sideDrafts[$0] } ?? ""
                     gitStatus = nil
                 }
                 selectedID = id; entries = decode([ChatEntry].self, event["entries"]) ?? []
@@ -334,9 +370,14 @@ final class ChatModel: ObservableObject {
                 setBusy(event["busy"] as? Bool ?? false); interrupting = event["interrupting"] as? Bool ?? false
             case "notice": notice = event["message"] as? String ?? ""
             case "git_status":
-                if event["chat"] as? String == selectedID { gitStatus = decode(ChatGitStatus.self, event["status"]) }
-            default: break
+                if event["chat"] as? String == selectedID,
+                   (event["workspace"] as? String).map({ $0 == selected?.workspace }) ?? true {
+                    gitStatus = decode(ChatGitStatus.self, event["status"])
+                }
+            default: consumeInspector(event)
             }
         }
     }
+
+    @discardableResult func inspectorCommand(_ command: [String: Any]) -> Bool { write(command) }
 }

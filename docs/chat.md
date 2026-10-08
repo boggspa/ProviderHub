@@ -58,6 +58,39 @@ fetches a remote. With no upstream, only a positive local-commit count appears;
 its tooltip labels that distinction. Git inspection runs separately from the
 conversation loop so it cannot block Stop.
 
+The **branch/worktree** chip beside the folder picker lists local branches and
+worktrees and can create either. Branch switching and creation require a clean
+repository and no live work claims; Chat never stashes or forces a checkout.
+Manual claims expire under the shared twenty-minute lease contract; runtime
+lock projections continue blocking until their owner resolves them.
+If a target branch lacks the selected subfolder, choose the worktree root first;
+Chat refuses that checkout before it can remove the working directory. The same
+check protects open Side Chats rooted in repository subfolders.
+Creating a worktree leaves
+the current selection in place until you choose the new one. Choosing a
+worktree keeps this chat, records the workspace change, archives its old provider
+context and starts fresh portable context for the new directory. Changes are
+available only between turns, including Side Chats using that workspace.
+
+The right-hand **inspector** has three views, each using the whole pane:
+
+- **File Changes** lists file diff counts and expandable patches with three
+  context lines. It includes untracked files and reports binary or truncated
+  changes. Reads use the local checkout and never fetch a remote.
+- **Subagents** lists delegated tasks by model and task. Choose one to read its
+  transcript and tool results. There is no child composer; it reports back to
+  the parent. Child approvals identify the requesting model in the normal strip.
+- **Side Chat** forks the visible conversation at that point with any enabled
+  model. It has its own composer and Stop/interrupt controls, with read/search
+  tools only. Provider reasoning stays isolated. Side Chats remain in memory
+  while you switch parent chats, keep their original workspace and are discarded
+  on explicit close, deletion of their parent, or quitting the app. They are not
+  written to Chat's saved JSONL history. At most eight can be open at once.
+
+The inspector collapses the left workspace rail on narrower windows to keep the
+conversation usable. The main turn clock and context count describe the parent;
+Side Chat runs independently.
+
 The small gear at the bottom-left of the sidebar offers Theme, Glass/Solid,
 Font, and Text size. Font choices include System, System Mono, Inter, Source
 Serif 4 and JetBrains Mono. **Custom…** opens the native macOS font panel for
@@ -68,7 +101,11 @@ the transcript and composer; code and diffs keep their monospace treatment.
 
 ## Files and commands
 
-The four tools are read file, search files, apply patch, and run shell. File
+The local tools are read file, search files, apply patch, and run shell. The
+parent also has **delegate**, which runs one helper at a time and returns its
+recorded result. Helpers inherit the workspace and approval mode, get the four
+local tools and cannot delegate. A turn can launch at most four helpers, with
+twelve model/tool rounds per helper. See [Subagents](chat-subagents.md). File
 tools stay inside the chosen workspace and reject symlink paths. A small menu
 below the composer selects one of three modes, saved per chat:
 
@@ -115,13 +152,18 @@ routes and account identities continue to govern requests.
 Provider marks use the Hub's existing icon assets. The four tool glyphs reuse
 TaskWraith's file/search/patch/shell paths as cached native vectors.
 
-The first version is a coding chat with attachments and local tools. It has no agent teams,
-schedules, connector catalogue, browser automation, or separate IDE.
+Chat is a coding harness with attachments, local tools and serial delegation.
+It has no parallel agent teams, schedules, connector catalogue, browser
+automation, or separate IDE.
 
 ## Implementation and verification
 
 `ChatWindow.swift`, `ChatModelPicker.swift` and `ChatModel.swift` are the native window, picker and local JSONL
-transport. `chat_runtime.py` owns the conversation/tool loop and saved chats;
+transport. `ChatInspector.swift`, `ChatInspectorModel.swift` and
+`ChatBranches.swift` provide the inspector and Git controls. `chat_runtime.py`
+owns the shared conversation/tool loop and saved chats; `chat_agents.py` provides
+isolated delegates and memory-only Side Chats, and `chat_inspector.py` handles
+bounded Git inspection and explicit branch/worktree actions;
 `chat_tools.py` executes the four local tools. The existing authenticated
 gateway serves `/_bridge/chat/models` and accepts Chat requests through
 `/v1/messages`, keeping all API and CLI provider adaptation in its current

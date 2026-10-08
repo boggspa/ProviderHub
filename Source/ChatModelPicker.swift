@@ -6,6 +6,9 @@ import SwiftUI
 struct ChatModelPicker: View {
     @ObservedObject var model: ChatModel
     var dismiss: () -> Void
+    var initialChoiceID: String? = nil
+    var initialEffort: String? = nil
+    var onSelect: ((String, String) -> Void)? = nil
     @State private var provider = ""
     @State private var choiceID = ""
     @State private var effort = ""
@@ -34,6 +37,7 @@ struct ChatModelPicker: View {
                 Button { model.refresh() } label: { Image(systemName: "arrow.clockwise") }
                     .buttonStyle(.plain).help("Refresh enabled models from Provider Hub")
                     .accessibilityLabel("Refresh enabled models")
+                    .disabled(model.busy || model.branchBusy)
             }.font(.system(size: 12)).padding(.horizontal, 14).padding(.vertical, 12)
             Divider()
             HStack(spacing: 0) {
@@ -49,15 +53,15 @@ struct ChatModelPicker: View {
                 Spacer()
                 Button("Use model", action: commit).controlSize(.small)
                     .buttonStyle(.borderedProminent).tint(choice?.accent ?? HubTheme.Accent.brand)
-                    .disabled(choice == nil || model.busy).keyboardShortcut(.defaultAction)
+                    .disabled(choice == nil || (onSelect == nil && (model.busy || model.branchBusy))).keyboardShortcut(.defaultAction)
             }.padding(.horizontal, 14).padding(.vertical, 12)
         }
         .padding(8)
         .frame(width: 520, height: 388)
         .onAppear {
-            let selected = model.selectedRoute ?? model.models.first
+            let selected = initialChoiceID.flatMap { id in model.models.first { $0.id == id } } ?? model.selectedRoute ?? model.models.first
             provider = selected?.connectionID ?? ""; choiceID = selected?.id ?? ""
-            effort = model.selected?.effort ?? ""
+            effort = initialEffort ?? model.selected?.effort ?? ""
         }
         .onChange(of: model.models.map(\.id)) { _, ids in
             if !ids.contains(choiceID) {
@@ -176,7 +180,8 @@ struct ChatModelPicker: View {
 
     private func commit() {
         guard let choice else { return }
-        if choice.id == model.selectedRoute?.id && choice.scope == model.selected?.scope { model.setEffort(effort) }
+        if let onSelect { onSelect(choice.id, effort) }
+        else if choice.id == model.selectedRoute?.id && choice.scope == model.selected?.scope { model.setEffort(effort) }
         else { model.setSelection(choice.id, effort: effort) }
         dismiss()
     }

@@ -7,7 +7,7 @@ from pathlib import Path
 from cli_images import normalize_image, MAX_IMAGE_BYTES
 
 
-def portable_history(entries, *, vision=True):
+def portable_history(entries, *, vision=True, reason="The user switched models in this chat."):
     """Project only visible dialogue, file contents and recorded tool results.
 
 No thinking/signature/encrypted block, live call id, or pending native RPC is
@@ -21,7 +21,7 @@ read from the old Messages history. That history stays intact in an archive.
             messages[-1]["content"].extend(content)
         else:
             messages.append({"role": role, "content": content})
-    add("user", [{"type": "text", "text": "The user switched models in this chat. The following is portable prior conversation. Earlier tool results are records only; do not execute those actions again. Prior provider reasoning was intentionally excluded."}])
+    add("user", [{"type": "text", "text": reason + " The following is portable prior conversation. Earlier tool results are records only; do not execute those actions again. Prior provider reasoning was intentionally excluded."}])
     for item in entries:
         kind = item.get("kind")
         content = []
@@ -60,4 +60,6 @@ read from the old Messages history. That history stays intact in an archive.
             add("user", [{"type": "text", "text": record}])
         elif kind == "error" and text:
             add("user", [{"type": "text", "text": "Earlier harness error: " + text}])
+        elif kind == "notice" and text:
+            add("user", [{"type": "text", "text": "Earlier recorded harness notice: " + text}])
     return messages
