@@ -60,4 +60,6 @@ read from the old Messages history. That history stays intact in an archive.
             add("user", [{"type": "text", "text": record}])
         elif kind == "error" and text:
             add("user", [{"type": "text", "text": "Earlier harness error: " + text}])
+        elif kind == "notice" and text:
+            add("user", [{"type": "text", "text": "Earlier recorded harness notice: " + text}])
     return messages

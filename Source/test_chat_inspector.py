@@ -262,6 +262,20 @@ class InspectorTests(unittest.TestCase):
         self.assertTrue(marker.exists())
         self.assertEqual(git_branches(self.root)["current"], "main")
 
+    def test_branch_switch_cannot_remove_the_selected_workspace_directory(self):
+        (self.root / "base").write_text("root\n"); self.commit()
+        self.git("branch", "without-subfolder")
+        folder = self.root / "chosen"; folder.mkdir()
+        (folder / "file").write_text("keep workspace\n"); self.commit()
+        before = self.git("rev-parse", "HEAD")
+        with self.assertRaisesRegex(ValueError, "target branch has no workspace directory"):
+            switch_branch(folder, "without-subfolder")
+        self.assertEqual(self.git("rev-parse", "HEAD"), before)
+        self.assertEqual((folder / "file").read_text(), "keep workspace\n")
+        self.assertEqual(switch_worktree(folder, self.root), str(self.root.resolve()))
+        self.assertEqual(switch_branch(self.root, "without-subfolder")["current"], "without-subfolder")
+        self.assertFalse(folder.exists())
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -68,7 +68,7 @@ private struct ChatBranchesPicker: View {
                                     if tree.current { Image(systemName: "checkmark") }
                                     else if tree.prunable == true { Image(systemName: "exclamationmark.triangle") }
                                 }.contentShape(Rectangle()).padding(.vertical, 5)
-                            }.buttonStyle(.plain).disabled(!model.canChangeBranch || tree.current || tree.prunable == true || tree.selectable == false)
+                            }.buttonStyle(.plain).disabled(!model.canChangeBranch || (tree.current && tree.path == model.selected?.workspace) || tree.prunable == true || tree.selectable == false)
                                 .help(tree.selectable == false ? "This path cannot be represented by macOS. Use Git to relocate the worktree." : tree.path)
                         }
                     }.font(.system(size: 12))

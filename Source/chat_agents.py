@@ -356,6 +356,7 @@ def handle_auxiliary(parent, command):
                 operation = command.get("action")
                 if operation == "switch":
                     branch = inspector.decode_branch(command.get("branchBytes")) if command.get("branchBytes") is not None else command.get("branch")
+                    for side in matching_sides: inspector.require_branch_workspace(side.chat["workspace"], branch)
                     result = inspector.switch_branch(workspace, branch)
                 elif operation == "create": result = inspector.create_branch(workspace, command.get("branch"))
                 elif operation == "worktree": result = inspector.create_worktree(workspace, command.get("branch"), command.get("path"))
