@@ -1452,7 +1452,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         showWindow()
     }
 
-    /// "compact" is the glass shell (CompactShell.swift); "classic" is the
+    /// "compact" is the compact shell (CompactShell.swift); "classic" is the
     /// original pages. Both drive the same model, so switching mid-edit keeps
     /// unsaved changes. The choice persists in UserDefaults.
     var design: String { UserDefaults.standard.string(forKey: "hubDesign") ?? "compact" }
@@ -1460,18 +1460,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         if design == "classic" {
             window.styleMask.remove(.fullSizeContentView)
             window.titleVisibility = .visible
-            window.isOpaque = true; window.backgroundColor = .windowBackgroundColor
             window.contentView = NSHostingView(rootView: BridgeWindow(model: model))
             window.minSize = NSSize(width: 870, height: 680)
             window.setContentSize(NSSize(width: 1200, height: 820))
         } else {
             window.styleMask.insert(.fullSizeContentView)
             window.titleVisibility = .hidden
-            window.isOpaque = false; window.backgroundColor = .clear
             window.contentView = NSHostingView(rootView: CompactShell(model: model))
             window.minSize = NSSize(width: 760, height: 500)
             window.setContentSize(NSSize(width: 840, height: 560))
         }
+        applyWindowStyle()
+    }
+    /// Change only the main window surface, retaining navigation and edits.
+    func applyWindowStyle() {
+        let glass = design != "classic" && HubTheme.WindowStyle.mode == .glass
+        window.isOpaque = !glass
+        window.backgroundColor = glass ? .clear : .windowBackgroundColor
     }
     @objc func chooseCompact() { UserDefaults.standard.set("compact", forKey: "hubDesign"); applyDesign() }
     @objc func chooseClassic() { UserDefaults.standard.set("classic", forKey: "hubDesign"); applyDesign() }
