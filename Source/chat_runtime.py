@@ -460,6 +460,13 @@ class ChatService:
         with self._mutex:
             self.chat["updated"] = now(); self.store.save(self.chat)
 
+    def reserve_delegations(self, count):
+        with self._mutex:
+            if self.role != "parent" or type(count) is not int or count < 1 or self._delegations + count > 4:
+                raise ValueError("This logical turn has reached its four-helper limit.")
+            self._delegations += count
+            self.chat["delegationsThisTurn"] = self._delegations
+
     def prepare_update(self, command):
         text = command.get("text", "")
         inputs = command.get("attachments", [])
@@ -610,6 +617,7 @@ class ChatService:
             choice = self.choice()
             if action == "send":
                 update = self.prepare_update(command)
+                self.chat["delegationsThisTurn"] = 0
                 accepted_entry = update["entry"]
                 self.chat["messages"].append({"role": "user", "content": update["content"]})
                 self.chat["entries"].append(accepted_entry)
@@ -709,7 +717,8 @@ class ChatService:
     def run(self):
         chat = self.chat
         current = None
-        self._delegations = 0
+        used = chat.get("delegationsThisTurn", 0)
+        self._delegations = min(4, max(0, used)) if type(used) is int else 4
         try:
             choice = self.choice()
             runner = self.runner_type(chat["workspace"], cancel_event=self.cancel)

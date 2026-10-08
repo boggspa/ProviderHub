@@ -230,7 +230,7 @@ class AgentTests(unittest.TestCase):
         parent = self.service([], [[]]); side = self.open_side(parent)
         entered, release = threading.Event(), threading.Event()
         def switch(workspace, branch): entered.set(); release.wait(2); return {"current": branch}
-        with patch("chat_inspector.switch_branch", switch):
+        with patch("chat_inspector.switch_branch", switch), patch("chat_inspector.repository_root", return_value=str(self.root)):
             parent.handle({"command": "branch_action", "id": parent.chat["id"], "action": "switch", "branch": "topic"})
             self.assertTrue(entered.wait(2))
             with self.assertRaises(ValueError): self.send(parent)
@@ -399,6 +399,59 @@ class AgentTests(unittest.TestCase):
             self.assertEqual(os.fsencode(switch.call_args.args[1]), raw)
         states = [e for e in self.events if e.get("event") == "branch_state"]
         self.assertTrue(all(e["request"] == "switch-1" for e in states))
+
+    def test_steering_preserves_budget_and_new_user_turn_resets_it(self):
+        waiting = threading.Event()
+        def paused(payload, cancel, delta):
+            waiting.set(); cancel.wait(2); raise InterruptedError("Steered")
+        replies = [call("delegate", {"task":str(i)}, f"helper-{i}") for i in range(4)]
+        replies += [paused, call("delegate", {"task":"Fifth"}, "helper-5"), response("Budget held"),
+                    call("delegate", {"task":"Fresh turn"}, "fresh"), response("New turn done")]
+        parent = self.service(replies, [[response("Done")] for _ in range(5)])
+        self.send(parent); self.assertTrue(waiting.wait(2))
+        parent.handle({"command":"steer", "id":parent.chat["id"], "text":"Refocus"})
+        self.wait_for(lambda: not parent.busy)
+        self.assertEqual(parent.chat["entries"][-1]["text"], "Budget held")
+        self.assertEqual(len(parent.chat["agents"]), 4)
+        self.assertEqual(self.store.load(parent.chat["id"])["delegationsThisTurn"], 4)
+        self.assertEqual(parent._delegations, 4)
+        self.send(parent); self.finish(parent)
+        self.assertEqual(len(parent.chat["agents"]), 5)
+        self.assertEqual(parent.chat["delegationsThisTurn"], 1)
+
+    def test_restart_and_retry_keep_durable_helper_budget(self):
+        parent = self.service([], [])
+        parent.reserve_delegations(4)
+        parent.chat.update(status="stopped", messages=[{"role":"user", "content":[{"type":"text", "text":"Continue"}]}])
+        parent.save()
+        transport = FakeTransport([call("delegate", {"task":"Must not launch"}), response("Limit retained")])
+        restarted = ChatService(self.store, transport, self.events.append, child_factory=lambda: self.fail("Budget reset after recovery"))
+        restarted.initialize()
+        restarted.handle({"command":"retry", "id":restarted.chat["id"]}); self.finish(restarted)
+        self.assertEqual(restarted._delegations, 4)
+        self.assertEqual(restarted.chat["entries"][-1]["text"], "Limit retained")
+
+    def test_branch_change_updates_hidden_and_subdirectory_sides_only_in_that_worktree(self):
+        parent = self.service([], [[], [], []])
+        first = self.open_side(parent)
+        subdirectory = self.root / "sub"; subdirectory.mkdir()
+        parent.create(parent.models[0]["id"], str(subdirectory))
+        owner = parent.chat["id"]
+        second = self.open_side(parent)
+        elsewhere = self.root.parent / (self.root.name + "-elsewhere"); elsewhere.mkdir()
+        self.addCleanup(elsewhere.rmdir)
+        parent.create(parent.models[0]["id"], str(elsewhere))
+        third = self.open_side(parent)
+        untouched = copy.deepcopy(third.chat["messages"])
+        parent.handle({"command":"select", "id":owner})
+        with patch("chat_inspector.repository_root", return_value=str(self.root)), patch("chat_inspector.switch_branch", return_value={"current":"topic", "root":str(self.root)}):
+            parent.handle({"command":"branch_action", "id":owner, "action":"switch", "branch":"topic"})
+            self.wait_for(lambda: not parent._branch_working)
+        for side in [first, second]:
+            self.assertIn("Switched branch to topic", side.chat["entries"][-1]["text"])
+            self.assertIn("previous branch", side.chat["messages"][-1]["content"][0]["text"])
+            self.assertFalse(self.store.path(side.chat["id"]).exists())
+        self.assertEqual(third.chat["messages"], untouched)
 
 
 if __name__ == "__main__": unittest.main()

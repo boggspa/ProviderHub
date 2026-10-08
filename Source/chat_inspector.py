@@ -221,7 +221,7 @@ def git_branches(workspace):
             "branches": branches, "worktrees": worktrees}
 
 
-def _claim_guard(root):
+def _claims_in_root(marker_root, root):
     """Inspect claim data only; never execute a workspace's guard script.
 
     Leases mirror the shared lifecycle: manual/contribution leases expire and
@@ -230,7 +230,7 @@ def _claim_guard(root):
     """
     now = time.time()
     try:
-        path = Path(root) / ".work-guard/heartbeat.json"
+        path = Path(marker_root) / ".work-guard/heartbeat.json"
         with path.open("rb") as stream: sidecar = json.loads(stream.read(1_000_001))
         heartbeats = sidecar.get("markers", {}) if sidecar.get("schemaVersion") == 2 else sidecar
     except (OSError, ValueError, AttributeError): heartbeats = {}
@@ -239,7 +239,7 @@ def _claim_guard(root):
             parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
             return parsed.replace(tzinfo=timezone.utc).timestamp() if parsed.tzinfo is None else parsed.timestamp()
         except (ValueError, AttributeError, OverflowError): return None
-    for path in Path(root).iterdir():
+    for path in Path(marker_root).iterdir():
         if not path.name.startswith((".WORK-IN-PROGRESS", "SHIP-HOLD", "SESSION-IN-PROGRESS")): continue
         if path.is_symlink() or not path.is_file():
             raise ValueError("Cannot verify work claim " + _display_path(path.name) + ". Resolve it before changing branches.")
@@ -260,7 +260,8 @@ def _claim_guard(root):
                     else: value = value.strip("'")
                     fields[key] = value
         target = fields.get("worktree")
-        if target and (Path(root) / target).resolve() != Path(root).resolve(): continue
+        claimed_root = Path(marker_root) / target if target else Path(marker_root)
+        if claimed_root.resolve() != Path(root).resolve(): continue
         contribution = path.name.startswith(".WORK-IN-PROGRESS-taskwraith-contribution-") or fields.get("agent") == "taskwraith-contribution"
         runtime = not contribution and (path.name.startswith(".WORK-IN-PROGRESS-taskwraith-runtime-")
                     or fields.get("derived", "").lower() == "true" or fields.get("agent") == "taskwraith-runtime")
@@ -280,6 +281,21 @@ def _claim_guard(root):
         held = bool(fields.get("lockOwnerId")) if contribution else alive or bool(fields.get("lockOwnerId")) or fresh
         if runtime or (expiry is not None and now <= expiry and held):
             raise ValueError("Active work claim " + _display_path(path.name) + ". Wait for its owner to finish before changing branches or creating a worktree.")
+
+
+def _claim_guard(root):
+    _claims_in_root(root, root)
+    # Git lists its main checkout first, including for linked worktrees and
+    # repositories using a separate Git directory. Main-root claims can name
+    # this linked checkout explicitly; unrelated main-root claims stay scoped.
+    fields = _complete(root, "worktree", "list", "--porcelain", "-z").split(b"\0")
+    primary = next((_text(field.removeprefix(b"worktree ")) for field in fields if field.startswith(b"worktree ")), None)
+    if primary and Path(primary).resolve() != Path(root).resolve():
+        _claims_in_root(primary, root)
+
+
+def repository_root(workspace):
+    return _root(workspace)
 
 
 def _clean(workspace):

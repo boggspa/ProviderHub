@@ -1,5 +1,6 @@
 """Small host-owned serial delegates, temporary discussion and inspector routing."""
 import copy
+from pathlib import Path
 import threading
 import uuid
 
@@ -97,7 +98,7 @@ def make_child(parent, choice, effort, role, emit):
 def delegate(parent, args, call_id):
     from chat_runtime import entry
     choice, effort = validate_delegate(parent, args)
-    parent._delegations += 1
+    parent.reserve_delegations(1)
     owner = parent.chat["id"]
     def emit(event):
         if event["event"] == "delta":
@@ -228,6 +229,16 @@ def side_command(parent, command):
         publish_side(parent)
 
 
+def _same_worktree(side, root, inspector):
+    path = Path(side.chat["workspace"]).resolve()
+    if not path.is_relative_to(root): return False
+    try: return Path(inspector.repository_root(path)).resolve() == root
+    except (OSError, ValueError):
+        # A checkout can remove an earlier side chat's subdirectory. It still
+        # needs the context update and must not be silently treated as unrelated.
+        return True
+
+
 def handle_auxiliary(parent, command):
     action = command.get("command", "")
     if action in {"open_side", "side_send", "side_stop", "side_model", "close_side"}:
@@ -250,7 +261,6 @@ def handle_auxiliary(parent, command):
     workspace = parent.chat["workspace"]
     mutation = action == "branch_action"
     if mutation:
-        from pathlib import Path
         active_side = any(side.busy and Path(side.chat["workspace"]).resolve() == Path(workspace).resolve() for side in parent.sides.values())
         if parent.busy or parent._branch_working or active_side:
             parent.emit({"event": event, "chat": identifier, "request": command.get("request"), "busy": parent._branch_working, "notice": "Stop both chats before changing branches or worktrees."}); return True
@@ -264,10 +274,11 @@ def handle_auxiliary(parent, command):
             elif action == "branches":
                 parent.emit({"event": event, "chat": identifier, "request": command.get("request"), "workspace": workspace, "branches": inspector.git_branches(workspace)})
             else:
-                if any(side.busy for side in parent.sides.values()):
-                    from pathlib import Path
-                    root = Path(inspector.git_branches(workspace)["root"]).resolve()
-                    if any(side.busy and Path(side.chat["workspace"]).resolve().is_relative_to(root) for side in parent.sides.values()):
+                matching_sides = []
+                if parent.sides:
+                    root = Path(inspector.repository_root(workspace)).resolve()
+                    matching_sides = [side for side in list(parent.sides.values()) if _same_worktree(side, root, inspector)]
+                    if any(side.busy for side in matching_sides):
                         raise ValueError("Stop Side Chats using this repository before changing branches or worktrees.")
                 operation = command.get("action")
                 if operation == "switch":
@@ -292,6 +303,10 @@ def handle_auxiliary(parent, command):
                     parent.add(entry("notice", message, parent.chat["route"]))
                     parent.chat["messages"].append({"role": "user", "content": [{"type": "text", "text": "[Workspace update from Provider Hub] " + message}]})
                     parent.save()
+                    for side in matching_sides:
+                        side.chat["entries"].append(entry("notice", message, side.chat["route"]))
+                        side.chat["messages"].append({"role": "user", "content": [{"type": "text", "text": "[Workspace update from Provider Hub] " + message}]})
+                        publish_side(parent, side=side)
                 parent.emit({"event": "branches", "chat": identifier, "request": command.get("request"), "workspace": parent.chat["workspace"], "branches": result})
         except Exception as exc:
             notice = str(exc)

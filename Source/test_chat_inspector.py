@@ -242,6 +242,26 @@ class InspectorTests(unittest.TestCase):
         self.assertFalse(result["worktrees"][1]["selectable"])
         self.assertEqual(bytes.fromhex(result["worktrees"][1]["pathBytes"]), b"/bad-\xff")
 
+    def test_linked_worktree_honors_claim_at_primary_checkout(self):
+        (self.root / "file").write_text("base\n"); self.commit()
+        self.git("branch", "other")
+        linked = self.root.parent / "linked"
+        create_worktree(self.root, "linked", linked)
+        now = datetime.now(timezone.utc)
+        lease = f"pid: {os.getpid()}\nstarted: {now.isoformat()}\nexpires: {(now + timedelta(minutes=10)).isoformat()}"
+        marker = self.claim(lease + f"\nworktree: {linked}")
+        self.assertEqual(subprocess.check_output(["git", "-C", str(linked), "status", "--porcelain"]), b"")
+        for action in [lambda: switch_branch(linked, "other"), lambda: create_branch(linked, "new"),
+                       lambda: create_worktree(linked, "nested", self.root.parent / "nested")]:
+            with self.assertRaisesRegex(ValueError, "Active work claim"): action()
+        self.assertEqual(git_branches(linked)["current"], "linked")
+        # A promise for the primary checkout alone must not block unrelated
+        # work in an isolated linked checkout.
+        marker.write_text("---\n" + lease + "\n---\n")
+        self.assertEqual(create_branch(linked, "independent")["current"], "independent")
+        self.assertTrue(marker.exists())
+        self.assertEqual(git_branches(self.root)["current"], "main")
+
 
 if __name__ == "__main__":
     unittest.main()
