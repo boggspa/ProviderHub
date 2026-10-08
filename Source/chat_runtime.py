@@ -1,0 +1,578 @@
+"""Small local Chat host: Messages streaming, four tools, private JSONL chats.
+
+The gateway continues to own all provider adaptation and credentials. This
+worker only connects to its authenticated loopback endpoint. No nested engine,
+orchestration service, or additional third-party runtime is involved.
+"""
+from __future__ import annotations
+
+import copy
+from datetime import datetime, timezone
+import fcntl
+import http.client
+import json
+import os
+from pathlib import Path
+import re
+import socket
+import sys
+import threading
+import uuid
+
+from bridge_core import gateway_token, load_settings, private_directory, state_root
+from chat_tools import ChatToolRunner, TOOL_DEFINITIONS
+from protocol import compact_conversation, estimated_tokens
+
+MAX_ROUNDS = 24
+MAX_TEXT = 100_000
+CHAT_ID = re.compile(r"[0-9a-f]{32}\Z")
+SYSTEM = """You are an assistant in Provider Hub Chat, a small local coding harness.
+Use the offered tools to inspect and change the chosen workspace. Read relevant
+files and AGENTS.md instructions before editing. File and search tools are
+restricted to the workspace. Shell commands run with the user's normal OS
+permissions and require approval; the working directory is not a sandbox.
+Patch and shell actions need Allow once from the user. A denial is a real result:
+do not bypass it through a different tool. Wait for actual tool results before
+claiming that something ran or changed. Keep replies clear and concise.
+The visible transcript is saved locally. Older model context may be trimmed
+with an explicit notice; do not pretend to remember text you cannot see.
+"""
+
+
+def now():
+    return datetime.now(timezone.utc).isoformat()
+
+
+def entry(kind, text="", route="", **extra):
+    return {"id": uuid.uuid4().hex, "kind": kind, "text": text, "route": route,
+            "isError": False, "changedFiles": [], **extra}
+
+
+class ChatStore:
+    """Atomic JSONL snapshots. Persist before an action, and after its result.
+
+The file contains metadata, display entries, and provider history separately;
+opaque thinking/signatures are kept intact and are never rendered as text.
+"""
+    def __init__(self, root, *, lock=True):
+        self.root = Path(root) / "chats"
+        if self.root.is_symlink():
+            raise ValueError("Chat storage must not be a symbolic link.")
+        private_directory(self.root)
+        self._lock = None
+        if lock:
+            path = self.root / ".lock"
+            fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+            self._lock = os.fdopen(fd, "a+")
+            try:
+                fcntl.flock(self._lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                self._lock.close()
+                raise ValueError("Chat is already open in another Provider Hub instance.")
+
+    def path(self, identifier):
+        if not isinstance(identifier, str) or not CHAT_ID.fullmatch(identifier):
+            raise ValueError("Choose a saved chat.")
+        path = self.root / (identifier + ".jsonl")
+        if path.is_symlink():
+            raise ValueError("A saved chat must not be a symbolic link.")
+        return path
+
+    def save(self, chat):
+        target = self.path(chat["id"])
+        metadata = {key: value for key, value in chat.items() if key not in {"entries", "messages"}}
+        rows = [{"type": "metadata", "value": metadata}]
+        rows += [{"type": "entry", "value": value} for value in chat["entries"]]
+        rows += [{"type": "message", "value": value} for value in chat["messages"]]
+        temp = self.root / ("." + uuid.uuid4().hex + ".tmp")
+        try:
+            fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                for row in rows:
+                    stream.write(json.dumps(row, ensure_ascii=False) + "\n")
+                stream.flush(); os.fsync(stream.fileno())
+            os.replace(temp, target)
+        finally:
+            temp.unlink(missing_ok=True)
+
+    def load(self, identifier):
+        with self.path(identifier).open(encoding="utf-8") as stream:
+            rows = [json.loads(line) for line in stream if line.strip()]
+        if not rows or rows[0].get("type") != "metadata":
+            raise ValueError("This saved chat is incomplete.")
+        chat = rows[0]["value"]
+        if chat.get("id") != identifier:
+            raise ValueError("The saved chat's identity does not match its filename.")
+        chat["entries"] = [row["value"] for row in rows[1:] if row.get("type") == "entry"]
+        chat["messages"] = [row["value"] for row in rows[1:] if row.get("type") == "message"]
+        return chat
+
+    def all(self):
+        chats = []
+        for path in self.root.glob("*.jsonl"):
+            try:
+                chats.append(self.load(path.stem))
+            except (ValueError, OSError, KeyError):
+                # Keep damaged source files for recovery; never overwrite them.
+                continue
+        return sorted(chats, key=lambda value: value["updated"], reverse=True)
+
+    def delete(self, identifier):
+        self.path(identifier).unlink()
+
+
+class GatewayClient:
+    def __init__(self, root):
+        self.root = Path(root)
+        self._socket = None
+        self._mutex = threading.Lock()
+
+    def connect(self):
+        connection = http.client.HTTPConnection("127.0.0.1", load_settings(self.root)["port"], timeout=120)
+        connection.connect()
+        with self._mutex:
+            self._socket = connection.sock
+        return connection
+
+    def cancel(self):
+        with self._mutex:
+            active = self._socket
+        if active is not None:
+            try:
+                active.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+
+    def headers(self):
+        return {"Authorization": "Bearer " + gateway_token(self.root), "Content-Type": "application/json"}
+
+    def catalogue(self):
+        connection = self.connect()
+        try:
+            connection.request("GET", "/_bridge/chat/models", headers=self.headers())
+            response = connection.getresponse()
+            if response.status != 200:
+                raise ValueError("The gateway could not load Chat's models. Reopen Chat after checking Providers.")
+            return json.loads(response.read())["models"]
+        finally:
+            connection.close()
+
+    def stream(self, payload, cancel, delta):
+        connection = self.connect()
+        blocks, fragments, usage = {}, {}, {}
+        open_blocks = set()
+        stopped = False
+        reason = None
+        try:
+            if cancel.is_set():
+                raise InterruptedError("Stopped")
+            connection.request("POST", "/v1/messages", json.dumps({**payload, "stream": True}).encode(), self.headers())
+            response = connection.getresponse()
+            if response.status != 200:
+                body = response.read(64_000)
+                try:
+                    error = json.loads(body).get("error", {})
+                    message = error.get("message") if isinstance(error, dict) else error
+                except (ValueError, AttributeError):
+                    message = None
+                raise ValueError(message or f"Gateway request failed ({response.status}).")
+            if "text/event-stream" not in response.getheader("Content-Type", ""):
+                raise ValueError("The gateway did not return a Messages stream.")
+            for event in self.events(response):
+                if cancel.is_set():
+                    raise InterruptedError("Stopped")
+                kind = event.get("type")
+                if kind == "error":
+                    raise ValueError((event.get("error") or {}).get("message", "Model request failed."))
+                if kind == "message_start":
+                    usage.update((event.get("message") or {}).get("usage") or {})
+                elif kind == "content_block_start":
+                    index = event["index"]
+                    if index in blocks:
+                        raise ValueError("The model stream repeated a content block.")
+                    blocks[index] = copy.deepcopy(event["content_block"])
+                    fragments[index] = ""
+                    open_blocks.add(index)
+                    if blocks[index].get("type") == "text" and blocks[index].get("text"):
+                        delta(blocks[index]["text"])
+                elif kind == "content_block_delta":
+                    block = blocks.get(event.get("index"))
+                    if block is None or event.get("index") not in open_blocks:
+                        raise ValueError("The model stream supplied an unknown content block.")
+                    change = event.get("delta") or {}
+                    dtype = change.get("type")
+                    if dtype == "text_delta":
+                        value = change.get("text", "")
+                        block["text"] = block.get("text", "") + value; delta(value)
+                    elif dtype == "thinking_delta":
+                        block["thinking"] = block.get("thinking", "") + change.get("thinking", "")
+                    elif dtype == "signature_delta":
+                        block["signature"] = block.get("signature", "") + change.get("signature", "")
+                    elif dtype == "input_json_delta":
+                        fragments[event["index"]] += change.get("partial_json", "")
+                    else:
+                        raise ValueError("The model stream used an unsupported content delta.")
+                elif kind == "content_block_stop":
+                    index = event["index"]
+                    if index not in open_blocks:
+                        raise ValueError("The model stream ended an unknown content block.")
+                    if fragments.get(index):
+                        value = json.loads(fragments[index])
+                        if not isinstance(value, dict):
+                            raise ValueError("The model returned invalid tool arguments.")
+                        blocks[index]["input"] = value
+                    open_blocks.remove(index)
+                elif kind == "message_delta":
+                    usage.update(event.get("usage") or {}); reason = (event.get("delta") or {}).get("stop_reason")
+                elif kind == "message_stop":
+                    if open_blocks:
+                        raise ValueError("The model stream ended with incomplete content. No pending tool was executed.")
+                    stopped = True; break
+                if sum(len(json.dumps(b)) for b in blocks.values()) + sum(len(s) for s in fragments.values()) > 4_000_000:
+                    raise ValueError("The model response exceeded Chat's 4 MB limit.")
+            if cancel.is_set():
+                raise InterruptedError("Stopped")
+            if not stopped:
+                raise ValueError("The model stream ended before its response completed. No pending tool was executed.")
+            content = [blocks[index] for index in sorted(blocks)]
+            if not content:
+                raise ValueError("The model returned an empty response.")
+            return {"role": "assistant", "content": content, "usage": usage, "stop_reason": reason}
+        finally:
+            connection.close()
+            with self._mutex:
+                self._socket = None
+
+    @staticmethod
+    def events(response):
+        parts = []
+        total = 0
+        while line := response.readline(1_000_001):
+            if len(line) > 1_000_000:
+                raise ValueError("The gateway sent an oversized stream event.")
+            text = line.decode("utf-8").rstrip("\r\n")
+            if not text:
+                if parts:
+                    yield json.loads("\n".join(parts))
+                    parts = []; total = 0
+            elif text.startswith("data:"):
+                parts.append(text[5:].lstrip(" ")); total += len(text)
+                if total > 1_000_000:
+                    raise ValueError("The gateway sent an oversized stream event.")
+
+
+class ChatService:
+    def __init__(self, store, transport, emit, *, runner=ChatToolRunner):
+        self.store, self.transport, self.emit, self.runner_type = store, transport, emit, runner
+        self.models = []
+        self.chat = None
+        self.cancel = threading.Event()
+        self.thread = None
+        self._working = False
+        self.approval = None
+        self.approval_event = threading.Event()
+        self.approval_allowed = False
+        self._mutex = threading.RLock()
+
+    @property
+    def busy(self):
+        return self._working
+
+    def summaries(self):
+        keys = ("id", "title", "updated", "route", "account", "workspace", "effort")
+        return [{key: chat[key] for key in keys} for chat in self.store.all()]
+
+    def publish(self):
+        self.emit({"event": "chats", "chats": self.summaries()})
+        if self.chat:
+            self.emit({"event": "selected", "id": self.chat["id"], "entries": self.chat["entries"], "usage": self.chat.get("usage")})
+
+    def refresh(self):
+        self.models = self.transport.catalogue()
+        folders = list(dict.fromkeys(chat["workspace"] for chat in self.store.all()))[:5]
+        self.emit({"event": "catalogue", "models": self.models, "folders": folders})
+
+    def initialize(self):
+        chats = self.store.all()
+        for chat in chats:
+            if chat.get("status") == "working":
+                self.settle(chat, "Chat was interrupted before a recorded result. Inspect the workspace before retrying.")
+                chat["entries"].append(entry("notice", "Interrupted when Chat closed. Recorded changes and output are kept.", chat["route"]))
+                for item in chat["entries"]:
+                    if item.get("kind") == "tool" and item.get("detail") == "Running…":
+                        item["detail"] = "Interrupted. Inspect the workspace before running this action again."; item["isError"] = True
+                chat["status"] = "interrupted"; self.store.save(chat)
+        if chats:
+            self.chat = self.store.load(chats[0]["id"])
+        self.publish()
+        try:
+            self.refresh()
+        except Exception as exc:
+            self.emit({"event": "notice", "message": "Saved chats are available. The gateway is offline: " + str(exc)})
+        if not chats and self.models:
+            self.create(self.models[0]["id"], str(Path.home()))
+        self.publish(); self.emit({"event": "ready"})
+
+    def choice(self, identifier=None):
+        identifier = identifier or (self.chat["route"] + "|" + self.chat["account"] if self.chat else "")
+        row = next((row for row in self.models if row["id"] == identifier), None)
+        if row is None:
+            raise ValueError("This model/account is no longer in the gateway catalogue. Refresh models and choose a new chat.")
+        return row
+
+    def create(self, identifier, workspace, effort=""):
+        choice = self.choice(identifier)
+        folder = Path(workspace).expanduser().resolve(strict=True)
+        if not folder.is_dir():
+            raise ValueError("Choose an existing workspace folder.")
+        if effort and effort not in choice["efforts"]:
+            raise ValueError("Choose one of this model's supported reasoning levels.")
+        self.chat = {"id": uuid.uuid4().hex, "title": "New chat", "updated": now(),
+                     "route": choice["route"], "account": choice["account"], "scope": choice["scope"],
+                     "workspace": str(folder), "effort": effort, "entries": [], "messages": [], "status": "ready"}
+        self.store.save(self.chat); self.publish()
+
+    def add(self, item):
+        self.chat["entries"].append(item)
+        self.emit({"event": "entry", "chat": self.chat["id"], "entry": item})
+        return item
+
+    def save(self):
+        self.chat["updated"] = now(); self.store.save(self.chat)
+
+    def handle(self, command):
+        action = command.get("command")
+        if action == "stop":
+            self.cancel.set(); self.transport.cancel(); self.approval_event.set(); return
+        if action == "approve":
+            with self._mutex:
+                if self.approval is None or command.get("id") != self.approval["id"]:
+                    raise ValueError("This approval is no longer pending.")
+                self.approval_allowed = command.get("allow") is True
+                self.approval_event.set()
+            return
+        if self.busy:
+            self.emit({"event": "notice", "message": "Stop the current turn before changing chats or settings."}); return
+        if action == "refresh":
+            self.refresh(); self.publish()
+        elif action == "create":
+            self.create(command["choice"], command.get("workspace", str(Path.home())))
+        elif action == "select":
+            self.chat = self.store.load(command["id"]); self.publish()
+        elif action == "configure":
+            choice = self.choice(command.get("choice"))
+            folder = command.get("workspace", self.chat["workspace"] if self.chat else str(Path.home()))
+            effort = command.get("effort", self.chat["effort"] if self.chat and choice["route"] == self.chat["route"] else "")
+            if self.chat and not self.chat["messages"]:
+                old_id = self.chat["id"]
+                self.create(choice["id"], folder, effort); self.store.delete(old_id); self.publish()
+            elif self.chat and "effort" in command and "choice" not in command and "workspace" not in command:
+                if effort and effort not in choice["efforts"]:
+                    raise ValueError("Choose a supported reasoning level.")
+                # CLI adapters already restart native reasoning when effort changes.
+                self.chat["effort"] = effort; self.save(); self.publish()
+            else:
+                self.create(choice["id"], folder, effort)
+        elif action in {"send", "retry"}:
+            if not self.chat or command.get("id") != self.chat["id"]:
+                raise ValueError("Select a chat before sending.")
+            self.choice()
+            text = command.get("text", "")
+            if action == "send":
+                if not isinstance(text, str) or not text.strip() or len(text) > MAX_TEXT:
+                    raise ValueError("Enter a message of at most 100,000 characters.")
+                self.chat["messages"].append({"role": "user", "content": [{"type": "text", "text": text}]})
+                accepted_entry = entry("user", text, self.chat["route"])
+                self.chat["entries"].append(accepted_entry)
+                if self.chat["title"] == "New chat":
+                    self.chat["title"] = " ".join(text.split())[:64]
+            elif self.chat.get("status") not in {"error", "interrupted", "stopped"} or not self.chat["messages"]:
+                raise ValueError("There is no interrupted turn to retry.")
+            self.chat["status"] = "working"; self.save()
+            if action == "send":
+                self.emit({"event": "entry", "chat": self.chat["id"], "entry": accepted_entry})
+            self.publish()
+            self.cancel.clear(); self.approval_event.clear()
+            self._working = True
+            self.thread = threading.Thread(target=self.run, name="provider-hub-chat", daemon=True)
+            self.thread.start()
+        elif action == "rename":
+            title = command.get("title")
+            if not isinstance(title, str) or not title.strip() or len(title) > 120:
+                raise ValueError("Use a chat title of at most 120 characters.")
+            chat = self.store.load(command["id"]); chat["title"] = title.strip(); self.store.save(chat)
+            if self.chat and self.chat["id"] == chat["id"]: self.chat = chat
+            self.publish()
+        elif action == "delete":
+            self.store.delete(command["id"])
+            if self.chat and self.chat["id"] == command["id"]:
+                chats = self.store.all(); self.chat = chats[0] if chats else None
+                if not chats and self.models: self.create(self.models[0]["id"], str(Path.home()))
+            self.publish()
+        else:
+            raise ValueError("Unknown Chat command.")
+
+    @staticmethod
+    def settle(chat, message):
+        """Complete every unanswered tool cycle without replaying an action."""
+        pending = {}
+        for item in chat["messages"]:
+            for block in item.get("content", []):
+                if block.get("type") == "tool_use": pending[block["id"]] = block
+                elif block.get("type") == "tool_result": pending.pop(block.get("tool_use_id"), None)
+        if pending:
+            chat["messages"].append({"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": identifier, "is_error": True,
+                 "content": [{"type": "text", "text": message}]} for identifier in pending]})
+
+    def payload(self, choice):
+        chat = self.chat
+        tools = TOOL_DEFINITIONS if choice["supportsTools"] else []
+        context = choice.get("context")
+        output = min(choice.get("max_output") or 4096, 8192)
+        if isinstance(context, int) and context > 0:
+            output = min(output, max(1, context // 4))
+        payload = {"model": chat["route"], "messages": chat["messages"], "system": SYSTEM + "\nWorkspace: " + chat["workspace"],
+                   "tools": tools, "max_tokens": output,
+                   "_provider_hub_surface": "chat", "_provider_hub_account": chat["account"],
+                   "_provider_hub_connection": chat["scope"]}
+        if chat["effort"]:
+            payload["output_config"] = {"effort": chat["effort"]}
+        if isinstance(context, int) and context > 0:
+            budget = max(1, int(context * .85) - payload["max_tokens"])
+            if estimated_tokens(payload) >= budget:
+                compacted = compact_conversation(payload, budget)
+                if compacted["messages"] != chat["messages"]:
+                    chat["messages"] = compacted["messages"]; payload = compacted
+                    self.add(entry("notice", "Older model context trimmed. The full visible transcript is kept.", chat["route"]))
+                    self.save()
+        return payload
+
+    def approved(self, summary, detail=None):
+        with self._mutex:
+            self.approval_allowed = False; self.approval_event.clear()
+            self.approval = {"id": uuid.uuid4().hex, "summary": summary, "workspace": self.chat["workspace"], "detail": detail}
+            self.emit({"event": "approval", "approval": self.approval})
+        while not self.cancel.is_set() and not self.approval_event.wait(.1):
+            pass
+        with self._mutex:
+            allowed = self.approval_allowed and not self.cancel.is_set(); self.approval = None
+        return allowed
+
+    def run(self):
+        chat = self.chat
+        current = None
+        try:
+            choice = self.choice()
+            runner = self.runner_type(chat["workspace"], cancel_event=self.cancel)
+            for _ in range(MAX_ROUNDS):
+                if self.cancel.is_set(): raise InterruptedError("Stopped")
+                self.emit({"event": "state", "busy": True, "status": "Thinking…"})
+                current = self.add(entry("assistant", route=chat["route"]))
+                def delta(text):
+                    current["text"] += text
+                    self.emit({"event": "delta", "chat": chat["id"], "id": current["id"], "text": text})
+                message = self.transport.stream(self.payload(choice), self.cancel, delta)
+                content = message["content"]
+                current["text"] = "".join(block.get("text", "") for block in content if block.get("type") == "text")
+                self.emit({"event": "entry", "chat": chat["id"], "entry": current})
+                calls = [block for block in content if block.get("type") == "tool_use"]
+                if calls and message.get("stop_reason") != "tool_use":
+                    raise ValueError("The model did not finish its tool response. No action was executed.")
+                ids = [call.get("id") for call in calls]
+                if len(calls) > 32 or len(set(ids)) != len(ids) or any(not isinstance(i, str) or not i for i in ids):
+                    raise ValueError("The model returned invalid or too many tool calls. No action was executed.")
+                chat["messages"].append({"role": "assistant", "content": content})
+                counts = message.get("usage") or {}
+                chat["usage"] = (counts.get("input_tokens") or 0) + (counts.get("cache_read_input_tokens") or 0) + (counts.get("cache_creation_input_tokens") or 0)
+                self.save()
+                if not calls:
+                    if message.get("stop_reason") == "max_tokens":
+                        self.add(entry("notice", "The response reached its output limit. Send Continue to carry on.", chat["route"]))
+                    chat["status"] = "ready"; break
+                results = {"role": "user", "content": []}
+                chat["messages"].append(results)
+                for call in calls:
+                    if self.cancel.is_set(): raise InterruptedError("Stopped")
+                    name, arguments = call.get("name"), call.get("input")
+                    try:
+                        description = runner.describe(name, arguments)
+                        allowed = not description["requires_approval"] or self.approved(description["summary"], arguments.get("patch"))
+                        if self.cancel.is_set(): raise InterruptedError("Stopped")
+                        if allowed:
+                            self.emit({"event": "state", "busy": True, "status": description["summary"]})
+                            self.add(entry("tool", route=chat["route"], tool=name, summary=description["summary"], detail="Running…", id=call["id"]))
+                            # Pending tool + working status are durable before execution.
+                            self.save()
+                            result = runner.execute(name, arguments)
+                        else:
+                            result = {"content": [{"type": "text", "text": "The user denied this action. It was not executed."}],
+                                      "is_error": True, "summary": description["summary"], "changed_files": []}
+                    except InterruptedError:
+                        raise
+                    except (ValueError, OSError, TypeError, KeyError) as exc:
+                        result = {"content": [{"type": "text", "text": str(exc)}], "is_error": True,
+                                  "summary": str(name or "Invalid tool"), "changed_files": []}
+                    results["content"].append({"type": "tool_result", "tool_use_id": call["id"],
+                                              "is_error": result["is_error"], "content": result["content"]})
+                    detail = "\n".join(part.get("text", "") for part in result["content"] if part.get("type") == "text")
+                    visible = entry("tool", route=chat["route"], tool=name, id=call["id"], summary=result["summary"], detail=detail,
+                                    isError=result["is_error"], changedFiles=result.get("changed_files") or [])
+                    index = next((i for i, item in enumerate(chat["entries"]) if item["id"] == call["id"]), None)
+                    if index is not None: chat["entries"][index] = visible; self.emit({"event": "entry", "chat": chat["id"], "entry": visible})
+                    else: self.add(visible)
+                    self.save()
+                current = None
+            else:
+                raise ValueError("This turn reached its 24-step limit. Send Continue to carry on from recorded results.")
+        except Exception as exc:
+            stopped = self.cancel.is_set() or isinstance(exc, InterruptedError)
+            chat["status"] = "stopped" if stopped else "error"
+            text = "Stopped. Partial output and recorded actions are kept." if stopped else str(exc)
+            chat["messages"] = [item for item in chat["messages"] if item.get("content")]
+            self.settle(chat, "Stopped or interrupted before a recorded result. An action may have run; inspect the workspace before retrying.")
+            for item in chat["entries"]:
+                if item.get("kind") == "tool" and item.get("detail") == "Running…":
+                    item["detail"] = "Interrupted. Inspect the workspace before running this action again."; item["isError"] = True
+                    self.emit({"event": "entry", "chat": chat["id"], "entry": item})
+            self.add(entry("notice" if stopped else "error", text, chat["route"], isError=not stopped))
+        finally:
+            self.approval = None
+            try:
+                self.save(); self.publish()
+            except Exception:
+                self.emit({"event": "error", "message": "Chat could not save its latest result. Inspect the workspace before retrying."})
+            status = {"stopped": "Stopped", "error": "Request failed"}.get(chat["status"], "Ready")
+            self._working = False
+            self.emit({"event": "state", "busy": False, "status": status, "usage": chat.get("usage")})
+
+
+def main():
+    mutex = threading.Lock()
+    def emit(event):
+        with mutex:
+            print(json.dumps(event, ensure_ascii=False), flush=True)
+    service = None
+    try:
+        root = state_root()
+        service = ChatService(ChatStore(root), GatewayClient(root), emit)
+        service.initialize()
+        for line in sys.stdin:
+            try:
+                if len(line) > 1_000_000: raise ValueError("Chat command is too large.")
+                command = json.loads(line)
+                if not isinstance(command, dict): raise ValueError("Chat command must be an object.")
+                service.handle(command)
+            except Exception as exc:
+                emit({"event": "notice" if service.busy else "error", "message": str(exc)})
+    except Exception as exc:
+        emit({"event": "error", "message": str(exc)})
+    finally:
+        if service:
+            service.handle({"command": "stop"})
+            if service.thread:
+                service.thread.join(timeout=10)
+
+
+if __name__ == "__main__":
+    main()

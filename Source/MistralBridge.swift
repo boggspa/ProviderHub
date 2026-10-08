@@ -69,6 +69,9 @@ final class BridgeModel: ObservableObject {
     var codexAccentInput: Pipe?
     /// The floating recent-chat composer (QuickComposerPanel.swift).
     let quickPanel = QuickPanelModel()
+    var openChatWindow: (() -> Void)?
+    @Published var chatWindowOpen = false
+    @Published var chatWorking = false
     @Published var profileActive = false
     @Published var recoveryNeeded = false
     @Published var codexModels: [CodexModelOption] = []
@@ -132,6 +135,7 @@ final class BridgeModel: ObservableObject {
 
     var running: Bool { gatewayState == "Ready" }
     var changed: Bool { settings != savedSettings }
+    func openChat() { openChatWindow?() }
 
     func omitSystem(for slot: String) -> Binding<Bool> {
         Binding(
@@ -1410,6 +1414,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     var model: BridgeModel!
     var statusItem: NSStatusItem!
     var window: NSWindow!
+    var chatWindow: NSWindow?
+    var chatModel: ChatModel!
     var readyToQuit = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -1428,6 +1434,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         }
         editItem.submenu = editMenu; mainMenu.addItem(editItem); NSApp.mainMenu = mainMenu
         model = BridgeModel()
+        chatModel = ChatModel(bridge: model)
+        chatModel.onActivity = { [weak self] working in self?.model.chatWorking = working }
+        model.openChatWindow = { [weak self] in self?.showChat() }
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         statusItem.button?.image = NSImage(systemSymbolName: "point.3.connected.trianglepath.dotted", accessibilityDescription: hubName)
         statusItem.button?.image?.isTemplate = true
@@ -1487,9 +1496,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         NSApp.setActivationPolicy(.regular)
         window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
     }
+    @objc func showChat() {
+        if chatWindow == nil {
+            let chat = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 940, height: 700),
+                                styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+                                backing: .buffered, defer: false)
+            chat.title = "Chat · Provider Hub"; chat.titleVisibility = .hidden
+            chat.titlebarAppearsTransparent = true; chat.isOpaque = false; chat.backgroundColor = .clear
+            chat.isReleasedWhenClosed = false; chat.delegate = self
+            chat.minSize = NSSize(width: 720, height: 500)
+            chat.contentView = NSHostingView(rootView: ChatWindow(model: chatModel))
+            chat.setFrameAutosaveName("ProviderHubChat"); chat.center(); chatWindow = chat
+        }
+        model.chatWindowOpen = true
+        NSApp.setActivationPolicy(.regular)
+        chatWindow?.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
+        Task { await chatModel.start() }
+    }
     func windowWillClose(_ notification: Notification) {
-        guard (notification.object as? NSWindow) === window else { return }
-        NSApp.setActivationPolicy(.accessory)
+        let closing = notification.object as? NSWindow
+        if closing === chatWindow { model.chatWindowOpen = false }
+        if (closing === window && chatWindow?.isVisible != true) || (closing === chatWindow && !window.isVisible) {
+            NSApp.setActivationPolicy(.accessory)
+        }
     }
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
         if !hasVisibleWindows { showWindow() }
@@ -1508,6 +1537,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         menu.addItem(.separator())
         add(menu, "Launch Claude…", #selector(launchClaude), "l")
         add(menu, "Launch Codex / ChatGPT…", #selector(launchCodex), "")
+        add(menu, "Chat with Model…", #selector(showChat), "k")
         if model.settings.codex_quick_composer && model.codexAccentInput != nil {
             add(menu, "Recent chats…", #selector(showQuickComposer), "")
         }
@@ -1545,7 +1575,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         if readyToQuit { return .terminateNow }
         model.updateClaudeRunning()
         model.updateCodexRunning()
-        if model.anyOwnedHarnessRunning {
+        if model.desktopOwnedHarnessRunning {
             let alert = NSAlert()
             alert.messageText = "A desktop session is using " + hubName
             alert.informativeText = "Quit the desktop sessions using this gateway so their previous configuration can be restored and active work can finish."
@@ -1553,10 +1583,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             alert.runModal()
             return .terminateCancel
         }
-        if model.activeRequests > 0 || model.busy {
+        if model.activeRequests > 0 || model.busy || model.chatWorking {
             model.tell("Wait for the current operation to finish before quitting.", error: true); showWindow(); return .terminateCancel
         }
         model.shuttingDown = true
+        chatModel.shutdown()
         Task {
             if model.codexRecoveryNeeded && !model.codexRunning {
                 do { _ = try await model.command("codex-restore"); model.codexRecoveryNeeded = false }

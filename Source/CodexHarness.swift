@@ -9,9 +9,10 @@ struct CodexModelOption: Decodable, Identifiable {
 }
 
 extension BridgeModel {
-    var anyOwnedHarnessRunning: Bool {
+    var desktopOwnedHarnessRunning: Bool {
         (claudeRunning && profileActive) || (codexRunning && codexRecoveryNeeded)
     }
+    var anyOwnedHarnessRunning: Bool { desktopOwnedHarnessRunning || chatWindowOpen || chatWorking }
 
     func readCodexState(_ object: [String: Any]) {
         if let raw = object["codex_models"], let data = try? JSONSerialization.data(withJSONObject: raw),

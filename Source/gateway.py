@@ -55,6 +55,7 @@ from protocol import (StreamTranslator, apply_mapping_options, apply_mistral_pre
 from responses_native import ResponseOwnership, handle_responses, NATIVE_PROVIDERS
 from codex_accent import bridge_command as codex_accent_bridge
 from codex_catalogue import catalogue_digest, choices as codex_choices, launch_settings as codex_launch_settings
+from chat_catalogue import chat_choices, chat_connection
 from codex_profile import CodexProfile
 from codex_runtime import qualify_runtime, runtime_signature
 from claude_context import claude_context_spec
@@ -192,11 +193,24 @@ class Runtime:
         route = self.resolve_route(payload.get("model"))
         provider_id, upstream_model = split_route(route)
         spec = self.settings["_model_specs"][route]
-        if payload.get("_provider_hub_surface") != "responses":
+        is_chat = payload.get("_provider_hub_surface") == "chat"
+        selected_settings = self.settings
+        connection = self.settings["providers"][provider_id]
+        chat_directory = None
+        chat_scope = None
+        if is_chat:
+            try:
+                selected_settings, connection, chat_directory, chat_scope = chat_connection(
+                    load_settings(self.root), provider_id, payload.get("_provider_hub_account", ""),
+                    payload.get("_provider_hub_connection"))
+            except ValueError as exc:
+                raise BridgeError(str(exc)) from exc
+        if payload.get("_provider_hub_surface") not in {"responses", "chat"}:
             spec = claude_context_spec(spec, self.settings)
         context = _effective_context(spec)
-        options = mapping_options_for(payload.get("model"), self.settings)
-        payload = apply_mapping_options(payload, self.settings)
+        options = mapping_options_for(payload.get("model"), {} if is_chat else self.settings)
+        if not is_chat:
+            payload = apply_mapping_options(payload, self.settings)
         # Ultracode announces itself only through reminders Claude Code writes
         # into user turns, which a non-Claude model has no reason to read as
         # standing orchestration instructions. One system note carries the
@@ -215,7 +229,8 @@ class Runtime:
         # model picker was traced to that request once already.
         wants_output = payload.get("max_tokens")
         if not options.get("omit_system") and not (type(wants_output) is int and wants_output <= 1):
-            payload = {**payload, "system": with_identity_note(payload.get("system"), spec)}
+            identity = with_identity_note(payload.get("system"), spec, harness="Provider Hub Chat") if is_chat else with_identity_note(payload.get("system"), spec)
+            payload = {**payload, "system": identity}
         if ultracode_active(payload) and not options.get("omit_system"):
             payload = {**payload, "system": with_ultracode_note(payload.get("system"))}
         # A route with no reasoning axis is still shown the slider, so it will
@@ -282,8 +297,8 @@ class Runtime:
         rewritten = rewrite_context_reminders(payload, context, estimate)
         reminders_rewritten = rewritten is not payload
         payload = rewritten
-        key = self.provider_key(provider_id)
-        scope = connection_signature(provider_id, self.settings["providers"][provider_id])
+        key = (self.key if self.key is not None else credentials(selected_settings, provider_id)[0]) if is_chat else self.provider_key(provider_id)
+        scope = chat_scope if is_chat else connection_signature(provider_id, connection)
         # Bind replay to the actual credential as well as the configured revision.
         # This covers Vibe/environment credential rotation between gateway runs.
         scope += ":" + hmac.new(self.replay_key.encode(), key.encode(), hashlib.sha256).hexdigest()
@@ -312,14 +327,14 @@ class Runtime:
                 # The provider builder repeats the window check on its own
                 # byte estimate; hand it the same learned factor.
                 request_options["estimate_factor"] = calibration_factor
-            if cli_routes.cli_credential_mode(self.settings, provider_id):
+            if cli_routes.cli_credential_mode(selected_settings, provider_id):
                 # The CLI owns this login: skip HTTP request building entirely.
                 # The adapter turns the payload into a prompt-in/text-out turn.
                 plan = cli_routes.plan_turn(provider_id, upstream_model, payload, spec,
                                             wanted_output=wanted_output,
-                                            config_dir=self.cli_account_dir(provider_id))
+                                            config_dir=chat_directory if is_chat else self.cli_account_dir(provider_id))
             else:
-                plan = (self.request_planner or prepare_request)(provider_id, self.settings["providers"][provider_id], key, payload, upstream_model, spec, **request_options)
+                plan = (self.request_planner or prepare_request)(provider_id, connection, key, payload, upstream_model, spec, **request_options)
         except (ProviderError, CerebrasReplayError) as exc:
             raise BridgeError(str(exc).replace(key, "[redacted]") if key else str(exc)) from exc
         plan.update(route=route, provider_id=provider_id, provider_name=PROVIDERS[provider_id]["name"],
@@ -732,6 +747,11 @@ class Handler(BaseHTTPRequestHandler):
             self.json_response(200, model_catalog(self.runtime.settings))
         elif path == "/_bridge/codex/models":
             self.json_response(200, {"models": codex_choices(self.runtime.settings, self.runtime.catalogue)})
+        elif path == "/_bridge/chat/models":
+            # Route metadata stays on the serving snapshot; accounts and display
+            # overrides are read live without changing a desktop's selection.
+            settings = {**load_settings(self.runtime.root), "_model_specs": self.runtime.settings["_model_specs"]}
+            self.json_response(200, {"models": chat_choices(settings)})
         elif path == "/v1/agents/sessions":
             return self._handle_list_agent_sessions()
         elif path.startswith("/v1/agents/sessions/"):

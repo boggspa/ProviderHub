@@ -167,6 +167,10 @@ struct CompactShell: View {
             Button(model.running ? "Stop" : "Start") { Task { await model.toggleGateway() } }
                 .buttonStyle(.bordered).controlSize(.mini).disabled(model.busy)
             launchCluster.padding(.leading, 10)
+            Button { model.openChat() } label: {
+                Image(systemName: "bubble.left.and.text.bubble.right").font(.system(size: 12))
+            }.buttonStyle(.plain).help("Chat with a model in Provider Hub")
+                .accessibilityLabel("Open Provider Hub Chat")
             if model.changed {
                 Button { Task { await model.saveFromUI() } } label: { Text("Save").foregroundStyle(HubTheme.Control.ink) }
                     .buttonStyle(.borderedProminent).controlSize(.mini).tint(HubTheme.Accent.brand)
