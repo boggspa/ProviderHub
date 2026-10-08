@@ -901,6 +901,7 @@ class _LiveCli:
         self.process.terminate.side_effect = self._stop
         self.stdin = _RecordingStdin()
         self.closed = threading.Event()
+        self.calls_finished = threading.Event()
         self.results = {}
         config = json.loads(argv[argv.index("--mcp-config") + 1])
         self.server = config["mcpServers"]["host"]
@@ -929,6 +930,7 @@ class _LiveCli:
             thread.start()
         for thread in threads:
             thread.join(30)
+        self.calls_finished.set()
         if self.returncode is None:
             for identifier, _, _ in calls:
                 self.lines.put({"type": "user", "message": {"role": "user", "content": [
@@ -1117,6 +1119,9 @@ class LiveSessionTests(unittest.TestCase):
         events = list(m.run_turn(request, pool=self.pool))
         self.assertEqual(events[-1], {"type": "message_stop", "stop_reason": "tool_use"})
         self.assertTrue(self.spawned[0].closed.wait(5))
+        # Closing the fake process and receiving the socket's NO_RESULT happen
+        # on different threads. Wait for the latter before reading its result.
+        self.assertTrue(self.spawned[0].calls_finished.wait(5))
         self.assertEqual(self.spawned[0].results["toolu_1"]["content"][0]["text"], host_tools_mcp.NO_RESULT)
 
     def test_a_busy_pool_replays_and_a_cancelled_wait_is_an_error(self):

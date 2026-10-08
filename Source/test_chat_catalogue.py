@@ -45,6 +45,26 @@ class ChatCatalogueTests(unittest.TestCase):
         self.settings["branding_overrides"] = {}
         self.assertNotEqual(chat_choices(self.settings)[0]["label"], "Old cached label")
 
+    def test_only_launcher_selected_models_are_listed_and_union_is_deduplicated(self):
+        fable = "claude/claude-fable-5-1"
+        other = "claude/claude-opus-5-5"
+        self.settings["_model_specs"][other] = {**self.settings["_model_specs"][fable], "id": other, "model_id": "claude-opus-5-5"}
+        self.settings["mappings"] = {slot[0]: fable for slot in SLOTS}
+        self.settings["codex_catalogue"] = [fable]
+        self.assertEqual({row["route"] for row in chat_choices(self.settings)}, {fable})
+        self.settings["codex_catalogue"] = [other, "claude/alias"]
+        rows = chat_choices(self.settings)
+        self.assertEqual({row["route"] for row in rows}, {fable, other})
+        self.assertEqual(len(rows), 4)  # one row per route/account, not desktop alias
+        self.assertEqual(rows[0]["connectionPresentation"]["runtimeProvider"], "claude")
+
+    def test_brand_accent_does_not_change_provider_connection_group(self):
+        route = "ollama/gpt-oss:120b"
+        self.settings["_model_specs"] = {route: {"id": route, "model_id": "gpt-oss:120b", "provider_id": "ollama", "context": 65536, "tools": True}}
+        rows = chat_choices(self.settings)
+        self.assertEqual(rows[0]["connectionPresentation"]["runtimeProvider"], "ollama")
+        self.assertEqual(rows[0]["route"], route)
+
     def test_named_key_account_selects_only_its_own_keychain_slot(self):
         self.settings["providers"]["mistral"].update(credential_mode="keychain", key_accounts=[{"id": "work", "label": "Work"}], key_account="work")
         selected, _, _, _ = chat_connection(self.settings, "mistral", "")

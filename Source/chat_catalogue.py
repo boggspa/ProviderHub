@@ -9,7 +9,9 @@ import hashlib
 import json
 
 from branding import resolve_presentation
-from hub_config import cli_account_dir, connection_signature
+from codex_catalogue import choices as codex_choices
+from hub_config import claude_routes, cli_account_dir, connection_signature
+from model_names import friendly_model_name
 
 
 def chat_connection(settings, provider, account="", expected_scope=None):
@@ -37,7 +39,14 @@ def chat_connection(settings, provider, account="", expected_scope=None):
 
 def chat_choices(settings):
     rows, seen = [], set()
-    for alias, spec in (settings.get("_model_specs") or {}).items():
+    specs = settings.get("_model_specs") or {}
+    inventory = {"models": list({spec["id"]: spec for spec in specs.values()}.values())}
+    selected = list(dict.fromkeys([*claude_routes(settings).values(),
+                                  *(row["id"] for row in codex_choices(settings, inventory))]))
+    for alias in selected:
+        spec = specs.get(alias)
+        if not spec:
+            continue
         route = spec.get("id") or alias
         if route in seen:
             continue
@@ -53,7 +62,11 @@ def chat_choices(settings):
             accounts += connection.get("cli_accounts" if mode == "cli" else "key_accounts") or []
         accounts.sort(key=lambda a: a["id"] != (connection.get(field) or ""))
         model = spec.get("model_id") or route.split("/", 1)[-1]
-        presentation = resolve_presentation(provider, model, settings.get("branding_overrides"))
+        overrides = settings.get("branding_overrides") or {}
+        labels = (overrides.get(provider) or {}).get("modelLabels") or {}
+        label = labels.get(model) or labels.get(route) or friendly_model_name(spec.get("canonical_id") or model)
+        presentation = resolve_presentation(provider, model, overrides, supplied_label=label)
+        connection_presentation = resolve_presentation(provider, overrides=overrides)
         label = presentation.get("modelLabel") or spec.get("display_name") or model
         efforts = spec.get("effort_modes") or []
         if spec.get("reasoning") is False:
@@ -65,5 +78,6 @@ def chat_choices(settings):
                          "accountLabel": account["label"], "scope": scope,
                          "efforts": efforts, "context": spec.get("runtime_context") or spec.get("context"),
                          "max_output": spec.get("max_output"), "supportsTools": spec.get("tools") is not False,
-                         "presentation": presentation})
+                         "vision": spec.get("vision"),
+                         "presentation": presentation, "connectionPresentation": connection_presentation})
     return rows

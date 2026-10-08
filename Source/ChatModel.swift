@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import PDFKit
 
 struct ChatSummary: Decodable, Identifiable {
     var id: String
@@ -9,6 +10,8 @@ struct ChatSummary: Decodable, Identifiable {
     var account: String
     var workspace: String
     var effort: String
+    var approvalMode: String?
+    var scope: String?
 }
 
 struct ChatRoute: Decodable, Identifiable {
@@ -23,7 +26,11 @@ struct ChatRoute: Decodable, Identifiable {
     var context: Int?
     var supportsTools: Bool
     var presentation: ProviderPresentation?
+    var connectionPresentation: ProviderPresentation?
     var accent: Color { presentation?.color ?? .secondary }
+    var connectionID: String { connectionPresentation?.runtimeProvider ?? String(route.split(separator: "/").first ?? "") }
+    var connectionLabel: String { connectionPresentation?.displayProvider ?? connectionID.capitalized }
+    var connectionAccent: Color { connectionPresentation?.color ?? accent }
 }
 
 struct ChatEntry: Decodable, Identifiable {
@@ -36,6 +43,21 @@ struct ChatEntry: Decodable, Identifiable {
     var detail: String?
     var isError: Bool
     var changedFiles: [String]
+    var attachments: [ChatAttachment]?
+}
+
+struct ChatAttachment: Decodable, Identifiable {
+    var id: String
+    var name: String
+    var path: String
+    var kind: String
+    var size: Int
+    var extractedText: String?
+    var request: [String: Any] {
+        var value: [String: Any] = ["path": path]
+        if let extractedText { value["extractedText"] = extractedText }
+        return value
+    }
 }
 
 struct ChatApproval: Decodable, Identifiable {
@@ -54,6 +76,7 @@ final class ChatModel: ObservableObject {
     @Published var entries: [ChatEntry] = []
     @Published var models: [ChatRoute] = []
     @Published var draft = ""
+    @Published var attachments: [ChatAttachment] = []
     @Published var busy = false
     @Published var notice = ""
     @Published var connected = false
@@ -69,7 +92,8 @@ final class ChatModel: ObservableObject {
     private var output: Pipe?
     private var buffer = Data()
     private var drafts: [String: String] = [:]
-    private var pendingSend: (chat: String, text: String)?
+    private var attachmentDrafts: [String: [ChatAttachment]] = [:]
+    private var pendingSend: (chat: String, text: String, attachments: [ChatAttachment])?
     private var commandSink: (([String: Any]) -> Bool)?
     private var starting = false
 
@@ -80,7 +104,8 @@ final class ChatModel: ObservableObject {
     var selected: ChatSummary? { chats.first { $0.id == selectedID } }
     var selectedRoute: ChatRoute? { models.first { $0.route == selected?.route && $0.account == selected?.account } }
     var activeAccent: Color { selectedRoute?.accent ?? .secondary }
-    var canSend: Bool { connected && !busy && selectedRoute != nil && !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+    var approvalMode: String { selected?.approvalMode ?? "manual" }
+    var canSend: Bool { connected && !busy && selectedRoute != nil && (!draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty) }
     func accent(for route: String) -> Color { models.first { $0.route == route }?.accent ?? .secondary }
 
     func start() async {
@@ -138,9 +163,10 @@ final class ChatModel: ObservableObject {
     func send() {
         guard canSend, let selectedID else { return }
         let text = draft; draft = ""; drafts[selectedID] = ""; notice = ""
-        pendingSend = (selectedID, text)
+        let files = attachments; attachments = []; attachmentDrafts[selectedID] = []
+        pendingSend = (selectedID, text, files)
         setBusy(true); status = "Connecting…"
-        if !write(["command": "send", "id": selectedID, "text": text]) { restorePendingSend(); setBusy(false) }
+        if !write(["command": "send", "id": selectedID, "text": text, "attachments": files.map(\.request)]) { restorePendingSend(); setBusy(false) }
     }
     func stop() { write(["command": "stop"]); status = "Stopping…" }
     func retry() {
@@ -151,7 +177,12 @@ final class ChatModel: ObservableObject {
         guard !busy, let choice = models.first(where: { $0.id == choiceID }) else { return }
         write(["command": "configure", "choice": choice.id])
     }
+    func setSelection(_ choiceID: String, effort: String) {
+        guard !busy, let choice = models.first(where: { $0.id == choiceID }) else { return }
+        write(["command": "configure", "choice": choice.id, "effort": effort])
+    }
     func setEffort(_ effort: String) { guard !busy else { return }; write(["command": "configure", "effort": effort]) }
+    func setApprovalMode(_ mode: String) { guard !busy else { return }; write(["command": "configure", "approvalMode": mode]) }
     func setFolder(_ path: String) { guard !busy else { return }; write(["command": "configure", "workspace": path]) }
     func chooseFolder() {
         let picker = NSOpenPanel(); picker.canChooseDirectories = true; picker.canChooseFiles = false
@@ -163,6 +194,38 @@ final class ChatModel: ObservableObject {
         guard let approval else { return }; write(["command": "approve", "id": approval.id, "allow": allow])
         self.approval = nil; status = allow ? "Working…" : "Denied"
     }
+    func chooseAttachments() {
+        let picker = NSOpenPanel(); picker.canChooseFiles = true; picker.canChooseDirectories = false
+        picker.allowsMultipleSelection = true; picker.prompt = "Attach"
+        if picker.runModal() == .OK { addAttachments(picker.urls) }
+    }
+    func addAttachments(_ urls: [URL]) {
+        guard selectedID != nil else { return }
+        for url in urls {
+            guard attachments.count < 8 else { notice = "Attach up to eight files per message."; return }
+            if attachments.contains(where: { $0.path == url.path }) { continue }
+            do {
+                let values = try url.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey])
+                guard values.isRegularFile == true, let size = values.fileSize, size <= 8 * 1024 * 1024 else {
+                    notice = "Choose a regular file of up to 8 MiB."; continue
+                }
+                let ext = url.pathExtension.lowercased()
+                let image = ["png", "jpg", "jpeg", "gif", "webp"].contains(ext)
+                var text: String?
+                if ext == "pdf" {
+                    guard let document = PDFDocument(url: url), let content = document.string, !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                        notice = "This PDF has no extractable text. Attach images of its pages instead."; continue
+                    }
+                    guard content.count <= 200_000 else { notice = "Choose a PDF with less than 200,000 characters of text."; continue }
+                    text = content
+                }
+                attachments.append(ChatAttachment(id: UUID().uuidString, name: url.lastPathComponent,
+                    path: url.path, kind: image ? "image" : "file", size: size, extractedText: text))
+                notice = ""
+            } catch { notice = "Could not attach \(url.lastPathComponent): \(error.localizedDescription)" }
+        }
+    }
+    func removeAttachment(_ id: String) { attachments.removeAll { $0.id == id } }
     func rename(_ id: String, title: String) { guard !busy else { return }; write(["command": "rename", "id": id, "title": title]) }
     func delete(_ id: String) { guard !busy else { return }; write(["command": "delete", "id": id]) }
 
@@ -171,9 +234,11 @@ final class ChatModel: ObservableObject {
         guard let pendingSend else { return }
         if selectedID == pendingSend.chat {
             draft = draft.isEmpty ? pendingSend.text : pendingSend.text + "\n\n" + draft
+            attachments = pendingSend.attachments + attachments
         } else {
             let existing = drafts[pendingSend.chat] ?? ""
             drafts[pendingSend.chat] = existing.isEmpty ? pendingSend.text : pendingSend.text + "\n\n" + existing
+            attachmentDrafts[pendingSend.chat] = pendingSend.attachments + (attachmentDrafts[pendingSend.chat] ?? [])
         }
         self.pendingSend = nil
     }
@@ -200,7 +265,10 @@ final class ChatModel: ObservableObject {
             case "chats": chats = decode([ChatSummary].self, event["chats"]) ?? []
             case "selected":
                 let id = event["id"] as? String
-                if id != selectedID { if let selectedID { drafts[selectedID] = draft }; draft = id.flatMap { drafts[$0] } ?? "" }
+                if id != selectedID {
+                    if let selectedID { drafts[selectedID] = draft; attachmentDrafts[selectedID] = attachments }
+                    draft = id.flatMap { drafts[$0] } ?? ""; attachments = id.flatMap { attachmentDrafts[$0] } ?? []
+                }
                 selectedID = id; entries = decode([ChatEntry].self, event["entries"]) ?? []
                 tokenUsage = event["usage"] as? Int; contextLimit = selectedRoute?.context
             case "entry":

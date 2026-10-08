@@ -36,9 +36,9 @@ TOOL_DEFINITIONS = [
     _tool("search_files", "Search literal text in UTF-8 workspace files, excluding symlinks and .git. Bounded scan.", {
         "pattern": {"type": "string"}, "path": {"type": "string"},
         "glob": {"type": "string"}, "max_results": {"type": "integer", "minimum": 1, "maximum": 500}}, ["pattern"]),
-    _tool("apply_patch", "Apply a Codex *** Begin Patch patch (Add/Update/Delete File, optional Move to). All hunks are validated first. Requires approval.", {
+    _tool("apply_patch", "Apply a Codex *** Begin Patch patch (Add/Update/Delete File, optional Move to). All hunks are validated first. The host applies the selected approval mode.", {
         "patch": {"type": "string"}}, ["patch"]),
-    _tool("run_shell", "Run the exact approved command with /bin/sh in the workspace. This is not sandboxed. Output is bounded; timeout is in seconds.", {
+    _tool("run_shell", "Run a command with /bin/sh in the workspace under the host's selected approval mode. This is not sandboxed. Output is bounded; timeout is in seconds.", {
         "command": {"type": "string"}, "timeout": {"type": "number", "minimum": 0.1, "maximum": 300}}, ["command"]),
 ]
 

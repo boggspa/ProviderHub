@@ -624,6 +624,7 @@ final class BridgeModel: ObservableObject {
             entry.compact_limit.map { !(1000...15000000).contains($0) } ?? false
         }) == true { return "Claude compaction thresholds must be 1,000–15,000,000 tokens, or blank for automatic." }
         if changeKind == .prefs { return nil }
+        if chatWorking { return "Stop the Chat turn before applying model or provider changes." }
         let claudeLive = claudeRunning && profileActive
         let codexLive = codexRunning && codexRecoveryNeeded
         if activeRequests > 0 { return "Wait for the current requests to finish before applying model changes." }
@@ -644,6 +645,9 @@ final class BridgeModel: ObservableObject {
         updateCodexRunning()
         let kind = changeKind
         if kind == .unchanged { return }
+        if chatWorking && kind != .prefs {
+            throw WorkerError(message: "Stop the Chat turn before changing model or provider settings.")
+        }
         let claudeLive = claudeRunning && profileActive
         let codexLive = codexRunning && codexRecoveryNeeded
         if activeRequests > 0 || claudeLive || codexLive {
@@ -704,6 +708,7 @@ final class BridgeModel: ObservableObject {
 
     func ensureGatewaySnapshot(fingerprint: String?, digest: String?, otherHarness: String) async throws {
         guard running, fingerprint != nil || digest != nil else { return }
+        guard !chatWorking else { throw WorkerError(message: "Stop the Chat turn before restarting the shared gateway.") }
         if try await gatewayMatches(fingerprint: fingerprint, digest: digest) == true { return }
         if activeRequests > 0 {
             throw WorkerError(message: "Wait for the active model requests to finish, then launch again so the gateway can load your latest selection.")
@@ -1472,11 +1477,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         }
         applyWindowStyle()
     }
-    /// Change only the main window surface, retaining navigation and edits.
+    /// Both Hub windows follow one surface preference without rebuilding state.
     func applyWindowStyle() {
         let glass = design != "classic" && HubTheme.WindowStyle.mode == .glass
         window.isOpaque = !glass
         window.backgroundColor = glass ? .clear : .windowBackgroundColor
+        let chatGlass = HubTheme.WindowStyle.mode == .glass
+        chatWindow?.isOpaque = !chatGlass
+        chatWindow?.backgroundColor = chatGlass ? .clear : .windowBackgroundColor
     }
     @objc func chooseCompact() { UserDefaults.standard.set("compact", forKey: "hubDesign"); applyDesign() }
     @objc func chooseClassic() { UserDefaults.standard.set("classic", forKey: "hubDesign"); applyDesign() }
@@ -1512,6 +1520,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             chat.minSize = NSSize(width: 720, height: 500)
             chat.contentView = NSHostingView(rootView: ChatWindow(model: chatModel))
             chat.setFrameAutosaveName("ProviderHubChat"); chat.center(); chatWindow = chat
+            applyWindowStyle()
         }
         model.chatWindowOpen = true
         NSApp.setActivationPolicy(.regular)

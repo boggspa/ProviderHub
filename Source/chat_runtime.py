@@ -14,24 +14,29 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import socket
+import subprocess
 import sys
 import threading
 import uuid
 
 from bridge_core import gateway_token, load_settings, private_directory, state_root
 from chat_tools import ChatToolRunner, TOOL_DEFINITIONS
+from chat_attachments import prepare_attachments, bound_image_history
+from chat_history import portable_history
 from protocol import compact_conversation, estimated_tokens
 
 MAX_ROUNDS = 24
 MAX_TEXT = 100_000
 CHAT_ID = re.compile(r"[0-9a-f]{32}\Z")
+APPROVAL_MODES = {"manual", "accept_edits", "yolo"}
 SYSTEM = """You are an assistant in Provider Hub Chat, a small local coding harness.
 Use the offered tools to inspect and change the chosen workspace. Read relevant
 files and AGENTS.md instructions before editing. File and search tools are
 restricted to the workspace. Shell commands run with the user's normal OS
-permissions and require approval; the working directory is not a sandbox.
-Patch and shell actions need Allow once from the user. A denial is a real result:
+permissions; the working directory is not a sandbox. The host enforces the
+selected approval mode described below. A denial is a real result:
 do not bypass it through a different tool. Wait for actual tool results before
 claiming that something ran or changed. Keep replies clear and concise.
 The visible transcript is saved locally. Older model context may be trimmed
@@ -46,6 +51,40 @@ def now():
 def entry(kind, text="", route="", **extra):
     return {"id": uuid.uuid4().hex, "kind": kind, "text": text, "route": route,
             "isError": False, "changedFiles": [], **extra}
+
+
+def needs_approval(mode, name, arguments, workspace):
+    """One small permission decision, independent of anything the model says.
+
+Accept Edits only preauthorizes validated patches within the selected Git
+worktree. Shell always asks in that mode, including shell commands that appear
+to edit files: trying to infer a command's effects would be a policy engine.
+"""
+    if mode == "yolo":
+        return False
+    if mode != "accept_edits" or name != "apply_patch":
+        return True
+    folder = Path(workspace).resolve()
+    try:
+        result = subprocess.run(["git", "-C", str(folder), "rev-parse", "--show-toplevel"],
+                                capture_output=True, text=True, timeout=3)
+        if result.returncode:
+            return True
+        root = Path(result.stdout.strip()).resolve(strict=True)
+        folder.relative_to(root)
+        paths = []
+        for line in arguments["patch"].splitlines():
+            for prefix in ("*** Add File: ", "*** Update File: ", "*** Delete File: ", "*** Move to: "):
+                if line.startswith(prefix):
+                    target = (folder / line[len(prefix):]).resolve()
+                    relative = target.relative_to(root)
+                    target.relative_to(folder)
+                    if ".git" in relative.parts:
+                        return True
+                    paths.append(target)
+        return not paths
+    except (OSError, ValueError, KeyError, TypeError, subprocess.TimeoutExpired):
+        return True
 
 
 class ChatStore:
@@ -80,10 +119,11 @@ opaque thinking/signatures are kept intact and are never rendered as text.
 
     def save(self, chat):
         target = self.path(chat["id"])
-        metadata = {key: value for key, value in chat.items() if key not in {"entries", "messages"}}
+        metadata = {key: value for key, value in chat.items() if key not in {"entries", "messages", "archives"}}
         rows = [{"type": "metadata", "value": metadata}]
         rows += [{"type": "entry", "value": value} for value in chat["entries"]]
         rows += [{"type": "message", "value": value} for value in chat["messages"]]
+        rows += [{"type": "archive", "value": value} for value in chat.get("archives", [])]
         temp = self.root / ("." + uuid.uuid4().hex + ".tmp")
         try:
             fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
@@ -101,10 +141,13 @@ opaque thinking/signatures are kept intact and are never rendered as text.
         if not rows or rows[0].get("type") != "metadata":
             raise ValueError("This saved chat is incomplete.")
         chat = rows[0]["value"]
+        if chat.get("approvalMode") not in APPROVAL_MODES:
+            chat["approvalMode"] = "manual"
         if chat.get("id") != identifier:
             raise ValueError("The saved chat's identity does not match its filename.")
         chat["entries"] = [row["value"] for row in rows[1:] if row.get("type") == "entry"]
         chat["messages"] = [row["value"] for row in rows[1:] if row.get("type") == "message"]
+        chat["archives"] = [row["value"] for row in rows[1:] if row.get("type") == "archive"]
         return chat
 
     def all(self):
@@ -117,8 +160,27 @@ opaque thinking/signatures are kept intact and are never rendered as text.
                 continue
         return sorted(chats, key=lambda value: value["updated"], reverse=True)
 
+    def headers(self):
+        """The rail needs one small metadata line, not every saved image/trace."""
+        rows = []
+        for path in self.root.glob("*.jsonl"):
+            try:
+                with self.path(path.stem).open(encoding="utf-8") as stream:
+                    first = json.loads(stream.readline())
+                row = first["value"]
+                if first["type"] != "metadata" or row["id"] != path.stem:
+                    continue
+                row.setdefault("approvalMode", "manual")
+                rows.append(row)
+            except (ValueError, OSError, KeyError, TypeError):
+                continue
+        return sorted(rows, key=lambda row: row["updated"], reverse=True)
+
     def delete(self, identifier):
         self.path(identifier).unlink()
+        attachment_root = self.root / identifier
+        if attachment_root.is_dir() and not attachment_root.is_symlink():
+            shutil.rmtree(attachment_root)
 
 
 class GatewayClient:
@@ -279,8 +341,8 @@ class ChatService:
         return self._working
 
     def summaries(self):
-        keys = ("id", "title", "updated", "route", "account", "workspace", "effort")
-        return [{key: chat[key] for key in keys} for chat in self.store.all()]
+        keys = ("id", "title", "updated", "route", "account", "workspace", "effort", "approvalMode", "scope")
+        return [{key: chat[key] for key in keys} for chat in self.store.headers()]
 
     def publish(self):
         self.emit({"event": "chats", "chats": self.summaries()})
@@ -289,7 +351,7 @@ class ChatService:
 
     def refresh(self):
         self.models = self.transport.catalogue()
-        folders = list(dict.fromkeys(chat["workspace"] for chat in self.store.all()))[:5]
+        folders = list(dict.fromkeys(chat["workspace"] for chat in self.store.headers()))[:5]
         self.emit({"event": "catalogue", "models": self.models, "folders": folders})
 
     def initialize(self):
@@ -320,16 +382,19 @@ class ChatService:
             raise ValueError("This model/account is no longer in the gateway catalogue. Refresh models and choose a new chat.")
         return row
 
-    def create(self, identifier, workspace, effort=""):
+    def create(self, identifier, workspace, effort="", approval_mode="manual"):
         choice = self.choice(identifier)
         folder = Path(workspace).expanduser().resolve(strict=True)
         if not folder.is_dir():
             raise ValueError("Choose an existing workspace folder.")
         if effort and effort not in choice["efforts"]:
             raise ValueError("Choose one of this model's supported reasoning levels.")
+        if approval_mode not in APPROVAL_MODES:
+            raise ValueError("Choose Manual, Accept Edits, or YOLO.")
         self.chat = {"id": uuid.uuid4().hex, "title": "New chat", "updated": now(),
                      "route": choice["route"], "account": choice["account"], "scope": choice["scope"],
-                     "workspace": str(folder), "effort": effort, "entries": [], "messages": [], "status": "ready"}
+                     "workspace": str(folder), "effort": effort, "approvalMode": approval_mode,
+                     "entries": [], "messages": [], "status": "ready"}
         self.store.save(self.chat); self.publish()
 
     def add(self, item):
@@ -363,29 +428,49 @@ class ChatService:
             choice = self.choice(command.get("choice"))
             folder = command.get("workspace", self.chat["workspace"] if self.chat else str(Path.home()))
             effort = command.get("effort", self.chat["effort"] if self.chat and choice["route"] == self.chat["route"] else "")
+            mode = command.get("approvalMode", self.chat.get("approvalMode", "manual") if self.chat else "manual")
+            if mode not in APPROVAL_MODES:
+                raise ValueError("Choose Manual, Accept Edits, or YOLO.")
             if self.chat and not self.chat["messages"]:
                 old_id = self.chat["id"]
-                self.create(choice["id"], folder, effort); self.store.delete(old_id); self.publish()
-            elif self.chat and "effort" in command and "choice" not in command and "workspace" not in command:
+                self.create(choice["id"], folder, effort, mode); self.store.delete(old_id); self.publish()
+            elif self.chat and ("effort" in command or "approvalMode" in command) and "choice" not in command and "workspace" not in command:
                 if effort and effort not in choice["efforts"]:
                     raise ValueError("Choose a supported reasoning level.")
                 # CLI adapters already restart native reasoning when effort changes.
-                self.chat["effort"] = effort; self.save(); self.publish()
+                self.chat["effort"] = effort; self.chat["approvalMode"] = mode; self.save(); self.publish()
+            elif self.chat and "choice" in command and folder == self.chat["workspace"]:
+                if effort and effort not in choice["efforts"]:
+                    raise ValueError("Choose a supported reasoning level.")
+                # Archive the exact provider context, then begin a fresh native
+                # session using only portable transcript data. Never splice an
+                # earlier provider's encrypted/signed trace into a new route.
+                messages = portable_history(self.chat["entries"], vision=choice.get("vision") is not False)
+                archive = {key: copy.deepcopy(self.chat[key]) for key in ("route", "account", "scope", "effort", "messages")}
+                archive["ended"] = now()
+                self.chat.setdefault("archives", []).append(archive)
+                self.chat.update(route=choice["route"], account=choice["account"], scope=choice["scope"],
+                                 effort=effort, messages=messages, status="ready")
+                self.add(entry("notice", "Switched to " + choice["label"] + ". Conversation and tool results carried over; earlier provider reasoning kept in the saved log.", choice["route"]))
+                self.save(); self.publish()
             else:
                 self.create(choice["id"], folder, effort)
         elif action in {"send", "retry"}:
             if not self.chat or command.get("id") != self.chat["id"]:
                 raise ValueError("Select a chat before sending.")
-            self.choice()
+            choice = self.choice()
             text = command.get("text", "")
             if action == "send":
-                if not isinstance(text, str) or not text.strip() or len(text) > MAX_TEXT:
+                attachment_inputs = command.get("attachments", [])
+                if not isinstance(text, str) or (not text.strip() and not attachment_inputs) or len(text) > MAX_TEXT:
                     raise ValueError("Enter a message of at most 100,000 characters.")
-                self.chat["messages"].append({"role": "user", "content": [{"type": "text", "text": text}]})
-                accepted_entry = entry("user", text, self.chat["route"])
+                attached, blocks = prepare_attachments(attachment_inputs, self.store.root / self.chat["id"], vision=choice.get("vision") is not False)
+                prompt = text if text.strip() else "Please review the attached files."
+                self.chat["messages"].append({"role": "user", "content": [{"type": "text", "text": prompt}, *blocks]})
+                accepted_entry = entry("user", text, self.chat["route"], attachments=attached)
                 self.chat["entries"].append(accepted_entry)
                 if self.chat["title"] == "New chat":
-                    self.chat["title"] = " ".join(text.split())[:64]
+                    self.chat["title"] = " ".join(text.split())[:64] if text.strip() else attached[0]["name"]
             elif self.chat.get("status") not in {"error", "interrupted", "stopped"} or not self.chat["messages"]:
                 raise ValueError("There is no interrupted turn to retry.")
             self.chat["status"] = "working"; self.save()
@@ -415,6 +500,7 @@ class ChatService:
     @staticmethod
     def settle(chat, message):
         """Complete every unanswered tool cycle without replaying an action."""
+        chat["messages"] = [item for item in chat["messages"] if item.get("content")]
         pending = {}
         for item in chat["messages"]:
             for block in item.get("content", []):
@@ -427,12 +513,20 @@ class ChatService:
 
     def payload(self, choice):
         chat = self.chat
+        bounded, omitted = bound_image_history(chat["messages"])
+        if omitted:
+            chat["messages"] = bounded
+            self.add(entry("notice", "Older images removed from model context. Their thumbnails and original files are kept here.", chat["route"]))
+            self.save()
         tools = TOOL_DEFINITIONS if choice["supportsTools"] else []
         context = choice.get("context")
         output = min(choice.get("max_output") or 4096, 8192)
         if isinstance(context, int) and context > 0:
             output = min(output, max(1, context // 4))
-        payload = {"model": chat["route"], "messages": chat["messages"], "system": SYSTEM + "\nWorkspace: " + chat["workspace"],
+        permission = {"manual": "Manual: patches and shell commands need the user's Allow once.",
+                      "accept_edits": "Accept Edits: patches inside the selected Git repository are preauthorized; shell commands and other mutations need Allow once.",
+                      "yolo": "YOLO: the user preauthorized the available tools without approval prompts."}[chat.get("approvalMode", "manual")]
+        payload = {"model": chat["route"], "messages": chat["messages"], "system": SYSTEM + "\nWorkspace: " + chat["workspace"] + "\nApproval mode: " + permission,
                    "tools": tools, "max_tokens": output,
                    "_provider_hub_surface": "chat", "_provider_hub_account": chat["account"],
                    "_provider_hub_connection": chat["scope"]}
@@ -497,7 +591,8 @@ class ChatService:
                     name, arguments = call.get("name"), call.get("input")
                     try:
                         description = runner.describe(name, arguments)
-                        allowed = not description["requires_approval"] or self.approved(description["summary"], arguments.get("patch"))
+                        must_ask = description["requires_approval"] and needs_approval(chat.get("approvalMode", "manual"), name, arguments, chat["workspace"])
+                        allowed = not must_ask or self.approved(description["summary"], arguments.get("patch"))
                         if self.cancel.is_set(): raise InterruptedError("Stopped")
                         if allowed:
                             self.emit({"event": "state", "busy": True, "status": description["summary"]})
@@ -559,7 +654,7 @@ def main():
         service.initialize()
         for line in sys.stdin:
             try:
-                if len(line) > 1_000_000: raise ValueError("Chat command is too large.")
+                if len(line) > 2_000_000: raise ValueError("Chat command is too large.")
                 command = json.loads(line)
                 if not isinstance(command, dict): raise ValueError("Chat command must be an object.")
                 service.handle(command)

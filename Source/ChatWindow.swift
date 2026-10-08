@@ -9,7 +9,7 @@ import UniformTypeIdentifiers
 //
 // Colour comes from the Python branding records through ChatRoute.presentation
 // and ChatModel.accent(for:); nothing here keeps a provider colour table. A
-// known provider tints the assistant edge, the model dot and the status
+// known provider tints the model dot and the status
 // spinner; an unknown provider keeps the neutral fallback those APIs return.
 
 private typealias Semantic = HubTheme.Semantic
@@ -17,6 +17,7 @@ private typealias Semantic = HubTheme.Semantic
 struct ChatWindow: View {
     @ObservedObject var model: ChatModel
     @AppStorage("chatRailVisible") private var railPreferred = true
+    @AppStorage(HubTheme.WindowStyle.defaultsKey) private var windowStyle = HubTheme.WindowStyle.Mode.glass
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var dropTargeted = false
 
@@ -37,7 +38,10 @@ struct ChatWindow: View {
             .animation(reduceMotion ? nil : .easeInOut(duration: 0.18), value: railPreferred)
         }
         .frame(minWidth: 720, minHeight: 500)
-        .background(VibrancyBackground().ignoresSafeArea())
+        .background {
+            if windowStyle == .glass { VibrancyBackground().ignoresSafeArea() }
+            else { Color(nsColor: .windowBackgroundColor).ignoresSafeArea() }
+        }
         .dropDestination(for: URL.self, action: { urls, _ in acceptFolder(urls) }, isTargeted: { dropTargeted = $0 })
         .overlay { if dropTargeted { dropHint } }
     }
@@ -47,7 +51,7 @@ struct ChatWindow: View {
             .stroke(model.activeAccent.opacity(0.7), style: StrokeStyle(lineWidth: 2, dash: [6, 4]))
             .padding(10)
             .overlay {
-                Text("Drop a folder to use it as the working folder")
+                Text("Drop files to attach, or a folder to change workspace")
                     .font(HubTheme.Typography.rowTitle).foregroundStyle(Semantic.ink)
                     .padding(.horizontal, 12).padding(.vertical, 8)
                     .background(RoundedRectangle(cornerRadius: HubTheme.Radius.row).fill(Semantic.raisedSurface))
@@ -59,11 +63,10 @@ struct ChatWindow: View {
         guard !model.busy, model.selectedID != nil else { return false }
         var isDirectory: ObjCBool = false
         for url in urls where FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory) {
-            let folder = isDirectory.boolValue ? url.path : url.deletingLastPathComponent().path
-            model.setFolder(folder)
-            return true
+            if isDirectory.boolValue { model.setFolder(url.path); return true }
         }
-        return false
+        model.addAttachments(urls)
+        return !urls.isEmpty
     }
 }
 
@@ -75,19 +78,6 @@ fileprivate extension ChatModel {
     func isKnownRoute(_ route: String) -> Bool { self.route(named: route)?.presentation != nil }
     func label(for route: String) -> String { self.route(named: route)?.label ?? route }
     func providerTitle(_ route: ChatRoute) -> String { route.presentation?.displayProvider ?? route.provider }
-    /// Routes grouped by provider in first-seen order, for the model menu.
-    var providerGroups: [(provider: String, title: String, routes: [ChatRoute])] {
-        var order: [String] = []
-        var groups: [String: [ChatRoute]] = [:]
-        for route in models {
-            if groups[route.provider] == nil { order.append(route.provider) }
-            groups[route.provider, default: []].append(route)
-        }
-        return order.map { provider in
-            let routes = groups[provider] ?? []
-            return (provider, routes.first.map(providerTitle) ?? provider, routes)
-        }
-    }
     func hasSeveralAccounts(_ provider: String) -> Bool {
         Set(models.filter { $0.provider == provider }.map(\.account)).count > 1
     }
@@ -124,11 +114,12 @@ private func reveal(_ path: String, in workspace: String?) {
     NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: full)])
 }
 
-private struct ModelDot: View {
-    var color: Color
-    var size: CGFloat = 7
-    var body: some View {
-        Circle().fill(color).overlay(Circle().stroke(Semantic.hairline, lineWidth: 0.5)).frame(width: size, height: size)
+private struct ChatProviderIcon: View {
+    var presentation: ProviderPresentation?
+    var size: CGFloat = 14
+    @ViewBuilder var body: some View {
+        if let presentation { ProviderMark(presentation: presentation, size: size) }
+        else { Image(systemName: "sparkle").font(.system(size: size - 2)).foregroundStyle(.secondary).frame(width: size, height: size) }
     }
 }
 
@@ -176,7 +167,7 @@ private struct ChatRail: View {
             model.select(chat.id)
         } label: {
             HStack(alignment: .top, spacing: 8) {
-                ModelDot(color: route?.accent ?? .secondary, size: 6).padding(.top, 5)
+                ChatProviderIcon(presentation: route?.presentation, size: 13).padding(.top, 2)
                 VStack(alignment: .leading, spacing: 2) {
                     if renaming == chat.id { renameField(chat) }
                     else { Text(chat.title).font(.system(size: 12.5)).foregroundStyle(Semantic.ink).lineLimit(1) }
@@ -244,6 +235,7 @@ private struct ChatHeader: View {
     var railVisible: Bool
     var railAvailable: Bool
     var toggleRail: () -> Void
+    @State private var showingModels = false
 
     var body: some View {
         HStack(spacing: HubTheme.Spacing.sm) {
@@ -251,7 +243,6 @@ private struct ChatHeader: View {
             newChatButton
             if model.selectedID != nil {
                 modelMenu
-                effortMenu
                 folderMenu
             }
             Spacer(minLength: HubTheme.Spacing.sm)
@@ -283,57 +274,29 @@ private struct ChatHeader: View {
     }
 
     private var modelMenu: some View {
-        Menu {
-            ForEach(model.providerGroups, id: \.provider) { group in
-                Section(group.title) {
-                    ForEach(group.routes) { route in
-                        Button { model.setRoute(route.id) } label: {
-                            if route.id == model.selectedRoute?.id { Label(routeTitle(route), systemImage: "checkmark") }
-                            else { Text(routeTitle(route)) }
-                        }
-                    }
-                }
-            }
-            if model.models.isEmpty { Text("No models yet. Configure a provider in Provider Hub and refresh.") }
+        Button {
+            showingModels = true; model.refresh()
         } label: {
             HStack(spacing: 6) {
-                ModelDot(color: model.activeAccent)
+                ChatProviderIcon(presentation: model.selectedRoute?.presentation)
                 Text(model.selectedRoute?.label ?? "Choose model").font(HubTheme.Typography.rowTitle).foregroundStyle(Semantic.ink)
                 if let route = model.selectedRoute, model.hasSeveralAccounts(route.provider), !route.accountLabel.isEmpty {
                     Text(route.accountLabel).font(HubTheme.Typography.detail).foregroundStyle(Semantic.secondaryInk)
                 }
+                if let effort = model.selected?.effort, !effort.isEmpty {
+                    Text("· " + effortTitle(effort)).font(HubTheme.Typography.detail).foregroundStyle(Semantic.secondaryInk)
+                }
+                Image(systemName: "chevron.down").font(.system(size: 9)).foregroundStyle(Semantic.secondaryInk)
             }
             .lineLimit(1)
         }
-        .menuStyle(.button).buttonStyle(.borderless).fixedSize()
+        .buttonStyle(.plain).fixedSize()
+        .popover(isPresented: $showingModels, arrowEdge: .bottom) {
+            ChatModelPicker(model: model) { showingModels = false }
+        }
         .disabled(model.busy)
         .accessibilityLabel("Model")
         .help(model.selectedRoute.map { "\(model.providerTitle($0)) · \($0.accountLabel)" } ?? "Choose a model")
-    }
-
-    private func routeTitle(_ route: ChatRoute) -> String {
-        guard model.hasSeveralAccounts(route.provider), !route.accountLabel.isEmpty else { return route.label }
-        return route.label + " — " + route.accountLabel
-    }
-
-    @ViewBuilder private var effortMenu: some View {
-        if let route = model.selectedRoute, !route.efforts.isEmpty {
-            let current = model.selected?.effort ?? ""
-            Menu {
-                ForEach(route.efforts, id: \.self) { effort in
-                    Button { model.setEffort(effort) } label: {
-                        if effort == current { Label(effortTitle(effort), systemImage: "checkmark") }
-                        else { Text(effortTitle(effort)) }
-                    }
-                }
-            } label: {
-                Label(effortTitle(current), systemImage: "dial.medium")
-                    .font(HubTheme.Typography.detail).foregroundStyle(Semantic.secondaryInk).lineLimit(1)
-            }
-            .menuStyle(.button).buttonStyle(.borderless).fixedSize()
-            .disabled(model.busy)
-            .accessibilityLabel("Reasoning effort").help("Reasoning effort")
-        }
     }
 
     private var folderMenu: some View {
@@ -391,7 +354,7 @@ private struct ChatWelcome: View {
                 .multilineTextAlignment(.center).frame(maxWidth: 420)
             if let route = model.models.first {
                 HStack(spacing: 14) {
-                    HStack(spacing: 6) { ModelDot(color: route.accent); Text(route.label) }
+                    HStack(spacing: 6) { ChatProviderIcon(presentation: route.presentation); Text(route.label) }
                     Label(folderName(model.recentFolders.first ?? NSHomeDirectory()), systemImage: "folder")
                 }
                 .font(HubTheme.Typography.detail).foregroundStyle(Semantic.secondaryInk).lineLimit(1)
@@ -491,7 +454,7 @@ private struct ChatTranscript: View {
             UserRow(entry: entry)
         case "assistant":
             AssistantRow(entry: entry, label: model.label(for: entry.route), accent: model.accent(for: entry.route),
-                         known: model.isKnownRoute(entry.route), streaming: model.busy && last)
+                         presentation: model.route(named: entry.route)?.presentation, streaming: model.busy && last)
         case "tool":
             ToolRow(entry: entry, expanded: expandedBinding(entry.id), workspace: model.selected?.workspace)
         case "error":
@@ -511,12 +474,12 @@ private struct UserRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             Text("You").font(.system(size: 10.5, weight: .semibold)).foregroundStyle(Semantic.secondaryInk)
-            Text(entry.text).font(HubTheme.Typography.body).foregroundStyle(Semantic.ink).textSelection(.enabled)
+            if let attachments = entry.attachments, !attachments.isEmpty { ChatAttachmentStrip(attachments: attachments) }
+            if !entry.text.isEmpty { Text(entry.text).font(HubTheme.Typography.body).foregroundStyle(Semantic.ink).textSelection(.enabled) }
         }
-        .padding(.horizontal, 12).padding(.vertical, 9)
+        .padding(.vertical, 5)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: HubTheme.Radius.providerTile).fill(Semantic.raisedSurface))
-        .accessibilityElement(children: .combine)
+        .accessibilityElement(children: .contain)
     }
 }
 
@@ -524,26 +487,21 @@ private struct AssistantRow: View {
     var entry: ChatEntry
     var label: String
     var accent: Color
-    var known: Bool
+    var presentation: ProviderPresentation?
     var streaming: Bool
 
     var body: some View {
-        HStack(alignment: .top, spacing: 10) {
-            RoundedRectangle(cornerRadius: 1.5)
-                .fill(entry.isError ? Color(nsColor: .systemRed).opacity(0.7) : (known ? accent.opacity(0.75) : Semantic.hairline))
-                .frame(width: 3).padding(.vertical, 2)
-            VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 6) {
-                    ModelDot(color: known ? accent : .secondary, size: 6)
+                    ChatProviderIcon(presentation: presentation, size: 13)
                     Text(label).font(.system(size: 10.5, weight: .semibold)).foregroundStyle(Semantic.secondaryInk).lineLimit(1)
-                    if streaming { ProgressView().controlSize(.mini).tint(known ? accent : Semantic.secondaryInk) }
+                    if streaming { ProgressView().controlSize(.mini).tint(accent) }
                 }
                 if entry.text.isEmpty, streaming {
                     Text("Thinking…").font(HubTheme.Typography.body).foregroundStyle(Semantic.secondaryInk)
                 } else {
                     Text(rendered).font(HubTheme.Typography.body).foregroundStyle(Semantic.ink).textSelection(.enabled)
                 }
-            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .accessibilityElement(children: .combine)
@@ -568,9 +526,7 @@ private struct ToolRow: View {
             header
             if expanded { body_ }
         }
-        .padding(.horizontal, 10).padding(.vertical, 6)
-        .background(RoundedRectangle(cornerRadius: HubTheme.Radius.row).fill(Semantic.raisedSurface))
-        .overlay(RoundedRectangle(cornerRadius: HubTheme.Radius.row).stroke(entry.isError ? Color(nsColor: .systemRed).opacity(0.35) : Semantic.hairline, lineWidth: 1))
+        .padding(.vertical, 4)
     }
 
     private var header: some View {
@@ -580,6 +536,7 @@ private struct ToolRow: View {
             HStack(spacing: 8) {
                 Image(systemName: "chevron.right").font(.system(size: 9, weight: .semibold)).foregroundStyle(Semantic.secondaryInk)
                     .rotationEffect(.degrees(expanded ? 90 : 0)).frame(width: 10)
+                ChatToolGlyph(name: entry.tool ?? "read_file").foregroundStyle(Semantic.secondaryInk)
                 Text(entry.tool ?? "tool").font(.system(size: 11.5, weight: .medium, design: .monospaced)).foregroundStyle(Semantic.ink)
                 Text(entry.summary ?? entry.text).font(HubTheme.Typography.detail).foregroundStyle(Semantic.secondaryInk)
                     .lineLimit(1).truncationMode(.middle)
@@ -679,9 +636,7 @@ private struct ErrorRow: View {
                     .help("Resume from the last recorded result")
             }
         }
-        .padding(.horizontal, 10).padding(.vertical, 8)
-        .background(RoundedRectangle(cornerRadius: HubTheme.Radius.row).fill(Color(nsColor: .systemRed).opacity(0.08)))
-        .overlay(RoundedRectangle(cornerRadius: HubTheme.Radius.row).stroke(Color(nsColor: .systemRed).opacity(0.3), lineWidth: 1))
+        .padding(.vertical, 6)
         .accessibilityElement(children: .contain)
     }
 }
@@ -724,10 +679,7 @@ private struct ApprovalStrip: View {
                     .keyboardShortcut("y", modifiers: .command).help("Allow this once (⌘Y)")
             }
         }
-        .padding(HubTheme.Spacing.md)
-        .background(RoundedRectangle(cornerRadius: HubTheme.Radius.providerTile).fill(Semantic.raisedSurface))
-        .overlay(RoundedRectangle(cornerRadius: HubTheme.Radius.providerTile).stroke(model.activeAccent.opacity(0.45), lineWidth: 1))
-        .padding(.horizontal, 16).padding(.top, 6)
+        .padding(.horizontal, 20).padding(.top, 12).padding(.bottom, 6)
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Approval needed: \(approval.summary)")
     }
@@ -751,7 +703,15 @@ private struct ChatComposer: View {
 
     var body: some View {
         VStack(spacing: 5) {
+            if !model.attachments.isEmpty {
+                ChatAttachmentStrip(attachments: model.attachments, remove: model.removeAttachment)
+            }
             HStack(alignment: .bottom, spacing: 8) {
+                Button { model.chooseAttachments() } label: {
+                    Image(systemName: "plus").font(.system(size: 15, weight: .medium)).foregroundStyle(Semantic.secondaryInk)
+                        .frame(width: 23, height: 24).contentShape(Rectangle())
+                }.buttonStyle(.plain).disabled(!editable).help("Attach files or images")
+                    .accessibilityLabel("Attach files or images")
                 ComposerTextView(text: $model.draft, height: $height, placeholder: placeholder, enabled: editable) { model.send() }
                     .frame(height: height)
                     .accessibilityLabel("Message")
@@ -794,6 +754,7 @@ private struct ChatComposer: View {
 
     private var footer: some View {
         HStack(alignment: .top) {
+            approvalModeMenu
             if model.notice.isEmpty {
                 Text(model.status).font(HubTheme.Typography.detail).foregroundStyle(Semantic.secondaryInk)
             } else {
@@ -804,6 +765,25 @@ private struct ChatComposer: View {
                 .accessibilityHidden(true)
         }
         .lineLimit(2).padding(.horizontal, 6).frame(minHeight: 16)
+    }
+
+    private var approvalModeMenu: some View {
+        let modes = [("manual", "Manual"), ("accept_edits", "Accept Edits"), ("yolo", "YOLO")]
+        let title = modes.first { $0.0 == model.approvalMode }?.1 ?? "Manual"
+        return Menu {
+            ForEach(modes, id: \.0) { mode in
+                Button { model.setApprovalMode(mode.0) } label: {
+                    if model.approvalMode == mode.0 { Label(mode.1, systemImage: "checkmark") }
+                    else { Text(mode.1) }
+                }
+            }
+        } label: {
+            Text(title).font(HubTheme.Typography.detail).foregroundStyle(Semantic.secondaryInk)
+        }
+        .menuStyle(.borderlessButton).fixedSize()
+        .disabled(model.busy || model.selectedID == nil)
+        .accessibilityLabel("Approval mode: " + title)
+        .help("Manual asks for edits and commands. Accept Edits allows repository patches and asks for commands. YOLO runs tools without prompts.")
     }
 }
 

@@ -12,7 +12,7 @@ import threading
 import time
 import unittest
 
-from chat_runtime import ChatService, ChatStore, GatewayClient, entry
+from chat_runtime import ChatService, ChatStore, GatewayClient, entry, needs_approval
 from chat_tools import ChatToolRunner
 
 
@@ -131,14 +131,14 @@ class ChatRuntimeTests(unittest.TestCase):
         self.assertTrue(any(item["text"] == "Partial output" for item in stored["entries"]))
         self.assertEqual(len(stored["messages"]), 1)
 
-    def test_model_account_and_workspace_changes_start_fresh_context(self):
+    def test_model_switch_keeps_thread_and_archives_context_workspace_starts_new_chat(self):
         service, transport = self.service([response()]); self.send(service); self.finish(service)
         previous = service.chat["id"]
         service.handle({"command": "configure", "choice": transport.rows[1]["id"]})
-        self.assertNotEqual(service.chat["id"], previous)
-        self.assertEqual(service.chat["messages"], [])
+        self.assertEqual(service.chat["id"], previous)
+        self.assertTrue(service.chat["messages"])
         self.assertEqual(service.chat["account"], "work")
-        self.assertEqual(len(self.store.load(previous)["messages"]), 2)
+        self.assertEqual(len(self.store.load(previous)["archives"][0]["messages"]), 2)
         service.handle({"command": "select", "id": previous})
         folder = self.root / "other"; folder.mkdir()
         service.handle({"command": "configure", "workspace": str(folder)})
@@ -208,6 +208,63 @@ class ChatRuntimeTests(unittest.TestCase):
         self.assertLess(len(payload["messages"]), before)
         self.assertEqual(service.chat["entries"][0]["text"], "original transcript")
         self.assertTrue(any("context trimmed" in item["text"] for item in service.chat["entries"]))
+
+    def test_accept_edits_applies_repository_patch_without_approval(self):
+        subprocess.run(["git", "init", "--quiet", str(self.root)], check=True)
+        patch = "*** Begin Patch\n*** Add File: accepted.txt\n+allowed\n*** End Patch"
+        service, transport = self.service([response("", patch), response("Done")])
+        service.handle({"command": "configure", "approvalMode": "accept_edits"})
+        self.send(service); self.finish(service)
+        self.assertEqual((self.root / "accepted.txt").read_text(), "allowed\n")
+        self.assertFalse(any(event["event"] == "approval" for event in self.events))
+        self.assertEqual(self.store.load(service.chat["id"])["approvalMode"], "accept_edits")
+        self.assertIn("Accept Edits", transport.requests[0]["system"])
+
+    def test_accept_edits_still_asks_for_shell_nonrepo_and_git_metadata(self):
+        patch = {"patch": "*** Begin Patch\n*** Add File: accepted.txt\n+allowed\n*** End Patch"}
+        self.assertTrue(needs_approval("accept_edits", "apply_patch", patch, self.root))
+        subprocess.run(["git", "init", "--quiet", str(self.root)], check=True)
+        self.assertFalse(needs_approval("accept_edits", "apply_patch", patch, self.root))
+        self.assertTrue(needs_approval("accept_edits", "run_shell", {"command": "printf hi > a"}, self.root))
+        for path in ("../outside", ".git/config"):
+            change = {"patch": f"*** Begin Patch\n*** Update File: {path}\n@@\n-old\n+new\n*** End Patch"}
+            self.assertTrue(needs_approval("accept_edits", "apply_patch", change, self.root))
+        service, _ = self.service([{"content": [{"type": "tool_use", "id": "shell", "name": "run_shell", "input": {"command": "echo hi"}}], "stop_reason": "tool_use"}, response()])
+        service.handle({"command": "configure", "approvalMode": "accept_edits"})
+        self.send(service); approval = self.approval(service)
+        service.handle({"command": "configure", "approvalMode": "yolo"})
+        self.assertEqual(service.chat["approvalMode"], "accept_edits")
+        service.handle({"command": "approve", "id": approval, "allow": False}); self.finish(service)
+
+    def test_yolo_runs_tools_without_prompt_and_modes_cannot_change_during_turn(self):
+        first = {"content": [{"type": "tool_use", "id": "shell", "name": "run_shell", "input": {"command": "printf yolo > mode.txt"}}], "stop_reason": "tool_use"}
+        service, _ = self.service([first, response()])
+        service.handle({"command": "configure", "approvalMode": "yolo"})
+        self.send(service); self.finish(service)
+        self.assertEqual((self.root / "mode.txt").read_text(), "yolo")
+        self.assertFalse(any(event["event"] == "approval" for event in self.events))
+        self.assertEqual(service.chat["approvalMode"], "yolo")
+        before = service.chat["id"]
+        service.handle({"command": "configure", "approvalMode": "manual"})
+        self.assertEqual(service.chat["id"], before)
+        with self.assertRaises(ValueError): service.handle({"command": "configure", "approvalMode": "invented"})
+        self.assertTrue(needs_approval("unknown", "run_shell", {}, self.root))
+        self.assertFalse(needs_approval("yolo", "run_shell", {}, self.root))
+
+    def test_old_chats_default_to_manual_and_sent_text_is_saved_before_ack(self):
+        service, _ = self.service([response()])
+        service.chat.pop("approvalMode"); service.save()
+        self.assertEqual(self.store.load(service.chat["id"])["approvalMode"], "manual")
+        self.assertTrue(needs_approval("manual", "apply_patch", {}, self.root))
+        service.chat["approvalMode"] = "manual"
+        accepted = []
+        def observe(event):
+            if event["event"] == "entry" and event["entry"]["kind"] == "user":
+                saved = self.store.load(service.chat["id"])
+                accepted.append(saved["messages"][-1]["content"][0]["text"])
+        service.emit = observe
+        self.send(service, "durable before acknowledgement"); self.finish(service)
+        self.assertEqual(accepted, ["durable before acknowledgement"])
 
 
 class MessagesStreamTests(unittest.TestCase):

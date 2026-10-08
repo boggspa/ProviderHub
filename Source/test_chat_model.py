@@ -13,7 +13,7 @@ class ChatModelStateTests(unittest.TestCase):
         stubs = r'''
 import AppKit
 import SwiftUI
-struct ProviderPresentation: Decodable { var accent: String; var color: Color { .blue } }
+struct ProviderPresentation: Decodable { var accent: String; var runtimeProvider: String; var displayProvider: String; var color: Color { .blue } }
 @MainActor final class BridgeModel {
     var python: String? = nil
     var helper = URL(fileURLWithPath: "/unused/gateway.py")
@@ -41,6 +41,9 @@ import SwiftUI
         try send(["event":"chats", "chats":[summary("A"),summary("B")]])
         try send(["event":"ready"])
         try send(["event":"selected", "id":"A", "entries":[]])
+        check(model.approvalMode == "manual", "old summaries must default to Manual")
+        model.setApprovalMode("accept_edits")
+        check(commands.last?["approvalMode"] as? String == "accept_edits", "permission selection not sent to worker")
         model.draft = "A's unsent draft"
         model.select("B")
         check(model.selectedID == "A" && model.draft == "A's unsent draft", "selection must wait for worker acknowledgement")
@@ -74,6 +77,24 @@ import SwiftUI
         check(model.entries.last?.text == "hello ☀︎", "fragmented worker output lost text")
         try send(["event":"delta", "chat":"A", "id":"reply-1", "text":"wrong chat"])
         check(model.entries.last?.text == "hello ☀︎", "cross-chat delta contaminated visible transcript")
+        let attachmentURL = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".txt")
+        try Data("attachment text".utf8).write(to: attachmentURL)
+        defer { try? FileManager.default.removeItem(at: attachmentURL) }
+        model.addAttachments([attachmentURL])
+        check(model.attachments.count == 1 && model.canSend, "attachment-only message not sendable")
+        model.send()
+        check(model.attachments.isEmpty && (commands.last?["attachments"] as? [[String:Any]])?.count == 1, "attachments not sent")
+        let commandCount = commands.count
+        model.draft = "do not queue this"; model.send()
+        check(commands.count == commandCount, "busy chat queued a message")
+        try send(["event":"error", "message":"rejected attachment"])
+        check(model.attachments.count == 1, "rejected attachment lost")
+        model.select("A"); try send(["event":"selected", "id":"A", "entries":[]])
+        check(model.attachments.isEmpty, "attachment leaked into other chat")
+        model.select("B"); try send(["event":"selected", "id":"B", "entries":[]])
+        check(model.attachments.count == 1, "attachment draft lost across chat selection")
+        model.removeAttachment(model.attachments[0].id)
+        check(model.attachments.isEmpty, "attachment removal failed")
         print("ChatModel state transitions passed")
     }
 }
@@ -86,7 +107,7 @@ import SwiftUI
             compiled = subprocess.run(["xcrun", "swiftc", "-swift-version", "5", "-parse-as-library",
                 "-module-cache-path", str(root / "cache"), str(root / "Stubs.swift"),
                 str(Path(__file__).with_name("ChatModel.swift")), str(root / "Cases.swift"),
-                "-framework", "AppKit", "-framework", "SwiftUI", "-o", str(binary)], capture_output=True, text=True, timeout=90)
+                "-framework", "AppKit", "-framework", "SwiftUI", "-framework", "PDFKit", "-o", str(binary)], capture_output=True, text=True, timeout=90)
             self.assertEqual(compiled.returncode, 0, compiled.stderr)
             ran = subprocess.run([str(binary)], capture_output=True, text=True, timeout=15)
             self.assertEqual(ran.returncode, 0, ran.stderr)
