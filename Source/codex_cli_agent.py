@@ -1176,7 +1176,14 @@ def _thread_params(payload, workspace):
         # Thread scope only: the argv keeps search off for every other thread.
         params.setdefault("config", {}).update(payload["web_search"])
     if payload.get("native_image_generation"):
-        params.setdefault("config", {}).setdefault("features", {})["image_generation"] = True
+        # thread/start replaces the features table; it does not merge it with
+        # individual -c features.* overrides. Sending only image_generation
+        # silently re-enabled the native shell (and other defaults), which
+        # then hit our native-tool guard and terminated Desktop runs. Carry
+        # every transport feature restriction into the replacement table.
+        features = {name: value for setting in _TRANSPORT_CONFIG
+                    for name, value in tomllib.loads(setting).get("features", {}).items()}
+        params.setdefault("config", {})["features"] = {**features, "image_generation": True}
     return params
 
 
