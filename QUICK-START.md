@@ -1,4 +1,4 @@
-# Provider Hub 0.5.6 (build 62)
+# Provider Hub 0.5.6 (build 63)
 
 Use your model accounts inside Claude Desktop, the Codex coding workspace, or Provider Hub's lightweight **Chat with Model…** window. See [Chat in Provider Hub](docs/chat.md) for its tools, attachments, approvals and model switching.
 
@@ -9,6 +9,12 @@ Use your model accounts inside Claude Desktop, the Codex coding workspace, or Pr
 3. Open **Models & Settings…** from its menu bar icon whenever you need it.
 
 Requires an Apple Silicon Mac (M1 or newer) with macOS 14 or newer. This distribution is Developer ID signed and Apple-notarized, and includes its own Python runtime. You do not need to install Python or run terminal commands. Install the desktop app you want to use separately.
+
+From build 63, **Update** appears beside the Provider Hub masthead when a newer
+release is available. Click it to download and verify the update. If Codex,
+Claude, or Chat work is active, it becomes **Restart** and waits for you to
+finish your work and click again. Older builds need this one manual install.
+See [Updating Provider Hub](docs/updater.md) for details.
 
 ## Connect a provider
 
@@ -213,7 +219,7 @@ provider-specific reasoning history.
 
 ## What has been checked
 
-Build 62's source passes 1,898 pytest tests and 1,284 subtests with CPython 3.13 and Node available. In earlier live checks, the
+Build 63's source passes 1,919 pytest tests and 1,328 subtests with CPython 3.13 and Node available. In earlier live checks, the
 installed Codex engine completed read/edit/read cycles using Ollama's
 DeepSeek V4 Flash cloud route and Cerebras GPT OSS 120B. Their reported context
 limits were preserved. Other provider translations have deterministic protocol

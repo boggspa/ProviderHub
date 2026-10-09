@@ -1,6 +1,6 @@
 # Provider Hub
 
-**Version 0.5.6 (build 62).** Licensed Apache-2.0 — see [LICENSE](LICENSE),
+**Version 0.5.6 (build 63).** Licensed Apache-2.0 — see [LICENSE](LICENSE),
 with attributions in [NOTICE](NOTICE).
 
 A native macOS menu bar app that connects Claude Desktop and the Codex coding workspace to eleven model API connections: Mistral, Kimi Code, MiMo Token Plan, Ollama, DeepSeek, Cerebras, Muse, Grok, Qwen Token Plan, OpenRouter, and the Gemini API. Claude uses the local Messages endpoint. Codex uses Responses: Grok, Ollama, and OpenRouter retain native Responses transports, while the other eight use the local Messages bridge and their provider adapters.
@@ -51,6 +51,10 @@ Provider implementation is split between [registry and connections](Source/provi
 9. While one desktop harness is live, you can still change the *other* harness's model selection (e.g., edit the Codex catalogue while Claude is running). Save writes the change without stopping the gateway; launching the second app briefly restarts the gateway so both share the new snapshot, and the running app reconnects automatically. Changing shared provider settings (keys, regions, port, branding) while either app is live still requires quitting both desktop apps first.
 
 Build from the repository root with `bash Source/build.sh` to create `Provider Hub.app` beside the checkout. `Source/build.sh` is the source of truth for both the version and the build stamp. Building from source applies an ad-hoc development signature, which is enough to run locally; distribution builds are signed with an Apple Developer ID and notarized on the maintainer's machine, and those credentials are never committed. See [`CONTRIBUTING.md`](CONTRIBUTING.md) for setup and tests, and [`SECURITY.md`](SECURITY.md) for the signing and threat model. A shorter end-user guide is in `QUICK-START.md`.
+
+Build 63 adds an **Update** pill to the compact Hub and lean Chat mastheads.
+It verifies a newer notarized GitHub release and defers restart while desktop
+apps or Chat work are active. See [Updating Provider Hub](docs/updater.md).
 
 **Provider connections**
 
