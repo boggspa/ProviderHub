@@ -24,16 +24,23 @@ The sidebar groups chats under their workspace folders. Collapse a group or use
 its **+** to start a chat there. Folders remain in the picker and sidebar after
 restart or after deleting their last chat. Path aliases share one group;
 different folders with the same name show their paths. Disconnected folders
-stay in the list and their saved chats can still be read.
+stay in the list and their saved chats can still be read. The selected row
+carries a thin bar in its model's provider accent, and shows a small spinner in
+that accent while its turn runs.
 
 Return sends a message; Shift-Return inserts a newline. Stop cancels the current
 request and local command execution, keeping partial output and recorded
 actions. Closing the window leaves active work running; reopen it from the menu
 bar. Quit the Hub after work has stopped.
 
-Use **+** or drop files onto Chat to attach them. Images have small thumbnails
-in the composer and transcript; click one to view it. Other files use compact
-chips. Text/code files and PDFs with extractable text are sent as text, and PNG,
+Use **+**, drop files onto Chat, or paste them into the composer to attach
+them. Draft attachments sit inside the composer above the text. Images have
+small thumbnails in the composer and transcript; click one to view it. Other
+files use compact chips with a type glyph, name and size. Pasting a copied
+image with no file behind it, such as a screenshot, writes a temporary PNG and
+attaches that; pasted text still pastes as text. Files can be dropped during a
+turn to ride along with an update, while a dropped folder waits for the turn to
+end. Text/code files and PDFs with extractable text are sent as text, and PNG,
 JPEG, GIF and WebP images use the gateway's existing image support. Up to eight
 files can be attached, at 8 MiB per file and 20 MiB per message. Originals are
 copied into private Chat storage so saved thumbnails do not depend on the
@@ -50,7 +57,10 @@ automatically executing it.
 
 **Turn time** beneath the composer counts the active turn, including tool and
 approval waits. Steering and provider-request restarts keep the same clock;
-completion, failure or an acknowledged Stop resets it to `00:00`.
+completion, failure or an acknowledged Stop resets it to `00:00`. While a turn
+runs, the status word beside the approval mode and the **Thinking…** label in
+the transcript sweep the model's provider accent; with Reduce Motion on they
+take the accent without movement.
 
 The header's unboxed Git indicator shows changed files, tracked added/deleted
 lines, and gold/blue ahead/behind counts against the cached upstream. It never
@@ -100,6 +110,8 @@ fonts installed through Font Book. Only the chosen font name is saved; custom
 font files are never copied. An unavailable custom font falls back to System.
 Theme and surface reuse the Hub's existing preferences. Text choices affect
 the transcript and composer; code and diffs keep their monospace treatment.
+The send and stop buttons stay monochrome and invert with the theme: a light
+disc on a dark window, a dark disc on a light one.
 
 ### Tables in replies
 
@@ -147,8 +159,17 @@ below the composer selects one of three modes, saved per chat:
 
 New chats default to Manual. Modes can be changed between turns. Expand a
 proposed patch to review it before allowing.
-Tool rows in the transcript expand to show output and textual diffs. Recorded
-changed files can be revealed in Finder.
+The mode menu shows its state in colour: Manual is blue, Accept Edits neutral,
+and YOLO red, which also tints the composer outline faintly. Choosing YOLO in a
+folder for the first time asks once to confirm; that answer is remembered per
+folder on this Mac and never sent to the worker.
+Tool rows in the transcript expand to show output and textual diffs. A patch
+row shows its added and removed line counts in the Git indicator's colours.
+Three or more consecutive local tool rows fold into one **Worked · N steps**
+disclosure with the combined file and line counts; the run at the end of a
+live turn stays open as **Working** and folds once the reply begins, and a
+fold opened or closed by hand keeps that choice. Delegate rows keep their own
+lanes and are never folded. Recorded changed files can be revealed in Finder.
 
 Shell commands use the user's normal macOS permissions, with the workspace as
 their working directory. They are not sandboxed. Output is bounded and commands
@@ -172,7 +193,10 @@ For models with a known context limit, older complete conversation units are
 trimmed before the limit is reached. A notice records this in the transcript;
 the full visible history remains saved. Unknown limits stay unknown. The token
 indicator reports the latest request's input usage, rather than a lifetime
-token total. A turn pauses after 24 model/tool rounds and can be continued.
+token total. With a known limit, a small ring beside it fills in the provider
+accent, turning amber at 80% and red at 95% of the window; with an unknown
+limit no ring is shown. A turn pauses after 24 model/tool rounds and can be
+continued.
 
 ### Recall and decision notes
 
