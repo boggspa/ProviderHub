@@ -472,7 +472,7 @@ def shimmer_css() -> str:
             f"oklch(from var(--color-codex-description) l {SHIMMER_CHROMA} var({HUE_PROPERTY}))}}")
 
 
-def usage_banner_selector() -> str:
+def usage_banner_selector(preserve_native_notices: bool = False) -> str:
     """The ChatGPT usage banners: the app's generic banner (an ``aside``)
     carrying the gauge icon. The account-wide banner and the per-model one
     both draw it; the icon's other uses are slash-command rows, not banners.
@@ -480,16 +480,20 @@ def usage_banner_selector() -> str:
     server-sent banner then, has no icon, so it is matched by the mark the
     watcher gives it.
     """
+    if preserve_native_notices:
+        # Icons and generic server banners cannot distinguish provider text
+        # usage from native image/Voice limits. Hide only identified text usage.
+        return f'aside[{USAGE_MARK}="1"]'
     return f'aside:has(svg path[d^="{USAGE_BANNER_ICON}"]),aside[{USAGE_MARK}="1"]'
 
 
-def usage_banner_css() -> str:
+def usage_banner_css(preserve_native_notices: bool = False) -> str:
     """Hide the usage banners. The selector outranks the app's utility
     classes on specificity alone, so no ``!important`` is needed; the state
     behind the banner (the account's rate-limit status, the modal it may
     open on submit, the account and usage pages) is untouched.
     """
-    return f"{usage_banner_selector()}{{display:none}}"
+    return f"{usage_banner_selector(preserve_native_notices)}{{display:none}}"
 
 
 def sidebar_spinner_css() -> str:
@@ -525,6 +529,7 @@ _WATCHER = r"""
     const ULTRA_MARK = "__HUB_ULTRA_MARK__";
     const USAGE_SELECTOR = __HUB_USAGE_SELECTOR__;
     const USAGE_MARK = "__HUB_USAGE_MARK__";
+    const PRESERVE_NATIVE_NOTICES = __HUB_PRESERVE_NATIVE_NOTICES__;
     const UNLOCK_COMPOSER = __HUB_UNLOCK_COMPOSER__;
     const HUES = __HUB_HUES__;
     const HUE_PROPERTY = "__HUB_HUE_PROPERTY__";
@@ -1072,7 +1077,32 @@ _WATCHER = r"""
     // reaching that first is other fallback content, so the walk stops there.
     const own = (props, name) => Object.prototype.hasOwnProperty.call(props, name);
     const usageBanners = new Set();
+    function textUsageBanner(element) {
+      const fiberKey = Object.keys(element).find(name => name.startsWith("__reactFiber$"));
+      let fiber = fiberKey ? element[fiberKey] : null;
+      for (let depth = 0; fiber && depth < 16; depth += 1, fiber = fiber.return) {
+        const props = fiber.memoizedProps;
+        if (!props || typeof props !== "object") { continue; }
+        if (own(props, "rateLimitStatus") && own(props, "lastImageGenerationImpressionKeyRef")) {
+          // This legacy component covers both account and image limits. Keep
+          // it visible even with a null image limit: that field alone does not
+          // prove which warning was rendered. Newer layouts also stay visible
+          // unless a separate model-limit component identifies the notice.
+          return false;
+        }
+        if (own(props, "modelName") && own(props, "resetAt")) { return true; }
+        const banner = props.banner;
+        if (banner && typeof banner === "object") {
+          // Cross a server renderer to look for a definitive owning component,
+          // but do not hide generic server/Voice/image notices by shape alone.
+          // Stop at unrelated fallback content under the banner provider.
+          if (!props.behavior || typeof props.behavior !== "object" || !Array.isArray(banner.ctas)) { return false; }
+        }
+      }
+      return false;
+    }
     function usageBanner(element) {
+      if (PRESERVE_NATIVE_NOTICES) { return textUsageBanner(element); }
       const fiberKey = Object.keys(element).find(name => name.startsWith("__reactFiber$"));
       let fiber = fiberKey ? element[fiberKey] : null;
       for (let depth = 0; fiber && depth < 16; depth += 1, fiber = fiber.return) {
@@ -1147,7 +1177,8 @@ def _label_key(label: str) -> str:
 
 
 def watcher_script(accents: dict, property_name: str = PROPERTY, hide_usage_banner: bool = False,
-                   native_labels=(), route_accents: dict | None = None, unlock_composer: bool = False) -> str:
+                   native_labels=(), route_accents: dict | None = None, unlock_composer: bool = False,
+                   preserve_native_notices: bool = False) -> str:
     table = {_label_key(label): colour for label, colour in accents.items()}
     routes = {_label_key(route): colour for route, colour in (route_accents or {}).items()}
     native = {}
@@ -1164,7 +1195,7 @@ def watcher_script(accents: dict, property_name: str = PROPERTY, hide_usage_bann
             ultras[key] = {"dark": NATIVE_CODEX_ACCENT, "light": NATIVE_CODEX_ACCENT}
     palette_hues = {colour.upper(): str(hue) for colour, hue in
                     hue_map({value: value for value in [*table.values(), *routes.values()]}).items()}
-    css = shimmer_css() + activity_glyph_css() + ultra_css() + sidebar_spinner_css() + (usage_banner_css() if hide_usage_banner else "")
+    css = shimmer_css() + activity_glyph_css() + ultra_css() + sidebar_spinner_css() + (usage_banner_css(preserve_native_notices) if hide_usage_banner else "")
     return (_WATCHER.replace("__HUB_ACCENTS__", json.dumps(table, ensure_ascii=False))
             .replace("__HUB_ROUTE_ACCENTS__", json.dumps(routes, ensure_ascii=False))
             .replace("__HUB_ROUTE_HUES__", json.dumps(hue_map(routes)))
@@ -1172,8 +1203,9 @@ def watcher_script(accents: dict, property_name: str = PROPERTY, hide_usage_bann
             .replace("__HUB_NATIVE_LABELS__", json.dumps(native, ensure_ascii=False))
             .replace("__HUB_ULTRA__", json.dumps(ultras, ensure_ascii=False))
             .replace("__HUB_STYLE_CSS__", json.dumps(css))
-            .replace("__HUB_USAGE_SELECTOR__", json.dumps(usage_banner_selector() if hide_usage_banner else ""))
+            .replace("__HUB_USAGE_SELECTOR__", json.dumps(usage_banner_selector(preserve_native_notices) if hide_usage_banner else ""))
             .replace("__HUB_USAGE_MARK__", USAGE_MARK)
+            .replace("__HUB_PRESERVE_NATIVE_NOTICES__", json.dumps(bool(preserve_native_notices)))
             .replace("__HUB_UNLOCK_COMPOSER__", json.dumps(bool(unlock_composer)))
             .replace("__HUB_HUES__", json.dumps(hue_map(table)))
             .replace("__HUB_HUE_PROPERTY__", HUE_PROPERTY)
@@ -1680,7 +1712,8 @@ def bridge_command(app_path: str, settings: dict, inventory: dict, emit=None, lo
             run_options.setdefault("sidebar_accents", SidebarAccents(routes, native_labels))
             run_options.setdefault("child_accents", ChildAccents(routes, native_labels))
         script = watcher_script(accents, hide_usage_banner=hide_banner, unlock_composer=unlock,
-                                native_labels=native_labels, route_accents=routes) if colour_enabled else "({ installed: true, colours: false })"
+                                native_labels=native_labels, route_accents=routes,
+                                preserve_native_notices=settings.get("codex_chatgpt_account") is True) if colour_enabled else "({ installed: true, colours: false })"
         if quick_enabled:
             from codex_desktop_actions import desktop_actions_script
             from codex_quick_composer import quick_composer_script

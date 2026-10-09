@@ -490,6 +490,57 @@ struct CodexModelsPane: View {
     }
 }
 
+/// Reports the applied launch configuration, never a guessed account entitlement.
+struct CodexNativeCapabilitiesStatus: View {
+    @ObservedObject var model: BridgeModel
+    @State private var accountMode = "unknown"
+
+    private var refreshKey: String {
+        "\(model.codexProfileActive):\(model.codexRunning):\(model.savedSettings.codex_chatgpt_account)"
+    }
+
+    private var accountSummary: String {
+        switch accountMode {
+        case "enabled":
+            return model.settings.codex_chatgpt_account
+                ? "Native account access is active for this launch."
+                : "Native account access stays active until Desktop quits."
+        case "disabled":
+            return model.settings.codex_chatgpt_account
+                ? "Save, then relaunch Desktop to apply native account access."
+                : "This launch uses an accountless provider session."
+        case "inactive":
+            return model.settings.codex_chatgpt_account
+                ? "Native account access will apply at the next launch."
+                : "Native account access is off for Hub launches."
+        default:
+            return "Current launch status is unavailable."
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text(accountSummary)
+            if model.settings.codex_chatgpt_account || accountMode == "enabled" {
+                Text("Voice and image availability are checked by Desktop using your sign-in, plan, workspace and rollout. Native requests retain ChatGPT account limits.")
+                Text("Start Voice in Desktop; request an image in the chat. With the desktop helper enabled, allow microphone access for Provider Hub.")
+            }
+        }
+        .font(.caption).foregroundStyle(.secondary)
+        .fixedSize(horizontal: false, vertical: true)
+        .task(id: refreshKey) {
+            do {
+                let state = try await model.command("codex-status")
+                guard !Task.isCancelled else { return }
+                let native = state["codex_native_capabilities"] as? [String: Any]
+                accountMode = native?["account_mode"] as? String ?? "unknown"
+            } catch {
+                if !Task.isCancelled { accountMode = "unknown" }
+            }
+        }
+    }
+}
+
 struct CodexConfigPane: View {
     @ObservedObject var model: BridgeModel
 
@@ -519,12 +570,14 @@ struct CodexConfigPane: View {
     var body: some View {
         Panel {
             HubPaneHeading(title: "Codex / ChatGPT", subtitle: "App preferences", icon: "terminal")
-                Text("Account & appearance").font(.headline)
+                Text("Native ChatGPT capabilities").font(.headline)
                 CodexPreference(isOn: $model.settings.codex_chatgpt_account, disabled: model.busy,
-                    title: "Show your ChatGPT account",
-                    summary: "Keep your sign-in and native account styling.",
-                    details: "A ChatGPT sign-in is required when this is on. Provider Hub writes the gateway credential into Codex’s configuration for the session, then removes it when restoring your previous setup. When off, Codex uses an accountless custom-provider session with a plain model pill. Save, then launch.")
+                    title: "Use native ChatGPT capabilities",
+                    summary: "Keep ChatGPT sign-in for native Voice and OpenAI image generation alongside provider models.",
+                    details: "Retains native account access and enables Desktop’s Voice and image-generation controls for this launch. Sign in to ChatGPT in Desktop; account, workspace and rollout availability still apply. Codex routes can use the native image tool; other models use Desktop’s image-generation host tool when offered. Native capabilities use their OpenAI account limits; model text uses the selected provider account. Extra Codex CLI accounts can differ from the Desktop account. The local gateway credential is stored separately for the session and removed on restore. Save, then launch.")
+                CodexNativeCapabilitiesStatus(model: model)
                 Divider()
+                Text("Appearance").font(.headline)
                 CodexPreference(isOn: $model.settings.codex_accent_slider, disabled: model.busy,
                     title: "Use provider accent colours",
                     summary: "Match the slider, activity and sidebar spinners to the provider.",
@@ -545,14 +598,14 @@ struct CodexConfigPane: View {
                     summary: model.settings.codex_accent_slider
                         ? "Hide plan-usage banners above the composer while using provider models."
                         : "Requires provider accent colours to be enabled above.",
-                    details: "The accent helper hides the ChatGPT plan’s out-of-usage banner, its per-model variant and the server-sent versions, including the “Get 250 credits” referral card; hub traffic does not spend that plan. Account and usage pages, and any rate-limit prompt on submit, stay visible. If a Codex update changes the banners’ icon or structure, they may reappear. This preference takes effect when the accent helper is enabled and the app is launched from here. Save, then launch.")
+                    details: "The accent helper hides model-text usage banners, their per-model variants and the “Get 250 credits” referral card. Provider-routed text uses its provider account; native Voice and images still have ChatGPT account limits. Native mode keeps combined account/image-limit and unrecognized notices visible, so some text usage banners may remain. Account and usage pages, and any rate-limit prompt on submit, stay visible. Save, then launch.")
                 Divider()
                 CodexPreference(isOn: $model.settings.codex_unlock_composer, disabled: model.busy || !model.settings.codex_accent_slider,
                     title: "Keep sending when ChatGPT usage runs out",
                     summary: model.settings.codex_accent_slider
                         ? "Let provider models send after the ChatGPT plan’s usage is exhausted."
                         : "Requires provider accent colours to be enabled above.",
-                    details: "Once the ChatGPT plan’s usage is exhausted, Codex disables the composer’s send button for every model, including provider routes that never spend that plan. The accent helper’s watcher reads the app’s usage status as it arrives and reports the plan’s core limit as still allowing sends; usage windows, per-model limits and credits are left as they are. Native OpenAI models stay limited by the server and show the app’s own usage-limit message. While this is on, the app’s reset-credit prompt and reserve-model offers stay off and usage meters show at least 1% remaining. Unsupported by OpenAI; an app update that changes the usage payload switches it off with no other effect. Save, then launch.")
+                    details: "Once the ChatGPT plan’s usage is exhausted, Codex disables the composer’s send button for every model, including provider routes. The accent helper reports the plan’s core limit as allowing sends; usage windows, per-model limits and credits are left as they are. Native OpenAI models, Voice and images keep their real server limits. When native capabilities are enabled, recognized image-limit notices stay visible. The core usage meter can show at least 1% remaining while native requests are unavailable; it is not an availability check. Unsupported by OpenAI; a changed usage payload switches this behavior off. Save, then launch.")
             Divider()
                 Text("Tools & goals").font(.headline)
                 CodexPreference(isOn: $model.settings.codex_apply_patch_all, disabled: model.busy,

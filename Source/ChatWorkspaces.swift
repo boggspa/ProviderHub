@@ -121,10 +121,22 @@ struct ChatWorkspaceRail: View {
                         Text(subtitle(chat, route: route)).font(.system(size: 10.5)).foregroundStyle(Semantic.secondaryInk).lineLimit(1)
                     }.frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
                 }.buttonStyle(.plain).disabled(model.busy && !selected)
+                // One worker, one turn: the busy chat is the selected one.
+                if selected, model.busy {
+                    ProgressView().controlSize(.mini).tint(route?.accent ?? Semantic.secondaryInk).accessibilityLabel("Working")
+                }
             }
         }
         .padding(.leading, 18).padding(.trailing, 8).padding(.vertical, 6)
         .background(RoundedRectangle(cornerRadius: HubTheme.Radius.row).fill(selected ? Semantic.selection : Color.clear))
+        // The selected row carries its model's accent as a 2pt leading bar,
+        // the rail's one touch of colour; an unbranded route keeps it neutral.
+        .overlay(alignment: .leading) {
+            if selected {
+                RoundedRectangle(cornerRadius: 1).fill(route?.accent ?? Semantic.secondaryInk)
+                    .frame(width: 2).padding(.vertical, 7).padding(.leading, 7).accessibilityHidden(true)
+            }
+        }
         .accessibilityAddTraits(selected ? .isSelected : [])
         .contextMenu {
             Button("Rename") { renameText = chat.title; renaming = chat.id }

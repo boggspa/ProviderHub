@@ -65,7 +65,7 @@ struct ChatWindow: View {
             .stroke(model.activeAccent.opacity(0.7), style: StrokeStyle(lineWidth: 2, dash: [6, 4]))
             .padding(10)
             .overlay {
-                Text("Drop files to attach, or a folder to change workspace")
+                Text(model.busy || model.branchBusy ? "Drop files to attach" : "Drop files to attach, or a folder to change workspace")
                     .font(HubTheme.Typography.rowTitle).foregroundStyle(Semantic.ink)
                     .padding(.horizontal, 12).padding(.vertical, 8)
                     .background(RoundedRectangle(cornerRadius: HubTheme.Radius.row).fill(Semantic.raisedSurface))
@@ -73,11 +73,17 @@ struct ChatWindow: View {
             .allowsHitTesting(false)
     }
 
+    /// A folder changes the workspace, which waits for the turn to end; files
+    /// attach to the draft at any time, as the + button does, so a dropped
+    /// screenshot can ride along with an update mid-turn.
     private func acceptFolder(_ urls: [URL]) -> Bool {
-        guard !model.busy, !model.branchBusy, model.connected else { return false }
+        guard model.connected else { return false }
         var isDirectory: ObjCBool = false
         for url in urls where FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory) {
-            if isDirectory.boolValue { model.setFolder(url.path); return true }
+            if isDirectory.boolValue {
+                guard !model.busy, !model.branchBusy else { model.notice = "Finish or stop the turn before changing folder."; return false }
+                model.setFolder(url.path); return true
+            }
         }
         guard model.selectedID != nil else { return false }
         model.addAttachments(urls)
@@ -276,15 +282,27 @@ private struct ChatHeader: View {
     @ViewBuilder private var usage: some View {
         if model.team?.enabled == true {
             if let member = model.team?.active, let used = member.usage {
-                Text(member.name + " · " + tokenCount(used) + (member.context.map { " / " + tokenCount($0) } ?? ""))
-                    .font(.system(size: 10.5, design: .monospaced)).foregroundStyle(Semantic.secondaryInk)
-                    .lineLimit(1).help("Active member's context; member windows are separate")
+                let readout = member.name + " · " + tokenCount(used) + (member.context.map { " / " + tokenCount($0) } ?? "")
+                HStack(spacing: 6) {
+                    if let limit = member.context, limit > 0 {
+                        ChatContextRing(used: used, limit: limit, accent: model.accent(for: member.route))
+                    }
+                    Text(readout).font(.system(size: 10.5, design: .monospaced)).foregroundStyle(Semantic.secondaryInk).lineLimit(1)
+                }
+                .help("Active member's context; member windows are separate")
+                .accessibilityElement(children: .combine).accessibilityLabel("Active member context used: " + readout)
             }
         } else if let used = model.tokenUsage {
-            Text(model.contextLimit.map { tokenCount(used) + " / " + tokenCount($0) } ?? tokenCount(used) + " tokens")
-                .font(.system(size: 10.5, design: .monospaced)).foregroundStyle(Semantic.secondaryInk)
-                .help("Context used in this chat")
-                .accessibilityLabel("Context used")
+            let readout = model.contextLimit.map { tokenCount(used) + " / " + tokenCount($0) } ?? tokenCount(used) + " tokens"
+            HStack(spacing: 6) {
+                if let limit = model.contextLimit, limit > 0 {
+                    ChatContextRing(used: used, limit: limit, accent: model.activeAccent)
+                }
+                Text(readout).font(.system(size: 10.5, design: .monospaced)).foregroundStyle(Semantic.secondaryInk)
+            }
+            .help(model.contextLimit.map { "\(Int((ChatContextRing.fraction(used: used, limit: $0) * 100).rounded()))% of context used in this chat" }
+                  ?? "Context used in this chat")
+            .accessibilityElement(children: .combine).accessibilityLabel("Context used: " + readout)
         }
     }
 
@@ -367,6 +385,10 @@ private struct ContentBottomKey: PreferenceKey {
 private struct ChatTranscript: View {
     @ObservedObject var model: ChatModel
     @State private var expanded: Set<String> = []
+    /// Explicit open/closed choices per fold; a fold without one follows the
+    /// turn (open while it is the live tail, closed afterwards).
+    @State private var foldChoice: [String: Bool] = [:]
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     /// True while the end of the transcript is within reach of the viewport;
     /// new text follows only then, so reading earlier turns is never yanked.
     @State private var nearBottom = true
@@ -395,9 +417,15 @@ private struct ChatTranscript: View {
     }
 
     private var content: some View {
-        LazyVStack(alignment: .leading, spacing: 14) {
+        let segments = ChatTranscriptSegment.segments(model.entries)
+        return LazyVStack(alignment: .leading, spacing: 14) {
             if model.entries.isEmpty { ChatInvitation(model: model) }
-            ForEach(model.entries) { entry in row(entry) }
+            ForEach(segments) { segment in
+                switch segment {
+                case .entry(let entry): row(entry)
+                case .fold(let entries): fold(entries, live: model.busy && segment.id == segments.last?.id)
+                }
+            }
             Color.clear.frame(height: 1).id(bottomID)
         }
         .frame(maxWidth: 760).frame(maxWidth: .infinity)
@@ -444,6 +472,89 @@ private struct ChatTranscript: View {
     private func expandedBinding(_ id: String) -> Binding<Bool> {
         Binding(get: { expanded.contains(id) }, set: { if $0 { expanded.insert(id) } else { expanded.remove(id) } })
     }
+
+    /// A run of local tool rows behind one disclosure. The live tail run stays
+    /// open so progress is visible; once the reply begins it folds, and a
+    /// choice the user makes by hand sticks for that run. Collapsed and live,
+    /// the header carries the latest step so nothing goes dark mid-turn.
+    @ViewBuilder private func fold(_ entries: [ChatEntry], live: Bool) -> some View {
+        let id = ChatTranscriptSegment.foldID(entries)
+        let open = foldChoice[id] ?? live
+        let files = Set(entries.flatMap(\.changedFiles)).count
+        let counted = entries.compactMap { ChatPatchStats.count(patchText($0)) }
+        let stats = counted.isEmpty ? nil : counted.reduce(ChatPatchStats(), +)
+        VStack(alignment: .leading, spacing: 6) {
+            Button {
+                if reduceMotion { foldChoice[id] = !open } else { withAnimation(.easeInOut(duration: 0.15)) { foldChoice[id] = !open } }
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "chevron.right").font(.system(size: 9, weight: .semibold)).foregroundStyle(Semantic.secondaryInk)
+                        .rotationEffect(.degrees(open ? 90 : 0)).frame(width: 10)
+                    ChatShimmerText(text: live ? "Working" : "Worked", active: live, accent: model.activeAccent, base: Semantic.ink)
+                        .font(.system(size: 11.5, weight: .medium))
+                    Text("· \(entries.count) steps" + (files > 0 ? " · \(files) \(files == 1 ? "file" : "files")" : ""))
+                        .font(HubTheme.Typography.detail).foregroundStyle(Semantic.secondaryInk)
+                    if let stats { ChatPatchStatsLabel(stats: stats) }
+                    if entries.contains(where: \.isError) {
+                        Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 10)).foregroundStyle(Color(nsColor: .systemRed))
+                    }
+                    if !open, live, let latest = entries.last {
+                        Text(latest.summary ?? latest.text).font(HubTheme.Typography.detail).foregroundStyle(Semantic.secondaryInk)
+                            .lineLimit(1).truncationMode(.middle)
+                    }
+                    Spacer(minLength: 0)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel((live ? "Working, " : "Worked, ") + "\(entries.count) steps")
+            .accessibilityValue(open ? "Expanded" : "Collapsed")
+            if open {
+                VStack(alignment: .leading, spacing: 14) { ForEach(entries) { entry in row(entry) } }.padding(.leading, 18)
+            }
+        }
+        .padding(.vertical, 4)
+    }
+}
+
+/// The recorded patch of a local patch row, or nothing for every other tool;
+/// shell output that happens to look like a diff never counts as one.
+private func patchText(_ entry: ChatEntry) -> String {
+    guard entry.tool == "apply_patch" else { return "" }
+    return entry.detail?.isEmpty == false ? entry.detail! : entry.text
+}
+
+/// Consecutive local tool rows fold into one "Worked · N steps" disclosure,
+/// as Codex Desktop collapses a run of activity. Delegate rows keep their
+/// lanes and break a run; runs shorter than three stay as plain rows.
+private enum ChatTranscriptSegment: Identifiable {
+    case entry(ChatEntry)
+    case fold([ChatEntry])
+    static let minimumFold = 3
+
+    var id: String {
+        switch self {
+        case .entry(let entry): return entry.id
+        case .fold(let entries): return Self.foldID(entries)
+        }
+    }
+    static func foldID(_ entries: [ChatEntry]) -> String { "fold-" + (entries.first?.id ?? "") }
+
+    static func segments(_ entries: [ChatEntry]) -> [ChatTranscriptSegment] {
+        var result: [ChatTranscriptSegment] = []
+        var run: [ChatEntry] = []
+        func flush() {
+            if run.count >= minimumFold { result.append(.fold(run)) }
+            else { result.append(contentsOf: run.map { ChatTranscriptSegment.entry($0) }) }
+            run.removeAll()
+        }
+        for entry in entries {
+            if entry.kind == "tool", entry.agentID == nil, entry.agentIDs?.isEmpty != false { run.append(entry) }
+            else { flush(); result.append(.entry(entry)) }
+        }
+        flush()
+        return result
+    }
 }
 
 struct UserRow: View {
@@ -477,7 +588,7 @@ struct AssistantRow: View {
                     if streaming { ProgressView().controlSize(.mini).tint(accent) }
                 }
                 if entry.text.isEmpty, streaming {
-                    Text("Thinking…").font(HubTheme.Typography.body).foregroundStyle(Semantic.secondaryInk)
+                    ChatShimmerText(text: "Thinking…", active: true, accent: accent).font(HubTheme.Typography.body)
                 } else {
                     ChatTranscriptText(text: entry.text, streaming: streaming)
                 }
@@ -525,6 +636,7 @@ struct ToolRow: View {
                     .lineLimit(1).truncationMode(.middle)
                 Spacer(minLength: 0)
                 if running { ProgressView().controlSize(.mini).accessibilityHidden(true) }
+                if let stats = ChatPatchStats.count(patchText(entry)) { ChatPatchStatsLabel(stats: stats) }
                 if !entry.changedFiles.isEmpty {
                     Text(entry.changedFiles.count == 1 ? "1 file" : "\(entry.changedFiles.count) files")
                         .font(HubTheme.Typography.detail).foregroundStyle(Semantic.secondaryInk)
@@ -688,35 +800,58 @@ private struct ApprovalStrip: View {
 private struct ChatComposer: View {
     @ObservedObject var model: ChatModel
     @State private var height: CGFloat = 22
+    /// The workspace waiting on a first-time YOLO confirmation, while shown.
+    @State private var yoloWorkspace: String?
 
     var body: some View {
         VStack(spacing: 5) {
-            if !model.attachments.isEmpty {
-                ChatAttachmentStrip(attachments: model.attachments, remove: model.removeAttachment)
-            }
-            HStack(alignment: .bottom, spacing: 8) {
-                Button { model.chooseAttachments() } label: {
-                    Image(systemName: "plus").font(.system(size: 15, weight: .medium)).foregroundStyle(Semantic.secondaryInk)
-                        .frame(width: 23, height: 24).contentShape(Rectangle())
-                }.buttonStyle(.plain).disabled(!editable).help("Attach files or images")
-                    .accessibilityLabel("Attach files or images")
-                ComposerTextView(text: $model.draft, height: $height, placeholder: placeholder, enabled: editable) { model.send() }
-                    .frame(height: height)
-                    .accessibilityLabel("Message")
-                if model.busy {
-                    if !model.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !model.attachments.isEmpty { interruptButton }
-                    stopButton
-                } else { sendButton }
+            VStack(alignment: .leading, spacing: 4) {
+                if !model.attachments.isEmpty {
+                    ChatAttachmentStrip(attachments: model.attachments, remove: model.removeAttachment)
+                }
+                HStack(alignment: .bottom, spacing: 8) {
+                    Button { model.chooseAttachments() } label: {
+                        Image(systemName: "plus").font(.system(size: 15, weight: .medium)).foregroundStyle(Semantic.secondaryInk)
+                            .frame(width: 23, height: 24).contentShape(Rectangle())
+                    }.buttonStyle(.plain).disabled(!editable).help("Attach files or images")
+                        .accessibilityLabel("Attach files or images")
+                    ComposerTextView(text: $model.draft, height: $height, placeholder: placeholder, enabled: editable,
+                                     onSend: { model.send() }, onPasteFiles: { urls in
+                        guard editable else { return false }
+                        model.addAttachments(urls); return true
+                    })
+                        .frame(height: height)
+                        .accessibilityLabel("Message")
+                    if model.busy {
+                        if !model.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !model.attachments.isEmpty { interruptButton }
+                        stopButton
+                    } else { sendButton }
+                }
             }
             .padding(.leading, 14).padding(.trailing, 7).padding(.vertical, 7)
             .background(RoundedRectangle(cornerRadius: HubTheme.Radius.panel).fill(Semantic.raisedSurface))
-            .overlay(RoundedRectangle(cornerRadius: HubTheme.Radius.panel).stroke(Semantic.hairline, lineWidth: 1))
+            .overlay(RoundedRectangle(cornerRadius: HubTheme.Radius.panel)
+                .stroke(yolo ? Semantic.approvalYolo.opacity(0.4) : Semantic.hairline, lineWidth: 1))
             footer
         }
         .padding(.horizontal, 16).padding(.top, 8).padding(.bottom, 10)
+        .confirmationDialog("Run tools without approval prompts?", isPresented: Binding(
+            get: { yoloWorkspace != nil }, set: { if !$0 { yoloWorkspace = nil } }
+        ), titleVisibility: .visible) {
+            Button("Use YOLO") {
+                if let yoloWorkspace { ChatYoloAcknowledgement.record(yoloWorkspace); model.setApprovalMode("yolo") }
+                yoloWorkspace = nil
+            }
+            Button("Cancel", role: .cancel) { yoloWorkspace = nil }
+        } message: {
+            Text("YOLO edits files and runs commands in \(folderName(yoloWorkspace ?? "")) without asking first. This is asked once per folder.")
+        }
     }
 
     private var editable: Bool { model.connected && model.selectedID != nil }
+    /// YOLO is the one mode worth marking on the composer itself: the outline
+    /// takes a faint red, the way TaskWraith tints full access.
+    private var yolo: Bool { model.selectedID != nil && model.approvalMode == "yolo" }
 
     private var placeholder: String {
         guard model.selectedID != nil else { return "Start a new chat to begin" }
@@ -727,8 +862,8 @@ private struct ChatComposer: View {
 
     private var sendButton: some View {
         Button { model.send() } label: {
-            Image(systemName: "arrow.up").font(.system(size: 13, weight: .bold)).foregroundStyle(.black)
-                .frame(width: 28, height: 28).background(Circle().fill(.white))
+            Image(systemName: "arrow.up").font(.system(size: 13, weight: .bold)).foregroundStyle(Semantic.surface)
+                .frame(width: 28, height: 28).background(Circle().fill(Semantic.ink))
         }
         .buttonStyle(.plain).disabled(!model.canSend).opacity(model.canSend ? 1 : 0.35)
         .accessibilityLabel("Send").help("Send (Return)")
@@ -736,8 +871,8 @@ private struct ChatComposer: View {
 
     private var stopButton: some View {
         Button { model.stop() } label: {
-            Image(systemName: "stop.fill").font(.system(size: 11, weight: .bold)).foregroundStyle(.black)
-                .frame(width: 28, height: 28).background(Circle().fill(.white))
+            Image(systemName: "stop.fill").font(.system(size: 11, weight: .bold)).foregroundStyle(Semantic.surface)
+                .frame(width: 28, height: 28).background(Circle().fill(Semantic.ink))
         }
         .buttonStyle(.plain).keyboardShortcut(".", modifiers: .command)
         .accessibilityLabel("Stop").help("Stop and keep what has arrived (⌘.)")
@@ -754,7 +889,8 @@ private struct ChatComposer: View {
         HStack(alignment: .top) {
             approvalModeMenu
             if model.notice.isEmpty {
-                Text(model.status).font(HubTheme.Typography.detail).foregroundStyle(Semantic.secondaryInk)
+                ChatShimmerText(text: model.status, active: model.busy && model.approval == nil, accent: model.activeAccent)
+                    .font(HubTheme.Typography.detail)
             } else {
                 Text(model.notice).font(HubTheme.Typography.detail).foregroundStyle(Semantic.accentOnSurface).textSelection(.enabled)
             }
@@ -767,20 +903,33 @@ private struct ChatComposer: View {
     private var approvalModeMenu: some View {
         let modes = [("manual", "Manual"), ("accept_edits", "Accept Edits"), ("yolo", "YOLO")]
         let title = modes.first { $0.0 == model.approvalMode }?.1 ?? "Manual"
+        let accent = ChatApprovalAccent.color(model.approvalMode)
         return Menu {
             ForEach(modes, id: \.0) { mode in
-                Button { model.setApprovalMode(mode.0) } label: {
+                Button { chooseApprovalMode(mode.0) } label: {
                     if model.approvalMode == mode.0 { Label(mode.1, systemImage: "checkmark") }
                     else { Text(mode.1) }
                 }
             }
         } label: {
-            Text(title).font(HubTheme.Typography.detail).foregroundStyle(Semantic.secondaryInk)
+            HStack(spacing: 5) {
+                Circle().fill(accent).frame(width: 6, height: 6)
+                Text(title).font(HubTheme.Typography.detail).foregroundStyle(accent)
+            }
         }
         .menuStyle(.borderlessButton).fixedSize()
         .disabled(model.busy || model.selectedID == nil)
         .accessibilityLabel("Approval mode: " + title)
         .help("Manual asks for edits and commands. Accept Edits allows repository patches and asks for commands. YOLO runs tools without prompts.")
+    }
+
+    /// YOLO asks once per folder before it is first used there; every other
+    /// change, and a repeat choice, applies at once.
+    private func chooseApprovalMode(_ mode: String) {
+        if mode == "yolo", let workspace = model.selected?.workspace, !ChatYoloAcknowledgement.contains(workspace) {
+            yoloWorkspace = workspace; return
+        }
+        model.setApprovalMode(mode)
     }
 }
 
@@ -793,18 +942,51 @@ struct ComposerTextView: NSViewRepresentable {
     var placeholder: String
     var enabled: Bool
     var onSend: () -> Void
+    /// Files or an image on the pasteboard; return true to consume the paste.
+    var onPasteFiles: (([URL]) -> Bool)? = nil
 
     private static let minHeight: CGFloat = 22
     private static let maxHeight: CGFloat = 160
 
     final class SendTextView: NSTextView {
         var onSend: (() -> Void)?
+        var onPasteFiles: (([URL]) -> Bool)?
         var placeholder = "" { didSet { if placeholder != oldValue { needsDisplay = true } } }
 
         override func keyDown(with event: NSEvent) {
             let command = event.modifierFlags.intersection(.deviceIndependentFlagsMask).contains(.command)
             if event.keyCode == 36, command, isEditable { onSend?(); return }
             super.keyDown(with: event)
+        }
+
+        /// Pasted files and images become attachments, matching + and drop.
+        /// An image with no file behind it (a copied screenshot) is written to
+        /// a temporary PNG first. Text still pastes as text.
+        override func paste(_ sender: Any?) {
+            if isEditable, let onPasteFiles, let urls = Self.pastedFiles(NSPasteboard.general), onPasteFiles(urls) { return }
+            super.paste(sender)
+        }
+
+        static func pastedFiles(_ board: NSPasteboard) -> [URL]? {
+            if let urls = board.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL], !urls.isEmpty {
+                return urls
+            }
+            // Text wins over an image unless the text is only the image's URL.
+            let text = board.string(forType: .string)?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let textIsLink = text.map { $0.range(of: #"^https?://\S+$"#, options: .regularExpression) != nil } ?? true
+            guard textIsLink, let image = NSImage(pasteboard: board), let tiff = image.tiffRepresentation,
+                  let bitmap = NSBitmapImageRep(data: tiff), let png = bitmap.representation(using: .png, properties: [:]) else { return nil }
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent("ProviderHubChatPaste", isDirectory: true)
+            let formatter = DateFormatter(); formatter.dateFormat = "yyyy-MM-dd 'at' HH.mm.ss"
+            let stem = "Pasted image " + formatter.string(from: Date())
+            do {
+                try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+                var url = directory.appendingPathComponent(stem + ".png")
+                var copy = 2
+                while FileManager.default.fileExists(atPath: url.path) { url = directory.appendingPathComponent("\(stem) \(copy).png"); copy += 1 }
+                try png.write(to: url)
+                return [url]
+            } catch { return nil }
         }
 
         override func draw(_ dirtyRect: NSRect) {
@@ -864,6 +1046,7 @@ struct ComposerTextView: NSViewRepresentable {
         context.coordinator.parent = self
         guard let view = scroll.documentView as? SendTextView else { return }
         view.onSend = onSend
+        view.onPasteFiles = onPasteFiles
         view.placeholder = placeholder
         view.font = textStyle.editorFont
         view.isEditable = enabled
