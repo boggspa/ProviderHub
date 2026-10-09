@@ -174,6 +174,42 @@ the full visible history remains saved. Unknown limits stay unknown. The token
 indicator reports the latest request's input usage, rather than a lifetime
 token total. A turn pauses after 24 model/tool rounds and can be continued.
 
+### Recall and decision notes
+
+The main chat can recover older visible messages with `search_history` and
+`read_history`, even after they leave the model's context. Search is literal,
+case-insensitive and newest-first, with bounded snippets and source entry IDs.
+Reading an ID returns the exact saved text in pages, including extracted
+attachment text and recorded tool results. It searches this chat only, never
+other chats, helper logs or provider reasoning. Earlier messages can refer to a
+previous workspace; recalled actions are records, not instructions to run again.
+
+The model can use `record_decision` to keep a concise decision, correction,
+verified finding or unresolved question, citing one to four source entry IDs.
+Replacing the same key updates a note; `forget_decision` removes it without
+deleting the original messages. Ask Chat to remember a decision, correct a note
+or forget one. These actions appear as expandable tool rows in the transcript.
+Notes are model-written reference material, not verified facts or permission;
+the model is instructed to read the original sources before relying on details.
+Workspace instructions and tool approvals continue to govern actions.
+
+The notebook holds at most sixteen notes, 800 UTF-8 bytes per note and 6,000
+bytes of serialized notes overall. A full notebook requires explicit replacement
+or removal; it never silently evicts an older decision. Notes share the chat's
+atomic save, survive reopening and model/account changes, and are shown only
+in the workspace where they were recorded. Switching back restores that view.
+They reserve space before context trimming and are projected into each request
+without being duplicated in saved model history. Helpers and Side Chats cannot
+call the memory tools or mutate the notebook. No background summarizer, extra
+provider request or cross-chat memory store is involved.
+
+If the notebook would consume more than a quarter of a model's context, Chat
+omits it for that request with a notice to the model; the notes stay saved and
+transcript recall remains available. Invalid notebook metadata is likewise
+excluded without hiding the transcript. New messages record their workspace;
+legacy messages may have no workspace attribution. Explicitly different
+workspace sources cannot be used for a new note without a current clarification.
+
 Provider accents and labels resolve through `branding.py`,
 `provider_branding.json`, and existing user overrides. This is the same
 TaskWraith-compatible presentation contract used throughout Provider Hub. Chat
@@ -189,7 +225,8 @@ catalogue, browser automation, or separate IDE.
 ## Implementation and verification
 
 `ChatWindow.swift`, `ChatModelPicker.swift` and `ChatModel.swift` are the native window, picker and local JSONL
-transport. `ChatInspector.swift`, `ChatInspectorModel.swift` and
+transport. `chat_memory.py` provides transcript recall and source-linked decision
+notes. `ChatInspector.swift`, `ChatInspectorModel.swift` and
 `ChatBranches.swift` provide the inspector and Git controls. `chat_runtime.py`
 owns the shared conversation/tool loop and saved chats; `chat_agents.py` provides
 isolated delegates and memory-only Side Chats, and `chat_inspector.py` handles
