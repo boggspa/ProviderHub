@@ -56,8 +56,17 @@ class OpenRouterProviderTests(unittest.TestCase):
         self.assertEqual(payload, original)
         for changed, model_spec in (({k: v for k, v in payload.items() if k != "_web_search"}, metadata),
                                     (payload, {**metadata, "web_search": False}),
-                                    ({**payload, "_provider_hub_surface": "responses"}, metadata)):
+                                    (payload, {k: v for k, v in metadata.items() if k != "web_search"})):
             body = prepare_request("openrouter", {}, "test-key", changed, metadata["id"], model_spec)["body"]
+            # Omission inherits the account default; Chat must explicitly opt out.
+            self.assertEqual(body["plugins"], [{"id": "web", "enabled": False}])
+            self.assertNotIn("web_search_options", body)
+            self.assertNotIn("_web_search", body)
+        for surface in ("responses", None):
+            changed = {k: v for k, v in payload.items() if k != "_provider_hub_surface"}
+            if surface is not None:
+                changed["_provider_hub_surface"] = surface
+            body = prepare_request("openrouter", {}, "test-key", changed, metadata["id"], metadata)["body"]
             self.assertNotIn("plugins", body)
             self.assertNotIn("_web_search", body)
 

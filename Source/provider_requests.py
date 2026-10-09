@@ -997,6 +997,9 @@ def prepare_request(
                           if anthropic_payload.get("_provider_hub_surface") == "chat" and model_spec.get("web_search") is True
                           else None)
                 openrouter_finalize(body, model_spec, api_key, search=search)
+                if anthropic_payload.get("_provider_hub_surface") == "chat" and search is None:
+                    # An omitted plugin inherits OpenRouter's account default.
+                    body["plugins"] = [{"id": "web", "enabled": False}]
             except OpenRouterError as exc:
                 raise ProviderError(str(exc)) from exc
         return {
