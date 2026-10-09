@@ -25,6 +25,7 @@ from bridge_core import gateway_token, load_settings, private_directory, state_r
 from chat_tools import ChatToolRunner, TOOL_DEFINITIONS
 from chat_attachments import prepare_attachments, bound_image_history
 from chat_history import portable_history
+import chat_memory
 from chat_git import git_status
 from chat_workspaces import ChatWorkspaces, available_workspace
 from protocol import compact_conversation, estimated_tokens
@@ -452,7 +453,7 @@ class ChatService:
 
     def add(self, item):
         with self._mutex:
-            if item.get("kind") == "tool": item.setdefault("workspace", self.chat["workspace"])
+            item.setdefault("workspace", self.chat["workspace"])
             self.chat["entries"].append(item)
             self.emit({"event": "entry", "chat": self.chat["id"], "entry": item})
         return item
@@ -474,7 +475,7 @@ class ChatService:
         if not isinstance(text, str) or (not text.strip() and not inputs) or len(text) > MAX_TEXT:
             raise ValueError("Enter a message of at most 100,000 characters.")
         attached, blocks = prepare_attachments(inputs, self.store.root / self.chat["id"], vision=self.choice().get("vision") is not False)
-        visible = entry("user", text, self.chat["route"], attachments=attached)
+        visible = entry("user", text, self.chat["route"], attachments=attached, workspace=self.chat["workspace"])
         content = [{"type": "text", "text": text if text.strip() else "Please review the attached files."}, *blocks]
         return {"entry": visible, "content": content}
 
@@ -683,6 +684,7 @@ class ChatService:
         elif self.role == "parent" and tools:
             from chat_agents import delegate_definition
             tools.append(delegate_definition(self.models))
+            tools.extend(chat_memory.TOOL_DEFINITIONS)
         context = choice.get("context")
         output = min(choice.get("max_output") or 4096, 8192)
         if isinstance(context, int) and context > 0:
@@ -698,16 +700,29 @@ class ChatService:
             payload["system"] += "\nThis is a temporary Side Chat. Only read_file and search_files are available; do not edit files or run commands. This conversation is held in memory until the app closes."
         elif self.role == "lane":
             payload["system"] += "\nThis is a read-only parallel helper lane. Only read_file and search_files are available. Do not edit files, run commands or delegate. Report findings to the parent."
+        if self.role == "parent" and tools:
+            payload["system"] += "\n" + chat_memory.GUIDANCE
+        memory = chat_memory.memory_message(chat) if self.role == "parent" else None
+        if memory and isinstance(context, int) and context > 0 and estimated_tokens({"messages": [memory]}) > context // 4:
+            memory = {"role": "user", "content": [{"type": "text", "text":
+                "[Saved decision notebook omitted because this model's context is small. "
+                "Notes remain saved. Use search_history/read_history to recover original decisions.]"}]}
         if chat["effort"]:
             payload["output_config"] = {"effort": chat["effort"]}
         if isinstance(context, int) and context > 0:
             budget = max(1, int(context * .85) - payload["max_tokens"])
+            if memory:
+                budget = max(1, budget - estimated_tokens({"messages": [memory]}))
             if estimated_tokens(payload) >= budget:
                 compacted = compact_conversation(payload, budget)
                 if compacted["messages"] != chat["messages"]:
                     chat["messages"] = compacted["messages"]; payload = compacted
                     self.add(entry("notice", "Older model context trimmed. The full visible transcript is kept.", chat["route"]))
                     self.save()
+        if memory:
+            # Projection only: never duplicate notebook text in saved provider
+            # history. Reserve its budget before trimming complete tool cycles.
+            payload = {**payload, "messages": [memory, *payload["messages"]]}
         return payload
 
     def approved(self, summary, detail=None):
@@ -767,6 +782,10 @@ class ChatService:
                             from chat_agents import validate_delegate, delegate_summary
                             validate_delegate(self, arguments)
                             description = {"summary": delegate_summary(arguments), "requires_approval": False}
+                        elif name in chat_memory.MEMORY_TOOLS:
+                            if self.role != "parent":
+                                raise ValueError("Chat memory tools are available only in the main conversation.")
+                            description = chat_memory.describe(name, arguments)
                         elif self.role in {"side", "lane"} and name not in {"read_file", "search_files"}:
                             raise ValueError("This read-only conversation only has read_file and search_files.")
                         else:
@@ -782,6 +801,8 @@ class ChatService:
                             if name == "delegate":
                                 from chat_agents import delegate
                                 result = delegate(self, arguments, call["id"])
+                            elif name in chat_memory.MEMORY_TOOLS:
+                                result = chat_memory.execute(chat, name, arguments)
                             else:
                                 result = runner.execute(name, arguments)
                         else:
