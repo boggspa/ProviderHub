@@ -167,6 +167,16 @@ final class ChatModel: ObservableObject {
     var selected: ChatSummary? { chats.first { $0.id == selectedID } }
     var selectedRoute: ChatRoute? { models.first { $0.route == selected?.route && $0.account == selected?.account } }
     var activeAccent: Color { selectedRoute?.accent ?? .secondary }
+    var hasActiveWork: Bool {
+        busy || branchBusy || teamRequest != nil || sideOpening || sideChat?.busy == true || agents.contains(where: \.busy)
+    }
+    var hasUnsentDrafts: Bool {
+        !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty ||
+        !sideDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || pendingSend != nil || pendingSideText != nil ||
+        drafts.contains { $0.key != selectedID && !$0.value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty } ||
+        attachmentDrafts.contains { $0.key != selectedID && !$0.value.isEmpty } ||
+        sideDrafts.contains { $0.key != selectedID && !$0.value.isEmpty }
+    }
     var approvalMode: String { selected?.approvalMode ?? "manual" }
     var canSend: Bool { connected && !busy && !branchBusy && teamRequest == nil && selectedRoute != nil && (!draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty) }
     var canInterrupt: Bool { connected && busy && !interrupting && pendingSend == nil && selectedRoute != nil && (!draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty) }
