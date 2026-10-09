@@ -719,8 +719,8 @@ private struct ChatComposer: View {
 
     private var sendButton: some View {
         Button { model.send() } label: {
-            Image(systemName: "arrow.up").font(.system(size: 13, weight: .bold)).foregroundStyle(Semantic.inkOnAccent)
-                .frame(width: 28, height: 28).background(Circle().fill(Semantic.accentOnSurface))
+            Image(systemName: "arrow.up").font(.system(size: 13, weight: .bold)).foregroundStyle(.black)
+                .frame(width: 28, height: 28).background(Circle().fill(.white))
         }
         .buttonStyle(.plain).disabled(!model.canSend).opacity(model.canSend ? 1 : 0.35)
         .accessibilityLabel("Send").help("Send (Return)")
@@ -728,8 +728,8 @@ private struct ChatComposer: View {
 
     private var stopButton: some View {
         Button { model.stop() } label: {
-            Image(systemName: "stop.fill").font(.system(size: 11, weight: .bold)).foregroundStyle(Semantic.inkOnAccent)
-                .frame(width: 28, height: 28).background(Circle().fill(model.activeAccent))
+            Image(systemName: "stop.fill").font(.system(size: 11, weight: .bold)).foregroundStyle(.black)
+                .frame(width: 28, height: 28).background(Circle().fill(.white))
         }
         .buttonStyle(.plain).keyboardShortcut(".", modifiers: .command)
         .accessibilityLabel("Stop").help("Stop and keep what has arrived (⌘.)")
