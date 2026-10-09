@@ -39,6 +39,15 @@ ROOT_KEYS = (
 NESTED_KEYS = (
     ("features", "multi_agent_v2"),
 )
+# Verified stable controls in the ChatGPT-bundled Codex runtime. These are
+# owned only during an account-enabled launch; an accountless launch must
+# leave the user's native feature choices alone. Availability is still
+# decided by Desktop and OpenAI, not by these configuration switches.
+NATIVE_FEATURE_KEYS = (
+    ("features", "image_generation"),
+    ("features", "in_app_voice"),
+    ("features", "realtime_conversation"),
+)
 
 
 def redact_provider(entry):
@@ -143,11 +152,18 @@ class CodexProfile:
 
     def status(self):
         active = False
+        account_mode = "inactive"
         if self.journal.exists():
             document = parse(self.read())
             active = document.get("model_provider") == PROVIDER_ID
+            if active:
+                provider = document.get("model_providers", {}).get(PROVIDER_ID, {})
+                account_mode = "enabled" if (provider.get("requires_openai_auth") is True
+                                             and "auth" not in provider) else "disabled"
         return {"codex_running": self.running(), "codex_profile_active": active,
-                "codex_recovery_needed": self.journal.exists(), "codex_app_path": installed_app()}
+                "codex_recovery_needed": self.journal.exists(), "codex_app_path": installed_app(),
+                "codex_native_capabilities": {"account_mode": account_mode,
+                                              "availability": "desktop_managed"}}
 
     def provider(self, port, chatgpt_account=False):
         """The owned provider table written into the Codex configuration.
@@ -155,7 +171,8 @@ class CodexProfile:
         Default: command-backed auth. The gateway credential never enters the
         config file; Codex runs codex_token.py to fetch it on demand.
 
-        chatgpt_account: the desktop only presents the user's ChatGPT sign-in
+        chatgpt_account: native ChatGPT capabilities retain the user's sign-in.
+        The desktop only presents the user's ChatGPT sign-in
         (native composer model pill, account chrome, ChatGPT-backed settings)
         when the active provider reports requires_openai_auth; the app-server
         hides the sign-in for any provider that does not. A command-backed auth
@@ -196,7 +213,9 @@ class CodexProfile:
             if PROVIDER_ID in before.get("model_providers", {}):
                 raise BridgeError("A provider_hub provider already exists outside this launch transaction. It has not been overwritten.")
             original_values = {key: value_at(document, key) for key in ROOT_KEYS}
-            nested_originals = {".".join(path): nested_value_at(document, path) for path in NESTED_KEYS}
+            account_enabled = settings.get("codex_chatgpt_account") is True
+            owned_nested_keys = NESTED_KEYS + (NATIVE_FEATURE_KEYS if account_enabled else ())
+            nested_originals = {".".join(path): nested_value_at(document, path) for path in owned_nested_keys}
             try:
                 json.dumps({**original_values, **nested_originals})
             except (TypeError, ValueError) as exc:
@@ -255,8 +274,10 @@ class CodexProfile:
                 elif key in document:
                     del document[key]
             nested_targets = {("features", "multi_agent_v2"): True if multi_agent else None}
+            if account_enabled:
+                nested_targets.update({path: True for path in NATIVE_FEATURE_KEYS})
             nested_applied = {}
-            for path in NESTED_KEYS:
+            for path in owned_nested_keys:
                 table = ensure_nested_table(document, path[:-1])
                 path_str = ".".join(path)
                 target = nested_targets[path]
@@ -269,7 +290,7 @@ class CodexProfile:
                     nested_applied[path_str] = target
             if "model_providers" not in document:
                 document["model_providers"] = tomlkit.table()
-            owned_provider = self.provider(settings["port"], settings.get("codex_chatgpt_account") is True)
+            owned_provider = self.provider(settings["port"], account_enabled)
             document["model_providers"][PROVIDER_ID] = owned_provider
             updated = tomlkit.dumps(document)
             after = parse(updated).unwrap()
@@ -277,7 +298,7 @@ class CodexProfile:
             for key in ROOT_KEYS:
                 expected.pop(key, None)
             expected.update(applied)
-            for path in NESTED_KEYS:
+            for path in owned_nested_keys:
                 container = expected
                 for part in path[:-1]:
                     container = container.setdefault(part, {})
@@ -307,6 +328,8 @@ class CodexProfile:
                 raise BridgeError("Codex configuration changed during preparation. No settings were overwritten; retry after closing the app.")
             atomic_text(self.config, updated, mode=mode)
             return {"codex_profile_active": True, "codex_recovery_needed": True,
+                    "codex_native_capabilities": {"account_mode": "enabled" if account_enabled else "disabled",
+                                                  "availability": "desktop_managed"},
                     "model_count": len(catalog["models"])}
 
     def restore(self):

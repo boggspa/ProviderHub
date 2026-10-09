@@ -8,7 +8,7 @@ import unittest
 from branding import resolve_presentation
 from bridge_core import BridgeError, SLOTS
 from codex_catalogue import catalogue_digest, project_codex
-from codex_profile import BEARER_PLACEHOLDER, ROOT_KEYS, CodexProfile, digest, parse, redact_provider, tomlkit, value_at
+from codex_profile import BEARER_PLACEHOLDER, NATIVE_FEATURE_KEYS, ROOT_KEYS, CodexProfile, digest, parse, redact_provider, tomlkit, value_at
 from hub_config import defaults
 
 
@@ -278,6 +278,83 @@ command = "existing-command"
         self.assertEqual(doc["model"], "my-usual-model")
         self.assertEqual(doc["model_provider"], "my-provider")
         self.assertNotIn("rotated-elsewhere", restored)
+
+    def test_native_controls_restore_absent_disabled_and_enabled_preferences(self):
+        self.settings["codex_chatgpt_account"] = True
+        for previous in (None, False, True):
+            with self.subTest(previous=previous):
+                self.manager.config.write_text(self.original)
+                def configure(doc):
+                    doc["features"] = {"shell_tool": False, "unrelated_feature": True}
+                    if previous is not None:
+                        for _, key in NATIVE_FEATURE_KEYS:
+                            doc["features"][key] = previous
+                self.edit(configure)
+                activated = self.activate()
+                self.assertEqual(activated["codex_native_capabilities"]["account_mode"], "enabled")
+                document = parse(self.manager.config.read_text())
+                for _, key in NATIVE_FEATURE_KEYS:
+                    self.assertIs(document["features"][key], True)
+                self.assertIs(document["features"]["shell_tool"], False)
+                journal = json.loads(self.manager.journal.read_text())
+                for path in NATIVE_FEATURE_KEYS:
+                    self.assertEqual(journal["nested_before"][".".join(path)],
+                                     {"present": previous is not None, "value": previous})
+                # Force merge restoration instead of the whole-file fast path.
+                self.edit(lambda doc: doc.update({"user_preference": "changed after launch"}))
+                self.assertEqual(self.manager.restore()["preserved_external_changes"], 0)
+                restored = parse(self.manager.config.read_text())
+                for _, key in NATIVE_FEATURE_KEYS:
+                    if previous is None:
+                        self.assertNotIn(key, restored["features"])
+                    else:
+                        self.assertIs(restored["features"][key], previous)
+                self.assertIs(restored["features"]["shell_tool"], False)
+                self.assertIs(restored["features"]["unrelated_feature"], True)
+                self.assertEqual(restored["user_preference"], "changed after launch")
+
+    def test_accountless_launch_does_not_own_native_feature_preferences(self):
+        self.edit(lambda doc: doc.update({"features": {key: False for _, key in NATIVE_FEATURE_KEYS}}))
+        before = self.manager.config.read_text()
+        self.activate()
+        document = parse(self.manager.config.read_text())
+        journal = json.loads(self.manager.journal.read_text())
+        for path in NATIVE_FEATURE_KEYS:
+            self.assertIs(document["features"][path[-1]], False)
+            self.assertNotIn(".".join(path), journal["nested_before"])
+        self.manager.restore()
+        self.assertEqual(self.manager.config.read_text(), before)
+
+    def test_native_control_edits_after_launch_survive_restore(self):
+        self.settings["codex_chatgpt_account"] = True
+        self.activate()
+        self.edit(lambda doc: doc["features"].update({"in_app_voice": False}))
+        restored = self.manager.restore()
+        self.assertEqual(restored["preserved_external_changes"], 1)
+        features = parse(self.manager.config.read_text())["features"]
+        self.assertIs(features["in_app_voice"], False)
+        self.assertNotIn("image_generation", features)
+        self.assertNotIn("realtime_conversation", features)
+
+    def test_native_status_reports_applied_account_mode_without_entitlement_or_secrets(self):
+        self.assertEqual(self.manager.status()["codex_native_capabilities"],
+                         {"account_mode": "inactive", "availability": "desktop_managed"})
+        self.activate()
+        self.assertEqual(self.manager.status()["codex_native_capabilities"]["account_mode"], "disabled")
+        # Merely changing the saved preference cannot change the active session.
+        self.settings["codex_chatgpt_account"] = True
+        self.assertEqual(self.manager.status()["codex_native_capabilities"]["account_mode"], "disabled")
+        self.manager.restore()
+        self.activate()
+        status = self.manager.status()
+        self.assertEqual(status["codex_native_capabilities"],
+                         {"account_mode": "enabled", "availability": "desktop_managed"})
+        token = (self.root / "gateway-token").read_text().strip()
+        self.assertNotIn(token, json.dumps(status))
+        self.assertNotIn("PRIVATE-AUTH-SENTINEL", json.dumps(status))
+        self.edit(lambda doc: doc.update({"model_provider": "my-provider"}))
+        self.assertEqual(self.manager.status()["codex_native_capabilities"]["account_mode"], "inactive")
+        self.manager.restore()
 
     def test_unrelated_edits_after_launch_survive_restore(self):
         self.activate()

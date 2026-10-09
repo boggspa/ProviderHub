@@ -593,6 +593,23 @@ class LaunchTests(unittest.TestCase):
             self.assertEqual(events, [{"event": "accents", "count": 2, "usage_banner": "shown", "composer": "unlocked", "quick_composer": "off"}])
             self.assertIn("const UNLOCK_COMPOSER = true;", scripts[-1])
 
+    def test_native_account_preserves_notices_without_disabling_usage_options(self):
+        settings, inventory = fixture()
+        with tempfile.TemporaryDirectory() as directory:
+            app = demo_bundle(Path(directory))
+            for enabled in (False, True):
+                with self.subTest(native_account=enabled):
+                    requested = dict(settings, codex_accent_slider=True, codex_chatgpt_account=enabled,
+                                     codex_hide_usage_banner=True, codex_unlock_composer=True)
+                    with mock.patch.object(codex_accent, "already_running", return_value=False), \
+                            mock.patch.object(codex_accent, "run", return_value=0), \
+                            mock.patch.object(codex_accent, "watcher_script", wraps=watcher_script) as watcher:
+                        self.assertEqual(bridge_command(str(app), requested, inventory, emit=lambda event: None), 0)
+                    watcher.assert_called_once()
+                    self.assertIs(watcher.call_args.kwargs["preserve_native_notices"], enabled)
+                    self.assertIs(watcher.call_args.kwargs["hide_usage_banner"], True)
+                    self.assertIs(watcher.call_args.kwargs["unlock_composer"], True)
+
     def test_quick_composer_launch_does_not_enable_provider_colours_or_usage_overrides(self):
         settings, inventory = fixture()
         settings.update(codex_quick_composer=True, codex_quick_composer_window=False, codex_accent_slider=False,

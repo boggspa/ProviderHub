@@ -439,6 +439,63 @@ const cases = {
     assert.equal(await display('referral'), 'block');
     assert.equal(await page.locator('#referral').getAttribute('data-provider-hub-usage-banner'), null);
   },
+  async native_mode_hides_only_identified_text_usage_notices(page) {
+    for (const native of [false, true]) {
+      await page.goto('about:blank'); // Reset watcher and JSON.parse wrapper.
+      const gauge = '<svg><path d="M10.8343 12.0693C10 12.5 9 12 8.5 11.4Z"></path></svg>';
+      const aside = id => `<aside id="${id}"><h3>Limit ${id}</h3>${gauge}</aside>`;
+      await page.setContent(styles + main() + ['core', 'image', 'server-core', 'server-image', 'unknown', 'icon', 'model'].map(aside).join(''));
+      await page.evaluate(() => {
+        const owner = imageGenerationLimit => ({
+          memoizedProps: {rateLimitStatus: {}, lastImageGenerationImpressionKeyRef: {}, imageGenerationLimit},
+          return: null,
+        });
+        const server = parent => ({
+          memoizedProps: {banner: {ctas: [{action: 'add_credits'}]}, behavior: {}},
+          return: parent,
+        });
+        const attach = (id, parent) => {
+          document.getElementById(id).__reactFiber$test = {memoizedProps: {}, return: parent};
+        };
+        attach('core', owner(null));
+        attach('image', owner({allowed: false}));
+        attach('server-core', server(owner(null)));
+        attach('server-image', server(owner({allowed: false})));
+        // Newer Desktop notices have no legacy image-impression marker.
+        attach('unknown', server({memoizedProps: {rateLimitStatus: {}}, return: null}));
+        attach('model', {memoizedProps: {modelName: 'gpt-6-astra', resetAt: null}, return: null});
+      });
+      const script = native ? input.nativeBannerScript : input.bannerScript;
+      await page.evaluate(script.replace('String(location.href)', '"app://-/"'));
+      await flush(page);
+      const display = id => page.locator('#' + id).evaluate(el => getComputedStyle(el).display);
+      for (const id of ['model']) {
+        assert.equal(await display(id), 'none', id);
+      }
+      for (const id of ['core', 'server-core', 'image', 'server-image', 'unknown', 'icon']) {
+        assert.equal(await display(id), native ? 'block' : 'none', id);
+      }
+      if (native) {
+        const status = await page.evaluate(() => JSON.parse('{"user_id":"u","plan_type":"plus","rate_limit":{"allowed":false},"image_generation_limit":{"allowed":false}}'));
+        assert.equal(status.rate_limit.allowed, true);
+        assert.equal(status.image_generation_limit.allowed, false);
+        // A reused model-limit notice becoming an account/image warning must
+        // lose its mark, while a separate model notice can be hidden again.
+        await page.evaluate(() => {
+          const model = document.getElementById('model');
+          const image = document.getElementById('image');
+          model.__reactFiber$test.return = image.__reactFiber$test.return;
+          image.__reactFiber$test.return = {memoizedProps: {modelName: 'gpt-6-astra', resetAt: null}, return: null};
+          model.querySelector('h3').textContent = 'Image now';
+          image.querySelector('h3').textContent = 'Model now';
+        });
+        await flush(page);
+        assert.equal(await display('model'), 'block');
+        assert.equal(await display('image'), 'none');
+        assert.equal(await page.locator('#model').getAttribute('data-provider-hub-usage-banner'), null);
+      }
+    }
+  },
   async recovery_banners_stay_without_the_usage_banner_switch(page) {
     await page.setContent(styles + main() + '<aside id="off" role="status">Out of usage</aside>');
     await page.evaluate(() => { document.getElementById('off').__reactFiber$test = {memoizedProps: {}, return: {memoizedProps: {banner: {ctas: [{action: 'refer'}]}, behavior: {}}, return: null}}; });
@@ -538,7 +595,10 @@ class PaneAccentBrowserTests(unittest.TestCase):
         script = watcher_script(accents, **options)
         unlock = watcher_script(accents, unlock_composer=True, **options)
         banner = watcher_script(accents, hide_usage_banner=True, **options)
+        native_banner = watcher_script(accents, hide_usage_banner=True, unlock_composer=True,
+                                       preserve_native_notices=True, **options)
         result = subprocess.run([node, "-e", BROWSER_TESTS], input=json.dumps({"script": script, "unlockScript": unlock, "bannerScript": banner,
+                                "nativeBannerScript": native_banner,
                                 "executablePath": os.environ.get("PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH")}),
                                 text=True, capture_output=True, timeout=90)
         self.assertEqual(result.returncode, 0, result.stderr)
