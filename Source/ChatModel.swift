@@ -25,6 +25,7 @@ struct ChatRoute: Decodable, Identifiable {
     var efforts: [String]
     var context: Int?
     var supportsTools: Bool
+    var supportsWebSearch: Bool?
     var presentation: ProviderPresentation?
     var connectionPresentation: ProviderPresentation?
     var accent: Color { presentation?.color ?? .secondary }
@@ -94,6 +95,7 @@ final class ChatModel: ObservableObject {
     @Published private(set) var turnStartedAt: TimeInterval?
     @Published var notice = ""
     @Published var connected = false
+    @Published private(set) var webSearchEnabled: Bool
     @Published var approval: ChatApproval?
     @Published var status = "Ready"
     @Published var recentFolders: [String] = []
@@ -135,13 +137,20 @@ final class ChatModel: ObservableObject {
     private var pendingSend: (chat: String, text: String, attachments: [ChatAttachment])?
     private var commandSink: (([String: Any]) -> Bool)?
     private var starting = false
+    private let preferences: UserDefaults
     private var uptime: () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
 
-    init(bridge: BridgeModel) { self.bridge = bridge }
+    init(bridge: BridgeModel) {
+        self.bridge = bridge
+        preferences = .standard
+        webSearchEnabled = preferences.object(forKey: "chatAllowWebSearch") as? Bool ?? true
+    }
     /// A local transport seam for exercising real UI state transitions without
     /// a gateway process or a provider account.
-    init(sendCommand: @escaping ([String: Any]) -> Bool, uptime: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }) {
+    init(sendCommand: @escaping ([String: Any]) -> Bool, uptime: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }, preferences: UserDefaults = .standard) {
         commandSink = sendCommand; self.uptime = uptime
+        self.preferences = preferences
+        webSearchEnabled = preferences.object(forKey: "chatAllowWebSearch") as? Bool ?? true
     }
     var turnElapsed: TimeInterval { turnStartedAt.map { max(0, uptime() - $0) } ?? 0 }
     var turnTimecode: String {
@@ -203,6 +212,11 @@ final class ChatModel: ObservableObject {
         input = nil
     }
     func refresh() { write(["command": "refresh"]) }
+    func setWebSearchEnabled(_ enabled: Bool) {
+        webSearchEnabled = enabled
+        preferences.set(enabled, forKey: "chatAllowWebSearch")
+        if connected { write(["command": "preferences", "webSearch": enabled]) }
+    }
     func refreshGitStatus() {
         if connected, let selectedID { write(["command": "git_status", "id": selectedID]) }
     }
@@ -326,7 +340,9 @@ final class ChatModel: ObservableObject {
             let line = buffer.prefix(upTo: newline); buffer.removeSubrange(...newline)
             guard let event = try? JSONSerialization.jsonObject(with: line) as? [String: Any] else { continue }
             switch event["event"] as? String {
-            case "ready": connected = true
+            case "ready":
+                connected = true
+                write(["command": "preferences", "webSearch": webSearchEnabled])
             case "catalogue":
                 models = decode([ChatRoute].self, event["models"]) ?? []; recentFolders = event["folders"] as? [String] ?? []
                 contextLimit = selectedRoute?.context; notice = ""

@@ -103,7 +103,7 @@ The inspector collapses the left workspace rail on narrower windows to keep the
 conversation usable. The main turn clock and context count describe the parent;
 Side Chat runs independently.
 
-The small gear at the bottom-left of the sidebar offers Theme, Glass/Solid,
+The small gear at the bottom-left of the sidebar offers Allow web search, Theme, Glass/Solid,
 Font, and Text size. Font choices include System, System Mono, Inter, Source
 Serif 4 and JetBrains Mono. **Custom…** opens the native macOS font panel for
 fonts installed through Font Book. Only the chosen font name is saved; custom
@@ -112,6 +112,21 @@ Theme and surface reuse the Hub's existing preferences. Text choices affect
 the transcript and composer; code and diffs keep their monospace treatment.
 The send and stop buttons stay monochrome and invert with the theme: a light
 disc on a dark window, a dark disc on a light one.
+
+**Allow web search** is on by default and saved across app launches. It enables
+the provider's native search on routes that advertise support: eligible Codex,
+Claude and Grok CLI models, and eligible OpenRouter API routes. Models without
+native search continue to work; Settings shows that search is unavailable for
+the selected model. OpenRouter uses its native engine without a third-party
+search fallback. No separate search account or API key is needed.
+
+The preference also applies to helpers, read-only lanes and Side Chats, using
+each agent's own model capabilities. A change takes effect on the next model
+request; an already-running request may finish its search. Turning it off omits
+native search and instructs agents not to search through other tools. This
+setting does not sandbox network access by shell commands. Provider search
+records appear in expandable transcript rows, and returned source links appear
+with the answer. Source data and citations survive reopening a chat.
 
 ### Tables in replies
 
@@ -145,7 +160,7 @@ recorded result. Helpers inherit the workspace and approval mode, get the four
 local tools and cannot delegate. A turn can launch at most four helpers, with
 twelve model/tool rounds per serial helper. Its alternative `tasks` form runs
 two or three read-only lanes together, with eight rounds per lane; all count
-toward the same four-helper limit. Read-only lanes have read/search tools only,
+toward the same four-helper limit. Read-only lanes have read/search local tools only,
 even in YOLO. Stop and steering cancel every lane and wait for cleanup before
 the parent continues. See [Subagents](chat-subagents.md). File
 tools stay inside the chosen workspace and reject symlink paths. A small menu

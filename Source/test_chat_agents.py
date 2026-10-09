@@ -10,7 +10,7 @@ import unittest
 from unittest.mock import patch
 
 from chat_runtime import ChatService, ChatStore
-from chat_agents import close_side, close_all_sides, validate_delegate
+from chat_agents import close_side, close_all_sides, validate_delegate, make_child
 from test_chat_runtime import FakeTransport, model, response
 
 
@@ -38,6 +38,23 @@ class AgentTests(unittest.TestCase):
 
     def send(self, parent):
         parent.handle({"command": "send", "id": parent.chat["id"], "text": "Parent task"})
+
+    def test_search_preference_reaches_existing_children_and_each_models_capability(self):
+        parent = self.service([], [[], [], []])
+        parent.models[0]["supportsWebSearch"] = True
+        parent.models[1]["supportsWebSearch"] = False
+        children = [make_child(parent, parent.models[0], "", role, lambda _: None) for role in ("delegate", "lane", "side")]
+        for child in children:
+            self.assertIn("_web_search", child.payload(child.choice()))
+            self.assertNotIn("_web_search", child.payload(child.models[1]))
+        parent._working = True
+        parent.handle({"command": "preferences", "webSearch": False})
+        parent._working = False
+        for child in children:
+            self.assertNotIn("_web_search", child.payload(child.choice()))
+        parent.handle({"command": "preferences", "webSearch": True})
+        for child in children:
+            self.assertIn("_web_search", child.payload(child.choice()))
 
     def finish(self, parent):
         parent.thread.join(3)

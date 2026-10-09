@@ -55,7 +55,7 @@ from protocol import (StreamTranslator, apply_mapping_options, apply_mistral_pre
 from responses_native import ResponseOwnership, handle_responses, NATIVE_PROVIDERS
 from codex_accent import bridge_command as codex_accent_bridge
 from codex_catalogue import catalogue_digest, choices as codex_choices, launch_settings as codex_launch_settings
-from chat_catalogue import chat_choices, chat_connection
+from chat_catalogue import chat_choices, chat_connection, native_search_available
 from codex_profile import CodexProfile
 from codex_runtime import qualify_runtime, runtime_signature
 from claude_context import claude_context_spec
@@ -208,6 +208,9 @@ class Runtime:
                     payload.get("_provider_hub_connection"))
             except ValueError as exc:
                 raise BridgeError(str(exc)) from exc
+            if not native_search_available(spec, connection, provider_id):
+                # Recheck the live route: Chat's model list may predate a refresh.
+                payload = {key: value for key, value in payload.items() if key != "_web_search"}
         if payload.get("_provider_hub_surface") not in {"responses", "chat"}:
             spec = claude_context_spec(spec, self.settings)
         context = _effective_context(spec)

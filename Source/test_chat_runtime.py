@@ -11,6 +11,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 
 from chat_runtime import ChatService, ChatStore, GatewayClient, entry, needs_approval
 from chat_tools import ChatToolRunner
@@ -93,6 +94,59 @@ class ChatRuntimeTests(unittest.TestCase):
         self.assertFalse((self.root / "denied.txt").exists())
         result = transport.requests[1]["messages"][-1]["content"][0]
         self.assertTrue(result["is_error"]); self.assertIn("denied", result["content"][0]["text"])
+
+    def test_web_search_default_toggle_and_unsupported_models(self):
+        service, transport = self.service([response(), response(), response()])
+        service.models[0]["supportsWebSearch"] = True
+        self.send(service); self.finish(service)
+        self.assertEqual(transport.requests[-1]["_web_search"], {"context_size": None, "allowed_domains": [], "live": True})
+        self.assertNotIn("web_search", {tool["name"] for tool in transport.requests[-1]["tools"]})
+        service.handle({"command": "preferences", "webSearch": False})
+        self.send(service); self.finish(service)
+        self.assertNotIn("_web_search", transport.requests[-1])
+        self.assertIn("Web search is disabled", transport.requests[-1]["system"])
+        service.handle({"command": "preferences", "webSearch": True})
+        service.models[0]["supportsWebSearch"] = False
+        self.send(service); self.finish(service)
+        self.assertNotIn("_web_search", transport.requests[-1])
+        self.assertIn("does not offer native web search", transport.requests[-1]["system"])
+        for invalid in (None, "false", 0, 1):
+            with self.assertRaises(ValueError):
+                service.handle({"command": "preferences", "webSearch": invalid})
+
+    def test_provider_search_results_are_visible_saved_and_never_executed_locally(self):
+        reply = response("Verified result.")
+        reply["content"][:0] = [
+            {"type": "server_tool_use", "id": "native-1", "name": "web_search", "input": {"query": "release notes"}},
+            {"type": "web_search_tool_result", "tool_use_id": "native-1", "content": [
+                {"type": "web_search_result", "url": "https://example.com/releases", "title": "Releases", "encrypted_content": "opaque-search-data"},
+                {"type": "web_search_result", "url": "file:///private/local", "title": "Local"}]}]
+        reply["content"][-1]["citations"] = [{"type": "web_search_result_location", "url": "https://example.com/releases", "title": "Releases"}]
+        service, transport = self.service([reply])
+        service.models[0]["supportsWebSearch"] = True
+        with mock.patch.object(ChatToolRunner, "execute", side_effect=AssertionError("Hosted searches are never local tools")):
+            self.send(service); self.finish(service)
+        saved = self.store.load(service.chat["id"])
+        self.assertEqual(saved["status"], "ready")
+        self.assertEqual(saved["messages"][-1]["content"], reply["content"])
+        answer = next(item for item in saved["entries"] if item["kind"] == "assistant")
+        self.assertEqual(answer["text"].count("https://example.com/releases"), 1)
+        search = next(item for item in saved["entries"] if item.get("tool") == "web_search")
+        self.assertEqual(search["summary"], "Web search: release notes")
+        self.assertFalse(search["isError"])
+        self.assertNotIn("opaque-search-data", json.dumps(saved["entries"]))
+        self.assertNotIn("file:///private/local", json.dumps(saved["entries"]))
+
+    def test_search_error_is_visible_without_failing_the_answer(self):
+        reply = response("Search unavailable.")
+        reply["content"][:0] = [
+            {"type": "server_tool_use", "id": "native-1", "name": "web_search", "input": {}},
+            {"type": "web_search_tool_result", "tool_use_id": "native-1", "content": {"type": "web_search_tool_result_error", "error_code": "unavailable"}}]
+        service, _ = self.service([reply]); self.send(service); self.finish(service)
+        search = next(item for item in service.chat["entries"] if item.get("tool") == "web_search")
+        self.assertTrue(search["isError"])
+        self.assertIn("unavailable", search["detail"])
+        self.assertEqual(service.chat["status"], "ready")
 
     def test_approved_action_is_persisted_and_not_replayed_on_retry(self):
         patch = "*** Begin Patch\n*** Add File: once.txt\n+once\n*** End Patch"
@@ -297,6 +351,22 @@ class MessagesStreamTests(unittest.TestCase):
         self.assertEqual(result["content"][0]["signature"], "sig")
         self.assertEqual(result["content"][1]["input"], {"path": "a"})
         self.assertEqual(result["usage"], {"input_tokens": 20, "output_tokens": 5})
+
+    def test_native_search_and_streamed_citations_preserved(self):
+        citation = {"type": "web_search_result_location", "url": "https://example.com", "title": "Source", "encrypted_index": "opaque"}
+        events = [
+            {"type": "content_block_start", "index": 0, "content_block": {"type": "server_tool_use", "id": "s1", "name": "web_search", "input": {}}},
+            {"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": '{"query":"news"}'}},
+            {"type": "content_block_stop", "index": 0},
+            {"type": "content_block_start", "index": 1, "content_block": {"type": "web_search_tool_result", "tool_use_id": "s1", "content": []}},
+            {"type": "content_block_stop", "index": 1},
+            {"type": "content_block_start", "index": 2, "content_block": {"type": "text", "text": "Answer"}},
+            {"type": "content_block_delta", "index": 2, "delta": {"type": "citations_delta", "citation": citation}},
+            {"type": "content_block_stop", "index": 2},
+            {"type": "message_delta", "delta": {"stop_reason": "end_turn"}}, {"type": "message_stop"}]
+        result = self.stream(events)
+        self.assertEqual(result["content"][0]["input"], {"query": "news"})
+        self.assertEqual(result["content"][2]["citations"], [citation])
 
     def test_truncated_or_invalid_tool_stream_fails_before_execution(self):
         with self.assertRaises(ValueError): self.stream(self.events()[:-1])

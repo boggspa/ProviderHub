@@ -21,7 +21,7 @@ def delegate_definition(models):
         "task": {"type": "string", "description": "Self-contained task for this helper."},
         "choice": {"type": "string", "enum": [row["id"] for row in models if row["supportsTools"]]},
         "effort": {"type": "string"}}, "required": ["task"]}
-    return {"name": "delegate", "description": "Use task for one serial helper with inherited tools/approvals, OR tasks for 2–3 parallel READ-ONLY helpers (read_file/search_files only). Never mix the two forms. All helpers must finish before the parent continues. No child delegation or queued messages. Each defaults to the parent's exact model/account; choice can select another enabled route. At most four helpers total per turn.",
+    return {"name": "delegate", "description": "Use task for one serial helper with inherited tools/approvals, OR tasks for 2–3 parallel READ-ONLY helpers (local tools: read_file/search_files only). Native web search follows Chat settings and each helper's model capabilities. Never mix the two forms. All helpers must finish before the parent continues. No child delegation or queued messages. Each defaults to the parent's exact model/account; choice can select another enabled route. At most four helpers total per turn.",
             "input_schema": {"type": "object", "additionalProperties": False,
                 "properties": {**task["properties"], "tasks": {"type": "array", "minItems": 2, "maxItems": 3, "items": task}}}}
 
@@ -99,6 +99,8 @@ def make_child(parent, choice, effort, role, emit):
                         runner=parent.runner_type, workspaces=parent.workspaces,
                         child_factory=parent.child_factory, role=role)
     child.models = copy.deepcopy(parent.models)
+    # One live preference for the parent and all existing/new helpers and Side Chats.
+    child.preferences = parent.preferences
     child.chat = {"id": uuid.uuid4().hex, "title": "Helper" if role == "delegate" else "Side Chat",
                   "updated": now(), "route": choice["route"], "account": choice["account"],
                   "scope": choice["scope"], "label": choice["label"], "effort": effort,

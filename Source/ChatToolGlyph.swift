@@ -40,6 +40,6 @@ struct ChatToolGlyph: View {
         let patch = lines([[5.2,4.1,15.8,3.9,19.2,7.3,19,20.2,5.1,20], [15.6,4.1,15.8,7.5,19,7.3],
                            [8,9.4,13.4,9.3], [8,16.2,15.9,16], [8.2,12.8,14.9,12.7],
                            [11.6,9.7,11.6,15.8], [18.1,12.1,20.8,14.4,18.1,16.8]], closed: [0])
-        return ["read_file": file, "run_shell": shell, "search_files": search, "apply_patch": patch]
+        return ["read_file": file, "run_shell": shell, "search_files": search, "web_search": search, "apply_patch": patch]
     }()
 }

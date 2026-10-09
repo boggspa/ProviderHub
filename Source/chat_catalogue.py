@@ -14,6 +14,10 @@ from hub_config import claude_routes, cli_account_dir, connection_signature
 from model_names import friendly_model_name
 
 
+def native_search_available(spec, connection, provider):
+    return spec.get("web_search") is True and (connection.get("credential_mode") == "cli" or provider == "openrouter")
+
+
 def chat_connection(settings, provider, account="", expected_scope=None):
     if not isinstance(account, str):
         raise ValueError("Choose a configured account.")
@@ -78,6 +82,7 @@ def chat_choices(settings):
                          "accountLabel": account["label"], "scope": scope,
                          "efforts": efforts, "context": spec.get("runtime_context") or spec.get("context"),
                          "max_output": spec.get("max_output"), "supportsTools": spec.get("tools") is not False,
+                         "supportsWebSearch": native_search_available(spec, connection, provider),
                          "vision": spec.get("vision"),
                          "presentation": presentation, "connectionPresentation": connection_presentation})
     return rows

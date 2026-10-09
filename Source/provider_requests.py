@@ -375,7 +375,7 @@ def _normalize_native_payload(
         raise ProviderError("Anthropic request payload must be an object.")
     result = copy.deepcopy(payload)
     for key in list(result):
-        if str(key).lower() in _LOCAL_CREDENTIAL_FIELDS:
+        if str(key).lower() in _LOCAL_CREDENTIAL_FIELDS or str(key).startswith("_provider_hub_") or key == "_web_search":
             result.pop(key, None)
     messages = result.get("messages")
     if not isinstance(messages, list) or not messages:
@@ -993,7 +993,10 @@ def prepare_request(
             _claude_prompt_cache(body)
         if provider_id == "openrouter":
             try:
-                openrouter_finalize(body, model_spec, api_key)
+                search = (anthropic_payload.get("_web_search")
+                          if anthropic_payload.get("_provider_hub_surface") == "chat" and model_spec.get("web_search") is True
+                          else None)
+                openrouter_finalize(body, model_spec, api_key, search=search)
             except OpenRouterError as exc:
                 raise ProviderError(str(exc)) from exc
         return {
