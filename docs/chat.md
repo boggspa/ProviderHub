@@ -101,6 +101,30 @@ font files are never copied. An unavailable custom font falls back to System.
 Theme and surface reuse the Hub's existing preferences. Text choices affect
 the transcript and composer; code and diffs keep their monospace treatment.
 
+### Tables in replies
+
+Assistant replies support inline emphasis, code and links, plus a small native
+layout for Markdown pipe tables. A header followed by a valid `---` delimiter
+row becomes a table with wrapped cells and the requested column alignment.
+Wide tables scroll horizontally within the transcript. Right-click a table
+to **Copy table (TSV)** for a spreadsheet or **Copy table as Markdown**; the
+reply's context menu also offers **Copy reply** with its original text.
+This applies to the main transcript, Side Chat and agent inspector.
+
+During streaming, only complete table lines become cells. The line currently
+arriving stays visible as text until its newline or the end of the turn.
+Fenced/indented code and malformed table syntax keep the existing text layout.
+The parser does not interpret HTML or change saved transcripts or model input.
+
+The renderer adds no dependencies or WebView. The transcripts already use
+SwiftUI `LazyVStack`: rows are created lazily, while saved entries still stay
+in memory. Formatting state belongs to each reply and reuses unchanged
+blocks/cells. Native tables are bounded to 12 columns, 128 body rows and 64 KiB;
+one reply can render up to 16 tables and 2,048 cells. Larger content falls back
+to complete text, and messages above 256 KiB skip structured parsing. These
+limits cap view/parse work without truncating history. Full transcript
+windowing is a separate optimization to consider after measuring long chats.
+
 ## Files and commands
 
 The local tools are read file, search files, apply patch, and run shell. The
