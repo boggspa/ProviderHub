@@ -431,6 +431,25 @@ def _contains_content_type(value, kinds: set[str]) -> bool:
     return False
 
 
+def _has_cache_policy(body):
+    """Respect caller cache controls, including invalid ones for upstream validation."""
+    if "cache_control" in body:
+        return True
+    groups = [body.get("system"), body.get("tools")]
+    groups.extend(message.get("content") for message in body.get("messages", []) if isinstance(message, dict))
+    return any(isinstance(block, dict) and "cache_control" in block
+               for group in groups if isinstance(group, list) for block in group)
+
+
+def _claude_prompt_cache(body):
+    # Anthropic's automatic cache point follows the last eligible block. Avoid
+    # rewriting signed thinking/tool history or colliding with the caller's
+    # breakpoint/TTL budget. This runs only for the Anthropic API, never a CLI
+    # or another provider speaking the Messages compatibility protocol.
+    if not _has_cache_policy(body):
+        body["cache_control"] = {"type": "ephemeral"}
+
+
 def _estimated_input_tokens(payload: dict) -> int:
     images = 0
 
@@ -970,6 +989,8 @@ def prepare_request(
                 raise ProviderError("Claude Fast mode is unavailable for this model.")
             headers["anthropic-beta"] = CLAUDE_FAST_BETA
         _apply_native_model_limits(body, model_spec, provider_id, estimate_factor)
+        if provider_id == "claude":
+            _claude_prompt_cache(body)
         if provider_id == "openrouter":
             try:
                 openrouter_finalize(body, model_spec, api_key)

@@ -914,7 +914,10 @@ def relay_cli_turn(events, emit, *, model, input_tokens=0) -> dict:
                         for key in fields[2:] if key in reported):
                     # Explicit zeros clear cache counts already sent at
                     # message_start when a later snapshot has no cache use.
-                    usage = {key: reported.get(key, 0) for key in fields}
+                    # If no snapshot ever reported cache fields, keep them
+                    # absent: missing telemetry is not a measured cache miss.
+                    cache_reported = any(key in reported or key in usage for key in fields[2:])
+                    usage = {key: reported.get(key, 0) for key in (fields if cache_reported else fields[:2])}
                 continue
             if kind == "error":
                 error = str(event.get("message") or "The CLI turn failed.")

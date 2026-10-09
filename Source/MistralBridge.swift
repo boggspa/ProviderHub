@@ -972,7 +972,8 @@ final class BridgeModel: ObservableObject {
             let (data, _) = try await URLSession.shared.data(for: request)
             guard let status = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
             activeRequests = status["active"] as? Int ?? 0; completed = status["completed"] as? Int ?? 0
-            failures = status["failed"] as? Int ?? 0; inputTokens = status["input_tokens"] as? Int ?? 0
+            failures = status["failed"] as? Int ?? 0
+            inputTokens = status["total_input_tokens"] as? Int ?? status["input_tokens"] as? Int ?? 0
             outputTokens = status["output_tokens"] as? Int ?? 0
         } catch { }
     }

@@ -177,6 +177,7 @@ State remains under `~/Library/Application Support/Provider Hub Preview/` after 
 - `reasoning-signing-key`: separate private key used to authenticate Cerebras reasoning replay and scope xAI response-ID ownership; never supplied to either desktop client as a provider credential.
 - `responses-encryption-key`: separate persistent local key used to authenticate and encrypt provider reasoning carried through translated Codex Responses history. It is not prompt or session storage.
 - `activity.jsonl`: event, real provider/model, HTTP status, and usage metadata. No prompts, tool arguments, response text, or authorization headers.
+  Claude cache reads/writes are preserved separately; see [prompt caching and usage](docs/prompt-caching.md) for the API/CLI distinction and how to interpret them.
 - `last-request-shape.json`: field/role/content-type names only.
 - `last-responses-shape.json`: Responses field, input-item-type, and tool-type names only.
 - `profile-transaction.json`: temporary restoration journal, removed after successful recovery.
