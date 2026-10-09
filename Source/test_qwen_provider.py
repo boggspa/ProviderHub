@@ -2,6 +2,7 @@
 import copy
 import http.client
 import json
+import time
 import unittest
 from unittest.mock import patch
 
@@ -182,6 +183,11 @@ class QwenGatewayTests(unittest.TestCase):
             response = client.getresponse()
             status, raw = response.status, response.read()
             client.close()
+            # The response can arrive before the gateway records completion.
+            # Match the other HTTP fixtures before inspecting runtime counters.
+            deadline = time.monotonic() + 2
+            while self.runtime.status()["active"] and time.monotonic() < deadline:
+                time.sleep(.01)
             return status, raw
 
         body = {"model": route, "input": [{"role": "user", "content": "Inspect the screen."}],
