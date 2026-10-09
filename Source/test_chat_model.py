@@ -44,6 +44,22 @@ import SwiftUI
             model.consume(try JSONSerialization.data(withJSONObject: event) + Data([10]))
         }
         func check(_ yes: Bool, _ text: String) { if !yes { fatalError(text) } }
+        check(!model.hasActiveWork && !model.hasUnsentDrafts, "Idle Chat blocked an update")
+        model.sideChat = ChatSide(id: "side", route: "test", account: "", label: "Side", effort: "", status: "working", busy: true, entries: [])
+        check(model.hasActiveWork, "Update ignored active Side Chat")
+        model.sideChat?.busy = false
+        check(!model.hasActiveWork, "Completed Side Chat still blocked restart")
+        model.agents = [ChatAgent(id: "agent", route: "test", account: "", label: "Agent", task: "Task", status: "approval", entries: [], changedFiles: [])]
+        check(model.hasActiveWork, "Update ignored delegated task awaiting approval")
+        model.agents[0].status = "done"
+        check(!model.hasActiveWork, "Completed delegated task blocked restart")
+        model.branchBusy = true; check(model.hasActiveWork, "Update ignored branch operation"); model.branchBusy = false
+        model.teamRequest = "team"; check(model.hasActiveWork, "Update ignored Team setup"); model.teamRequest = nil
+        model.sideOpening = true; check(model.hasActiveWork, "Update ignored Side Chat startup"); model.sideOpening = false
+        model.sideDraft = "Unsent side message"; check(model.hasUnsentDrafts, "Update lost Side Chat draft"); model.sideDraft = ""
+        model.sideDrafts["other"] = "Saved side draft"; check(model.hasUnsentDrafts, "Update lost another chat's Side Chat draft")
+        model.sideDrafts.removeAll(); model.agents = []; model.sideChat = nil
+        check(!model.hasActiveWork && !model.hasUnsentDrafts, "Cleared work still blocked restart")
         let route: [String: Any] = ["id":"ollama/test|", "route":"ollama/test", "label":"Test", "provider":"Ollama",
             "account":"", "accountLabel":"Default", "scope":"scope", "efforts":["low","high"], "context":100000, "supportsTools":true]
         func summary(_ id: String) -> [String: Any] {
@@ -75,7 +91,7 @@ import SwiftUI
         model.select("B"); try send(["event":"selected", "id":"B", "entries":[]])
         check(model.draft == "B's unsent draft", "B draft lost across selection")
         model.send()
-        check(model.busy && model.draft.isEmpty, "send did not begin")
+        check(model.busy && model.draft.isEmpty && model.hasActiveWork, "send did not begin or update ignored the turn")
         try send(["event":"error", "message":"rejected before acceptance"])
         check(model.draft == "B's unsent draft" && !model.busy, "rejected send lost submitted text")
         model.send()

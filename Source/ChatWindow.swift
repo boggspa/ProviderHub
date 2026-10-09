@@ -72,6 +72,7 @@ struct ChatWindow: View {
                 .frame(width: 18, height: 18).clipShape(RoundedRectangle(cornerRadius: 5))
                 .accessibilityHidden(true)
             Text("Provider Hub").font(.system(size: 12, weight: .semibold))
+            HubUpdatePill()
             Spacer()
         }
         .padding(.leading, 78).padding(.trailing, 12).frame(height: 36)

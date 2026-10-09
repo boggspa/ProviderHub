@@ -167,6 +167,7 @@ struct CompactShell: View {
         HStack(spacing: 8) {
             Image(nsImage: NSApp.applicationIconImage).resizable().frame(width: 18, height: 18).clipShape(RoundedRectangle(cornerRadius: 5))
             Text("Provider Hub").font(.system(size: 12, weight: .semibold))
+            HubUpdatePill()
             Spacer()
             Circle().fill(model.running ? Chroma.ok : Color.secondary.opacity(0.5)).frame(width: 7, height: 7)
                 .shadow(color: model.running ? Chroma.ok.opacity(0.5) : .clear, radius: 3)

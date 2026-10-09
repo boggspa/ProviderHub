@@ -1457,6 +1457,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         applyDesign()
         window.center()
         showWindow()
+        HubUpdater.shared.start(python: model.python, worker: model.helper.deletingLastPathComponent(), root: model.root) { [weak self] in
+            guard let self else { return "Provider Hub is closing." }
+            return self.updateRestartBlocker()
+        }
+    }
+
+    func updateRestartBlocker() -> String? {
+        let desktopIDs: Set<String> = ["com.openai.codex", "com.openai.chat", "com.anthropic.claudefordesktop"]
+        return HubUpdateRestartPolicy.blocker(
+            desktopOpen: NSWorkspace.shared.runningApplications.contains { !$0.isTerminated && desktopIDs.contains($0.bundleIdentifier ?? "") },
+            activeWork: model.activeRequests > 0 || model.busy || model.chatWorking || chatModel.hasActiveWork,
+            unsavedSettings: model.changed, drafts: chatModel.hasUnsentDrafts)
     }
 
     /// "compact" is the compact shell (CompactShell.swift); "classic" is the
@@ -1589,6 +1601,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         if readyToQuit { return .terminateNow }
+        if HubUpdater.shared.working { return .terminateCancel }
+        if HubUpdater.shared.restartRequested, let reason = updateRestartBlocker() {
+            HubUpdater.shared.deferRestart(reason)
+            return .terminateCancel
+        }
         model.updateClaudeRunning()
         model.updateCodexRunning()
         if model.desktopOwnedHarnessRunning {
@@ -1599,7 +1616,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             alert.runModal()
             return .terminateCancel
         }
-        if model.activeRequests > 0 || model.busy || model.chatWorking {
+        if model.activeRequests > 0 || model.busy || model.chatWorking || chatModel.hasActiveWork {
             model.tell("Wait for the current operation to finish before quitting.", error: true); showWindow(); return .terminateCancel
         }
         model.shuttingDown = true
@@ -1607,13 +1624,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         Task {
             if model.codexRecoveryNeeded && !model.codexRunning {
                 do { _ = try await model.command("codex-restore"); model.codexRecoveryNeeded = false }
-                catch { model.shuttingDown = false; model.tell(error.localizedDescription, error: true); showWindow(); NSApp.reply(toApplicationShouldTerminate: false); return }
+                catch {
+                    model.shuttingDown = false
+                    if HubUpdater.shared.restartRequested { HubUpdater.shared.deferRestart("Click Restart to retry after recovery.") }
+                    model.tell(error.localizedDescription, error: true); showWindow(); NSApp.reply(toApplicationShouldTerminate: false); return
+                }
             }
             if model.recoveryNeeded && !model.claudeRunning {
                 do { _ = try await model.command("restore"); model.recoveryNeeded = false }
-                catch { model.shuttingDown = false; model.tell(error.localizedDescription, error: true); showWindow(); NSApp.reply(toApplicationShouldTerminate: false); return }
+                catch {
+                    model.shuttingDown = false
+                    if HubUpdater.shared.restartRequested { HubUpdater.shared.deferRestart("Click Restart to retry after recovery.") }
+                    model.tell(error.localizedDescription, error: true); showWindow(); NSApp.reply(toApplicationShouldTerminate: false); return
+                }
             }
             await model.stopGateway()
+            do { try HubUpdater.shared.launchInstaller() }
+            catch {
+                model.shuttingDown = false
+                HubUpdater.shared.deferRestart("Click Restart to retry.")
+                model.tell(error.localizedDescription, error: true); showWindow()
+                NSApp.reply(toApplicationShouldTerminate: false); return
+            }
             readyToQuit = true
             NSApp.reply(toApplicationShouldTerminate: true)
         }

@@ -13,7 +13,7 @@ SWIFT_SOURCES=(
   "$SOURCE_DIR/CatalogueSelection.swift" "$SOURCE_DIR/HubModels.swift"
   "$SOURCE_DIR/HubLayout.swift" "$SOURCE_DIR/ProviderViews.swift"
   "$SOURCE_DIR/DevinAgentsView.swift" "$SOURCE_DIR/CodexHarness.swift"
-  "$SOURCE_DIR/HubTheme.swift" "$SOURCE_DIR/HubGlass.swift" "$SOURCE_DIR/QuickComposerPanel.swift" "$SOURCE_DIR/CompactShell.swift"
+  "$SOURCE_DIR/HubTheme.swift" "$SOURCE_DIR/HubGlass.swift" "$SOURCE_DIR/HubUpdater.swift" "$SOURCE_DIR/QuickComposerPanel.swift" "$SOURCE_DIR/CompactShell.swift"
   "$SOURCE_DIR/ChatModel.swift" "$SOURCE_DIR/ChatInspectorModel.swift" "$SOURCE_DIR/ChatInspector.swift" "$SOURCE_DIR/ChatTeam.swift" "$SOURCE_DIR/ChatBranches.swift" "$SOURCE_DIR/ChatFonts.swift" "$SOURCE_DIR/ChatSettings.swift" "$SOURCE_DIR/ChatTurnTime.swift" "$SOURCE_DIR/ChatStateAccents.swift" "$SOURCE_DIR/ChatWorkspaces.swift" "$SOURCE_DIR/ChatModelPicker.swift" "$SOURCE_DIR/ChatAttachments.swift" "$SOURCE_DIR/ChatToolGlyph.swift" "$SOURCE_DIR/ChatTranscriptText.swift" "$SOURCE_DIR/ChatWindow.swift"
   "$SOURCE_DIR/MistralBridge.swift"
 )
@@ -26,6 +26,7 @@ for module in chat_git chat_memory chat_history chat_team chat_attachments chat_
   cp "$SOURCE_DIR/$module.py" "$APP_DIR/Contents/Resources/worker/"
 done
 cp "$SOURCE_DIR/provider_branding.json" "$APP_DIR/Contents/Resources/worker/"
+cp "$SOURCE_DIR/hub_updater.py" "$SOURCE_DIR/update_install.sh" "$APP_DIR/Contents/Resources/worker/"
 cp -R "$SOURCE_DIR/provider-logos" "$APP_DIR/Contents/Resources/worker/"
 cp -R "$SOURCE_DIR/fonts" "$APP_DIR/Contents/Resources/worker/"
 # Copy only runtime assets; --plugin-dir previews generate local type stubs.
