@@ -642,6 +642,16 @@ class _TurnState:
         self.host_handoff = False
         # Host calls handed over on earlier legs of a live session.
         self.handed: set = set()
+        # Native message usage is cumulative per message, repeated in block
+        # snapshots. Result usage is cumulative for the CLI query. Live host
+        # continuations share that query, but each gateway leg reports only
+        # its own increment. Never infer cache hits from prompt length.
+        self.usage_messages = {}
+        self.usage_baseline = {}
+        self.usage_baseline_known = True
+        self.usage_prior_keys = set()
+        self.usage_changed = False
+        self.result_usage = None
 
     def next_leg(self) -> None:
         """Start the next host request on a live session.
@@ -650,6 +660,12 @@ class _TurnState:
         shown (its registry, its tool set, the messages it has streamed) stays,
         so a late snapshot of an earlier message repeats neither text nor calls.
         """
+        totals = self.usage_totals()
+        self.usage_baseline_known = totals is not None
+        self.usage_baseline = totals or {}
+        self.usage_prior_keys = set(self.usage_messages)
+        self.usage_changed = False
+        self.result_usage = None
         self.handed.update(identifier for identifier in self.host_calls if isinstance(identifier, str))
         self.host_calls = {}
         self.pending_calls = {}
@@ -663,6 +679,66 @@ class _TurnState:
         self.current_message = None
         self.last_text_message = None
         self.raw_lines = self.raw_lines[-5:]
+
+    def record_usage(self, value, message=None, *, terminal=False, final_output=False):
+        fields = ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
+        current = None
+        if not terminal and message is not None:
+            key = message.setdefault("usage_key", len(self.usage_messages))
+            current = self.usage_messages.setdefault(key, {})
+        if not isinstance(value, dict):
+            return
+        counters = {key: value[key] for key in fields if key in value}
+        if not counters or any(type(number) is not int or number < 0 for number in counters.values()):
+            return
+        if terminal:
+            if not self.usage_baseline_known or not all(key in counters for key in fields[:2]):
+                return
+            # Some CLI versions omit a query-total field. Do not treat an
+            # omitted or decreasing cumulative counter as negative leg usage.
+            if any(counters.get(key, -1) < number for key, number in self.usage_baseline.items()):
+                return
+            self.result_usage = counters
+            self.usage_changed = True
+        elif message is not None:
+            # Assistant block snapshots may carry an output placeholder even
+            # after the native message_delta reported its final output count.
+            if message.get("usage_output_final") and not final_output:
+                counters.pop("output_tokens", None)
+            if final_output and "output_tokens" in counters:
+                message["usage_output_final"] = True
+            if any(current.get(key) != number for key, number in counters.items()):
+                current.update(counters)
+                self.usage_changed = True
+
+    def usage_totals(self):
+        if self.result_usage is not None:
+            return dict(self.result_usage)
+        if not self.usage_messages or any(not all(key in value for key in ("input_tokens", "output_tokens"))
+                                          for value in self.usage_messages.values()):
+            return None
+        totals = {}
+        for value in self.usage_messages.values():
+            for key, number in value.items():
+                totals[key] = totals.get(key, 0) + number
+        return totals
+
+    def usage_events(self):
+        if not self.usage_changed:
+            return
+        if self.result_usage is not None:
+            yield {"type": "usage", "usage": {key: max(0, number - self.usage_baseline.get(key, 0))
+                                              for key, number in self.result_usage.items()}}
+            return
+        # If an earlier leg lacked usage, a query total cannot be assigned to
+        # this leg. Use only newly observed message IDs, never earlier replay.
+        values = [value for key, value in self.usage_messages.items() if key not in self.usage_prior_keys]
+        if not values or any(not all(key in value for key in ("input_tokens", "output_tokens")) for value in values):
+            return
+        totals = {}
+        for value in values:
+            for key, number in value.items(): totals[key] = totals.get(key, 0) + number
+        yield {"type": "usage", "usage": totals}
 
     def host_tool_for(self, name) -> str | None:
         """The host tool a native tool_use stands for, when handing it over is safe.
@@ -843,7 +919,9 @@ def _translate(payload: Any, state: _TurnState) -> list[dict]:
         if not isinstance(event, dict):
             return []
         if event.get("type") == "message_start":
-            state.start_message(event.get("message"))
+            message = event.get("message")
+            current = state.start_message(message)
+            state.record_usage(message.get("usage") if isinstance(message, dict) else None, current)
             return []
         if event.get("type") == "content_block_start":
             block = event.get("content_block") or {}
@@ -869,6 +947,7 @@ def _translate(payload: Any, state: _TurnState) -> list[dict]:
             # so a stream truncated before `result` still reports why it ended
             # instead of silently defaulting to "end_turn".
             if event.get("type") == "message_delta":
+                state.record_usage(event.get("usage"), state.current_message, final_output=True)
                 delta = event.get("delta")
                 if isinstance(delta, dict):
                     reason = delta.get("stop_reason")
@@ -906,6 +985,7 @@ def _translate(payload: Any, state: _TurnState) -> list[dict]:
         message = payload.get("message")
         if isinstance(message, dict):
             current = state.snapshot_message(message)
+            state.record_usage(message.get("usage"), current)
             content = message.get("content") or []
             if isinstance(content, str):
                 content = [{"type": "text", "text": content}]
@@ -937,6 +1017,7 @@ def _translate(payload: Any, state: _TurnState) -> list[dict]:
         return []
 
     if kind == "result":
+        state.record_usage(payload.get("usage"), terminal=True)
         if state.host_calls or state.stray_calls:
             state.end_of_calls()
             return []
@@ -1338,12 +1419,14 @@ def _stream(session, state, *, timeout, on_handoff=None):
             if state.host_handoff:
                 if on_handoff is not None and on_handoff():
                     # The CLI waits in the bridge for the host's results.
+                    yield from state.usage_events()
                     yield {"type": "message_stop", "stop_reason": "tool_use"}
                     return "pending"
                 # Native calls for host tools the CLI must not run. Stop
                 # before its refusal reaches the model; its stdin is already
                 # at EOF, so only a signal ends it now.
                 _interrupt(session)
+                yield from state.usage_events()
                 yield {"type": "message_stop", "stop_reason": "tool_use"}
                 return None
             if state.terminal:
@@ -1358,6 +1441,7 @@ def _stream(session, state, *, timeout, on_handoff=None):
                 if not state.emitted_text:
                     yield {"type": "error", "message": "the claude CLI produced no output"}
                     return None
+                yield from state.usage_events()
                 yield {"type": "message_stop", "stop_reason": state.stop_reason or "end_turn"}
                 return None
 
@@ -1390,6 +1474,7 @@ def _stream(session, state, *, timeout, on_handoff=None):
     except Exception as exc:
         yield {"type": "error", "message": _describe(exc, state, timeout)}
         return None
+    yield from state.usage_events()
     yield {"type": "message_stop", "stop_reason": stop_reason}
     return None
 

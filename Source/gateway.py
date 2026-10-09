@@ -134,12 +134,15 @@ class Runtime:
         self.failed = 0
         self.input_tokens = 0
         self.output_tokens = 0
+        self.cache_read_input_tokens = 0
+        self.cache_creation_input_tokens = 0
         self.last_error = ""
         self.last_model = ""
         self.started = time.time()
         self.stopping = threading.Event()
         self.connections = set()
-        self.provider_counts = {provider_id: {"completed": 0, "failed": 0, "input_tokens": 0, "output_tokens": 0} for provider_id in PROVIDERS}
+        self.provider_counts = {provider_id: {"completed": 0, "failed": 0, "input_tokens": 0, "output_tokens": 0,
+            "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0, "total_input_tokens": 0} for provider_id in PROVIDERS}
 
     def resolve_route(self, requested):
         if not isinstance(requested, str):
@@ -394,6 +397,9 @@ class Runtime:
         with self.lock:
             return {"running": True, "active": self.active, "completed": self.completed, "failed": self.failed,
                     "input_tokens": self.input_tokens, "output_tokens": self.output_tokens,
+                    "cache_read_input_tokens": self.cache_read_input_tokens,
+                    "cache_creation_input_tokens": self.cache_creation_input_tokens,
+                    "total_input_tokens": self.input_tokens + self.cache_read_input_tokens + self.cache_creation_input_tokens,
                     "last_error": self.last_error, "last_model": self.last_model,
                     "credential_source": self.source, "uptime_seconds": int(time.time() - self.started), "pid": os.getpid(),
                     "catalogue_fingerprint": self.catalogue_fingerprint,
@@ -420,6 +426,10 @@ class Runtime:
                 self.completed += 1
                 self.input_tokens += (usage or {}).get("input_tokens", 0)
                 self.output_tokens += (usage or {}).get("output_tokens", 0)
+                for key in ("cache_read_input_tokens", "cache_creation_input_tokens"):
+                    value = (usage or {}).get(key)
+                    if type(value) is int and value >= 0:
+                        setattr(self, key, getattr(self, key) + value)
                 self.last_error = ""
             elif kind == "error":
                 self.failed += 1
@@ -434,6 +444,11 @@ class Runtime:
                     counters["completed"] += 1
                     counters["input_tokens"] += (usage or {}).get("input_tokens", 0)
                     counters["output_tokens"] += (usage or {}).get("output_tokens", 0)
+                    for key in ("cache_read_input_tokens", "cache_creation_input_tokens"):
+                        value = (usage or {}).get(key)
+                        if type(value) is int and value >= 0:
+                            counters[key] += value
+                    counters["total_input_tokens"] = counters["input_tokens"] + counters["cache_read_input_tokens"] + counters["cache_creation_input_tokens"]
                 elif kind in {"error", "slot_timeout"}:
                     counters["failed"] += 1
             path = self.root / "activity.jsonl"
