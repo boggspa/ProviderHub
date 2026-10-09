@@ -45,6 +45,7 @@ class FakeCodexSession:
         self.stdin = _FakeStdin()
         self.requests = []
         self.notifications = []
+        self.sent = []
         self.script = []
         self.responses = {
             "initialize": {"result": {}},
@@ -59,6 +60,9 @@ class FakeCodexSession:
 
     def notify(self, method, params):
         self.notifications.append((method, params))
+
+    def send(self, payload):
+        self.sent.append(json.loads(payload))
 
     def events(self, timeout=None):
         for event in self.script:
@@ -1134,6 +1138,88 @@ class RunTurnTests(unittest.TestCase):
                 events, _, _ = self._run(self._request(), fake)
                 self.assertEqual([e["type"] for e in events], ["error"])
                 self.assertTrue(fake.closed)
+
+    def test_native_image_generation_streams_and_keeps_the_turn_alive(self):
+        fake = FakeCodexSession([])
+        fake.script = [
+            _ev("item/started", {"item": {"type": "imageGeneration", "id": "ig1", "status": "in_progress", "result": ""}}),
+            _ev("item/completed", {"item": {"type": "imageGeneration", "id": "ig1", "status": "completed",
+                                          "result": "PNG-RESULT", "revisedPrompt": "A red bird"}}),
+            _delta_ev("Here is the image."), _completed_turn()]
+        events, session, _ = self._run(self._request(native_image_generation=True), fake)
+        self.assertEqual([event["type"] for event in events],
+                         ["image_generation", "image_generation", "text_delta", "message_stop"])
+        self.assertEqual(events[1]["result"], "PNG-RESULT")
+        self.assertEqual(events[1]["revised_prompt"], "A red bird")
+        self.assertEqual(events[-1]["stop_reason"], "end_turn")
+        thread = next(params for method, params, _ in session.requests if method == "thread/start")
+        self.assertTrue(thread["config"]["features"]["image_generation"])
+        self.assertIn("features.image_generation=false", session.argv)
+        self.assertIn("features.shell_tool=false", session.argv)
+
+    def test_failed_native_image_can_recover_with_a_host_tool_in_the_same_turn(self):
+        tool = {"name": "imagegen", "input_schema": {"type": "object"}}
+        fake = FakeCodexSession([])
+        fake.script = [
+            _ev("item/completed", {"item": {"type": "imageGeneration", "id": "ig1", "status": "failed", "result": "",
+                                          "failure": {"type": "usageLimitExceeded", "limitId": "images"}}}),
+            {"id": 7, "method": "item/tool/call", "params": {"namespace": "host", "callId": "host-image",
+                "tool": codex._tool_alias("imagegen"), "arguments": {"prompt": "A red bird"}}}]
+        events, _, _ = self._run(self._request(native_image_generation=True, tools=[tool]), fake)
+        self.assertEqual([event["type"] for event in events], ["image_generation", "tool_call", "message_stop"])
+        self.assertEqual(events[0]["status"], "failed")
+        self.assertEqual(events[1]["name"], "imagegen")
+        self.assertEqual(events[-1]["stop_reason"], "tool_use")
+
+    def test_native_image_generation_respects_tool_choice_none(self):
+        fake = FakeCodexSession([])
+        fake.script = [_completed_turn()]
+        _, session, _ = self._run(self._request(native_image_generation=True, tool_choice={"type": "none"}), fake)
+        thread = next(params for method, params, _ in session.requests if method == "thread/start")
+        self.assertFalse(thread.get("config", {}).get("features", {}).get("image_generation", False))
+
+    def test_native_image_completion_normalizes_runtime_status_without_hiding_failure(self):
+        for status, result, failure, expected in [
+                ("succeeded", "PNG", None, "completed"),
+                ("completed", "PNG", {"type": "usageLimitExceeded"}, "failed"),
+                ("cancelled", "PARTIAL", None, "failed"),
+                ("incomplete", "PARTIAL", None, "incomplete"),
+                ("completed", "", None, "failed")]:
+            with self.subTest(status=status, failure=failure):
+                fake = FakeCodexSession([])
+                fake.script = [_ev("item/completed", {"item": {"type": "imageGeneration", "id": "ig1",
+                    "status": status, "result": result, "failure": failure}}), _completed_turn()]
+                events, _, _ = self._run(self._request(native_image_generation=True), fake)
+                self.assertEqual(events[0]["status"], expected)
+                self.assertEqual(events[-1]["type"], "message_stop")
+
+    def test_invalid_host_call_is_returned_to_model_for_correction_without_reconnecting(self):
+        tool = {"name": "imagegen", "input_schema": {"type": "object"}}
+        for name, arguments in [("imagegen", {}), (codex._tool_alias("imagegen"), "not an object")]:
+            with self.subTest(name=name):
+                fake = FakeCodexSession([])
+                fake.script = [
+                    {"id": 6, "method": "item/tool/call", "params": {"namespace": "host", "callId": "bad",
+                        "tool": name, "arguments": arguments}},
+                    {"id": 7, "method": "item/tool/call", "params": {"namespace": "host", "callId": "fixed",
+                        "tool": codex._tool_alias("imagegen"), "arguments": {"prompt": "A red bird"}}}]
+                events, session, _ = self._run(self._request(tools=[tool]), fake)
+                self.assertEqual([event["type"] for event in events], ["tool_call", "message_stop"])
+                self.assertEqual(events[0]["id"], "fixed")
+                self.assertEqual(len(session.sent), 1)
+                self.assertEqual(session.sent[0]["id"], 6)
+                self.assertFalse(session.sent[0]["result"]["success"])
+                self.assertIn("No tool was executed", session.sent[0]["result"]["contentItems"][0]["text"])
+
+    def test_invalid_host_call_recovery_is_bounded(self):
+        fake = FakeCodexSession([])
+        fake.script = [{"id": number, "method": "item/tool/call", "params": {
+            "namespace": "host", "callId": "bad", "tool": "unknown", "arguments": {}}}
+            for number in range(10)]
+        events, session, _ = self._run(self._request(), fake)
+        self.assertEqual(len(session.sent), 3)
+        self.assertEqual([event["type"] for event in events], ["error"])
+        self.assertEqual(events[0]["http_status"], 400)
 
     def test_image_viewing_is_steered_to_the_host_view_image_alias(self):
         # The nested runtime has no image viewer of its own, so a model that

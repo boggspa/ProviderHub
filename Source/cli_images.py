@@ -116,6 +116,38 @@ def image_label(image, index):
     return f"Image {index} attached; original screenshot pixels{geometry}"
 
 
+def recover_tool_content(content):
+    """Keep usable tool output and explain only the blocks we cannot relay.
+
+    This is for results already produced by the host, not user attachments.
+    Never fetch URLs, resize pixels, or claim to have seen omitted content.
+    The caller retains tool identity and the host's own success/error flag.
+    """
+    if isinstance(content, str):
+        return content
+    result = []
+    for block in content if isinstance(content, list) else [content]:
+        kind = block.get("type") if isinstance(block, dict) else None
+        kind = kind if isinstance(kind, str) else None
+        try:
+            if kind in {"text", "input_text", "output_text"} and isinstance(block.get("text"), str):
+                result.append({"type": "text", "text": block["text"]})
+            elif kind == "refusal" and isinstance(block.get("refusal"), str):
+                result.append({"type": "text", "text": block["refusal"]})
+            elif kind in {"image", "input_image"}:
+                result.append(normalize_image(block))
+            else:
+                raise CliImageError("This content format cannot be passed to the CLI model")
+        except (CliImageError, TypeError, AttributeError) as exc:
+            label = "image" if kind in {"image", "input_image"} else "content"
+            reason = str(exc) if isinstance(exc, CliImageError) else "Malformed content block"
+            result.append({"type": "text", "text":
+                f"[Provider Hub could not relay this tool-result {label}: {reason}. "
+                "The original result remains in the host transcript. Use a host tool to retrieve "
+                "a supported image or text if needed; its contents have not been inspected here.]"})
+    return result
+
+
 def responses_content(content):
     """Project canonical Messages content into native Responses tool output."""
     if isinstance(content, str):

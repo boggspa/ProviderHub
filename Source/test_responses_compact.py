@@ -63,6 +63,18 @@ class CompactionTests(unittest.TestCase):
         self.assertIn("observed result 7", self.calls[0][1])
         self.assertNotIn("observed result 11", self.calls[0][1])
 
+    def test_native_search_and_image_history_compacts_without_summarizing_base64(self):
+        image = {"type": "image_generation_call", "status": "completed", "result": "BASE64-IMAGE-DATA",
+                 "revised_prompt": "A red bird"}
+        search = {"type": "web_search_call", "status": "completed", "action": {"type": "search", "query": "birds"}}
+        history = [long_history()[0], search, image, *long_history()[1:]]
+        original = copy.deepcopy(history)
+        result = self.compact(history)
+        self.assertTrue(result["output"][0]["encrypted_content"].startswith(PREFIX))
+        self.assertIn("A red bird", self.calls[0][1])
+        self.assertNotIn("BASE64-IMAGE-DATA", self.calls[0][1])
+        self.assertEqual(history, original)
+
     def test_pending_call_and_intervening_steers_are_preserved(self):
         items = long_history()
         pending = {"type": "function_call", "call_id": "pending", "name": "read_file", "arguments": "{}"}

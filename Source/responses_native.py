@@ -12,14 +12,14 @@ import threading
 import time
 import uuid
 
-from bridge_core import BridgeError, atomic_json, read_json
+from bridge_core import BridgeError, MAX_REQUEST_BODY, atomic_json, read_json
 from hub_config import connection_signature, qualify, split_route
 from protocol import mask_effort_rejection
 from providers import PROVIDERS, ProviderError, _auth_headers, _chat_effort, validate_connection
 from catalogue import image_input_blocked
 from responses_tools import (flatten_tools, input_names, normalize_custom_calls, output_names, register,
                              restore_custom_call, split_hosted_search, strip_goal_budget)
-from responses_bridge import ENVELOPE_PREFIX, MessagesResponsesAdapter, ReasoningEnvelope, to_messages
+from responses_bridge import ENVELOPE_PREFIX, MessagesResponsesAdapter, ReasoningEnvelope, image_generation_message, to_messages
 from responses_compact import expand_items
 from openrouter_provider import OpenRouterError, finalize as openrouter_finalize, app_headers as openrouter_app_headers
 from effort_map import cap_high_end, map_effort, nearest_effort, ollama_effort_aliases
@@ -76,6 +76,11 @@ def is_context_overflow(message):
     """True when a 400's text says the conversation is over the context window."""
     return isinstance(message, str) and bool(_CONTEXT_OVERFLOW.search(message))
 MAX_BODY = 32 * 1024 * 1024
+# Leave room for compaction to receive the same history, plus JSON/base64
+# expansion on the internal Messages hop. This is a wire-byte budget, not a
+# model context window. Older 32 MiB ingress checks rejected valid images
+# before the existing CLI image-history budget could run.
+MAX_RESPONSES_BODY = 64 * 1024 * 1024
 REQUEST_FIELDS = frozenset({
     "model", "input", "instructions", "tools", "tool_choice", "parallel_tool_calls",
     "stream", "stream_options", "store", "previous_response_id", "include", "reasoning",
@@ -720,10 +725,14 @@ def prepare_native(runtime, payload):
     if note is not None:
         body["instructions"] = with_ultra_note(body.get("instructions"), note)
     note = compaction_note(body, tools)
+    compacting = note is not None
     if note is not None:
         body["instructions"] = with_ultra_note(body.get("instructions"), note)
     if isinstance(body["input"], list):
         body["input"] = _normalize_multi_agent_items(body["input"])
+        body["input"] = [image_generation_message(item, include_image=not image_input_blocked(provider_id, spec))
+                         if isinstance(item, dict) and item.get("type") == "image_generation_call" else item
+                         for item in body["input"]]
         # A search a provider ran on an earlier turn comes back as history.
         # It carries no results, and what it found is already in the assistant
         # text after it, so no route replays it - including a route switched to
@@ -776,6 +785,8 @@ def prepare_native(runtime, payload):
         translated = to_messages(body, route, spec, envelope, scope)
         if cli_mode:
             translated["_provider_hub_surface"] = "responses"
+            if compacting:
+                translated["tool_choice"] = {"type": "none"}
             if search is not None:
                 # The CLI runs the hosted search itself (checked above: the
                 # route's entry carries web_search).
@@ -941,6 +952,28 @@ def usage_metadata(value):
             for key in ("input_tokens", "output_tokens")}
 
 
+def _respond_context_overflow(handler, model, stream, message):
+    """Use the client's compaction signal instead of its reconnect loop."""
+    error = {"code": "context_length_exceeded", "message": message}
+    if not stream:
+        handler.json_response(400, {"type": "error", "error": {"type": "invalid_request_error", **error}})
+        return
+    event = {"type": "response.failed", "sequence_number": 0, "response": {
+        "id": "resp_" + uuid.uuid4().hex, "object": "response", "created_at": int(time.time()),
+        "status": "failed", "model": model, "output": [], "error": error,
+        "incomplete_details": None, "usage": None}}
+    raw = ("event: response.failed\ndata: " + json.dumps(event) + "\n\n").encode()
+    handler.send_response(200)
+    handler.send_header("Content-Type", "text/event-stream")
+    handler.send_header("Cache-Control", "no-store")
+    handler.send_header("Content-Length", str(len(raw)))
+    handler.send_header("Connection", "close")
+    handler.end_headers()
+    handler.wfile.write(raw)
+    handler.wfile.flush()
+    handler.close_connection = True
+
+
 def handle_responses(handler):
     """Relay complete native Responses JSON/SSE with shared lifecycle control."""
     runtime = handler.runtime
@@ -948,13 +981,27 @@ def handle_responses(handler):
         if handler.headers.get("Transfer-Encoding"):
             raise BridgeError("Use a Content-Length request body.")
         size = int(handler.headers.get("Content-Length", "0"))
-        if not 0 < size <= MAX_BODY:
-            handler.error(413, "Responses request is too large or empty.")
+        if size <= 0:
+            handler.error(400, "Responses request is empty.")
+            return
+        if size > MAX_REQUEST_BODY:
+            handler.error(413, "Responses request exceeds the 128 MiB transport limit; compact the conversation or reduce attachments.")
             return
         raw = handler.rfile.read(size)
         if len(raw) != size:
             raise BridgeError("The request body was interrupted.")
         payload = json.loads(raw)
+        if not isinstance(payload, dict):
+            raise BridgeError("The Responses request must be a JSON object.")
+        # Older custom-provider runtimes compact through this same endpoint
+        # with a checkpoint prompt rather than /responses/compact. Give that
+        # recovery request the larger ingress budget too, or it would hit the
+        # exact same soft limit and never shrink the conversation.
+        if size > MAX_RESPONSES_BODY and compaction_note(payload, payload.get("tools") or []) is None:
+            _respond_context_overflow(handler, payload.get("model"), payload.get("stream") is True,
+                                      "Provider Hub's conversation payload budget was reached. "
+                                      "Compact the conversation before continuing.")
+            return
         plan = prepare_native(runtime, payload)
         atomic_json(runtime.root / "last-responses-shape.json", _request_shape(payload))
     except (ValueError, TypeError, KeyError, BridgeError, ProviderError) as exc:

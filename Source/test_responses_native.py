@@ -300,6 +300,68 @@ class NativeResponsesTests(unittest.TestCase):
                 "store": False, "stream": False,
                 "tools": [{"type": "function", "name": "read_file", "parameters": {"type": "object"}}], **changes}
 
+    def test_request_budget_is_separate_from_the_response_event_limit(self):
+        self.start()
+        with patch("responses_native.MAX_BODY", 1024), patch("responses_native.MAX_RESPONSES_BODY", 4096):
+            status, raw = self.request(self.body(input="x" * 2048))
+        self.assertEqual(status, 200, raw[:500])
+        self.assertEqual(MockProvider.requests[-1]["input"], "x" * 2048)
+
+    def test_payload_pressure_asks_for_compaction_without_retrying_the_provider(self):
+        self.start()
+        for stream in (False, True):
+            with self.subTest(stream=stream), patch("responses_native.MAX_RESPONSES_BODY", 1024):
+                status, raw = self.request(self.body(stream=stream, input="x" * 2048))
+                if stream:
+                    self.assertEqual(status, 200, raw)
+                    events = fixtures.parse_sse(raw)
+                    self.assertEqual([event["type"] for event in events], ["response.failed"])
+                    error = events[0]["response"]["error"]
+                else:
+                    self.assertEqual(status, 400, raw)
+                    error = json.loads(raw)["error"]
+                self.assertEqual(error["code"], "context_length_exceeded")
+        self.assertEqual(MockProvider.requests, [])
+        self.assertEqual(self.runtime.status()["active"], 0)
+
+    def test_compaction_can_receive_history_above_the_responses_byte_budget(self):
+        self.start()
+        body = {"model": self.route, "input": [{"role": "user", "content": "x" * 2048}]}
+        with patch("responses_compact.MAX_BODY", 1024), patch("responses_compact.compact_payload", return_value={
+                "object": "response.compaction", "output": [{"role": "user", "content": "summary"}]}) as compact:
+            client = http.client.HTTPConnection("127.0.0.1", self.gateway.server_port, timeout=6)
+            client.request("POST", "/v1/responses/compact", json.dumps(body), {
+                "Authorization": "Bearer " + self.runtime.token, "Content-Type": "application/json"})
+            response = client.getresponse()
+            raw = response.read()
+            client.close()
+        self.assertEqual(response.status, 200, raw)
+        self.assertEqual(compact.call_args.args[1], body)
+
+    def test_local_checkpoint_can_pass_the_soft_limit_to_reduce_history(self):
+        from responses_native import CODEX_COMPACTION_PROMPT
+        self.start()
+        body = self.body(input=[{"role": "user", "content": "x" * 2048},
+                                {"role": "user", "content": CODEX_COMPACTION_PROMPT + " Summarize."}], tools=[])
+        with patch("responses_native.MAX_RESPONSES_BODY", 1024):
+            status, raw = self.request(body)
+        self.assertEqual(status, 200, raw[:500])
+        self.assertEqual(len(MockProvider.requests), 1)
+
+    def test_empty_requests_are_bad_requests_and_hard_overflow_stays_bounded(self):
+        self.start()
+        with patch("responses_native.MAX_REQUEST_BODY", 1024):
+            status, raw = self.request(self.body(input="x" * 2048))
+        self.assertEqual(status, 413, raw)
+        self.assertIn(b"transport limit", raw)
+        client = http.client.HTTPConnection("127.0.0.1", self.gateway.server_port, timeout=6)
+        client.request("POST", "/v1/responses", b"", {"Authorization": "Bearer " + self.runtime.token})
+        response = client.getresponse()
+        raw = response.read()
+        client.close()
+        self.assertEqual(response.status, 400, raw)
+        self.assertEqual(MockProvider.requests, [])
+
     def test_json_tool_history_and_native_reasoning_remain_intact(self):
         self.start()
         body = self.body(reasoning={"effort": "max"}, service_tier="fast", client_metadata={"local_session": "not-for-provider"})
@@ -1621,6 +1683,14 @@ class CodexCliWebSearchPlanTests(unittest.TestCase):
         self.assertEqual(plan["protocol"], "messages_bridge")
         self.assertEqual(plan["body"]["_web_search"], {"context_size": "low", "allowed_domains": [], "live": False})
         self.assertNotIn("tools", plan["body"])
+
+    def test_local_compaction_disables_native_image_generation_as_well_as_host_tools(self):
+        from responses_native import CODEX_COMPACTION_PROMPT
+        import cli_routes
+        plan = self.plan(tools=[], history=[{"role": "user", "content": CODEX_COMPACTION_PROMPT}])
+        self.assertEqual(plan["body"]["tool_choice"], {"type": "none"})
+        cli = cli_routes.plan_turn("codex", "gpt-6-sol", plan["body"], {}, wanted_output=64)
+        self.assertFalse(cli["body"]["native_image_generation"])
 
     def test_a_route_that_cannot_search_runs_the_turn_without_the_tool(self):
         # Codex offers search on every route once any route can serve it, so

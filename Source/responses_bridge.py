@@ -9,6 +9,7 @@ import time
 import uuid
 
 from bridge_core import BridgeError, private_token
+from cli_images import recover_tool_content, responses_content
 from responses_tools import APPLY_PATCH_PARAM, APPLY_PATCH_TOOL_NAME, is_custom_tool, repair_apply_patch
 
 
@@ -128,9 +129,21 @@ def content_blocks(content):
     return result
 
 
-def tool_output_blocks(item):
+def tool_output_blocks(item, *, recover=False):
     """Keep standalone tool notifications out of paired tool-result history."""
-    blocks = content_blocks(item.get("output", ""))
+    output = item.get("output", "")
+    if recover and isinstance(output, list):
+        blocks = []
+        for part in output:
+            try:
+                # This layer translates shapes; image-byte validation stays
+                # in the CLI planner. Standalone notification images must
+                # retain the same conversion contract as ordinary messages.
+                blocks.extend(content_blocks([part]))
+            except BridgeError:
+                blocks.extend(recover_tool_content([part]))
+    else:
+        blocks = content_blocks(output)
     call_id = item.get("call_id")
     if call_id:
         return [{"type": "tool_result", "tool_use_id": call_id,
@@ -149,6 +162,37 @@ def tool_output_blocks(item):
     # without inventing a tool invocation or elevating it to system text.
     identity = f"{namespace}.{name}" if namespace else name
     return [{"type": "text", "text": f"[Standalone tool output from {identity}]"}, *blocks]
+
+
+def image_generation_message(item, *, include_image=True):
+    """Replay a completed native image as attributed tool data, not a new call.
+
+    Ordinary message/image history works after a provider switch too. Keep
+    the image bytes, so the next turn can refer to/edit the actual result.
+    """
+    status = item.get("status") or "unknown"
+    note = f"[Native image generation result: {status}]"
+    prompt = item.get("revised_prompt")
+    if isinstance(prompt, str) and prompt:
+        note += "\nRevised prompt: " + prompt
+    parts = [{"type": "input_text", "text": note}]
+    result = item.get("result")
+    if status == "completed" and isinstance(result, str) and result:
+        # The Responses tool returns raw base64, normally PNG. Preserve a
+        # data URL when supplied, and recognise other supported output types.
+        if result.startswith("data:image/"):
+            url = result
+        else:
+            media = ("image/jpeg" if result.startswith("/9j/") else
+                     "image/webp" if result.startswith("UklGR") else "image/png")
+            url = f"data:{media};base64,{result}"
+        if include_image:
+            parts.extend(responses_content(recover_tool_content([{"type": "input_image", "image_url": url}])))
+        else:
+            parts.append({"type": "input_text", "text":
+                          "[Generated image pixels omitted because the selected model does not support image input. "
+                          "The original image remains in the host transcript.]"})
+    return {"type": "message", "role": "user", "content": parts}
 
 
 def to_messages(body, route, spec, envelope, scope):
@@ -179,6 +223,9 @@ def to_messages(body, route, spec, envelope, scope):
 
     for item in inputs:
         kind = item.get("type", "message")
+        if kind == "image_generation_call":
+            item = image_generation_message(item)
+            kind = "message"
         if kind == "message":
             target = item.get("role")
             if target not in {"user", "assistant", "system", "developer"}:
@@ -199,7 +246,7 @@ def to_messages(body, route, spec, envelope, scope):
                 raise BridgeError("Function arguments must be an object.")
             add("assistant", [{"type": "tool_use", "id": item.get("call_id"), "name": item.get("name"), "input": arguments}])
         elif kind == "function_call_output":
-            add("user", tool_output_blocks(item))
+            add("user", tool_output_blocks(item, recover=route.startswith("codex/")))
         elif kind == "reasoning":
             # Only this route's own sealed reasoning is replayed; anything
             # else (another model's after a switch, or a bare summary) is
@@ -219,7 +266,7 @@ def to_messages(body, route, spec, envelope, scope):
             add("assistant", [{"type": "tool_use", "id": item.get("call_id"), "name": item.get("name"),
                                "input": {APPLY_PATCH_PARAM: patch}}])
         elif kind == "custom_tool_call_output":
-            add("user", tool_output_blocks(item))
+            add("user", tool_output_blocks(item, recover=route.startswith("codex/")))
         elif kind == "web_search_call":
             # A search the provider already ran. What it found lives in the
             # assistant text that followed, and the item carries no results
@@ -247,6 +294,8 @@ def to_messages(body, route, spec, envelope, scope):
             raise BridgeError("Unsupported function tool choice.")
         if "parallel_tool_calls" in body:
             result["tool_choice"]["disable_parallel_tool_use"] = not body["parallel_tool_calls"]
+    elif body.get("tool_choice") == "none":
+        result["tool_choice"] = {"type": "none"}
     reasoning = body.get("reasoning") or {}
     if not isinstance(reasoning, dict):
         raise BridgeError("reasoning must be an object.")
@@ -304,6 +353,7 @@ class MessagesResponsesAdapter:
         self.created = int(time.time())
         self.output = []
         self.blocks = {}
+        self.image_calls = {}
         self.usage = {}
         self.stop_reason = None
         self.sequence = 0
@@ -345,6 +395,11 @@ class MessagesResponsesAdapter:
             # back as history, never as a call for the client to execute.
             return {"id": "ws_" + uuid.uuid4().hex, "type": "web_search_call", "status": "completed",
                     "action": search_action(block.get("input"))}
+        if kind == "server_tool_use" and block.get("name") == "image_generation":
+            value = block.get("input") or {}
+            return {"id": "ig_" + uuid.uuid4().hex, "type": "image_generation_call",
+                    "status": value.get("status") or "incomplete", "result": value.get("result") or "",
+                    "revised_prompt": value.get("revised_prompt")}
         if kind in {"thinking", "redacted_thinking"}:
             summary = [{"type": "summary_text", "text": block.get("thinking", "")}] \
                 if self.has_published_summary(block) else []
@@ -364,6 +419,29 @@ class MessagesResponsesAdapter:
         kind = value.get("type")
         if kind == "ping":
             return []
+        if kind == "provider_hub_image_generation":
+            source = value.get("id")
+            events = []
+            if source not in self.image_calls:
+                index = len(self.output)
+                item = self.item({"type": "server_tool_use", "name": "image_generation",
+                                  "input": {"status": "in_progress"}})
+                self.output.append(item)
+                self.image_calls[source] = index
+                events.append(self.event("response.output_item.added", output_index=index, item=copy.deepcopy(item)))
+                for phase in ("in_progress", "generating"):
+                    events.append(self.event("response.image_generation_call." + phase,
+                                             item_id=item["id"], output_index=index))
+            index = self.image_calls[source]
+            item = self.output[index]
+            if value.get("phase") == "completed" and item["status"] == "in_progress":
+                item.update(status=value.get("status") or "failed", result=value.get("result") or "",
+                            revised_prompt=value.get("revised_prompt"))
+                if item["status"] == "completed":
+                    events.append(self.event("response.image_generation_call.completed",
+                                             item_id=item["id"], output_index=index))
+                events.append(self.event("response.output_item.done", output_index=index, item=copy.deepcopy(item)))
+            return events
         if kind == "error":
             error = value.get("error") or {}
             return [self.event("response.failed", response=self.response("failed", {

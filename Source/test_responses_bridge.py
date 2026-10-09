@@ -24,6 +24,67 @@ MODELS = {
 
 
 class ResponsesBridgeTests(unittest.TestCase):
+    def test_native_image_progress_interleaves_without_losing_identity_or_failing_the_run(self):
+        from cli_routes import relay_cli_turn
+        adapter = MessagesResponsesAdapter("codex/gpt-6-luna", None, "scope")
+        wire = []
+
+        def emit(event):
+            wire.extend(adapter.feed(event))
+
+        result = relay_cli_turn(iter([
+            {"type": "image_generation", "id": "a", "phase": "started", "status": "in_progress"},
+            {"type": "text_delta", "text": "Preparing another image"},
+            {"type": "image_generation", "id": "b", "phase": "started", "status": "in_progress"},
+            {"type": "image_generation", "id": "a", "phase": "completed", "status": "failed", "result": ""},
+            {"type": "image_generation", "id": "b", "phase": "completed", "status": "completed", "result": "PNG", "revised_prompt": "Bird"},
+            {"type": "image_generation", "id": "b", "phase": "completed", "status": "completed", "result": "PNG"},
+            {"type": "text_delta", "text": "The second image succeeded."},
+            {"type": "message_stop", "stop_reason": "end_turn"}]), emit, model="codex/gpt-6-luna")
+        self.assertIsNone(result["error"])
+        self.assertEqual(wire[-1]["type"], "response.completed")
+        self.assertFalse(any(event["type"] in {"error", "response.failed"} for event in wire))
+        done = [event for event in wire if event["type"] == "response.output_item.done"
+                and event["item"]["type"] == "image_generation_call"]
+        self.assertEqual([event["output_index"] for event in done], [0, 2])
+        self.assertEqual([event["item"]["status"] for event in done], ["failed", "completed"])
+        self.assertEqual(done[1]["item"]["result"], "PNG")
+        added = [event for event in wire if event["type"] == "response.output_item.added"
+                 and event["item"]["type"] == "image_generation_call"]
+        self.assertEqual([event["item"]["id"] for event in added], [event["item"]["id"] for event in done])
+        self.assertEqual(sum(event["type"] == "response.image_generation_call.completed" for event in wire), 1)
+
+    def test_generated_images_survive_replay_and_failed_images_are_not_fabricated(self):
+        body = {"input": [{"type": "image_generation_call", "status": "completed", "result": "iVBORw0KGgo=",
+                           "revised_prompt": "A bird"},
+                          {"type": "image_generation_call", "status": "failed", "result": "", "revised_prompt": "A fish"}],
+                "stream": False}
+        before = copy.deepcopy(body)
+        translated = to_messages(body, "codex/gpt-6-luna", {}, None, "scope")
+        blocks = translated["messages"][0]["content"]
+        self.assertEqual([block["type"] for block in blocks], ["text", "image", "text"])
+        self.assertEqual(blocks[1]["source"]["data"], "iVBORw0KGgo=")
+        self.assertIn("failed", blocks[2]["text"])
+        self.assertEqual(body, before)
+
+    def test_no_tools_is_preserved_even_without_function_definitions(self):
+        translated = to_messages({"input": "hi", "stream": True, "tool_choice": "none"},
+                                 "codex/gpt-6-luna", {}, None, "scope")
+        self.assertEqual(translated["tool_choice"], {"type": "none"})
+
+    def test_generated_image_history_recovers_from_image_limits_and_text_only_switches(self):
+        from unittest.mock import patch
+        from responses_bridge import image_generation_message
+        item = {"type": "image_generation_call", "status": "completed", "result": "iVBORw0KGgo=",
+                "revised_prompt": "A bird"}
+        with patch("cli_images.MAX_IMAGE_BYTES", 1):
+            replay = image_generation_message(item)
+        self.assertTrue(all(part["type"] == "input_text" for part in replay["content"]))
+        self.assertIn("could not relay", replay["content"][1]["text"])
+        replay = image_generation_message(item, include_image=False)
+        self.assertIn("does not support image input", replay["content"][1]["text"])
+        self.assertEqual(item["result"], "iVBORw0KGgo=")
+
     def exercise(self, provider, stream):
         fixture = fixtures.GatewayHubHTTPTests()
         fixture.setUp()

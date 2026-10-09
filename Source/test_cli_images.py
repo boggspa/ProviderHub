@@ -28,6 +28,40 @@ def payload():
 
 
 class ImageValidationTests(unittest.TestCase):
+    def test_tool_result_recovery_preserves_text_images_and_explains_unsupported_blocks(self):
+        content = [{"type": "text", "text": "Saved the document."},
+                   {"type": "document", "source": {"data": "PRIVATE-DATA"}}, IMAGE,
+                   {"type": "image", "source": {"type": "url", "url": "https://example.test/signed-secret"}}]
+        original = copy.deepcopy(content)
+        result = cli_images.recover_tool_content(content)
+        self.assertEqual(result[0], content[0])
+        self.assertEqual(result[2], IMAGE)
+        for index in (1, 3):
+            self.assertIn("could not relay", result[index]["text"])
+        self.assertNotIn("PRIVATE-DATA", json.dumps(result))
+        self.assertNotIn("signed-secret", json.dumps(result))
+        self.assertEqual(content, original)
+
+    def test_malformed_tool_media_does_not_expose_raw_content_or_poison_the_result(self):
+        content = [{"type": {}}, {"type": "image", "source": "secret-source"},
+                   {"type": "image", "source": {}, "detail": []}, None]
+        result = cli_images.recover_tool_content(content)
+        self.assertEqual(len(result), 4)
+        self.assertTrue(all("could not relay" in part["text"] for part in result))
+        self.assertNotIn("secret-source", json.dumps(result))
+
+    def test_responses_tool_document_no_longer_poisons_codex_history(self):
+        from responses_bridge import to_messages
+        body = {"input": [{"type": "function_call_output", "call_id": "read-1", "output": [
+            {"type": "input_text", "text": "Extracted title"}, {"type": "document", "source": {"data": "BINARY"}}]}],
+            "stream": True}
+        translated = to_messages(body, "codex/gpt-6-luna", {}, None, "scope")
+        plan = cli_routes.plan_turn("codex", "gpt-6-luna", translated, {}, wanted_output=64)
+        output = codex_cli_agent._history_items(plan["body"]["history"])[0]
+        self.assertEqual(output["call_id"], "read-1")
+        self.assertEqual(output["output"][0]["text"], "Extracted title")
+        self.assertIn("could not relay", output["output"][1]["text"])
+
     def test_bytes_are_unchanged_in_each_encoding(self):
         for content in (cli_images.prompt_content("p", [IMAGE]),
                         cli_images.prompt_content("p", [IMAGE], acp=True)):
@@ -50,6 +84,31 @@ class ImageValidationTests(unittest.TestCase):
             cli_images.normalize_images([IMAGE] * 21)
         with patch.object(cli_images, "MAX_TOTAL_BYTES", 1), self.assertRaises(cli_images.CliImageError):
             cli_images.normalize_images([IMAGE])
+
+    def test_oversized_tool_image_becomes_a_placeholder_but_user_input_stays_strict(self):
+        from cli_image_history import compact_image_history
+        original = payload()["messages"]
+        with patch.object(cli_images, "MAX_IMAGE_BYTES", 8):
+            result, _ = compact_image_history(original, recover_tool_results=True)
+            output = codex_cli_agent._history_items(result)[-1]
+            self.assertEqual(output["output"][0]["text"], "Current screen:")
+            self.assertIn("8 MiB limit", output["output"][1]["text"])
+            with self.assertRaises(cli_images.CliImageError):
+                compact_image_history([{"role": "user", "content": [IMAGE]}], recover_tool_results=True)
+
+    def test_resumed_tool_result_retains_success_and_other_blocks_when_one_image_cannot_relay(self):
+        from types import SimpleNamespace
+        from test_codex_cli_agent import FakeCodexSession
+        session = FakeCodexSession([])
+        lease = SimpleNamespace(session=session, thread_id="t", turn_id="u", pending={"rpc_id": 3})
+        result = {"content": [{"type": "text", "text": "Saved output"}, IMAGE], "is_error": False}
+        with patch.object(cli_images, "MAX_IMAGE_BYTES", 8):
+            codex_cli_agent._resume_host_call(lease, result, [], timeout=1)
+        reply = session.sent[0]
+        self.assertTrue(reply["result"]["success"])
+        self.assertEqual(reply["result"]["contentItems"][0]["text"], "Saved output")
+        self.assertIn("could not relay", reply["result"]["contentItems"][1]["text"])
+        self.assertIsNone(lease.pending)
 
     def test_private_image_files_preserve_bytes(self):
         with tempfile.TemporaryDirectory() as directory:
