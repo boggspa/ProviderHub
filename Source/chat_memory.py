@@ -83,7 +83,7 @@ def _body(item):
 
 
 def _identity(item):
-    return {key: item[key] for key in ("id", "kind", "route", "workspace", "isError") if key in item}
+    return {key: item[key] for key in ("id", "kind", "route", "workspace", "isError", "memberID", "memberName", "contributionID") if key in item}
 
 
 def _snippet(body, query):

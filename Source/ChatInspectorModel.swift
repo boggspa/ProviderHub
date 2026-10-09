@@ -4,7 +4,7 @@ import SwiftUI
 enum ChatInspectorTab: String, CaseIterable, Identifiable {
     case changes, agents, side
     var id: String { rawValue }
-    var title: String { switch self { case .changes: "File Changes"; case .agents: "Subagents"; case .side: "Side Chat" } }
+    var title: String { switch self { case .changes: "File Changes"; case .agents: "Team"; case .side: "Side Chat" } }
     var icon: String { switch self { case .changes: "filemenu.and.selection"; case .agents: "person.2"; case .side: "bubble.left.and.bubble.right" } }
 }
 
@@ -49,7 +49,48 @@ struct ChatSide: Decodable, Identifiable {
     var truncated: Bool?
 }
 
+struct ChatTeamMember: Decodable, Identifiable {
+    var id: String; var name: String; var label: String; var choice: String; var route: String
+    var account: String; var effort: String; var responsibility: String; var status: String
+    var nextStep: String; var contributions: Int; var contributionID: String?; var usage: Int?; var context: Int?
+    var configuration: [String: Any] {
+        ["id": id, "name": name, "choice": choice, "effort": effort, "responsibility": responsibility]
+    }
+}
+struct ChatTeamSnapshot: Decodable {
+    var enabled: Bool; var status: String; var activeMemberID: String?; var members: [ChatTeamMember]
+    var active: ChatTeamMember? { members.first { $0.id == activeMemberID } }
+    var needsInput: Bool { members.contains { $0.status == "needs_input" } }
+    var canResume: Bool { enabled && !needsInput && ["stopped", "interrupted", "error"].contains(status) && members.contains { $0.status != "done" } }
+}
+
 @MainActor extension ChatModel {
+    var canConfigureTeam: Bool { connected && selectedID != nil && !busy && !branchBusy && teamRequest == nil }
+    func configureTeam(enabled: Bool, members: [[String: Any]]) {
+        guard canConfigureTeam, let selectedID else { return }
+        guard (1...3).contains(members.count), members.allSatisfy({ member in
+            guard let choice = member["choice"] as? String, let name = member["name"] as? String else { return false }
+            return !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && models.contains { $0.id == choice && $0.supportsTools }
+        }) else { teamNotice = "Choose one to three named members with enabled models."; return }
+        let request = UUID().uuidString
+        teamRequest = request; teamNotice = ""
+        if !inspectorCommand(["command": "configure_team", "id": selectedID, "request": request,
+                              "enabled": enabled, "members": members]) {
+            teamRequest = nil; teamNotice = "Chat is disconnected."
+        }
+    }
+    func resumeTeam(member: String? = nil) {
+        guard canConfigureTeam, team?.canResume == true, let selectedID else { return }
+        let request = UUID().uuidString; teamRequest = request; teamNotice = ""
+        var command: [String: Any] = ["command": "team_resume", "id": selectedID, "request": request]
+        if let member { command["member"] = member }
+        if !inspectorCommand(command) { teamRequest = nil; teamNotice = "Chat is disconnected." }
+    }
+    func isStreaming(_ entry: ChatEntry, fallback: Bool) -> Bool {
+        guard let memberID = entry.memberID else { return fallback }
+        return busy && team?.enabled == true && team?.activeMemberID == memberID &&
+            team?.active?.contributionID == entry.contributionID && entries.last?.id == entry.id
+    }
     var canChangeBranch: Bool { connected && selectedID != nil && !busy && !branchBusy && sideChat?.busy != true && !sideOpening }
     var canSendSide: Bool {
         connected && sideChat != nil && !branchBusy && !sideOpening && pendingSideText == nil && sideChat?.interrupting != true
@@ -124,6 +165,7 @@ struct ChatSide: Decodable, Identifiable {
         gitChanges = nil; gitChangesLoading = false; branches = nil; branchesLoading = false; branchBusy = false
         changesRequest = nil; changesRefreshPending = false; branchesRequest = nil; branchesRefreshPending = false; branchRequest = nil
         inspectorNotice = ""; branchNotice = ""; agents = []; inspectedAgentID = nil
+        team = nil; teamNotice = ""; teamRequest = nil
         sideChat = nil; sideDraft = ""; sideNotice = ""; sideOpening = false; pendingSideText = nil
     }
     func consumeInspector(_ event: [String: Any]) {
@@ -133,6 +175,17 @@ struct ChatSide: Decodable, Identifiable {
             return try? JSONDecoder().decode(type, from: data)
         }
         switch event["event"] as? String {
+        case "team":
+            if let request = event["request"] as? String {
+                guard request == teamRequest else { return }
+                teamRequest = nil
+            }
+            if let value = event["team"], !(value is NSNull) {
+                guard let snapshot = decoded(value, as: ChatTeamSnapshot.self),
+                      (1...3).contains(snapshot.members.count), Set(snapshot.members.map(\.id)).count == snapshot.members.count else { return }
+                team = snapshot
+            } else { team = nil }
+            teamNotice = event["notice"] as? String ?? ""
         case "git_changes":
             if let workspace = event["workspace"] as? String, workspace != selected?.workspace { return }
             guard event["request"] as? String == changesRequest else { return }

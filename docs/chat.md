@@ -77,11 +77,14 @@ The right-hand **inspector** has three views, each using the whole pane:
 - **File Changes** lists file diff counts and expandable patches with three
   context lines. It includes untracked files and reports binary or truncated
   changes. Reads use the local checkout and never fetch a remote.
-- **Subagents** lists delegated tasks by model and task. Choose one to read its
-  transcript and tool results. There is no child composer; it reports back to
-  the parent. Parallel read-only tasks also appear as model/task chips beside
-  their originating delegate row in the main transcript. Child approvals for
-  serial helpers identify the requesting model in the normal strip.
+- **Team** configures up to three persistent members, including the current
+  chat model. Each contributes once by default and may explicitly continue with
+  a next step. Contributions run serially in one attributed transcript, with
+  separate provider histories and the chat's approval mode. Stop, unfinished
+  work and questions are visible in this pane. See [Team](chat-team.md).
+  Earlier delegated tasks remain underneath the roster; choose one to read
+  its transcript and tool results. Parallel read-only helper chips remain
+  beside their originating delegate row in the main transcript.
 - **Side Chat** forks the visible conversation at that point with any enabled
   model. It has its own composer and Stop/interrupt controls, with read/search
   tools only. Provider reasoning stays isolated. Side Chats remain in memory
@@ -127,8 +130,8 @@ windowing is a separate optimization to consider after measuring long chats.
 
 ## Files and commands
 
-The local tools are read file, search files, apply patch, and run shell. The
-parent also has **delegate**, which runs one helper at a time and returns its
+The local tools are read file, search files, apply patch, and run shell. In solo
+mode the parent also has **delegate**, which runs one helper at a time and returns its
 recorded result. Helpers inherit the workspace and approval mode, get the four
 local tools and cannot delegate. A turn can launch at most four helpers, with
 twelve model/tool rounds per serial helper. Its alternative `tasks` form runs
@@ -172,7 +175,11 @@ For models with a known context limit, older complete conversation units are
 trimmed before the limit is reached. A notice records this in the transcript;
 the full visible history remains saved. Unknown limits stay unknown. The token
 indicator reports the latest request's input usage, rather than a lifetime
-token total. A turn pauses after 24 model/tool rounds and can be continued.
+token total. A solo turn pauses after 24 model/tool rounds and can be continued.
+Team uses the same bounded execution slices, but members who explicitly request
+continuation rejoin the queue. There is no lifetime Team contribution quota.
+The header and roster show each member's own context usage; windows are never
+added together.
 
 ### Recall and decision notes
 
@@ -199,7 +206,8 @@ or removal; it never silently evicts an older decision. Notes share the chat's
 atomic save, survive reopening and model/account changes, and are shown only
 in the workspace where they were recorded. Switching back restores that view.
 They reserve space before context trimming and are projected into each request
-without being duplicated in saved model history. Helpers and Side Chats cannot
+without being duplicated in saved model history. Team members share this
+notebook and recall the same attributed transcript. Helpers and Side Chats cannot
 call the memory tools or mutate the notebook. No background summarizer, extra
 provider request or cross-chat memory store is involved.
 
@@ -218,8 +226,8 @@ routes and account identities continue to govern requests.
 Provider marks use the Hub's existing icon assets. The four tool glyphs reuse
 TaskWraith's file/search/patch/shell paths as cached native vectors.
 
-Chat is a coding harness with attachments, local tools and bounded delegation.
-It has no writable parallel teams, agent mailboxes, schedules, connector
+Chat is a coding harness with attachments, local tools, persistent serial Teams
+and bounded delegation. It has no concurrent workspace writers, agent mailboxes, schedules, connector
 catalogue, browser automation, or separate IDE.
 
 ## Implementation and verification
@@ -228,7 +236,9 @@ catalogue, browser automation, or separate IDE.
 transport. `chat_memory.py` provides transcript recall and source-linked decision
 notes. `ChatInspector.swift`, `ChatInspectorModel.swift` and
 `ChatBranches.swift` provide the inspector and Git controls. `chat_runtime.py`
-owns the shared conversation/tool loop and saved chats; `chat_agents.py` provides
+owns the shared conversation/tool loop and saved chats; `chat_team.py` and
+`ChatTeam.swift` provide persistent membership, serial scheduling and roster UI.
+`chat_agents.py` provides
 isolated delegates and memory-only Side Chats, and `chat_inspector.py` handles
 bounded Git inspection and explicit branch/worktree actions;
 `chat_tools.py` executes the four local tools. The existing authenticated
