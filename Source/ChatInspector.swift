@@ -220,7 +220,7 @@ private struct InspectorTranscript: View {
                             let route = model.models.first { $0.route == entry.route }
                             AssistantRow(entry: entry, label: route?.label ?? entry.route, accent: route?.accent ?? .secondary,
                                          presentation: route?.presentation, streaming: busy && entries.last?.id == entry.id)
-                        case "tool": ToolRow(entry: entry, expanded: Binding(get: { expanded.contains(entry.id) }, set: { yes in
+                        case "tool": ToolRow(entry: entry, accent: model.accent(for: entry.route), expanded: Binding(get: { expanded.contains(entry.id) }, set: { yes in
                             if yes { expanded.insert(entry.id) } else { expanded.remove(entry.id) }
                         }), workspace: workspace)
                         default: NoticeRow(entry: entry)
