@@ -9,7 +9,7 @@ struct ChatInspector: View {
                 ForEach(ChatInspectorTab.allCases) { tab in
                     Button { model.inspectorTab = tab } label: {
                         VStack(spacing: 8) {
-                            Label(tab == .changes ? "Changes" : tab == .agents ? "Subagents" : "Side Chat", systemImage: tab.icon)
+                            Label(tab == .changes ? "Changes" : tab == .agents ? "Team" : "Side Chat", systemImage: tab.icon)
                                 .font(.system(size: 11.5, weight: model.inspectorTab == tab ? .medium : .regular)).lineLimit(1)
                             Rectangle().fill(model.inspectorTab == tab ? model.activeAccent : .clear).frame(height: 2)
                         }.contentShape(Rectangle())
@@ -101,10 +101,11 @@ private struct ChatAgentsPane: View {
                 if selected.truncated == true { Text("Recent activity shown; full transcript is saved.").font(.system(size: 10)).foregroundStyle(.secondary).padding(.horizontal, 14) }
                 Text(selected.status.capitalized + (selected.readOnly == true ? " · Read only" : "") + (selected.changedFiles.isEmpty ? "" : " · \(selected.changedFiles.count) files changed"))
                     .font(.system(size: 10.5)).foregroundStyle(.secondary).padding(14)
-            } else if model.agents.isEmpty { inspectorEmpty("Delegated tasks appear here.") }
-            else {
+            } else {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 4) {
+                        ChatTeamControls(model: model)
+                        if !model.agents.isEmpty { Text("Earlier delegated tasks").font(.system(size: 11.5, weight: .medium)).foregroundStyle(.secondary).padding(8) }
                         ForEach(model.agents) { agent in
                             Button { model.inspectedAgentID = agent.id } label: {
                                 HStack(alignment: .top, spacing: 8) {

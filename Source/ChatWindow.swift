@@ -172,7 +172,11 @@ private struct ChatHeader: View {
                 railButton
                 newChatButton
                 if model.selectedID != nil {
-                    modelMenu
+                    if model.team?.enabled == true {
+                        Button { model.inspectedAgentID = nil; model.showInspector(.agents) } label: {
+                            Label("Team · \(model.team?.members.count ?? 0)", systemImage: "person.3")
+                        }.buttonStyle(.plain).font(HubTheme.Typography.rowTitle).help("Team members and progress")
+                    } else { modelMenu }
                     if !compact { workspaceControls }
                 }
                 Spacer(minLength: 4)
@@ -276,7 +280,19 @@ private struct ChatHeader: View {
     }
 
     @ViewBuilder private var usage: some View {
-        if let used = model.tokenUsage {
+        if model.team?.enabled == true {
+            if let member = model.team?.active, let used = member.usage {
+                let readout = member.name + " · " + tokenCount(used) + (member.context.map { " / " + tokenCount($0) } ?? "")
+                HStack(spacing: 6) {
+                    if let limit = member.context, limit > 0 {
+                        ChatContextRing(used: used, limit: limit, accent: model.accent(for: member.route))
+                    }
+                    Text(readout).font(.system(size: 10.5, design: .monospaced)).foregroundStyle(Semantic.secondaryInk).lineLimit(1)
+                }
+                .help("Active member's context; member windows are separate")
+                .accessibilityElement(children: .combine).accessibilityLabel("Active member context used: " + readout)
+            }
+        } else if let used = model.tokenUsage {
             let readout = model.contextLimit.map { tokenCount(used) + " / " + tokenCount($0) } ?? tokenCount(used) + " tokens"
             HStack(spacing: 6) {
                 if let limit = model.contextLimit, limit > 0 {
@@ -427,7 +443,7 @@ private struct ChatTranscript: View {
             UserRow(entry: entry)
         case "assistant":
             AssistantRow(entry: entry, label: model.label(for: entry.route), accent: model.accent(for: entry.route),
-                         presentation: model.route(named: entry.route)?.presentation, streaming: model.busy && last)
+                         presentation: model.route(named: entry.route)?.presentation, streaming: model.isStreaming(entry, fallback: model.busy && last))
         case "tool":
             if let ids = entry.agentIDs, !ids.isEmpty {
                 VStack(alignment: .leading, spacing: 4) {
@@ -440,7 +456,12 @@ private struct ChatTranscript: View {
                 ToolRow(entry: entry, expanded: expandedBinding(entry.id), workspace: model.selected?.workspace, onInspect: {
                     model.inspectedAgentID = agentID; model.showInspector(.agents)
                 }, running: model.agents.first { $0.id == agentID }?.busy == true)
-            } else { ToolRow(entry: entry, expanded: expandedBinding(entry.id), workspace: model.selected?.workspace) }
+            } else {
+                VStack(alignment: .leading, spacing: 2) {
+                    if let name = entry.memberName { Text(name).font(.system(size: 10.5)).foregroundStyle(Semantic.secondaryInk) }
+                    ToolRow(entry: entry, expanded: expandedBinding(entry.id), workspace: model.selected?.workspace)
+                }
+            }
         case "error":
             ErrorRow(entry: entry, canRetry: last && !model.busy && model.connected) { model.retry() }
         default:
@@ -563,7 +584,7 @@ struct AssistantRow: View {
         VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 6) {
                     ChatProviderIcon(presentation: presentation, size: 13)
-                    Text(label).font(.system(size: 10.5, weight: .semibold)).foregroundStyle(Semantic.secondaryInk).lineLimit(1)
+                    Text(entry.memberName.map { $0 + " · " + label } ?? label).font(.system(size: 10.5, weight: .semibold)).foregroundStyle(Semantic.secondaryInk).lineLimit(1)
                     if streaming { ProgressView().controlSize(.mini).tint(accent) }
                 }
                 if entry.text.isEmpty, streaming {

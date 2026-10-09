@@ -48,6 +48,9 @@ struct ChatEntry: Decodable, Identifiable {
     var agentID: String?
     var agentIDs: [String]?
     var workspace: String?
+    var memberID: String?
+    var memberName: String?
+    var contributionID: String?
 }
 
 struct ChatAttachment: Decodable, Identifiable {
@@ -117,6 +120,9 @@ final class ChatModel: ObservableObject {
     @Published var inspectorNotice = ""
     @Published var branchNotice = ""
     @Published var agents: [ChatAgent] = []
+    @Published var team: ChatTeamSnapshot?
+    @Published var teamNotice = ""
+    @Published var teamRequest: String?
     @Published var inspectedAgentID: String?
     @Published var sideChat: ChatSide?
     @Published var sideDraft = ""
@@ -162,7 +168,7 @@ final class ChatModel: ObservableObject {
     var selectedRoute: ChatRoute? { models.first { $0.route == selected?.route && $0.account == selected?.account } }
     var activeAccent: Color { selectedRoute?.accent ?? .secondary }
     var approvalMode: String { selected?.approvalMode ?? "manual" }
-    var canSend: Bool { connected && !busy && !branchBusy && selectedRoute != nil && (!draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty) }
+    var canSend: Bool { connected && !busy && !branchBusy && teamRequest == nil && selectedRoute != nil && (!draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty) }
     var canInterrupt: Bool { connected && busy && !interrupting && pendingSend == nil && selectedRoute != nil && (!draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !attachments.isEmpty) }
     func accent(for route: String) -> Color { models.first { $0.route == route }?.accent ?? .secondary }
 
@@ -250,14 +256,14 @@ final class ChatModel: ObservableObject {
         if !write(["command": "retry", "id": selectedID]) { setBusy(false) }
     }
     func setRoute(_ choiceID: String) {
-        guard !busy, let choice = models.first(where: { $0.id == choiceID }) else { return }
+        guard !busy, teamRequest == nil, team?.enabled != true, let choice = models.first(where: { $0.id == choiceID }) else { return }
         write(["command": "configure", "choice": choice.id])
     }
     func setSelection(_ choiceID: String, effort: String) {
-        guard !busy, let choice = models.first(where: { $0.id == choiceID }) else { return }
+        guard !busy, teamRequest == nil, team?.enabled != true, let choice = models.first(where: { $0.id == choiceID }) else { return }
         write(["command": "configure", "choice": choice.id, "effort": effort])
     }
-    func setEffort(_ effort: String) { guard !busy else { return }; write(["command": "configure", "effort": effort]) }
+    func setEffort(_ effort: String) { guard !busy, teamRequest == nil, team?.enabled != true else { return }; write(["command": "configure", "effort": effort]) }
     func setApprovalMode(_ mode: String) { guard !busy else { return }; write(["command": "configure", "approvalMode": mode]) }
     func setFolder(_ path: String) { guard !busy, !branchBusy else { return }; write(["command": "configure", "workspace": path]) }
     func chooseFolder() {
