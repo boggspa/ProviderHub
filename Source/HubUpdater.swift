@@ -1,7 +1,7 @@
 import AppKit
 import SwiftUI
 
-struct HubUpdateInfo: Decodable {
+struct HubUpdateInfo: Decodable, Sendable {
     var version: String
     var build: String
     var tag: String?
@@ -71,10 +71,14 @@ final class HubUpdater: ObservableObject {
             await check()
         }
         timer = Timer.scheduledTimer(withTimeInterval: 6 * 60 * 60, repeats: true) { [weak self] _ in
-            Task { await self?.check() }
+            guard let owner = self else { return }
+            Task { await owner.check() }
         }
         NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didWakeNotification,
-            object: nil, queue: .main) { [weak self] _ in Task { await self?.check() } }
+            object: nil, queue: .main) { [weak self] _ in
+                guard let owner = self else { return }
+                Task { await owner.check() }
+            }
     }
 
     func check() async {
@@ -154,9 +158,10 @@ final class HubUpdater: ObservableObject {
         var arguments = [helper.path, action, "--version", version, "--build", build,
             "--cache", cache.path, "--target", Bundle.main.bundleURL.resolvingSymlinksInPath().path]
         if let tag { arguments += ["--tag", tag] }
+        let commandArguments = arguments
         return try await Task.detached {
             let process = Process(), output = Pipe()
-            process.executableURL = URL(fileURLWithPath: python); process.arguments = arguments
+            process.executableURL = URL(fileURLWithPath: python); process.arguments = commandArguments
             var environment = ProcessInfo.processInfo.environment
             environment["PYTHONDONTWRITEBYTECODE"] = "1"
             process.environment = environment
