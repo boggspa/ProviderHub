@@ -30,24 +30,27 @@ struct ChatWindow: View {
     private static let narrowWidth: CGFloat = 860
 
     var body: some View {
-        GeometryReader { proxy in
-            let inspectorWidth = min(360, max(290, proxy.size.width * 0.35))
-            let remaining = proxy.size.width - (model.inspectorVisible ? inspectorWidth : 0)
-            let narrow = remaining < Self.narrowWidth
-            HStack(spacing: 0) {
-                if railPreferred && !narrow {
-                    ChatWorkspaceRail(model: model).frame(width: Self.railWidth)
-                    Rectangle().fill(Semantic.hairline).frame(width: HubTheme.Separator.width)
+        VStack(spacing: 0) {
+            titleBar
+            GeometryReader { proxy in
+                let inspectorWidth = min(360, max(290, proxy.size.width * 0.35))
+                let remaining = proxy.size.width - (model.inspectorVisible ? inspectorWidth : 0)
+                let narrow = remaining < Self.narrowWidth
+                HStack(spacing: 0) {
+                    if railPreferred && !narrow {
+                        ChatWorkspaceRail(model: model).frame(width: Self.railWidth)
+                        Rectangle().fill(Semantic.hairline).frame(width: HubTheme.Separator.width)
+                    }
+                    ChatPane(model: model, railVisible: railPreferred && !narrow, railAvailable: !narrow,
+                             compactHeader: remaining - (railPreferred && !narrow ? Self.railWidth : 0) < 860) { railPreferred.toggle() }
+                    if model.inspectorVisible {
+                        Rectangle().fill(Semantic.hairline).frame(width: HubTheme.Separator.width)
+                        ChatInspector(model: model).frame(width: inspectorWidth)
+                    }
                 }
-                ChatPane(model: model, railVisible: railPreferred && !narrow, railAvailable: !narrow,
-                         compactHeader: remaining - (railPreferred && !narrow ? Self.railWidth : 0) < 860) { railPreferred.toggle() }
-                if model.inspectorVisible {
-                    Rectangle().fill(Semantic.hairline).frame(width: HubTheme.Separator.width)
-                    ChatInspector(model: model).frame(width: inspectorWidth)
-                }
+                .animation(reduceMotion ? nil : .easeInOut(duration: 0.18), value: railPreferred)
+                .animation(reduceMotion ? nil : .easeInOut(duration: 0.18), value: model.inspectorVisible)
             }
-            .animation(reduceMotion ? nil : .easeInOut(duration: 0.18), value: railPreferred)
-            .animation(reduceMotion ? nil : .easeInOut(duration: 0.18), value: model.inspectorVisible)
         }
         .frame(minWidth: 720, minHeight: 500)
         .environment(\.chatTextStyle, ChatTextStyle(size: textSize,
@@ -56,8 +59,22 @@ struct ChatWindow: View {
             if windowStyle == .glass { VibrancyBackground().ignoresSafeArea() }
             else { Color(nsColor: .windowBackgroundColor).ignoresSafeArea() }
         }
+        // Own the hidden title-bar band, as CompactShell does, so the masthead
+        // shares the traffic-light row rather than sitting beneath it.
+        .ignoresSafeArea()
         .dropDestination(for: URL.self, action: { urls, _ in acceptFolder(urls) }, isTargeted: { dropTargeted = $0 })
         .overlay { if dropTargeted { dropHint } }
+    }
+
+    private var titleBar: some View {
+        HStack(spacing: 8) {
+            Image(nsImage: NSApp.applicationIconImage).resizable()
+                .frame(width: 18, height: 18).clipShape(RoundedRectangle(cornerRadius: 5))
+                .accessibilityHidden(true)
+            Text("Provider Hub").font(.system(size: 12, weight: .semibold))
+            Spacer()
+        }
+        .padding(.leading, 78).padding(.trailing, 12).frame(height: 36)
     }
 
     private var dropHint: some View {
