@@ -96,6 +96,21 @@ enum HubTheme {
                                              dark: NSColor(red: 1.0, green: 0.43, blue: 0.18, alpha: 1))
         /// Label ink for text drawn on `accentOnSurface`.
         static let inkOnAccent = Color.white
+        /// Approval mode as state colour. Manual asks first (blue, the tint
+        /// TaskWraith gives plan/read-only); Accept Edits is deliberately
+        /// neutral; YOLO runs tools unprompted (red, its full-access tint).
+        /// Light values are the AA-on-white allocations, dark their brighter
+        /// counterparts on the dark surface.
+        static let approvalManual = dynamic(light: NSColor(red: 0.0, green: 0.45, blue: 0.9, alpha: 1),
+                                            dark: NSColor(red: 0.44, green: 0.71, blue: 1.0, alpha: 1))
+        static let approvalAcceptEdits = secondaryInk
+        static let approvalYolo = dynamic(light: NSColor(red: 0.86, green: 0.15, blue: 0.15, alpha: 1),
+                                          dark: NSColor(red: 0.93, green: 0.35, blue: 0.35, alpha: 1))
+        /// Context pressure, on TaskWraith's wheel thresholds: amber from 80%
+        /// of the window, red from 95%. Below that the provider accent shows.
+        static let contextWarn = dynamic(light: NSColor(red: 0.80, green: 0.50, blue: 0.0, alpha: 1),
+                                         dark: NSColor(red: 0.94, green: 0.66, blue: 0.25, alpha: 1))
+        static let contextCritical = approvalYolo
 
         static func dynamic(light: NSColor, dark: NSColor) -> Color {
             Color(nsColor: NSColor(name: nil) { appearance in
