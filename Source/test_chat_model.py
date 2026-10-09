@@ -36,7 +36,10 @@ import SwiftUI
         var commands: [[String: Any]] = []
         var clock: TimeInterval = 100
         var writable = true
-        let model = ChatModel(sendCommand: { commands.append($0); return writable }, uptime: { clock })
+        let preferencesID = "ProviderHub.ChatSearchTests." + UUID().uuidString
+        let preferences = UserDefaults(suiteName: preferencesID)!
+        defer { preferences.removePersistentDomain(forName: preferencesID) }
+        let model = ChatModel(sendCommand: { commands.append($0); return writable }, uptime: { clock }, preferences: preferences)
         func send(_ event: [String: Any]) throws {
             model.consume(try JSONSerialization.data(withJSONObject: event) + Data([10]))
         }
@@ -49,6 +52,14 @@ import SwiftUI
         try send(["event":"catalogue", "models":[route], "folders":["/tmp"]])
         try send(["event":"chats", "chats":[summary("A"),summary("B")]])
         try send(["event":"ready"])
+        check(model.webSearchEnabled && commands.last?["webSearch"] as? Bool == true, "search must default on and sync at connection")
+        model.setWebSearchEnabled(false)
+        check(!model.webSearchEnabled && commands.last?["webSearch"] as? Bool == false, "search toggle was not sent")
+        let reopened = ChatModel(sendCommand: { commands.append($0); return true }, preferences: preferences)
+        check(!reopened.webSearchEnabled, "disabled search did not survive reopening")
+        reopened.consume(try JSONSerialization.data(withJSONObject: ["event":"ready"]) + Data([10]))
+        check(commands.last?["webSearch"] as? Bool == false, "reconnection did not restore saved search setting")
+        model.setWebSearchEnabled(true)
         try send(["event":"selected", "id":"A", "entries":[]])
         check(model.approvalMode == "manual", "old summaries must default to Manual")
         model.setApprovalMode("accept_edits")

@@ -27,6 +27,19 @@ class ChatCatalogueTests(unittest.TestCase):
         self.assertEqual(rows[0]["provider"], "Studio")
         self.assertTrue(rows[0]["route"].startswith("claude/"))
 
+    def test_native_search_requires_advertised_and_supported_route(self):
+        spec = self.settings["_model_specs"]["claude/claude-fable-5-1"]
+        self.assertTrue(all(row["supportsWebSearch"] is False for row in chat_choices(self.settings)))
+        spec["web_search"] = True
+        self.assertTrue(all(row["supportsWebSearch"] is True for row in chat_choices(self.settings)))
+        self.settings["providers"]["claude"]["credential_mode"] = "keychain"
+        self.assertTrue(all(row["supportsWebSearch"] is False for row in chat_choices(self.settings)))
+        route = "openrouter/test"
+        self.settings["_model_specs"] = {route: {**spec, "id": route, "provider_id": "openrouter", "model_id": "test"}}
+        self.settings["mappings"] = {slot[0]: route for slot in SLOTS}
+        self.settings["codex_catalogue"] = [route]
+        self.assertTrue(all(row["supportsWebSearch"] is True for row in chat_choices(self.settings)))
+
     def test_per_chat_cli_account_does_not_mutate_active_desktop_account(self):
         before = copy.deepcopy(self.settings)
         selected, connection, directory, default_scope = chat_connection(self.settings, "claude", "")
@@ -96,6 +109,38 @@ class ChatCatalogueTests(unittest.TestCase):
             self.assertEqual(plan["model_spec"]["context"], 16384)
             self.assertIn("Provider Hub Chat", json_text(plan))
             self.assertIn("read_file", json_text(plan))
+        finally:
+            harness.tearDown()
+
+    def test_chat_search_crosses_real_gateway_and_rechecks_live_capability(self):
+        import json
+        import cli_routes
+        from test_cli_routes import GatewayCliTurnTest
+        harness = GatewayCliTurnTest()
+        harness.setUp()
+        try:
+            route = "claude/claude-sonnet-5"
+            spec = harness.runtime.settings["_model_specs"][route]
+            spec["web_search"] = True
+            cli_routes._cache["claude"].WEB_SEARCH = True
+            harness.events = [
+                {"type": "web_search", "status": "completed", "id": "s1", "action": {"type": "search", "query": "news"},
+                 "results": [{"url": "https://example.com/news", "title": "News"}]},
+                {"type": "text_delta", "text": "Answer"}, {"type": "message_stop", "stop_reason": "end_turn"}]
+            payload = {"model": route, "max_tokens": 512, "messages": [{"role": "user", "content": "news"}],
+                       "_provider_hub_surface": "chat", "_web_search": {"context_size": None, "allowed_domains": [], "live": True}}
+            status, raw = harness.request(payload)
+            self.assertEqual(status, 200, raw)
+            self.assertEqual(harness.requests[-1]["web_search"], payload["_web_search"])
+            self.assertTrue(any(block["type"] == "web_search_tool_result" for block in json.loads(raw)["content"]))
+            harness.events = [{"type": "text_delta", "text": "No search"}, {"type": "message_stop", "stop_reason": "end_turn"}]
+            status, raw = harness.request({k: v for k, v in payload.items() if k != "_web_search"})
+            self.assertEqual(status, 200, raw)
+            self.assertNotIn("web_search", harness.requests[-1])
+            spec["web_search"] = False
+            status, raw = harness.request(payload)
+            self.assertEqual(status, 200, raw)
+            self.assertNotIn("web_search", harness.requests[-1])
         finally:
             harness.tearDown()
 

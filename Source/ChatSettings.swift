@@ -11,6 +11,12 @@ struct ChatSettingsMenu: View {
     @AppStorage("chatTextSize") private var textSize = 13.0
     var body: some View {
         Menu {
+            Toggle("Allow web search", isOn: Binding(get: { model.webSearchEnabled }, set: { model.setWebSearchEnabled($0) }))
+                .help("Allow agents to use their provider’s native web search. Applies to the next model request, including helpers and Side Chats.")
+            if model.webSearchEnabled, let route = model.selectedRoute, route.supportsWebSearch != true {
+                Text("Native search unavailable for this model").font(.caption)
+            }
+            Divider()
             Menu("Theme") {
                 ForEach(HubTheme.Appearance.Mode.allCases, id: \.self) { mode in
                     Button { appearance = mode; HubTheme.Appearance.apply() } label: {

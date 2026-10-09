@@ -462,6 +462,7 @@ def run(parent):
                                 runner=parent.runner_type, workspaces=parent.workspaces, role="team")
             child.team_parent, child.team_member, child.team_run_id = parent, member, run_id
             child.models = copy.deepcopy(parent.models)
+            child.preferences = parent.preferences
             messages = member.get("messages", [])
             messages.extend(shared_context(chat, member, choice))
             messages.append({"role": "user", "content": [{"type": "text", "text":

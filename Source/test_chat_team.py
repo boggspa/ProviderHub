@@ -74,6 +74,38 @@ class TeamTests(unittest.TestCase):
         self.assertNotIn("messages", json.dumps([e for e in self.events if e["event"] == "team"]))
         self.assertNotIn("team", self.store.headers()[0])
 
+    def test_team_search_uses_shared_preference_and_each_members_capability(self):
+        for enabled in (False, True):
+            with self.subTest(enabled=enabled):
+                parent = self.service([[response("Search capable")], [response("No native search")]])
+                parent.models[0]["supportsWebSearch"] = True
+                parent.models[1]["supportsWebSearch"] = False
+                self.configure(parent)
+                parent.handle({"command": "preferences", "webSearch": enabled})
+                self.send(parent); self.finish(parent)
+                self.assertEqual("_web_search" in self.transports[0].requests[0], enabled)
+                self.assertNotIn("_web_search", self.transports[1].requests[0])
+                for transport in self.transports:
+                    system = transport.requests[0]["system"]
+                    self.assertIn(chat_memory.GUIDANCE, system)
+                    self.assertIn(chat_team.GUIDANCE, system)
+                    if not enabled:
+                        self.assertIn("Web search is disabled", system)
+
+    def test_disabling_search_mid_contribution_reaches_active_and_queued_members(self):
+        def disable_search(payload, cancel, delta):
+            parent.handle({"command": "preferences", "webSearch": False})
+            return call("read_file", {"path": "missing.txt"})
+        parent = self.service([[disable_search, response("First finished")], [response("Second finished")]])
+        for choice in parent.models:
+            choice["supportsWebSearch"] = True
+        self.configure(parent)
+        self.send(parent); self.finish(parent)
+        self.assertEqual(len(self.transports[0].requests), 2)
+        self.assertIn("_web_search", self.transports[0].requests[0])
+        self.assertNotIn("_web_search", self.transports[0].requests[1])
+        self.assertNotIn("_web_search", self.transports[1].requests[0])
+
     def test_explicit_continuation_rotates_fairly_and_must_be_renewed(self):
         parent = self.service([[decision("continue", "Verify the tests"), response("Implementation done"), response("Tests passed")],
                                [response("Review complete")]])

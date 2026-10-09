@@ -44,6 +44,32 @@ def spec(context=262144):
 
 
 class OpenRouterProviderTests(unittest.TestCase):
+    def test_chat_native_search_translation_and_internal_fields_stay_local(self):
+        metadata = {**spec(), "web_search": True}
+        payload = {"model": "openrouter/test", "max_tokens": 128, "messages": [{"role": "user", "content": "latest release"}],
+                   "_provider_hub_surface": "chat", "_provider_hub_account": "work", "_provider_hub_connection": "private-scope",
+                   "_web_search": {"context_size": None, "allowed_domains": [], "live": True}}
+        original = copy.deepcopy(payload)
+        body = prepare_request("openrouter", {}, "test-key", payload, metadata["id"], metadata)["body"]
+        self.assertEqual(body["plugins"], [{"id": "web", "engine": "native"}])
+        self.assertFalse(any(key.startswith("_") for key in body))
+        self.assertEqual(payload, original)
+        for changed, model_spec in (({k: v for k, v in payload.items() if k != "_web_search"}, metadata),
+                                    (payload, {**metadata, "web_search": False}),
+                                    (payload, {k: v for k, v in metadata.items() if k != "web_search"})):
+            body = prepare_request("openrouter", {}, "test-key", changed, metadata["id"], model_spec)["body"]
+            # Omission inherits the account default; Chat must explicitly opt out.
+            self.assertEqual(body["plugins"], [{"id": "web", "enabled": False}])
+            self.assertNotIn("web_search_options", body)
+            self.assertNotIn("_web_search", body)
+        for surface in ("responses", None):
+            changed = {k: v for k, v in payload.items() if k != "_provider_hub_surface"}
+            if surface is not None:
+                changed["_provider_hub_surface"] = surface
+            body = prepare_request("openrouter", {}, "test-key", changed, metadata["id"], metadata)["body"]
+            self.assertNotIn("plugins", body)
+            self.assertNotIn("_web_search", body)
+
     def test_official_endpoint_and_bearer_contract(self):
         for url in (BASE_URL, BASE_URL + "/v1", BASE_URL + "/v1/messages", BASE_URL + "/v1/responses"):
             self.assertEqual(validate_connection("openrouter", {"base_url": url})["base_url"], BASE_URL)
