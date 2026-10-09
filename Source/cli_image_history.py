@@ -1,10 +1,10 @@
 """Keep recent screenshots within CLI budgets without dropping user/tool text."""
 from __future__ import annotations
 
-from cli_images import MAX_IMAGES, MAX_TOTAL_BYTES, normalize_image
+from cli_images import MAX_IMAGES, MAX_TOTAL_BYTES, normalize_image, recover_tool_content
 
 
-def compact_image_history(messages):
+def compact_image_history(messages, *, recover_tool_results=False):
     """Return copied Messages history and budget metadata, newest images first.
 
     The byte limit applies only to image data. Tool identifiers, tool results,
@@ -29,7 +29,10 @@ def compact_image_history(messages):
                 size = len(data) // 4 * 3 - (len(data) - len(data.rstrip("=")))
                 images.append((result, len(result), size))
             elif block.get("type") == "tool_result":
-                copied["content"] = copy_content(block.get("content"))
+                content = block.get("content", "")
+                if recover_tool_results:
+                    content = recover_tool_content(content)
+                copied["content"] = copy_content(content)
             result.append(copied)
         return result
 

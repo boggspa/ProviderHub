@@ -428,7 +428,8 @@ def plan_turn(provider_id: str, upstream_model: str, payload: dict, spec: dict,
         provider_id == "antigravity" or
         provider_id in {"muse", "grok"} and payload.get("_provider_hub_surface") != "responses")
     try:
-        history, image_compaction = compact_image_history(payload.get("messages"))
+        history, image_compaction = compact_image_history(payload.get("messages"),
+                                                         recover_tool_results=provider_id == "codex")
         messages, system = _messages_for_cli(history, system, images=images,
                                             full_tool_history=structured_surface)
         if images:
@@ -489,6 +490,11 @@ def plan_turn(provider_id: str, upstream_model: str, payload: dict, spec: dict,
         "tools": tools,
         "tool_choice": tool_choice,
     }
+    if provider_id == "codex":
+        # Only this outer surface can render the hosted image tool's native
+        # progress/result items. Summarizers and Messages clients stay off.
+        request["native_image_generation"] = (payload.get("_provider_hub_surface") == "responses"
+                                               and (payload.get("tool_choice") or {}).get("type") != "none")
     if structured_tools:
         request["host_tool_schema"] = cli_structured_reply.reply_schema(tools, tool_choice)
     thinking = payload.get("thinking")
@@ -942,6 +948,17 @@ def relay_cli_turn(events, emit, *, model, input_tokens=0) -> dict:
                     timing.mark("first_visible_text")
             elif kind == "web_search":
                 search(event)
+            elif kind == "image_generation":
+                if not started:
+                    start_message()
+                if open_block is not None:
+                    emit({"type": "content_block_stop", "index": index})
+                    index += 1
+                    open_block = open_source = None
+                # Private loopback event: unlike function arguments, native
+                # tool progress can interleave with reasoning/text and other
+                # images. The Responses adapter retains each item's identity.
+                emit({**event, "type": "provider_hub_image_generation"})
             elif kind == "tool_call":
                 if not started:
                     start_message()

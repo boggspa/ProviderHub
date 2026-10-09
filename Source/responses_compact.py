@@ -16,7 +16,7 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 
-from bridge_core import BridgeError
+from bridge_core import BridgeError, MAX_REQUEST_BODY
 from hub_config import connection_signature, qualify, split_route
 from responses_bridge import ReasoningEnvelope, to_messages
 
@@ -143,6 +143,10 @@ def _text_only(value):
     if isinstance(value, list):
         return [_text_only(item) for item in value]
     if isinstance(value, dict):
+        if value.get("type") == "image_generation_call":
+            # Keep the tool outcome and prompt, never send base64 to the
+            # summarizer as millions of text tokens.
+            return {**value, "result": ""}
         if value.get("type") in {"input_image", "image", "input_audio", "audio", "input_file", "file"}:
             return {"type": "text", "text": "[Earlier attachment omitted; use accompanying text and observations.]"}
         return {key: _text_only(item) for key, item in value.items()}
@@ -249,7 +253,7 @@ def compact_payload(runtime, payload, summarize):
     if not isinstance(original, list) or not original or any(not isinstance(item, dict) for item in original):
         raise BridgeError("Compaction input must be nonempty text or an array of conversation items.")
     items = copy.deepcopy(original)
-    allowed = {"message", "function_call", "function_call_output", "custom_tool_call", "custom_tool_call_output", "reasoning", "compaction"}
+    allowed = {"message", "function_call", "function_call_output", "custom_tool_call", "custom_tool_call_output", "reasoning", "compaction", "web_search_call", "image_generation_call"}
     if any(item.get("type", "message") not in allowed for item in items):
         raise BridgeError("Unsupported conversation item in compaction input.")
     # Validate sealed state even when a short conversation needs no reduction.
@@ -385,8 +389,11 @@ def handle_compact(handler):
         if handler.headers.get("Transfer-Encoding"):
             raise BridgeError("Use a Content-Length request body.")
         length = int(handler.headers.get("Content-Length", "0"))
-        if not 0 < length <= MAX_BODY:
-            handler.error(413, "Compaction request is empty or above 32 MB.")
+        if length <= 0:
+            handler.error(400, "Compaction request is empty.")
+            return
+        if length > MAX_REQUEST_BODY:
+            handler.error(413, "Compaction request exceeds the 128 MiB transport limit; reduce attachments.")
             return
         raw = handler.rfile.read(length)
         if len(raw) != length:

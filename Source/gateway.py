@@ -24,7 +24,7 @@ import urllib.parse
 import urllib.request
 
 import cli_routes
-from bridge_core import (BridgeError, ClaudeProfile, atomic_json, attach_model_specs, bootstrap_metadata, cached_catalogue, credentials, discover_provider, gateway_token,
+from bridge_core import (BridgeError, ClaudeProfile, MAX_REQUEST_BODY, atomic_json, attach_model_specs, bootstrap_metadata, cached_catalogue, credentials, discover_provider, gateway_token,
                          inspect_state, key_account_states, load_settings, model_labels, private_directory, private_token, read_json, ssl_context, state_root, validate_settings)
 from catalogue_lifecycle import (CataloguePreparationError, catalogue_fingerprint,
                                  prepare_launch, refresh_all, require_prepared,
@@ -787,8 +787,11 @@ class Handler(BaseHTTPRequestHandler):
         payload = None
         try:
             length = int(self.headers.get("Content-Length", "0"))
-            if not 0 < length <= MAX_BODY:
-                self.error(413, "Request body is empty or above 32 MB.")
+            if length <= 0:
+                self.error(400, "Request body is empty.")
+                return
+            if length > MAX_REQUEST_BODY:
+                self.error(413, "Request body exceeds the 128 MiB transport limit; compact the conversation or reduce attachments.")
                 return
             body = self.rfile.read(length)
             if len(body) != length:
@@ -1313,9 +1316,18 @@ class Handler(BaseHTTPRequestHandler):
             return True
         content = []
         current = None
+        image_calls = {}
         for event in collected:
             kind = event.get("type")
-            if kind == "content_block_start":
+            if kind == "provider_hub_image_generation":
+                source = event.get("id")
+                if source not in image_calls:
+                    image_calls[source] = {"type": "server_tool_use", "id": source,
+                                           "name": "image_generation", "input": {}}
+                    content.append(image_calls[source])
+                image_calls[source]["input"] = {key: event.get(key) for key in
+                                                ("status", "result", "revised_prompt")}
+            elif kind == "content_block_start":
                 current = dict(event["content_block"])
                 if current.get("type") in {"tool_use", "server_tool_use"}:
                     current["_partial"] = ""

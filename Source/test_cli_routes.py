@@ -309,6 +309,15 @@ class CliRoutesTest(unittest.TestCase):
         self.assertNotIn(OPEN_SENTINEL, plan["body"]["system"] or "")
         self.assertNotIn("<host_note>", plan["body"]["messages"][-1]["content"])
 
+    def test_native_images_only_enable_for_codex_responses_and_obey_no_tools(self):
+        base = {"messages": [{"role": "user", "content": "Draw a bird"}]}
+        for changes, expected in [({}, False), ({"_provider_hub_surface": "responses"}, True),
+                                  ({"_provider_hub_surface": "responses", "tool_choice": {
+                                      "type": "none", "disable_parallel_tool_use": True}}, False)]:
+            with self.subTest(changes=changes):
+                plan = plan_turn("codex", "gpt-6-luna", {**base, **changes}, {}, wanted_output=64)
+                self.assertEqual(plan["body"]["native_image_generation"], expected)
+
     def test_tool_history_round_trips_with_correlation_ids(self):
         payload = {"messages": [
             {"role": "assistant", "content": [
@@ -1261,6 +1270,56 @@ class ResponsesEndToEndTest(unittest.TestCase):
         self.assertIn("response.completed", kinds)
         self.assertNotIn("error", kinds)
         self.assertIn("ROUTE2 OK", raw)
+
+    def test_native_image_tools_render_and_replay_through_both_response_modes(self):
+        import codex_cli_agent as codex
+        from test_codex_cli_agent import FakeCodexSession, _ev, _delta_ev, _completed_turn
+        from test_gateway_hub import parse_sse
+
+        route = "codex/gpt-6-luna"
+        self.runtime.settings["providers"]["codex"]["credential_mode"] = "cli"
+        self.runtime.settings["_model_specs"][route] = {"context": 1000000, "max_output": 16384,
+                                                       "tools": True, "vision": True}
+        requests = []
+
+        def run(request, *, timeout=300):
+            requests.append(request)
+            return codex.run_turn(request, spawner="scripted-session", timeout=timeout)
+
+        cli_routes._cache["codex"] = _fake_adapter(PROVIDER_ID="codex", HOST_TOOL_TRANSPORT="dynamic",
+            IMAGE_TRANSPORT="native_history", run_turn=run)
+        png = "iVBORw0KGgo="
+        for stream in (False, True):
+            for image_status in ("completed", "failed"):
+                with self.subTest(stream=stream, status=image_status):
+                    session = FakeCodexSession([])
+                    session.script = [
+                        _ev("item/started", {"item": {"type": "imageGeneration", "id": "ig1", "status": "in_progress", "result": ""}}),
+                        _delta_ev("Working on the image."),
+                        _ev("item/completed", {"item": {"type": "imageGeneration", "id": "ig1", "status": image_status,
+                                                      "result": png if image_status == "completed" else "", "revisedPrompt": "Bird"}}),
+                        _delta_ev("Done."), _completed_turn()]
+                    with patch.object(codex, "runtime_binary", return_value="/fake/codex"), \
+                            patch.object(codex, "StdioSession", return_value=session):
+                        connection = http.client.HTTPConnection("127.0.0.1", self.gateway.server_port, timeout=8)
+                        connection.request("POST", "/v1/responses", json.dumps({
+                            "model": route, "stream": stream, "input": "Draw a bird"}), {
+                            "Authorization": "Bearer " + self.runtime.token, "Content-Type": "application/json"})
+                        response = connection.getresponse()
+                        raw = response.read()
+                        connection.close()
+                    self.assertEqual(response.status, 200, raw[:1000])
+                    result = parse_sse(raw)[-1]["response"] if stream else json.loads(raw)
+                    self.assertEqual(result["status"], "completed", raw[:1000])
+                    image = next(item for item in result["output"] if item["type"] == "image_generation_call")
+                    self.assertEqual(image["status"], image_status)
+                    self.assertEqual(image["result"], png if image_status == "completed" else "")
+                    self.assertTrue(requests[-1]["native_image_generation"])
+                    plan = responses_native.prepare_native(self.runtime, {"model": route, "stream": True,
+                        "input": [{"role": "user", "content": "Draw a bird"}, *result["output"],
+                                  {"role": "user", "content": "Make it blue"}]})
+                    self.assertIn("Make it blue", json.dumps(plan["body"]))
+                    self.assertIn("Native image generation result", json.dumps(plan["body"]))
 
     def test_bridged_tool_call_becomes_a_function_call(self):
         def tool_turn(request, *, timeout=300):

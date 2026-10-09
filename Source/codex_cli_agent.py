@@ -100,13 +100,17 @@ and writes are forwarded to the host, which enforces its own settings. Native
 shell, image viewing, plugins, and multi-agent features are disabled;
 unexpected native tool activity is an error, never silently discarded.
 
-Web search is the one native tool a turn may enable, and only when the
-desktop asked for its hosted search. It is hosted: OpenAI's servers run it
-under the user's plan and nothing on the machine executes, so it sits outside
-the read-only boundary. The argv keeps it disabled; ``thread/start`` switches
-it on for that thread alone (verified live on 0.155.1: a thread-scoped
+Web search and image generation can run as native hosted tools. The latter
+is enabled only on the Responses surface that can render its output items;
+search requires the desktop to ask for it. OpenAI's servers run generation
+under the user's plan; workspace execution still belongs to host tools. The
+argv keeps search disabled; ``thread/start`` switches it on for that thread
+alone (verified live on 0.155.1: a thread-scoped
 ``web_search="live"`` overrides the argv), and its ``webSearch`` items are
 relayed as searches rather than refused as tool activity.
+Image generation is likewise disabled by default and enabled per thread.
+Its progress and result are relayed as image-generation items; even a failed
+image remains a tool result the model can recover from, not a failed run.
 
 :data:`_FORBIDDEN_FLAGS` is asserted inside every argv builder, so a future
 edit cannot introduce an approval bypass or a write-capable sandbox. Threads are
@@ -137,8 +141,8 @@ import uuid
 from cli_session import CliSessionError, StdioSession, minimal_env, resolve_binary
 from codex_session_pool import SessionPool, digest as _digest, history_blocks as _history_blocks
 from cli_lifecycle import cleanup_after_exit
-from cli_tool_call import HOST_EXECUTION_NOTE, normalize_tools, validate_host_call
-from cli_images import normalize_images, responses_content
+from cli_tool_call import HOST_EXECUTION_NOTE, ToolCallError, normalize_tools, validate_host_call
+from cli_images import normalize_images, recover_tool_content, responses_content
 
 
 PROVIDER_ID = "codex"
@@ -226,6 +230,9 @@ _TRANSPORT_CONFIG = (
     # result returns as a native image. A stable feature on 0.155.1 and on
     # ChatGPT's bundled 0.158.0-alpha.2 (`codex features list`).
     'features.view_image=false',
+    # Enable only when the outer Responses transcript can render its native
+    # progress/result items. Other surfaces and exec fallback stay host-only.
+    'features.image_generation=false',
     # Context reduction: the nested runtime's own goal and skill-search tools
     # and its skills catalogue (about 3,000 characters listing SKILL.md files
     # it has no native tool to read) duplicate the host's goal tools or point
@@ -1168,6 +1175,8 @@ def _thread_params(payload, workspace):
     if payload.get("web_search") is not None:
         # Thread scope only: the argv keeps search off for every other thread.
         params.setdefault("config", {}).update(payload["web_search"])
+    if payload.get("native_image_generation"):
+        params.setdefault("config", {}).setdefault("features", {})["image_generation"] = True
     return params
 
 
@@ -1319,6 +1328,10 @@ def _normalise_request(request):
         instructions += (f"\nThis session has no native image viewer. To look at a local image, "
                          f"call host.{_tool_alias('view_image')} (host tool view_image).")
     offered = {tool["name"] for tool in tools}
+    native_images = request.get("native_image_generation") is True and choice.get("type") != "none"
+    if native_images:
+        instructions += ("\nNative hosted image generation is available. Its progress and results "
+                         "appear in the desktop transcript. Workspace tools still run through the host.")
     goals = [name for name in _GOAL_TOOLS if name in offered]
     if goals:
         instructions += ("\nThread goals are host tools here and persist on the host's thread: "
@@ -1328,6 +1341,7 @@ def _normalise_request(request):
             "prompt": prompt, "system": instructions, "tools": tools,
             "history": request.get("history"), "images": images, "reasoning_summary": summary,
             "service_tier": tier, "web_search": _checked_search(request.get("web_search")),
+            "native_image_generation": native_images,
             "codex_home": _home_env(request.get("config_dir")).get("CODEX_HOME")}
 
 
@@ -1372,7 +1386,7 @@ def _history_items(messages):
                               "name": _tool_alias(block["name"]), "namespace": _HOST_TOOL_NAMESPACE,
                               "arguments": json.dumps(block.get("input") or {})})
             elif kind == "tool_result":
-                result = block.get("content", "")
+                result = recover_tool_content(block.get("content", ""))
                 if not isinstance(result, str):
                     result = responses_content(result)
                 if block.get("is_error"):
@@ -1521,7 +1535,7 @@ def _usage_snapshot(params):
 
 
 def _stream_turn(session, *, turn_id, deadline, tools=None, thread_id=None, summary_only=False,
-                 lease=None, timing=None, search=False):
+                 lease=None, timing=None, search=False, native_images=False):
     """Consume notifications until the turn terminates.
 
     Yields ``text_delta`` / ``thinking_delta`` as they arrive, ``web_search``
@@ -1530,6 +1544,7 @@ def _stream_turn(session, *, turn_id, deadline, tools=None, thread_id=None, summ
     """
     fragments = lease.fragments if lease is not None else {}
     last_error = None
+    rejected_calls = 0
     host_names = {_tool_alias(tool["name"]): tool["name"] for tool in tools or []}
 
     def fragment(item_id, kind, index, text, *, complete=False):
@@ -1599,9 +1614,25 @@ def _stream_turn(session, *, turn_id, deadline, tools=None, thread_id=None, summ
                     if "id" not in event or params.get("namespace") != _HOST_TOOL_NAMESPACE:
                         yield {"type": "error", "message": "Codex requested an unregistered native tool."}
                         return
-                    call = validate_host_call({"id": params.get("callId"),
-                                               "name": host_names.get(params.get("tool")),
-                                               "input": params.get("arguments")}, tools or [])
+                    try:
+                        call = validate_host_call({"id": params.get("callId"),
+                                                   "name": host_names.get(params.get("tool")),
+                                                   "input": params.get("arguments")}, tools or [])
+                    except ToolCallError as exc:
+                        # The model can fix an invalid request if its pending
+                        # RPC receives a tool error. Killing the stream here
+                        # instead made Desktop reconnect and repeat the turn.
+                        rejected_calls += 1
+                        if rejected_calls > 3:
+                            yield {"type": "error", "http_status": 400,
+                                   "message": "Codex repeatedly sent invalid host tool requests."}
+                            return
+                        session.send(json.dumps({"id": event["id"], "result": {
+                            "success": False, "contentItems": [{"type": "inputText", "text":
+                                f"Tool request rejected before execution: {exc}. "
+                                "Use an offered host.bridge_ alias and a JSON object for arguments. "
+                                "No tool was executed; correct the request and continue."}]}}))
+                        continue
                     if lease is not None:
                         # A bridge-owned id is unique across tasks/processes,
                         # even when runtimes reuse local call identifiers.
@@ -1614,6 +1645,24 @@ def _stream_turn(session, *, turn_id, deadline, tools=None, thread_id=None, summ
                     item = params.get("item") or {}
                     if search and isinstance(item, dict) and item.get("type") == "webSearch":
                         yield _search_event(method, item)
+                        continue
+                    if native_images and isinstance(item, dict) and item.get("type") == "imageGeneration":
+                        # An image tool failure belongs to the tool, not the
+                        # run. The nested model receives it and can recover.
+                        result = item.get("result") or ""
+                        status = item.get("status")
+                        if method == "item/started":
+                            status = "in_progress"
+                        elif item.get("failure") or status in {"failed", "cancelled", "canceled"}:
+                            status = "failed"
+                        elif status != "incomplete":
+                            # Runtime schema leaves status as a free string;
+                            # completion with actual pixels is authoritative.
+                            status = "completed" if result else "failed"
+                        yield {"type": "image_generation", "id": item.get("id"),
+                               "phase": "started" if method == "item/started" else "completed",
+                               "status": status, "result": result,
+                               "revised_prompt": item.get("revisedPrompt")}
                         continue
                     if isinstance(item, dict) and item.get("type") in _NATIVE_TOOL_ITEMS:
                         yield {"type": "error", "message": "Codex attempted a native CLI tool "
@@ -1784,7 +1833,7 @@ def _resume_host_call(lease, result, steering, *, timeout):
             "threadId": lease.thread_id, "expectedTurnId": lease.turn_id,
             "input": inputs}, timeout=timeout), context="turn/steer")
     content = []
-    for part in responses_content(result.get("content", "")):
+    for part in responses_content(recover_tool_content(result.get("content", ""))):
         if part["type"] == "input_text":
             content.append({"type": "inputText", "text": part["text"]})
         else:
@@ -1829,7 +1878,8 @@ def run_turn(request, *, spawner=None, timeout=300, pool=None) -> Iterator[dict]
         if owner is not None:
             key = _digest({"argv": argv, "env": minimal_env(_home_env(payload["codex_home"])), "system": payload["system"],
                            "tools": payload["tools"], "summary": payload["reasoning_summary"],
-                           "tier": payload["service_tier"], "search": payload["web_search"]})
+                           "tier": payload["service_tier"], "search": payload["web_search"],
+                           "native_images": payload["native_image_generation"]})
             blocks = _history_blocks(payload.get("history"))
             continuation_key = (_digest([key, blocks]) if any(
                 role == "user" and block.get("type") == "tool_result" and
@@ -1898,7 +1948,8 @@ def run_turn(request, *, spawner=None, timeout=300, pool=None) -> Iterator[dict]
                                   tools=payload["tools"], thread_id=thread_id,
                                   summary_only=payload["reasoning_summary"] is not None,
                                   lease=lease, timing=timing,
-                                  search=payload["web_search"] is not None):
+                                  search=payload["web_search"] is not None,
+                                  native_images=payload["native_image_generation"]):
             if event.get("type") == "message_stop":
                 healthy = True
                 if lease is not None and lease.pending:

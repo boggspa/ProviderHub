@@ -34,6 +34,11 @@ PROFILE_ID = str(uuid.UUID(os.environ.get("MISTRAL_BRIDGE_PROFILE_ID", "8a93d471
 # prefix so they can be told apart from the user's own rows on restore.
 HUB_ROW_PREFIX = "Provider Hub"
 
+# Incoming multimodal history includes base64 (at least 4/3 of the image
+# bytes) and tool schemas. Keep its transport budget separate from the much
+# smaller limits on individual provider responses and stream events.
+MAX_REQUEST_BODY = 128 * 1024 * 1024
+
 
 class BridgeError(Exception):
     pass
