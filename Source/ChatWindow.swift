@@ -464,19 +464,19 @@ private struct ChatTranscript: View {
         case "tool":
             if let ids = entry.agentIDs, !ids.isEmpty {
                 VStack(alignment: .leading, spacing: 4) {
-                    ToolRow(entry: entry, expanded: expandedBinding(entry.id), workspace: entry.workspace ?? model.selected?.workspace, onInspect: {
+                    ToolRow(entry: entry, accent: model.accent(for: entry.route), expanded: expandedBinding(entry.id), workspace: entry.workspace ?? model.selected?.workspace, onInspect: {
                         model.inspectedAgentID = nil; model.showInspector(.agents)
                     }, running: model.agents.contains { ids.contains($0.id) && $0.busy })
                     ChatParallelLanes(model: model, agentIDs: ids).padding(.leading, 18)
                 }
             } else if let agentID = entry.agentID {
-                ToolRow(entry: entry, expanded: expandedBinding(entry.id), workspace: model.selected?.workspace, onInspect: {
+                ToolRow(entry: entry, accent: model.accent(for: entry.route), expanded: expandedBinding(entry.id), workspace: model.selected?.workspace, onInspect: {
                     model.inspectedAgentID = agentID; model.showInspector(.agents)
                 }, running: model.agents.first { $0.id == agentID }?.busy == true)
             } else {
                 VStack(alignment: .leading, spacing: 2) {
                     if let name = entry.memberName { Text(name).font(.system(size: 10.5)).foregroundStyle(Semantic.secondaryInk) }
-                    ToolRow(entry: entry, expanded: expandedBinding(entry.id), workspace: model.selected?.workspace)
+                    ToolRow(entry: entry, accent: model.accent(for: entry.route), expanded: expandedBinding(entry.id), workspace: model.selected?.workspace)
                 }
             }
         case "error":
@@ -618,6 +618,7 @@ struct AssistantRow: View {
 
 struct ToolRow: View {
     var entry: ChatEntry
+    var accent: Color
     @Binding var expanded: Bool
     var workspace: String?
     var onInspect: (() -> Void)? = nil
@@ -646,8 +647,8 @@ struct ToolRow: View {
             HStack(spacing: 8) {
                 Image(systemName: "chevron.right").font(.system(size: 9, weight: .semibold)).foregroundStyle(Semantic.secondaryInk)
                     .rotationEffect(.degrees(expanded ? 90 : 0)).frame(width: 10)
-                if entry.tool == "delegate" { Image(systemName: "person.2").font(.system(size: 12)).foregroundStyle(Semantic.secondaryInk) }
-                else { ChatToolGlyph(name: entry.tool ?? "read_file").foregroundStyle(Semantic.secondaryInk) }
+                if entry.tool == "delegate" { Image(systemName: "person.2").font(.system(size: 12)).foregroundStyle(accent) }
+                else { ChatToolGlyph(name: entry.tool ?? "read_file").foregroundStyle(accent) }
                 Text(entry.tool ?? "tool").font(.system(size: 11.5, weight: .medium, design: .monospaced)).foregroundStyle(Semantic.ink)
                 Text(entry.summary ?? entry.text).font(HubTheme.Typography.detail).foregroundStyle(Semantic.secondaryInk)
                     .lineLimit(1).truncationMode(.middle)
