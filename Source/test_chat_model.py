@@ -262,6 +262,47 @@ import SwiftUI
         check(model.agents[1].entries[0].text == "Only B" && model.agents[1].readOnly == true, "parallel state escaped parent")
         try send(["event":"entry", "chat":"A", "entry":["id":"fanout-row", "kind":"tool", "text":"", "route":"ollama/test", "isError":false, "changedFiles":[], "tool":"delegate", "agentIDs":["lane-a","lane-b"]]])
         check(model.entries.last?.agentIDs == ["lane-a", "lane-b"], "lane chips lost their tool-call identity")
+        // Team configuration uses correlated replies and the owning chat.
+        model.draft = "Team task"
+        let memberSpec: [String: Any] = ["name":"Builder", "choice":"ollama/test|", "effort":"high", "responsibility":"Build"]
+        model.configureTeam(enabled: true, members: [memberSpec])
+        let teamRequest = commands.last?["request"] as! String
+        check(!model.canSend && !model.canConfigureTeam, "Team configuration must settle before another send")
+        let beforePendingSwitch = commands.count; model.setEffort("low")
+        check(commands.count == beforePendingSwitch, "pending roster allowed solo model changes")
+        func roster(_ status: String, _ memberStatus: String = "done", _ contribution: String = "c1") -> [String: Any] {
+            ["enabled":true, "status":status, "activeMemberID":"builder", "members":[[
+                "id":"builder", "name":"Builder", "label":"Test", "choice":"ollama/test|", "route":"ollama/test",
+                "account":"", "effort":"high", "responsibility":"Build", "status":memberStatus,
+                "nextStep":"", "contributions":1, "contributionID":contribution, "usage":800, "context":100000]]]
+        }
+        try send(["event":"team", "chat":"B", "request":teamRequest, "team":roster("ready")])
+        try send(["event":"team", "chat":"A", "request":"stale", "team":roster("ready")])
+        check(model.team == nil && model.teamRequest == teamRequest, "cross-chat or stale Team ack accepted")
+        try send(["event":"team", "chat":"A", "request":teamRequest, "team":roster("ready")])
+        check(model.team?.members.count == 1 && model.teamRequest == nil && model.canSend, "Team ack not applied")
+        let beforeTeamSwitch = commands.count
+        model.setRoute("ollama/test|"); model.setEffort("low")
+        check(commands.count == beforeTeamSwitch, "solo controls changed an enabled Team")
+        try send(["event":"state", "busy":true, "status":"Builder"])
+        try send(["event":"team", "chat":"A", "team":roster("working", "working")])
+        try send(["event":"entry", "chat":"A", "entry":["id":"team-reply", "kind":"assistant", "text":"Building",
+            "route":"ollama/test", "isError":false, "changedFiles":[], "memberID":"builder", "memberName":"Builder", "contributionID":"c1"]])
+        let teamEntry = model.entries.last!
+        check(teamEntry.memberName == "Builder" && model.isStreaming(teamEntry, fallback:false), "active member attribution lost")
+        try send(["event":"team", "chat":"A", "team":roster("working", "working", "c2")])
+        check(!model.isStreaming(teamEntry, fallback:true), "old contribution resumed its streaming layout")
+        try send(["event":"state", "busy":false, "status":"Paused"])
+        try send(["event":"team", "chat":"A", "team":roster("needs_input", "needs_input")])
+        let beforeInputResume = commands.count; model.resumeTeam()
+        check(commands.count == beforeInputResume, "needs-input work resumed without an answer")
+        try send(["event":"team", "chat":"A", "team":roster("stopped", "stopped")])
+        model.resumeTeam()
+        check(commands.last?["command"] as? String == "team_resume" && model.teamRequest != nil, "paused Team could not resume")
+        try send(["event":"selected", "id":"B", "entries":[]])
+        check(model.team == nil && model.teamRequest == nil, "Team state leaked into another chat")
+        try send(["event":"team", "chat":"A", "team":roster("working", "working")])
+        check(model.team == nil, "late Team event escaped its chat")
         print("ChatModel state transitions passed")
     }
 }

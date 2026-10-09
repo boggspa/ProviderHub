@@ -26,6 +26,7 @@ from chat_tools import ChatToolRunner, TOOL_DEFINITIONS
 from chat_attachments import prepare_attachments, bound_image_history
 from chat_history import portable_history
 import chat_memory
+import chat_team
 from chat_git import git_status
 from chat_workspaces import ChatWorkspaces, available_workspace
 from protocol import compact_conversation, estimated_tokens
@@ -122,12 +123,15 @@ opaque thinking/signatures are kept intact and are never rendered as text.
 
     def save(self, chat):
         target = self.path(chat["id"])
-        metadata = {key: value for key, value in chat.items() if key not in {"entries", "messages", "archives", "pending_update", "agents"}}
+        metadata = {key: value for key, value in chat.items() if key not in {"entries", "messages", "archives", "pending_update", "agents", "team"}}
         rows = [{"type": "metadata", "value": metadata}]
         rows += [{"type": "entry", "value": value} for value in chat["entries"]]
         rows += [{"type": "message", "value": value} for value in chat["messages"]]
         rows += [{"type": "archive", "value": value} for value in chat.get("archives", [])]
         rows += [{"type": "agent", "value": value} for value in chat.get("agents", [])]
+        if chat.get("team"):
+            rows.append({"type": "team", "value": {k: v for k, v in chat["team"].items() if k != "members"}})
+            rows += [{"type": "team_member", "value": member} for member in chat["team"]["members"]]
         if chat.get("pending_update"):
             rows.append({"type": "pending_update", "value": chat["pending_update"]})
         temp = self.root / ("." + uuid.uuid4().hex + ".tmp")
@@ -138,6 +142,10 @@ opaque thinking/signatures are kept intact and are never rendered as text.
                     stream.write(json.dumps(row, ensure_ascii=False) + "\n")
                 stream.flush(); os.fsync(stream.fileno())
             os.replace(temp, target)
+            # A replayed sequence is durable in this snapshot before its
+            # incremental Team log is removed. A crash between these steps
+            # replays nothing twice, because old sequences are ignored.
+            chat_team.journal_path(self, chat["id"]).unlink(missing_ok=True)
         finally:
             temp.unlink(missing_ok=True)
 
@@ -155,6 +163,10 @@ opaque thinking/signatures are kept intact and are never rendered as text.
         chat["messages"] = [row["value"] for row in rows[1:] if row.get("type") == "message"]
         chat["archives"] = [row["value"] for row in rows[1:] if row.get("type") == "archive"]
         chat["agents"] = [row["value"] for row in rows[1:] if row.get("type") == "agent"] or chat.get("agents", [])
+        teams = [row["value"] for row in rows[1:] if row.get("type") == "team"]
+        if teams:
+            chat["team"] = {**teams[-1], "members": [row["value"] for row in rows[1:] if row.get("type") == "team_member"]}
+        chat_team.load_journal(self, chat)
         pending = [row["value"] for row in rows[1:] if row.get("type") == "pending_update"]
         if pending: chat["pending_update"] = pending[-1]
         return chat
@@ -187,6 +199,7 @@ opaque thinking/signatures are kept intact and are never rendered as text.
 
     def delete(self, identifier):
         self.path(identifier).unlink()
+        chat_team.journal_path(self, identifier).unlink(missing_ok=True)
         attachment_root = self.root / identifier
         if attachment_root.is_dir() and not attachment_root.is_symlink():
             shutil.rmtree(attachment_root)
@@ -356,6 +369,9 @@ class ChatService:
         self.approval_event = threading.Event()
         self.approval_allowed = False
         self._mutex = threading.RLock()
+        self.team_parent = None
+        self.team_member = None
+        self.team_run_id = None
 
     @property
     def busy(self):
@@ -388,6 +404,7 @@ class ChatService:
         if self.role == "parent" and self.side:
             from chat_agents import publish_side
             publish_side(self)
+        if self.role == "parent" and self.chat and self.chat.get("team"): chat_team.publish(self)
 
     def refresh(self):
         self.models = self.transport.catalogue()
@@ -407,6 +424,11 @@ class ChatService:
         for chat in chats:
             from chat_agents import recover_agents
             if recover_agents(chat, self.settle): self.store.save(chat)
+            if chat_team.recover(chat, self.settle):
+                for item in chat["entries"]:
+                    if item.get("memberID") and item.get("detail") == "Running…":
+                        item.update(detail="Interrupted; inspect workspace state before retrying.", isError=True)
+                self.store.save(chat)
             if chat.get("status") == "working" or chat.get("pending_update"):
                 self.settle(chat, "Chat was interrupted before a recorded result. Inspect the workspace before retrying.")
                 self.apply_pending_update(chat)
@@ -482,7 +504,7 @@ class ChatService:
     @staticmethod
     def apply_pending_update(chat):
         pending = chat.pop("pending_update", None)
-        if pending:
+        if pending and not chat_team.enabled(chat):
             chat["messages"].append({"role": "user", "content": pending["content"]})
         return pending
 
@@ -520,6 +542,11 @@ class ChatService:
             with self._mutex:
                 self.apply_pending_update(self.chat)
                 resume = self._resume_after_interrupt
+                if resume and chat_team.enabled(self.chat):
+                    try: chat_team.start_run(self, new_input=True)
+                    except (ValueError, KeyError) as exc:
+                        resume = False
+                        self.emit({"event": "notice", "message": str(exc)})
                 self._steering = False; self._resume_after_interrupt = False
                 self.chat["status"] = "working" if resume else "stopped"
                 try: self.save(); self.publish()
@@ -538,6 +565,7 @@ class ChatService:
     def handle(self, command):
         action = command.get("command")
         if self.role == "parent":
+            if chat_team.handle(self, command): return
             from chat_agents import handle_auxiliary
             if handle_auxiliary(self, command):
                 return
@@ -585,6 +613,8 @@ class ChatService:
             self.chat = selected
             self.publish_workspaces(); self.publish()
         elif action == "configure":
+            if chat_team.enabled(self.chat) and ("choice" in command or "effort" in command):
+                raise ValueError("Choose each member's model and effort in Team.")
             choice = self.choice(command.get("choice") or (self.models[0]["id"] if not self.chat and self.models else None))
             folder = command.get("workspace", self.current_workspace())
             if "workspace" in command:
@@ -593,7 +623,7 @@ class ChatService:
             mode = command.get("approvalMode", self.chat.get("approvalMode", "manual") if self.chat else "manual")
             if mode not in APPROVAL_MODES:
                 raise ValueError("Choose Manual, Accept Edits, or YOLO.")
-            if self.chat and not self.chat["messages"] and not self.side and not (("effort" in command or "approvalMode" in command) and "choice" not in command and "workspace" not in command):
+            if self.chat and not self.chat["entries"] and not self.chat.get("team") and not self.side and not (("effort" in command or "approvalMode" in command) and "choice" not in command and "workspace" not in command):
                 old_id = self.chat["id"]
                 self.create(choice["id"], folder, effort, mode); self.store.delete(old_id); self.publish()
             elif self.chat and ("effort" in command or "approvalMode" in command) and "choice" not in command and "workspace" not in command:
@@ -621,17 +651,19 @@ class ChatService:
             if not self.chat or command.get("id") != self.chat["id"]:
                 raise ValueError("Select a chat before sending.")
             choice = self.choice()
+            if chat_team.enabled(self.chat): chat_team.validate_roster(self)
             if action == "send":
                 update = self.prepare_update(command)
                 self.chat["delegationsThisTurn"] = 0
                 accepted_entry = update["entry"]
-                self.chat["messages"].append({"role": "user", "content": update["content"]})
+                if not chat_team.enabled(self.chat): self.chat["messages"].append({"role": "user", "content": update["content"]})
                 self.chat["entries"].append(accepted_entry)
                 if self.chat["title"] == "New chat":
                     text = accepted_entry["text"]
                     self.chat["title"] = " ".join(text.split())[:64] if text.strip() else accepted_entry["attachments"][0]["name"]
-            elif self.chat.get("status") not in {"error", "interrupted", "stopped"} or not self.chat["messages"]:
+            elif not chat_team.enabled(self.chat) and (self.chat.get("status") not in {"error", "interrupted", "stopped"} or not self.chat["messages"]):
                 raise ValueError("There is no interrupted turn to retry.")
+            if chat_team.enabled(self.chat): chat_team.start_run(self, new_input=action == "send")
             self.chat["status"] = "working"; self.save()
             if action == "send":
                 self.emit({"event": "entry", "chat": self.chat["id"], "entry": accepted_entry})
@@ -685,6 +717,8 @@ class ChatService:
             from chat_agents import delegate_definition
             tools.append(delegate_definition(self.models))
             tools.extend(chat_memory.TOOL_DEFINITIONS)
+        elif self.role == "team" and tools:
+            tools.extend([*chat_memory.TOOL_DEFINITIONS, chat_team.STATUS_TOOL])
         context = choice.get("context")
         output = min(choice.get("max_output") or 4096, 8192)
         if isinstance(context, int) and context > 0:
@@ -700,9 +734,16 @@ class ChatService:
             payload["system"] += "\nThis is a temporary Side Chat. Only read_file and search_files are available; do not edit files or run commands. This conversation is held in memory until the app closes."
         elif self.role == "lane":
             payload["system"] += "\nThis is a read-only parallel helper lane. Only read_file and search_files are available. Do not edit files, run commands or delegate. Report findings to the parent."
-        if self.role == "parent" and tools:
+        if self.role in {"parent", "team"} and tools:
             payload["system"] += "\n" + chat_memory.GUIDANCE
-        memory = chat_memory.memory_message(chat) if self.role == "parent" else None
+        if self.role == "team":
+            payload["system"] += "\n" + chat_team.GUIDANCE + "\nYour member name: " + self.team_member["name"]
+            if self.team_member["responsibility"]: payload["system"] += "\nResponsibility: " + self.team_member["responsibility"]
+            # A missing provider window is not permission to accumulate an
+            # unbounded private context in an indefinitely continuing Team.
+            context = min(context, 200000) if isinstance(context, int) and context > 0 else 128000
+        memory_chat = self.team_parent.chat if self.role == "team" else chat
+        memory = chat_memory.memory_message(memory_chat) if self.role in {"parent", "team"} else None
         if memory and isinstance(context, int) and context > 0 and estimated_tokens({"messages": [memory]}) > context // 4:
             memory = {"role": "user", "content": [{"type": "text", "text":
                 "[Saved decision notebook omitted because this model's context is small. "
@@ -737,6 +778,8 @@ class ChatService:
         return allowed
 
     def run(self):
+        if self.role == "parent" and chat_team.enabled(self.chat):
+            return chat_team.run(self)
         chat = self.chat
         current = None
         used = chat.get("delegationsThisTurn", 0)
@@ -764,10 +807,15 @@ class ChatService:
                 chat["messages"].append({"role": "assistant", "content": content})
                 counts = message.get("usage") or {}
                 chat["usage"] = (counts.get("input_tokens") or 0) + (counts.get("cache_read_input_tokens") or 0) + (counts.get("cache_creation_input_tokens") or 0)
-                self.save()
+                # A Team final reply and its queue outcome share one durable
+                # boundary in finally; do not first persist it as unfinished.
+                if self.role != "team" or calls: self.save()
                 if not calls:
                     if message.get("stop_reason") == "max_tokens":
                         self.add(entry("notice", "The response reached its output limit. Send Continue to carry on.", chat["route"]))
+                        if self.role == "team":
+                            chat["status"] = "yielded" if chat["teamDecision"]["state"] == "continue" else "needs_input"
+                            break
                     chat["status"] = "ready"; break
                 results = {"role": "user", "content": []}
                 chat["messages"].append(results)
@@ -782,8 +830,10 @@ class ChatService:
                             from chat_agents import validate_delegate, delegate_summary
                             validate_delegate(self, arguments)
                             description = {"summary": delegate_summary(arguments), "requires_approval": False}
+                        elif name == "team_status" and self.role == "team":
+                            description = {"summary": "Team contribution outcome", "requires_approval": False}
                         elif name in chat_memory.MEMORY_TOOLS:
-                            if self.role != "parent":
+                            if self.role not in {"parent", "team"}:
                                 raise ValueError("Chat memory tools are available only in the main conversation.")
                             description = chat_memory.describe(name, arguments)
                         elif self.role in {"side", "lane"} and name not in {"read_file", "search_files"}:
@@ -801,8 +851,10 @@ class ChatService:
                             if name == "delegate":
                                 from chat_agents import delegate
                                 result = delegate(self, arguments, call["id"])
+                            elif name == "team_status" and self.role == "team":
+                                result = chat_team.decide(self, arguments)
                             elif name in chat_memory.MEMORY_TOOLS:
-                                result = chat_memory.execute(chat, name, arguments)
+                                result = chat_memory.execute(self.team_parent.chat if self.role == "team" else chat, name, arguments)
                             else:
                                 result = runner.execute(name, arguments)
                         else:
@@ -826,7 +878,13 @@ class ChatService:
                     self.save()
                 current = None
             else:
-                raise ValueError(f"This turn reached its {self.max_rounds}-step limit. Send Continue to carry on from recorded results.")
+                if self.role == "team":
+                    chat["status"] = "yielded" if chat["teamDecision"]["state"] == "continue" else "needs_input"
+                    self.add(entry("notice", "Team contribution checkpoint reached. " +
+                        ("Your requested continuation will resume after other members." if chat["status"] == "yielded" else
+                         "This member did not request continuation; send a message to continue."), chat["route"]))
+                else:
+                    raise ValueError(f"This turn reached its {self.max_rounds}-step limit. Send Continue to carry on from recorded results.")
         except Exception as exc:
             stopped = self.cancel.is_set() or isinstance(exc, InterruptedError)
             chat["status"] = "stopped" if stopped else "error"
@@ -843,6 +901,7 @@ class ChatService:
             try:
                 self.save(); self.publish()
             except Exception:
+                if self.role == "team": chat["saveFailed"] = True
                 self.emit({"event": "error", "message": "Chat could not save its latest result. Inspect the workspace before retrying."})
             status = {"stopped": "Stopped", "error": "Request failed"}.get(chat["status"], "Ready")
             with self._mutex:
