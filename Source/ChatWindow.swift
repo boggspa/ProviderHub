@@ -448,7 +448,6 @@ struct UserRow: View {
 }
 
 struct AssistantRow: View {
-    @Environment(\.chatTextStyle) private var textStyle
     var entry: ChatEntry
     var label: String
     var accent: Color
@@ -465,18 +464,12 @@ struct AssistantRow: View {
                 if entry.text.isEmpty, streaming {
                     Text("Thinking…").font(HubTheme.Typography.body).foregroundStyle(Semantic.secondaryInk)
                 } else {
-                    Text(rendered).font(textStyle.font).foregroundStyle(Semantic.ink).textSelection(.enabled)
+                    ChatTranscriptText(text: entry.text, streaming: streaming)
                 }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .accessibilityElement(children: .combine)
-    }
-
-    /// Inline Markdown only (emphasis, code, links); block syntax stays as
-    /// typed so a half-streamed list or fence never flickers into a layout.
-    private var rendered: AttributedString {
-        let options = AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace)
-        return (try? AttributedString(markdown: entry.text, options: options)) ?? AttributedString(entry.text)
+        .contextMenu { Button("Copy reply") { ChatTranscriptTable.copy(entry.text) } }
+        .accessibilityElement(children: .contain)
     }
 }
 
