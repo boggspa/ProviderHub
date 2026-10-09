@@ -1178,6 +1178,30 @@ class RunTurnTests(unittest.TestCase):
         thread = next(params for method, params, _ in session.requests if method == "thread/start")
         self.assertFalse(thread.get("config", {}).get("features", {}).get("image_generation", False))
 
+    def test_native_image_override_preserves_the_entire_transport_feature_policy(self):
+        # The installed runtime replaces this table, losing argv features.*
+        # values omitted here. Merely checking the argv or image flag missed
+        # the shell re-enablement behind commandExecution terminal errors.
+        import tomllib
+        argv_features = {name: value for setting in codex._TRANSPORT_CONFIG
+                         for name, value in tomllib.loads(setting).get("features", {}).items()}
+        params = codex._thread_params({"model": "gpt-6-luna", "effort": "low", "tools": [],
+                                      "native_image_generation": True}, type("Workspace", (), {"cwd": "/tmp/probe"})())
+        self.assertEqual(params["config"]["features"], {**argv_features, "image_generation": True})
+        for name in ("shell_tool", "multi_agent", "multi_agent_v2", "apps", "plugins", "hooks",
+                     "view_image", "goals", "skill_search"):
+            self.assertFalse(params["config"]["features"][name], name)
+        self.assertEqual(params["sandbox"], "read-only")
+        self.assertEqual(params["approvalPolicy"], "never")
+
+    def test_new_transport_restrictions_are_carried_into_image_threads(self):
+        from types import SimpleNamespace
+        with mock.patch.object(codex, "_TRANSPORT_CONFIG", (*codex._TRANSPORT_CONFIG,
+                                                         "features.future_native_tool=false")):
+            params = codex._thread_params({"model": "gpt-6-luna", "effort": None, "tools": [],
+                                          "native_image_generation": True}, SimpleNamespace(cwd="/tmp/probe"))
+        self.assertFalse(params["config"]["features"]["future_native_tool"])
+
     def test_native_image_completion_normalizes_runtime_status_without_hiding_failure(self):
         for status, result, failure, expected in [
                 ("succeeded", "PNG", None, "completed"),

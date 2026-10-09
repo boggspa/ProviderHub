@@ -43,6 +43,29 @@ summarizer. Switching to a text-only route retains an image outcome note.
 
 ## Qualification
 
+### Build 59 native-command regression
+
+The running v0.5.6 build 59 (`c49b85d`) included the original repairs but
+still failed with `Codex attempted a native CLI tool (commandExecution)`.
+An offline probe of the installed Codex 0.162.0-alpha.2 runtime reproduced
+the cause: `thread/start` replaces the `features` table. The image repair's
+`{"features":{"image_generation":true}}` override discarded the argv's
+`features.shell_tool=false` and the other feature restrictions. Native
+commands became available again, and the existing guard terminated the run.
+
+The image thread override now copies **all** transport feature restrictions
+before enabling image generation. A synthetic native-command attempt is
+therefore answered by the runtime as an unavailable tool, and a corrected
+host-tool request continues in the same turn without the bridge's fatal
+native-command event. The guard remains for unexpected native activity.
+
+Run `uv run --python 3.13 python scripts/probe_codex_native_commands.py` to
+verify the installed runtime against a local scripted provider. The optional
+`--reproduce-legacy` case restores the faulty table in an isolated scratch
+thread and attempts only a fixed `printf`, demonstrating the old failure.
+No user credentials or real model calls are involved. Unit tests also require
+new transport feature restrictions to survive future image-thread overrides.
+
 Deterministic tests exercise the real local HTTP gateway with scripted Codex
 app-server events: streamed and buffered images, image failure followed by
 host work, interleaved outputs, replay, compaction, request budgets, invalid
