@@ -441,6 +441,8 @@ class ChatService:
         self._git_working = False
         self._steering = False
         self._resume_after_interrupt = False
+        self._preserve_turn_head = False
+        self.turn_heads = {}
         self.closing = False
         self.restart_thread = None
         self.branch_thread = None
@@ -676,6 +678,7 @@ class ChatService:
                     self.emit({"event": "error", "message": "The update was saved but Chat could not restart. Reopen Chat to recover it."})
                 if resume:
                     self.cancel.clear(); self.approval_event.clear()
+                    self._preserve_turn_head = True
                     self.thread = threading.Thread(target=self.run, name="provider-hub-chat", daemon=True)
                     self.thread.start()
                 else:
@@ -959,6 +962,12 @@ class ChatService:
                 if self.cancel.wait(delay): raise InterruptedError("Stopped")
 
     def run(self):
+        if self.role == "parent":
+            preserve = self._preserve_turn_head
+            self._preserve_turn_head = False
+            if not preserve:
+                try: self._note_turn_head()
+                except Exception: pass
         if self.role == "parent" and chat_team.enabled(self.chat):
             return chat_team.run(self)
         chat = self.chat
@@ -1160,6 +1169,21 @@ class ChatService:
                 if not self._steering:
                     self._working = False
                     self.emit({"event": "state", "busy": False, "interrupting": False, "status": status, "usage": chat.get("usage")})
+
+    def _note_turn_head(self):
+        """Remember this workspace's HEAD so later commits stay visible for the turn."""
+        chat = self.chat
+        if not chat or not isinstance(chat.get("workspace"), str):
+            return
+        try: key = str(Path(chat["workspace"]).expanduser().resolve())
+        except OSError: return
+        try:
+            import chat_inspector
+            revision = chat_inspector.turn_revision(chat["workspace"])
+        except Exception:
+            revision = None
+        if revision is None: self.turn_heads.pop(key, None)
+        else: self.turn_heads[key] = revision
 
 
 def main():

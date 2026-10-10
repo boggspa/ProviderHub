@@ -349,7 +349,12 @@ def handle_auxiliary(parent, command):
         notice = None
         try:
             if action == "inspect_git":
-                parent.emit({"event": event, "chat": identifier, "request": command.get("request"), "workspace": workspace, "changes": inspector.git_changes(workspace)})
+                since = None
+                heads = getattr(parent, "turn_heads", None)
+                if isinstance(heads, dict):
+                    try: since = heads.get(str(Path(workspace).expanduser().resolve()))
+                    except OSError: since = None
+                parent.emit({"event": event, "chat": identifier, "request": command.get("request"), "workspace": workspace, "changes": inspector.git_changes(workspace, since=since)})
             elif action == "branches":
                 parent.emit({"event": event, "chat": identifier, "request": command.get("request"), "workspace": workspace, "branches": inspector.git_branches(workspace)})
             else:

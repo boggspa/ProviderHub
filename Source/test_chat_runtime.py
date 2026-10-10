@@ -349,6 +349,45 @@ class ChatRuntimeTests(unittest.TestCase):
         self.send(service, "durable before acknowledgement"); self.finish(service)
         self.assertEqual(accepted, ["durable before acknowledgement"])
 
+    def test_turn_start_head_lists_later_commits_and_resets_on_the_next_turn(self):
+        repo = self.root / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-b", "main", str(repo)], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(repo), "config", "user.email", "test@example.invalid"], check=True)
+        subprocess.run(["git", "-C", str(repo), "config", "user.name", "Test"], check=True)
+        (repo / "base.txt").write_text("base\n")
+        subprocess.run(["git", "-C", str(repo), "add", "--all"], check=True)
+        subprocess.run(["git", "-C", str(repo), "commit", "-m", "base"], check=True, capture_output=True)
+        service, _ = self.service([response("Done"), response("Again")])
+        service.chat["workspace"] = str(repo)
+        self.send(service); self.finish(service)
+        key = str(repo.resolve())
+        baseline = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], check=True, capture_output=True).stdout.decode().strip()
+        self.assertEqual(service.turn_heads.get(key), baseline)
+        (repo / "during.txt").write_text("during\n")
+        subprocess.run(["git", "-C", str(repo), "add", "--all"], check=True)
+        subprocess.run(["git", "-C", str(repo), "commit", "-m", "during the turn"], check=True, capture_output=True)
+        service.handle({"command": "inspect_git", "id": service.chat["id"], "request": "turn-commits"})
+        event = self._inspector_event("turn-commits")
+        self.assertEqual([row["subject"] for row in event["changes"]["commits"]], ["during the turn"])
+        self.assertEqual(event["changes"]["commits"][0]["files"][0]["path"], "during.txt")
+        self.assertEqual(service.turn_heads[key], baseline)
+        self.send(service, "Next turn"); self.finish(service)
+        moved = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], check=True, capture_output=True).stdout.decode().strip()
+        self.assertEqual(service.turn_heads[key], moved)
+        self.assertNotEqual(moved, baseline)
+        service.handle({"command": "inspect_git", "id": service.chat["id"], "request": "next-turn"})
+        nxt = self._inspector_event("next-turn")
+        self.assertEqual(nxt["changes"]["commits"], [])
+
+    def _inspector_event(self, request):
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            found = next((item for item in self.events if item.get("event") == "git_changes" and item.get("request") == request), None)
+            if found: return found
+            time.sleep(0.01)
+        self.fail("inspect_git did not answer " + request)
+
 
 class MessagesStreamTests(unittest.TestCase):
     def wire(self, events):

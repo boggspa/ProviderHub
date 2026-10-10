@@ -18,6 +18,11 @@ MAX_DIFF = 64_000
 MAX_TOTAL = 512_000
 MAX_FILES = 100
 
+MAX_COMMITS = 20
+MAX_COMMIT_FILES = 40
+MAX_COMMIT_DIFF = 8_000
+MAX_COMMIT_TOTAL = 96_000
+
 
 def _git(workspace, *args, limit=MAX_OUTPUT, timeout=10, allow_failure=False):
     env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
@@ -101,7 +106,124 @@ def _root(workspace):
     return _text(_complete(path, "rev-parse", "--show-toplevel").removesuffix(b"\n"))
 
 
-def git_changes(workspace):
+def turn_revision(workspace):
+    """HEAD at a turn boundary: a sha, '' when unborn, None outside a repository."""
+    try:
+        root = _root(workspace)
+    except (OSError, ValueError):
+        return None
+    data, truncated, code = _git(root, "rev-parse", "--verify", "--quiet", "HEAD", allow_failure=True)
+    if truncated or code or not data.strip():
+        return "" if not truncated else None
+    text = data.strip().decode("ascii", "replace")
+    return text if re.fullmatch(r"[0-9a-fA-F]{40}", text) else None
+
+
+def _commit_range(root, since):
+    if since is None:
+        return None
+    if since != "" and not re.fullmatch(r"[0-9a-fA-F]{40}", since):
+        return None
+    data, truncated, code = _git(root, "rev-parse", "--verify", "--quiet", "HEAD", allow_failure=True)
+    if truncated or code or not data.strip():
+        return None
+    head = data.strip().decode("ascii", "replace")
+    if not re.fullmatch(r"[0-9a-fA-F]{40}", head):
+        return None
+    if since and since.lower() == head.lower():
+        return ""
+    if since:
+        _, anc_truncated, ancestor = _git(root, "merge-base", "--is-ancestor", since, head, allow_failure=True)
+        if anc_truncated or ancestor:
+            return None
+        return since + ".." + head
+    return head
+
+
+def _commit_rows(data):
+    rows, tokens, index = [], data.split(b"\0"), 0
+    while index < len(tokens) and tokens[index]:
+        fields = tokens[index].split(b"\t", 2); index += 1
+        if len(fields) != 3:
+            continue
+        added, deleted, path = fields
+        old = None
+        if not path:
+            if index + 1 >= len(tokens):
+                break
+            old, path = tokens[index], tokens[index + 1]; index += 2
+        rows.append((added, deleted, _text(path), _text(old) if old is not None else None))
+    return rows
+
+
+def _commit_files(root, sha, deadline, used):
+    if time.monotonic() >= deadline:
+        return [], True, used
+    data, clipped, code = _git(root, "diff-tree", "--root", "--no-commit-id", "--numstat", "-r", "-z",
+        "--find-renames", "--no-ext-diff", "--no-textconv", sha, allow_failure=True)
+    if clipped or code:
+        return [], True, used
+    rows = _commit_rows(data)
+    truncated = len(rows) > MAX_COMMIT_FILES
+    files = []
+    for added, deleted, path, old in rows[:MAX_COMMIT_FILES]:
+        if time.monotonic() >= deadline or used >= MAX_COMMIT_TOTAL:
+            truncated = True
+            break
+        binary = added == b"-" or deleted == b"-"
+        add_n = 0 if binary or not added.isdigit() else int(added)
+        del_n = 0 if binary or not deleted.isdigit() else int(deleted)
+        diff, suffix = "", ""
+        if not binary and used < MAX_COMMIT_TOTAL:
+            cap = min(MAX_COMMIT_DIFF, MAX_COMMIT_TOTAL - used)
+            blob, diff_clipped, _ = _git(root, "diff-tree", "--root", "--no-commit-id", "-p", "--unified=3",
+                "--no-ext-diff", "--no-textconv", "--find-renames", sha, "--", path, limit=cap, allow_failure=True)
+            suffix = "\n[Diff truncated]" if diff_clipped or len(blob) > cap else ""
+            diff = blob[:max(0, cap - len(suffix.encode()))].decode("utf-8", "ignore") + suffix[:cap]
+            used += len(diff.encode("utf-8"))
+            truncated |= bool(suffix)
+        row = {"path": _display_path(path), "added": add_n, "deleted": del_n, "binary": binary,
+               "diff": diff, "status": "R" if old else "M"}
+        if old:
+            row["oldPath"] = _display_path(old)
+        files.append(row)
+    return files, truncated, used
+
+
+def _commits_since(root, since, deadline):
+    revision = _commit_range(root, since)
+    if revision is None:
+        return [], False
+    if revision == "":
+        return [], False
+    if time.monotonic() >= deadline:
+        return [], True
+    data, clipped, code = _git(root, "log", "-n", str(MAX_COMMITS + 1), "-z",
+        "--format=%H%x1f%an%x1f%aI%x1f%s", revision, allow_failure=True)
+    records = [item for item in data.split(b"\0") if item]
+    if code and not records:
+        return [], False
+    truncated = clipped or len(records) > MAX_COMMITS
+    commits, used = [], 0
+    for record in records[:MAX_COMMITS]:
+        if time.monotonic() >= deadline:
+            truncated = True
+            break
+        parts = record.split(b"\x1f", 3)
+        if len(parts) != 4:
+            continue
+        sha, author, when, subject = (part.decode("utf-8", "replace") for part in parts)
+        subject = subject.strip("\n")
+        if not re.fullmatch(r"[0-9a-fA-F]{40}", sha):
+            continue
+        files, file_truncated, used = _commit_files(root, sha, deadline, used)
+        truncated |= file_truncated
+        commits.append({"hash": sha, "subject": subject, "author": author, "time": when,
+                        "files": files, "truncated": file_truncated})
+    return commits, truncated
+
+
+def git_changes(workspace, since=None):
     root = _root(workspace)
     _, _, code = _git(root, "rev-parse", "--verify", "HEAD", allow_failure=True)
     base = ["HEAD"] if not code else []
@@ -184,7 +306,8 @@ def git_changes(workspace):
         if "oldPath" in row: row["oldPath"] = _display_path(row["oldPath"])
         used += len(row["diff"].encode("utf-8")); truncated |= clipped
         files.append(row)
-    return {"files": files, "truncated": truncated}
+    commits, commit_truncated = _commits_since(root, since, deadline)
+    return {"files": files, "truncated": truncated or commit_truncated, "commits": commits}
 
 
 def git_branches(workspace):

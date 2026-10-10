@@ -746,6 +746,47 @@ import Combine
             ["id":"p9", "command":"sleep 30", "status":"exited", "code":-9, "started":0, "ended":4]))
         check(signalled.failed && signalled.statusText() == "Failed (signal 9) · 4s", "a signal death read as an exit code")
         try processEvent(["event":"processes", "chat":"A", "processes":[runningRow]])
+        procs.primeChangesActivity()
+        let beforeLive = processCommands.count
+        procs.noteCompletedFileTools(now: 50)
+        check(processCommands.count == beforeLive, "unchanged transcript refreshed changes")
+        func toolEntry(_ id: String, _ name: String, _ detail: String, _ files: [String], _ member: String? = nil, _ memberName: String? = nil) -> ChatEntry {
+            ChatEntry(id: id, kind: "tool", text: "", route: "ollama/test", tool: name, detail: detail, isError: false, changedFiles: files, memberID: member, memberName: memberName)
+        }
+        procs.entries = [toolEntry("running", "run_shell", "Running\u{2026}", [])]
+        procs.noteCompletedFileTools(now: 51)
+        check(processCommands.count == beforeLive, "in-flight shell refreshed changes")
+        procs.entries = [toolEntry("running", "run_shell", "Finished", [])]
+        procs.noteCompletedFileTools(now: 52)
+        check(processCommands.count == beforeLive + 1 && processCommands.last?["command"] as? String == "inspect_git" && processCommands.last?["id"] as? String == "A", "completed shell did not refresh changes")
+        let firstLive = processCommands.last?["request"] as! String
+        try processEvent(["event":"git_changes", "chat":"A", "workspace":"/tmp", "request":firstLive, "changes":["files":[], "truncated":false]])
+        check(procs.gitChanges?.commits.isEmpty == true && !procs.gitChangesLoading, "legacy changes payload did not decode")
+        procs.entries.append(toolEntry("patch", "apply_patch", "Applied", ["A.swift"], "m-old", "Old"))
+        procs.noteCompletedFileTools(now: 53)
+        procs.flushScheduledChanges(now: 54)
+        check(processCommands.count == beforeLive + 1, "throttled refresh flooded inspect_git")
+        procs.flushScheduledChanges(now: 55)
+        check(processCommands.count == beforeLive + 2 && processCommands.last?["command"] as? String == "inspect_git", "coalesced refresh did not run after the interval")
+        let secondLive = processCommands.last?["request"] as! String
+        try processEvent(["event":"git_changes", "chat":"A", "workspace":"/tmp", "request":secondLive, "changes":["files":[], "truncated":false]])
+        procs.entries.append(toolEntry("read", "read_file", "Done", ["B.swift"], "m-old", "Old"))
+        procs.noteCompletedFileTools(now: 58)
+        check(processCommands.count == beforeLive + 3, "a finished edit outside patch and shell did not refresh")
+        let thirdLive = processCommands.last?["request"] as! String
+        try processEvent(["event":"git_changes", "chat":"A", "workspace":"/tmp", "request":thirdLive, "changes":["files":[], "truncated":false]])
+        procs.entries.append(toolEntry("later", "apply_patch", "Applied", ["A.swift"], "m-new", "New"))
+        procs.noteCompletedFileTools(now: 59)
+        check(processCommands.count == beforeLive + 3 && procs.changesActivityDirty, "an edit inside the interval was sent immediately")
+        check(procs.fileAuthor(path: "A.swift")?.memberID == "m-new" && procs.fileAuthor(path: "A.swift")?.name == "New", "latest member did not win the path")
+        check(procs.fileAuthor(path: "B.swift")?.name == "Old", "an earlier path lost its author")
+        check(procs.fileAuthor(path: "missing.swift") == nil, "an untouched path was attributed")
+        procs.refreshChanges()
+        let commitRequest = processCommands.last?["request"] as! String
+        let commitFile: [String: Any] = ["path":"A.swift", "status":"M", "added":3, "deleted":1, "binary":false, "diff":"+now"]
+        let commitRow: [String: Any] = ["hash":String(repeating: "ab", count: 20), "subject":"Keep the edit", "author":"Ada", "time":"2026-10-11T00:04:00Z", "files":[commitFile], "truncated":false]
+        try processEvent(["event":"git_changes", "chat":"A", "workspace":"/tmp", "request":commitRequest, "changes":["files":[commitFile], "truncated":false, "commits":[commitRow]]])
+        check(procs.gitChanges?.commits.count == 1 && procs.gitChanges?.commits.first?.subject == "Keep the edit" && procs.gitChanges?.commits.first?.files.first?.added == 3 && procs.gitChanges?.files.first?.added == 3, "commit payload did not decode")
         procs.disconnected("Transport gone")
         check(procs.processes.isEmpty && procs.processesNotice.contains("may still be running"), "disconnect kept rows or hid possible orphans")
         print("ChatModel state transitions passed")
