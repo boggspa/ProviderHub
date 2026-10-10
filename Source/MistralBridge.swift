@@ -72,6 +72,12 @@ final class BridgeModel: ObservableObject {
     var openChatWindow: (() -> Void)?
     @Published var chatWindowOpen = false
     @Published var chatWorking = false
+    /// The ChatModel's own active-turn signal, propagated by AppController
+    /// so the Hub's launch / restore paths can guard on it independently of
+    /// ``chatWorking``. The two are normally in lock-step (``onActivity``
+    /// forwards ``hasActiveWork``); the dedicated slot lets the auto-stop
+    /// and restore paths prefer whichever signal is freshest at call time.
+    @Published var chatHasActiveWork = false
     @Published var profileActive = false
     @Published var recoveryNeeded = false
     @Published var codexModels: [CodexModelOption] = []
@@ -679,6 +685,191 @@ final class BridgeModel: ObservableObject {
         try await writeSettings()
     }
 
+    /// Settings save used by the launch flow.
+    ///
+    /// ``save()`` refuses when ``chatWorking`` is true because the Settings
+    /// UI is for hand-edited model changes — the user has not asked to act.
+    /// A launch *is* an action: the user has explicitly clicked Launch, and
+    /// the launch should not be blocked by a Chat turn that is unaffected
+    /// by the new settings. The gateway is also left running here; the
+    /// snapshot match in ``ensureGatewaySnapshot`` decides whether the
+    /// prepared plan still needs a fresh gateway or not.
+    func saveForLaunch() async throws {
+        await waitForCatalogueRefresh()
+        updateClaudeRunning()
+        updateCodexRunning()
+        let kind = changeKind
+        if kind == .unchanged { return }
+        // Live-harness-vs-change rules remain: a live app's profile is never
+        // rewritten from under it (AGENTS.md "never rewrite a live app's
+        // profile under it"). Chat work is intentionally NOT a refusal.
+        let claudeLive = claudeRunning && profileActive
+        let codexLive = codexRunning && codexRecoveryNeeded
+        if activeRequests > 0 || claudeLive || codexLive {
+            switch kind {
+            case .prefs:
+                try await writeSettings()
+                return
+            case .codexOnly:
+                guard !codexLive else {
+                    throw WorkerError(message: "Quit Codex / ChatGPT before changing its model catalogue or default.")
+                }
+            case .claudeRouting:
+                guard !claudeLive else {
+                    throw WorkerError(message: "Quit Claude before changing its provider settings.")
+                }
+            case .mixed:
+                throw WorkerError(message: "Quit the desktop sessions using this gateway before changing provider settings.")
+            case .unchanged:
+                return
+            }
+            try await saveScoped()
+            return
+        }
+        try await writeSettings()
+    }
+
+    // MARK: - Launch-plan resolver
+    //
+    // The Hub used to refuse launching any desktop app while a run was
+    // active in another surface. The Swift ``LaunchPlan`` resolver below
+    // is a faithful mirror of ``Source/launch_plan.py``'s pure function;
+    // both speak the same verbs (``open_directly`` / ``save_and_open`` /
+    // ``restart_and_open`` / ``blocked``) so the resolver can move to the
+    // worker later without churning the orchestrator.
+
+    enum LaunchAction: String {
+        /// Gateway snapshot already matches the prepared plan. Activate
+        /// the app's profile and open it; no save, no restart, no chat
+        /// block. The "open directly" verb is the relaxed-launch win.
+        case openDirectly = "open_directly"
+        /// Settings need persisting but the gateway snapshot already
+        /// matches. Save without disturbing the gateway and open.
+        case saveAndOpen = "save_and_open"
+        /// Gateway snapshot does not match. The orchestrator offers a
+        /// restart alert (no in-flight work) or blocks with a named reason.
+        case restartAndOpen = "restart_and_open"
+        /// Launch cannot proceed. ``blockReason`` names what is in the way.
+        case blocked = "blocked"
+    }
+
+    struct LaunchPlan {
+        var action: LaunchAction
+        var blockReason: String?
+        var requiresUserConfirm: Bool = false
+        var mustRestart: Bool = false
+        var mustSave: Bool = false
+        /// The other harness's display name, used in alert copy.
+        var otherHarness: String
+        /// The surface being launched ("claude" or "codex").
+        var surface: String
+    }
+
+    /// Pure resolver; mirrors ``resolve_launch_plan`` in launch_plan.py.
+    /// ``surface`` is "claude" or "codex"; the gateway fingerprint/digest
+    /// arguments are the current ``/_bridge/status`` values (or nil if the
+    /// gateway is not running); the prepared values come from the worker's
+    /// ``prepare-launch`` / ``codex-prepare`` response.
+    func resolveLaunchPlan(surface: String,
+                           gatewayFingerprint: String?,
+                           gatewayDigest: String?,
+                           preparedFingerprint: String?,
+                           preparedDigest: String?) -> LaunchPlan {
+        let claudeLive = claudeRunning && profileActive
+        let codexLive = codexRunning && codexRecoveryNeeded
+        let otherHarness = surface == "claude" ? "Codex / ChatGPT" : "Claude"
+        let surfaceLabel = surface == "claude" ? "Claude" : "Codex"
+        let kind = changeKind
+        let chatBusy = chatWorking || chatHasActiveWork
+
+        // 1. Live-harness-vs-change refusal. Hard block: a live app's
+        // profile is never rewritten from under it.
+        if kind != .unchanged {
+            switch kind {
+            case .codexOnly where codexLive:
+                return LaunchPlan(action: .blocked,
+                                  blockReason: "Quit Codex / ChatGPT before changing its model catalogue or default.",
+                                  otherHarness: otherHarness, surface: surface)
+            case .claudeRouting where claudeLive:
+                return LaunchPlan(action: .blocked,
+                                  blockReason: "Quit Claude before changing its provider settings.",
+                                  otherHarness: otherHarness, surface: surface)
+            case .mixed where claudeLive || codexLive:
+                return LaunchPlan(action: .blocked,
+                                  blockReason: "Quit the desktop sessions using this gateway before changing provider settings.",
+                                  otherHarness: otherHarness, surface: surface)
+            default: break
+            }
+        }
+
+        // 2. Snapshot comparison. If the gateway already carries what this
+        //    launch needs, no save is needed unless settings changed, and
+        //    no restart is ever needed.
+        let mustSave = kind != .unchanged
+        let matches = snapshotsMatch(surface: surface,
+                                     gatewayFingerprint: gatewayFingerprint,
+                                     gatewayDigest: gatewayDigest,
+                                     preparedFingerprint: preparedFingerprint,
+                                     preparedDigest: preparedDigest)
+        if matches {
+            return LaunchPlan(action: mustSave ? .saveAndOpen : .openDirectly,
+                              mustRestart: false, mustSave: mustSave,
+                              otherHarness: otherHarness, surface: surface)
+        }
+
+        // 3. Snapshot mismatch — a gateway restart is needed. Name the
+        //    holders rather than refusing generically.
+        if activeRequests > 0 {
+            let noun = activeRequests == 1 ? "request" : "requests"
+            return LaunchPlan(action: .blocked,
+                              blockReason: "\(otherHarness) has \(activeRequests) \(noun) in flight. Wait for them to finish, then launch again so the gateway can load \(surfaceLabel)'s selection.",
+                              mustRestart: true, mustSave: mustSave,
+                              otherHarness: otherHarness, surface: surface)
+        }
+        if chatBusy {
+            return LaunchPlan(action: .blocked,
+                              blockReason: "Chat is working. Stop the Chat turn, then launch again so the gateway can load \(surfaceLabel)'s selection.",
+                              mustRestart: true, mustSave: mustSave,
+                              otherHarness: otherHarness, surface: surface)
+        }
+
+        // 4. No in-flight work; surface the existing restart alert.
+        return LaunchPlan(action: .restartAndOpen,
+                          requiresUserConfirm: true,
+                          mustRestart: true, mustSave: mustSave,
+                          otherHarness: otherHarness, surface: surface)
+    }
+
+    /// True when the live gateway already has the snapshot the launch needs.
+    /// ``None`` on either side means "do not compare this dimension".
+    private func snapshotsMatch(surface: String,
+                                gatewayFingerprint: String?,
+                                gatewayDigest: String?,
+                                preparedFingerprint: String?,
+                                preparedDigest: String?) -> Bool {
+        guard running else { return false }
+        if surface == "claude" {
+            // Claude-side launch compares catalogue_fingerprint; codex-side
+            // digest is irrelevant here.
+            guard let expected = preparedFingerprint else { return true }
+            return gatewayFingerprint == expected
+        }
+        // surface == "codex"
+        guard let expected = preparedDigest else { return true }
+        return gatewayDigest == expected
+    }
+
+    /// True when no surface (desktop harness or chat) is keeping the
+    /// gateway alive and no requests are in flight. The restore / auto-stop
+    /// paths share this predicate so the policy lives in one place.
+    func mayStopGateway() -> Bool {
+        let chatBusy = chatWorking || chatHasActiveWork
+        let anyOwned = (claudeRunning && profileActive)
+            || (codexRunning && codexRecoveryNeeded)
+            || chatWindowOpen || chatBusy
+        return !anyOwned && activeRequests == 0
+    }
+
     func saveScoped() async throws {
         // Persist a change scoped to the idle harness without disturbing the
         // gateway owned by the live one.
@@ -708,10 +899,21 @@ final class BridgeModel: ObservableObject {
 
     func ensureGatewaySnapshot(fingerprint: String?, digest: String?, otherHarness: String) async throws {
         guard running, fingerprint != nil || digest != nil else { return }
-        guard !chatWorking else { throw WorkerError(message: "Stop the Chat turn before restarting the shared gateway.") }
+        // Snapshot check FIRST. If the live gateway already carries what
+        // this launch needs, there is no restart to refuse — chat work and
+        // in-flight requests are safe, and the app opens without a hitch.
+        // This is the relaxed-launch win the user asked for.
         if try await gatewayMatches(fingerprint: fingerprint, digest: digest) == true { return }
+        // Snapshot mismatch — a gateway restart is genuinely needed. Name
+        // the holders in the block reason so the user can act.
+        let chatBusy = chatWorking || chatHasActiveWork
+        let surfaceLabel = otherHarness == "Codex / ChatGPT" ? "Claude" : "Codex / ChatGPT"
         if activeRequests > 0 {
-            throw WorkerError(message: "Wait for the active model requests to finish, then launch again so the gateway can load your latest selection.")
+            let noun = activeRequests == 1 ? "request" : "requests"
+            throw WorkerError(message: "\(otherHarness) has \(activeRequests) \(noun) in flight. Wait for them to finish, then launch again so the gateway can load \(surfaceLabel)'s selection.")
+        }
+        if chatBusy {
+            throw WorkerError(message: "Chat is working. Stop the Chat turn, then launch again so the gateway can load \(surfaceLabel)'s selection.")
         }
         let alert = NSAlert()
         alert.messageText = "Restart the gateway for this launch?"
@@ -888,13 +1090,20 @@ final class BridgeModel: ObservableObject {
             if recoveryNeeded { _ = try await command("restore"); recoveryNeeded = false }
             tell("Preparing the selected models for Claude…")
             updateCodexRunning()
-            if changed || !anyOwnedHarnessRunning { try await save() }
-            else { await waitForCatalogueRefresh() }
+            // ``saveForLaunch`` persists unsaved settings WITHOUT blocking
+            // on ``chatWorking`` and WITHOUT stopping the gateway. The
+            // gateway-restart decision now lives in ``ensureGatewaySnapshot``
+            // and only triggers when the prepared snapshot doesn't match
+            // the live one — so a Codex turn in flight is no longer in the
+            // way of launching Claude.
+            try await saveForLaunch()
             let prepared = try await command("prepare-launch")
             readCatalogue(prepared, modelsKey: "models")
             applyCatalogueDiagnostics(prepared)
-            // save() stops an idle gateway before preparation. The new worker
-            // must snapshot the prepared catalogue, not the old startup cache.
+            // Start the gateway if it isn't already running for Codex.
+            // When Codex is the live harness, the gateway is already up
+            // and ``ensureGatewaySnapshot`` will short-circuit on a
+            // matching fingerprint — no restart, no chat block.
             try await startGateway()
             try await ensureGatewaySnapshot(fingerprint: prepared["catalogue_fingerprint"] as? String, digest: nil, otherHarness: "Codex / ChatGPT")
             _ = try await command("activate")
@@ -928,7 +1137,13 @@ final class BridgeModel: ObservableObject {
         do {
             let result = try await command("restore")
             recoveryNeeded = false; profileActive = false; hasObservedOwnedClaude = false
-            if !anyOwnedHarnessRunning { await stopGateway() }
+            // ``mayStopGateway`` is the explicit predicate that honours
+            // ChatModel's ``hasActiveWork`` in addition to ``chatWorking``.
+            // It used to be implicit in ``!anyOwnedHarnessRunning``, which
+            // only folded ``chatWorking`` in via the AppController's
+            // activity bridge — the dedicated predicate closes the gap
+            // between the two signals at the call site.
+            if mayStopGateway() { await stopGateway() }
             let kept = result["preserved_external_changes"] as? Int ?? 0
             tell(kept > 0 ? "Disconnected. Changes made by another app were preserved." : "Restored Claude’s previous configuration. Your conversations remain saved.")
         } catch { tell(error.localizedDescription, error: true) }
@@ -953,7 +1168,11 @@ final class BridgeModel: ObservableObject {
             do {
                 _ = try await command("restore")
                 recoveryNeeded = false; profileActive = false; hasObservedOwnedClaude = false
-                if savedSettings.auto_stop && !anyOwnedHarnessRunning && activeRequests == 0 { await stopGateway() }
+                // ``mayStopGateway`` folds ChatModel's ``hasActiveWork`` into
+                // the predicate in addition to ``chatWorking``, so a turn
+                // still in flight is enough to keep the gateway alive even
+                // if no desktop harness is currently running.
+                if savedSettings.auto_stop && mayStopGateway() { await stopGateway() }
                 tell("Claude closed. Its previous configuration has been restored.")
             } catch { tell(error.localizedDescription, error: true) }
             finishingSession = false
@@ -1444,8 +1663,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         NSApp.mainMenu = mainMenu
         model = BridgeModel()
         chatModel = ChatModel(bridge: model)
-        chatModel.onActivity = { [weak self] working in self?.model.chatWorking = working }
-        chatModel.onSurfaceChange = { [weak self] in self?.applyWindowStyle() }
+        // Mirror the ChatModel's own active-turn signal so restore/auto-stop
+        // can guard on it independently of ``chatWorking``. ``onActivity``
+        // fires on every transition of ``hasActiveWork``; the closures
+        // below keep the two slots synchronised on the main actor.
+        let mirrorActivity: (Bool) -> Void = { [weak self] working in
+            self?.model.chatWorking = working
+            self?.model.chatHasActiveWork = working
+        }
+        chatModel.onActivity = mirrorActivity
+        chatModel.onSurfaceChange = { [weak self] in
+            guard let self else { return }
+            // Re-read on surface change so a session switch that leaves
+            // active work behind still flips the slot.
+            self.model.chatHasActiveWork = self.chatModel.hasActiveWork
+            self.applyWindowStyle()
+        }
         model.openChatWindow = { [weak self] in self?.showChat() }
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         statusItem.button?.image = NSImage(systemSymbolName: "point.3.connected.trianglepath.dotted", accessibilityDescription: hubName)

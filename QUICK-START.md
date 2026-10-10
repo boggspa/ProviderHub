@@ -207,6 +207,16 @@ restarts the gateway so both share the new snapshot, and the running app
 reconnects automatically. Shared provider settings (keys, regions, port) still
 require quitting both desktop apps.
 
+Launching another desktop app while a run is active elsewhere does not need
+the active run to finish first. When the live gateway already carries the
+selection the new launch needs, the launch opens the app directly — no save,
+no gateway restart, no chat block. A Chat turn or in-flight requests block
+the restart with a named reason ("Chat is working", "Codex / ChatGPT has 2
+requests in flight") rather than a generic refusal; the shared gateway
+auto-stop on the Config pane honours ChatModel's active-turn signal so a
+Chat turn in flight keeps the gateway alive while you close or switch the
+other desktop app.
+
 This integration applies to the Codex coding workspace. It does not reroute
 ordinary ChatGPT cloud chats, voice, or every other product feature. File
 editing and terminal tools are supported. Hosted web search is on when any
