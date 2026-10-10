@@ -17,6 +17,8 @@ private typealias Semantic = HubTheme.Semantic
 struct ChatWindow: View {
     @ObservedObject var model: ChatModel
     @AppStorage("chatRailVisible") private var railPreferred = true
+    @AppStorage("chatRailWidth") private var railWidth = 190.0
+    @AppStorage("chatInspectorWidth") private var inspectorWidth = 0.0
     @AppStorage(HubTheme.WindowStyle.defaultsKey) private var windowStyle = HubTheme.WindowStyle.Mode.glass
     @AppStorage("chatMonospacedText") private var monospacedText = false
     @AppStorage("chatFontChoice") private var fontChoice = ""
@@ -26,27 +28,27 @@ struct ChatWindow: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var dropTargeted = false
 
-    private static let railWidth: CGFloat = 190
-    /// Below this width the rail hides on its own; the toggle explains why.
-    private static let narrowWidth: CGFloat = 860
-
     var body: some View {
         VStack(spacing: 0) {
             titleBar
             GeometryReader { proxy in
-                let inspectorWidth = min(360, max(290, proxy.size.width * 0.35))
-                let remaining = proxy.size.width - (model.inspectorVisible ? inspectorWidth : 0)
-                let narrow = remaining < Self.narrowWidth
+                let panes = ChatPaneSizing.layout(window: proxy.size.width, railPreferred: railPreferred,
+                    inspectorVisible: model.inspectorVisible, rail: railWidth, inspector: inspectorWidth)
                 HStack(spacing: 0) {
-                    if railPreferred && !narrow {
-                        ChatWorkspaceRail(model: model).frame(width: Self.railWidth)
-                        Rectangle().fill(Semantic.hairline).frame(width: HubTheme.Separator.width)
+                    if panes.rail > 0 {
+                        ChatWorkspaceRail(model: model).frame(width: panes.rail)
+                        ChatPaneDivider(label: "Workspace rail width", width: panes.rail, direction: 1,
+                            resize: { railWidth = Double(ChatPaneSizing.clamp($0, 150, 360)) },
+                            reset: { railWidth = Double(ChatPaneSizing.railDefault) })
                     }
-                    ChatPane(model: model, railVisible: railPreferred && !narrow, railAvailable: !narrow,
-                             compactHeader: remaining - (railPreferred && !narrow ? Self.railWidth : 0) < 860) { railPreferred.toggle() }
+                    ChatPane(model: model, railVisible: panes.rail > 0, railAvailable: panes.railAvailable,
+                             compactHeader: panes.transcript < 860) { railPreferred.toggle() }
                     if model.inspectorVisible {
-                        Rectangle().fill(Semantic.hairline).frame(width: HubTheme.Separator.width)
-                        ChatInspector(model: model).frame(width: inspectorWidth)
+                        ChatPaneDivider(label: "Inspector width", width: panes.inspector, direction: -1,
+                            resize: { inspectorWidth = Double(ChatPaneSizing.clamp($0, 260,
+                                min(600, proxy.size.width - ChatPaneSizing.transcriptMinimum - ChatPaneSizing.divider))) },
+                            reset: { inspectorWidth = 0 })
+                        ChatInspector(model: model).frame(width: panes.inspector)
                     }
                 }
                 .animation(reduceMotion ? nil : .easeInOut(duration: 0.18), value: railPreferred)

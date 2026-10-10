@@ -30,7 +30,7 @@ PROVIDER_KEYS = {"displayProvider", "hueKey", "shortCode", "logo"}
 USER_OVERRIDE_KEYS = {
     "displayProvider", "hueKey", "accent", "shortCode", "modelLabels", "logo",
 }
-LOGO_KEYS = {"light", "dark", "scale", "leadingMarkAspectRatio", "trailingMarkAspectRatio", "template"}
+LOGO_KEYS = {"light", "dark", "scale", "leadingMarkAspectRatio", "trailingMarkAspectRatio", "template", "tint"}
 RULE_KEYS = {
     "runtimeProvider", "id", "providerLabel", "providerClass", "needles",
     "fallbackModelLabel",
@@ -128,6 +128,11 @@ def _logo(value, label: str) -> dict:
         if not isinstance(logo["template"], bool):
             raise BrandingError(f"{label}.template must be a boolean.")
         result["template"] = logo["template"]
+    if "tint" in logo:
+        tint = logo["tint"]
+        if not isinstance(tint, str) or tint != "accent":
+            raise BrandingError(f"{label}.tint must be 'accent'.")
+        result["tint"] = tint
     return result
 
 

@@ -61,6 +61,7 @@ struct BrandLogo: Codable, Equatable {
     var leadingMarkAspectRatio: Double?
     var trailingMarkAspectRatio: Double?
     var template: Bool?
+    var tint: String?
 }
 struct BrandOverride: Codable, Equatable {
     var displayProvider: String?
@@ -213,7 +214,11 @@ struct ProviderMark: View {
             if let logo = presentation.logo,
                let url = Bundle.main.resourceURL?.appendingPathComponent("worker").appendingPathComponent(logoFileName(logo)),
                let image = NSImage(contentsOf: url) {
-                artwork(image, logo: logo).foregroundStyle(.primary).scaleEffect(logo.scale ?? 1)
+                if logo.tint == "accent" {
+                    artwork(image, logo: logo).foregroundStyle(presentation.color).scaleEffect(logo.scale ?? 1)
+                } else {
+                    artwork(image, logo: logo).foregroundStyle(.primary).scaleEffect(logo.scale ?? 1)
+                }
             } else {
                 Text(presentation.shortCode).font(.system(size: size * 0.31, weight: .bold, design: .rounded)).foregroundStyle(presentation.color)
             }
