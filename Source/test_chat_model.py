@@ -35,6 +35,10 @@ import Combine
 @main struct Cases {
     @MainActor static func main() throws {
         var commands: [[String: Any]] = []
+        let decoder = JSONDecoder()
+        let timed = try decoder.decode(ChatEntry.self, from: Data(#"{"id":"timed","kind":"assistant","text":"Hi","route":"test","isError":false,"changedFiles":[],"time":1791763020.5}"#.utf8))
+        let legacy = try decoder.decode(ChatEntry.self, from: Data(#"{"id":"legacy","kind":"assistant","text":"Hi","route":"test","isError":false,"changedFiles":[]}"#.utf8))
+        precondition(timed.time == 1791763020.5 && legacy.time == nil, "Recorded/legacy time decoding")
         var clock: TimeInterval = 100
         var writable = true
         let preferencesID = "ProviderHub.ChatSearchTests." + UUID().uuidString

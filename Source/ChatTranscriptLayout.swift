@@ -8,6 +8,7 @@ import Foundation
 /// app; tests supply a small record of their own.
 protocol ChatTranscriptItem {
     var id: String { get }
+    var time: Double? { get }
     var kind: String { get }
     var text: String { get }
     var route: String { get }
@@ -23,7 +24,27 @@ protocol ChatTranscriptItem {
 }
 
 extension ChatTranscriptItem {
+    var time: Double? { nil }
     var changedFiles: [String] { [] }
+}
+
+/// Recorded wall-clock time only; legacy rows deliberately have no label.
+enum ChatSectionTime {
+    static func label(_ time: Double?, now: Date = Date(), calendar: Calendar = .current) -> String? {
+        guard let time, time.isFinite else { return nil }
+        let date = Date(timeIntervalSince1970: time)
+        let format = DateFormatter()
+        format.calendar = calendar
+        format.timeZone = calendar.timeZone
+        format.dateFormat = calendar.isDate(date, inSameDayAs: now) ? "HH:mm" : "d MMM yyyy HH:mm"
+        return format.string(from: date)
+    }
+    static func help(_ time: Double?) -> String? {
+        guard let time, time.isFinite else { return nil }
+        let format = DateFormatter()
+        format.dateStyle = .full; format.timeStyle = .long
+        return format.string(from: Date(timeIntervalSince1970: time))
+    }
 }
 
 /// Who is speaking, then what they did, the way Claude and Codex Desktop read.

@@ -249,6 +249,7 @@ by name) gets a section header; in a Team, every text reply starts a new section
 and later tools join that member's current section even when peers interleave.
 User messages and notices close all member sections; solo chats retain their
 continuous speaker blocks, and finished rounds that produced no text draw nothing.
+Section headers show the opening entry's recorded time in local time (with a date for earlier days); older chats without recorded times show none.
 Tool rows lead with what was done ("Ran `swift build`", "Edited Model.swift",
 "Read tools/import.py · lines 85–259", "Searched for `water_height`") instead
 of the folder every call shares, and their glyph wears the caller's provider

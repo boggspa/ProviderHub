@@ -535,7 +535,7 @@ private struct ChatTranscript: View {
                 Group {
                     switch segment.content {
                     case .speaker(let entry):
-                        ChatSpeakerHeader(member: entry.memberName, label: model.label(for: entry.route),
+                        ChatSpeakerHeader(member: entry.memberName, time: entry.time, label: model.label(for: entry.route),
                                           presentation: model.route(named: entry.route)?.presentation,
                                           accent: model.accent(for: entry.route), live: liveSpeakers.contains(segment.id))
                     case .entry(let entry): row(entry, after: segment.previousSpeaker)

@@ -28,6 +28,7 @@ func chatReveal(_ path: String, in workspace: String?) {
 /// calls. A Team member leads with their own name, then the model.
 struct ChatSpeakerHeader: View {
     var member: String?
+    var time: Double? = nil
     var label: String
     var presentation: ProviderPresentation?
     var accent: Color
@@ -39,6 +40,10 @@ struct ChatSpeakerHeader: View {
             ChatProviderIcon(presentation: presentation, size: textStyle.scaled(15))
             Text(member ?? label).font(textStyle.system(12, weight: .semibold)).foregroundStyle(Semantic.ink)
             if member != nil { Text(label).font(textStyle.system(11.5)).foregroundStyle(Semantic.secondaryInk) }
+            if let timestamp = ChatSectionTime.label(time) {
+                Text(timestamp).font(textStyle.system(10.5)).foregroundStyle(Semantic.secondaryInk)
+                    .help(ChatSectionTime.help(time) ?? timestamp)
+            }
             if live { ProgressView().controlSize(.mini).tint(accent).accessibilityLabel("Working") }
         }
         .lineLimit(1)

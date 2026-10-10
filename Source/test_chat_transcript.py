@@ -306,6 +306,7 @@ import SwiftUI
 
 struct Item: ChatTranscriptItem {
     var id: String; var kind: String; var text = ""; var route = "codex/sol"
+    var time: Double? = nil
     var tool: String? = nil; var summary: String? = nil; var detail: String? = nil
     var memberID: String? = nil; var memberName: String? = nil
     var agentID: String? = nil; var agentIDs: [String]? = nil
@@ -324,6 +325,17 @@ struct Item: ChatTranscriptItem {
             Item(id: id, kind: "assistant", text: text, route: route, memberID: member.id, memberName: member.name)
         }
         typealias Segment = ChatTranscriptSegment<Item>
+        var opening = tool("timed-opening"); opening.time = 1791763020
+        var later = tool("timed-later"); later.time = 1791763080
+        let timedSection = Segment.outline([opening, later]) { _ in false }
+        if case .speaker(let first) = timedSection[0].content {
+            check(first.time == opening.time, "Header time did not come from section opening")
+        } else { fatalError("Timed section lost header") }
+        var utc = Calendar(identifier: .gregorian); utc.timeZone = TimeZone(secondsFromGMT: 0)!
+        let today = Date(timeIntervalSince1970: opening.time!)
+        check(ChatSectionTime.label(opening.time, now: today, calendar: utc) == "23:57", "Short local section time")
+        check(ChatSectionTime.label(opening.time, now: today.addingTimeInterval(86400), calendar: utc)?.contains("2026") == true, "Older section omitted date")
+        check(ChatSectionTime.label(nil) == nil && ChatSectionTime.help(nil) == nil, "Legacy section inferred a timestamp")
 
         // One header per speaker block; empty rounds vanish; tool runs fold
         // across them and across hidden notices; a checkpoint ends the block.
