@@ -337,6 +337,31 @@ import Combine
             "isError":false, "changedFiles":[], "mentions":[["id":"builder", "name":"Builder", "route":"ollama/test", "start":9, "length":8], 7]]])
         check(model.entries.last?.mentions?.first == ChatMention(id: "builder", name: "Builder", route: "ollama/test", start: 9, length: 8) &&
               model.entries.last?.mentions?.count == 2, "recorded tags did not survive decoding beside a malformed one")
+        // Names and recorded tags arrive exactly as the worker sent them.
+        // JSONSerialization alone drops a string's leading U+FEFF, which
+        // renamed a member (refusing its chips) and moved a recorded tag.
+        func scalars(_ text: String?) -> [UInt32] { (text ?? "").unicodeScalars.map(\.value) }
+        var bomTeam = roster("ready")
+        var bomMember = (bomTeam["members"] as! [[String: Any]])[0]
+        bomMember["name"] = "\u{FEFF}Builder"; bomTeam["members"] = [bomMember]
+        try send(["event":"team", "chat":"A", "team":bomTeam])
+        check(scalars(model.team?.members.first?.name) == scalars("\u{FEFF}Builder") &&
+              scalars(model.mentionTargets.first?.name) == scalars("\u{FEFF}Builder"), "a member's name lost its leading U+FEFF")
+        try send(["event":"team", "chat":"A", "team":roster("ready")])
+        let bomRow: [String: Any] = ["id":"bom-row", "kind":"user", "text":"\u{FEFF} @Builder", "route":"ollama/test", "isError":false,
+                                     "changedFiles":[], "mentions":[["id":"builder", "name":"Builder", "route":"ollama/test", "start":2, "length":8]]]
+        func drawsTag(_ row: ChatEntry?) -> Bool {
+            guard let row else { return false }
+            return ChatMentions.marked(row.text, mentions: row.mentions ?? [], accent: { _ in .red }).runs.contains { $0[ChatMentionAttribute.self] != nil }
+        }
+        try send(["event":"entry", "chat":"A", "entry":bomRow])
+        check(scalars(model.entries.last?.text) == scalars("\u{FEFF} @Builder") && drawsTag(model.entries.last),
+              "a message's leading U+FEFF moved its recorded tag")
+        let reselected = ChatModel(sendCommand: { _ in true }, uptime: { clock }, preferences: preferences)
+        reselected.consume(try JSONSerialization.data(withJSONObject: ["event":"selected", "id":"A", "entries":[bomRow], "busy":false,
+                                                                         "interrupting":false, "status":"Ready", "usage":0]) + Data([10]))
+        check(scalars(reselected.entries.first?.text) == scalars("\u{FEFF} @Builder") && drawsTag(reselected.entries.first),
+              "a reopened transcript lost a leading U+FEFF")
         check(model.team?.taskMode == false, "legacy roster unexpectedly enabled Task mode")
         var fourMemberTeam = roster("ready")
         let rosterTemplate = (fourMemberTeam["members"] as! [[String: Any]])[0]

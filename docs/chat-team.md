@@ -111,7 +111,11 @@ above. Otherwise the composer drew from an outdated roster, so the worker
 refuses the message before storing anything and resends the current roster;
 Chat restores the draft and the tints correct themselves. Sent messages record
 each tag's member, name, route and position, so a later rename or model change
-never recolours history. The composer's cases live in
+never recolours history. Chat decodes rosters and transcripts character for
+character, so a member's name and a recorded tag's position are exactly what
+the worker compared. Text an input method is still composing is part of the
+draft, so a send takes it as shown; a tag it completes is tinted once the
+composition is committed. The composer's cases live in
 `Source/test_chat_mentions_cases.json`; the tests also generate thousands of
 messages full of awkward characters and check that the worker keeps every chip
 the composer draws for them.

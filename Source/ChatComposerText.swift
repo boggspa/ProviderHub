@@ -24,12 +24,26 @@ struct ComposerTextView: NSViewRepresentable {
     final class SendTextView: NSTextView {
         var onSend: (() -> Void)?
         var onPasteFiles: (([URL]) -> Bool)?
+        /// An input method's composition changed. AppKit posts no text change
+        /// for marked text, so the draft follows it through here; otherwise a
+        /// send would drop it, and the next SwiftUI update would erase it.
+        var onComposition: (() -> Void)?
         var placeholder = "" { didSet { if placeholder != oldValue { needsDisplay = true } } }
 
         override func keyDown(with event: NSEvent) {
             let command = event.modifierFlags.intersection(.deviceIndependentFlagsMask).contains(.command)
             if event.keyCode == 36, command, isEditable { onSend?(); return }
             super.keyDown(with: event)
+        }
+
+        override func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {
+            super.setMarkedText(string, selectedRange: selectedRange, replacementRange: replacementRange)
+            onComposition?()
+        }
+
+        override func unmarkText() {
+            super.unmarkText()
+            onComposition?()
         }
 
         /// Pasted files and images become attachments, matching + and drop.
@@ -85,6 +99,13 @@ struct ComposerTextView: NSViewRepresentable {
 
         func textDidChange(_ notification: Notification) {
             guard let view = notification.object as? NSTextView else { return }
+            changed(view)
+        }
+
+        /// The draft follows the view, an unfinished composition included, so
+        /// a send takes exactly what is shown and no update replaces it.
+        func changed(_ view: NSTextView) {
+            guard !applying else { return }
             parent.text = view.string
             paint(view)
             parent.measure(view)
@@ -201,6 +222,9 @@ struct ComposerTextView: NSViewRepresentable {
         mentionMenu?.choose = { [weak view, weak coordinator] target in
             if let view { coordinator?.accept(target, in: view) }
         }
+        view.onComposition = { [weak view, weak coordinator] in
+            if let view { coordinator?.changed(view) }
+        }
         DispatchQueue.main.async { view.window?.makeFirstResponder(view) }
         return scroll
     }
@@ -226,7 +250,12 @@ struct ComposerTextView: NSViewRepresentable {
         // Literally, not Swift `==`: an equivalent but differently encoded
         // draft would leave the painted chips out of step with the sent ones.
         if !ChatMentions.same(view.string, text) {
-            coordinator.applying = true; view.string = text; coordinator.applying = false
+            coordinator.applying = true
+            // The draft changed under a composition (a send, a restored draft,
+            // another chat): end it here and tell the input method.
+            if view.hasMarkedText() { view.unmarkText(); view.inputContext?.discardMarkedText() }
+            view.string = text
+            coordinator.applying = false
             repaint = true; refresh = true
         }
         if repaint { coordinator.paint(view) }

@@ -340,7 +340,8 @@ struct ChatTeamSnapshot: Decodable {
             if !(value is NSNull) {
                 guard JSONSerialization.isValidJSONObject(value) else { rejectTeamUpdate("invalid snapshot JSON"); return }
                 do {
-                    let snapshot = try JSONDecoder().decode(ChatTeamSnapshot.self, from: JSONSerialization.data(withJSONObject: value))
+                    // From the worker's bytes: member names must arrive exactly as it compares them.
+                    guard let snapshot = try payload(ChatTeamSnapshot.self, "team") else { rejectTeamUpdate("missing team field"); return }
                     guard (1...ChatTeamSnapshot.maxMembers).contains(snapshot.members.count) else {
                         rejectTeamUpdate("expected 1...\(ChatTeamSnapshot.maxMembers) members, received \(snapshot.members.count)"); return
                     }

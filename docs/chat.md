@@ -43,10 +43,11 @@ requests across chats, helpers and Side Chats. When the chat limit is reached,
 the message stays in your draft so you can send it
 after a turn finishes.
 
-Return sends a message; Shift-Return inserts a newline. Stop cancels the selected chat's
-request and local command execution, keeping partial output and recorded
-actions. Closing the window leaves active work running; reopen it from the menu
-bar. Quit the Hub after work has stopped.
+Return sends a message; Shift-Return inserts a newline. Text an input method is
+still composing counts as typed, so a send takes exactly what the composer
+shows. Stop cancels the selected chat's request and local command execution,
+keeping partial output and recorded actions. Closing the window leaves active
+work running; reopen it from the menu bar. Quit the Hub after work has stopped.
 
 Use **+**, drop files onto Chat, or paste them into the composer to attach
 them. Draft attachments sit inside the composer above the text. Images have
@@ -388,8 +389,8 @@ catalogue, browser automation, or separate IDE.
 
 ## Implementation and verification
 
-`ChatWindow.swift`, `ChatModelPicker.swift` and `ChatModel.swift` are the native window, picker and local JSONL
-transport. `ChatTranscriptLayout.swift` decides what the transcript draws
+`ChatWindow.swift`, `ChatComposerText.swift`, `ChatModelPicker.swift` and `ChatModel.swift` are the native window,
+composer text view, picker and local JSONL transport. `ChatTranscriptLayout.swift` decides what the transcript draws
 (speaker blocks, folds, tool phrasing, source links and notices) without views,
 and `ChatTranscriptRows.swift` draws it. `chat_memory.py` provides transcript recall and source-linked decision
 notes. `ChatInspector.swift`, `ChatInspectorModel.swift` and
@@ -410,6 +411,7 @@ with those adapters.
 
 Run the repository suite with uv CPython 3.13. Chat tests cover approvals,
 cancellation, recovery, account isolation, branding overrides, malformed
-streams, and actual Swift model transitions through a fake worker. Local HTTP
+streams, actual Swift model transitions through a fake worker, and the real
+composer text view with input-method compositions. Local HTTP
 fixture tests exercise the real gateway without contacting a provider account.
 Build the native app with `bash Source/build.sh`.
