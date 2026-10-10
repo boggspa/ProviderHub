@@ -640,6 +640,7 @@ def load_journal(store, chat):
                     or {m["id"] for m in members} != set(previous) or len({m["id"] for m in members}) != len(members)
                     or record.get("member") is not None and (not isinstance(record["member"], str) or record["member"] not in previous)
                     or not isinstance(record.get("messages"), list) or not isinstance(record.get("decisions"), list)
+                    or not isinstance(record.get("blackboard", {}), dict)
                     or not isinstance(record.get("updated"), str) or not isinstance(entries, list)
                     or any(not isinstance(e, dict) or not isinstance(e.get("id"), str) for e in entries)):
                 raise ValueError("Invalid Team checkpoint contents; the saved source has been preserved.")
@@ -650,6 +651,7 @@ def load_journal(store, chat):
                 if item["id"] in by_id: chat["entries"][by_id[item["id"]]] = item
                 else: by_id[item["id"]] = len(chat["entries"]); chat["entries"].append(item)
             chat.update(teamJournalSequence=seq, decisions=record["decisions"], updated=record["updated"], status="working")
+            if "blackboard" in record: chat["blackboard"] = record["blackboard"]
 
 
 def checkpoint(parent, member=None, dirty=None):
@@ -680,6 +682,7 @@ def _checkpoint(parent, member=None, dirty=None):
     record = {"version": 1, "chat": chat["id"], "sequence": seq, "team": team,
               "member": member["id"] if member else None, "messages": member.get("messages", []) if member else [],
               "entries": entries, "decisions": chat.get("decisions", []), "updated": chat["updated"]}
+    if "blackboard" in chat: record["blackboard"] = chat["blackboard"]
     raw = json.dumps(record, ensure_ascii=False).encode() + b"\n"
     path = journal_path(parent.store, chat["id"])
     fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)

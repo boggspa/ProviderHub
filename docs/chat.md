@@ -365,6 +365,9 @@ without being duplicated in saved model history. Team members share this
 notebook and recall the same attributed transcript. Helpers and Side Chats cannot
 call the memory tools or mutate the notebook. No background summarizer, extra
 provider request or cross-chat memory store is involved.
+Team chats also have a Blackboard of short pinned posts and reference files,
+shown in the Team tab; like notes, its posts are model-written (or yours) reference
+material, not verified facts or permission. See [Team in Chat](chat-team.md#blackboard).
 
 If the notebook would consume more than a quarter of a model's context, Chat
 omits it for that request with a notice to the model; the notes stay saved and

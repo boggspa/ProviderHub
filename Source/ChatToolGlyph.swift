@@ -113,7 +113,9 @@ struct ChatToolGlyph: View {
                            "M13.3 14.1 15 15.5 13.3 17", "M3.1 13.9C4.1 13.3 4.7 13.1 5.5 13.2",
                            "M20.8 10.8C20.1 11.6 19.6 12 18.9 12.2"],
                           circles: [(8.8, 9.3, 1.25), (15.7, 9.2, 1.25)])
+        // A push pin: the Team Blackboard's post, remove and read tools.
+        let pin = lines([[9.2,3.4,14.9,3.3,14.1,8.2,17.2,11.9,6.9,12.1,10,8.2], [12.1,12.1,12,20.7]], closed: [0])
         return ["read_file": file, "run_shell": shell, "search_files": search, "web_search": browser, "apply_patch": patch,
-                "memory": memory, "delegate": delegate, "team_status": status, "handoff": handoff]
+                "memory": memory, "delegate": delegate, "team_status": status, "handoff": handoff, "blackboard": pin]
     }()
 }
