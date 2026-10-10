@@ -236,12 +236,20 @@ struct ComposerTextView: NSViewRepresentable {
         view.onSend = onSend
         view.onPasteFiles = onPasteFiles
         view.placeholder = placeholder
-        view.isEditable = enabled
-        // Assigning the font restyles every character, tags included, so only
-        // a real change (zoom, or another reading font) does it.
         var repaint = coordinator.members != mentions
         var refresh = repaint
         coordinator.members = mentions
+        if view.isEditable != enabled {
+            // Disabling ends a composition. Its text belongs to the draft this
+            // update may be replacing (a deleted chat's), which already holds
+            // it, never to the draft now bound. A disabled composer lists no one.
+            coordinator.applying = true
+            view.isEditable = enabled
+            coordinator.applying = false
+            refresh = true
+        }
+        // Assigning the font restyles every character, tags included, so only
+        // a real change (zoom, or another reading font) does it.
         if coordinator.font != textStyle.editorFont {
             coordinator.font = textStyle.editorFont
             view.font = textStyle.editorFont

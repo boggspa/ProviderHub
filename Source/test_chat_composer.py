@@ -15,12 +15,20 @@ import AppKit
 import SwiftUI
 import Combine
 
-/// The draft a composer binds, and what each send took.
+/// The drafts a composer binds, one per chat as ChatModel keeps them, and
+/// what each send took.
 final class Draft: ObservableObject {
-    @Published var text = ""
+    @Published var drafts: [String: String] = [:]
+    /// The chat whose draft is shown; nil is the draft shown with no chat.
+    @Published var chat: String? = "A"
+    @Published var enabled = true
     /// Bumped to make SwiftUI update the composer, as a streamed reply does.
     @Published var unrelated = 0
     var sent: [String] = []
+    var text: String {
+        get { drafts[chat ?? ""] ?? "" }
+        set { drafts[chat ?? ""] = newValue }
+    }
 }
 
 struct Composer: View {
@@ -31,7 +39,7 @@ struct Composer: View {
     var body: some View {
         VStack {
             Text("\(draft.unrelated)")
-            ComposerTextView(text: $draft.text, height: $height, placeholder: "Message", enabled: true,
+            ComposerTextView(text: $draft.text, height: $height, placeholder: "Message", enabled: draft.enabled,
                              onSend: { draft.sent.append(draft.text); draft.text = "" },
                              mentions: members, mentionMenu: menu)
                 .frame(width: 360, height: 60)
@@ -99,6 +107,31 @@ struct Composer: View {
         draft.text = "restored"; settle()
         check(text.string == "restored" && !text.hasMarkedText() && draft.text == "restored",
               "a replaced draft kept the old composition: \(text.string.debugDescription), \(draft.text.debugDescription)")
+
+        // Deleting the last chat mid-composition shows the draft with no chat
+        // and disables the composer in one update. The composition ends with
+        // the deleted chat; none of it flows into the draft now shown.
+        draft.text = ""; settle()
+        compose("@中", "文")
+        check(draft.text == "@中文", "the draft lagged a second composition: \(draft.text.debugDescription)")
+        draft.drafts["A"] = nil; draft.chat = nil; draft.enabled = false; settle()
+        check(!text.isEditable && text.string.isEmpty && !text.hasMarkedText() && (draft.drafts[""] ?? "").isEmpty,
+              "a deleted chat's composition reached the next draft: \(text.string.debugDescription), \(String(describing: draft.drafts[""]))")
+
+        // Disabled mid-composition in the same chat (a lost connection), the
+        // draft keeps exactly what was shown, and the @ list closes.
+        draft.chat = "B"; draft.enabled = true; settle()
+        window.makeFirstResponder(text)
+        compose("@中", "文")
+        draft.enabled = false; settle()
+        check(draft.text == "@中文" && text.string == "@中文",
+              "disabling lost a composition: \(text.string.debugDescription), \(draft.text.debugDescription)")
+        draft.enabled = true; draft.text = ""; settle()
+        window.makeFirstResponder(text)
+        text.insertText("@S", replacementRange: none); settle()
+        check(menu.current?.id == "s", "the @ list did not open for @S")
+        draft.enabled = false; settle()
+        check(menu.state == nil, "the @ list stayed open over a disabled composer")
 
         if !failures.isEmpty {
             FileHandle.standardError.write(Data(failures.joined(separator: "\n").utf8))
