@@ -1,4 +1,4 @@
-# Provider Hub 0.5.6 (build 65)
+# Provider Hub 0.5.6 (build 66)
 
 Use your model accounts inside Claude Desktop, the Codex coding workspace, or Provider Hub's lightweight **Chat with Model…** window. See [Chat in Provider Hub](docs/chat.md) for its tools, attachments, approvals and model switching.
 
@@ -219,7 +219,7 @@ provider-specific reasoning history.
 
 ## What has been checked
 
-Build 65's source passes 2,010 pytest tests and 1,357 subtests with CPython 3.13 and Node available. In earlier live checks, the
+Build 66's source passes 2,045 pytest tests and 1,445 subtests with CPython 3.13 and Node available. In earlier live checks, the
 installed Codex engine completed read/edit/read cycles using Ollama's
 DeepSeek V4 Flash cloud route and Cerebras GPT OSS 120B. Their reported context
 limits were preserved. Other provider translations have deterministic protocol
