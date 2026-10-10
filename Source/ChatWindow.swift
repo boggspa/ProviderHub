@@ -481,6 +481,7 @@ private struct ChatTranscript: View {
     /// new text follows only then, so reading earlier turns is never yanked.
     @State private var nearBottom = true
     @State private var viewportHeight: CGFloat = 0
+    @State private var visibleSegmentLimit = 100
     private let bottomID = "chat-transcript-bottom"
 
     var body: some View {
@@ -498,7 +499,10 @@ private struct ChatTranscript: View {
                     if model.entries.last?.kind == "user" || nearBottom { scrollToEnd(proxy) }
                 }
                 .onChange(of: model.entries.last?.text.count) { _, _ in if nearBottom { scrollToEnd(proxy) } }
-                .onChange(of: model.selectedID) { _, _ in scrollToEnd(proxy) }
+                .onChange(of: model.selectedID) { _, _ in
+                    visibleSegmentLimit = 100; nearBottom = true
+                    scrollToEnd(proxy)
+                }
                 .onAppear { scrollToEnd(proxy) }
             }
         }
@@ -513,7 +517,14 @@ private struct ChatTranscript: View {
         let liveSpeaker = model.busy ? segments.last(where: \.isSpeaker)?.id : nil
         return LazyVStack(alignment: .leading, spacing: 0) {
             if model.entries.isEmpty { ChatInvitation(model: model) }
-            ForEach(segments) { segment in
+            if segments.count > visibleSegmentLimit {
+                Button("Load earlier messages") {
+                    nearBottom = false
+                    visibleSegmentLimit += 100
+                }
+                .frame(maxWidth: .infinity).padding(.bottom, 16)
+            }
+            ForEach(Array(segments.suffix(visibleSegmentLimit))) { segment in
                 Group {
                     switch segment.content {
                     case .speaker(let entry):

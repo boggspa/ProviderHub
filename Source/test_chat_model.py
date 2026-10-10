@@ -33,7 +33,7 @@ import AppKit
 import SwiftUI
 import Combine
 @main struct Cases {
-    @MainActor static func main() throws {
+    @MainActor static func main() async throws {
         var commands: [[String: Any]] = []
         var clock: TimeInterval = 100
         var writable = true
@@ -748,6 +748,36 @@ import Combine
         try processEvent(["event":"processes", "chat":"A", "processes":[runningRow]])
         procs.disconnected("Transport gone")
         check(procs.processes.isEmpty && procs.processesNotice.contains("may still be running"), "disconnect kept rows or hid possible orphans")
+        let largeEntries: [[String: Any]] = (0..<5000).map { index in
+            ["id":"large-\(index)", "kind":"tool", "text":String(repeating: "tool output 🐈 ", count: 128),
+             "route":"test", "isError":false, "changedFiles":[]]
+        }
+        let largeLine = try JSONSerialization.data(withJSONObject: ["event":"selected", "id":"large", "entries":largeEntries]) + Data([10])
+        let began = ProcessInfo.processInfo.systemUptime
+        let reader = ChatEventReader()
+        var applySeconds: TimeInterval = 0
+        var mainQueueRan = false
+        DispatchQueue.main.async { mainQueueRan = true }
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            reader.consume(largeLine.prefix(1024)) { _ in fatalError("partial line applied") }
+            reader.consume(largeLine.dropFirst(1024)) { parsed in
+                let start = ProcessInfo.processInfo.systemUptime
+                model.apply(parsed)
+                applySeconds = ProcessInfo.processInfo.systemUptime - start
+                check(mainQueueRan, "snapshot decoder blocked main queue")
+                continuation.resume()
+            }
+        }
+        print("Large snapshot total seconds: \(ProcessInfo.processInfo.systemUptime - began); main actor apply seconds: \(applySeconds)")
+        check(model.entries.count == 5000 && model.entries.last?.id == "large-4999", "large transcript lost entries")
+        let ordered = try JSONSerialization.data(withJSONObject: ["event":"delta", "chat":"large", "id":"large-4999", "text":"after snapshot", "offset":model.entries.last!.text.unicodeScalars.count]) + Data([10])
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            reader.consume(largeLine + ordered) { parsed in
+                model.apply(parsed)
+                if parsed.event["event"] as? String == "delta" { continuation.resume() }
+            }
+        }
+        check(model.entries.last!.text.hasSuffix("after snapshot"), "reader reordered snapshot and delta")
         print("ChatModel state transitions passed")
     }
 }
@@ -768,6 +798,7 @@ import Combine
             # update; repeats within each failure period must not flood the log.
             self.assertEqual(ran.stderr.count("Team update rejected for"), 7, ran.stderr)
             self.assertIn("state transitions passed", ran.stdout)
+            print(ran.stdout)
 
 
 if __name__ == "__main__": unittest.main()

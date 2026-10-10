@@ -415,3 +415,17 @@ streams, actual Swift model transitions through a fake worker, and the real
 composer text view with input-method compositions. Local HTTP
 fixture tests exercise the real gateway without contacting a provider account.
 Build the native app with `bash Source/build.sh`.
+
+## Transcript loading
+
+Worker events retain the existing JSONL `selected` snapshot semantics. Swift
+frames and parses events and decodes transcript, catalogue, chat-list and Team
+payloads on a serial background queue, then applies them in FIFO order on the
+main actor. Each worker gets a new reader; queued events from an older process
+are ignored after reconnecting. Streaming offsets and inspector request IDs
+therefore retain their original ordering.
+
+The transcript initially renders the last 100 layout segments. “Load earlier
+messages” reveals 100 more at a time, preserving the full transcript and its
+speaker/fold grouping while bounding layout during a chat switch. Workspace
+history is persisted only when its folder order changes.

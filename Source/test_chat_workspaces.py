@@ -5,6 +5,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from chat_runtime import ChatService, ChatStore
 from chat_workspaces import ChatWorkspaces
@@ -12,6 +13,18 @@ from test_chat_runtime import FakeTransport, model
 
 
 class WorkspaceTests(unittest.TestCase):
+    def test_remember_persists_only_changed_order(self):
+        with tempfile.TemporaryDirectory() as root:
+            history = ChatWorkspaces(root)
+            with patch.object(history, "save", wraps=history.save) as save:
+                history.remember(root)
+                history.remember(root)
+                self.assertEqual(save.call_count, 1)
+                history.remember(str(Path(root) / "offline"), require_available=False)
+                history.remember(root)
+                self.assertEqual(save.call_count, 3)
+            self.assertEqual(ChatWorkspaces(root).folders, history.folders)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
