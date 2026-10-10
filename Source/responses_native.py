@@ -21,6 +21,7 @@ from responses_tools import (flatten_tools, input_names, normalize_custom_calls,
                              restore_custom_call, split_hosted_search, strip_goal_budget)
 from responses_bridge import ENVELOPE_PREFIX, MessagesResponsesAdapter, ReasoningEnvelope, image_generation_message, to_messages
 from responses_compact import expand_items
+from responses_visualize import VisualizeRewriter, wrap_message_item, wrap_output, wrap_text
 from openrouter_provider import OpenRouterError, finalize as openrouter_finalize, app_headers as openrouter_app_headers
 from effort_map import cap_high_end, map_effort, nearest_effort, ollama_effort_aliases
 from spawn_depth import (SPAWN_NAMESPACE, SPAWN_TOOL, apply_subagent_model,
@@ -937,6 +938,85 @@ def _is_spawn_call_item(item):
             and is_spawn_tool_reference(item.get("namespace"), item.get("name")))
 
 
+def rewrite_visualize_events(event, rewriters):
+    """Wrap bare visualize references in one relayed native Responses event.
+
+    Returns the events to forward in place of ``event``: nothing while a
+    text delta is held back, the released text ahead of its done event, or
+    the event itself. Text deltas are rewritten line by line (``rewriters``
+    keeps one VisualizeRewriter per text part) so a reference never shows
+    as raw text while streaming; every completed shape is wrapped whole,
+    since the desktop renders the finished item's text.
+    """
+    if not isinstance(event, dict):
+        return [event]
+    kind = event.get("type")
+    key = (event.get("item_id"), event.get("content_index", 0))
+
+    def state_for(part_key):
+        return rewriters.setdefault(part_key, {"writer": VisualizeRewriter(),
+                                              "output_index": event.get("output_index", 0)})
+
+    def opening(part, part_key):
+        if not (isinstance(part, dict) and part.get("type") == "output_text"
+                and isinstance(part.get("text"), str)):
+            return
+        state = state_for(part_key)
+        # output_item.added and content_part.added can repeat the opening
+        # snapshot. Seed it once, preserving fence state for later deltas.
+        source = state.get("source_opening", "")
+        if not state.get("delta_seen") and part["text"].startswith(source):
+            visible = state["writer"].feed(part["text"][len(source):])
+            state["opening"] = state.get("opening", "") + visible
+            state["source_opening"] = part["text"]
+        part["text"] = state.get("opening", "")
+
+    def release(keys):
+        events = []
+        for part_key in keys:
+            state = rewriters.pop(part_key, None)
+            tail = state["writer"].flush() if state is not None else ""
+            if tail:
+                events.append({"type": "response.output_text.delta", "delta": tail,
+                               "item_id": part_key[0], "content_index": part_key[1],
+                               "output_index": state["output_index"], "logprobs": []})
+        return events
+
+    if kind == "response.output_text.delta" and isinstance(event.get("delta"), str):
+        state = state_for(key)
+        state["delta_seen"] = True
+        event["delta"] = state["writer"].feed(event["delta"])
+        return [event] if event["delta"] else []
+    events = []
+    if kind == "response.output_text.done":
+        events = release([key])
+        if isinstance(event.get("text"), str):
+            event["text"] = wrap_text(event["text"])
+    elif kind == "response.content_part.added":
+        opening(event.get("part"), key)
+    elif kind == "response.content_part.done":
+        events = release([key])
+        part = event.get("part")
+        if isinstance(part, dict) and part.get("type") == "output_text" and isinstance(part.get("text"), str):
+            part["text"] = wrap_text(part["text"])
+    elif kind == "response.output_item.added":
+        item = event.get("item") or {}
+        if (isinstance(item, dict) and item.get("type") == "message"
+                and item.get("role", "assistant") == "assistant"):
+            for index, part in enumerate(item.get("content") or []):
+                opening(part, (item.get("id"), index))
+    elif kind == "response.output_item.done":
+        item = event.get("item") or {}
+        if isinstance(item, dict):
+            events = release([part_key for part_key in rewriters if part_key[0] == item.get("id")])
+        wrap_message_item(item)
+    elif isinstance(event.get("response"), dict):
+        if kind in TERMINAL_EVENTS:
+            events = release(list(rewriters))
+        wrap_output(event["response"].get("output"))
+    return events + [event]
+
+
 def _client_gone(handler):
     """True when the local client disconnected (socket peek only, like the monitors)."""
     try:
@@ -1019,6 +1099,8 @@ def handle_responses(handler):
     final = None
     custom_items = set()
     spawn_items = set()
+    visualizers = {}
+    wire_sequence = 0
     service_tier = None
     usage = {}
     slot_held = False
@@ -1031,13 +1113,18 @@ def handle_responses(handler):
                 text = text.replace(secret, "[redacted]")
         return text[:700]
 
-    def write_chunk(data):
+    def emit(event):
+        # Rewriting can hold or insert text events. Number the actual wire
+        # stream, under the same lock as keepalive writes, instead of
+        # duplicating an upstream done event's number.
+        nonlocal wire_sequence
         with write_lock:
+            if event["type"].startswith("response."):
+                event["sequence_number"] = wire_sequence
+                wire_sequence += 1
+            data = ("event: " + event["type"] + "\ndata: " + json.dumps(event, ensure_ascii=False) + "\n\n").encode()
             handler.wfile.write(f"{len(data):x}\r\n".encode() + data + b"\r\n")
             handler.wfile.flush()
-
-    def emit(event):
-        write_chunk(("event: " + event["type"] + "\ndata: " + json.dumps(event, ensure_ascii=False) + "\n\n").encode())
 
     def clean_error(value):
         if isinstance(value, str):
@@ -1054,6 +1141,9 @@ def handle_responses(handler):
                 or value.get("status") not in {"completed", "incomplete", "failed"}):
             raise BridgeError("The provider returned an invalid terminal Responses object.")
         value["model"] = plan["requested"]
+        if not delegated:
+            # The Messages adapter wraps its own items; native text arrives as sent.
+            wrap_output(value["output"])
         for item in value["output"]:
             if not restore_custom_call(item, plan["tool_map"]):
                 output_names(item, plan["tool_map"])
@@ -1275,7 +1365,8 @@ def handle_responses(handler):
                     if not data or data == b"[DONE]":
                         continue
                     decoded = json.loads(data)
-                    events = plan["adapter"].feed(decoded) if delegated else [decoded]
+                    events = (plan["adapter"].feed(decoded) if delegated
+                              else rewrite_visualize_events(decoded, visualizers))
                     for event in events:
                         kind = event.get("type") if isinstance(event, dict) else None
                         if not isinstance(kind, str) or not (kind.startswith("response.") or kind == "error"):

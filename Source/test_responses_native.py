@@ -232,6 +232,9 @@ def handle_native_response(server):
     inputs = body.get("input", [])
     second = bool(body.get("previous_response_id")) or any(isinstance(item, dict) and item.get("type") == "function_call_output" for item in inputs)
     result = response_object(body, second)
+    if MockProvider.mode == "visualize":
+        result["output"] = [{"type": "message", "id": "message-viz", "role": "assistant", "status": "completed",
+                             "content": [{"type": "output_text", "text": VISUALIZE_TEXT, "annotations": []}]}]
     if MockProvider.mode == "failed":
         result.update(status="failed", error={"message": "Provider problem " + fixtures.PROVIDER_KEY, "code": "server_error"})
     if not body.get("stream"):
@@ -240,12 +243,26 @@ def handle_native_response(server):
     initial = {**result, "status": "in_progress", "output": [], "usage": None}
     events = [{"type": "response.created", "response": initial}]
     for index, item in enumerate(result["output"]):
-        events.append({"type": "response.output_item.added", "output_index": index, "item": {**item, "arguments": ""}})
+        added = copy.deepcopy(item)
+        if item["type"] == "message" and MockProvider.mode == "visualize":
+            added["content"][0]["text"] = ""
+            added["status"] = "in_progress"
+        else:
+            added["arguments"] = ""
+        events.append({"type": "response.output_item.added", "output_index": index, "item": added})
         if item["type"] == "function_call":
             events += [{"type": "response.function_call_arguments.delta", "item_id": item["id"],
                         "output_index": index, "delta": '{"path":'},
                        {"type": "response.function_call_arguments.delta", "item_id": item["id"],
                         "output_index": index, "delta": '"fixture.txt"}'}]
+        elif item["type"] == "message" and MockProvider.mode == "visualize":
+            # Split the reference mid-keyword so the relay has to hold it.
+            text = item["content"][0]["text"]
+            for piece in (text[:10], text[10:-3], text[-3:]):
+                events.append({"type": "response.output_text.delta", "item_id": item["id"],
+                               "output_index": index, "content_index": 0, "delta": piece})
+            events.append({"type": "response.output_text.done", "item_id": item["id"],
+                           "output_index": index, "content_index": 0, "text": text})
         events.append({"type": "response.output_item.done", "output_index": index, "item": item})
     if MockProvider.mode == "slow":
         server.send_response(200)
@@ -262,6 +279,137 @@ def handle_native_response(server):
     elif MockProvider.mode != "missing_terminal":
         events.append({"type": "response.failed" if MockProvider.mode == "failed" else "response.completed", "response": result})
     server.send_sse(events)
+
+
+VISUALIZE_BODY = '{"path":"/tmp/viz/chart.html"}'
+VISUALIZE_TEXT = "Chart:\nvisualize" + VISUALIZE_BODY
+
+
+class VisualizeRelayUnitTests(unittest.TestCase):
+    """Socket-free coverage for sentinel wrapping on the native relay."""
+
+    def test_text_events_are_wrapped_and_a_held_tail_is_released_before_done(self):
+        from responses_native import rewrite_visualize_events
+        from responses_visualize import CLOSE, OPEN, SEPARATOR
+        bare = "visualize" + VISUALIZE_BODY
+        wrapped = OPEN + "visualize" + SEPARATOR + VISUALIZE_BODY + CLOSE
+        rewriters = {}
+
+        def delta(text, sequence):
+            return {"type": "response.output_text.delta", "sequence_number": sequence, "item_id": "msg-1",
+                    "output_index": 0, "content_index": 0, "delta": text}
+
+        self.assertEqual([event["delta"] for event in rewrite_visualize_events(delta("Chart:\nvisu", 1), rewriters)],
+                         ["Chart:\n"])
+        self.assertEqual(rewrite_visualize_events(delta("alize" + VISUALIZE_BODY, 2), rewriters), [])
+        done = {"type": "response.output_text.done", "sequence_number": 3, "item_id": "msg-1",
+                "output_index": 0, "content_index": 0, "text": "Chart:\n" + bare}
+        released, finished = rewrite_visualize_events(done, rewriters)
+        self.assertEqual(released, {"type": "response.output_text.delta", "item_id": "msg-1", "logprobs": [],
+                                    "output_index": 0, "content_index": 0, "delta": wrapped})
+        self.assertIs(finished, done)
+        self.assertEqual(done["text"], "Chart:\n" + wrapped)
+        self.assertEqual(rewriters, {})
+        part = {"type": "response.content_part.done", "item_id": "msg-1", "output_index": 0, "content_index": 0,
+                "part": {"type": "output_text", "text": "Chart:\n" + bare, "annotations": []}}
+        self.assertEqual(rewrite_visualize_events(part, rewriters)[0]["part"]["text"], "Chart:\n" + wrapped)
+        item = {"type": "response.output_item.done", "output_index": 0, "item": {
+            "type": "message", "id": "msg-1", "role": "assistant", "status": "completed",
+            "content": [{"type": "output_text", "text": bare, "annotations": []}]}}
+        self.assertEqual(rewrite_visualize_events(item, rewriters)[0]["item"]["content"][0]["text"], wrapped)
+        completed = {"type": "response.completed", "response": {"id": "r", "status": "completed", "output": [
+            {"type": "message", "content": [{"type": "output_text", "text": bare}]},
+            {"type": "function_call", "name": "visualize", "arguments": bare}]}}
+        forwarded = rewrite_visualize_events(completed, rewriters)[0]
+        self.assertEqual(forwarded["response"]["output"][0]["content"][0]["text"], wrapped)
+        self.assertEqual(forwarded["response"]["output"][1]["arguments"], bare)
+        # Everything else passes through untouched, including shapes the relay later rejects.
+        other = {"type": "response.function_call_arguments.delta", "item_id": "fc-1", "delta": bare}
+        self.assertEqual(rewrite_visualize_events(other, rewriters), [other])
+        self.assertEqual(other["delta"], bare)
+        self.assertEqual(rewrite_visualize_events(["not", "an", "event"], rewriters), [["not", "an", "event"]])
+        # A done event with no prior deltas simply wraps its text.
+        lone = {"type": "response.output_text.done", "item_id": "msg-2", "content_index": 0, "text": bare}
+        self.assertEqual(rewrite_visualize_events(lone, rewriters), [lone])
+        self.assertEqual(lone["text"], wrapped)
+
+    def test_opening_snapshots_are_seeded_once_across_every_split(self):
+        from responses_native import rewrite_visualize_events
+        from responses_visualize import wrap_text
+        for raw in (VISUALIZE_TEXT,
+                    "```text\nvisualize" + VISUALIZE_BODY + "\n```\n" + VISUALIZE_TEXT):
+            for cut in range(len(raw) + 1):
+                with self.subTest(raw=raw, cut=cut):
+                    writers = {}
+                    item = {"type": "message", "role": "assistant", "id": "msg-1", "content": [
+                        {"type": "output_text", "text": raw[:cut]}]}
+                    added = {"type": "response.output_item.added", "output_index": 0, "item": copy.deepcopy(item)}
+                    part = {"type": "response.content_part.added", "output_index": 0, "content_index": 0,
+                            "item_id": "msg-1", "part": copy.deepcopy(item["content"][0])}
+                    rewrite_visualize_events(added, writers)
+                    rewrite_visualize_events(part, writers)
+                    opening = added["item"]["content"][0]["text"]
+                    self.assertEqual(part["part"]["text"], opening)
+                    delta = {"type": "response.output_text.delta", "output_index": 0, "content_index": 0,
+                             "item_id": "msg-1", "delta": raw[cut:]}
+                    events = rewrite_visualize_events(delta, writers)
+                    done = {"type": "response.output_text.done", "output_index": 0, "content_index": 0,
+                            "item_id": "msg-1", "text": raw}
+                    events += rewrite_visualize_events(done, writers)
+                    stream = opening + "".join(e["delta"] for e in events if e["type"] == "response.output_text.delta")
+                    self.assertEqual(stream, wrap_text(raw))
+                    self.assertEqual(events[-1]["text"], stream)
+                    self.assertEqual(writers, {})
+
+    def test_part_opening_can_extend_an_empty_item_snapshot(self):
+        from responses_native import rewrite_visualize_events
+        writers = {}
+        rewrite_visualize_events({"type": "response.output_item.added", "output_index": 0, "item": {
+            "type": "message", "id": "msg", "content": [{"type": "output_text", "text": ""}]}}, writers)
+        opening = {"type": "response.content_part.added", "output_index": 0, "item_id": "msg", "content_index": 0,
+                   "part": {"type": "output_text", "text": "```\n"}}
+        rewrite_visualize_events(opening, writers)
+        bare = "visualize" + VISUALIZE_BODY
+        events = rewrite_visualize_events({"type": "response.output_text.delta", "output_index": 0,
+                                            "item_id": "msg", "content_index": 0, "delta": bare}, writers)
+        events += rewrite_visualize_events({"type": "response.output_text.done", "output_index": 0,
+                                            "item_id": "msg", "content_index": 0, "text": "```\n" + bare}, writers)
+        streamed = opening["part"]["text"] + "".join(e["delta"] for e in events if e["type"] == "response.output_text.delta")
+        self.assertEqual(streamed, "```\n" + bare)
+        self.assertEqual(writers, {})
+
+    def test_interleaved_parts_keep_fences_separate_and_flush_at_completion(self):
+        from responses_native import rewrite_visualize_events
+        from responses_visualize import wrap_text
+        bare = "visualize" + VISUALIZE_BODY
+        for finish in ("response.content_part.done", "response.output_item.done", "response.completed",
+                       "response.incomplete", "response.failed"):
+            with self.subTest(finish=finish):
+                writers = {}
+                for item_id, index, prefix in (("code", 0, "```\n"), ("chart", 1, "")):
+                    rewrite_visualize_events({"type": "response.content_part.added", "output_index": index,
+                                              "content_index": 0, "item_id": item_id,
+                                              "part": {"type": "output_text", "text": prefix}}, writers)
+                    rewrite_visualize_events({"type": "response.output_text.delta", "output_index": index,
+                                              "content_index": 0, "item_id": item_id, "delta": bare}, writers)
+                messages = [{"type": "message", "id": name, "content": [{"type": "output_text", "text": prefix + bare}]}
+                            for name, prefix in (("code", "```\n"), ("chart", ""))]
+                events = []
+                if finish.startswith("response.content_part"):
+                    for index, item in enumerate(messages):
+                        events += rewrite_visualize_events({"type": finish, "output_index": index, "content_index": 0,
+                                                            "item_id": item["id"], "part": item["content"][0]}, writers)
+                elif finish.startswith("response.output_item"):
+                    for index, item in enumerate(messages):
+                        events += rewrite_visualize_events({"type": finish, "output_index": index, "item": item}, writers)
+                else:
+                    events = rewrite_visualize_events({"type": finish, "response": {"output": messages}}, writers)
+                released = {e["item_id"]: e["delta"] for e in events if e["type"] == "response.output_text.delta"}
+                self.assertEqual(released, {"code": bare, "chart": wrap_text(bare)})
+                self.assertEqual(writers, {})
+                # A repeated final snapshot never releases the tail again.
+                self.assertEqual(len(rewrite_visualize_events({"type": "response.completed",
+                                                               "response": {"output": messages}}, writers)), 1)
 
 
 class NativeResponsesTests(unittest.TestCase):
@@ -415,6 +563,25 @@ class NativeResponsesTests(unittest.TestCase):
         args = ''.join(event.get("delta", "") for event in events if event["type"] == "response.function_call_arguments.delta")
         self.assertEqual(json.loads(args), {"path": "fixture.txt"})
         self.assertEqual(self.runtime.status()["completed"], 1)
+
+    def test_a_bare_visualize_reference_reaches_codex_in_sentinel_form(self):
+        from responses_visualize import CLOSE, OPEN, SEPARATOR
+        self.start()
+        MockProvider.mode = "visualize"
+        wrapped = "Chart:\n" + OPEN + "visualize" + SEPARATOR + VISUALIZE_BODY + CLOSE
+        status, raw = self.request(self.body(stream=True))
+        self.assertEqual(status, 200, raw)
+        events = fixtures.parse_sse(raw)
+        self.assertEqual([event["sequence_number"] for event in events], list(range(len(events))))
+        streamed = "".join(event["delta"] for event in events if event["type"] == "response.output_text.delta")
+        self.assertEqual(streamed, wrapped)
+        done = next(event for event in events if event["type"] == "response.output_text.done")
+        self.assertEqual(done["text"], wrapped)
+        self.assertEqual(events[-1]["type"], "response.completed")
+        self.assertEqual(events[-1]["response"]["output"][0]["content"][0]["text"], wrapped)
+        status, raw = self.request(self.body(stream=False))
+        self.assertEqual(status, 200, raw)
+        self.assertEqual(json.loads(raw)["output"][0]["content"][0]["text"], wrapped)
 
     def test_explicit_stored_xai_continuations_are_scoped_to_account(self):
         self.start()
