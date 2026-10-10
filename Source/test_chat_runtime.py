@@ -47,6 +47,12 @@ class FakeTransport:
 
 
 class ChatRuntimeTests(unittest.TestCase):
+    def test_entry_records_wall_clock_time(self):
+        first, second = entry("assistant"), entry("tool")
+        self.assertIsInstance(first["time"], float)
+        self.assertIsInstance(second["time"], float)
+        self.assertGreaterEqual(second["time"], first["time"])
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(); self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name).resolve()

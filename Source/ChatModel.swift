@@ -36,6 +36,7 @@ struct ChatRoute: Decodable, Identifiable {
 
 struct ChatEntry: Decodable, Identifiable {
     var id: String
+    var time: Double?
     var kind: String
     var text: String
     var route: String
