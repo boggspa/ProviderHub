@@ -551,6 +551,9 @@ private struct ChatTranscript: View {
     @ViewBuilder private func row(_ entry: ChatEntry, after speaker: ChatEntry? = nil) -> some View {
         let last = entry.id == model.entries.last?.id
         let live = model.busy && entry.detail == "Running…"
+        let canPin = model.team?.enabled == true && model.connected && ["user", "assistant", "tool"].contains(entry.kind)
+            && !live && (!entry.text.isEmpty || entry.detail?.isEmpty == false)
+        Group {
         switch entry.kind {
         case "user":
             UserRow(entry: entry, accent: { model.accent(for: $0) })
@@ -577,6 +580,24 @@ private struct ChatTranscript: View {
         default:
             NoticeRow(entry: entry, member: speaker?.memberName)
         }
+        }
+        .environment(\.chatBlackboardPin, canPin ? { pinEntry(entry) } : nil)
+        .contextMenu {
+            if canPin {
+                Button("Pin to Blackboard") { pinEntry(entry) }
+            }
+        }
+    }
+
+    private func pinEntry(_ entry: ChatEntry) {
+        let source = entry.kind == "tool" ? (entry.detail?.isEmpty == false ? entry.detail! : entry.text) : entry.text
+        // Keep an exact bounded prefix; the worker retains the source ID.
+        var body = ""
+        for character in source {
+            if (body + String(character)).utf8.count > 1500 { break }
+            body.append(character)
+        }
+        model.postToBlackboard(key: "quote-" + entry.id.lowercased(), body: body, category: "note", quote: entry.id)
     }
 
     private func expandedBinding(_ id: String) -> Binding<Bool> {

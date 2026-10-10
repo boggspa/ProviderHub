@@ -1,6 +1,17 @@
 import AppKit
 import SwiftUI
 
+private struct ChatBlackboardPinKey: EnvironmentKey {
+    static let defaultValue: (() -> Void)? = nil
+}
+
+extension EnvironmentValues {
+    var chatBlackboardPin: (() -> Void)? {
+        get { self[ChatBlackboardPinKey.self] }
+        set { self[ChatBlackboardPinKey.self] = newValue }
+    }
+}
+
 /// Transcript prose as a native, non-editable NSTextView, so reading behaves
 /// like any Mac document: drag to select, double-click a word, triple-click a
 /// paragraph, ⌘C, links that open on click, and the system right-click menu
@@ -17,6 +28,7 @@ struct ChatSelectableText: NSViewRepresentable {
     var color: NSColor
     /// The whole entry for **Copy Message**; nil leaves the item out.
     var message: String?
+    @Environment(\.chatBlackboardPin) private var blackboardPin
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
@@ -44,6 +56,7 @@ struct ChatSelectableText: NSViewRepresentable {
         let attributed = context.coordinator.attributed(for: self)
         if view.textStorage?.isEqual(to: attributed) == false { view.textStorage?.setAttributedString(attributed) }
         view.message = message
+        view.blackboardPin = blackboardPin
     }
 
     func sizeThatFits(_ proposal: ProposedViewSize, nsView: TextView, context: Context) -> CGSize? {
@@ -211,6 +224,7 @@ struct ChatSelectableText: NSViewRepresentable {
 
     final class TextView: NSTextView {
         var message: String?
+        var blackboardPin: (() -> Void)?
         /// Injectable so tests never touch the user's clipboard.
         var pasteboard = NSPasteboard.general
 
@@ -223,8 +237,15 @@ struct ChatSelectableText: NSViewRepresentable {
             item.target = self
             let copy = menu.items.firstIndex { $0.action == #selector(NSText.copy(_:)) }
             menu.insertItem(item, at: copy.map { $0 + 1 } ?? 0)
+            if blackboardPin != nil {
+                let pin = NSMenuItem(title: "Pin to Blackboard", action: #selector(pinToBlackboard(_:)), keyEquivalent: "")
+                pin.target = self
+                menu.addItem(pin)
+            }
             return menu
         }
+
+        @objc func pinToBlackboard(_ sender: Any?) { blackboardPin?() }
 
         @objc func copyMessage(_ sender: Any?) {
             guard let message else { return }
