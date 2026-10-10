@@ -217,6 +217,7 @@ final class ChatModel: ObservableObject {
     private var buffer = Data()
     /// The worker line being consumed, for `payload`.
     private(set) var eventLine = Data()
+    private var preparedFields: [String: Any] = [:]
     private var commandSink: (([String: Any]) -> Bool)?
     private var starting = false
     private let preferences: UserDefaults
@@ -266,11 +267,15 @@ final class ChatModel: ObservableObject {
             child.arguments = [bridge.helper.deletingLastPathComponent().appendingPathComponent("chat_runtime.py").path]
             child.environment = bridge.workerEnvironment
             child.standardInput = stdin; child.standardOutput = stdout; child.standardError = stderr
+            let reader = ChatEventReader()
             stdout.fileHandleForReading.readabilityHandler = { [weak self] handle in
                 let data = handle.availableData
                 if data.isEmpty { handle.readabilityHandler = nil; return }
                 guard let owner = self else { return }
-                Task { @MainActor in owner.consume(data) }
+                reader.consume(data) { parsed in
+                    guard owner.process === child else { return }
+                    owner.apply(parsed)
+                }
             }
             stderr.fileHandleForReading.readabilityHandler = { handle in
                 if handle.availableData.isEmpty { handle.readabilityHandler = nil }
@@ -471,6 +476,7 @@ final class ChatModel: ObservableObject {
     /// tag off its text. JSONDecoder keeps every character, so the payloads the
     /// `@Name` contract compares exactly (the roster and transcript) use this.
     func payload<T: Decodable>(_ type: T.Type, _ key: String) throws -> T? {
+        if let value = preparedFields[key] as? T { return value }
         let decoder = JSONDecoder()
         decoder.userInfo[ChatEventKey.field] = key
         return try decoder.decode(ChatEventField<T>.self, from: eventLine).value
@@ -484,18 +490,25 @@ final class ChatModel: ObservableObject {
         buffer.append(data)
         while let newline = buffer.firstIndex(of: 10) {
             let line = buffer.prefix(upTo: newline); buffer.removeSubrange(...newline)
-            guard let event = try? JSONSerialization.jsonObject(with: line) as? [String: Any] else { continue }
-            eventLine = line
+            if let parsed = ChatParsedEvent(line: Data(line)) { apply(parsed) }
+        }
+    }
+
+    func apply(_ parsed: ChatParsedEvent) {
+            let event = parsed.event
+            eventLine = parsed.line
+            preparedFields = parsed.fields
+            defer { preparedFields = [:]; eventLine = Data() }
             switch event["event"] as? String {
             case "ready":
                 connected = true
                 write(["command": "preferences", "webSearch": webSearchEnabled])
             case "catalogue":
-                models = decode([ChatRoute].self, event["models"]) ?? []; recentFolders = event["folders"] as? [String] ?? []
+                models = (try? payload([ChatRoute].self, "models")) ?? []; recentFolders = event["folders"] as? [String] ?? []
                 contextLimit = selectedRoute?.context; notice = ""
             case "chats":
                 let previous = Dictionary(uniqueKeysWithValues: chats.map { ($0.id, $0.workspace) })
-                chats = decode([ChatSummary].self, event["chats"]) ?? []
+                chats = (try? payload([ChatSummary].self, "chats")) ?? []
                 for chat in chats where previous[chat.id] != nil && previous[chat.id] != chat.workspace {
                     withChat(chat.id) {
                         gitStatus = nil; gitChanges = nil; gitChangesLoading = false; branches = nil; branchesLoading = false
@@ -528,7 +541,6 @@ final class ChatModel: ObservableObject {
                     notice = event["message"] as? String ?? "Chat failed."
                 }
             }
-        }
     }
 
     private func consumeChatEvent(_ event: [String: Any]) {
@@ -582,7 +594,49 @@ final class ChatModel: ObservableObject {
     }
 }
 
-/// One top-level field of a worker event, decoded on its own (`ChatModel.payload`).
+/// A complete wire event with its expensive fields already decoded.
+struct ChatParsedEvent {
+    let line: Data
+    let event: [String: Any]
+    var fields: [String: Any] = [:]
+
+    init?(line: Data) {
+        guard let event = try? JSONSerialization.jsonObject(with: line) as? [String: Any] else { return nil }
+        self.line = line; self.event = event
+        func field<T: Decodable>(_ type: T.Type, _ key: String) -> T? {
+            let decoder = JSONDecoder(); decoder.userInfo[ChatEventKey.field] = key
+            return (try? decoder.decode(ChatEventField<T>.self, from: line))?.value
+        }
+        switch event["event"] as? String {
+        case "selected": fields["entries"] = field([ChatEntry].self, "entries") ?? []
+        case "entry": fields["entry"] = field(ChatEntry.self, "entry")
+        case "catalogue": fields["models"] = field([ChatRoute].self, "models") ?? []
+        case "chats": fields["chats"] = field([ChatSummary].self, "chats") ?? []
+        case "team": fields["team"] = field(ChatTeamSnapshot.self, "team")
+        default: break
+        }
+    }
+}
+
+/// Each worker owns a serial reader. FIFO dispatch onto the main queue keeps
+/// snapshots, stream offsets and inspector request acknowledgements ordered.
+final class ChatEventReader {
+    private let queue = DispatchQueue(label: "ProviderHub.chat.events", qos: .userInitiated)
+    private var buffer = Data()
+    func consume(_ data: Data, apply: @escaping @MainActor (ChatParsedEvent) -> Void) {
+        queue.async {
+            self.buffer.append(data)
+            while let newline = self.buffer.firstIndex(of: 10) {
+                let line = Data(self.buffer.prefix(upTo: newline))
+                self.buffer.removeSubrange(...newline)
+                guard let parsed = ChatParsedEvent(line: line) else { continue }
+                DispatchQueue.main.async { apply(parsed) }
+            }
+        }
+    }
+}
+
+/// One top-level field of a worker event, decoded from its original bytes.
 private struct ChatEventField<T: Decodable>: Decodable {
     var value: T?
     init(from decoder: Decoder) throws {

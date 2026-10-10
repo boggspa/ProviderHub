@@ -39,8 +39,10 @@ class ChatWorkspaces:
 
     def remember(self, value, *, require_available=True):
         folder = available_workspace(value) if require_available else workspace_identity(value)
-        self.folders = [folder, *(item for item in self.folders if item != folder)]
-        self.save()
+        folders = [folder, *(item for item in self.folders if item != folder)]
+        if folders != self.folders:
+            self.folders = folders
+            self.save()
         return folder
 
     def save(self):
