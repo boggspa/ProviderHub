@@ -28,6 +28,24 @@ class ResponsesToolTests(unittest.TestCase):
         self.assertNotIn("namespace", item)
         self.assertEqual(item["name"], flat[1]["name"])
 
+    def test_unknown_schema_keywords_travel_untouched_and_drop_no_tool(self):
+        # The desktop's dispatch tools (spawn_agent, followup_task,
+        # send_message) mark their message argument "encrypted": true, which
+        # no JSON Schema draft defines. Flattening carries schemas verbatim:
+        # a tool is never validated away for a keyword a provider may reject.
+        schema = {"type": "object", "properties": {"message": {"type": "string", "encrypted": True}},
+                  "required": ["message"]}
+        source = [{"type": "namespace", "name": "collaboration", "description": "Multi-agent tools",
+                   "tools": [{"type": "function", "name": name, "parameters": copy.deepcopy(schema)}
+                             for name in ("spawn_agent", "followup_task", "send_message", "wait_agent")]},
+                  {"type": "function", "name": "read", "parameters": {"type": "object"}}]
+        flat, mapping = flatten_tools(source)
+        self.assertEqual([tool["name"] for tool in flat],
+                         ["spawn_agent", "followup_task", "send_message", "wait_agent", "read"])
+        for tool in flat[:4]:
+            self.assertEqual(tool["parameters"], schema)
+            self.assertEqual(mapping[tool["name"]], {"namespace": "collaboration", "name": tool["name"]})
+
     def test_invalid_namespaces_and_non_function_children_fail_explicitly(self):
         for tool in ({"type": "namespace", "tools": [{"type": "function", "name": "read"}]},
                      {"type": "namespace", "name": "ns", "tools": [{"type": "custom", "name": "patch"}]},

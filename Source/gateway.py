@@ -790,8 +790,10 @@ class Handler(BaseHTTPRequestHandler):
             return handle_compact(self)
         if path == "/v1/responses":
             # Fail-open spawn-depth middleware: without the provider flag it
-            # hands the body through byte-identical for normal handling.
-            filter_spawn_tools(self)
+            # hands the body through byte-identical for normal handling. The
+            # count feeds the request-shape log, so a withheld spawn tool is
+            # attributable to this middleware rather than to the desktop.
+            self.spawn_stripped = filter_spawn_tools(self)
             return handle_responses(self)
         if path == "/v1/agents/sessions":
             return self._handle_create_agent_session()

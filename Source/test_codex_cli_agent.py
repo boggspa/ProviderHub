@@ -1330,13 +1330,63 @@ class RunTurnTests(unittest.TestCase):
         self.assertEqual(items[1]["output"][0]["type"], "input_image")
         self.assertTrue(items[1]["output"][0]["image_url"].startswith("data:image/png;base64,"))
 
-    def test_tool_aliases_are_short_stable_and_distinct(self):
+    def test_tool_aliases_are_readable_stable_and_distinct(self):
         names = [f"mcp__codex_apps__sites._tool_{n}" for n in range(5000)] + ["exec_command", "view_image"]
         aliases = [codex._tool_alias(name) for name in names]
         self.assertEqual(len(set(aliases)), len(names))
         for alias in aliases[:50] + aliases[-2:]:
-            self.assertRegex(alias, r"^bridge_[0-9a-f]{16}$")
+            self.assertRegex(alias, r"^bridge_[A-Za-z0-9_-]{1,40}_[0-9a-f]{8}$")
+            self.assertLessEqual(len(alias), 64)
         self.assertEqual(codex._tool_alias("exec_command"), aliases[-2])
+        # The name Codex's briefing tells the model to call is in the alias,
+        # so a model told to "use `spawn_agent`" finds it in a 170-tool list.
+        self.assertTrue(codex._tool_alias("spawn_agent").startswith("bridge_spawn_agent_"))
+        self.assertTrue(codex._tool_alias("followup_task").startswith("bridge_followup_task_"))
+        self.assertTrue(codex._tool_alias("_create_page").startswith("bridge_create_page_"))
+        self.assertTrue(codex._tool_alias("mcp__plugin.tool").startswith("bridge_mcp__plugin_tool_"))
+        # Names that reduce to one stem still map apart, and a host tool
+        # named like one of our aliases maps apart from the tool it mimics.
+        long = "x" * 60
+        self.assertNotEqual(codex._tool_alias(long + "a"), codex._tool_alias(long + "b"))
+        self.assertNotEqual(codex._tool_alias(codex._tool_alias("spawn_agent")),
+                            codex._tool_alias("spawn_agent"))
+        self.assertEqual(codex._tool_alias("..."), "bridge_tool_" + codex._tool_alias("...")[-8:])
+
+    def test_collaboration_tools_survive_the_whole_cli_handoff_with_their_schema_keywords(self):
+        # The desktop's spawn_agent, followup_task and send_message carry a
+        # non-standard "encrypted" keyword on their message argument. No
+        # layer between the desktop and the nested runtime may validate it
+        # away or drop the tool for carrying it: those three are exactly the
+        # dispatch set a seat loses when "collaboration controls" vanish.
+        from cli_tool_call import normalize_tools
+        from responses_bridge import to_messages
+        from responses_tools import flatten_tools
+        message = {"type": "string", "encrypted": True, "description": "Task text."}
+        dispatch = ("spawn_agent", "followup_task", "send_message")
+        collaboration = {"type": "namespace", "name": "collaboration", "description": "Multi-agent tools",
+                         "tools": [{"type": "function", "name": name, "description": f"{name} tool",
+                                    "parameters": {"type": "object", "properties": {"message": dict(message)},
+                                                   "required": ["message"]}} for name in dispatch]
+                         + [{"type": "function", "name": "wait_agent", "parameters": {"type": "object"}}]}
+        tools = [collaboration] + [{"type": "function", "name": f"tool_{n}", "parameters": {"type": "object"}}
+                                   for n in range(160)]
+        flattened, _ = flatten_tools(tools)
+        body = {"input": [{"role": "user", "content": "go"}], "stream": False, "tools": flattened}
+        translated = to_messages(body, "codex/gpt-5.6-sol", {"max_output": 16384}, None, "scope")
+        normalized = normalize_tools(translated["tools"])
+        payload = codex._normalise_request(self._request(tools=normalized))
+        params = codex._thread_params(payload, mock.Mock(cwd="/tmp"))
+        offered = {tool["name"]: tool for tool in params["dynamicTools"][0]["tools"]}
+        self.assertEqual(len(offered), 164)
+        for name in dispatch + ("wait_agent",):
+            alias = codex._tool_alias(name)
+            self.assertIn(alias, offered)
+            self.assertIn(name, alias)
+            self.assertTrue(offered[alias]["description"].startswith(f"Host tool: {name}."))
+        for name in dispatch:
+            schema = offered[codex._tool_alias(name)]["inputSchema"]
+            self.assertIs(schema["properties"]["message"]["encrypted"], True)
+            self.assertEqual(schema["required"], ["message"])
 
     def test_host_execution_note_is_sent_once(self):
         import cli_routes

@@ -5,6 +5,7 @@ import copy
 import hashlib
 import hmac
 import json
+import os
 import re
 import select
 import socket
@@ -608,6 +609,69 @@ def _request_shape(payload):
     return shape
 
 
+#: A bounded history of request shapes, one line per Responses request.
+#: last-responses-shape.json keeps only the newest request, which is useless
+#: for the question that matters when a tool goes missing mid-session: what
+#: did the desktop send on *that* turn, and what did this gateway do with it?
+#: The record is the same non-sensitive projection as the shape file (tool
+#: names, item types, counts), plus the spawn-depth strip count, so a missing
+#: collaboration tool is attributable to the desktop or to the middleware
+#: without reading a transcript. Full tool names are written only when the
+#: set changed since the previous line, so a long session costs a few hundred
+#: bytes a turn.
+SHAPE_LOG_NAME = "responses-shapes.jsonl"
+SHAPE_LOG_LIMIT = 400
+_shape_log_lock = threading.Lock()
+
+
+def shape_log_record(shape, stripped=0, now=None):
+    """One log line's content for a request shape; no content, no credentials."""
+    names = [name for name in shape.get("tool_names") or [] if isinstance(name, str)]
+    counts = {}
+    for kind in shape.get("input_types") or []:
+        counts[kind] = counts.get(kind, 0) + 1
+    prefix = SPAWN_NAMESPACE + "."
+    return {"time": time.strftime("%Y-%m-%dT%H:%M:%S%z", now) if now else time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "model": shape.get("model", ""),
+            "tool_count": len(names),
+            "tools_digest": hashlib.sha256(json.dumps(names, ensure_ascii=False).encode()).hexdigest()[:16],
+            "collaboration": sorted(name[len(prefix):] for name in names if name.startswith(prefix)),
+            "spawn_stripped": int(stripped or 0),
+            "input_types": counts}
+
+
+def append_shape_log(root, shape, stripped=0, limit=SHAPE_LOG_LIMIT):
+    """Append a shape record to the bounded log; diagnostics never fail a turn."""
+    if root is None:
+        return None
+    record = shape_log_record(shape, stripped)
+    path = root / SHAPE_LOG_NAME
+    with _shape_log_lock:
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+        except OSError:
+            lines = []
+        previous = None
+        if lines:
+            try:
+                previous = json.loads(lines[-1]).get("tools_digest")
+            except (ValueError, AttributeError):
+                previous = None
+        if previous != record["tools_digest"]:
+            record["tool_names"] = [name for name in shape.get("tool_names") or [] if isinstance(name, str)]
+        lines.append(json.dumps(record, ensure_ascii=False))
+        lines = lines[-limit:]
+        try:
+            temporary = path.with_name(path.name + ".tmp")
+            descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+                stream.write("\n".join(lines) + "\n")
+            os.replace(temporary, path)
+        except OSError:
+            return None
+    return record
+
+
 def prune_vacuous_schema(value, depth=0):
     """Drop the structured-output keywords Ollama's GGUF runner cannot compile.
 
@@ -1003,7 +1067,9 @@ def handle_responses(handler):
                                       "Compact the conversation before continuing.")
             return
         plan = prepare_native(runtime, payload)
-        atomic_json(runtime.root / "last-responses-shape.json", _request_shape(payload))
+        shape = _request_shape(payload)
+        atomic_json(runtime.root / "last-responses-shape.json", shape)
+        append_shape_log(runtime.root, shape, getattr(handler, "spawn_stripped", 0))
     except (ValueError, TypeError, KeyError, BridgeError, ProviderError) as exc:
         handler.error(400, str(exc))
         return

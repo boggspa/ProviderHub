@@ -130,6 +130,48 @@ def should_strip(body_input, limit):
     return tasked and not any(_is_spawn_call(item) for item in body_input)
 
 
+#: What a stripped request is told, so the absence reads as a decision and not
+#: as a broken session. Codex's own briefing tells every agent, children
+#: included, that it "can spawn sub-agents", and a model handed that text with
+#: no spawn tool has only its guesses: seen live on 10 Oct 2026, a Codex seat
+#: reported "agent metadata but no direct collaboration controls" and stopped
+#: rather than finishing its own task. The note names the one tool withheld
+#: and why, in the same voice as the compaction note in responses_native.
+SPAWN_DISABLED_NOTE = (
+    "Provider Hub note: sub-agent delegation is switched off for this route, so the "
+    "collaboration spawn tool is deliberately not offered on this turn. Every other "
+    "tool is intact. Do not report the spawn tool as missing or ask for it to be "
+    "restored: do the work yourself with the tools offered."
+)
+SPAWN_CHILD_NOTE = (
+    "Provider Hub note: this request runs as a delegated sub-agent, and sub-agents "
+    "may not spawn further agents on this route, so the collaboration spawn tool is "
+    "deliberately not offered on this turn. Every other tool is intact. Do not report "
+    "the spawn tool as missing or wait for it: complete your task with the tools "
+    "offered and return your result to your parent."
+)
+
+
+def spawn_depth_note(limit):
+    """The instruction text that explains the strip the limit just caused."""
+    return SPAWN_DISABLED_NOTE if limit == 0 else SPAWN_CHILD_NOTE
+
+
+def with_note(instructions, note):
+    """Append the note to a request's `instructions`, keeping what is there.
+
+    Mirrors responses_native.with_ultra_note, which this module cannot import
+    without a cycle: absent or empty instructions become the note, text gets
+    the note appended, and anything else is returned unchanged for the
+    provider to judge.
+    """
+    if instructions is None or instructions == "":
+        return note
+    if isinstance(instructions, str):
+        return instructions + "\n\n" + note
+    return instructions
+
+
 def strip_spawn_tools(tools):
     """Return (tools, removed) with every spawn-tool entry dropped.
 
@@ -171,7 +213,9 @@ def apply_spawn_depth_limit(body, limit):
 
     Returns (body, stripped). The same object is returned when nothing
     changed, so callers can skip re-encoding; otherwise a copy with the
-    spawn tools removed.
+    spawn tools removed and `instructions` carrying the matching note, so
+    the model is told what was withheld instead of being left to infer a
+    broken tool list from the briefing that still mentions spawning.
     """
     if limit is None:
         return body, 0
@@ -182,6 +226,7 @@ def apply_spawn_depth_limit(body, limit):
         return body, 0
     edited = dict(body)
     edited["tools"] = tools
+    edited["instructions"] = with_note(body.get("instructions"), spawn_depth_note(limit))
     return edited, stripped
 
 

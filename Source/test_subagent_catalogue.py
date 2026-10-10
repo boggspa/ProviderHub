@@ -116,6 +116,21 @@ class SubagentCatalogueTests(unittest.TestCase):
         self.assertEqual(advertise_subagent_models(tools, self.config, self.stock), 1)
         self.assertIn("mistral/model-6", tools[0]["description"])
 
+    def test_host_description_leads_and_the_catalogue_follows(self):
+        # The host's text is what says what the tool is for. Forty rows of
+        # model slugs ahead of it read as a model listing, not as a control.
+        tools = host_tools()
+        self.assertEqual(advertise_subagent_models(tools, self.config, self.stock), 1)
+        description = tools[0]["tools"][0]["description"]
+        self.assertTrue(description.startswith("Spawns an agent."), description[:80])
+        self.assertLess(description.index("Spawns an agent."),
+                        description.index("[Provider Hub subagent catalogue]"))
+        self.assertTrue(description.endswith("[/Provider Hub subagent catalogue]"))
+        self.assertNotIn("old/model", description)
+        # Replaying an advertised tool keeps one block, still last.
+        self.assertEqual(advertise_subagent_models(tools, self.config, self.stock), 1)
+        self.assertEqual(tools[0]["tools"][0]["description"], description)
+
     def test_catalogue_reaches_native_and_cli_routes_before_transport_translation(self):
         import responses_native
         import codex_cli_agent

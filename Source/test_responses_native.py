@@ -1588,6 +1588,42 @@ class MultiAgentNormalizationTests(unittest.TestCase):
         for secret in ("secret prompt", "secret task", "secret findings"):
             self.assertNotIn(secret, blob)
 
+    def test_shape_log_is_bounded_and_attributes_a_withheld_spawn_tool(self):
+        """One line per request, tool names only when they change, strip count kept."""
+        import json
+        import tempfile
+        from pathlib import Path
+
+        from responses_native import SHAPE_LOG_NAME, append_shape_log, shape_log_record
+
+        full = {"model": "codex/gpt-6.1-sol", "input_types": ["message", "message", "function_call"],
+                "tool_names": ["collaboration.spawn_agent", "collaboration.wait_agent", "read_file"]}
+        child = {"model": "codex/gpt-6.1-sol", "input_types": ["agent_message"],
+                 "tool_names": ["collaboration.wait_agent", "read_file"]}
+        record = shape_log_record(full)
+        self.assertEqual(record["collaboration"], ["spawn_agent", "wait_agent"])
+        self.assertEqual(record["tool_count"], 3)
+        self.assertEqual(record["spawn_stripped"], 0)
+        self.assertEqual(record["input_types"], {"message": 2, "function_call": 1})
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            append_shape_log(root, full)
+            append_shape_log(root, full)
+            append_shape_log(root, child, stripped=1)
+            lines = [json.loads(line) for line in (root / SHAPE_LOG_NAME).read_text().splitlines()]
+            self.assertEqual([line["spawn_stripped"] for line in lines], [0, 0, 1])
+            self.assertEqual(lines[0]["tool_names"], full["tool_names"])
+            self.assertNotIn("tool_names", lines[1])
+            self.assertEqual(lines[2]["tool_names"], child["tool_names"])
+            self.assertEqual(lines[2]["collaboration"], ["wait_agent"])
+            self.assertEqual((root / SHAPE_LOG_NAME).stat().st_mode & 0o777, 0o600)
+            for _ in range(6):
+                append_shape_log(root, full, limit=4)
+            lines = [json.loads(line) for line in (root / SHAPE_LOG_NAME).read_text().splitlines()]
+            self.assertEqual(len(lines), 4)
+            self.assertTrue(all("tool_names" not in line for line in lines))
+        self.assertIsNone(append_shape_log(None, full))
+
 
 class CodexCliReasoningSummaryPlanTests(unittest.TestCase):
     """Published-summary opt-in is restricted to Codex's CLI transport."""
