@@ -227,7 +227,9 @@ own processes does not. Each process runs in its own process group, so Stop
 sends SIGTERM to everything it started and SIGKILL three seconds later; when
 the command itself exits, anything it left in its group is ended too. A chat
 can have four running at once, Chat eight in total. Output is kept as a
-bounded tail in memory and never written to disk. Stopping a turn does not
+bounded tail in memory with no separate log file; output a tool call reports
+to the model is saved with the transcript like any other tool result.
+Stopping a turn does not
 stop its background processes: stop them in the inspector, or they end when
 their chat is deleted or Chat quits. Read-only Side Chats and lanes cannot
 start them. If the worker is killed outright, macOS does not end these
