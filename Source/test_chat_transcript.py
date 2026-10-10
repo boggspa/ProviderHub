@@ -306,6 +306,7 @@ import SwiftUI
 
 struct Item: ChatTranscriptItem {
     var id: String; var kind: String; var text = ""; var route = "codex/sol"
+    var time: Double? = nil
     var tool: String? = nil; var summary: String? = nil; var detail: String? = nil
     var memberID: String? = nil; var memberName: String? = nil
     var agentID: String? = nil; var agentIDs: [String]? = nil
@@ -324,6 +325,17 @@ struct Item: ChatTranscriptItem {
             Item(id: id, kind: "assistant", text: text, route: route, memberID: member.id, memberName: member.name)
         }
         typealias Segment = ChatTranscriptSegment<Item>
+        var opening = tool("timed-opening"); opening.time = 1791763020
+        var later = tool("timed-later"); later.time = 1791763080
+        let timedSection = Segment.outline([opening, later]) { _ in false }
+        if case .speaker(let first) = timedSection[0].content {
+            check(first.time == opening.time, "Header time did not come from section opening")
+        } else { fatalError("Timed section lost header") }
+        var utc = Calendar(identifier: .gregorian); utc.timeZone = TimeZone(secondsFromGMT: 0)!
+        let today = Date(timeIntervalSince1970: opening.time!)
+        check(ChatSectionTime.label(opening.time, now: today, calendar: utc) == "23:57", "Short local section time")
+        check(ChatSectionTime.label(opening.time, now: today.addingTimeInterval(86400), calendar: utc)?.contains("2026") == true, "Older section omitted date")
+        check(ChatSectionTime.label(nil) == nil && ChatSectionTime.help(nil) == nil, "Legacy section inferred a timestamp")
 
         // One header per speaker block; empty rounds vanish; tool runs fold
         // across them and across hidden notices; a checkpoint ends the block.
@@ -338,18 +350,45 @@ struct Item: ChatTranscriptItem {
             tool("d1", "delegate", member: opus, route: "claude/opus", agent: "child"), tool("t6", member: opus, route: "claude/opus"),
         ]
         let segments = Segment.outline(items) { $0.id == "a3" }
-        check(segments.map(\.id) == ["u1", "speaker-t1", "fold-t1", "a2", "t4", "n1", "speaker-a3", "a3", "t5", "d1", "t6"],
+        check(segments.map(\.id) == ["u1", "speaker-t1", "fold-t1", "speaker-a2", "a2", "t4", "n1", "speaker-a3", "a3", "t5", "d1", "t6"],
               "Outline order: " + segments.map(\.id).joined(separator: ","))
-        check(segments.map(\.spacing) == [.none, .speaker, .header, .item, .item, .speaker, .speaker, .header, .item, .item, .item],
+        check(segments.map(\.spacing) == [.none, .speaker, .header, .speaker, .header, .item, .speaker, .speaker, .header, .item, .item, .item],
               "Speaker and in-block spacing changed")
         if case .fold(let folded) = segments[2].content { check(folded.map(\.id) == ["t1", "t2", "t3"], "Fold lost a step") }
         else { fatalError("Three tool rows across an empty round did not fold") }
-        check(segments[5].previousSpeaker?.memberName == "Sol", "Checkpoint does not know whose block it ends")
+        check(segments[6].previousSpeaker?.memberName == "Sol", "Checkpoint does not know whose block it ends")
         check(Segment.outline(items) { _ in false }.contains { $0.id == "a3" } == false, "Empty finished reply still drawn")
         let sameRouteOtherMember = [reply("x1", "One"), reply("x2", "Two", member: opus)]
         check(Segment.outline(sameRouteOtherMember) { _ in false }.filter(\.isSpeaker).count == 2, "Members on one route shared a header")
         let continued = [reply("y1", "One"), tool("y2"), reply("y3", "Two")]
-        check(Segment.outline(continued) { _ in false }.filter(\.isSpeaker).count == 1, "One speaker repeated its header")
+        check(Segment.outline(continued) { _ in false }.filter(\.isSpeaker).count == 2, "Team text reply did not open a section")
+        check(Segment.outline([tool("thinkingTool"), reply("thinking", "")]) { $0.id == "thinking" }.filter(\.isSpeaker).count == 1, "Blank live round opened a text section")
+        let blankInterleaved = [tool("blank-s"), tool("blank-o", member: opus), reply("blank-live", "")]
+        check(Segment.outline(blankInterleaved) { $0.id == "blank-live" }.map(\.id) == ["speaker-blank-s", "blank-s", "blank-live", "speaker-blank-o", "blank-o"], "Blank live placeholder opened an interleaved section")
+        check(Segment.outline([reply("first-blank", "")]) { _ in true }.map(\.id) == ["speaker-first-blank", "first-blank"], "First live placeholder lost needed section")
+        let soloContinued = continued.map { item -> Item in var item = item; item.memberID = nil; item.memberName = nil; return item }
+        check(Segment.outline(soloContinued) { _ in false }.map(\.id) == ["speaker-y1", "y1", "y2", "y3"], "Solo layout changed")
+
+        let interleaved = [tool("s1"), tool("o1", member: opus), tool("s2", "read_file"),
+                           tool("o2", member: opus), tool("s3", "search"), reply("sReply", "Partial"),
+                           tool("o3", member: opus), tool("s4", "team_status")]
+        let grouped = Segment.outline(interleaved, open: true) { $0.id == "sReply" }
+        check(grouped.map(\.id) == ["speaker-s1", "fold-s1", "speaker-o1", "fold-o1", "speaker-sReply", "sReply", "s4"], "Interleaved sections lost first-arrival order")
+        if case .fold(let tools) = grouped[1].content { check(tools.map(\.id) == ["s1", "s2", "s3"], "Sol tools crossed sections") }
+        else { fatalError("Sol tools did not fold") }
+        if case .fold(let tools) = grouped[3].content { check(tools.map(\.id) == ["o1", "o2", "o3"], "Opus tools crossed sections") }
+        else { fatalError("Opus tools did not fold") }
+        let appended = Segment.outline(interleaved + [tool("o4", member: opus)], open: true) { _ in false }
+        check(appended.filter { if case .fold = $0.content { return true }; return false }.map(\.id) == ["fold-s1", "fold-o1"], "Appended tool changed fold identities")
+        let boundary = Segment.outline(interleaved + [Item(id: "next", kind: "user"), tool("s5"), tool("o5", member: opus)]) { _ in false }
+        check(boundary.suffix(5).map(\.id) == ["next", "speaker-s5", "s5", "speaker-o5", "o5"], "User did not close every member section")
+        let noticeBoundary = Segment.outline([tool("nTool"), Item(id: "steer", kind: "notice", text: "Steering"), tool("nNext")]) { _ in false }
+        check(noticeBoundary.map(\.id) == ["speaker-nTool", "nTool", "steer", "speaker-nNext", "nNext"], "Notice did not close sections")
+        let hiddenBoundary = Segment.outline([tool("hTool"), Item(id: "hidden", kind: "notice", text: ChatNotice.contextTrimmed), tool("hNext")]) { _ in false }
+        check(hiddenBoundary.map(\.id) == ["speaker-hTool", "hTool", "speaker-hNext", "hNext"], "Hidden notice did not close sections")
+        let four = [tool("f1"), tool("f2", member: opus), tool("f3", member: ("m3", "Grok")),
+                    tool("f4", member: ("m4", "Gemini")), tool("f5"), tool("f6", member: opus)]
+        check(Segment.outline(four) { _ in false }.map(\.id) == ["speaker-f1", "f1", "f5", "speaker-f2", "f2", "f6", "speaker-f3", "f3", "speaker-f4", "f4"], "Four members repeated headers")
 
         // A Team turn that changed files closes with one table of them, after
         // the turn ends: at the next request, or once the Team stops working.
@@ -363,11 +402,16 @@ struct Item: ChatTranscriptItem {
                       memberID: opus.id, memberName: opus.name)
         p2.changedFiles = ["A.swift"]
         let teamTurn = [Item(id: "u", kind: "user", text: "Go"), p1, reply("r1", "Done"), p2, Item(id: "u2", kind: "user", text: "Next")]
-        check(Segment.outline(teamTurn) { _ in false }.map(\.id) == ["u", "speaker-p1", "p1", "r1", "speaker-p2", "p2", "changes-p1", "u2"],
+        check(Segment.outline(teamTurn) { _ in false }.map(\.id) == ["u", "speaker-p1", "p1", "speaker-r1", "r1", "speaker-p2", "p2", "changes-p1", "u2"],
               "Close-out placement: " + Segment.outline(teamTurn) { _ in false }.map(\.id).joined(separator: ","))
         let working = Array(teamTurn.dropLast())
         check(!Segment.outline(working, open: true) { _ in false }.contains { $0.id == "changes-p1" }, "Close-out drawn mid-turn")
         check(Segment.outline(working) { _ in false }.last?.id == "changes-p1", "Finished turn lost its close-out")
+        var p3 = p1; p3.id = "p3"; p3.changedFiles = ["C.swift"]
+        let reorderedChanges = Segment.outline([p1, p2, p3]) { _ in false }
+        if case .changes(let recorded) = reorderedChanges.last!.content {
+            check(recorded.map(\.id) == ["p1", "p2", "p3"], "Section grouping reordered turn changes")
+        } else { fatalError("Grouped turn lost changes") }
         var solo = p1; solo.memberID = nil; solo.memberName = nil
         check(!Segment.outline([teamTurn[0], solo]) { _ in false }.contains { $0.id.hasPrefix("changes-") }, "Solo turn grew a Team close-out")
         let changes = ChatTurnChanges.collect([p1, p2])

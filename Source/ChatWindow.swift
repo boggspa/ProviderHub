@@ -497,7 +497,9 @@ private struct ChatTranscript: View {
                 .onChange(of: model.entries.count) { _, _ in
                     if model.entries.last?.kind == "user" || nearBottom { scrollToEnd(proxy) }
                 }
-                .onChange(of: model.entries.last?.text.count) { _, _ in if nearBottom { scrollToEnd(proxy) } }
+                .onChange(of: model.transcriptVersion) { _, _ in
+                    if nearBottom { scrollToEnd(proxy) }
+                }
                 .onChange(of: model.selectedID) { _, _ in scrollToEnd(proxy) }
                 .onAppear { scrollToEnd(proxy) }
             }
@@ -505,23 +507,42 @@ private struct ChatTranscript: View {
     }
 
     private var content: some View {
-        let lastID = model.entries.last?.id
+        let liveEntryIDs = model.streamingEntryIDs()
         // While a turn runs its close-out waits; it appears once the turn ends.
         let segments = ChatTranscriptSegment<ChatEntry>.outline(model.entries, open: model.busy) {
-            model.isStreaming($0, fallback: model.busy && $0.id == lastID)
+            liveEntryIDs.contains($0.id)
         }
-        let liveSpeaker = model.busy ? segments.last(where: \.isSpeaker)?.id : nil
+        // Streaming belongs to a member's current section, which can sit
+        // above sections opened by peers. Do not assume the bottom row is live.
+        var liveSpeakers: Set<String> = []
+        var currentSpeaker: String?
+        for segment in segments {
+            switch segment.content {
+            case .speaker: currentSpeaker = segment.id
+            case .entry(let entry):
+                if liveEntryIDs.contains(entry.id), let currentSpeaker { liveSpeakers.insert(currentSpeaker) }
+            case .fold(let entries):
+                if entries.contains(where: { liveEntryIDs.contains($0.id) }), let currentSpeaker { liveSpeakers.insert(currentSpeaker) }
+            case .changes: currentSpeaker = nil
+            }
+        }
+        if model.team?.enabled != true, model.busy, let speaker = segments.last(where: \.isSpeaker) {
+            liveSpeakers.insert(speaker.id)
+        }
         return LazyVStack(alignment: .leading, spacing: 0) {
             if model.entries.isEmpty { ChatInvitation(model: model) }
             ForEach(segments) { segment in
                 Group {
                     switch segment.content {
                     case .speaker(let entry):
-                        ChatSpeakerHeader(member: entry.memberName, label: model.label(for: entry.route),
+                        ChatSpeakerHeader(member: entry.memberName, time: entry.time, label: model.label(for: entry.route),
                                           presentation: model.route(named: entry.route)?.presentation,
-                                          accent: model.accent(for: entry.route), live: segment.id == liveSpeaker)
-                    case .entry(let entry): row(entry, after: segment.previousSpeaker)
-                    case .fold(let entries): fold(entries, live: model.busy && segment.id == segments.last?.id)
+                                          accent: model.accent(for: entry.route), live: liveSpeakers.contains(segment.id))
+                    case .entry(let entry): row(entry, after: segment.previousSpeaker, liveEntryIDs: liveEntryIDs)
+                    case .fold(let entries):
+                        fold(entries, live: model.team?.enabled == true
+                             ? entries.contains { liveEntryIDs.contains($0.id) }
+                             : model.busy && segment.id == segments.last?.id, liveEntryIDs: liveEntryIDs)
                     case .changes(let entries):
                         ChatTurnChangesRow(entries: entries, workspace: model.selected?.workspace) { expandedBinding($0) }
                     }
@@ -548,14 +569,14 @@ private struct ChatTranscript: View {
         proxy.scrollTo(bottomID, anchor: .bottom)
     }
 
-    @ViewBuilder private func row(_ entry: ChatEntry, after speaker: ChatEntry? = nil) -> some View {
+    @ViewBuilder private func row(_ entry: ChatEntry, after speaker: ChatEntry? = nil, liveEntryIDs: Set<String>) -> some View {
         let last = entry.id == model.entries.last?.id
         let live = model.busy && entry.detail == "Running…"
         switch entry.kind {
         case "user":
             UserRow(entry: entry, accent: { model.accent(for: $0) })
         case "assistant":
-            AssistantRow(entry: entry, accent: model.accent(for: entry.route), streaming: model.isStreaming(entry, fallback: model.busy && last))
+            AssistantRow(entry: entry, accent: model.accent(for: entry.route), streaming: liveEntryIDs.contains(entry.id))
         case "tool":
             if let ids = entry.agentIDs, !ids.isEmpty {
                 VStack(alignment: .leading, spacing: 4) {
@@ -588,7 +609,7 @@ private struct ChatTranscript: View {
     /// choice the user makes by hand sticks for that run. Collapsed and live,
     /// the header carries the latest step so nothing goes dark mid-turn. Open,
     /// the steps hang from a hairline under the header's glyphs.
-    @ViewBuilder private func fold(_ entries: [ChatEntry], live: Bool) -> some View {
+    @ViewBuilder private func fold(_ entries: [ChatEntry], live: Bool, liveEntryIDs: Set<String>) -> some View {
         let id = ChatTranscriptSegment<ChatEntry>.foldID(entries)
         let open = foldChoice[id] ?? live
         VStack(alignment: .leading, spacing: textStyle.scaled(4)) {
@@ -601,7 +622,7 @@ private struct ChatTranscript: View {
             .accessibilityLabel((live ? "Working, " : "Worked, ") + ChatToolDisplay.activity(entries.map(\.tool)))
             .accessibilityValue(open ? "Expanded" : "Collapsed")
             if open {
-                VStack(alignment: .leading, spacing: textStyle.scaled(2)) { ForEach(entries) { entry in row(entry) } }
+                VStack(alignment: .leading, spacing: textStyle.scaled(2)) { ForEach(entries) { entry in row(entry, liveEntryIDs: liveEntryIDs) } }
                     .padding(.leading, textStyle.scaled(18))
                     .overlay(alignment: .leading) {
                         Rectangle().fill(Semantic.hairline).frame(width: 1).padding(.leading, textStyle.scaled(7)).padding(.vertical, 2)

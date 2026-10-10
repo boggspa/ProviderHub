@@ -61,7 +61,7 @@ def now():
 
 def entry(kind, text="", route="", **extra):
     return {"id": uuid.uuid4().hex, "kind": kind, "text": text, "route": route,
-            "isError": False, "changedFiles": [], **extra}
+            "isError": False, "changedFiles": [], "time": time.time(), **extra}
 
 
 class ModelRequestError(ValueError):

@@ -36,6 +36,7 @@ struct ChatRoute: Decodable, Identifiable {
 
 struct ChatEntry: Decodable, Identifiable {
     var id: String
+    var time: Double?
     var kind: String
     var text: String
     var route: String
@@ -92,6 +93,7 @@ struct ChatGitStatus: Decodable {
 /// contains no provider credentials; the existing authenticated gateway owns them.
 private struct ChatSessionState {
     var entries: [ChatEntry] = []
+    var transcriptVersion: UInt64 = 0
     var draft = ""
     var attachments: [ChatAttachment] = []
     var busy = false
@@ -163,6 +165,7 @@ final class ChatModel: ObservableObject {
         let wasActive = hasActiveWork
         let previous = stateChatID.map { sessions[$0] ?? ChatSessionState() } ?? unselected
         var state = previous; state[keyPath: key] = value
+        if key == \ChatSessionState.entries { state.transcriptVersion &+= 1 }
         let rowChanged = previous.busy != state.busy || previous.active != state.active || previous.approval?.id != state.approval?.id
         if stateChatID == selectedID || (background && rowChanged) { objectWillChange.send() }
         if let id = stateChatID {
@@ -170,6 +173,8 @@ final class ChatModel: ObservableObject {
         } else { unselected = state }
         if hasActiveWork != wasActive { onActivity?(hasActiveWork) }
     }
+    /// A scalar scroll invalidation signal, independent of history/text size.
+    var transcriptVersion: UInt64 { value(\.transcriptVersion) }
     var entries: [ChatEntry] { get { value(\.entries) } set { update(\.entries, newValue) } }
     var draft: String { get { value(\.draft) } set { update(\.draft, newValue) } }
     var attachments: [ChatAttachment] { get { value(\.attachments) } set { update(\.attachments, newValue) } }

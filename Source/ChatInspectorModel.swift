@@ -222,6 +222,25 @@ struct ChatTeamSnapshot: Decodable {
               let contribution = member.contributionID, contribution == entry.contributionID else { return false }
         return entries.last(where: { $0.memberID == memberID && $0.contributionID == contribution })?.id == entry.id
     }
+    /// One reverse pass per render, rather than one history scan per row.
+    /// Only the latest row in each working member's current contribution lives.
+    func streamingEntryIDs() -> Set<String> {
+        guard busy else { return [] }
+        var result: Set<String> = []
+        if let last = entries.last, last.memberID == nil { result.insert(last.id) }
+        guard team?.enabled == true else { return result }
+        var pending: [String: String] = [:]
+        for member in team?.members ?? [] where member.status == "working" {
+            if let contribution = member.contributionID { pending[member.id] = contribution }
+        }
+        for entry in entries.reversed() {
+            if pending.isEmpty { break }
+            if let member = entry.memberID, let contribution = pending[member], contribution == entry.contributionID {
+                result.insert(entry.id); pending.removeValue(forKey: member)
+            }
+        }
+        return result
+    }
     var canChangeBranch: Bool { connected && selectedID != nil && !busy && !branchBusy && sideChat?.busy != true && !sideOpening }
     var canSendSide: Bool {
         connected && sideChat != nil && !branchBusy && !sideOpening && pendingSideText == nil && sideChat?.interrupting != true
