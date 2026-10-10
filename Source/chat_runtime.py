@@ -27,6 +27,7 @@ from chat_tools import ChatToolRunner, TOOL_DEFINITIONS
 from chat_attachments import prepare_attachments, bound_image_history
 from chat_history import portable_history
 import chat_memory
+import chat_processes
 import chat_team
 from chat_git import git_status
 from chat_workspaces import ChatWorkspaces, available_workspace
@@ -396,7 +397,7 @@ class ChatService:
         self._delegations = 0
         self.models = []
         self.chat = None
-        self.cancel = threading.Event()
+        self.cancel = chat_processes.OwnerEvent(self)
         self.thread = None
         self._working = False
         self._git_working = False

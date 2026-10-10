@@ -26,7 +26,8 @@ class ChatToolsTests(unittest.TestCase):
         return self.runner.execute("apply_patch", {"patch": "*** Begin Patch\n" + body + "\n*** End Patch"})
 
     def test_contract_and_strict_arguments(self):
-        self.assertEqual({t["name"] for t in TOOL_DEFINITIONS}, {"read_file", "search_files", "apply_patch", "run_shell"})
+        self.assertEqual({t["name"] for t in TOOL_DEFINITIONS},
+                         {"read_file", "search_files", "apply_patch", "run_shell", "read_process", "stop_process"})
         for name, args in [("unknown", {}), ("read_file", {"path": "a", "offset": True}),
                            ("run_shell", {"command": "echo hi", "extra": 1}),
                            ("run_shell", {"command": "echo hi", "timeout": float("nan")}),

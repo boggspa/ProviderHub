@@ -90,7 +90,8 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(request["messages"][0]["content"][0]["text"], "Inspect only")
         self.assertEqual(request["output_config"], {"effort": "high"})
         self.assertNotIn("Parent task", json.dumps(request["messages"]))
-        self.assertEqual({t["name"] for t in request["tools"]}, {"read_file", "search_files", "apply_patch", "run_shell"})
+        self.assertEqual({t["name"] for t in request["tools"]},
+                         {"read_file", "search_files", "apply_patch", "run_shell", "read_process", "stop_process"})
         self.assertEqual(child["workspace"], parent.chat["workspace"])
         self.assertEqual(child["approvalMode"], "manual")
         stored = self.store.load(parent.chat["id"])

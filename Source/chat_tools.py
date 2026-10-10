@@ -2,6 +2,7 @@
 
 File tools reject symlinks and anchor opens to directory descriptors. Shell is
 ordinary local execution, NOT a sandbox; its exact command requires approval.
+Background shells (chat_processes.py) keep running after the call returns.
 """
 from __future__ import annotations
 
@@ -38,9 +39,16 @@ TOOL_DEFINITIONS = [
         "glob": {"type": "string"}, "max_results": {"type": "integer", "minimum": 1, "maximum": 500}}, ["pattern"]),
     _tool("apply_patch", "Apply a Codex *** Begin Patch patch (Add/Update/Delete File, optional Move to). All hunks are validated first. The host applies the selected approval mode.", {
         "patch": {"type": "string"}}, ["patch"]),
-    _tool("run_shell", "Run a command with /bin/sh in the workspace under the host's selected approval mode. This is not sandboxed. Output is bounded; timeout is in seconds.", {
-        "command": {"type": "string"}, "timeout": {"type": "number", "minimum": 0.1, "maximum": 300}}, ["command"]),
+    _tool("run_shell", "Run a command with /bin/sh in the workspace under the host's selected approval mode. This is not sandboxed. Output is bounded; timeout is in seconds. "
+          "Set background to true for servers, watchers or long jobs: the command keeps running between turns, the call returns its first output and an id for read_process and stop_process, and timeout is not used. Stop background processes you no longer need.", {
+        "command": {"type": "string"}, "timeout": {"type": "number", "minimum": 0.1, "maximum": 300},
+        "background": {"type": "boolean"}}, ["command"]),
+    _tool("read_process", "Read new output and the status of a background process this chat started. wait is seconds (at most 30) to wait for it to finish first; it returns early when the process exits.", {
+        "id": {"type": "string"}, "wait": {"type": "number", "minimum": 0, "maximum": 30}}, ["id"]),
+    _tool("stop_process", "Stop a background process this chat started: SIGTERM to its process group, then SIGKILL after 3 seconds.", {
+        "id": {"type": "string"}}, ["id"]),
 ]
+PROCESS_TOOLS = ("read_process", "stop_process")
 
 
 def _bounded(text):
@@ -50,12 +58,21 @@ def _bounded(text):
     return text[:MAX_OUTPUT - len(suffix)] + suffix
 
 
+def _environment():
+    # Retain operational PATH/HOME/locale, remove recognizable credentials.
+    sensitive = ("KEY", "TOKEN", "SECRET", "PASSWORD", "PASSWD", "CREDENTIAL", "AUTH", "COOKIE")
+    return {key: value for key, value in os.environ.items()
+            if not any(word in key.upper() for word in sensitive)}
+
+
 class ChatToolRunner:
-    def __init__(self, workspace: str, cancel_event: threading.Event | None = None):
+    def __init__(self, workspace: str, cancel_event: threading.Event | None = None, processes=None):
         self.workspace = Path(workspace).resolve(strict=True)
         if not self.workspace.is_dir():
             raise ValueError("Workspace must be an existing directory")
         self.cancel_event = cancel_event if cancel_event is not None else threading.Event()
+        # A chat_processes.ProcessRegistry; the Chat worker supplies one.
+        self.processes = processes
 
     def _cancel(self):
         if self.cancel_event.is_set():
@@ -132,6 +149,9 @@ class ChatToolRunner:
                     raise ValueError(f"{key} must be a nonempty string without NUL")
                 if len(value) > (MAX_FILE if key == "patch" else MAX_OUTPUT):
                     raise ValueError(f"{key} is too long")
+            elif kind == "boolean":
+                if type(value) is not bool:
+                    raise ValueError(f"{key} must be true or false")
             else:
                 if type(value) not in ((int,) if kind == "integer" else (int, float)) or (type(value) is float and not math.isfinite(value)):
                     raise ValueError(f"Invalid {key}")
@@ -145,8 +165,14 @@ class ChatToolRunner:
 
     def describe(self, name, args):
         plan = self._validate(name, args)
-        if name == "run_shell":
+        if name == "run_shell" and args.get("background"):
+            summary = f"Run in background in {self.workspace}:\n{args['command']}"
+        elif name == "run_shell":
             summary = f"Run in {self.workspace}:\n{args['command']}"
+        elif name == "read_process":
+            summary = f"Read background process {args['id']}" + (f" (wait {args['wait']:g}s)" if args.get("wait") else "")
+        elif name == "stop_process":
+            summary = f"Stop background process {args['id']}"
         elif name == "apply_patch":
             operations = []
             for line in args["patch"].splitlines():
@@ -185,6 +211,8 @@ class ChatToolRunner:
                 self._cancel()
                 self._apply(plan, changed)
                 output = "Applied patch:\n" + "\n".join(changed) + "\n\n" + self._patch_diff(plan)
+            elif name in PROCESS_TOOLS or args.get("background"):
+                output, error = self._background(name, args)
             else:
                 output, error = self._shell(args)
         except (ValueError, OSError, UnicodeError) as exc:
@@ -195,6 +223,16 @@ class ChatToolRunner:
         return {"content": [{"type": "text", "text": _bounded(output)}], "is_error": error,
                 "summary": summary, "changed_files": changed,
                 "duration_ms": int((time.monotonic() - start) * 1000)}
+
+    def _background(self, name, args):
+        owner = getattr(self.cancel_event, "owner", None)
+        if self.processes is None or owner is None:
+            raise ValueError("Background processes are not available in this conversation; run the command in the foreground.")
+        if name == "run_shell":
+            return self.processes.start(owner, str(self.workspace), args["command"], _environment(), self.cancel_event)
+        if name == "read_process":
+            return self.processes.read(owner, args["id"], args.get("wait", 0), self.cancel_event)
+        return self.processes.stop(owner, args["id"], self.cancel_event)
 
     def _search(self, args):
         root = self._relative(args.get("path", "."))
@@ -389,10 +427,7 @@ class ChatToolRunner:
                 os.close(parent)
 
     def _shell(self, args):
-        # Retain operational PATH/HOME/locale, remove recognizable credentials.
-        sensitive = ("KEY", "TOKEN", "SECRET", "PASSWORD", "PASSWD", "CREDENTIAL", "AUTH", "COOKIE")
-        env = {key: value for key, value in os.environ.items()
-               if not any(word in key.upper() for word in sensitive)}
+        env = _environment()
         timeout = args.get("timeout", 60)
         self._cancel()
         process = subprocess.Popen(["/bin/sh", "-c", args["command"]], cwd=self.workspace,

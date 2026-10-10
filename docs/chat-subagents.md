@@ -8,7 +8,7 @@ same gateway, run loop and inspector for both forms.
 
 The blocking `delegate` tool lets the parent ask another model to
 complete a self-contained task, waits for its result, then continues. One child
-at a time, one level deep. The child receives the existing four local tools but
+at a time, one level deep. The child receives the existing local tools but
 cannot delegate. Use the existing Messages gateway and provider adapters.
 
 This gives a second opinion, focused investigation or bounded implementation
@@ -45,10 +45,12 @@ Git counts already cover the workspace and need no separate child view.
   patch validation. Do not classify shell commands as read-only by their label.
 - Enforce depth, launch, round and output limits in the host. Omit delegation
   from the child catalogue and reject attempts anyway; prompts are not limits.
-- Stop cancels the active request and local command, including a child. A steer
-  cancels the child, waits for tool cleanup and a recorded outcome, then restarts
-  the parent with the user's update. No queued messages or synthetic tool-result
-  injection. A stopped tool may already have changed files.
+- Stop cancels the active request and foreground local command, including a
+  child's. A steer cancels the child, waits for tool cleanup and a recorded
+  outcome, then restarts the parent with the user's update. No queued messages
+  or synthetic tool-result injection. A stopped tool may already have changed
+  files. Background processes a child started belong to the parent chat and
+  keep running; see background shells in [Chat](chat.md#files-and-commands).
 - Child identity, visible entries, tool outcomes and opaque provider history
   persist as separate `agent` rows in the parent's JSONL file. They are excluded
   from its small metadata header and retain exact route/account ownership. Portable
