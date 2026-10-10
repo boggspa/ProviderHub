@@ -302,7 +302,11 @@ import Combine
         // Team configuration uses correlated replies and the owning chat.
         model.draft = "Team task"
         let memberSpec: [String: Any] = ["name":"Builder", "choice":"ollama/test|", "effort":"high", "responsibility":"Build"]
-        model.configureTeam(enabled: true, members: [memberSpec])
+        let execution = ChatTeamExecution(mode: "task", contextTokens: 64000, processes: 6, minutes: 45, tokens: nil)
+        model.configureTeam(enabled: true, members: [memberSpec], execution: execution)
+        let executionWire = commands.last?["execution"] as! [String: Any]
+        check(executionWire["mode"] as? String == "task" && executionWire["minutes"] as? Int == 45 && executionWire["tokens"] is NSNull,
+              "run settings lost explicit limits or clearing a limit")
         let teamRequest = commands.last?["request"] as! String
         check(!model.canSend && !model.canConfigureTeam, "Team configuration must settle before another send")
         let beforePendingSwitch = commands.count; model.setEffort("low")
@@ -318,6 +322,25 @@ import Combine
         check(model.team == nil && model.teamRequest == teamRequest, "cross-chat or stale Team ack accepted")
         try send(["event":"team", "chat":"A", "request":teamRequest, "team":roster("ready")])
         check(model.team?.members.count == 1 && model.teamRequest == nil && model.canSend, "Team ack not applied")
+        check(model.team?.taskMode == false, "legacy roster unexpectedly enabled Task mode")
+        var configuredTeam = roster("waiting", "waiting")
+        configuredTeam["execution"] = execution.wire
+        configuredTeam["runUsage"] = ["started": 100.0, "tokens": 1800, "requests": 4, "usageComplete": false]
+        var waitingMember = (configuredTeam["members"] as! [[String: Any]])[0]
+        waitingMember["context"] = 64000; waitingMember["modelContext"] = 100000
+        waitingMember["waitReason"] = "Waiting for process p1"
+        configuredTeam["members"] = [waitingMember]
+        try send(["event":"team", "chat":"A", "team":configuredTeam])
+        check(model.team?.taskMode == true && model.team?.members[0].context == 64000 && model.team?.runUsage?.usageComplete == false,
+              "effective context or partial run usage lost")
+        check(model.team?.members[0].waitReason == "Waiting for process p1" && model.team?.canResume == false,
+              "active wait showed a resume action")
+        configuredTeam["status"] = "limit_reached"; waitingMember["status"] = "limit_reached"
+        configuredTeam["members"] = [waitingMember]; configuredTeam["limitReason"] = "Token limit reached"
+        try send(["event":"team", "chat":"A", "team":configuredTeam])
+        check(model.team?.canResume == true && model.team?.members[0].statusLabel == "Limit reached", "run limit could not resume")
+        check(model.team?.limitReason == "Token limit reached", "specific limit reason lost")
+        try send(["event":"team", "chat":"A", "team":roster("ready")])
         let beforeTeamSwitch = commands.count
         model.setRoute("ollama/test|"); model.setEffort("low")
         check(commands.count == beforeTeamSwitch, "solo controls changed an enabled Team")

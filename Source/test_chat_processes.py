@@ -82,6 +82,31 @@ class ProcessRegistryTests(unittest.TestCase):
         self.assertTrue(wait_for(lambda: gone(child)), "a process left in the group survived Stop")
         self.assertIn("chat-a", self.changes)
 
+    def test_peer_reads_do_not_consume_the_owners_output(self):
+        member = Conversation("member-a", role="team", member={"id": "m1", "name": "Sol"}, parent=self.chat)
+        peer = Conversation("member-b", role="team", member={"id": "m2", "name": "Grok"}, parent=self.chat)
+        self.start("echo shared-finding", member)
+        text, _ = self.registry.read(peer, "p1", 1, peer.cancel)
+        self.assertIn("shared-finding", text)
+        again, _ = self.registry.read(peer, "p1", 0, peer.cancel)
+        self.assertIn("No new output", again)
+        self.assertIn("shared-finding", self.registry.inspect("chat-a", "p1")["output"])
+
+    def test_team_slots_reserve_capacity_for_peers_and_obey_configured_limit(self):
+        members = [{"id": "m1", "name": "Sol", "status": "working"},
+                   {"id": "m2", "name": "Grok", "status": "working"}]
+        self.chat.chat["team"] = {"enabled": True, "execution": {"processes": 3}, "members": members}
+        first = Conversation("member-a", role="team", member=members[0], parent=self.chat)
+        second = Conversation("member-b", role="team", member=members[1], parent=self.chat)
+        with mock.patch.object(chat_processes, "FIRST_LOOK", .01):
+            self.start("sleep 30", first)
+            self.start("sleep 30", first)
+            with self.assertRaisesRegex(ValueError, "reserved"):
+                self.start("sleep 30", first)
+            self.start("sleep 30", second)
+            with self.assertRaisesRegex(ValueError, "already has 3"):
+                self.start("sleep 30", second)
+
     def test_quick_failure_is_an_error_with_its_exit_code(self):
         text, error = self.start("echo oops >&2; exit 3")
         self.assertTrue(error)

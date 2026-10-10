@@ -281,7 +281,9 @@ needs the same approval as any shell command; reading or stopping the chat's
 own processes does not. Each process runs in its own process group, so Stop
 sends SIGTERM to everything it started and SIGKILL three seconds later; when
 the command itself exits, anything it left in its group is ended too. A chat
-can have four running at once, Chat eight in total. Output is kept as a
+can have four running at once by default, Chat eight in total. Teams can choose
+one to eight slots in their run settings; extra launches reserve capacity for
+active peers. Each member has an independent output cursor. Output is kept as a
 bounded tail in memory with no separate log file; output a tool call reports
 to the model is saved with the transcript like any other tool result.
 Stopping a turn does not
@@ -317,10 +319,13 @@ token total. With a known limit, a small ring beside it fills in the provider
 accent, turning amber at 80% and red at 95% of the window; with an unknown
 limit no ring is shown. A solo turn pauses after 24 model/tool rounds and can
 be continued.
-Team uses the same bounded execution slices with a reserved checkpoint sign-off.
-Members run together; explicit continuations join the next wave after current
-contributions settle. There is no lifetime Team contribution quota. Usage and
-context belong to individual members and are never added together. While a
+New Teams use Task mode: the 24-round boundary saves progress and keeps working
+without a sign-off. One contribution mode keeps the earlier closing phase;
+existing Teams retain that mode until changed. Members resume independently and
+can wait for a process or peer without model polling. There is no lifetime Team
+contribution quota. Run settings optionally limit elapsed minutes and cumulative
+reported tokens; these are separate from the per-member context indicators.
+Context indicators use the effective configured window. While a
 Team works, the header shows every member's own ring, name and token count,
 with working members in bold; members that have not run yet show an empty
 ring. Once the Team stops, the header returns to the chat's own context. The

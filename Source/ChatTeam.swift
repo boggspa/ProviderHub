@@ -13,7 +13,9 @@ struct ChatTeamControls: View {
                 Button(model.team == nil ? "Set up" : "Edit") { editing = true }
                     .controlSize(.small).disabled(!model.canConfigureTeam)
             }
-            Text("Up to \(ChatTeamSnapshot.maxMembers) members working together. One contribution each; members opt in when more work is needed.")
+            Text(model.team?.taskMode == false
+                 ? "One contribution each. Members can continue when more work is needed."
+                 : "Up to \(ChatTeamSnapshot.maxMembers) members working independently on the same task.")
                 .font(.system(size: 11.5)).foregroundStyle(.secondary)
             if let team = model.team {
                 if !team.enabled { Text("Team is off").font(.system(size: 11.5)).foregroundStyle(.secondary) }
@@ -24,7 +26,7 @@ struct ChatTeamControls: View {
                             Text(member.name).font(.system(size: 12, weight: .medium))
                             Spacer(minLength: 0)
                             if member.status == "working" { ProgressView().controlSize(.mini) }
-                            Text(member.status.replacingOccurrences(of: "_", with: " ").capitalized)
+                            Text(member.statusLabel)
                                 .font(.system(size: 10.5)).foregroundStyle(member.status == "error" ? HubTheme.Semantic.contextCritical : HubTheme.Semantic.secondaryInk)
                         }
                         Text(member.label + (member.account.isEmpty ? "" : " · " + member.account))
@@ -37,15 +39,29 @@ struct ChatTeamControls: View {
                         } else if !member.nextStep.isEmpty, member.status != "done" {
                             Text(member.nextStep).font(.system(size: 11.5)).foregroundStyle(.secondary).textSelection(.enabled)
                         }
+                        if let reason = member.waitReason, !reason.isEmpty, member.status != "done" {
+                            Text(reason).font(.system(size: 10.5)).foregroundStyle(.secondary).textSelection(.enabled)
+                        }
                         if let usage = member.usage {
                             Text("Context \(usage.formatted())" + (member.context.map { " / \($0.formatted())" } ?? ""))
                                 .font(.system(size: 10, design: .monospaced)).foregroundStyle(.secondary)
+                                .help("Effective Team context. Space is reserved for output and saved notes." +
+                                      (member.modelContext.map { " Model window: \($0.formatted()) tokens." } ?? ""))
                         }
                     }.padding(8).frame(maxWidth: .infinity, alignment: .leading)
                         .background(HubTheme.Semantic.raisedSurface, in: RoundedRectangle(cornerRadius: 7))
                 }
                 if team.needsInput {
                     Text("Answer in the main composer to continue.").font(.system(size: 11.5)).foregroundStyle(.secondary)
+                }
+                if let reason = team.limitReason, team.status == "limit_reached" {
+                    Text(reason + ". Resume starts a new allowance.")
+                        .font(.system(size: 11.5)).foregroundStyle(.secondary).textSelection(.enabled)
+                }
+                if let run = team.runUsage, let tokens = run.tokens, (run.requests ?? 0) > 0 {
+                    Text("Run · \(tokens.formatted()) reported tokens" + (run.usageComplete == false ? " (partial)" : ""))
+                        .font(.system(size: 10.5)).foregroundStyle(.secondary)
+                        .help("Cumulative input, output and cache tokens reported by all members in this run. Separate from context usage; not a billing estimate.")
                 }
                 HStack {
                     if team.canResume {
@@ -87,8 +103,22 @@ private struct ChatTeamEditor: View {
     @State private var enabled = true
     @State private var drafts: [TeamDraft] = []
     @State private var picking: String?
+    @State private var mode = "task"
+    @State private var minutes = ""
+    @State private var tokens = ""
+    @State private var contextTokens = "200000"
+    @State private var processSlots = 4
+    private var execution: ChatTeamExecution? {
+        let minuteText = minutes.trimmingCharacters(in: .whitespacesAndNewlines)
+        let tokenText = tokens.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard minuteText.isEmpty || Int(minuteText) != nil, tokenText.isEmpty || Int(tokenText) != nil,
+              let context = Int(contextTokens.trimmingCharacters(in: .whitespacesAndNewlines)) else { return nil }
+        let value = ChatTeamExecution(mode: mode, contextTokens: context, processes: processSlots,
+                                      minutes: Int(minuteText), tokens: Int(tokenText))
+        return value.isValid ? value : nil
+    }
     private var valid: Bool {
-        (1...ChatTeamSnapshot.maxMembers).contains(drafts.count) && drafts.allSatisfy { draft in
+        execution != nil && (1...ChatTeamSnapshot.maxMembers).contains(drafts.count) && drafts.allSatisfy { draft in
             !draft.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && draft.name.count <= 60 &&
             draft.responsibility.count <= 2000 && model.models.contains { $0.id == draft.choice && $0.supportsTools }
         }
@@ -100,6 +130,37 @@ private struct ChatTeamEditor: View {
                 .font(.system(size: 12)).foregroundStyle(.secondary)
             ScrollView {
                 VStack(spacing: 12) {
+                    DisclosureGroup("Run settings") {
+                        VStack(alignment: .leading, spacing: 10) {
+                            Picker("Work mode", selection: $mode) {
+                                Text("Task").tag("task")
+                                Text("One contribution").tag("contribution")
+                            }.pickerStyle(.segmented)
+                            Text(mode == "task"
+                                 ? "Keep working through checkpoints until finished or stopped."
+                                 : "One contribution per member; members can request another.")
+                                .font(.system(size: 11)).foregroundStyle(.secondary)
+                            HStack {
+                                Text("Time limit (minutes)").frame(width: 160, alignment: .leading)
+                                TextField("No limit", text: $minutes).textFieldStyle(.roundedBorder)
+                            }
+                            HStack {
+                                Text("Reported token limit").frame(width: 160, alignment: .leading)
+                                TextField("No limit", text: $tokens).textFieldStyle(.roundedBorder)
+                            }
+                            HStack {
+                                Text("Context per member").frame(width: 160, alignment: .leading)
+                                TextField("200000", text: $contextTokens).textFieldStyle(.roundedBorder)
+                            }
+                            Stepper("Background processes: \(processSlots)", value: $processSlots, in: 1...8)
+                            Text("Limits apply to the whole run; in-flight requests can exceed them. Context uses the smaller of this value and the model’s window. Process slots are shared fairly. Dollar limits are unavailable.")
+                                .font(.system(size: 10.5)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                            if execution == nil {
+                                Text("Use whole numbers: 1–10,080 minutes, 1–2 billion tokens, and 16,000–2 million context tokens. Leave run limits blank for no limit.")
+                                    .font(.system(size: 10.5)).foregroundStyle(HubTheme.Semantic.contextCritical)
+                            }
+                        }.font(.system(size: 12)).padding(.top, 8)
+                    }
                     ForEach($drafts) { $member in
                         VStack(alignment: .leading, spacing: 8) {
                             HStack {
@@ -136,13 +197,19 @@ private struct ChatTeamEditor: View {
                 Spacer()
                 Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
                 Button("Save Team") {
-                    model.configureTeam(enabled: enabled, members: drafts.map(\.wire)); dismiss()
+                    model.configureTeam(enabled: enabled, members: drafts.map(\.wire), execution: execution); dismiss()
                 }.keyboardShortcut(.defaultAction).disabled(!valid || !model.canConfigureTeam)
             }
         }.padding(20).frame(width: 480)
         .onAppear {
             if let team = model.team {
                 enabled = team.enabled
+                let settings = team.execution ?? ChatTeamExecution(mode: "contribution")
+                mode = settings.mode
+                minutes = settings.minutes.map(String.init) ?? ""
+                tokens = settings.tokens.map(String.init) ?? ""
+                contextTokens = String(settings.contextTokens)
+                processSlots = settings.processes
                 drafts = team.members.map { TeamDraft(id: $0.id, existingID: $0.id, name: $0.name,
                                                       choice: $0.choice, effort: $0.effort, responsibility: $0.responsibility) }
             } else { add() }

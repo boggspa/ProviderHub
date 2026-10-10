@@ -102,7 +102,7 @@ class BackgroundProcess:
         self.workspace, self.command, self.popen, self.pid = workspace, command, popen, popen.pid
         self.started, self.ended = time.time(), None
         self.status, self.code, self.stopped_by = "running", None, None
-        self.tail, self.total, self.seen = bytearray(), 0, 0
+        self.tail, self.total, self.seen = bytearray(), 0, {}
         self.kill_at, self.forgotten, self.thread, self.reaped = None, False, None, False
 
     @property
@@ -159,14 +159,27 @@ class ProcessRegistry:
             raise ValueError("Background processes need a Python runtime with os.waitid (3.13 or later on macOS); "
                              "run the command in the foreground.")
         chat, owner = scope(service)
+        root = getattr(service, "team_parent", None) or service
+        team = (root.chat or {}).get("team") or {}
+        from chat_execution import policy
+        maximum = policy(team)["processes"] if team.get("enabled") else MAX_RUNNING_PER_CHAT
         with self._condition:
             if self.closing:
                 raise ValueError("Chat is closing.")
             running = [process for record in self._chats.values() for process in record["processes"] if process.alive]
             mine = [process for process in running if process.chat == chat]
-            if len(mine) >= MAX_RUNNING_PER_CHAT:
+            if len(mine) >= maximum:
                 raise ValueError(f"This chat already has {len(mine)} background processes running "
                                  f"({', '.join(process.id for process in mine)}). Stop one with stop_process first.")
+            if owner["memberID"] and team.get("enabled"):
+                occupied = {process.owner.get("memberID") for process in mine}
+                reserved = sum(1 for member in team.get("members", []) if member["id"] != owner["memberID"]
+                               and member.get("status") in {"working", "queued", "continuing", "waiting"}
+                               and member["id"] not in occupied)
+                # When slots are fewer than members, allow everyone's first
+                # launch in FIFO order; otherwise preserve a first slot per peer.
+                if owner["memberID"] in occupied and len(mine) >= max(1, maximum - reserved):
+                    raise ValueError("Remaining background process slots are reserved for other Team members. Wait for one of your processes to finish.")
             if len(running) >= MAX_RUNNING:
                 raise ValueError(f"{MAX_RUNNING} background processes are already running in Chat. Stop one first.")
             popen = subprocess.Popen(["/bin/sh", "-c", command], cwd=workspace, env=env, stdin=subprocess.DEVNULL,
@@ -179,13 +192,13 @@ class ProcessRegistry:
             process.thread.start()
         self._changed(process)
         self._wait(process, FIRST_LOOK, cancel)
-        return self._report(process, "Started background process")
+        return self._report(process, "Started background process", reader=service.chat["id"])
 
     def read(self, service, identifier, wait, cancel):
         with self._condition:
             process = self._find(scope(service)[0], identifier)
         self._wait(process, wait, cancel)
-        return self._report(process, "Background process")
+        return self._report(process, "Background process", reader=service.chat["id"])
 
     def stop(self, service, identifier, cancel):
         with self._condition:
@@ -194,7 +207,12 @@ class ProcessRegistry:
         if stopping:
             self._request_stop(process, "agent")
             self._wait(process, STOP_GRACE + DRAIN, cancel)
-        return self._report(process, "Background process")
+        return self._report(process, "Background process", reader=service.chat["id"])
+
+    def inspect(self, chat, identifier):
+        """Read a dependency snapshot without consuming another member's output."""
+        with self._condition:
+            return self._find(chat, identifier).public(True)
 
     def stop_by_user(self, chat, identifier):
         with self._condition:
@@ -268,14 +286,15 @@ class ProcessRegistry:
                     break
                 self._condition.wait(min(0.1, remaining))
 
-    def _report(self, process, prefix):
+    def _report(self, process, prefix, *, reader="parent"):
         with self._condition:
             # The model sees each byte once; complete UTF-8 only while running.
             end = process.total if not process.alive else process.total - len(process.tail) + _complete_utf8(process.tail)
             first = process.total - len(process.tail)
-            lost = max(0, first - process.seen)
-            data = bytes(process.tail[max(process.seen, first) - first:end - first])
-            process.seen = max(process.seen, end)
+            seen = process.seen.get(reader, 0)
+            lost = max(0, first - seen)
+            data = bytes(process.tail[max(seen, first) - first:end - first])
+            process.seen[reader] = max(seen, end)
             state = {"running": "is running", "stopping": "is stopping"}.get(process.status)
             if state is None:
                 verb = "was stopped" if process.status == "stopped" else "exited"

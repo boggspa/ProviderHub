@@ -13,6 +13,7 @@ import time
 
 from chat_runtime import ChatService, GatewayClient
 from chat_processes import ProcessRegistry
+import chat_execution
 from chat_tools import ChatToolRunner
 from chat_workspaces import ChatWorkspaces
 
@@ -95,6 +96,7 @@ class SessionTransport:
         self.host._requests.take(cancel, lambda: self.host.closing)
         try:
             if self.host.closing or cancel.is_set(): raise InterruptedError("Stopped")
+            chat_execution.guard(getattr(cancel, "owner", None))
             return self.client.stream(payload, cancel, delta)
         finally:
             self.host._requests.release()
@@ -120,6 +122,7 @@ class WorkspaceRunner:
         self.lock.take(self.cancel, lambda: self.host.closing)
         try:
             if self.cancel.is_set() or self.host.closing: raise InterruptedError("Stopped")
+            chat_execution.guard(getattr(self.cancel, "owner", None))
             return self.runner.execute(name, args)
         finally:
             self.lock.release()
@@ -196,6 +199,8 @@ class ChatHost:
                 self.emit({"event": "chats", "chats": summaries})
 
     def publish_processes(self, chat, notice=None):
+        service = self.sessions.get(chat)
+        if service is not None: service.team_wake.set()
         # Output tails go only to the chat on screen; others get the rows.
         with self._output:
             event = {"event": "processes", "chat": chat, "processes": self.processes.snapshot(chat, output=chat == self.view_id)}
@@ -248,6 +253,7 @@ class ChatHost:
                               runner=self.runner, workspaces=self.workspaces, child_factory=self.transport)
         holder["service"] = service
         service.chat, service.models, service.preferences, service.sides = chat, self.models, self.preferences, self.sides
+        service.process_registry = self.processes
         return service
 
     def initialize(self):

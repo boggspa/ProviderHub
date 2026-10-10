@@ -30,6 +30,7 @@ from chat_tools import ChatToolRunner, TOOL_DEFINITIONS
 from chat_attachments import prepare_attachments, bound_image_history
 from chat_history import portable_history
 import chat_memory
+import chat_execution
 import chat_processes
 import chat_team
 from chat_git import git_status
@@ -450,6 +451,8 @@ class ChatService:
         self.team_parent = None
         self.team_member = None
         self.team_run_id = None
+        self.team_wake = threading.Event()
+        self.process_registry = None
 
     @property
     def busy(self):
@@ -627,6 +630,7 @@ class ChatService:
                 self.apply_pending_update(self.chat)
                 self.emit({"event": "entry", "chat": self.chat["id"], "entry": pending["entry"]})
                 chat_team.publish(self)
+                self.team_wake.set()
                 self.emit({"event": "state", "busy": True, "interrupting": False, "status": "Update sent · Team continuing"})
                 return
             self._steering = True; self._working = True; self._resume_after_interrupt = True
@@ -862,14 +866,20 @@ class ChatService:
             payload["system"] += "\n" + chat_memory.GUIDANCE
         if self.role == "team":
             payload["system"] += "\n" + chat_team.GUIDANCE + "\nYour member name: " + self.team_member["name"]
+            payload["system"] += "\nTeam directory (use these exact IDs for member dependencies): " + json.dumps(
+                [{"id": member["id"], "name": member["name"]} for member in self.team_parent.chat["team"]["members"]])
+            if chat_execution.task(self): payload["system"] += "\n" + chat_team.TASK_GUIDANCE
             if self.team_member["responsibility"]: payload["system"] += "\nResponsibility: " + self.team_member["responsibility"]
             # A missing provider window is not permission to accumulate an
             # unbounded private context in an indefinitely continuing Team.
-            context = min(context, 200000) if isinstance(context, int) and context > 0 else 128000
+            context = chat_execution.context(self.team_parent.chat["team"], choice)
         memory_chat = self.team_parent.chat if self.role == "team" else chat
         memory_owner = self.team_parent if self.role == "team" else self
         with memory_owner._mutex:
             memory = chat_memory.memory_message(memory_chat) if self.role in {"parent", "team"} else None
+            progress = chat_execution.progress(self.team_member) if self.role == "team" else None
+            if progress:
+                memory = {"role": "user", "content": [*progress["content"], *(memory["content"] if memory else [])]}
         if memory and isinstance(context, int) and context > 0 and estimated_tokens({"messages": [memory]}) > context // 4:
             memory = {"role": "user", "content": [{"type": "text", "text":
                 "[Saved decision notebook omitted because this model's context is small. "
@@ -913,6 +923,7 @@ class ChatService:
             if self.cancel.is_set(): raise InterruptedError("Stopped")
             started, stamp = time.monotonic(), now()
             try:
+                chat_execution.guard(self)
                 message = self.transport.stream(payload, self.cancel, delta)
                 if not any(block.get("type") == "tool_use" or block.get("type") == "text" and block.get("text", "").strip()
                            for block in message["content"]):
@@ -920,6 +931,7 @@ class ChatService:
                 return message
             except Exception as exc:
                 if self.cancel.is_set() or isinstance(exc, InterruptedError): raise InterruptedError("Stopped") from exc
+                if isinstance(exc, chat_execution.RunLimitReached): raise
                 failure = exc if isinstance(exc, ModelRequestError) else ModelRequestError(str(exc), code=type(exc).__name__)
                 attempts.append({"attempt": index + 1, "at": stamp, "elapsed": round(time.monotonic() - started, 3),
                                  "code": failure.code, "status": failure.status, "error": str(exc)})
@@ -944,8 +956,22 @@ class ChatService:
             choice = self.choice()
             runner = self.runner_type(chat["workspace"], cancel_event=self.cancel)
             closing_rounds = chat_team.CLOSING_ROUNDS if self.role in {"parent", "team"} else 0
-            for round_index in range(self.max_rounds + closing_rounds):
+            import itertools
+            for round_index in itertools.count():
                 if self.cancel.is_set(): raise InterruptedError("Stopped")
+                if chat_execution.task(self):
+                    if round_index and round_index % self.max_rounds == 0:
+                        if not chat_execution.checkpoint(self): break
+                elif round_index >= self.max_rounds + closing_rounds:
+                    if closing_rounds: chat_team.finish_checkpoint(self); break
+                    raise ValueError(f"This turn reached its {self.max_rounds}-step limit. Send Continue to carry on from recorded results.")
+                if self.role == "team":
+                    with self.team_parent._mutex:
+                        reason = chat_execution.limit(self.team_parent.chat["team"])
+                        if reason:
+                            self.team_parent.chat["team"]["limitReason"] = reason
+                            chat["status"] = "limit_reached"
+                            break
                 if self.role == "team": chat_team.consume_update(self, choice)
                 self.emit({"event": "state", "busy": True, "interrupting": False, "status": "Thinking…"})
                 current = self.add(entry("assistant", route=chat["route"], recorded=False))
@@ -987,6 +1013,7 @@ class ChatService:
                         block["input"] = {}  # Keep the next provider history valid; the tool result explains the mistake.
                 chat["messages"].append({"role": "assistant", "content": history})
                 counts = message.get("usage") or {}
+                chat_execution.record(self, counts)
                 chat["usage"] = (counts.get("input_tokens") or 0) + (counts.get("cache_read_input_tokens") or 0) + (counts.get("cache_creation_input_tokens") or 0)
                 # A Team final reply and its queue outcome share one durable
                 # boundary in finally; do not first persist it as unfinished.
@@ -997,7 +1024,7 @@ class ChatService:
                         if self.role == "team":
                             chat["status"] = "yielded" if chat["teamDecision"]["state"] == "continue" else "needs_input"
                             break
-                    if round_index >= self.max_rounds:
+                    if round_index >= self.max_rounds and not chat_execution.task(self):
                         chat_team.finish_checkpoint(self)
                     else:
                         chat["status"] = "ready"
@@ -1012,8 +1039,15 @@ class ChatService:
                     display_id = uuid.uuid4().hex
                     try:
                         if not isinstance(arguments, dict): raise ValueError("Tool arguments must be an object.")
+                        if self.role == "team" and name != "team_status":
+                            with self.team_parent._mutex:
+                                reason = chat_execution.limit(self.team_parent.chat["team"])
+                                if reason:
+                                    self.team_parent.chat["team"]["limitReason"] = reason
+                                    raise ValueError(reason + ". This action was not executed.")
                         chat_team.check_round_tool(self, name, round_index)
                         with chat_team.tool_gate(self, name):
+                            if name != "team_status": chat_execution.guard(self)
                             if name == "delegate":
                                 from chat_agents import validate_delegate, delegate_summary
                                 validate_delegate(self, arguments)
@@ -1032,6 +1066,7 @@ class ChatService:
                             allowed = not must_ask or self.approved(description["summary"], arguments.get("patch"))
                             if self.cancel.is_set(): raise InterruptedError("Stopped")
                             if allowed:
+                                if name != "team_status": chat_execution.guard(self)
                                 self.emit({"event": "state", "busy": True, "status": description["summary"]})
                                 self.add(entry("tool", route=chat["route"], tool=name, summary=description["summary"], detail="Running…", id=display_id, recorded=False))
                                 # Pending tool + working status are durable before execution.
@@ -1056,6 +1091,7 @@ class ChatService:
                     results["content"].append({"type": "tool_result", "tool_use_id": call["id"],
                                               "is_error": result["is_error"], "content": result["content"]})
                     detail = "\n".join(part.get("text", "") for part in result["content"] if part.get("type") == "text")
+                    chat_execution.evidence(self, name, arguments, result)
                     visible = entry("tool", route=chat["route"], tool=name, id=display_id, summary=result["summary"], detail=detail,
                                     isError=result["is_error"], changedFiles=result.get("changed_files") or [], workspace=chat["workspace"], recorded=True)
                     if result.get("agent_id"): visible["agentID"] = result["agent_id"]
@@ -1065,11 +1101,14 @@ class ChatService:
                     else: self.add(visible)
                     self.save()
                 current = None
-            else:
-                if closing_rounds:
-                    chat_team.finish_checkpoint(self)
-                else:
-                    raise ValueError(f"This turn reached its {self.max_rounds}-step limit. Send Continue to carry on from recorded results.")
+                if self.role == "team" and chat["teamDecision"]["state"] == "waiting":
+                    chat["status"] = "yielded"
+                    break
+        except chat_execution.RunLimitReached:
+            chat["status"] = "limit_reached"
+            if current is not None:
+                current["recorded"] = True
+                self.emit({"event": "entry", "chat": chat["id"], "entry": current})
         except Exception as exc:
             stopped = self.cancel.is_set() or isinstance(exc, InterruptedError)
             chat["status"] = "stopped" if stopped else "error"
