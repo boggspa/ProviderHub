@@ -1530,5 +1530,27 @@ class HandoffTelemetryTests(unittest.TestCase):
         self.assertEqual(record["reasoning"], 1)
 
 
+class ResumeHostCallTests(unittest.TestCase):
+    def test_only_confirmed_inactive_turn_can_fall_back_to_history_replay(self):
+        from codex_session_pool import Lease
+        for code, message, recover in ((-32600, "no active turn to steer", True),
+                                       (-32600, "expected turn id mismatch", False),
+                                       (-32602, "no active turn to steer", False),
+                                       (-32000, "permission denied", False)):
+            with self.subTest(code=code, message=message):
+                session = FakeCodexSession([])
+                session.responses["turn/steer"] = {"error": {"code": code, "message": message}}
+                lease = Lease(key="test", session=session, thread_id="t1", turn_id="t1", pending={"rpc_id": 42})
+                args = (lease, {"content": "Recorded result"}, [{"type": "text", "text": "Continue"}])
+                if recover:
+                    self.assertFalse(codex._resume_host_call(*args, timeout=30))
+                    self.assertIsNone(lease.pending)
+                else:
+                    with self.assertRaises(codex.CodexCliAgentError):
+                        codex._resume_host_call(*args, timeout=30)
+                    self.assertIsNotNone(lease.pending)
+                self.assertEqual(session.sent, [])
+
+
 if __name__ == "__main__":
     unittest.main()

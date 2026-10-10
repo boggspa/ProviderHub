@@ -1828,7 +1828,8 @@ def _continuation(lease, payload):
 
 def _resume_host_call(lease, result, steering, *, timeout):
     # Queue new user input before unblocking the model's tool wait. If steering
-    # is refused, fail this leg instead of silently dropping the user's input.
+    # confirms the turn has ended, replay in a fresh thread. Other refusals
+    # still fail this leg instead of silently dropping the user's input.
     if steering:
         inputs = []
         for part in responses_content(steering):
@@ -1836,9 +1837,17 @@ def _resume_host_call(lease, result, steering, *, timeout):
                 inputs.append({"type": "text", "text": part["text"], "text_elements": []})
             else:
                 inputs.append({"type": "image", "url": part["image_url"]})
-        _result(lease.session.request("turn/steer", {
+        response = lease.session.request("turn/steer", {
             "threadId": lease.thread_id, "expectedTurnId": lease.turn_id,
-            "input": inputs}, timeout=timeout), context="turn/steer")
+            "input": inputs}, timeout=timeout)
+        error = response.get("error") if isinstance(response, dict) else None
+        if (isinstance(error, dict) and error.get("code") == -32600 and
+                "no active turn" in str(error.get("message", "")).lower()):
+            # The host result is already in the replay history. Do not answer
+            # a stale RPC or drop any trailing user input from that history.
+            lease.pending = None
+            return False
+        _result(response, context="turn/steer")
     content = []
     for part in responses_content(recover_tool_content(result.get("content", ""))):
         if part["type"] == "input_text":
@@ -1848,6 +1857,7 @@ def _resume_host_call(lease, result, steering, *, timeout):
     lease.session.send(json.dumps({"id": lease.pending["rpc_id"], "result": {
         "contentItems": content, "success": not bool(result.get("is_error"))}}))
     lease.pending = None
+    return True
 
 
 def _dispose_lease(lease):
@@ -1920,9 +1930,12 @@ def run_turn(request, *, spawner=None, timeout=300, pool=None) -> Iterator[dict]
             timing.label(cli_pid=getattr(getattr(session, "process", None), "pid", None))
         if mode == "resumed":
             result, steering = _continuation(lease, payload)
-            _resume_host_call(lease, result, steering, timeout=max(0.01, deadline - time.monotonic()))
-            thread_id, turn_id = lease.thread_id, lease.turn_id
-        else:
+            if _resume_host_call(lease, result, steering, timeout=max(0.01, deadline - time.monotonic())):
+                thread_id, turn_id = lease.thread_id, lease.turn_id
+            else:
+                mode = "warm"
+                if timing: timing.label(reuse="recovered")
+        if mode != "resumed":
             if lease is not None and lease.thread_id:
                 _result(session.request("thread/unsubscribe", {"threadId": lease.thread_id},
                                         timeout=max(0.01, deadline - time.monotonic())),
