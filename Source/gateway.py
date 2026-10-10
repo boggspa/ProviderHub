@@ -57,6 +57,7 @@ from codex_accent import bridge_command as codex_accent_bridge
 from codex_catalogue import catalogue_digest, choices as codex_choices, launch_settings as codex_launch_settings
 from chat_catalogue import chat_choices, chat_connection, native_search_available
 from codex_profile import CodexProfile
+from codex_projects import disk_root_projects
 from codex_runtime import qualify_runtime, runtime_signature
 from claude_context import claude_context_spec
 
@@ -1457,7 +1458,7 @@ def catalogue_command_result(settings, root, lifecycle):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=["inspect", "validate", "save", "discover", "refresh-all", "prepare-launch", "activate", "restore", "serve", "codex-status", "codex-prepare", "codex-activate", "codex-restore", "codex-accent", "cli-accounts", "key-accounts"])
+    parser.add_argument("command", choices=["inspect", "validate", "save", "discover", "refresh-all", "prepare-launch", "activate", "restore", "serve", "codex-status", "codex-projects", "codex-prepare", "codex-activate", "codex-restore", "codex-accent", "cli-accounts", "key-accounts"])
     parser.add_argument("--provider", choices=list(PROVIDERS), default="mistral")
     parser.add_argument("--parent-pipe", action="store_true")
     parser.add_argument("--app", help="App bundle to launch for codex-accent")
@@ -1485,6 +1486,11 @@ def main():
     elif args.command == "codex-status":
         settings = load_settings(root)
         result = {**CodexProfile(root).status(), "codex_models": codex_choices(settings, cached_catalogue(settings, root))}
+    elif args.command == "codex-projects":
+        # Desktop projects rooted at "/" lock their chats after one message
+        # (codex_projects). Advice only; kept out of codex-status, which the
+        # inspect path also runs.
+        result = {"codex_disk_root_projects": disk_root_projects()}
     elif args.command == "codex-prepare":
         settings = load_settings(root)
         # Freshness-scoped preparation only: an unconditional refresh-all here
@@ -1508,7 +1514,7 @@ def main():
                     "runtime_signature": qualification["runtime_signature"]}
         atomic_json(root / "codex-prepared.json", prepared)
         result = {**catalogue_command_result(settings, root, lifecycle), **prepared,
-                  "launch_omissions": omissions}
+                  "launch_omissions": omissions, "codex_disk_root_projects": disk_root_projects()}
     elif args.command == "codex-activate":
         settings = load_settings(root)
         inventory = cached_catalogue(settings, root)
