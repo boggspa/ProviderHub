@@ -20,10 +20,20 @@ normally means **Done**. A member may call `team_status` with:
 
 Only the member requesting continuation is queued again. Peers that have
 finished remain finished. There is no fixed lifetime turn quota. Each execution
-slice retains Chat's 24 model/tool-round checkpoint; an opted-in member yields
-there and rejoins the queue. Without continuation it pauses for input. Output
-limits behave the same way. Three identical consecutive contributions by one
-member pause the Team for review, preventing a simple acknowledgement loop.
+slice retains Chat's 24 model/tool-round checkpoint. The model receives its
+budget at the start and warnings in the last three rounds. At the checkpoint,
+workspace tools and hosted search stop. The member has up to two closing rounds:
+one can use only `team_status` to choose an outcome, and the final reply has no
+tools. Its sign-off explains progress, remaining work and the next step. An
+explicit continuation rejoins the queue; an explicit `done` finishes. Without
+an outcome it pauses with recorded results and asks for a message to continue.
+The checkpoint notice identifies the exhausted tool budget. Solo Chat turns
+also reserve a closing reply instead of reporting the round limit as an error.
+Closing is bounded even when a model ignores the tool restriction, and no
+workspace actions or additional approvals are allowed there. Output limits
+still yield only with an explicit continuation. Three identical consecutive
+contributions by one member pause the Team for review, preventing a simple
+acknowledgement loop.
 This detects exact repeats, not every possible unproductive conversation.
 
 Scheduling is deliberately serial. One member's contribution finishes before
@@ -77,6 +87,11 @@ contributions retain their outcome and queue position. Interrupted tool calls
 receive an uncertainty result instructing the member to inspect the workspace
 before retrying; a host cannot prove whether an external side effect happened
 immediately before a crash. Provider and persistence errors pause further work.
+For the Codex CLI route, a pending host call can outlive its native turn during
+a checkpoint pause. If `turn/steer` confirms there is no active turn, the host
+starts a fresh thread and replays the recorded call, result and new user input
+in the same request. It does not answer the stale RPC or require a Retry. Other
+steering errors still surface normally.
 
 ## Persistence and verification
 

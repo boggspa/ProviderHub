@@ -117,6 +117,32 @@ class PersistentTurnTests(unittest.TestCase):
         self.assertTrue(self.fake.closed)
         self.assertFalse(timing.delivered)
 
+    def test_checkpoint_continuation_with_ended_turn_replays_without_retry(self):
+        call = self.run_leg()[0]
+        self.add_result(call)
+        self.history.append({'role': 'user', 'content': 'Continue the unfinished work.'})
+        self.fake.responses['turn/steer'] = {'error': {'code': -32600, 'message': 'no active turn to steer'}}
+        self.fake.responses['thread/start'] = {'result': {'thread': {'id': 'fresh-thread'}}}
+        self.fake.responses['turn/start'] = {'result': {'turn': {'id': 'fresh-turn'}}}
+        self.fake.script.extend([_completed_turn(),
+            {'method': 'item/agentMessage/delta', 'params': {'threadId': 'fresh-thread', 'turnId': 'fresh-turn',
+                                                         'itemId': 'reply', 'delta': 'Continued cleanly'}},
+            {'method': 'turn/completed', 'params': {'threadId': 'fresh-thread',
+                                                  'turn': {'id': 'fresh-turn', 'status': 'completed'}}}])
+        events = self.run_leg()
+        self.assertEqual(events[-1].get('stop_reason'), 'end_turn', events)
+        self.assertTrue(any(e.get('text') == 'Continued cleanly' for e in events), events)
+        self.assertEqual(self.fake.sent, [], 'Do not answer the stale host-call RPC')
+        methods = [m for m, _, _ in self.fake.requests]
+        self.assertEqual(methods.count('turn/steer'), 1)
+        self.assertEqual(methods.count('thread/start'), 2)
+        self.assertEqual(methods.count('turn/start'), 2)
+        replay = [p['items'] for m, p, _ in self.fake.requests if m == 'thread/inject_items'][-1]
+        self.assertIn('Continue the unfinished work.', json.dumps(replay))
+        self.assertIn('host value', json.dumps(replay))
+        self.assertIn(call['id'], json.dumps(replay))
+        self.assertIsNone(self.pool.leases[0].pending)
+
     def test_duplicate_continuation_is_rejected_without_new_generation(self):
         call = self.run_leg()[0]
         self.add_result(call)

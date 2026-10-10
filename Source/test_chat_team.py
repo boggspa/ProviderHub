@@ -225,11 +225,52 @@ class TeamTests(unittest.TestCase):
         self.assertIn("Updated B", json.dumps(parent.chat["entries"]))
 
     def test_checkpoint_round_limit_yields_only_when_opted_in(self):
-        parent = self.service([[decision("continue", "Finish reading"), call("read_file", {"path": "missing"}), response("Finished")]])
+        parent = self.service([[decision("continue", "Finish reading"), call("read_file", {"path": "missing"}),
+                                response("Pausing here; I will finish reading next."), response("Finished")]])
         member = self.configure(parent, 1)[0]
         with patch("chat_runtime.MAX_ROUNDS", 2): self.send(parent); self.finish(parent)
         self.assertEqual(member["contributions"], 2)
         self.assertEqual(member["status"], "done")
+
+    def test_mid_tool_checkpoint_gets_signoff_without_implicit_continuation(self):
+        signoff = "Both reads finished. No edits yet; next I need to update the configuration."
+        parent = self.service([[call("read_file", {"path": "a"}), call("read_file", {"path": "b"}), response(signoff)],
+                               [response("Peer should wait")]])
+        members = self.configure(parent)
+        with patch("chat_runtime.MAX_ROUNDS", 2): self.send(parent); self.finish(parent)
+        self.assertEqual(parent.chat["team"]["status"], "needs_input")
+        self.assertEqual([m["status"] for m in members], ["needs_input", "queued"])
+        self.assertEqual(len(self.transports[0].requests), 3)
+        self.assertEqual(self.transports[1].requests, [])
+        closing = self.transports[0].requests[-1]
+        self.assertEqual([t["name"] for t in closing["tools"]], ["team_status"])
+        self.assertIn("1 model/tool round", json.dumps(self.transports[0].requests[1]))
+        stored = self.store.load(parent.chat["id"])
+        self.assertTrue(any(e.get("text") == signoff for e in stored["entries"]))
+        notice = stored["entries"][-1]
+        self.assertTrue(notice["text"].startswith("Team contribution checkpoint reached."))
+        self.assertIn("2-round tool budget", notice["text"])
+        self.assertFalse(any(e["kind"] == "error" for e in stored["entries"]))
+
+    def test_closing_can_request_continuation_then_sign_off_before_peer_runs(self):
+        parent = self.service([[call("read_file", {"path": "a"}), decision("continue", "Apply the change"),
+                                response("Read complete; I will apply the change after the review."), response("Change complete")],
+                               [response("Review complete")]])
+        members = self.configure(parent)
+        with patch("chat_runtime.MAX_ROUNDS", 1): self.send(parent); self.finish(parent)
+        self.assertEqual([m["contributions"] for m in members], [2, 1])
+        self.assertEqual([m["status"] for m in members], ["done", "done"])
+        replies = [e["text"] for e in parent.chat["entries"] if e["kind"] == "assistant" and e["text"]]
+        self.assertEqual(replies, ["Read complete; I will apply the change after the review.", "Review complete", "Change complete"])
+        self.assertEqual(self.transports[0].requests[2]["tools"], [])
+        self.assertEqual(members[0]["decision"]["state"], "done")
+
+    def test_explicit_done_during_closing_finishes_instead_of_asking_for_input(self):
+        parent = self.service([[call("read_file", {"path": "a"}), decision("done"), response("Inspection complete")]])
+        member = self.configure(parent, 1)[0]
+        with patch("chat_runtime.MAX_ROUNDS", 1): self.send(parent); self.finish(parent)
+        self.assertEqual(member["status"], "done")
+        self.assertEqual(parent.chat["team"]["status"], "done")
 
     def test_steer_at_terminal_save_delivers_new_instruction_to_every_member(self):
         final_save, release = threading.Event(), threading.Event()

@@ -836,14 +836,15 @@ class ChatService:
         try:
             choice = self.choice()
             runner = self.runner_type(chat["workspace"], cancel_event=self.cancel)
-            for _ in range(self.max_rounds):
+            closing_rounds = chat_team.CLOSING_ROUNDS if self.role in {"parent", "team"} else 0
+            for round_index in range(self.max_rounds + closing_rounds):
                 if self.cancel.is_set(): raise InterruptedError("Stopped")
                 self.emit({"event": "state", "busy": True, "interrupting": False, "status": "Thinking…"})
                 current = self.add(entry("assistant", route=chat["route"]))
                 def delta(text):
                     current["text"] += text
                     self.emit({"event": "delta", "chat": chat["id"], "id": current["id"], "text": text})
-                message = self.transport.stream(self.payload(choice), self.cancel, delta)
+                message = self.transport.stream(chat_team.round_payload(self, choice, round_index), self.cancel, delta)
                 content = message["content"]
                 current["text"] = "".join(block.get("text", "") for block in content if block.get("type") == "text")
                 sources = [link for url, link in search_sources(content).items() if url not in current["text"]]
@@ -881,7 +882,11 @@ class ChatService:
                         if self.role == "team":
                             chat["status"] = "yielded" if chat["teamDecision"]["state"] == "continue" else "needs_input"
                             break
-                    chat["status"] = "ready"; break
+                    if round_index >= self.max_rounds:
+                        chat_team.finish_checkpoint(self)
+                    else:
+                        chat["status"] = "ready"
+                    break
                 results = {"role": "user", "content": []}
                 chat["messages"].append(results)
                 for call in calls:
@@ -891,6 +896,7 @@ class ChatService:
                     # repeat after switching routes. Visible row identity is local.
                     display_id = uuid.uuid4().hex
                     try:
+                        chat_team.check_round_tool(self, name, round_index)
                         if name == "delegate":
                             from chat_agents import validate_delegate, delegate_summary
                             validate_delegate(self, arguments)
@@ -943,11 +949,8 @@ class ChatService:
                     self.save()
                 current = None
             else:
-                if self.role == "team":
-                    chat["status"] = "yielded" if chat["teamDecision"]["state"] == "continue" else "needs_input"
-                    self.add(entry("notice", "Team contribution checkpoint reached. " +
-                        ("Your requested continuation will resume after other members." if chat["status"] == "yielded" else
-                         "This member did not request continuation; send a message to continue."), chat["route"]))
+                if closing_rounds:
+                    chat_team.finish_checkpoint(self)
                 else:
                     raise ValueError(f"This turn reached its {self.max_rounds}-step limit. Send Continue to carry on from recorded results.")
         except Exception as exc:
