@@ -112,32 +112,67 @@ struct ChatTeamMember: Decodable, Identifiable {
     var account: String; var effort: String; var responsibility: String; var status: String
     var nextStep: String; var contributions: Int; var contributionID: String?; var usage: Int?; var context: Int?
     var failureReason: String?
+    var waitReason: String?; var modelContext: Int?; var checkpoints: Int?
+    var statusLabel: String {
+        let text = status.replacingOccurrences(of: "_", with: " ")
+        return text.prefix(1).uppercased() + text.dropFirst()
+    }
     var configuration: [String: Any] {
         ["id": id, "name": name, "choice": choice, "effort": effort, "responsibility": responsibility]
     }
+}
+struct ChatTeamExecution: Decodable {
+    var mode: String = "task"
+    var contextTokens: Int = 200_000
+    var processes: Int = 4
+    var minutes: Int?
+    var tokens: Int?
+    var isValid: Bool {
+        ["task", "contribution"].contains(mode) && (16_000...2_000_000).contains(contextTokens) &&
+        (1...8).contains(processes) && (minutes.map { (1...10_080).contains($0) } ?? true) &&
+        (tokens.map { (1...2_000_000_000).contains($0) } ?? true)
+    }
+    var wire: [String: Any] {
+        ["mode": mode, "contextTokens": contextTokens, "processes": processes,
+         "minutes": minutes.map { $0 as Any } ?? NSNull(), "tokens": tokens.map { $0 as Any } ?? NSNull()]
+    }
+}
+struct ChatTeamRunUsage: Decodable {
+    var started: Double?; var ended: Double?; var tokens: Int?; var requests: Int?; var usageComplete: Bool?
 }
 struct ChatTeamSnapshot: Decodable {
     /// The runtime's MAX_MEMBERS (chat_team.py), including the chat's own model.
     static let maxMembers = 4
     var enabled: Bool; var status: String; var activeMemberID: String?; var members: [ChatTeamMember]
     var activeMemberIDs: [String]?
+    var execution: ChatTeamExecution?; var runUsage: ChatTeamRunUsage?; var limitReason: String?
+    var taskMode: Bool { execution?.mode == "task" }
+    var limitAdvice: String? {
+        guard status == "limit_reached", let limitReason else { return nil }
+        return limitReason + (["Time limit reached", "Token limit reached"].contains(limitReason)
+                             ? ". Resume starts a new allowance."
+                             : ". Clear the token limit in Run settings to continue.")
+    }
     var active: ChatTeamMember? { members.first { $0.id == activeMemberID } }
     var needsInput: Bool { members.contains { $0.status == "needs_input" } }
-    var canResume: Bool { enabled && !needsInput && ["stopped", "interrupted", "error"].contains(status) && members.contains { $0.status != "done" } }
+    var canResume: Bool { enabled && !needsInput && ["stopped", "interrupted", "error", "limit_reached"].contains(status) && members.contains { $0.status != "done" } }
 }
 
 @MainActor extension ChatModel {
     var canConfigureTeam: Bool { connected && selectedID != nil && !busy && !branchBusy && teamRequest == nil }
-    func configureTeam(enabled: Bool, members: [[String: Any]]) {
+    func configureTeam(enabled: Bool, members: [[String: Any]], execution: ChatTeamExecution? = nil) {
         guard canConfigureTeam, let selectedID = stateChatID else { return }
         guard (1...ChatTeamSnapshot.maxMembers).contains(members.count), members.allSatisfy({ member in
             guard let choice = member["choice"] as? String, let name = member["name"] as? String else { return false }
             return !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && models.contains { $0.id == choice && $0.supportsTools }
         }) else { teamNotice = "Choose one to four named members with enabled models."; return }
+        if let execution, !execution.isValid { teamNotice = "Check the Team run settings."; return }
         let request = UUID().uuidString
         teamRequest = request; teamNotice = ""
-        if !inspectorCommand(["command": "configure_team", "id": selectedID, "request": request,
-                              "enabled": enabled, "members": members]) {
+        var command: [String: Any] = ["command": "configure_team", "id": selectedID, "request": request,
+                                      "enabled": enabled, "members": members]
+        if let execution { command["execution"] = execution.wire }
+        if !inspectorCommand(command) {
             teamRequest = nil; teamNotice = "Chat is disconnected."
         }
     }
@@ -263,7 +298,7 @@ struct ChatTeamSnapshot: Decodable {
             }
             if let value = event["team"], !(value is NSNull) {
                 guard let snapshot = decoded(value, as: ChatTeamSnapshot.self),
-                      (1...3).contains(snapshot.members.count), Set(snapshot.members.map(\.id)).count == snapshot.members.count else { return }
+                      (1...ChatTeamSnapshot.maxMembers).contains(snapshot.members.count), Set(snapshot.members.map(\.id)).count == snapshot.members.count else { return }
                 team = snapshot
             } else { team = nil }
             teamNotice = event["notice"] as? String ?? ""

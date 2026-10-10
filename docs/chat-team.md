@@ -15,31 +15,49 @@ normally means **Done**. A member may call `team_status` with:
 | Outcome | Effect |
 | --- | --- |
 | `done` | Finish this contribution; do not queue another. This is the default. |
-| `continue` | Supply a concrete `next_step` and join the next contribution wave when the current members finish. Renew this choice on every contribution that needs another. |
+| `continue` | Supply a concrete `next_step` and resume independently as soon as this contribution is saved. |
+| `waiting` | Supply `next_step` and exactly one `process_id` or `member_id`. Release the model until that dependency finishes; the host then resumes this member with its result. |
 | `needs_input` | Supply the blocking question. Running peers finish their contributions, then the Team waits for a real user message. |
 
-Only the member requesting continuation is queued again. Peers that have
-finished remain finished. There is no fixed lifetime turn quota. Each execution
-slice retains Chat's 24 model/tool-round checkpoint. The model receives its
-budget at the start and warnings in the last three rounds. At the checkpoint,
-workspace tools and hosted search stop. The member has up to two closing rounds:
-one can use only `team_status` to choose an outcome, and the final reply has no
-tools. Its sign-off explains progress, remaining work and the next step. An
-explicit continuation rejoins the queue; an explicit `done` finishes. Without
-an outcome it pauses with recorded results and asks for a message to continue.
-The checkpoint notice identifies the exhausted tool budget. In the transcript,
-a member that continues later or finishes as planned closes silently: its
-sign-off already says so. A pause or a question still draws a handoff line.
+New Teams default to **Task** mode. Every 24 model/tool rounds the host saves a
+quiet checkpoint in the same contribution. Tools and private history remain
+available; no sign-off or renewed continuation choice is required. A normal
+final reply still finishes that member's work. A checkpoint is not a spending
+limit. There is no fixed lifetime contribution quota.
+
+**One contribution** preserves the earlier behavior for discussions and reviews:
+24 rounds, then up to two closing rounds with only `team_status` followed by a
+tool-free reply. Explicit continuation resumes that member; without an outcome
+the checkpoint pauses for a user message. Saved Teams without execution settings
+keep this mode until reconfigured. Solo Chat and delegated helper limits are
+unchanged.
+
+Members run and resume independently; there is no wave barrier. Finished peers
+remain finished. A real process/member dependency puts a member into **Waiting**.
+No model polling requests run during that wait. Missing process records interrupt
+the wait for review, and cyclic member waits are rejected. A new user message
+supersedes a wait. Stop interrupts waiting members as well as active workers.
+Reopening Chat marks old waits interrupted; process IDs are never rebound to
+processes from a new worker.
+
+Optional run settings bound elapsed minutes and cumulative reported input,
+output and cache tokens across all members. The allowance begins on Send or
+Resume; steering an active run does not reset it. Checks run before model
+requests and tools, including after a queued request or approval. In-flight
+requests may exceed a token limit; these are not prepaid reservations. Missing
+usage pauses a configured token limit rather than silently treating it as zero.
+Provider spending is not estimated or capped because these routes do not supply
+consistent billing telemetry. The inspector reports the specific limit reason.
 Once a Team turn ends, one quiet table lists the files its members changed
 through patches, with line counts, who touched each file, and its diff on
 expansion. Solo Chat turns
 also reserve a closing reply instead of reporting the round limit as an error.
-Closing is bounded even when a model ignores the tool restriction, and no
-workspace actions or additional approvals are allowed there. Output limits
-still yield only with an explicit continuation. Three identical consecutive
-contributions by one member pause the Team for review, preventing a simple
-acknowledgement loop.
-This detects exact repeats, not every possible unproductive conversation.
+In One contribution mode, closing is bounded even if the model ignores the
+tool restriction. Output limits still require explicit continuation. Three
+identical consecutive contributions pause the Team for review. In Task mode,
+three checkpoints without new successful tool evidence also pause for review;
+new read/search findings count as progress, as do edits. This bounded comparison
+does not judge the meaning of prose or detect every unproductive workflow.
 
 Parallel execution is the default for existing and new Teams, with the same
 four-member cap. Model requests, file/search reads and transcript recall can
@@ -47,7 +65,8 @@ overlap. Patches and shell commands take a cancellable FIFO gate for the chosen
 workspace, including their approval wait. Workspace gates are shared with other
 Chat turns in the same worker using that folder. Reads may observe another
 member's edits; models are instructed to re-read current files before changing
-them. Continuing members begin together only after the current wave settles.
+them. Background commands release the gate after launch, so their later writes
+still require the members' normal path coordination.
 
 ## Failed requests
 
@@ -83,9 +102,15 @@ result, since a member can re-read files itself. Source IDs lead back to
 `search_history` and `read_history` for omitted details. Peer output is
 labelled reference material, never new user authorization.
 
-Members share the chat's source-linked decision notebook. Private model context
-is trimmed using the provider's reported window with a 200,000-token ceiling;
-unknown windows use a 128,000-token working bound. These are local budgeting
+Members share the chat's source-linked decision notebook. `team_status` also
+accepts bounded `objective`, `findings` and `owned_paths`; these are stored with the next step
+and dependency as a per-member work record, and reintroduced after compaction.
+Follow-up messages preserve the findings and record the latest request; members
+can replace outdated notes. The record is reference data, not a path lock or permission.
+Private model context is trimmed using the smaller of the provider's reported
+window and the configured Team context ceiling (default 200,000 tokens);
+unknown windows use at most 128,000. The inspector shows that effective ceiling.
+Input budgeting reserves 15% plus output and saved notes. These are local budgeting
 estimates, not a promise that a provider accepts every payload. The full visible
 transcript and notebook remain on disk when context is trimmed.
 
@@ -98,13 +123,21 @@ attributed public record. Normal model switching is available again in solo mode
 
 ## Permissions and interruptions
 
-All members have the four workspace tools plus recall/notebook tools and
+All members have workspace tools, background process tools, recall/notebook tools and
 `team_status`. They inherit Manual, Accept Edits or YOLO from the chat. Approvals
 are queued one at a time and identify the requesting member and approval ID.
 Allow or Deny resolves only that request; denial is returned to that member as
 a denied tool result. Waiting for an approval holds the workspace write gate,
 while other members can continue model work and reads.
-Team members cannot recursively delegate or create a fourth member.
+Team members cannot recursively delegate or add members.
+
+Background processes retain member attribution in the shared Processes tab.
+The Team's running-process ceiling is configurable from one to eight (default
+four), within the worker-wide maximum of eight. Extra launches preserve a first
+slot for active peers where capacity permits. Each member has its own output
+cursor, so one member reading a process cannot consume another's unread output.
+Process completion wakes registered waits. Stopping Team leaves background
+processes running; stop them from Processes, delete the chat, or quit Chat.
 
 **Stop Team** cancels every active request/tool, approval wait and queued write.
 **Resume unfinished work** schedules incomplete members only; completed members

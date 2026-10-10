@@ -39,6 +39,7 @@ class TeamTests(unittest.TestCase):
         specs = [{"choice": parent.models[i % 2]["id"], "name": f"Member {i + 1}",
                   "effort": "", "responsibility": f"Responsibility {i + 1}"} for i in range(count)]
         parent.handle({"command": "configure_team", "id": parent.chat["id"], "enabled": True,
+                       "execution": {"mode": "contribution"},
                        "members": specs, "request": "config-request"})
         self.assertTrue(parent.chat.get("team"), self.events[-1])
         return parent.chat["team"]["members"]
@@ -112,7 +113,10 @@ class TeamTests(unittest.TestCase):
         self.assertNotIn("_web_search", self.transports[1].requests[1])
 
     def test_explicit_continuation_rotates_fairly_and_must_be_renewed(self):
-        parent = self.service([[decision("continue", "Verify the tests"), response("Implementation done"), response("Tests passed")],
+        def after_review(payload, cancel, delta):
+            self.wait_for(lambda: members[1]["status"] == "done")
+            return response("Implementation done")
+        parent = self.service([[decision("continue", "Verify the tests"), after_review, response("Tests passed")],
                                [response("Review complete")]])
         members = self.configure(parent)
         self.send(parent); self.finish(parent)
@@ -232,7 +236,10 @@ class TeamTests(unittest.TestCase):
             self.assertIn("New direction", json.dumps(payload))
             self.assertTrue(any(b.get("type") == "tool_result" for m in payload["messages"] for b in m["content"] if isinstance(b, dict)))
             return response("Updated B")
-        parent = self.service([[decision("continue", "Verify tests"), response("First A"), response("Continued A")],
+        def continued(payload, cancel, delta):
+            self.assertTrue(release.wait(3))
+            return call("read_file", {"path": "missing.txt"})
+        parent = self.service([[decision("continue", "Verify tests"), response("First A"), continued, response("Continued A")],
                                [waiting, restarted]])
         members = self.configure(parent)
         self.send(parent); self.assertTrue(started.wait(2))
