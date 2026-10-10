@@ -1,6 +1,6 @@
 # Team in Chat
 
-Team lets up to four model/account choices contribute to one Chat transcript.
+Team lets up to five model/account choices contribute to one Chat transcript.
 Open **Team** in the inspector, choose **Set up**, and pick names, models,
 reasoning efforts and optional responsibilities. The first member takes the
 place of the chat's current model. There is no separate coordinator model or
@@ -60,7 +60,7 @@ new read/search findings count as progress, as do edits. This bounded comparison
 does not judge the meaning of prose or detect every unproductive workflow.
 
 Parallel execution is the default for existing and new Teams, with the same
-four-member cap. Model requests, file/search reads and transcript recall can
+five-member cap. Model requests, file/search reads and transcript recall can
 overlap. Patches and shell commands take a cancellable FIFO gate for the chosen
 workspace, including their approval wait. Workspace gates are shared with other
 Chat turns in the same worker using that folder. Reads may observe another
@@ -185,7 +185,7 @@ Team members cannot recursively delegate or add members.
 
 Background processes retain member attribution in the shared Processes tab.
 The Team's running-process ceiling is configurable from one to eight (default
-four), within the worker-wide maximum of eight. Extra launches preserve a first
+five), within the worker-wide maximum of eight. Extra launches preserve a first
 slot for active peers where capacity permits. Each member has its own output
 cursor, so one member reading a process cannot consume another's unread output.
 Process completion wakes registered waits. Stopping Team leaves background
@@ -240,7 +240,7 @@ working. Every member retains its own `status`, `contributionID`, `usage` and
 latest row in its live contribution, even when another member appends a row.
 
 `test_chat_team.py` exercises real ChatService scheduling against scripted
-providers: all four members, long continuation, fairness, private reasoning and
+providers: all five members, long continuation, fairness, private reasoning and
 account isolation, shared recall, serialized approvals/edits, Stop/steer,
 failures, context checkpoints and crash recovery. `test_chat_model.py` runs the
 actual Swift model to check correlated configuration, cross-chat isolation,

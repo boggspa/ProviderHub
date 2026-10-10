@@ -62,10 +62,10 @@ class ParallelTeamTests(unittest.TestCase):
             return response("Contributed")
         parent = self.service([[meet] for _ in range(chat_team.MAX_MEMBERS)])
         members = self.configure(parent, count=chat_team.MAX_MEMBERS)
-        self.assertEqual(len(members), 4)
+        self.assertEqual(len(members), chat_team.MAX_MEMBERS)
         self.send(parent); self.finish(parent)
         self.assertEqual(parent.chat["team"]["status"], "done")
-        self.assertEqual([m["contributions"] for m in members], [1, 1, 1, 1])
+        self.assertEqual([m["contributions"] for m in members], [1] * chat_team.MAX_MEMBERS)
 
     def test_write_fifo_never_overlaps_but_read_tools_do(self):
         models = threading.Barrier(3)

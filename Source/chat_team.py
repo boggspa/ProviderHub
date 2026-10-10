@@ -17,7 +17,7 @@ import chat_execution
 from chat_history import portable_history
 from chat_tools import _tool
 
-MAX_MEMBERS = 4
+MAX_MEMBERS = 5
 MAX_SHARED_BYTES = 48_000
 # Peers' replies carry the reasoning worth sharing; their raw tool output is
 # mostly file text a member can read itself, so it arrives as a shorter head.
@@ -356,7 +356,7 @@ def _text(value, label, maximum, *, empty=False):
 
 def validate_members(parent, specifications):
     if not isinstance(specifications, list) or not 1 <= len(specifications) <= MAX_MEMBERS:
-        raise ValueError("A Team has one to four members total, including the current chat model.")
+        raise ValueError("A Team has one to five members total, including the current chat model.")
     existing = {m["id"]: m for m in (parent.chat.get("team") or {}).get("members", [])}
     members, used, archived = [], set(), []
     for position, spec in enumerate(specifications):

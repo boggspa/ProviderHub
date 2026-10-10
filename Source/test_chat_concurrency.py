@@ -9,7 +9,7 @@ import unittest
 from unittest.mock import patch
 
 from chat_runtime import ChatStore
-from chat_sessions import ChatHost
+from chat_sessions import MAX_ACTIVE_REQUESTS, ChatHost
 from test_chat_runtime import FakeTransport, response
 
 
@@ -444,11 +444,11 @@ class ConcurrentChatTests(unittest.TestCase):
         finally:
             release.set(); self.host.stop_all()
 
-    def test_stream_budget_waits_without_opening_ninth_socket_and_stop_releases_waiter(self):
-        release = threading.Event(); entered = [threading.Event() for _ in range(8)]
+    def test_stream_budget_waits_without_opening_one_over_the_cap_socket_and_stop_releases_waiter(self):
+        release = threading.Event(); entered = [threading.Event() for _ in range(MAX_ACTIVE_REQUESTS)]
         self.addCleanup(release.set)
         threads = []
-        for index in range(8):
+        for index in range(MAX_ACTIVE_REQUESTS):
             transport = self.host.transport()
             def run(payload, cancel, delta, index=index):
                 entered[index].set(); release.wait(3); return response()
@@ -456,15 +456,15 @@ class ConcurrentChatTests(unittest.TestCase):
             thread = threading.Thread(target=transport.stream, args=({}, threading.Event(), lambda text: None))
             thread.start(); threads.append(thread)
         self.assertTrue(all(event.wait(2) for event in entered))
-        ninth = self.host.transport()
+        overCap = self.host.transport()
         cancel = threading.Event(); stopped = threading.Event()
         def waiter():
-            try: ninth.stream({}, cancel, lambda text: None)
+            try: overCap.stream({}, cancel, lambda text: None)
             except InterruptedError: stopped.set()
         waiting = threading.Thread(target=waiter)
         waiting.start(); self.assertFalse(stopped.wait(.05))
-        self.assertEqual(ninth.client.requests, [])
-        cancel.set(); ninth.cancel(); self.assertTrue(stopped.wait(2)); waiting.join(2)
+        self.assertEqual(overCap.client.requests, [])
+        cancel.set(); overCap.cancel(); self.assertTrue(stopped.wait(2)); waiting.join(2)
         release.set()
         for thread in threads: thread.join(2); self.assertFalse(thread.is_alive())
 
