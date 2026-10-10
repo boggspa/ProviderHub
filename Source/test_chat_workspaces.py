@@ -6,9 +6,204 @@ import sys
 import tempfile
 import unittest
 
-from chat_runtime import ChatService, ChatStore
+from chat_runtime import ChatService, ChatStore, needs_approval
+from chat_tools import ChatToolRunner
 from chat_workspaces import ChatWorkspaces
 from test_chat_runtime import FakeTransport, model
+
+
+class AttachedFolderTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name).resolve()
+        self.folder = self.root / "project"
+        self.folder.mkdir()
+        self.secondary = self.root / "docs"
+        self.secondary.mkdir()
+        self.store = ChatStore(self.root, lock=False)
+        self.events = []
+        self.transport = FakeTransport([])
+        self.service = ChatService(self.store, self.transport, self.events.append)
+        self.service.models = [model()]
+        self.service.create(model()["id"], str(self.folder))
+
+    def catalogues(self):
+        return [event for event in self.events if event["event"] == "catalogue"]
+
+    def test_attach_persists_version_two_and_survives_restart(self):
+        self.service.handle({"command": "attach_workspace", "workspace": str(self.folder), "folder": str(self.secondary)})
+        data = json.loads(self.service.workspaces.path.read_text(encoding="utf-8"))
+        self.assertEqual(data["version"], 2)
+        self.assertEqual(data["projects"], {str(self.folder): [str(self.secondary)]})
+        restarted = ChatService(ChatStore(self.root, lock=False), FakeTransport([]), self.events.append)
+        self.assertEqual(restarted.workspaces.projects, {str(self.folder): [str(self.secondary)]})
+        self.assertEqual(restarted.workspaces.secondaries(str(self.folder)), [str(self.secondary)])
+
+    def test_version_one_file_loads_without_projects(self):
+        self.service.workspaces.path.write_text(json.dumps({"version": 1, "folders": [str(self.folder)]}), encoding="utf-8")
+        migrated = ChatWorkspaces(self.store.root)
+        self.assertEqual(migrated.folders, [str(self.folder)])
+        self.assertEqual(migrated.projects, {})
+        migrated.save()
+        self.assertEqual(json.loads(migrated.path.read_text(encoding="utf-8"))["version"], 2)
+
+    def test_attach_and_detach_commands_publish_projects(self):
+        self.events.clear()
+        self.service.handle({"command": "attach_workspace", "workspace": str(self.folder), "folder": str(self.secondary)})
+        self.assertEqual(self.catalogues()[-1]["projects"], {str(self.folder): [str(self.secondary)]})
+        self.service.handle({"command": "detach_workspace", "workspace": str(self.folder), "folder": str(self.secondary)})
+        self.assertEqual(self.catalogues()[-1]["projects"], {})
+        self.assertEqual(self.service.workspaces.projects, {})
+
+    def test_demotion_after_last_disconnect(self):
+        other = self.root / "assets"
+        other.mkdir()
+        self.service.handle({"command": "attach_workspace", "workspace": str(self.folder), "folder": str(self.secondary)})
+        self.service.handle({"command": "attach_workspace", "workspace": str(self.folder), "folder": str(other)})
+        self.assertEqual(self.service.workspaces.secondaries(str(self.folder)), [str(self.secondary), str(other)])
+        self.service.handle({"command": "detach_workspace", "workspace": str(self.folder), "folder": str(self.secondary)})
+        self.assertEqual(list(self.service.workspaces.projects), [str(self.folder)])
+        self.service.handle({"command": "detach_workspace", "workspace": str(self.folder), "folder": str(other)})
+        self.assertEqual(self.service.workspaces.projects, {})
+
+    def test_attach_requires_saved_workspace_and_available_folder(self):
+        unsaved = self.root / "unsaved"
+        unsaved.mkdir()
+        with self.assertRaisesRegex(ValueError, "saved workspace"):
+            self.service.handle({"command": "attach_workspace", "workspace": str(unsaved), "folder": str(self.secondary)})
+        missing = self.root / "missing"
+        with self.assertRaisesRegex(ValueError, "unavailable"):
+            self.service.handle({"command": "attach_workspace", "workspace": str(self.folder), "folder": str(missing)})
+        self.assertEqual(self.service.workspaces.projects, {})
+
+    def test_attach_rejects_aliases_duplicates_conflicts_and_cycles(self):
+        self.service.handle({"command": "attach_workspace", "workspace": str(self.folder), "folder": str(self.secondary)})
+        alias = self.root / "alias"
+        alias.symlink_to(self.secondary, target_is_directory=True)
+        # The same folder through an alias adds nothing and stays unique.
+        self.service.handle({"command": "attach_workspace", "workspace": str(self.folder), "folder": str(alias)})
+        self.assertEqual(self.service.workspaces.secondaries(str(self.folder)), [str(self.secondary)])
+        primary_alias = self.root / "project-alias"
+        primary_alias.symlink_to(self.folder, target_is_directory=True)
+        with self.assertRaisesRegex(ValueError, "itself"):
+            self.service.handle({"command": "attach_workspace", "workspace": str(self.folder), "folder": str(primary_alias)})
+        # A folder that is itself a project cannot be absorbed.
+        third = self.root / "third"
+        third.mkdir()
+        assets = self.root / "assets2"
+        assets.mkdir()
+        self.service.workspaces.remember(str(third))
+        self.service.handle({"command": "attach_workspace", "workspace": str(third), "folder": str(assets)})
+        with self.assertRaisesRegex(ValueError, "project with its own folders"):
+            self.service.handle({"command": "attach_workspace", "workspace": str(self.folder), "folder": str(third)})
+        # A folder already attached elsewhere cannot be attached twice.
+        fourth = self.root / "fourth"
+        fourth.mkdir()
+        self.service.workspaces.remember(str(fourth))
+        with self.assertRaisesRegex(ValueError, "already attached"):
+            self.service.handle({"command": "attach_workspace", "workspace": str(fourth), "folder": str(assets)})
+        self.assertEqual(self.service.workspaces.secondaries(str(fourth)), [])
+        with self.assertRaisesRegex(ValueError, "not attached"):
+            self.service.handle({"command": "detach_workspace", "workspace": str(self.folder), "folder": str(assets)})
+
+    def test_attached_folders_reach_the_system_prompt(self):
+        from test_chat_runtime import response
+        self.service.handle({"command": "attach_workspace", "workspace": str(self.folder), "folder": str(self.secondary)})
+        self.service.transport.responses.append(response())
+        self.service.handle({"command": "send", "id": self.service.chat["id"], "text": "work"})
+        self.service.thread.join(3)
+        self.assertFalse(self.service.busy, "worker did not complete")
+        self.assertIn("Attached folders:", self.service.transport.requests[-1]["system"])
+        self.assertIn(str(self.secondary), self.service.transport.requests[-1]["system"])
+
+    def test_workspace_without_attachments_keeps_plain_prompt(self):
+        from test_chat_runtime import response
+        self.service.transport.responses.append(response())
+        self.service.handle({"command": "send", "id": self.service.chat["id"], "text": "work"})
+        self.service.thread.join(3)
+        self.assertNotIn("Attached folders:", self.service.transport.requests[-1]["system"])
+
+
+class SecondaryRootToolTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name).resolve()
+        self.primary = self.root / "primary"
+        self.primary.mkdir()
+        self.secondary = self.root / "secondary"
+        self.secondary.mkdir()
+        (self.primary / "main.py").write_text("print('primary')\n", encoding="utf-8")
+        (self.secondary / "lib.py").write_text("VALUE = 42\nprint(VALUE)\n", encoding="utf-8")
+
+    def runner(self, roots=()):
+        return ChatToolRunner(str(self.primary), roots=[str(path) for path in roots])
+
+    def test_read_and_search_reach_secondary_roots_only_by_absolute_path(self):
+        runner = self.runner([self.secondary])
+        read = runner.execute("read_file", {"path": str(self.secondary / "lib.py")})
+        self.assertFalse(read["is_error"], read["content"][0]["text"])
+        self.assertIn("VALUE = 42", read["content"][0]["text"])
+        relative = runner.execute("read_file", {"path": "lib.py"})
+        self.assertTrue(relative["is_error"], "relative paths must stay in the primary workspace")
+        outside = self.root / "outside"
+        outside.mkdir()
+        (outside / "secret.txt").write_text("nope", encoding="utf-8")
+        denied = runner.execute("read_file", {"path": str(outside / "secret.txt")})
+        self.assertTrue(denied["is_error"] and "outside workspace" in denied["content"][0]["text"])
+        found = runner.execute("search_files", {"pattern": "VALUE", "path": str(self.secondary)})
+        self.assertFalse(found["is_error"], found["content"][0]["text"])
+        self.assertIn("lib.py:1", found["content"][0]["text"])
+
+    def test_patch_add_and_update_in_secondary_root(self):
+        runner = self.runner([self.secondary])
+        added = runner.execute("apply_patch", {"patch":
+            f"*** Begin Patch\n*** Add File: {self.secondary / 'new.py'}\n+hello = 1\n*** End Patch"})
+        self.assertFalse(added["is_error"], added["content"][0]["text"])
+        self.assertEqual((self.secondary / "new.py").read_text(encoding="utf-8"), "hello = 1\n")
+        updated = runner.execute("apply_patch", {"patch":
+            f"*** Begin Patch\n*** Update File: {self.secondary / 'lib.py'}\n@@\n-VALUE = 42\n+VALUE = 43\n*** End Patch"})
+        self.assertFalse(updated["is_error"], updated["content"][0]["text"])
+        self.assertIn("VALUE = 43", (self.secondary / "lib.py").read_text(encoding="utf-8"))
+        denied = runner.execute("apply_patch", {"patch":
+            f"*** Begin Patch\n*** Add File: {self.root / 'outside' / 'x.py'}\n+x = 1\n*** End Patch"})
+        self.assertTrue(denied["is_error"])
+
+    def test_symlink_and_traversal_guards_still_apply_in_secondary_roots(self):
+        # Absolute paths resolve aliases (like workspace_identity does); a
+        # symlink that escapes every root is still refused, as is traversal.
+        outside = self.root / "outside.txt"
+        outside.write_text("secret", encoding="utf-8")
+        link = self.secondary / "link.py"
+        link.symlink_to(outside)
+        runner = self.runner([self.secondary])
+        denied = runner.execute("read_file", {"path": str(link)})
+        self.assertTrue(denied["is_error"] and "outside workspace" in denied["content"][0]["text"])
+
+    def test_missing_secondary_volume_is_skipped_not_fatal(self):
+        missing = self.root / "gone"
+        runner = self.runner([missing])
+        self.assertEqual(runner.extra_roots, ())
+        read = runner.execute("read_file", {"path": str(self.primary / "main.py")})
+        self.assertFalse(read["is_error"], read["content"][0]["text"])
+
+    def test_nested_roots_resolve_to_the_most_specific(self):
+        nested = self.secondary / "nested"
+        nested.mkdir()
+        (nested / "deep.txt").write_text("deep", encoding="utf-8")
+        runner = self.runner([self.secondary, nested])
+        read = runner.execute("read_file", {"path": str(nested / "deep.txt")})
+        self.assertFalse(read["is_error"], read["content"][0]["text"])
+
+    def test_accept_edits_preauthorization_stays_inside_the_git_worktree(self):
+        import subprocess as sp
+        sp.run(["git", "init", "-q", str(self.primary)], check=True)
+        patch = f"*** Begin Patch\n*** Add File: {self.secondary / 'x.py'}\n+x = 1\n*** End Patch"
+        # A patch landing outside the selected Git repository still asks.
+        self.assertTrue(needs_approval("accept_edits", "apply_patch", {"patch": patch}, str(self.primary)))
+        inside = "*** Begin Patch\n*** Add File: main2.py\n+x = 1\n*** End Patch"
+        self.assertFalse(needs_approval("accept_edits", "apply_patch", {"patch": inside}, str(self.primary)))
 
 
 class WorkspaceTests(unittest.TestCase):

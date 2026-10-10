@@ -31,13 +31,13 @@ def _tool(name, description, properties, required):
 
 
 TOOL_DEFINITIONS = [
-    _tool("read_file", "Read UTF-8 text inside the workspace. Offset is a 1-based line number; output is bounded.", {
+    _tool("read_file", "Read UTF-8 text inside the workspace or an attached folder. Offset is a 1-based line number; output is bounded.", {
         "path": {"type": "string"}, "offset": {"type": "integer", "minimum": 1},
         "limit": {"type": "integer", "minimum": 1, "maximum": 2000}}, ["path"]),
-    _tool("search_files", "Search literal text in UTF-8 workspace files, excluding symlinks and .git. Bounded scan.", {
+    _tool("search_files", "Search literal text in UTF-8 workspace files, including attached folders, excluding symlinks and .git. Bounded scan.", {
         "pattern": {"type": "string"}, "path": {"type": "string"},
         "glob": {"type": "string"}, "max_results": {"type": "integer", "minimum": 1, "maximum": 500}}, ["pattern"]),
-    _tool("apply_patch", "Apply a Codex *** Begin Patch patch (Add/Update/Delete File, optional Move to). All hunks are validated first. The host applies the selected approval mode.", {
+    _tool("apply_patch", "Apply a Codex *** Begin Patch patch (Add/Update/Delete File, optional Move to) inside the workspace or an attached folder. All hunks are validated first. The host applies the selected approval mode.", {
         "patch": {"type": "string"}}, ["patch"]),
     _tool("run_shell", "Run a command with /bin/sh in the workspace under the host's selected approval mode. This is not sandboxed. Output is bounded; timeout is seconds (0.1–300). For CLI compatibility, values 1000–600000 are treated as milliseconds and capped at 300 seconds. "
           "Set background to true for servers, watchers or long jobs: the command keeps running between turns, the call returns its first output and an id for read_process and stop_process, and timeout is not used. Stop background processes you no longer need.", {
@@ -49,6 +49,14 @@ TOOL_DEFINITIONS = [
         "id": {"type": "string"}}, ["id"]),
 ]
 PROCESS_TOOLS = ("read_process", "stop_process")
+
+
+def _within(path, root):
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
 
 
 def shell_timeout(value):
@@ -74,42 +82,60 @@ def _environment():
 
 
 class ChatToolRunner:
-    def __init__(self, workspace: str, cancel_event: threading.Event | None = None, processes=None):
+    def __init__(self, workspace: str, cancel_event: threading.Event | None = None, processes=None, roots=()):
         self.workspace = Path(workspace).resolve(strict=True)
         if not self.workspace.is_dir():
             raise ValueError("Workspace must be an existing directory")
         self.cancel_event = cancel_event if cancel_event is not None else threading.Event()
         # A chat_processes.ProcessRegistry; the Chat worker supplies one.
         self.processes = processes
+        # Attached folders (secondary workspace roots) share the chat's file
+        # tools under the same approvals. Relative paths stay anchored to the
+        # primary workspace; absolute paths may target any root. A missing or
+        # non-directory volume is skipped so one detached drive cannot stop
+        # the primary workspace's tools.
+        extra = []
+        for root in roots:
+            candidate = Path(root).expanduser().resolve()
+            if candidate != self.workspace and candidate.is_dir() and candidate not in extra:
+                extra.append(candidate)
+        self.extra_roots = tuple(extra)
+        self.roots = (self.workspace, *self.extra_roots)
 
     def _cancel(self):
         if self.cancel_event.is_set():
             raise ValueError("Tool execution cancelled")
 
-    def _relative(self, value):
+    def _resolve(self, value):
+        """Resolve a tool path to (root, relative path) within the allowed roots."""
         if not isinstance(value, str) or not value or "\x00" in value:
             raise ValueError("Path must be a nonempty string")
         path = Path(value)
         if path.is_absolute():
-            try:
-                path = path.relative_to(self.workspace)
-            except ValueError:
+            resolved = path.expanduser().resolve()
+            # Nested roots resolve to the most specific one.
+            matches = [root for root in self.roots if _within(resolved, root)]
+            if not matches:
                 raise ValueError("Path is outside workspace") from None
+            anchor = max(matches, key=lambda root: len(root.parts))
+            path = resolved.relative_to(anchor)
+        else:
+            anchor = self.workspace
         if ".." in path.parts:
             raise ValueError("Parent traversal is not allowed")
         # Reject even internal symlinks, for predictable read/write semantics.
-        current = self.workspace
+        current = anchor
         for part in path.parts:
             current /= part
             if current.is_symlink():
                 raise ValueError("Symlink paths are not allowed")
-        return path
+        return anchor, path
 
-    def _parent(self, path, create=False):
+    def _parent(self, anchor, path, create=False):
         """Return owned parent fd; O_NOFOLLOW protects against path swaps."""
         if not path.name:
             raise ValueError("Expected a file path")
-        fd = os.open(self.workspace, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        fd = os.open(anchor, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         try:
             for part in path.parts[:-1]:
                 if create:
@@ -125,8 +151,8 @@ class ChatToolRunner:
             os.close(fd)
             raise
 
-    def _read(self, path):
-        parent = self._parent(path)
+    def _read(self, anchor, path):
+        parent = self._parent(anchor, path)
         try:
             fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
             with os.fdopen(fd, "rb") as stream:
@@ -169,7 +195,7 @@ class ChatToolRunner:
                 if value < spec["minimum"] or value > spec.get("maximum", 10**9):
                     raise ValueError(f"{key} is out of range")
         if name in ("read_file", "search_files"):
-            self._relative(args.get("path", "."))
+            self._resolve(args.get("path", "."))
         if name == "apply_patch":
             return self._plan_patch(args["patch"])
         return None
@@ -208,7 +234,7 @@ class ChatToolRunner:
             self._cancel()
             summary = self.describe(name, args)["summary"]
             if name == "read_file":
-                content, _ = self._read(self._relative(args["path"]))
+                content, _ = self._read(*self._resolve(args["path"]))
                 lines = content.splitlines(keepends=True)
                 offset = args.get("offset", 1) - 1
                 selected = lines[offset:offset + args.get("limit", 500)]
@@ -246,8 +272,8 @@ class ChatToolRunner:
         return self.processes.stop(owner, args["id"], self.cancel_event)
 
     def _search(self, args):
-        root = self._relative(args.get("path", "."))
-        (self.workspace / root).stat()  # Missing search roots are errors.
+        anchor, root = self._resolve(args.get("path", "."))
+        (anchor / root).stat()  # Missing search roots are errors.
         results, seen, skipped = [], 0, 0
         max_results = args.get("max_results", 100)
         # Iterative traversal, capped by visited entries as well as output size.
@@ -256,12 +282,12 @@ class ChatToolRunner:
             self._cancel()
             path = pending.pop()
             seen += 1
-            absolute = self.workspace / path
+            absolute = anchor / path
             if absolute.is_symlink():
                 continue
             if absolute.is_dir():
                 # Do not recurse via a concurrently swapped symlink.
-                parent = self._parent(path / "placeholder")
+                parent = self._parent(anchor, path / "placeholder")
                 try:
                     with os.scandir(parent) as entries:
                         for entry in entries:
@@ -277,7 +303,7 @@ class ChatToolRunner:
             if not fnmatch.fnmatch(str(path), args.get("glob", "*")):
                 continue
             try:
-                content, _ = self._read(path)
+                content, _ = self._read(anchor, path)
             except (OSError, ValueError, UnicodeError):
                 skipped += 1
                 continue
@@ -300,28 +326,29 @@ class ChatToolRunner:
             if not kinds:
                 raise ValueError(f"Invalid patch header: {header}")
             kind = kinds[0]
-            path = self._relative(header.split(": ", 1)[1])
-            if path == Path(".") or path in plans:
+            base, path = self._resolve(header.split(": ", 1)[1])
+            if path == Path(".") or (base, path) in plans:
                 raise ValueError("Duplicate or invalid patch path")
             i += 1
             target = path
+            target_base = base
             if kind == "Update" and i < len(lines) - 1 and lines[i].startswith("*** Move to: "):
-                target = self._relative(lines[i][13:])
+                target_base, target = self._resolve(lines[i][13:])
                 i += 1
-                if target == path or target == Path(".") or target in plans:
+                if (target_base, target) == (base, path) or target == Path(".") or (target_base, target) in plans:
                     raise ValueError("Invalid move destination")
             if kind == "Add":
-                if os.path.lexists(self.workspace / path):
+                if os.path.lexists(base / path):
                     raise ValueError(f"Add destination already exists: {path}")
                 added = []
                 while i < len(lines) - 1 and lines[i].startswith("+"):
                     added.append(lines[i][1:])
                     i += 1
-                plans[path] = (None, "\n".join(added) + ("\n" if added else ""), 0o644)
+                plans[(base, path)] = (None, "\n".join(added) + ("\n" if added else ""), 0o644)
                 continue
-            original, mode = self._read(path)
+            original, mode = self._read(base, path)
             if kind == "Delete":
-                plans[path] = (original, None, mode)
+                plans[(base, path)] = (original, None, mode)
                 continue
             source = original.splitlines()
             cursor, pieces, hunks = 0, [], 0
@@ -370,21 +397,23 @@ class ChatToolRunner:
             pieces.extend(source[cursor:])
             newline = "\r\n" if "\r\n" in original else "\n"
             updated = newline.join(pieces) + (newline if pieces and original.endswith("\n") else "")
-            if target != path:
-                if os.path.lexists(self.workspace / target):
+            if (target_base, target) != (base, path):
+                if os.path.lexists(target_base / target):
                     raise ValueError("Move destination already exists")
-                plans[target] = (None, updated, mode)
-                plans[path] = (original, None, mode)
+                plans[(target_base, target)] = (None, updated, mode)
+                plans[(base, path)] = (original, None, mode)
             else:
-                plans[path] = (original, updated, mode)
+                plans[(base, path)] = (original, updated, mode)
         if not plans:
             raise ValueError("Patch has no file operations")
         # File/ancestor conflicts would otherwise fail after earlier mutations.
-        for path in plans:
-            if any(parent in plans for parent in path.parents):
+        for key in plans:
+            anchor, path = key
+            siblings = [other for other in plans if other[0] == anchor]
+            if any(parent in (item[1] for item in siblings) for parent in path.parents):
                 raise ValueError("Conflicting file and directory patch paths")
             for parent in path.parents:
-                full = self.workspace / parent
+                full = anchor / parent
                 if full.exists() and not full.is_dir():
                     raise ValueError("Patch parent is not a directory")
         return plans
@@ -392,7 +421,7 @@ class ChatToolRunner:
     @staticmethod
     def _patch_diff(plans):
         chunks, length = [], 0
-        for path, (before, after, _) in plans.items():
+        for (_, path), (before, after, _) in plans.items():
             for line in difflib.unified_diff(
                     (before or "").splitlines(keepends=True),
                     (after or "").splitlines(keepends=True),
@@ -410,15 +439,15 @@ class ChatToolRunner:
 
     def _apply(self, plans, changed):
         # Validate every file again immediately before the first mutation.
-        for path, (before, _, _) in plans.items():
-            self._relative(str(path))
+        for (base, path), (before, _, _) in plans.items():
+            self._resolve(str(base / path))
             if before is None:
-                if os.path.lexists(self.workspace / path):
+                if os.path.lexists(base / path):
                     raise ValueError("Patch destination changed during validation")
-            elif self._read(path)[0] != before:
+            elif self._read(base, path)[0] != before:
                 raise ValueError("File changed during patch validation")
-        for path, (_, after, mode) in plans.items():
-            parent = self._parent(path, create=after is not None)
+        for (base, path), (_, after, mode) in plans.items():
+            parent = self._parent(base, path, create=after is not None)
             temporary = ".chat-patch-" + uuid.uuid4().hex
             try:
                 if after is None:

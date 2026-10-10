@@ -147,6 +147,8 @@ final class ChatModel: ObservableObject {
     @Published var connected = false
     @Published private(set) var webSearchEnabled: Bool
     @Published var recentFolders: [String] = []
+    // Workspaces with attached secondary folders: primary path -> secondary paths.
+    @Published var workspaceProjects: [String: [String]] = [:]
     @Published var inspectorVisible = false
     @Published var inspectorTab: ChatInspectorTab = .changes
     // Only the selected session publishes transcript changes. Background chats
@@ -367,6 +369,18 @@ final class ChatModel: ObservableObject {
         }
     }
     func setFolder(_ path: String) { guard !busy, !branchBusy else { return }; configure(["workspace": path]) }
+    func attachFolder(to workspace: String) {
+        guard connected, !branchBusy else { return }
+        let picker = NSOpenPanel(); picker.canChooseDirectories = true; picker.canChooseFiles = false
+        picker.allowsMultipleSelection = false; picker.prompt = "Attach"
+        picker.directoryURL = URL(fileURLWithPath: workspace)
+        guard picker.runModal() == .OK, let url = picker.url else { return }
+        write(["command": "attach_workspace", "workspace": workspace, "folder": url.path])
+    }
+    func detachFolder(from workspace: String, _ folder: String) {
+        guard connected, !branchBusy else { return }
+        write(["command": "detach_workspace", "workspace": workspace, "folder": folder])
+    }
     func chooseFolder() {
         let owner = selectedID
         let picker = NSOpenPanel(); picker.canChooseDirectories = true; picker.canChooseFiles = false
@@ -492,6 +506,7 @@ final class ChatModel: ObservableObject {
                 write(["command": "preferences", "webSearch": webSearchEnabled])
             case "catalogue":
                 models = decode([ChatRoute].self, event["models"]) ?? []; recentFolders = event["folders"] as? [String] ?? []
+                workspaceProjects = (event["projects"] as? [String: [String]]) ?? [:]
                 contextLimit = selectedRoute?.context; notice = ""
             case "chats":
                 let previous = Dictionary(uniqueKeysWithValues: chats.map { ($0.id, $0.workspace) })

@@ -20,14 +20,24 @@ Switching back follows the same rule rather than reviving a stale trace. Changed
 connections also start a fresh provider context. Changing workspace opens a new
 chat, leaving the original transcript in the rail.
 
-The sidebar groups chats under their workspace folders. Collapse a group or use
-its **+** to start a chat there. Folders remain in the picker and sidebar after
-restart or after deleting their last chat. Path aliases share one group;
-different folders with the same name show their paths. Disconnected folders
-stay in the list and their saved chats can still be read. The selected row
-carries a thin bar in its model's provider accent. Each running chat shows a
-small spinner; a hand marks a chat waiting for approval, including chats in
-another folder.
+The sidebar lists **Projects** first, then **Recents**, then **Workspaces**. A
+workspace with attached folders is promoted into Projects; the extra folders
+are listed under its header. Attach a folder from the workspace header's
+context menu (**Attach folder…**) and disconnect one from its row's context
+menu; disconnecting the last folder demotes the workspace back to Workspaces.
+Attachments persist across restarts, and a chat's file tools can
+read/search/patch the attached folders with absolute paths under the same
+approval rules; the system prompt lists them so the model knows they exist.
+The Workspaces section groups chats under their single workspace folders.
+Collapse a group or use its **+** to start a chat there. Recents shows the ten
+newest chats across every workspace, each labelled with its workspace, and
+selecting one behaves like selecting it in its group. Folders remain in the
+picker and sidebar after restart or after deleting their last chat. Path
+aliases share one group; different folders with the same name show their
+paths. Disconnected folders stay in the list and their saved chats can still
+be read. The selected row carries a thin bar in its model's provider accent.
+Each running chat shows a small spinner; a hand marks a chat waiting for
+approval, including chats in another folder.
 In a narrow window, the saved-chats button opens the same list in a popover.
 
 You can switch chats or start a new one while other chats run. Each chat keeps
