@@ -265,6 +265,13 @@ struct ChatToolDisplay: Equatable {
         case "read_history": return ChatToolDisplay(verb: verb("Read chat history", "Reading chat history"))
         case "record_decision": return ChatToolDisplay(verb: verb("Saved a decision note", "Saving a decision note"))
         case "forget_decision": return ChatToolDisplay(verb: verb("Forgot a decision note", "Forgetting a decision note"))
+        case "blackboard_post":
+            return ChatToolDisplay(verb: verb("Pinned to the Blackboard", "Pinning to the Blackboard"), subject: after("Pinned") ?? "", code: true)
+        case "blackboard_remove":
+            return ChatToolDisplay(verb: verb("Removed a Blackboard post", "Removing a Blackboard post"), subject: after("Removed") ?? "", code: true)
+        case "blackboard_read": return ChatToolDisplay(verb: verb("Read the Blackboard", "Reading the Blackboard"))
+        case "blackboard_attach":
+            return ChatToolDisplay(verb: verb("Added to the Blackboard", "Adding to the Blackboard"), subject: after("Added") ?? "")
         case "delegate":
             return ChatToolDisplay(verb: verb("Delegated", "Delegating"), subject: after("Delegate:") ?? summary)
         case "team_status":
@@ -289,6 +296,7 @@ struct ChatToolDisplay: Equatable {
         case "search_files": return "search_files"
         case "web_search": return "web_search"
         case "search_history", "read_history", "record_decision", "forget_decision": return "memory"
+        case "blackboard_post", "blackboard_remove", "blackboard_read", "blackboard_attach": return "blackboard"
         case "delegate": return "delegate"
         case "team_status": return "team_status"
         default: return "read_file"
@@ -302,7 +310,9 @@ struct ChatToolDisplay: Equatable {
             "run_shell": ("command", "commands"), "apply_patch": ("edit", "edits"), "read_file": ("read", "reads"),
             "search_files": ("search", "searches"), "web_search": ("web search", "web searches"),
             "search_history": ("recall", "recalls"), "read_history": ("recall", "recalls"),
-            "record_decision": ("note", "notes"), "forget_decision": ("note", "notes"), "team_status": ("outcome", "outcomes")]
+            "record_decision": ("note", "notes"), "forget_decision": ("note", "notes"), "team_status": ("outcome", "outcomes"),
+            "blackboard_post": ("pin", "pins"), "blackboard_remove": ("pin", "pins"), "blackboard_read": ("board read", "board reads"),
+            "blackboard_attach": ("board file", "board files")]
         var order: [String] = [], counts: [String: Int] = [:], plural: [String: String] = [:]
         for tool in tools {
             let noun = nouns[tool ?? ""] ?? ("step", "steps")

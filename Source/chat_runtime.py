@@ -29,6 +29,7 @@ from bridge_core import gateway_token, load_settings, private_directory, state_r
 from chat_tools import ChatToolRunner, TOOL_DEFINITIONS
 from chat_attachments import prepare_attachments, bound_image_history
 from chat_history import portable_history
+import chat_blackboard
 import chat_memory
 import chat_execution
 import chat_processes
@@ -695,6 +696,7 @@ class ChatService:
             return
         if self.role == "parent":
             if chat_team.handle(self, command): return
+            if chat_blackboard.handle(self, command): return
             from chat_agents import handle_auxiliary
             if handle_auxiliary(self, command):
                 return
@@ -850,7 +852,7 @@ class ChatService:
             tools.append(delegate_definition(self.models))
             tools.extend(chat_memory.TOOL_DEFINITIONS)
         elif self.role == "team" and tools:
-            tools.extend([*chat_memory.TOOL_DEFINITIONS, chat_team.STATUS_TOOL])
+            tools.extend([*chat_memory.TOOL_DEFINITIONS, chat_team.STATUS_TOOL, *chat_blackboard.TOOL_DEFINITIONS])
         context = choice.get("context")
         output = min(choice.get("max_output") or 4096, 8192)
         if isinstance(context, int) and context > 0:
@@ -879,6 +881,7 @@ class ChatService:
             payload["system"] += "\n" + chat_memory.GUIDANCE
         if self.role == "team":
             payload["system"] += "\n" + chat_team.GUIDANCE + "\nYour member name: " + self.team_member["name"]
+            if tools: payload["system"] += "\n" + chat_blackboard.GUIDANCE
             payload["system"] += "\nTeam directory (use these exact IDs for member dependencies): " + json.dumps(
                 [{"id": member["id"], "name": member["name"]} for member in self.team_parent.chat["team"]["members"]])
             if chat_execution.task(self): payload["system"] += "\n" + chat_team.TASK_GUIDANCE
@@ -890,6 +893,7 @@ class ChatService:
         memory_owner = self.team_parent if self.role == "team" else self
         with memory_owner._mutex:
             memory = chat_memory.memory_message(memory_chat) if self.role in {"parent", "team"} else None
+            board = chat_blackboard.digest_message(memory_chat) if self.role == "team" else None
             progress = chat_execution.progress(self.team_member) if self.role == "team" else None
             if progress:
                 memory = {"role": "user", "content": [*progress["content"], *(memory["content"] if memory else [])]}
@@ -897,6 +901,12 @@ class ChatService:
             memory = {"role": "user", "content": [{"type": "text", "text":
                 "[Saved decision notebook omitted because this model's context is small. "
                 "Notes remain saved. Use search_history/read_history to recover original decisions.]"}]}
+        if board and isinstance(context, int) and context > 0 and estimated_tokens({"messages": [board]}) > context // 8:
+            board = {"role": "user", "content": [{"type": "text", "text":
+                "[Team Blackboard digest omitted because this model's context is small. Posts remain saved; use blackboard_read.]"}]}
+        if board:
+            # Same projection as the notebook: reserved before trimming, never saved.
+            memory = {"role": "user", "content": [*(memory["content"] if memory else []), *board["content"]]}
         if chat["effort"]:
             payload["output_config"] = {"effort": chat["effort"]}
         if isinstance(context, int) and context > 0:
@@ -1071,6 +1081,10 @@ class ChatService:
                                 if self.role not in {"parent", "team"}:
                                     raise ValueError("Chat memory tools are available only in the main conversation.")
                                 description = chat_memory.describe(name, arguments)
+                            elif name in chat_blackboard.TOOLS:
+                                if self.role != "team":
+                                    raise ValueError("Blackboard tools are available only to Team members.")
+                                description = chat_blackboard.describe(name, arguments)
                             elif self.role in {"side", "lane"} and name not in {"read_file", "search_files"}:
                                 raise ValueError("This read-only conversation only has read_file and search_files.")
                             else:
@@ -1091,6 +1105,8 @@ class ChatService:
                                     result = chat_team.decide(self, arguments)
                                 elif name in chat_memory.MEMORY_TOOLS:
                                     result = chat_team.memory_tool(self, name, arguments)
+                                elif name in chat_blackboard.TOOLS:
+                                    result = chat_blackboard.execute(self, name, arguments)
                                 else:
                                     result = runner.execute(name, arguments)
                             else:

@@ -315,6 +315,7 @@ struct ChatTeamSnapshot: Decodable {
         team = nil; teamNotice = ""; teamRequest = nil
         sideChat = nil; sideNotice = ""; sideOpening = false; pendingSideText = nil
         processes = []; processesNotice = ""
+        if let stateChatID { blackboard.reset(stateChatID) }
     }
     func consumeInspector(_ event: [String: Any]) {
         guard let chat = event["chat"] as? String, chat == stateChatID else { return }
@@ -418,6 +419,8 @@ struct ChatTeamSnapshot: Decodable {
             // A snapshot without a notice keeps the last one, so a poll cannot
             // wipe a Stop result before it is read. Actions in the tab clear it.
             if let notice = event["notice"] as? String { processesNotice = notice }
+        case "blackboard":
+            blackboard.consume(chat: chat, event: event) { try? payload(ChatBlackboardSnapshot.self, "blackboard") }
         default: break
         }
     }

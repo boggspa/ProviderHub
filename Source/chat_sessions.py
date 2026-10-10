@@ -311,6 +311,11 @@ class ChatHost:
             else:
                 self.emit({"event": "team", "chat": identifier, "request": command.get("request"), "team": None, "notice": str(error)})
             return
+        if action in {"blackboard", "blackboard_post", "blackboard_remove", "blackboard_attach", "blackboard_detach"}:
+            # The pane's own notice; the board itself is unchanged.
+            if identifier is not None:
+                self.emit({"event": "blackboard", "chat": identifier, "request": command.get("request"), "notice": str(error)})
+            return
         if action in {"open_side", "side_send", "side_model", "side_stop", "close_side"}:
             from chat_agents import visible
             side = self.sides.get(identifier)
