@@ -88,7 +88,9 @@ enum HubTheme {
         static let hairline = dynamic(light: NSColor.black.withAlphaComponent(0.09),
                                       dark: NSColor.white.withAlphaComponent(0.07))
         /// Primary text.
-        static let ink = dynamic(light: NSColor(white: 0.11, alpha: 1), dark: NSColor(white: 0.93, alpha: 1))
+        static let ink = Color(nsColor: nsInk)
+        /// Primary text for AppKit text views, such as Chat's selectable transcript.
+        static let nsInk = dynamicNS(light: NSColor(white: 0.11, alpha: 1), dark: NSColor(white: 0.93, alpha: 1))
         /// Secondary text and glyphs.
         static let secondaryInk = dynamic(light: NSColor(white: 0.11, alpha: 0.6), dark: NSColor(white: 0.93, alpha: 0.6))
         /// The brand accent as it should sit on the surface of each appearance.
@@ -113,9 +115,13 @@ enum HubTheme {
         static let contextCritical = approvalYolo
 
         static func dynamic(light: NSColor, dark: NSColor) -> Color {
-            Color(nsColor: NSColor(name: nil) { appearance in
+            Color(nsColor: dynamicNS(light: light, dark: dark))
+        }
+
+        static func dynamicNS(light: NSColor, dark: NSColor) -> NSColor {
+            NSColor(name: nil) { appearance in
                 appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? dark : light
-            })
+            }
         }
     }
 

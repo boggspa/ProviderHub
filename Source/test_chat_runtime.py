@@ -290,7 +290,7 @@ class ChatRuntimeTests(unittest.TestCase):
         payload = service.payload(choice)
         self.assertLess(len(payload["messages"]), before)
         self.assertEqual(service.chat["entries"][0]["text"], "original transcript")
-        self.assertTrue(any("context trimmed" in item["text"] for item in service.chat["entries"]))
+        self.assertEqual(len(service.chat["entries"]), 1, "Routine trimming must not add transcript notices")
 
     def test_accept_edits_applies_repository_patch_without_approval(self):
         subprocess.run(["git", "init", "--quiet", str(self.root)], check=True)

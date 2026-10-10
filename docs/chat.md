@@ -70,6 +70,12 @@ the composer until the new turn starts. Stop also cancels an impending restart.
 If the app closes during interruption, the saved update is recovered without
 automatically executing it.
 
+Sending an update while a Team is working keeps the Team running. Members
+receive the update after their current recorded work reaches a safe boundary.
+Queued continuations keep their place, and members that already finished
+receive another contribution afterward. Running tools finish and record their
+real results. Use Stop to cancel the Team.
+
 **Turn time** beneath the composer counts the active turn, including tool and
 approval waits. Steering and provider-request restarts keep the same clock;
 completion, failure or an acknowledged Stop resets it to `00:00`. While a turn
@@ -134,6 +140,15 @@ fonts installed through Font Book. Only the chosen font name is saved; custom
 font files are never copied. An unavailable custom font falls back to System.
 Theme and surface reuse the Hub's existing preferences. Text choices affect
 the transcript and composer; code and diffs keep their monospace treatment.
+
+**Zoom** enlarges the conversation without rescaling the app. Use the header's
+**− 100% +** control (click the percentage for actual size) or View › Zoom In
+(⌘+), Zoom Out (⌘−) and Actual Size (⌘0) while the Chat window is in front.
+Steps run from 85% to 300% on top of the Text size choice. Transcript text,
+tool rows, glyphs, tables and the composer scale, and the reading column
+widens with them; the header, rail, footer and buttons keep their size. The
+zoom is saved across launches.
+
 The send and stop buttons stay monochrome and invert with the theme: a light
 disc on a dark window, a dark disc on a light one.
 
@@ -158,8 +173,14 @@ Assistant replies support inline emphasis, code and links, plus a small native
 layout for Markdown pipe tables. A header followed by a valid `---` delimiter
 row becomes a table with wrapped cells and the requested column alignment.
 Wide tables scroll horizontally within the transcript. Right-click a table
-to **Copy table (TSV)** for a spreadsheet or **Copy table as Markdown**; the
-reply's context menu also offers **Copy reply** with its original text.
+to **Copy table (TSV)** for a spreadsheet or **Copy table as Markdown**.
+
+Transcript text behaves like text in any Mac app: click and drag to select
+within a message, double-click a word, ⌘A to select a whole message, and ⌘C
+to copy. Each message is selected on its own.
+Right-click offers the native menu (Copy, Look Up, Translate, Share and
+Services) plus **Copy Message**, which copies the whole message with its
+original Markdown, whether or not anything is selected.
 This applies to the main transcript, Side Chat and agent inspector.
 
 During streaming, only complete table lines become cells. The line currently
@@ -204,13 +225,31 @@ The mode menu shows its state in colour: Manual is blue, Accept Edits neutral,
 and YOLO red, which also tints the composer outline faintly. Choosing YOLO in a
 folder for the first time asks once to confirm; that answer is remembered per
 folder on this Mac and never sent to the worker.
-Tool rows in the transcript expand to show output and textual diffs. A patch
-row shows its added and removed line counts in the Git indicator's colours.
-Three or more consecutive local tool rows fold into one **Worked · N steps**
-disclosure with the combined file and line counts; the run at the end of a
-live turn stays open as **Working** and folds once the reply begins, and a
-fold opened or closed by hand keeps that choice. Delegate rows keep their own
-lanes and are never folded. Recorded changed files can be revealed in Finder.
+
+The transcript reads like Claude and Codex Desktop. Your messages sit in a
+bubble on the trailing edge. Each speaker (the chat's model, or a Team member
+by name) gets one header above a run of replies and tool calls, rather than a
+header per model round; rounds that produced no text draw nothing.
+Tool rows lead with what was done ("Ran `swift build`", "Edited Model.swift",
+"Read tools/import.py · lines 85–259", "Searched for `water_height`") instead
+of the folder every call shares, and their glyph wears the caller's provider
+accent, so Team members' calls are recognisable at a glance. A row lifts on
+hover and expands to show output and textual diffs; a shell row shows its full
+command above the output. A patch row shows its added and removed line counts
+in the Git indicator's colours. A call still running shimmers its verb.
+Three or more consecutive local tool rows fold into one disclosure such as
+**Worked · 4 commands, 2 edits** with the combined file and line counts; the
+run at the end of a live turn stays open as **Working** and folds once the
+reply begins, and a fold opened or closed by hand keeps that choice. Delegate
+rows keep their own lanes and are never folded. Recorded changed files can be
+revealed in Finder.
+
+Web search sources collapse into one pill under the reply (**12 sources ·
+github.com · …**) that opens into a numbered list; copied and saved text keeps
+the original **Sources:** line. Notices are quiet dividers, and a Team
+checkpoint reads as a handoff naming the member who paused, with the runtime's
+full wording in its tooltip. Older chats saved an "Older model context trimmed"
+notice on most rounds of a long turn; those are no longer drawn.
 
 Shell commands use the user's normal macOS permissions, with the workspace as
 their working directory. They are not sandboxed. Output is bounded and commands
@@ -254,8 +293,9 @@ provider credentials. Writes are atomic and the directory is held by one Chat
 worker at a time. Saved transcripts remain available if the gateway is offline.
 
 For models with a known context limit, older complete conversation units are
-trimmed before the limit is reached. A notice records this in the transcript;
-the full visible history remains saved. Unknown limits stay unknown. The token
+trimmed before the limit is reached. This is routine on long turns, so it adds
+no transcript notice; the full visible history remains saved and recoverable
+with search_history. Unknown limits stay unknown. The token
 indicator reports the latest request's input usage, rather than a lifetime
 token total. With a known limit, a small ring beside it fills in the provider
 accent, turning amber at 80% and red at 95% of the window; with an unknown
@@ -264,8 +304,11 @@ be continued.
 Team uses the same bounded execution slices with a reserved checkpoint sign-off.
 Members run together; explicit continuations join the next wave after current
 contributions settle. There is no lifetime Team contribution quota. Usage and
-context belong to individual members and are never added together. The roster
-shows every member's status and context separately.
+context belong to individual members and are never added together. While a
+Team works, the header shows every member's own ring, name and token count,
+with working members in bold; members that have not run yet show an empty
+ring. Once the Team stops, the header returns to the chat's own context. The
+roster shows every member's status and context separately.
 
 ### Recall and decision notes
 
@@ -310,7 +353,8 @@ TaskWraith-compatible presentation contract used throughout Provider Hub. Chat
 does not maintain its own provider-colour table. Presentation is display data;
 routes and account identities continue to govern requests.
 Provider marks use the Hub's existing icon assets. The four tool glyphs reuse
-TaskWraith's file/search/patch/shell paths as cached native vectors.
+Tool glyphs reuse TaskWraith's tool-call icon catalogue (file, shell, search,
+patch, browser, memory, delegate, status and handoff) as cached native vectors.
 
 Chat is a coding harness with attachments, local tools, concurrent chats,
 persistent parallel Teams and bounded delegation. Mutating tools in one checkout
@@ -320,7 +364,9 @@ catalogue, browser automation, or separate IDE.
 ## Implementation and verification
 
 `ChatWindow.swift`, `ChatModelPicker.swift` and `ChatModel.swift` are the native window, picker and local JSONL
-transport. `chat_memory.py` provides transcript recall and source-linked decision
+transport. `ChatTranscriptLayout.swift` decides what the transcript draws
+(speaker blocks, folds, tool phrasing, source links and notices) without views,
+and `ChatTranscriptRows.swift` draws it. `chat_memory.py` provides transcript recall and source-linked decision
 notes. `ChatInspector.swift`, `ChatInspectorModel.swift` and
 `ChatBranches.swift` provide the inspector and Git controls. `chat_runtime.py`
 owns each conversation/tool loop and saved chats; `chat_sessions.py` hosts

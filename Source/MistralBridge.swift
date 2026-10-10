@@ -1438,7 +1438,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         for (title, action, key) in [("Cut", "cut:", "x"), ("Copy", "copy:", "c"), ("Paste", "paste:", "v"), ("Select All", "selectAll:", "a")] {
             editMenu.addItem(NSMenuItem(title: title, action: Selector(action), keyEquivalent: key))
         }
-        editItem.submenu = editMenu; mainMenu.addItem(editItem); NSApp.mainMenu = mainMenu
+        editItem.submenu = editMenu; mainMenu.addItem(editItem)
+        let viewItem = NSMenuItem()
+        viewItem.submenu = ChatZoomCommands.shared.menu(); mainMenu.addItem(viewItem)
+        NSApp.mainMenu = mainMenu
         model = BridgeModel()
         chatModel = ChatModel(bridge: model)
         chatModel.onActivity = { [weak self] working in self?.model.chatWorking = working }
@@ -1534,6 +1537,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             chat.minSize = NSSize(width: 720, height: 500)
             chat.contentView = NSHostingView(rootView: ChatWindow(model: chatModel))
             chat.setFrameAutosaveName("ProviderHubChat"); chat.center(); chatWindow = chat
+            ChatZoomCommands.shared.window = chat
             applyWindowStyle()
         }
         model.chatWindowOpen = true

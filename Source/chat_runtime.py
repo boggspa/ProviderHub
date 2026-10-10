@@ -846,8 +846,9 @@ class ChatService:
             if estimated_tokens(payload) >= budget:
                 compacted = compact_conversation(payload, budget)
                 if compacted["messages"] != chat["messages"]:
+                    # Routine near the limit, so it stays out of the transcript:
+                    # a notice on every long-turn round only buried the work.
                     chat["messages"] = compacted["messages"]; payload = compacted
-                    self.add(entry("notice", "Older model context trimmed. The full visible transcript is kept.", chat["route"]))
                     self.save()
         if memory:
             # Projection only: never duplicate notebook text in saved provider

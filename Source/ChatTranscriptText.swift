@@ -259,11 +259,13 @@ final class ChatTextPresentation: ObservableObject {
 struct ChatTranscriptText: View {
     let text: String
     let streaming: Bool
+    /// The whole entry, for the text's **Copy Message** menu item.
+    var message: String?
     @StateObject private var presentation: ChatTextPresentation
     @Environment(\.chatTextStyle) private var textStyle
 
-    init(text: String, streaming: Bool) {
-        self.text = text; self.streaming = streaming
+    init(text: String, streaming: Bool, message: String? = nil) {
+        self.text = text; self.streaming = streaming; self.message = message
         _presentation = StateObject(wrappedValue: ChatTextPresentation(text: text, streaming: streaming))
     }
 
@@ -272,8 +274,8 @@ struct ChatTranscriptText: View {
             ForEach(presentation.blocks) { block in
                 switch block.content {
                 case .text(let content):
-                    Text(content).font(textStyle.font).foregroundStyle(HubTheme.Semantic.ink)
-                        .textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
+                    ChatSelectableText(text: content, font: textStyle.nsFont, color: HubTheme.Semantic.nsInk, message: message)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                 case .table(let table): ChatTranscriptTable(table: table)
                 }
             }
@@ -365,7 +367,7 @@ struct ChatTranscriptTable: View {
     }
 
     private var grid: some View {
-        let nativeFont = ChatFonts.font(textStyle.selection, customName: textStyle.customName, size: textStyle.size)
+        let nativeFont = textStyle.nsFont
         return ChatTableLayout(hints: table.columnHints, minimum: max(80, nativeFont.pointSize * 6)) {
             ForEach(0..<(table.cells.count * columns), id: \.self) { index in
                 let row = index / columns, column = index % columns
