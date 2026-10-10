@@ -331,6 +331,7 @@ def public(team):
     keys = ("id", "name", "label", "choice", "route", "account", "effort", "responsibility",
             "status", "nextStep", "contributions", "contributionID", "usage", "context", "failureReason",
             "modelContext", "waitReason", "checkpoints")
+    keys += ("pendingChange",)
     return {"enabled": team.get("enabled", False), "status": team.get("status", "ready"),
             "activeMemberID": team.get("activeMemberID"),
             "activeMemberIDs": list(team.get("activeMemberIDs", [])),
@@ -416,6 +417,8 @@ def configure(parent, command):
     candidate["team"] = {"enabled": command["enabled"], "members": members, "queue": [],
                          "execution": execution,
                          "runID": None, "activeMemberID": None, "activeMemberIDs": [], "status": "ready"}
+    if command["enabled"] and enabled(previous):
+        _carry_replaced(parent, candidate, previous["team"])
     # Provider histories are private to seats. Solo mode resumes from visible
     # dialogue, never one of their native tool/opaque reasoning histories.
     candidate["messages"] = [] if command["enabled"] else portable_history(previous["entries"],
@@ -428,6 +431,25 @@ def configure(parent, command):
         parent.chat = previous
         raise
     parent.publish()
+
+
+def _carry_replaced(parent, candidate, old_team):
+    """An idle edit keeps a failed member resumable once its model or settings
+    change, so Resume unfinished work continues its part with the new model."""
+    old = {member["id"]: member for member in old_team.get("members", [])}
+    carried = []
+    for member in candidate["team"]["members"]:
+        before = old.get(member["id"])
+        if not before or before.get("status") not in {"error", "interrupted", "stopped"}: continue
+        if all(member[key] == before.get(key) for key in IDENTITY_FIELDS): continue
+        candidate["entries"] = list(candidate["entries"])
+        _fresh_context(candidate, member, parent.choice(member["choice"]), member["name"])
+        member.update(status="interrupted", nextStep=before.get("nextStep", ""),
+                      waitReason="Replaced. Resume unfinished work continues here.")
+        if before.get("progress"): member["progress"] = before["progress"]
+        _note(candidate, [], _change_text(before, member), member)
+        carried.append(member["id"])
+    if carried: candidate["team"].update(queue=carried, status="interrupted")
 
 
 def validate_roster(parent):
@@ -447,6 +469,7 @@ def validate_roster(parent):
 
 def start_run(parent, *, new_input=False, member_id=None):
     validate_roster(parent)
+    parent.team_closing = False
     team = parent.chat["team"]
     if not new_input and any(m["status"] == "needs_input" for m in team["members"]):
         raise ValueError("A Team member needs your answer. Send a message before continuing.")
@@ -493,9 +516,12 @@ def handle(parent, command):
     try:
         if not parent.chat or command.get("id") != parent.chat["id"]:
             raise ValueError("Select the owning chat before changing its Team.")
-        if parent.busy or parent._branch_working:
+        live = command["command"] == "configure_team" and live_editable(parent)
+        if not live and (parent.busy or parent._branch_working):
             raise ValueError("Wait for the active work to stop.")
-        if command["command"] == "configure_team":
+        if live:
+            configure_live(parent, command)
+        elif command["command"] == "configure_team":
             configure(parent, command)
         else:
             if not enabled(parent.chat): raise ValueError("Enable Team before resuming it.")
@@ -792,7 +818,8 @@ def finish_contribution(chat, member):
         member.update(status="waiting", waitFor=decision["waitFor"])
         dependency = decision["waitFor"]
         if dependency["kind"] == "member":
-            name = next(m["name"] for m in team["members"] if m["id"] == dependency["id"])
+            # A removed dependency resolves on the scheduler's next pass.
+            name = next((m["name"] for m in team["members"] if m["id"] == dependency["id"]), "a removed member")
             member["waitReason"] = "Waiting for " + name + " to finish"
         else:
             member["waitReason"] = "Waiting for " + dependency["id"] + " to exit"
@@ -819,6 +846,12 @@ def recover(chat, settle):
     team = chat.get("team")
     if not isinstance(team, dict): return False
     changed = team.get("status") == "working" or team.get("activeMemberID") is not None or bool(team.get("activeMemberIDs"))
+    for member in team.get("members", []):
+        # A change that had not landed when Chat closed is dropped whole.
+        pending = member.pop("pendingChange", None)
+        if pending:
+            _discard(chat, member, pending, "Chat closed before it could apply", [])
+            changed = True
     interrupted = set()
     for member in team.get("members", []):
         if member.get("status") == "waiting":
@@ -873,8 +906,16 @@ class MemberStore:
                 from chat_runtime import entry
                 item = self.parent.add(entry("notice", notice, chat["route"]))
                 self.dirty[item["id"]] = item
+            # A pending Team edit lands in the checkpoint that ends this
+            # contribution. Archives and membership need a full snapshot.
+            notes = []
+            landed = chat["status"] != "working" and settle_change(self.parent, self.member, chat, notes)
             refresh_status(self.parent.chat)
-            checkpoint(self.parent, self.member, self.dirty)
+            if landed:
+                self.dirty.clear(); self.parent.save()
+            else:
+                checkpoint(self.parent, self.member, self.dirty)
+            for item in notes: self.parent.emit({"event": "entry", "chat": self.parent.chat["id"], "entry": item})
             publish(self.parent)
             self.parent.team_wake.set()
 
@@ -896,6 +937,322 @@ def refresh_status(chat):
     elif "interrupted" in states: status = "interrupted"
     else: status = "done"
     team["status"] = status
+
+
+# Editing a running Team. The edited roster is accepted at once; each member
+# then changes at its own safe boundary, the one Team steering already uses:
+# the top of a model round in ChatService.run, where recorded tool outcomes
+# are saved and nothing is in flight. A member that is not working changes
+# immediately. A working member's model request is cancelled; a tool it is
+# running, with any approval or workspace gate the tool holds, finishes and
+# records its real result first, and calls it had not started are recorded as
+# not executed. The change then lands in the checkpoint that ends that
+# contribution. A later edit supersedes a pending one; Stop or a closed Chat
+# discards it whole, so the saved roster is the previous one or the applied one.
+CHANGE_FIELDS = ("choice", "name", "label", "route", "account", "scope", "effort", "responsibility", "modelContext")
+IDENTITY_FIELDS = ("choice", "scope", "effort", "responsibility")
+NOT_STARTED = ("Not executed: the user changed this Team member before this action started. "
+               "Nothing ran; inspect current files before repeating it.")
+
+
+class MemberChanged(Exception):
+    """The user changed this member; its contribution ends at a safe boundary."""
+
+
+def live_editable(service):
+    return service.busy and enabled(service.chat) and not service._steering and not service._branch_working
+
+
+def _changing(service):
+    lock = getattr(service, "team_phase_lock", None) if service.role == "team" else None
+    if lock is None: return False
+    with lock: return service.team_changing
+
+
+def boundary(service):
+    """The top of a member's model round, where Team steering is also read."""
+    if _changing(service): raise MemberChanged()
+
+
+@contextmanager
+def model_request(service):
+    """A change may cancel a member's model request, never a tool."""
+    lock = getattr(service, "team_phase_lock", None) if service.role == "team" else None
+    if lock is None:
+        yield
+        return
+    with lock:
+        if service.team_changing: raise MemberChanged()
+        service.team_phase = "model"
+    try:
+        yield
+    except Exception:
+        with lock: service.team_phase = None
+        if _changing(service): raise MemberChanged() from None
+        raise
+    with lock: service.team_phase = None
+    # A reply that completed as the change arrived stays visible text; its
+    # tool calls never start and it does not enter the archived history.
+    if _changing(service): raise MemberChanged()
+
+
+def skip_remaining(service, results, calls):
+    """Before a member starts a tool: calls it will never start are recorded
+    as not executed, and its contribution ends at this boundary."""
+    if not _changing(service): return
+    record_unstarted(results, calls)
+    raise MemberChanged()
+
+
+def record_unstarted(results, calls):
+    recorded = {block.get("tool_use_id") for block in results["content"]}
+    results["content"].extend({"type": "tool_result", "tool_use_id": call["id"], "is_error": True,
+                               "content": [{"type": "text", "text": NOT_STARTED}]}
+                              for call in calls if call["id"] not in recorded)
+
+
+def _signal(parent, member):
+    child = parent.team_children.get(member["id"])
+    if child is None or not hasattr(child, "team_phase_lock"): return
+    with child.team_phase_lock:
+        child.team_changing = True
+        if child.team_phase != "tool" and not child.team_cancelled:
+            child.team_cancelled = True
+            child.cancel.set(); child.transport.cancel()
+            if (parent.approval or {}).get("memberID") == member["id"]:
+                parent.approval_event.set()
+
+
+def start_tool(service, results, calls):
+    """Atomically choose between an accepted replacement and starting a tool."""
+    lock = getattr(service, "team_phase_lock", None) if service.role == "team" else None
+    if lock is None: return
+    with lock:
+        if service.team_changing:
+            record_unstarted(results, calls)
+            raise MemberChanged()
+        service.team_phase = "tool"
+
+
+def end_tool(service):
+    lock = getattr(service, "team_phase_lock", None) if service.role == "team" else None
+    if lock is not None:
+        with lock: service.team_phase = None
+
+
+def _unsignal(parent, member):
+    """A superseded change: work continues unless its request was cancelled."""
+    child = parent.team_children.get(member["id"])
+    if child is None or not hasattr(child, "team_phase_lock"): return
+    with child.team_phase_lock:
+        if not child.team_cancelled: child.team_changing = False
+
+
+def _note(chat, notes, text, member):
+    from chat_runtime import entry
+    item = entry("notice", text, member["route"], noticeKind="team_member_change", memberID=member["id"],
+                 memberName=member["name"], recorded=True, workspace=chat["workspace"])
+    chat["entries"].append(item)
+    notes.append(item)
+
+
+def _who(member):
+    return f"{member['name']} ({member['label']})"
+
+
+def _change_text(old, new):
+    if (old["route"], old["account"]) != (new["route"], new["account"]):
+        same = old["label"] == new["label"]
+        def model(member): return member["label"] + (" · " + member["account"] if same and member["account"] else "")
+        return f"{old['name']} ({model(old)}) was replaced by {new['name']} ({model(new)}) by the user."
+    parts = []
+    if old["name"] != new["name"]: parts.append("renamed to " + new["name"])
+    if old["effort"] != new["effort"]: parts.append(f"effort {old['effort'] or 'default'} → {new['effort'] or 'default'}")
+    if old["responsibility"] != new["responsibility"]: parts.append("responsibility updated")
+    return f"{_who(old)} was updated by the user: " + ", ".join(parts or ["settings updated"]) + "."
+
+
+def _discard(chat, member, change, why, notes):
+    if change.get("remove"):
+        text = f"{member['name']} was not removed because {why}; it stays in the Team."
+    else:
+        text = f"{member['name']}'s change to {_who(change)} was not applied because {why}; its previous settings are kept."
+    _note(chat, notes, text, member)
+
+
+def _resume(team, member, result):
+    """The same resumption wake_dependencies gives a finished dependency."""
+    member.update(status="continuing", dependencyResult=result)
+    member.pop("waitFor", None); member.pop("waitReason", None)
+    if member.get("progress"): member["progress"]["waiting_for"] = None
+    if member["id"] not in team["queue"]: team["queue"].append(member["id"])
+
+
+def _land(parent, member, change, notes):
+    """Apply one member's change to its slot; the caller persists a snapshot."""
+    from chat_runtime import now
+    chat, team = parent.chat, parent.chat["team"]
+    if change.get("remove"):
+        _note(chat, notes, _who(member) + " was removed from the Team by the user.", member)
+        chat.setdefault("archives", []).append({"kind": "team_member", "member": copy.deepcopy(member), "ended": now()})
+        team["members"] = [m for m in team["members"] if m["id"] != member["id"]]
+        team["queue"] = [identifier for identifier in team["queue"] if identifier != member["id"]]
+        team["activeMemberIDs"] = [i for i in team.get("activeMemberIDs", []) if i != member["id"]]
+        for peer in team["members"]:
+            wait = peer.get("waitFor") or {}
+            if peer["status"] == "waiting" and wait.get("kind") == "member" and wait.get("id") == member["id"]:
+                _resume(team, peer, f"Member {member['name']} was removed from the Team by the user, so it will not "
+                                    "finish this work. " + member.get("nextStep", ""))
+        return
+    choice = parent.choice(change["choice"])
+    before = {key: member.get(key) for key in CHANGE_FIELDS}
+    identity = any(change[key] != member.get(key) for key in IDENTITY_FIELDS)
+    if identity:
+        chat.setdefault("archives", []).append({"kind": "team_member", "member": copy.deepcopy(member), "ended": now()})
+        _fresh_context(chat, member, choice, change["name"])
+        getattr(parent, "team_fresh", set()).add(member["id"])
+    member.update({key: change[key] for key in CHANGE_FIELDS})
+    member["context"] = chat_execution.context(team, choice)
+    if identity and member["status"] in {"error", "interrupted", "stopped"}:
+        # The replacement picks up where the slot stopped.
+        member["status"] = "continuing" if member.get("nextStep") else "queued"
+        for key in ("failureReason", "waitReason"): member.pop(key, None)
+        if member["id"] not in team["queue"]: team["queue"].append(member["id"])
+    _note(chat, notes, _change_text(before, change), member)
+
+
+def _fresh_context(chat, member, choice, name):
+    """The model-switch rule for a slot: its exact provider history is archived
+    by the caller; the slot continues from portable visible records only, its
+    own included, never another provider's reasoning or pending calls."""
+    recorded = [item for item in chat["entries"] if item.get("recorded") is not False]
+    member.update(messages=portable_history(recorded, vision=choice.get("vision") is not False, reason=(
+        f"The user changed this Team member's model or settings; you now continue in its place as {name}.")),
+        cursor=len(chat["entries"]), usage=None, repeats=0, lastFingerprint=None,
+        idleCheckpoints=0, seenEvidence=[], newEvidence=False)
+    # Peers' unfinished rows arrive once they are recorded.
+    member["sharedDeferred"] = [item["id"] for item in chat["entries"]
+                                if item.get("recorded") is False and item.get("memberID") != member["id"]]
+
+
+def settle_change(parent, member, chat, notes):
+    """At the end of a member's contribution, land its pending change.
+
+    Returns True when anything landed, so the caller saves a snapshot. A
+    contribution cut short for a change resumes in the same slot.
+    """
+    team = parent.chat["team"]
+    change = member.pop("pendingChange", None)
+    if chat["status"] == "retired":
+        member["appliedContributionID"] = member.get("contributionID")
+        decision = member.get("decision") or {}
+        if decision.get("next_step"): member["nextStep"] = decision["next_step"]
+        member["status"] = "continuing" if member.get("nextStep") else "queued"
+        if member["id"] not in team["queue"]: team["queue"].append(member["id"])
+    if change is None: return False
+    if parent.cancel.is_set() or chat["status"] == "stopped":
+        _discard(parent.chat, member, change, "the Team stopped first", notes)
+        return True
+    try:
+        _land(parent, member, change, notes)
+    except ValueError as exc:
+        _discard(parent.chat, member, change, str(exc).rstrip("."), notes)
+    _follow_primary(parent)
+    return True
+
+
+def _follow_primary(parent):
+    primary = parent.chat["team"]["members"][0]
+    parent.chat.update({key: primary[key] for key in ("route", "account", "scope", "effort")})
+
+
+def configure_live(parent, command):
+    """Accept an edit to a working Team; members change at their boundaries."""
+    if command.get("enabled") is not True:
+        raise ValueError("Stop the Team before turning it off.")
+    with parent._mutex:
+        if getattr(parent, "team_closing", False) or parent.cancel.is_set():
+            raise ValueError("This Team run is ending. Edit the Team again once it stops.")
+        chat, team = parent.chat, parent.chat["team"]
+        targets, _ = validate_members(parent, command.get("members"))
+        execution = chat_execution.settings(command.get("execution", chat_execution.policy(team)))
+        previous_execution = chat_execution.policy(team)
+        for key in ("minutes", "tokens"):
+            previous_limit, new_limit = previous_execution[key], execution[key]
+            if previous_limit is not None and (new_limit is None or new_limit > previous_limit):
+                raise ValueError("Stop the Team before increasing or removing its running " + key + " limit.")
+        existing = {member["id"]: member for member in team["members"]}
+        plan, names = [], {}
+        def claim(identifier, *values):
+            # Names stay distinct throughout, whichever pending change lands first.
+            for value in values:
+                if names.setdefault(_name_key(value), identifier) != identifier:
+                    raise ValueError("Give each member a different name, including names still in use until a pending change applies.")
+        for target in targets:
+            old = existing.get(target["id"])
+            if old is None:
+                plan.append(("add", target, None)); claim(target["id"], target["name"])
+                continue
+            change = {**{key: target[key] for key in CHANGE_FIELDS if key != "modelContext"}, "modelContext": target.get("context")}
+            deferred = old["status"] == "working" and any(change[key] != old.get(key) for key in IDENTITY_FIELDS)
+            plan.append(("pending" if deferred else "now", old, change))
+            claim(old["id"], change["name"], *([old["name"]] if deferred else []))
+        kept = {target["id"] for target in targets}
+        for identifier, old in existing.items():
+            if identifier not in kept:
+                deferred = old["status"] == "working"
+                plan.append(("leaving" if deferred else "remove", old, {"remove": True}))
+                if deferred: claim(identifier, old["name"])
+        if sum(kind != "remove" for kind, _, _ in plan) > MAX_MEMBERS:
+            raise ValueError("A member being removed is still finishing its current step, so the Team is full. "
+                             "Add the new member once it has left.")
+        saved_team = copy.deepcopy({key: value for key, value in team.items() if key != "members"})
+        saved = ([(member, dict(member)) for member in team["members"]], list(team["members"]), len(chat["entries"]),
+                 len(chat.get("archives", [])), {key: chat[key] for key in ("route", "account", "scope", "effort")})
+        notes, order, leaving = [], [], []
+        team["execution"] = execution  # Going forward; the running allowance is kept.
+        try:
+            for kind, member, change in plan:
+                if kind == "add":
+                    choice = parent.choice(member["choice"])
+                    request = (latest_request(chat) or {}).get("text", "")
+                    member.update(status="queued", modelContext=choice.get("context"), context=chat_execution.context(team, choice),
+                                  progress={"objective": request[:1000], "latest_request": request[:1000], "findings": "",
+                                            "owned_paths": [], "next_step": "", "waiting_for": None})
+                    team["queue"].append(member["id"])
+                    order.append(member)
+                    _note(chat, notes, _who(member) + " was added to the Team by the user.", member)
+                elif kind == "now":
+                    member.pop("pendingChange", None)
+                    if any(change[key] != member.get(key) for key in CHANGE_FIELDS if key != "modelContext"):
+                        _land(parent, member, change, notes)
+                    order.append(member)
+                elif kind == "pending":
+                    member["pendingChange"] = change; order.append(member)
+                elif kind == "leaving":
+                    member["pendingChange"] = change; leaving.append(member)
+                else:
+                    _land(parent, member, change, notes)
+            team["members"] = order + leaving
+            for member in team["members"]:
+                if member["status"] != "working": member["context"] = chat_execution.context(team, parent.choice(member["choice"]))
+            _follow_primary(parent)
+            refresh_status(chat)
+            parent.save()
+        except Exception:
+            members, roster, entries, archives, identity = saved
+            for key in set(team) - set(saved_team): del team[key]
+            team.update(saved_team); team["members"] = roster
+            for member, fields in members: member.clear(); member.update(fields)
+            del chat["entries"][entries:]
+            if "archives" in chat: del chat["archives"][archives:]
+            chat.update(identity)
+            raise
+        for member in team["members"]:
+            if member["status"] == "working":
+                (_signal if member.get("pendingChange") else _unsignal)(parent, member)
+        for item in notes: parent.emit({"event": "entry", "chat": chat["id"], "entry": item})
+        parent.team_wake.set()
 
 
 def contribution(parent, member, transport):
@@ -964,6 +1321,8 @@ def contribution(parent, member, transport):
                   "entries": [], "messages": messages, "status": "working",
                   "teamDecision": {"state": "done", "next_step": ""}}
     child.approved = lambda summary, detail=None: approve(parent, child, summary, detail)
+    child.team_phase_lock, child.team_phase = threading.Lock(), None
+    child.team_changing = child.team_cancelled = False
     parent.team_children[member["id"]] = child
     child.store.save(child.chat)
     child._working = True
@@ -991,7 +1350,9 @@ def wake_dependencies(parent):
                 result = json.dumps(process, ensure_ascii=False)
         else:
             peer = peers.get(wait.get("id"))
-            if peer and peer["status"] == "ready":
+            if peer is None:
+                result = "That member was removed from the Team by the user, so it will not finish this work."
+            elif peer["status"] == "ready":
                 # Standing by until a message addresses it: this work will not finish.
                 result = (f"Member {peer['name']} is standing by: the latest message does not address it, "
                           "so it will not finish this work. " + peer.get("nextStep", ""))
@@ -1014,6 +1375,7 @@ def run(parent):
     waiting_notified = False
     parent.team_approvals = FifoGate()
     parent.team_saved_entries = len(chat["entries"])
+    parent.team_fresh, parent.team_closing = set(), False
     try:
         validate_roster(parent)
         while True:
@@ -1052,10 +1414,15 @@ def run(parent):
                 ready = [] if blocked else [next(m for m in team["members"] if m["id"] == identifier)
                         for identifier in team["queue"] if any(m["id"] == identifier and
                         m["status"] in {"queued", "continuing"} and identifier not in threads for m in team["members"])]
-                if not threads and not ready and (blocked or team["status"] != "waiting"): break
+                if not threads and not ready and (blocked or team["status"] != "waiting"):
+                    parent.team_closing = True  # a later edit cannot reach this run
+                    break
                 children = []
                 for member in ready:
-                    if member["id"] not in services: services[member["id"]] = parent.child_factory()
+                    # A replaced model starts on its own connection.
+                    if member["id"] not in services or member["id"] in parent.team_fresh:
+                        services[member["id"]] = parent.child_factory()
+                        parent.team_fresh.discard(member["id"])
                     children.append(contribution(parent, member, services[member["id"]]))
                 if children: publish(parent)
             for child in children:
@@ -1071,6 +1438,7 @@ def run(parent):
     except Exception as exc:
         stopped = parent.cancel.is_set() or isinstance(exc, InterruptedError)
         with parent._mutex:
+            parent.team_closing = True
             cancel_children(parent)
             team["status"] = "stopped" if stopped else "error"
         for thread in threads.values():
@@ -1087,6 +1455,11 @@ def run(parent):
                 team["runUsage"]["ended"] = time.time()
             team.update(activeMemberID=None, activeMemberIDs=[])
             parent.team_children.clear(); parent.approval = None
+            parent.team_closing = True
+            notes = []
+            for member in team["members"]:
+                pending = member.pop("pendingChange", None)
+                if pending: _discard(chat, member, pending, "the Team stopped first", notes)
             chat["status"] = "ready" if team["status"] in {"done", "needs_input"} else team["status"]
             try: parent.save(); parent.publish()
             except Exception:

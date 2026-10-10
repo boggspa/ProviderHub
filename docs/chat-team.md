@@ -214,6 +214,61 @@ starts a fresh thread and replays the recorded call, result and new user input
 in the same request. It does not answer the stale RPC or require a Retry. Other
 steering errors still surface normally.
 
+## Editing a running Team
+
+**Edit** stays available while the Team works. You can change a member's
+model/account, effort, name and responsibility, remove a member, add one within
+the member cap, and change run settings. A finite running time or token limit
+can be reduced but cannot be increased or removed; measured usage and elapsed
+time are not reset. Team cannot be turned off mid-run;
+Stop it first.
+
+The roster is accepted at once, and each member changes at its own safe
+boundary, the one steering already uses: the top of its next model round.
+
+- A member that is not working changes immediately. This includes one in
+  Error, Done, standing by, Waiting, paused for a question, or paused at a
+  checkpoint.
+- A working member's change waits, and its row reads **Applying…** (or
+  **Removing…**). A model request in flight is cancelled; its streamed text
+  stays in the transcript. A tool that is running is never cancelled. It
+  finishes and records its real result first, including any patch or shell
+  command holding the workspace gate. A pending approval or a tool still queued
+  for the gate is retired promptly without executing the old action; a late
+  approval callback is rejected.
+- Calls from the same reply that had not started are recorded in that
+  member's archived history as not executed. They never run.
+
+A model, account, effort or responsibility change keeps the member's slot: the
+same member ID, so its transcript rows, `@Name` routing and peers waiting on it
+still point at it. One quiet notice records it, such as
+"Kimi (Kimi For Coding) was replaced by Kimi (Grok 4.7) by the user". The previous
+private history is archived. The new model starts from portable visible records
+only, including the slot's own earlier rows and failure. It never receives
+another provider's reasoning, signatures or pending calls. It then resumes the
+slot's work at once: a member in Error, or one cut short by the change,
+continues the current request or its recorded next step. Done, standing-by,
+waiting and question states are kept. A rename alone applies immediately, even
+mid-request. If the run ends before the edit, the idle edit keeps a failed member
+resumable, and **Resume unfinished work** continues it on the new model.
+
+Removing a working member waits for its boundary in the same way. Its recorded
+rows stay in the transcript, and a peer waiting on it resumes with a
+"member removed" result. An added member starts on the current request at once,
+subject to the usual request gate. While a removal is pending, the leaving
+member still counts towards the cap. Names must stay distinct throughout, so a
+pending member's current name is not available to others until its change lands.
+
+Saving again while a change is pending replaces it. Returning a member to its
+current settings cancels the change, and its work continues uninterrupted unless
+its model request was already cancelled. The roster is published when an edit
+is accepted and again as each change lands. A message drawn from the previous
+roster is refused before anything is stored, and its draft is restored. Stop
+discards pending changes with a notice. The roster, any pending change, and
+the checkpoint that lands it are saved together. If Chat quits mid-change, it
+reopens with the previous settings for that member and a notice, never a
+partly applied roster. `test_chat_team_live_edit.py` covers these cases.
+
 ## Persistence and verification
 
 The chat's atomic JSONL snapshot stores a Team record and individual member

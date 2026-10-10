@@ -14,6 +14,7 @@ import time
 from chat_runtime import ChatService, GatewayClient
 from chat_processes import ProcessRegistry
 import chat_execution
+from chat_team import live_editable as live_team_edit
 from chat_tools import ChatToolRunner
 from chat_workspaces import ChatWorkspaces
 
@@ -411,7 +412,8 @@ class ChatHost:
             self.emit({"event": "branch_state", "chat": identifier, "request": command.get("request"), "busy": False,
                        "notice": "Stop the other chats using this checkout before changing branches or worktrees."})
             return
-        if action in {"delete", "rename", "configure", "configure_team"} and self.active(service):
+        if action in {"delete", "rename", "configure", "configure_team"} and self.active(service) and not (
+                action == "configure_team" and live_team_edit(service)):
             raise ValueError("Stop this chat and its Side Chat before changing it.")
         if action == "rename":
             title = command.get("title")

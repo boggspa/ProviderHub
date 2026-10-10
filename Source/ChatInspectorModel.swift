@@ -113,7 +113,10 @@ struct ChatTeamMember: Decodable, Identifiable {
     var nextStep: String; var contributions: Int; var contributionID: String?; var usage: Int?; var context: Int?
     var failureReason: String?
     var waitReason: String?; var modelContext: Int?; var checkpoints: Int?
+    /// An edit accepted while this member works; it lands at the member's next safe boundary.
+    var pendingChange: ChatTeamPendingChange?
     var statusLabel: String {
+        if let pendingChange { return pendingChange.remove ? "Removing…" : "Applying…" }
         let text = status.replacingOccurrences(of: "_", with: " ")
         return text.prefix(1).uppercased() + text.dropFirst()
     }
@@ -124,7 +127,7 @@ struct ChatTeamMember: Decodable, Identifiable {
 extension ChatTeamMember {
     private enum CodingKeys: String, CodingKey {
         case id, name, label, choice, route, account, effort, responsibility, status, nextStep, contributions
-        case contributionID, usage, context, failureReason, waitReason, modelContext, checkpoints
+        case contributionID, usage, context, failureReason, waitReason, modelContext, checkpoints, pendingChange
     }
     init(from decoder: Decoder) throws {
         let row = try decoder.container(keyedBy: CodingKeys.self)
@@ -142,6 +145,22 @@ extension ChatTeamMember {
         waitReason = try? row.decodeIfPresent(String.self, forKey: .waitReason)
         modelContext = try? row.decodeIfPresent(Int.self, forKey: .modelContext)
         checkpoints = try? row.decodeIfPresent(Int.self, forKey: .checkpoints)
+        pendingChange = try? row.decodeIfPresent(ChatTeamPendingChange.self, forKey: .pendingChange)
+    }
+}
+/// The target of a Team edit still waiting for its member's boundary.
+struct ChatTeamPendingChange: Decodable {
+    var remove = false
+    var name: String?; var label: String?; var choice: String?; var effort: String?; var responsibility: String?
+    private enum CodingKeys: String, CodingKey { case remove, name, label, choice, effort, responsibility }
+    init(from decoder: Decoder) throws {
+        let row = try decoder.container(keyedBy: CodingKeys.self)
+        remove = (try? row.decodeIfPresent(Bool.self, forKey: .remove)) ?? false
+        name = try? row.decodeIfPresent(String.self, forKey: .name)
+        label = try? row.decodeIfPresent(String.self, forKey: .label)
+        choice = try? row.decodeIfPresent(String.self, forKey: .choice)
+        effort = try? row.decodeIfPresent(String.self, forKey: .effort)
+        responsibility = try? row.decodeIfPresent(String.self, forKey: .responsibility)
     }
 }
 struct ChatTeamExecution: Decodable {
@@ -184,13 +203,18 @@ struct ChatTeamSnapshot: Decodable {
 
 @MainActor extension ChatModel {
     var canConfigureTeam: Bool { connected && selectedID != nil && !busy && !branchBusy && teamRequest == nil }
+    /// A working Team can be edited too; each member changes at its next safe boundary.
+    var canEditTeam: Bool {
+        canConfigureTeam || connected && selectedID != nil && busy && !interrupting && !branchBusy && teamRequest == nil && team?.enabled == true
+    }
     /// Members an `@Name` tag can address, with their accents; none outside a Team.
     var mentionTargets: [ChatMentionTarget] {
         guard let team, team.enabled else { return [] }
         return team.members.map { ChatMentionTarget(id: $0.id, name: $0.name, route: $0.route, accent: NSColor(accent(for: $0.route))) }
     }
     func configureTeam(enabled: Bool, members: [[String: Any]], execution: ChatTeamExecution? = nil) {
-        guard canConfigureTeam, let selectedID = stateChatID else { return }
+        guard canEditTeam, let selectedID = stateChatID else { return }
+        if busy, !enabled { teamNotice = "Stop the Team before turning it off."; return }
         guard (1...ChatTeamSnapshot.maxMembers).contains(members.count), members.allSatisfy({ member in
             guard let choice = member["choice"] as? String, let name = member["name"] as? String else { return false }
             return !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && models.contains { $0.id == choice && $0.supportsTools }
