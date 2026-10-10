@@ -3,6 +3,13 @@
 The desktop advertises only five priority rows in the tool description, but
 accepts other catalogue routes in the model argument. This is discovery
 metadata, not a new tool, permission, model route, or execution mechanism.
+
+The catalogue is appended after the host's own description, never put in
+front of it. The host's text is what identifies the tool ("Spawn a new agent
+..."); forty-odd rows of model slugs ahead of it turned the spawn tool's
+description into a model listing with the purpose at the bottom, which on a
+route where the tool also travels under an alias is what a model reads as
+"agent metadata" rather than as the control it was told to use.
 """
 from __future__ import annotations
 
@@ -71,10 +78,11 @@ def advertise_subagent_models(tools, settings, inventory):
         lines.extend([_FORK_GUIDANCE, _CATALOGUE_END])
         description = tool.get("description") or ""
         # Idempotence matters on replayed tool catalogues. Preserve the host's
-        # task, concurrency and permission guidance after replacing its list.
+        # task, concurrency and permission guidance, and keep it first, after
+        # replacing its list.
         description = re.sub(re.escape(_CATALOGUE_START) + r".*?" + re.escape(_CATALOGUE_END),
                              "", description, flags=re.DOTALL)
         description = _OVERRIDES.sub("", description).strip()
-        tool["description"] = "\n".join(lines) + ("\n\n" + description if description else "")
+        tool["description"] = (description + "\n\n" if description else "") + "\n".join(lines)
         changed += 1
     return changed
