@@ -323,6 +323,15 @@ import Combine
         try send(["event":"team", "chat":"A", "request":teamRequest, "team":roster("ready")])
         check(model.team?.members.count == 1 && model.teamRequest == nil && model.canSend, "Team ack not applied")
         check(model.team?.taskMode == false, "legacy roster unexpectedly enabled Task mode")
+        var fourMemberTeam = roster("ready")
+        let rosterTemplate = (fourMemberTeam["members"] as! [[String: Any]])[0]
+        fourMemberTeam["members"] = (1...4).map { number -> [String: Any] in
+            var member = rosterTemplate
+            member["id"] = "member-\(number)"; member["name"] = "Member \(number)"
+            return member
+        }
+        try send(["event":"team", "chat":"A", "team":fourMemberTeam])
+        check(model.team?.members.count == 4 && model.team?.enabled == true, "four-member Team was rejected")
         var configuredTeam = roster("waiting", "waiting")
         configuredTeam["execution"] = execution.wire
         configuredTeam["runUsage"] = ["started": 100.0, "tokens": 1800, "requests": 4, "usageComplete": false]
@@ -340,6 +349,11 @@ import Combine
         try send(["event":"team", "chat":"A", "team":configuredTeam])
         check(model.team?.canResume == true && model.team?.members[0].statusLabel == "Limit reached", "run limit could not resume")
         check(model.team?.limitReason == "Token limit reached", "specific limit reason lost")
+        check(model.team?.limitAdvice?.contains("Resume starts") == true, "exhausted allowance omitted resume advice")
+        configuredTeam["limitReason"] = "Token usage unavailable; the token limit cannot be enforced"
+        try send(["event":"team", "chat":"A", "team":configuredTeam])
+        check(model.team?.limitAdvice?.contains("Clear the token limit") == true && model.team?.limitAdvice?.contains("Resume starts") == false,
+              "unavailable usage incorrectly promised that Resume fixes it")
         try send(["event":"team", "chat":"A", "team":roster("ready")])
         let beforeTeamSwitch = commands.count
         model.setRoute("ollama/test|"); model.setEffort("low")

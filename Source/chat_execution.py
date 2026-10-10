@@ -123,6 +123,7 @@ def checkpoint(service):
         member["idleCheckpoints"] = 0 if member.pop("newEvidence", False) else member.get("idleCheckpoints", 0) + 1
         if member["idleCheckpoints"] >= 3:
             from chat_runtime import entry
+            member["waitReason"] = "Paused: no new tool results in three checkpoints"
             service.chat["status"] = "stopped"
             service.add(entry("notice", "No new tool results across three checkpoints. Team paused for review.",
                               service.chat["route"], noticeKind="team_progress"))

@@ -54,14 +54,17 @@ struct ChatTeamControls: View {
                 if team.needsInput {
                     Text("Answer in the main composer to continue.").font(.system(size: 11.5)).foregroundStyle(.secondary)
                 }
-                if let reason = team.limitReason, team.status == "limit_reached" {
-                    Text(reason + ". Resume starts a new allowance.")
+                if let advice = team.limitAdvice {
+                    Text(advice)
                         .font(.system(size: 11.5)).foregroundStyle(.secondary).textSelection(.enabled)
                 }
                 if let run = team.runUsage, let tokens = run.tokens, (run.requests ?? 0) > 0 {
-                    Text("Run · \(tokens.formatted()) reported tokens" + (run.usageComplete == false ? " (partial)" : ""))
-                        .font(.system(size: 10.5)).foregroundStyle(.secondary)
-                        .help("Cumulative input, output and cache tokens reported by all members in this run. Separate from context usage; not a billing estimate.")
+                    TimelineView(.periodic(from: .now, by: 60)) { tick in
+                        Text(runReadout(team, tokens: tokens, now: tick.date))
+                            .font(.system(size: 10.5)).foregroundStyle(.secondary)
+                            .help("Cumulative input, output and cache tokens across all members; not a billing estimate." +
+                                  (run.usageComplete == false ? " Some requests did not report usage." : ""))
+                    }
                 }
                 HStack {
                     if team.canResume {
@@ -80,6 +83,16 @@ struct ChatTeamControls: View {
             if model.teamRequest != nil { ProgressView().controlSize(.small) }
         }.padding(14)
         .sheet(isPresented: $editing) { ChatTeamEditor(model: model) }
+    }
+    private func runReadout(_ team: ChatTeamSnapshot, tokens: Int, now: Date) -> String {
+        var parts = ["Run"]
+        if let limit = team.execution?.minutes, let start = team.runUsage?.started {
+            let end = team.runUsage?.ended ?? now.timeIntervalSince1970
+            parts.append("\(max(0, Int((end - start) / 60))) of \(limit) min")
+        }
+        parts.append(tokens.formatted() + (team.execution?.tokens.map { " of \($0.formatted())" } ?? "") + " reported tokens" +
+                     (team.runUsage?.usageComplete == false ? " (partial)" : ""))
+        return parts.joined(separator: " · ")
     }
 }
 
@@ -130,37 +143,6 @@ private struct ChatTeamEditor: View {
                 .font(.system(size: 12)).foregroundStyle(.secondary)
             ScrollView {
                 VStack(spacing: 12) {
-                    DisclosureGroup("Run settings") {
-                        VStack(alignment: .leading, spacing: 10) {
-                            Picker("Work mode", selection: $mode) {
-                                Text("Task").tag("task")
-                                Text("One contribution").tag("contribution")
-                            }.pickerStyle(.segmented)
-                            Text(mode == "task"
-                                 ? "Keep working through checkpoints until finished or stopped."
-                                 : "One contribution per member; members can request another.")
-                                .font(.system(size: 11)).foregroundStyle(.secondary)
-                            HStack {
-                                Text("Time limit (minutes)").frame(width: 160, alignment: .leading)
-                                TextField("No limit", text: $minutes).textFieldStyle(.roundedBorder)
-                            }
-                            HStack {
-                                Text("Reported token limit").frame(width: 160, alignment: .leading)
-                                TextField("No limit", text: $tokens).textFieldStyle(.roundedBorder)
-                            }
-                            HStack {
-                                Text("Context per member").frame(width: 160, alignment: .leading)
-                                TextField("200000", text: $contextTokens).textFieldStyle(.roundedBorder)
-                            }
-                            Stepper("Background processes: \(processSlots)", value: $processSlots, in: 1...8)
-                            Text("Limits apply to the whole run; in-flight requests can exceed them. Context uses the smaller of this value and the model’s window. Process slots are shared fairly. Dollar limits are unavailable.")
-                                .font(.system(size: 10.5)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                            if execution == nil {
-                                Text("Use whole numbers: 1–10,080 minutes, 1–2 billion tokens, and 16,000–2 million context tokens. Leave run limits blank for no limit.")
-                                    .font(.system(size: 10.5)).foregroundStyle(HubTheme.Semantic.contextCritical)
-                            }
-                        }.font(.system(size: 12)).padding(.top, 8)
-                    }
                     ForEach($drafts) { $member in
                         VStack(alignment: .leading, spacing: 8) {
                             HStack {
@@ -190,6 +172,7 @@ private struct ChatTeamEditor: View {
                                 .lineLimit(2...4).textFieldStyle(.roundedBorder)
                         }.padding(10).background(HubTheme.Semantic.surface, in: RoundedRectangle(cornerRadius: 8))
                     }
+                    runSettings
                 }
             }.frame(maxHeight: 410)
             HStack {
@@ -220,5 +203,41 @@ private struct ChatTeamEditor: View {
         let currentEffort = model.selected?.effort ?? ""
         drafts.append(TeamDraft(id: UUID().uuidString, name: "Member \(drafts.count + 1)",
                                 choice: choice.id, effort: choice.efforts.contains(currentEffort) ? currentEffort : "", responsibility: ""))
+    }
+    private var runSettings: some View {
+        DisclosureGroup("Run settings · " + (mode == "task" ? "Task" : "One contribution") +
+                        (execution?.minutes.map { " · \($0) min" } ?? "")) {
+            VStack(alignment: .leading, spacing: 10) {
+                Picker("Work mode", selection: $mode) {
+                    Text("Task").tag("task")
+                    Text("One contribution").tag("contribution")
+                }.pickerStyle(.segmented)
+                Text(mode == "task" ? "Keep working through checkpoints until finished or stopped." :
+                     "One contribution per member; members can request another.")
+                    .font(.system(size: 11)).foregroundStyle(.secondary)
+                HStack {
+                    Text("Time limit (minutes)").frame(width: 160, alignment: .leading)
+                    TextField("No limit", text: $minutes).textFieldStyle(.roundedBorder).accessibilityLabel("Time limit in minutes")
+                }
+                HStack {
+                    Text("Reported token limit").frame(width: 160, alignment: .leading)
+                    TextField("No limit", text: $tokens).textFieldStyle(.roundedBorder).accessibilityLabel("Reported token limit")
+                }
+                Picker("Context per member", selection: $contextTokens) {
+                    ForEach(Array(Set([16000, 32000, 64000, 128000, 200000, 500000, 1000000, 2000000,
+                                       Int(contextTokens) ?? 200000])).sorted(), id: \.self) { value in
+                        Text(value.formatted() + " tokens").tag(String(value))
+                    }
+                }.help("Uses the smaller of this ceiling and the model’s window; space is reserved for output and notes.")
+                Stepper("Background processes: \(processSlots)", value: $processSlots, in: 1...8)
+                    .help("Shared across this Team. Extra launches reserve capacity for active peers; eight processes maximum across Chat.")
+                Text("A new message or Resume starts a fresh run allowance; updates to active work keep it. Limits are checked between requests and actions, so work already running can go over. A token limit pauses if usage is unavailable. Spending limits are unavailable because providers do not report reliable charges.")
+                    .font(.system(size: 10.5)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                if execution == nil {
+                    Text("Use whole numbers: 1–10,080 minutes or 1–2 billion tokens. Leave run limits blank for no limit.")
+                        .font(.system(size: 10.5)).foregroundStyle(HubTheme.Semantic.contextCritical)
+                }
+            }.font(.system(size: 12)).padding(.top, 8)
+        }
     }
 }

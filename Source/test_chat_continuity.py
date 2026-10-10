@@ -114,6 +114,8 @@ class ContinuityTests(unittest.TestCase):
         try:
             self.send(parent)
             self.wait_for(lambda: first["status"] == "waiting")
+            self.assertEqual(first["waitReason"], "Waiting for Member 2 to finish")
+            self.assertIn(second["id"], self.transports[0].requests[0]["system"])
             self.assertEqual(len(self.transports[0].requests), 1)
         finally:
             release.set(); self.finish(parent)
@@ -243,6 +245,8 @@ class ContinuityTests(unittest.TestCase):
         self.assertEqual(parent.chat["team"]["status"], "stopped")
         self.assertEqual(len(self.transports[0].requests), 4)
         self.assertIn("No new tool results", json.dumps(parent.chat["entries"]))
+        self.assertEqual(parent.chat["team"]["members"][0]["waitReason"], "Paused: no new tool results in three checkpoints")
+        self.assertGreaterEqual(parent.chat["team"]["runUsage"]["ended"], parent.chat["team"]["runUsage"]["started"])
 
     def test_effective_context_and_progress_survive_contribution_and_disk(self):
         parent = self.task_team([[call("team_status", {"state": "continue", "next_step": "Implement", "findings": "Importer found", "owned_paths": ["renderer.py"]}),

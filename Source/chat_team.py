@@ -647,7 +647,12 @@ def finish_contribution(chat, member):
         return
     if decision["state"] == "waiting":
         member.update(status="waiting", waitFor=decision["waitFor"])
-        member["waitReason"] = "Waiting for " + decision["waitFor"]["kind"] + " " + decision["waitFor"]["id"]
+        dependency = decision["waitFor"]
+        if dependency["kind"] == "member":
+            name = next(m["name"] for m in team["members"] if m["id"] == dependency["id"])
+            member["waitReason"] = "Waiting for " + name + " to finish"
+        else:
+            member["waitReason"] = "Waiting for " + dependency["id"] + " to exit"
         return
     team["queue"] = [identifier for identifier in team["queue"] if identifier != member["id"]]
     if decision["state"] == "continue":
@@ -660,6 +665,7 @@ def finish_contribution(chat, member):
         team["queue"].append(member["id"])
         if member["repeats"] >= 2:
             member["status"] = "stopped"; team["status"] = "stopped"
+            member["waitReason"] = "Paused: same contribution three times"
             return member["name"] + " repeated the same contribution three times. Team paused for review."
     else:
         member["status"] = "done"
@@ -928,6 +934,9 @@ def run(parent):
             parent.add(entry("notice" if stopped else "error", "Team stopped. Recorded results are kept." if stopped else str(exc), chat["route"], isError=not stopped))
     finally:
         with parent._mutex:
+            if team.get("runUsage"):
+                import time
+                team["runUsage"]["ended"] = time.time()
             team.update(activeMemberID=None, activeMemberIDs=[])
             parent.team_children.clear(); parent.approval = None
             chat["status"] = "ready" if team["status"] in {"done", "needs_input"} else team["status"]

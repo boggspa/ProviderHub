@@ -114,7 +114,8 @@ struct ChatTeamMember: Decodable, Identifiable {
     var failureReason: String?
     var waitReason: String?; var modelContext: Int?; var checkpoints: Int?
     var statusLabel: String {
-        status == "limit_reached" ? "Limit reached" : status.replacingOccurrences(of: "_", with: " ").capitalized
+        let text = status.replacingOccurrences(of: "_", with: " ")
+        return text.prefix(1).uppercased() + text.dropFirst()
     }
     var configuration: [String: Any] {
         ["id": id, "name": name, "choice": choice, "effort": effort, "responsibility": responsibility]
@@ -137,7 +138,7 @@ struct ChatTeamExecution: Decodable {
     }
 }
 struct ChatTeamRunUsage: Decodable {
-    var started: Double?; var tokens: Int?; var requests: Int?; var usageComplete: Bool?
+    var started: Double?; var ended: Double?; var tokens: Int?; var requests: Int?; var usageComplete: Bool?
 }
 struct ChatTeamSnapshot: Decodable {
     /// The runtime's MAX_MEMBERS (chat_team.py), including the chat's own model.
@@ -146,6 +147,12 @@ struct ChatTeamSnapshot: Decodable {
     var activeMemberIDs: [String]?
     var execution: ChatTeamExecution?; var runUsage: ChatTeamRunUsage?; var limitReason: String?
     var taskMode: Bool { execution?.mode == "task" }
+    var limitAdvice: String? {
+        guard status == "limit_reached", let limitReason else { return nil }
+        return limitReason + (["Time limit reached", "Token limit reached"].contains(limitReason)
+                             ? ". Resume starts a new allowance."
+                             : ". Clear the token limit in Run settings to continue.")
+    }
     var active: ChatTeamMember? { members.first { $0.id == activeMemberID } }
     var needsInput: Bool { members.contains { $0.status == "needs_input" } }
     var canResume: Bool { enabled && !needsInput && ["stopped", "interrupted", "error", "limit_reached"].contains(status) && members.contains { $0.status != "done" } }
@@ -291,7 +298,7 @@ struct ChatTeamSnapshot: Decodable {
             }
             if let value = event["team"], !(value is NSNull) {
                 guard let snapshot = decoded(value, as: ChatTeamSnapshot.self),
-                      (1...3).contains(snapshot.members.count), Set(snapshot.members.map(\.id)).count == snapshot.members.count else { return }
+                      (1...ChatTeamSnapshot.maxMembers).contains(snapshot.members.count), Set(snapshot.members.map(\.id)).count == snapshot.members.count else { return }
                 team = snapshot
             } else { team = nil }
             teamNotice = event["notice"] as? String ?? ""
