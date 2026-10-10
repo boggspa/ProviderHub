@@ -11,7 +11,7 @@ struct ChatTeamControls: View {
                 Text("Team").font(.system(size: 13, weight: .semibold))
                 Spacer()
                 Button(model.team == nil ? "Set up" : "Edit") { editing = true }
-                    .controlSize(.small).disabled(!model.canConfigureTeam)
+                    .controlSize(.small).disabled(!model.canEditTeam)
             }
             Text(model.team?.taskMode == false
                  ? "One contribution each. Members can continue when more work is needed."
@@ -25,12 +25,17 @@ struct ChatTeamControls: View {
                             ChatProviderIcon(presentation: model.models.first { $0.id == member.choice }?.presentation)
                             Text(member.name).font(.system(size: 12, weight: .medium))
                             Spacer(minLength: 0)
-                            if member.status == "working" { ProgressView().controlSize(.mini) }
+                            if member.status == "working" || member.pendingChange != nil { ProgressView().controlSize(.mini) }
                             Text(member.statusLabel)
                                 .font(.system(size: 10.5)).foregroundStyle(member.status == "error" ? HubTheme.Semantic.contextCritical : HubTheme.Semantic.secondaryInk)
+                                .help(member.pendingChange == nil ? "" : "Applies after this member's current step; a running tool finishes and records its result first.")
                         }
                         Text(member.label + (member.account.isEmpty ? "" : " · " + member.account))
                             .font(.system(size: 10.5)).foregroundStyle(.secondary).lineLimit(2)
+                        if let pending = member.pendingChange, !pending.remove, let label = pending.label {
+                            Text("→ " + (pending.name.map { $0 == member.name ? label : $0 + " · " + label } ?? label))
+                                .font(.system(size: 10.5)).foregroundStyle(.secondary).lineLimit(1)
+                        }
                         if !member.responsibility.isEmpty {
                             Text(member.responsibility).font(.system(size: 11.5)).lineLimit(3)
                         }
@@ -138,9 +143,17 @@ private struct ChatTeamEditor: View {
     }
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            HStack { Text("Configure Team").font(.headline); Spacer(); Toggle("Use Team", isOn: $enabled).toggleStyle(.switch) }
+            HStack {
+                Text("Configure Team").font(.headline); Spacer()
+                Toggle("Use Team", isOn: $enabled).toggleStyle(.switch).disabled(model.busy)
+                    .help(model.busy ? "Stop the Team before turning it off." : "")
+            }
             Text("The first member replaces the current chat model while Team is on. Every member keeps a private model history and shares visible work in this transcript.")
                 .font(.system(size: 12)).foregroundStyle(.secondary)
+            if model.busy {
+                Text("The Team is working. Each member changes at its next safe point: a model request is cancelled, while a running tool finishes and records its result first. A replaced member keeps its place and picks up its work on the new model.")
+                    .font(.system(size: 11.5)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
             ScrollView {
                 VStack(spacing: 12) {
                     ForEach($drafts) { $member in
@@ -181,7 +194,7 @@ private struct ChatTeamEditor: View {
                 Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
                 Button("Save Team") {
                     model.configureTeam(enabled: enabled, members: drafts.map(\.wire), execution: execution); dismiss()
-                }.keyboardShortcut(.defaultAction).disabled(!valid || !model.canConfigureTeam)
+                }.keyboardShortcut(.defaultAction).disabled(!valid || !model.canEditTeam)
             }
         }.padding(20).frame(width: 480)
         .onAppear {
@@ -193,8 +206,13 @@ private struct ChatTeamEditor: View {
                 tokens = settings.tokens.map(String.init) ?? ""
                 contextTokens = String(settings.contextTokens)
                 processSlots = settings.processes
-                drafts = team.members.map { TeamDraft(id: $0.id, existingID: $0.id, name: $0.name,
-                                                      choice: $0.choice, effort: $0.effort, responsibility: $0.responsibility) }
+                // A pending edit is what the user last asked for; saving again supersedes it.
+                drafts = team.members.filter { $0.pendingChange?.remove != true }.map { member in
+                    let pending = member.pendingChange
+                    return TeamDraft(id: member.id, existingID: member.id, name: pending?.name ?? member.name,
+                                     choice: pending?.choice ?? member.choice, effort: pending?.effort ?? member.effort,
+                                     responsibility: pending?.responsibility ?? member.responsibility)
+                }
             } else { add() }
         }
     }
