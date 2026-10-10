@@ -36,11 +36,17 @@ struct ChatBlackboardPost: Decodable, Identifiable, Equatable {
 struct ChatBlackboardFile: Decodable, Identifiable, Equatable {
     var id: String; var name: String; var kind: String; var path: String?; var url: String?
     var size: Int; var source: String; var entryID: String?
+    /// Who added a board item: a member ID or "user". Message files are the user's.
+    var author: String?; var authorName: String?; var route: String?
+    /// The user may remove any added item; message files leave with their message.
     var removable: Bool { source == "board" }
-    private enum CodingKeys: String, CodingKey { case id, name, kind, path, url, size, source, entryID }
-    init(id: String, name: String, kind: String, path: String? = nil, url: String? = nil, size: Int = 0, source: String = "board", entryID: String? = nil) {
+    var byUser: Bool { source == "message" || (author ?? "user") == "user" }
+    private enum CodingKeys: String, CodingKey { case id, name, kind, path, url, size, source, entryID, author, authorName, route }
+    init(id: String, name: String, kind: String, path: String? = nil, url: String? = nil, size: Int = 0, source: String = "board", entryID: String? = nil,
+         author: String? = nil, authorName: String? = nil, route: String? = nil) {
         self.id = id; self.name = name; self.kind = kind; self.path = path; self.url = url
         self.size = size; self.source = source; self.entryID = entryID
+        self.author = author; self.authorName = authorName; self.route = route
     }
     init(from decoder: Decoder) throws {
         let row = try decoder.container(keyedBy: CodingKeys.self)
@@ -50,6 +56,9 @@ struct ChatBlackboardFile: Decodable, Identifiable, Equatable {
         size = (try? row.decodeIfPresent(Int.self, forKey: .size)) ?? 0
         source = (try? row.decodeIfPresent(String.self, forKey: .source)) ?? "board"
         entryID = try? row.decodeIfPresent(String.self, forKey: .entryID)
+        author = try? row.decodeIfPresent(String.self, forKey: .author)
+        authorName = try? row.decodeIfPresent(String.self, forKey: .authorName)
+        route = try? row.decodeIfPresent(String.self, forKey: .route)
     }
 }
 

@@ -1,9 +1,5 @@
 import AppKit
-import AVFoundation
-import ImageIO
-import PDFKit
 import SwiftUI
-import UniformTypeIdentifiers
 
 /// The Team Blackboard, drawn in the Team inspector pane and in its own window.
 /// The worker owns the board (chat_blackboard.py); these views render its
@@ -318,9 +314,18 @@ private struct ChatBlackboardTile: View {
         VStack(alignment: .leading, spacing: 3) {
             Button(action: open) { preview }.buttonStyle(.plain).help(file.url ?? file.name)
             Text(file.name).font(.system(size: 10.5)).foregroundStyle(Semantic.ink).lineLimit(1).truncationMode(.middle)
-            Text(detail).font(.system(size: 9.5)).foregroundStyle(Semantic.secondaryInk).lineLimit(1)
+            HStack(spacing: 3) {
+                // Attribution: a member's provider mark and name, or "You".
+                if !file.byUser {
+                    ChatProviderIcon(presentation: model.models.first { $0.route == file.route }?.presentation, size: 10)
+                    Text(file.authorName ?? "Member").foregroundStyle(model.accent(for: file.route ?? ""))
+                    Text("·").foregroundStyle(Semantic.secondaryInk)
+                }
+                Text(detail).foregroundStyle(Semantic.secondaryInk)
+            }.font(.system(size: 9.5)).lineLimit(1)
         }
         .frame(width: width, alignment: .leading)
+        .help(file.byUser ? file.name : file.name + " · added by " + (file.authorName ?? "a member"))
         .contextMenu {
             Button("Open") { open() }
             if let path = file.path {
@@ -335,7 +340,10 @@ private struct ChatBlackboardTile: View {
         }
         .accessibilityElement(children: .combine)
         .accessibilityLabel("Blackboard \(file.kind): \(file.name)")
-        .task(id: file.id) { image = await ChatBlackboardThumbnails.load(file, directory: directory) }
+        .task(id: file.id) {
+            guard let path = file.path else { return }
+            image = await ChatBlackboardThumbnails.load(path: path, kind: file.kind, id: file.id, directory: directory)
+        }
     }
     @ViewBuilder private var preview: some View {
         ZStack {
@@ -364,163 +372,5 @@ private struct ChatBlackboardTile: View {
         } else if let path = file.path {
             NSWorkspace.shared.open(URL(fileURLWithPath: path))
         }
-    }
-}
-
-/// Small previews for board files, rendered off the main thread and cached as
-/// PNGs (at most `maxEdge` pixels on a side) in the chat's private
-/// `blackboard/thumbnails` folder. Images use ImageIO's thumbnail decoder,
-/// video a filmstrip of evenly spaced frames, audio a peak waveform read with
-/// AVAssetReader, and PDFs their first page. Other files keep a glyph chip.
-enum ChatBlackboardThumbnails {
-    static let maxEdge = 360
-    static let waveformBuckets = 200
-    static let filmstripFrames = 5
-    private static let memory: NSCache<NSString, NSImage> = { let cache = NSCache<NSString, NSImage>(); cache.countLimit = 200; return cache }()
-
-    static func load(_ file: ChatBlackboardFile, directory: String) async -> NSImage? {
-        guard let path = file.path, ["image", "video", "audio", "pdf"].contains(file.kind), !directory.isEmpty,
-              file.id.allSatisfy({ $0.isLetter || $0.isNumber }) else { return nil }
-        let key = (directory + "/" + file.id) as NSString
-        if let image = memory.object(forKey: key) { return image }
-        let kind = file.kind, id = file.id
-        let image = await Task.detached(priority: .utility) { () -> NSImage? in
-            let folder = URL(fileURLWithPath: directory, isDirectory: true)
-            let target = folder.appendingPathComponent(id + ".png")
-            if let data = try? Data(contentsOf: target), let image = NSImage(data: data) { return image }
-            guard let rendered = await render(kind, URL(fileURLWithPath: path)) else { return nil }
-            store(rendered, at: target, in: folder)
-            return NSImage(cgImage: rendered, size: NSSize(width: rendered.width / 2, height: rendered.height / 2))
-        }.value
-        if let image { memory.setObject(image, forKey: key) }
-        return image
-    }
-
-    static func render(_ kind: String, _ url: URL) async -> CGImage? {
-        switch kind {
-        case "image": return still(url)
-        case "pdf": return page(url)
-        case "video": return await filmstrip(url)
-        case "audio": return await waveform(url)
-        default: return nil
-        }
-    }
-
-    static func still(_ url: URL) -> CGImage? {
-        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
-        return CGImageSourceCreateThumbnailAtIndex(source, 0, [
-            kCGImageSourceCreateThumbnailFromImageAlways: true, kCGImageSourceCreateThumbnailWithTransform: true,
-            kCGImageSourceThumbnailMaxPixelSize: maxEdge] as CFDictionary)
-    }
-
-    static func page(_ url: URL) -> CGImage? {
-        guard let page = PDFDocument(url: url)?.page(at: 0) else { return nil }
-        let bounds = page.bounds(for: .cropBox)
-        guard bounds.width > 0, bounds.height > 0 else { return nil }
-        let scale = CGFloat(maxEdge) / max(bounds.width, bounds.height)
-        let size = CGSize(width: max(1, (bounds.width * scale).rounded()), height: max(1, (bounds.height * scale).rounded()))
-        guard let context = canvas(size) else { return nil }
-        context.setFillColor(NSColor.white.cgColor); context.fill(CGRect(origin: .zero, size: size))
-        context.scaleBy(x: scale, y: scale); context.translateBy(x: -bounds.minX, y: -bounds.minY)
-        page.draw(with: .cropBox, to: context)
-        return context.makeImage()
-    }
-
-    static func filmstrip(_ url: URL) async -> CGImage? {
-        let asset = AVURLAsset(url: url)
-        guard let duration = try? await asset.load(.duration), duration.seconds.isFinite, duration.seconds > 0 else { return nil }
-        let generator = AVAssetImageGenerator(asset: asset)
-        generator.appliesPreferredTrackTransform = true
-        generator.maximumSize = CGSize(width: 160, height: 160)
-        let tolerance = CMTime(seconds: max(0.1, duration.seconds / Double(filmstripFrames * 4)), preferredTimescale: 600)
-        generator.requestedTimeToleranceBefore = tolerance; generator.requestedTimeToleranceAfter = tolerance
-        var frames: [CGImage] = []
-        for index in 0..<filmstripFrames {
-            if Task.isCancelled { return nil }
-            let time = CMTime(seconds: duration.seconds * (Double(index) + 0.5) / Double(filmstripFrames), preferredTimescale: 600)
-            if let frame = try? await generator.image(at: time).image { frames.append(frame) }
-        }
-        guard let first = frames.first, first.height > 0 else { return nil }
-        let height = CGFloat(min(maxEdge / filmstripFrames * 3 / 2, first.height))
-        let widths = frames.map { CGFloat($0.width) * height / CGFloat(max(1, $0.height)) }
-        let gap: CGFloat = 2
-        var total = widths.reduce(0, +) + gap * CGFloat(frames.count - 1)
-        let shrink = min(1, CGFloat(maxEdge) / total)
-        total = (total * shrink).rounded()
-        guard let context = canvas(CGSize(width: max(1, total), height: max(1, (height * shrink).rounded()))) else { return nil }
-        var x: CGFloat = 0
-        for (frame, width) in zip(frames, widths) {
-            context.draw(frame, in: CGRect(x: x, y: 0, width: width * shrink, height: height * shrink))
-            x += (width + gap) * shrink
-        }
-        return context.makeImage()
-    }
-
-    /// Peak amplitude per bucket from 16-bit PCM. Peaks are first gathered per
-    /// fixed run of samples (so the duration need not be known), then reduced
-    /// to `waveformBuckets` bars.
-    static func waveform(_ url: URL) async -> CGImage? {
-        let asset = AVURLAsset(url: url)
-        guard let track = try? await asset.loadTracks(withMediaType: .audio).first,
-              let reader = try? AVAssetReader(asset: asset) else { return nil }
-        let output = AVAssetReaderTrackOutput(track: track, outputSettings: [
-            AVFormatIDKey: kAudioFormatLinearPCM, AVLinearPCMBitDepthKey: 16, AVLinearPCMIsFloatKey: false,
-            AVLinearPCMIsBigEndianKey: false, AVLinearPCMIsNonInterleaved: false])
-        output.alwaysCopiesSampleData = false
-        guard reader.canAdd(output) else { return nil }
-        reader.add(output)
-        guard reader.startReading() else { return nil }
-        let run = 2048
-        var peaks: [Float] = [], peak: Int32 = 0, count = 0
-        var samples: [Int16] = []
-        while let buffer = output.copyNextSampleBuffer() {
-            if Task.isCancelled || peaks.count > 4_000_000 { reader.cancelReading(); return nil }
-            guard let block = CMSampleBufferGetDataBuffer(buffer) else { continue }
-            let length = CMBlockBufferGetDataLength(block) / 2
-            if samples.count < length { samples = [Int16](repeating: 0, count: length) }
-            let copied = samples.withUnsafeMutableBytes { CMBlockBufferCopyDataBytes(block, atOffset: 0, dataLength: length * 2, destination: $0.baseAddress!) }
-            guard copied == kCMBlockBufferNoErr else { continue }
-            for index in 0..<length {
-                let value = abs(Int32(samples[index]))
-                if value > peak { peak = value }
-                count += 1
-                if count == run { peaks.append(Float(peak) / 32768); peak = 0; count = 0 }
-            }
-        }
-        if count > 0 { peaks.append(Float(peak) / 32768) }
-        guard reader.status == .completed, !peaks.isEmpty else { return nil }
-        let buckets = waveformBuckets
-        var bars = [Float](repeating: 0, count: buckets)
-        for bucket in 0..<buckets {
-            let start = bucket * peaks.count / buckets, end = max(start + 1, (bucket + 1) * peaks.count / buckets)
-            bars[bucket] = peaks[min(start, peaks.count - 1)..<min(end, peaks.count)].max() ?? 0
-        }
-        let loudest = max(bars.max() ?? 0, 0.001)
-        let size = CGSize(width: buckets * 2, height: 72)
-        guard let context = canvas(size) else { return nil }
-        context.setFillColor(NSColor.black.cgColor)
-        for (index, bar) in bars.enumerated() {
-            let height = max(1.5, CGFloat(bar / loudest) * (size.height - 4))
-            context.fill(CGRect(x: CGFloat(index * 2), y: (size.height - height) / 2, width: 1.4, height: height))
-        }
-        return context.makeImage()
-    }
-
-    private static func canvas(_ size: CGSize) -> CGContext? {
-        CGContext(data: nil, width: Int(size.width), height: Int(size.height), bitsPerComponent: 8, bytesPerRow: 0,
-                  space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
-    }
-
-    private static func store(_ image: CGImage, at target: URL, in folder: URL) {
-        // Private like the rest of the chat's storage; a cache that cannot be
-        // written only costs a re-render next time.
-        guard (try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true,
-                                                         attributes: [.posixPermissions: 0o700])) != nil else { return }
-        let data = NSMutableData()
-        guard let destination = CGImageDestinationCreateWithData(data, UTType.png.identifier as CFString, 1, nil) else { return }
-        CGImageDestinationAddImage(destination, image, nil)
-        guard CGImageDestinationFinalize(destination) else { return }
-        try? (data as Data).write(to: target, options: [.atomic])
-        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: target.path)
     }
 }

@@ -403,6 +403,8 @@ struct Item: ChatTranscriptItem {
               == ChatToolDisplay(verb: "Pinned to the Blackboard", subject: "schema (risk)", code: true), "Blackboard post phrasing")
         check(ChatToolDisplay.describe(tool: "blackboard_remove", summary: "Removed schema", live: true).verb == "Removing a Blackboard post", "Live Blackboard removal")
         check(ChatToolDisplay.activity(["blackboard_post", "blackboard_post", "blackboard_read"]) == "2 pins, 1 board read", "Blackboard fold activity")
+        check(ChatToolDisplay.describe(tool: "blackboard_attach", summary: "Added notes.txt, example.com/spec")
+              == ChatToolDisplay(verb: "Added to the Blackboard", subject: "notes.txt, example.com/spec"), "Blackboard attach phrasing")
 
         // Source links collapse only when the line is exactly the runtime's list.
         let cited = ChatReplySources.split("Body\n\nSources: [A \\[x\\]](<https://www.a.com/p>), [B](<https://b.org/q?x=1>)")

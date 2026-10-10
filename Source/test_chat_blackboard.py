@@ -1,8 +1,10 @@
 """Team Blackboard: bounded store, user commands, member tools and projection."""
 import json
+import os
 from pathlib import Path
 import stat
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -111,6 +113,69 @@ class BlackboardStoreTests(unittest.TestCase):
         self.assertEqual(len(list(folder.iterdir())), 1, "a refused attach left a copy behind")
         with self.assertRaises(ValueError): blackboard.attach(self.chat, self.root, paths=[str(self.root)], now=NOW)
 
+    def member_workspace(self):
+        workspace = self.root / "work"; (workspace / "notes").mkdir(parents=True)
+        (workspace / "notes" / "a.txt").write_text("finding")
+        outside = self.root / "secret.txt"; outside.write_text("secret")
+        (workspace / "escape.txt").symlink_to(outside)
+        (workspace / "linked").symlink_to(self.root, target_is_directory=True)
+        return workspace, self.root / "store"
+
+    def test_member_files_must_be_readable_regular_files_inside_the_workspace(self):
+        workspace, store = self.member_workspace()
+        locked = workspace / "locked.txt"; locked.write_text("x"); locked.chmod(0)
+        self.addCleanup(locked.chmod, 0o600)
+        cases = [("../secret.txt", "Parent traversal"), (str(self.root / "secret.txt"), "outside workspace"),
+                 ("escape.txt", "Symlink"), ("linked/secret.txt", "Symlink"), ("notes", "not a regular file"),
+                 (".", "Expected a file path"), ("missing.txt", "does not exist")]
+        if os.geteuid() != 0: cases.append(("locked.txt", "cannot be read"))
+        for path, message in cases:
+            with self.subTest(path), self.assertRaisesRegex(ValueError, message):
+                blackboard.member_attach(self.chat, store, str(workspace), MEMBER, paths=[path], now=NOW)
+        # One bad item refuses the whole call: nothing stored, nothing copied.
+        with self.assertRaises(ValueError):
+            blackboard.member_attach(self.chat, store, str(workspace), MEMBER, paths=["notes/a.txt", "../secret.txt"], now=NOW)
+        self.assertNotIn("blackboard", self.chat)
+        self.assertFalse(blackboard.directory(store, self.chat["id"]).exists())
+
+    def test_member_file_cap_links_and_attribution(self):
+        workspace, store = self.member_workspace()
+        with (workspace / "big.bin").open("wb") as stream: stream.truncate(blackboard.MAX_MEMBER_FILE_BYTES + 1)
+        with self.assertRaisesRegex(ValueError, "8 MiB"):
+            blackboard.member_attach(self.chat, store, str(workspace), MEMBER, paths=["big.bin"], now=NOW)
+        for url in ("ftp://example.com/a", "file:///etc/passwd", "javascript:alert(1)", "https://u:p@example.com"):
+            with self.subTest(url), self.assertRaisesRegex(ValueError, "http or https"):
+                blackboard.member_attach(self.chat, store, str(workspace), MEMBER, links=[{"url": url}], now=NOW)
+        with self.assertRaisesRegex(ValueError, "at most"):
+            blackboard.member_attach(self.chat, store, str(workspace), MEMBER, links=[{"url": "https://a.example"}] * 5, now=NOW)
+        added = blackboard.member_attach(self.chat, store, str(workspace), MEMBER, paths=["notes/a.txt"],
+                                         links=[{"url": "https://example.com/spec", "title": "Spec"}], now=NOW)
+        self.assertEqual([(i["kind"], i["name"], i["author"], i["authorName"], i["route"]) for i in added],
+                         [("file", "a.txt", "m1", "Sol", "ollama/test"), ("url", "Spec", "m1", "Sol", "ollama/test")])
+        copy = Path(added[0]["path"])
+        self.assertEqual((copy.read_text(), copy.parent), ("finding", blackboard.directory(store, self.chat["id"])))
+        self.assertEqual(stat.S_IMODE(copy.stat().st_mode), 0o600)
+        listed = json.loads(blackboard.digest(self.chat)["content"][0]["text"].rsplit("remove your own by id): ", 1)[1])
+        self.assertEqual({(row["name"], row["by"], row["author_id"]) for row in listed}, {("a.txt", "Sol", "m1"), ("Spec", "Sol", "m1")})
+        self.assertNotIn(str(copy), blackboard.digest(self.chat)["content"][0]["text"], "a private path reached model context")
+
+    def test_attachment_removal_rights(self):
+        workspace, store = self.member_workspace()
+        mine = blackboard.member_attach(self.chat, store, str(workspace), MEMBER, links=[{"url": "https://a.example"}], now=NOW)[0]
+        users = blackboard.attach(self.chat, store, url="https://b.example", now=NOW)[0]
+        self.assertEqual(users["author"], "user")
+        with self.assertRaisesRegex(ValueError, "only be removed by the user"):
+            blackboard.detach(self.chat, store, users["id"], by="m1")
+        with self.assertRaisesRegex(ValueError, "only your own"):
+            blackboard.detach(self.chat, store, mine["id"], by="m2")
+        # Rows saved before attribution existed are the user's.
+        self.chat["blackboard"]["attachments"].append({"id": "legacy", "name": "old", "kind": "url", "url": "https://c.example", "size": 0})
+        with self.assertRaisesRegex(ValueError, "only be removed by the user"):
+            blackboard.detach(self.chat, store, "legacy", by="m1")
+        blackboard.detach(self.chat, store, mine["id"], by="m1")
+        blackboard.detach(self.chat, store, users["id"])
+        self.assertEqual([item["id"] for item in self.chat["blackboard"]["attachments"]], ["legacy"])
+
     def test_digest_is_bounded_and_says_what_it_left_out(self):
         self.assertIsNone(blackboard.digest(self.chat))
         for index in range(40):
@@ -168,14 +233,18 @@ class BlackboardCommandTests(unittest.TestCase):
         self.assertEqual(list(folder.iterdir()) if folder.exists() else [], [])
 
     def test_solo_chat_model_has_no_blackboard_tools(self):
-        self.transport.responses.extend([call("blackboard_post", {"key": "x", "body": "y"}), response("ok")])
+        (self.root / "notes.txt").write_text("hello")
+        self.transport.responses.extend([call("blackboard_post", {"key": "x", "body": "y"}),
+                                         call("blackboard_attach", {"paths": ["notes.txt"]}), response("ok")])
         self.service.handle({"command": "send", "id": self.chat["id"], "text": "Pin it"})
         self.service.thread.join(3)
         offered = {tool["name"] for tool in self.transport.requests[0]["tools"]}
         self.assertFalse(offered & blackboard.TOOLS)
-        row = next(item for item in self.chat["entries"] if item.get("tool") == "blackboard_post")
-        self.assertTrue(row["isError"]); self.assertIn("only to Team members", row["detail"])
+        for tool in ("blackboard_post", "blackboard_attach"):
+            row = next(item for item in self.chat["entries"] if item.get("tool") == tool)
+            self.assertTrue(row["isError"]); self.assertIn("only to Team members", row["detail"])
         self.assertNotIn("blackboard", self.chat)
+        self.assertFalse(blackboard.directory(self.store.root, self.chat["id"]).exists())
 
 
 class BlackboardTeamTests(unittest.TestCase):
@@ -199,6 +268,11 @@ class BlackboardTeamTests(unittest.TestCase):
         parent.handle({"command": "send", "id": parent.chat["id"], "text": "Work on it"})
         parent.thread.join(4)
         self.assertFalse(parent.busy)
+
+    def wait_for(self, check):
+        end = time.monotonic() + 3
+        while not check() and time.monotonic() < end: time.sleep(.005)
+        self.assertTrue(check())
 
     def test_member_posts_reach_peers_and_appear_as_tool_rows(self):
         parent = self.team([[call("blackboard_post", {"key": "schema", "body": "Users table has no email index", "category": "risk"}),
@@ -248,11 +322,39 @@ class BlackboardTeamTests(unittest.TestCase):
         self.assertIn("Bug in parser", journal)
         self.assertEqual(self.store.load(parent.chat["id"])["blackboard"]["posts"][0]["key"], "found")
 
+    def test_member_attachments_are_attributed_listed_and_removable_only_by_owner_or_user(self):
+        (self.root / "report.txt").write_text("results")
+        def peer(payload, cancel, delta):
+            self.wait_for(lambda: bool(parent.chat.get("blackboard", {}).get("attachments")))
+            return call("blackboard_remove", {"attachment_id": parent.chat["blackboard"]["attachments"][0]["id"]})
+        parent = self.team([[call("blackboard_attach", {"paths": ["report.txt"], "links": [{"url": "https://example.com/spec"}]}),
+                             response("Added")], [peer, response("Tried")]])
+        self.run_team(parent)
+        first, second = parent.chat["team"]["members"]
+        row = next(item for item in parent.chat["entries"] if item.get("tool") == "blackboard_attach")
+        self.assertEqual((row["summary"], row["memberName"], row["isError"]), ("Added report.txt, example.com/spec", "Member 1", False))
+        refused = next(item for item in parent.chat["entries"] if item.get("tool") == "blackboard_remove")
+        self.assertTrue(refused["isError"]); self.assertIn("only your own", refused["detail"])
+        saved = self.store.load(parent.chat["id"])["blackboard"]["attachments"]
+        self.assertEqual([(item["name"], item["author"]) for item in saved], [("report.txt", first["id"]), ("example.com/spec", first["id"])])
+        self.assertEqual(Path(saved[0]["path"]).read_text(), "results")
+        projected = json.dumps(self.transports[1].requests[1]["messages"][0])
+        self.assertIn("report.txt", projected); self.assertIn("Member 1", projected)
+        snapshot = next(e for e in reversed(self.events) if e.get("event") == "blackboard" and e.get("blackboard"))
+        self.assertEqual(snapshot["blackboard"]["attachments"][0]["authorName"], "Member 1")
+        # The user may remove a member's file.
+        parent.handle({"command": "blackboard_detach", "id": parent.chat["id"], "attachment": saved[0]["id"], "request": "detach"})
+        self.assertNotIn("notice", self.events[-1])
+        self.assertFalse(Path(saved[0]["path"]).exists())
+        self.assertEqual([item["name"] for item in self.store.load(parent.chat["id"])["blackboard"]["attachments"]], ["example.com/spec"])
+        self.assertNotEqual(second["id"], first["id"])
+
     def test_helpers_and_side_chats_cannot_run_blackboard_tools(self):
         for role in ("parent", "side", "lane"):
             service = ChatService(self.store, FakeTransport([]), lambda event: None, role=role)
-            with self.assertRaisesRegex(ValueError, "Team members"):
-                blackboard.execute(service, "blackboard_post", {"key": "x", "body": "y"})
+            for name, args in (("blackboard_post", {"key": "x", "body": "y"}), ("blackboard_attach", {"links": [{"url": "https://a.example"}]})):
+                with self.subTest(role=role, tool=name), self.assertRaisesRegex(ValueError, "Team members"):
+                    blackboard.execute(service, name, args)
 
 
 if __name__ == "__main__": unittest.main()

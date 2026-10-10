@@ -769,13 +769,16 @@ import Combine
         let limits: [String: Any] = ["posts":48, "bodyBytes":1500, "boardBytes":24000, "usedBytes":300, "attachments":24, "attachmentBytes":67108864]
         var rows = (0..<10).map { post("p\($0)", "k\($0)", updated: "2026-10-10T12:0\($0):00+00:00") }
         rows[3]["category"] = "risk"; rows.append(["id":"broken", "author":7])
-        let files: [[String: Any]] = [["id":"f1", "name":"clip.mov", "kind":"video", "path":"/tmp/clip.mov", "size":64, "source":"board"],
+        let files: [[String: Any]] = [["id":"f1", "name":"clip.mov", "kind":"video", "path":"/tmp/clip.mov", "size":64, "source":"board",
+                                       "author":"m1", "authorName":"Sol", "route":"ollama/test"],
                                       ["id":"f2", "name":"shot.png", "kind":"image", "path":"/tmp/shot.png", "size":3, "source":"message", "entryID":"u1"],
-                                      ["id":"bad"]]
+                                      ["id":"bad"], ["id":"f3", "name":"spec", "kind":"url", "url":"https://example.com", "author":"user", "authorName":"You"]]
         let board: [String: Any] = ["posts":rows, "attachments":files, "omittedAttachments":0, "thumbnails":"/tmp/A/blackboard/thumbnails", "limits":limits]
         try boardEvent(["event":"blackboard", "chat":"A", "blackboard":board])
         let snapshotA = boards.blackboard.state("A").snapshot
-        check(snapshotA?.posts.count == 10 && snapshotA?.attachments.map(\.id) == ["f1", "f2"], "one malformed row hid the board")
+        check(snapshotA?.posts.count == 10 && snapshotA?.attachments.map(\.id) == ["f1", "f2", "f3"], "one malformed row hid the board")
+        check(snapshotA?.attachments.map(\.byUser) == [false, true, true] && snapshotA?.attachments[0].authorName == "Sol"
+              && snapshotA?.attachments[0].route == "ollama/test", "attachment attribution lost")
         check(snapshotA?.latest.map(\.key) == ["k9", "k8", "k7", "k6", "k5", "k4", "k3", "k2"], "inspector must show the newest eight posts")
         check(snapshotA?.groups.map(\.category) == ["risk", "note"] && snapshotA?.attachments[0].removable == true
               && snapshotA?.attachments[1].removable == false, "categories or attachment sources wrong")
