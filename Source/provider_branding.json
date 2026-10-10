@@ -269,7 +269,8 @@
       "hueKey": "claude",
       "shortCode": "CLD",
       "logo": {
-        "light": "provider-logos/provider-logo-claude.png"
+        "light": "provider-logos/provider-logo-claude-spark.png",
+        "scale": 1.15
       }
     },
     "codex": {
@@ -277,7 +278,10 @@
       "hueKey": "codex",
       "shortCode": "CDX",
       "logo": {
-        "light": "provider-logos/provider-logo-codex.png"
+        "light": "provider-logos/provider-logo-codex-cloud.png",
+        "scale": 0.88,
+        "template": true,
+        "tint": "accent"
       }
     },
     "antigravity": {
