@@ -218,12 +218,19 @@ private struct InspectorTranscript: View {
                         case "user": UserRow(entry: entry, title: userTitle)
                         case "assistant":
                             let route = model.models.first { $0.route == entry.route }
-                            AssistantRow(entry: entry, label: route?.label ?? entry.route, accent: route?.accent ?? .secondary,
-                                         presentation: route?.presentation, streaming: busy && entries.last?.id == entry.id)
+                            let streaming = busy && entries.last?.id == entry.id
+                            if streaming || !ChatReplySources.isBlank(entry.text) {
+                                VStack(alignment: .leading, spacing: 6) {
+                                    ChatSpeakerHeader(member: entry.memberName, label: route?.label ?? entry.route, presentation: route?.presentation,
+                                                      accent: route?.accent ?? .secondary, live: streaming)
+                                    AssistantRow(entry: entry, accent: route?.accent ?? .secondary, streaming: streaming)
+                                }
+                            }
                         case "tool": ToolRow(entry: entry, accent: model.accent(for: entry.route), expanded: Binding(get: { expanded.contains(entry.id) }, set: { yes in
                             if yes { expanded.insert(entry.id) } else { expanded.remove(entry.id) }
-                        }), workspace: workspace)
-                        default: NoticeRow(entry: entry)
+                        }), workspace: workspace, live: busy && entry.detail == "Running…")
+                        default:
+                            if ChatNotice.style(entry.text) != .hidden { NoticeRow(entry: entry) }
                         }
                     }
                     Color.clear.frame(height: 1).id("inspector-bottom")
