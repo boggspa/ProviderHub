@@ -68,6 +68,58 @@ member's edits; models are instructed to re-read current files before changing
 them. Background commands release the gate after launch, so their later writes
 still require the members' normal path coordination.
 
+## Addressing members
+
+Type `@` in the composer to address members by name. A short list above the
+composer shows each member's mark, name and model. Arrow keys move through it,
+Return or Tab inserts the whole name, Escape closes it, and a click works too.
+A tag that will reach a member is drawn in that member's provider accent, on a
+chip of the same hue, in the composer and again in the sent message. A tag that
+stays plain text addresses nobody.
+
+A message that tags members runs only them, in the order they were first
+tagged. The others stand by and read it as context, marked as addressed to
+their peers. An untagged message still reaches every member. While the Team
+works, a tagged update queues only its members, in tag order. Untagged members
+keep working. One that is paused for a question, a stop or a run limit stands
+by instead of holding back the tagged members, and so does one that asks a
+question after the update; the question stays its next step until a message
+addresses it. Tagging a peer in a reply does not schedule it; members use
+`team_status(waiting, member_id=...)` for a real dependency. A member standing
+by cannot be waited on, and a wait on one that later stands by resumes with
+that result.
+
+A tag starts the message or follows a space, an opening bracket or quote, a
+comma, semicolon or asterisk, so an email address never addresses anyone. It
+matches a member's whole name as written, except that ASCII letters may differ
+in case: `@sol` reaches Sol, but other letters, and how an accent is encoded,
+must match the name exactly. Choosing from the list always inserts the exact
+name. A tag ends before another letter, mark, number or underscore, so
+`@Opus 2` and `@Opus` can coexist, and tags inside code spans or fenced blocks
+stay text. Member names must differ, ignoring case and how their accents are
+encoded; in an older saved Team, names that differ only in the case of ASCII
+letters are plain text.
+
+Only the composer decides what is a tag. Each send carries the chips it drew,
+and those chips are the routing record: a tinted tag always reaches its member,
+an untinted one stays plain text, and a message sent without chips reaches the
+whole Team. The worker never reads the text for tags, and its checks use no
+Unicode case or normalization tables, so neither side's Unicode version can
+change a tag. It keeps a chip only while its member is still in the Team under
+exactly that name and model, over text that reads `@` and the name by the rule
+above. Otherwise the composer drew from an outdated roster, so the worker
+refuses the message before storing anything and resends the current roster;
+Chat restores the draft and the tints correct themselves. Sent messages record
+each tag's member, name, route and position, so a later rename or model change
+never recolours history. Chat decodes rosters and transcripts character for
+character, so a member's name and a recorded tag's position are exactly what
+the worker compared. Text an input method is still composing is part of the
+draft, so a send takes it as shown; a tag it completes is tinted once the
+composition is committed. The composer's cases live in
+`Source/test_chat_mentions_cases.json`; the tests also generate thousands of
+messages full of awkward characters and check that the worker keeps every chip
+the composer draws for them.
+
 ## Failed requests
 
 Transient member request failures retry quietly, for up to five attempts total,

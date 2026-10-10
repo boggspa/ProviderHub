@@ -53,6 +53,8 @@ struct ChatEntry: Decodable, Identifiable {
     var contributionID: String?
     var clientRequest: String?
     var textOffset: Int?
+    /// `@Name` tags as the worker resolved and routed them, in UTF-16 units.
+    var mentions: [ChatMention]?
 }
 
 struct ChatAttachment: Decodable, Identifiable {
@@ -213,6 +215,8 @@ final class ChatModel: ObservableObject {
     private var input: Pipe?
     private var output: Pipe?
     private var buffer = Data()
+    /// The worker line being consumed, for `payload`.
+    private(set) var eventLine = Data()
     private var commandSink: (([String: Any]) -> Bool)?
     private var starting = false
     private let preferences: UserDefaults
@@ -319,7 +323,11 @@ final class ChatModel: ObservableObject {
         pendingSend = (selectedID, request, text, files)
         setBusy(true); interrupting = command == "steer"
         status = interrupting ? "Interrupting for your update…" : "Connecting…"
-        if !write(["command": command, "id": selectedID, "chat": selectedID, "request": request, "text": text, "attachments": files.map(\.request)]) { restorePendingSend(); setBusy(false); interrupting = false }
+        // Every chip the composer drew is the routing record; the worker
+        // refuses chips drawn from a roster it no longer has.
+        let mentions = ChatMentions.resolve(text, members: mentionTargets).map(\.wire)
+        if !write(["command": command, "id": selectedID, "chat": selectedID, "request": request, "text": text,
+                   "attachments": files.map(\.request), "mentions": mentions]) { restorePendingSend(); setBusy(false); interrupting = false }
     }
     func stop() {
         guard busy, let stateChatID else { return }
@@ -457,6 +465,16 @@ final class ChatModel: ObservableObject {
         guard let raw, JSONSerialization.isValidJSONObject(raw), let data = try? JSONSerialization.data(withJSONObject: raw) else { return nil }
         return try? JSONDecoder().decode(type, from: data)
     }
+    /// `key` of the event being consumed, decoded from the worker's own bytes.
+    /// JSONSerialization drops a string's leading U+FEFF, which would rename a
+    /// Team member, so every chip drawn for it was refused, or move a recorded
+    /// tag off its text. JSONDecoder keeps every character, so the payloads the
+    /// `@Name` contract compares exactly (the roster and transcript) use this.
+    func payload<T: Decodable>(_ type: T.Type, _ key: String) throws -> T? {
+        let decoder = JSONDecoder()
+        decoder.userInfo[ChatEventKey.field] = key
+        return try decoder.decode(ChatEventField<T>.self, from: eventLine).value
+    }
     private func decodeApproval(_ raw: Any?) -> ChatApproval? {
         guard var approval = decode(ChatApproval.self, raw) else { return nil }
         approval.chat = stateChatID
@@ -467,6 +485,7 @@ final class ChatModel: ObservableObject {
         while let newline = buffer.firstIndex(of: 10) {
             let line = buffer.prefix(upTo: newline); buffer.removeSubrange(...newline)
             guard let event = try? JSONSerialization.jsonObject(with: line) as? [String: Any] else { continue }
+            eventLine = line
             switch event["event"] as? String {
             case "ready":
                 connected = true
@@ -493,7 +512,7 @@ final class ChatModel: ObservableObject {
                     // needs a Swift cache. Selection snapshots rebuild it.
                     if let selectedID { sessions[selectedID]?.entries = [] }
                 }
-                selectedID = id; entries = decode([ChatEntry].self, event["entries"]) ?? []
+                selectedID = id; entries = (try? payload([ChatEntry].self, "entries")) ?? []
                 tokenUsage = event["usage"] as? Int; contextLimit = selectedRoute?.context
                 if let current = event["busy"] as? Bool { setBusy(current) }
                 if let current = event["interrupting"] as? Bool { interrupting = current }
@@ -515,7 +534,7 @@ final class ChatModel: ObservableObject {
     private func consumeChatEvent(_ event: [String: Any]) {
         switch event["event"] as? String {
         case "entry":
-            guard let entry = decode(ChatEntry.self, event["entry"]) else { return }
+            guard let entry = try? payload(ChatEntry.self, "entry") else { return }
             if entry.kind == "user", let pendingSend, entry.clientRequest == pendingSend.request { self.pendingSend = nil }
             guard stateChatID == selectedID else { return }
             if let index = entries.firstIndex(where: { $0.id == entry.id }) { entries[index] = entry } else { entries.append(entry) }
@@ -561,4 +580,21 @@ final class ChatModel: ObservableObject {
         if let owner = command["id"] as? String ?? stateChatID { command["chat"] = owner }
         return write(command)
     }
+}
+
+/// One top-level field of a worker event, decoded on its own (`ChatModel.payload`).
+private struct ChatEventField<T: Decodable>: Decodable {
+    var value: T?
+    init(from decoder: Decoder) throws {
+        let key = ChatEventKey(stringValue: decoder.userInfo[ChatEventKey.field] as? String ?? "")
+        value = try decoder.container(keyedBy: ChatEventKey.self).decodeIfPresent(T.self, forKey: key)
+    }
+}
+
+private struct ChatEventKey: CodingKey {
+    static let field = CodingUserInfoKey(rawValue: "ProviderHub.eventField")!
+    var stringValue: String
+    var intValue: Int? { nil }
+    init(stringValue: String) { self.stringValue = stringValue }
+    init?(intValue: Int) { nil }
 }

@@ -130,6 +130,7 @@ import Combine
         check(model.attachments.count == 1 && model.canSend, "attachment-only message not sendable")
         model.send()
         check(model.attachments.isEmpty && (commands.last?["attachments"] as? [[String:Any]])?.count == 1, "attachments not sent")
+        check((commands.last?["mentions"] as? [[String: Any]])?.isEmpty == true, "a solo send drew Team chips")
         let commandCount = commands.count
         model.draft = "do not queue this"; model.send()
         check(commands.count == commandCount, "busy chat queued a message")
@@ -322,6 +323,45 @@ import Combine
         check(model.team == nil && model.teamRequest == teamRequest, "cross-chat or stale Team ack accepted")
         try send(["event":"team", "chat":"A", "request":teamRequest, "team":roster("ready")])
         check(model.team?.members.count == 1 && model.teamRequest == nil && model.canSend, "Team ack not applied")
+        // The send carries the chip it drew; a refusal keeps the draft.
+        model.draft = "Ship it, @builder."
+        model.send()
+        let chips = commands.last?["mentions"] as? [[String: Any]] ?? []
+        check(commands.last?["command"] as? String == "send" && chips.count == 1 && chips[0]["id"] as? String == "builder" &&
+              chips[0]["name"] as? String == "Builder" && chips[0]["route"] as? String == "ollama/test" &&
+              chips[0]["start"] as? Int == 9 && chips[0]["length"] as? Int == 8, "a tagged send did not carry the chip it drew")
+        try send(["event":"rejected", "chat":"A", "message":"The tagged members no longer match this Team.", "busy":false, "interrupting":false])
+        check(model.draft == "Ship it, @builder." && !model.busy && model.canSend, "a refused tagged send lost its draft")
+        model.draft = ""; model.notice = ""
+        try send(["event":"entry", "chat":"A", "entry":["id":"tagged-row", "kind":"user", "text":"Ship it, @builder.", "route":"ollama/test",
+            "isError":false, "changedFiles":[], "mentions":[["id":"builder", "name":"Builder", "route":"ollama/test", "start":9, "length":8], 7]]])
+        check(model.entries.last?.mentions?.first == ChatMention(id: "builder", name: "Builder", route: "ollama/test", start: 9, length: 8) &&
+              model.entries.last?.mentions?.count == 2, "recorded tags did not survive decoding beside a malformed one")
+        // Names and recorded tags arrive exactly as the worker sent them.
+        // JSONSerialization alone drops a string's leading U+FEFF, which
+        // renamed a member (refusing its chips) and moved a recorded tag.
+        func scalars(_ text: String?) -> [UInt32] { (text ?? "").unicodeScalars.map(\.value) }
+        var bomTeam = roster("ready")
+        var bomMember = (bomTeam["members"] as! [[String: Any]])[0]
+        bomMember["name"] = "\u{FEFF}Builder"; bomTeam["members"] = [bomMember]
+        try send(["event":"team", "chat":"A", "team":bomTeam])
+        check(scalars(model.team?.members.first?.name) == scalars("\u{FEFF}Builder") &&
+              scalars(model.mentionTargets.first?.name) == scalars("\u{FEFF}Builder"), "a member's name lost its leading U+FEFF")
+        try send(["event":"team", "chat":"A", "team":roster("ready")])
+        let bomRow: [String: Any] = ["id":"bom-row", "kind":"user", "text":"\u{FEFF} @Builder", "route":"ollama/test", "isError":false,
+                                     "changedFiles":[], "mentions":[["id":"builder", "name":"Builder", "route":"ollama/test", "start":2, "length":8]]]
+        func drawsTag(_ row: ChatEntry?) -> Bool {
+            guard let row else { return false }
+            return ChatMentions.marked(row.text, mentions: row.mentions ?? [], accent: { _ in .red }).runs.contains { $0[ChatMentionAttribute.self] != nil }
+        }
+        try send(["event":"entry", "chat":"A", "entry":bomRow])
+        check(scalars(model.entries.last?.text) == scalars("\u{FEFF} @Builder") && drawsTag(model.entries.last),
+              "a message's leading U+FEFF moved its recorded tag")
+        let reselected = ChatModel(sendCommand: { _ in true }, uptime: { clock }, preferences: preferences)
+        reselected.consume(try JSONSerialization.data(withJSONObject: ["event":"selected", "id":"A", "entries":[bomRow], "busy":false,
+                                                                         "interrupting":false, "status":"Ready", "usage":0]) + Data([10]))
+        check(scalars(reselected.entries.first?.text) == scalars("\u{FEFF} @Builder") && drawsTag(reselected.entries.first),
+              "a reopened transcript lost a leading U+FEFF")
         check(model.team?.taskMode == false, "legacy roster unexpectedly enabled Task mode")
         var fourMemberTeam = roster("ready")
         let rosterTemplate = (fourMemberTeam["members"] as! [[String: Any]])[0]
@@ -330,8 +370,78 @@ import Combine
             member["id"] = "member-\(number)"; member["name"] = "Member \(number)"
             return member
         }
+        fourMemberTeam["activeMemberID"] = NSNull()
+        let fourMemberSpecs = (1...4).map { number -> [String: Any] in
+            var spec = memberSpec; spec["name"] = "Member \(number)"; return spec
+        }
+        model.configureTeam(enabled: true, members: fourMemberSpecs)
+        let fourMemberRequest = commands.last?["request"] as! String
+        check((commands.last?["members"] as? [[String: Any]])?.count == 4 && model.teamRequest == fourMemberRequest,
+              "four-member configure was not sent")
+        try send(["event":"team", "chat":"A", "request":fourMemberRequest, "team":fourMemberTeam])
+        check(model.team?.members.count == 4 && model.team?.enabled == true && model.teamRequest == nil && model.teamNotice.isEmpty,
+              "four-member configure acknowledgement was rejected")
+        var fourMembers = fourMemberTeam["members"] as! [[String: Any]]
+        fourMembers[3]["status"] = "working"; fourMembers[3]["contributionID"] = "fourth-run"
+        fourMemberTeam["members"] = fourMembers; fourMemberTeam["status"] = "working"
+        fourMemberTeam["activeMemberID"] = "member-4"; fourMemberTeam["activeMemberIDs"] = ["member-4"]
         try send(["event":"team", "chat":"A", "team":fourMemberTeam])
-        check(model.team?.members.count == 4 && model.team?.enabled == true, "four-member Team was rejected")
+        check(model.team?.members.count == 4 && model.team?.members[3].status == "working" && model.team?.status == "working" &&
+              model.team?.activeMemberID == "member-4" && model.team?.activeMemberIDs == ["member-4"], "fourth member status stayed stale")
+        var optionalFields = fourMembers
+        for key in ["contributionID", "usage", "context", "failureReason", "waitReason", "modelContext", "checkpoints"] {
+            optionalFields[3][key] = ["unexpected":true]
+        }
+        var optionalTeam = fourMemberTeam; optionalTeam["members"] = optionalFields
+        try send(["event":"team", "chat":"A", "team":optionalTeam])
+        let tolerantMember = model.team!.members[3]
+        check(model.team?.members.count == 4 && tolerantMember.status == "working" && model.teamNotice.isEmpty,
+              "malformed optional member data hid the roster")
+        check(tolerantMember.contributionID == nil && tolerantMember.usage == nil && tolerantMember.context == nil &&
+              tolerantMember.failureReason == nil && tolerantMember.waitReason == nil && tolerantMember.modelContext == nil &&
+              tolerantMember.checkpoints == nil, "malformed optional fields were retained")
+        var fifthMember = rosterTemplate; fifthMember["id"] = "member-5"
+        var overLimit = fourMemberTeam; overLimit["members"] = fourMembers + [fifthMember]
+        var emptyTeam = fourMemberTeam; emptyTeam["members"] = [[String: Any]]()
+        var duplicateMembers = fourMembers; duplicateMembers[3]["id"] = duplicateMembers[0]["id"]
+        var duplicateTeam = fourMemberTeam; duplicateTeam["members"] = duplicateMembers
+        var missingIdentity = fourMembers; missingIdentity[3]["id"] = "  "
+        var missingIDTeam = fourMemberTeam; missingIDTeam["members"] = missingIdentity
+        var requiredFields = fourMembers; requiredFields[3].removeValue(forKey: "name")
+        var malformedTeam = fourMemberTeam; malformedTeam["members"] = requiredFields
+        for invalidTeam in [overLimit, emptyTeam, duplicateTeam, missingIDTeam, malformedTeam] {
+            model.configureTeam(enabled: true, members: fourMemberSpecs)
+            let pendingRequest = model.teamRequest!
+            try send(["event":"team", "chat":"A", "request":"stale", "team":invalidTeam])
+            try send(["event":"team", "chat":"B", "request":pendingRequest, "team":invalidTeam])
+            check(model.teamRequest == pendingRequest && model.teamNotice.isEmpty, "invalid unrelated reply settled Team setup")
+            let rejected: [String: Any] = ["event":"team", "chat":"A", "request":pendingRequest, "team":invalidTeam,
+                                          "notice":"Worker notice"]
+            try send(rejected)
+            check(model.teamRequest == nil && model.canConfigureTeam && model.team?.members.count == 4 &&
+                  model.teamNotice.contains("could not refresh") && model.teamNotice.contains("Worker notice"),
+                  "invalid Team silently kept stale state or stranded its request")
+            var repeated = rejected; repeated.removeValue(forKey: "request"); try send(repeated)
+            try send(["event":"team", "chat":"A", "team":fourMemberTeam])
+            check(model.team?.members[3].contributionID == "fourth-run" && model.teamNotice.isEmpty, "valid Team update did not recover")
+        }
+        model.configureTeam(enabled: true, members: fourMemberSpecs)
+        let missingTeamRequest = model.teamRequest!
+        try send(["event":"team", "chat":"A", "request":missingTeamRequest])
+        check(model.teamRequest == nil && model.team?.members.count == 4 && model.teamNotice.contains("could not refresh"),
+              "missing snapshot silently cleared Team")
+        try send(["event":"team", "chat":"A", "team":false])
+        check(model.team?.members.count == 4 && model.teamNotice.contains("could not refresh"), "invalid JSON snapshot cleared Team")
+        try send(["event":"team", "chat":"A", "team":NSNull()])
+        check(model.team == nil && model.teamNotice.isEmpty, "explicit null snapshot did not clear Team")
+        try send(["event":"team", "chat":"A", "team":fourMemberTeam])
+        model.configureTeam(enabled: true, members: fourMemberSpecs)
+        let correlatedRequest = model.teamRequest!
+        try send(["event":"team", "chat":"A", "team":overLimit])
+        check(model.teamRequest == correlatedRequest && model.teamNotice.contains("could not refresh"),
+              "unsolicited invalid update settled a pending configure")
+        try send(["event":"team", "chat":"A", "request":correlatedRequest, "team":fourMemberTeam])
+        check(model.teamRequest == nil && model.teamNotice.isEmpty, "matching reply did not settle after an invalid poll")
         var configuredTeam = roster("waiting", "waiting")
         configuredTeam["execution"] = execution.wire
         configuredTeam["runUsage"] = ["started": 100.0, "tokens": 1800, "requests": 4, "usageComplete": false]
@@ -649,11 +759,14 @@ import Combine
             binary = root / "chat-model-tests"
             compiled = subprocess.run(["xcrun", "swiftc", "-swift-version", "5", "-parse-as-library",
                 "-module-cache-path", str(root / "cache"), str(root / "Stubs.swift"),
-                str(Path(__file__).with_name("ChatModel.swift")), str(Path(__file__).with_name("ChatInspectorModel.swift")), str(Path(__file__).with_name("ChatWorkspaces.swift")), str(root / "Cases.swift"),
+                str(Path(__file__).with_name("ChatModel.swift")), str(Path(__file__).with_name("ChatMentions.swift")), str(Path(__file__).with_name("ChatInspectorModel.swift")), str(Path(__file__).with_name("ChatWorkspaces.swift")), str(root / "Cases.swift"),
                 "-framework", "AppKit", "-framework", "SwiftUI", "-framework", "PDFKit", "-o", str(binary)], capture_output=True, text=True, timeout=90)
             self.assertEqual(compiled.returncode, 0, compiled.stderr)
             ran = subprocess.run([str(binary)], capture_output=True, text=True, timeout=15)
             self.assertEqual(ran.returncode, 0, ran.stderr)
+            # Five invalid rosters, a missing snapshot and an unsolicited invalid
+            # update; repeats within each failure period must not flood the log.
+            self.assertEqual(ran.stderr.count("Team update rejected for"), 7, ran.stderr)
             self.assertIn("state transitions passed", ran.stdout)
 
 

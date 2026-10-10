@@ -131,6 +131,11 @@ struct ChatSelectableText: NSViewRepresentable {
                 runFont = .monospacedSystemFont(ofSize: base.pointSize * 0.94, weight: .regular)
                 attributes[.chatCodeChip] = chip
             }
+            if let accent = run[ChatMentionAttribute.self] {
+                runFont = semibold(runFont)
+                attributes[.foregroundColor] = ChatMentionStyle.ink(accent.color)
+                attributes[.chatCodeChip] = ChatMentionStyle.fill(accent.color)
+            }
             if intent.contains(.stronglyEmphasized) { runFont = bold(runFont) }
             if intent.contains(.emphasized) {
                 let italic = NSFontManager.shared.convert(runFont, toHaveTrait: .italicFontMask)
@@ -144,18 +149,7 @@ struct ChatSelectableText: NSViewRepresentable {
         guard result.length > 0 else { return result }
         let string = result.string as NSString
         let whole = NSRange(location: 0, length: result.length)
-
-        // Room around each code chip, so its fill never touches neighbours.
-        var chips: [NSRange] = []
-        result.enumerateAttribute(.chatCodeChip, in: whole) { value, range, _ in if value != nil { chips.append(range) } }
-        for range in chips {
-            guard let chipFont = result.attribute(.font, at: range.location, effectiveRange: nil) as? NSFont else { continue }
-            let kern = ChatLayoutManager.chipPadding(chipFont) + chipFont.pointSize * 0.08
-            result.addAttribute(.kern, value: kern, range: string.rangeOfComposedCharacterSequence(at: NSMaxRange(range) - 1))
-            if range.location > 0, ![9, 10].contains(string.character(at: range.location - 1)) {
-                result.addAttribute(.kern, value: kern, range: string.rangeOfComposedCharacterSequence(at: range.location - 1))
-            }
-        }
+        ChatLayoutManager.padChips(result)
 
         var location = 0
         while location < string.length {
@@ -196,7 +190,7 @@ struct ChatSelectableText: NSViewRepresentable {
         return paragraph
     }
 
-    private static func semibold(_ font: NSFont) -> NSFont {
+    static func semibold(_ font: NSFont) -> NSFont {
         if font.familyName == NSFont.systemFont(ofSize: font.pointSize).familyName {
             return .systemFont(ofSize: font.pointSize, weight: .semibold)
         }
@@ -241,7 +235,7 @@ struct ChatSelectableText: NSViewRepresentable {
 }
 
 extension NSAttributedString.Key {
-    /// Fill colour for an inline code chip.
+    /// Fill colour for an inline code chip, or a member tag's tinted chip.
     static let chatCodeChip = NSAttributedString.Key("ProviderHub.chatCodeChip")
     /// Colour of a blockquote's leading bar.
     static let chatQuoteBar = NSAttributedString.Key("ProviderHub.chatQuoteBar")
@@ -256,12 +250,50 @@ private final class ChatBlockStyleBox: NSObject {
     init(_ style: ChatBlockStyle) { self.style = style }
 }
 
+/// A member tag's look, shared by the composer and the transcript: semibold
+/// text in the member's provider accent on a chip of the same hue. The text is
+/// pulled toward the ink so every accent stays legible in either appearance,
+/// on the composer and on a message bubble alike.
+enum ChatMentionStyle {
+    static func ink(_ accent: NSColor) -> NSColor {
+        let rgb = accent.usingColorSpace(.sRGB) ?? accent
+        return HubTheme.Semantic.dynamicNS(light: rgb.blended(withFraction: 0.25, of: .black) ?? rgb,
+                                           dark: rgb.blended(withFraction: 0.4, of: .white) ?? rgb)
+    }
+
+    static func fill(_ accent: NSColor) -> NSColor {
+        let rgb = accent.usingColorSpace(.sRGB) ?? accent
+        return HubTheme.Semantic.dynamicNS(light: rgb.withAlphaComponent(0.14), dark: rgb.withAlphaComponent(0.26))
+    }
+
+    static func attributes(_ accent: NSColor, font: NSFont) -> [NSAttributedString.Key: Any] {
+        [.font: ChatSelectableText.semibold(font), .foregroundColor: ink(accent), .chatCodeChip: fill(accent)]
+    }
+}
+
 /// TextKit 1 layout that draws the transcript's block decorations behind
 /// the text: rounded code chips (one per line fragment when a chip wraps),
 /// a blockquote's bar and a rule's hairline. Layout itself is the stock
 /// typesetter, so the measuring stack and the view agree on every height.
 final class ChatLayoutManager: NSLayoutManager {
     static func chipPadding(_ font: NSFont) -> CGFloat { font.pointSize * 0.22 }
+
+    /// Room around each chip, so its fill never touches its neighbours.
+    static func padChips(_ text: NSMutableAttributedString) {
+        let string = text.string as NSString
+        var chips: [NSRange] = []
+        text.enumerateAttribute(.chatCodeChip, in: NSRange(location: 0, length: text.length)) { value, range, _ in
+            if value != nil { chips.append(range) }
+        }
+        for range in chips {
+            guard let font = text.attribute(.font, at: range.location, effectiveRange: nil) as? NSFont else { continue }
+            let kern = chipPadding(font) + font.pointSize * 0.08
+            text.addAttribute(.kern, value: kern, range: string.rangeOfComposedCharacterSequence(at: NSMaxRange(range) - 1))
+            if range.location > 0, ![9, 10].contains(string.character(at: range.location - 1)) {
+                text.addAttribute(.kern, value: kern, range: string.rangeOfComposedCharacterSequence(at: range.location - 1))
+            }
+        }
+    }
 
     override func drawBackground(forGlyphRange glyphsToShow: NSRange, at origin: NSPoint) {
         if let storage = textStorage, storage.length > 0 {

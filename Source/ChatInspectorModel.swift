@@ -121,6 +121,29 @@ struct ChatTeamMember: Decodable, Identifiable {
         ["id": id, "name": name, "choice": choice, "effort": effort, "responsibility": responsibility]
     }
 }
+extension ChatTeamMember {
+    private enum CodingKeys: String, CodingKey {
+        case id, name, label, choice, route, account, effort, responsibility, status, nextStep, contributions
+        case contributionID, usage, context, failureReason, waitReason, modelContext, checkpoints
+    }
+    init(from decoder: Decoder) throws {
+        let row = try decoder.container(keyedBy: CodingKeys.self)
+        id = try row.decode(String.self, forKey: .id); name = try row.decode(String.self, forKey: .name)
+        label = try row.decode(String.self, forKey: .label); choice = try row.decode(String.self, forKey: .choice)
+        route = try row.decode(String.self, forKey: .route); account = try row.decode(String.self, forKey: .account)
+        effort = try row.decode(String.self, forKey: .effort); responsibility = try row.decode(String.self, forKey: .responsibility)
+        status = try row.decode(String.self, forKey: .status); nextStep = try row.decode(String.self, forKey: .nextStep)
+        contributions = try row.decode(Int.self, forKey: .contributions)
+        // Optional diagnostics must not hide an otherwise valid roster/status update.
+        contributionID = try? row.decodeIfPresent(String.self, forKey: .contributionID)
+        usage = try? row.decodeIfPresent(Int.self, forKey: .usage)
+        context = try? row.decodeIfPresent(Int.self, forKey: .context)
+        failureReason = try? row.decodeIfPresent(String.self, forKey: .failureReason)
+        waitReason = try? row.decodeIfPresent(String.self, forKey: .waitReason)
+        modelContext = try? row.decodeIfPresent(Int.self, forKey: .modelContext)
+        checkpoints = try? row.decodeIfPresent(Int.self, forKey: .checkpoints)
+    }
+}
 struct ChatTeamExecution: Decodable {
     var mode: String = "task"
     var contextTokens: Int = 200_000
@@ -155,17 +178,26 @@ struct ChatTeamSnapshot: Decodable {
     }
     var active: ChatTeamMember? { members.first { $0.id == activeMemberID } }
     var needsInput: Bool { members.contains { $0.status == "needs_input" } }
-    var canResume: Bool { enabled && !needsInput && ["stopped", "interrupted", "error", "limit_reached"].contains(status) && members.contains { $0.status != "done" } }
+    /// A member standing by (ready) after a message tagged others has nothing to resume.
+    var canResume: Bool { enabled && !needsInput && ["stopped", "interrupted", "error", "limit_reached"].contains(status) && members.contains { !["done", "ready"].contains($0.status) } }
 }
 
 @MainActor extension ChatModel {
     var canConfigureTeam: Bool { connected && selectedID != nil && !busy && !branchBusy && teamRequest == nil }
+    /// Members an `@Name` tag can address, with their accents; none outside a Team.
+    var mentionTargets: [ChatMentionTarget] {
+        guard let team, team.enabled else { return [] }
+        return team.members.map { ChatMentionTarget(id: $0.id, name: $0.name, route: $0.route, accent: NSColor(accent(for: $0.route))) }
+    }
     func configureTeam(enabled: Bool, members: [[String: Any]], execution: ChatTeamExecution? = nil) {
         guard canConfigureTeam, let selectedID = stateChatID else { return }
         guard (1...ChatTeamSnapshot.maxMembers).contains(members.count), members.allSatisfy({ member in
             guard let choice = member["choice"] as? String, let name = member["name"] as? String else { return false }
             return !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && models.contains { $0.id == choice && $0.supportsTools }
         }) else { teamNotice = "Choose one to four named members with enabled models."; return }
+        let names = members.compactMap { ($0["name"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+            .folding(options: .caseInsensitive, locale: nil) }
+        guard Set(names).count == names.count else { teamNotice = "Give each member a different name, so an @name tag reaches one member."; return }
         if let execution, !execution.isValid { teamNotice = "Check the Team run settings."; return }
         let request = UUID().uuidString
         teamRequest = request; teamNotice = ""
@@ -296,12 +328,31 @@ struct ChatTeamSnapshot: Decodable {
                 guard request == teamRequest else { return }
                 teamRequest = nil
             }
-            if let value = event["team"], !(value is NSNull) {
-                guard let snapshot = decoded(value, as: ChatTeamSnapshot.self),
-                      (1...ChatTeamSnapshot.maxMembers).contains(snapshot.members.count), Set(snapshot.members.map(\.id)).count == snapshot.members.count else { return }
-                team = snapshot
+            let notice = event["notice"] as? String ?? ""
+            func rejectTeamUpdate(_ reason: String) {
+                let message = "Team could not refresh. Reopen the chat to reload it."
+                let visibleNotice = notice.isEmpty ? message : notice + "\n" + message
+                // Repeated invalid status polls should not flood the log.
+                if teamNotice != visibleNotice { NSLog("Provider Hub: Team update rejected for %@: %@", chat, reason) }
+                teamNotice = visibleNotice
+            }
+            guard let value = event["team"] else { rejectTeamUpdate("missing team field"); return }
+            if !(value is NSNull) {
+                guard JSONSerialization.isValidJSONObject(value) else { rejectTeamUpdate("invalid snapshot JSON"); return }
+                do {
+                    // From the worker's bytes: member names must arrive exactly as it compares them.
+                    guard let snapshot = try payload(ChatTeamSnapshot.self, "team") else { rejectTeamUpdate("missing team field"); return }
+                    guard (1...ChatTeamSnapshot.maxMembers).contains(snapshot.members.count) else {
+                        rejectTeamUpdate("expected 1...\(ChatTeamSnapshot.maxMembers) members, received \(snapshot.members.count)"); return
+                    }
+                    guard Set(snapshot.members.map(\.id)).count == snapshot.members.count,
+                          snapshot.members.allSatisfy({ !$0.id.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) else {
+                        rejectTeamUpdate("missing or duplicate member IDs"); return
+                    }
+                    team = snapshot
+                } catch { rejectTeamUpdate(String(describing: error)); return }
             } else { team = nil }
-            teamNotice = event["notice"] as? String ?? ""
+            teamNotice = notice
         case "git_changes":
             if let workspace = event["workspace"] as? String, workspace != selected?.workspace { return }
             guard event["request"] as? String == changesRequest else { return }

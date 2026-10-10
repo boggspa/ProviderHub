@@ -307,11 +307,9 @@ private struct ChatHeader: View {
         if let team = model.team, team.enabled, model.busy || team.status == "working" {
             // Every member's own window while the Team works; they are never
             // added together. The parent's returns once the Team stops.
-            HStack(spacing: 10) {
-                ForEach(team.members) { member in
-                    memberContext(member, active: member.status == "working" || member.id == team.activeMemberID,
-                                  counted: !compact || team.members.count < 3)
-                }
+            ViewThatFits(in: .horizontal) {
+                teamContext(team, named: true)
+                teamContext(team, named: false)
             }
         } else if let used = model.tokenUsage {
             let readout = model.contextLimit.map { tokenCount(used) + " / " + tokenCount($0) } ?? tokenCount(used) + " tokens"
@@ -327,9 +325,19 @@ private struct ChatHeader: View {
         }
     }
 
+    private func teamContext(_ team: ChatTeamSnapshot, named: Bool) -> some View {
+        HStack(spacing: 10) {
+            ForEach(team.members) { member in
+                memberContext(member, active: member.status == "working" || member.id == team.activeMemberID,
+                              named: named, counted: named && (!compact || team.members.count < 3))
+            }
+        }
+    }
+
     /// A ring and name per member; the token count drops out on a narrow
-    /// header with a larger Team, and stays in the tooltip.
-    private func memberContext(_ member: ChatTeamMember, active: Bool, counted: Bool) -> some View {
+    /// header with a larger Team. Names also yield to keep every ring visible;
+    /// both remain in the tooltip and accessibility label.
+    private func memberContext(_ member: ChatTeamMember, active: Bool, named: Bool, counted: Bool) -> some View {
         let accent = model.accent(for: member.route)
         let readout = member.usage.map { tokenCount($0) + (member.context.map { " / " + tokenCount($0) } ?? "") } ?? "not started"
         return HStack(spacing: 5) {
@@ -338,8 +346,10 @@ private struct ChatHeader: View {
             } else {
                 Circle().stroke(accent.opacity(0.3), lineWidth: 2).frame(width: 12, height: 12)
             }
-            Text(member.name).font(.system(size: 10.5, weight: active ? .semibold : .regular))
-                .foregroundStyle(active ? Semantic.ink : Semantic.secondaryInk)
+            if named {
+                Text(member.name).font(.system(size: 10.5, weight: active ? .semibold : .regular))
+                    .foregroundStyle(active ? Semantic.ink : Semantic.secondaryInk)
+            }
             if counted, let used = member.usage {
                 Text(tokenCount(used)).font(.system(size: 10.5, design: .monospaced)).foregroundStyle(Semantic.secondaryInk)
             }
@@ -543,7 +553,7 @@ private struct ChatTranscript: View {
         let live = model.busy && entry.detail == "Running…"
         switch entry.kind {
         case "user":
-            UserRow(entry: entry)
+            UserRow(entry: entry, accent: { model.accent(for: $0) })
         case "assistant":
             AssistantRow(entry: entry, accent: model.accent(for: entry.route), streaming: model.isStreaming(entry, fallback: model.busy && last))
         case "tool":
@@ -673,6 +683,7 @@ private struct ApprovalStrip: View {
 private struct ChatComposer: View {
     @ObservedObject var model: ChatModel
     @State private var height: CGFloat = 22
+    @StateObject private var mentionMenu = ChatMentionMenu()
     /// The workspace waiting on a first-time YOLO confirmation, while shown.
     @State private var yoloWorkspace: String?
     @State private var yoloChatID: String?
@@ -693,7 +704,7 @@ private struct ChatComposer: View {
                                      onSend: { model.send() }, onPasteFiles: { urls in
                         guard editable else { return false }
                         model.addAttachments(urls); return true
-                    })
+                    }, mentions: model.mentionTargets, mentionMenu: mentionMenu)
                         .frame(height: height)
                         .accessibilityLabel("Message")
                     if model.busy {
@@ -706,6 +717,9 @@ private struct ChatComposer: View {
             .background(RoundedRectangle(cornerRadius: HubTheme.Radius.panel).fill(Semantic.raisedSurface))
             .overlay(RoundedRectangle(cornerRadius: HubTheme.Radius.panel)
                 .stroke(yolo ? Semantic.approvalYolo.opacity(0.4) : Semantic.hairline, lineWidth: 1))
+            .overlay(alignment: .topLeading) {
+                ChatMentionList(menu: mentionMenu, model: model).padding(.leading, 6).alignmentGuide(.top) { $0[.bottom] + 6 }
+            }
             footer
         }
         .padding(.horizontal, 16).padding(.top, 8).padding(.bottom, 10)
@@ -733,7 +747,7 @@ private struct ChatComposer: View {
     private var placeholder: String {
         guard model.selectedID != nil else { return "Start a new chat to begin" }
         guard model.connected else { return "Connecting…" }
-        if model.team?.enabled == true { return "Message the Team…" }
+        if model.team?.enabled == true { return "Message the Team, or @ a member…" }
         guard let route = model.selectedRoute else { return "Choose a model above" }
         return "Message " + route.label + "…"
     }
@@ -824,137 +838,55 @@ private struct ChatComposer: View {
     }
 }
 
-/// A plain NSTextView: Return and ⌘Return send, Shift-Return and Option-Return
-/// insert a line, and the view grows with its text up to a few lines.
-struct ComposerTextView: NSViewRepresentable {
-    @Environment(\.chatTextStyle) private var textStyle
-    @Binding var text: String
-    @Binding var height: CGFloat
-    var placeholder: String
-    var enabled: Bool
-    var onSend: () -> Void
-    /// Files or an image on the pasteboard; return true to consume the paste.
-    var onPasteFiles: (([URL]) -> Bool)? = nil
+/// The Team members `@` can address, floated above the composer while a tag
+/// is typed: each member's mark, name and model, the chosen row tinted with
+/// its accent. The text view keeps the keys; a click or hover works too.
+private struct ChatMentionList: View {
+    @ObservedObject var menu: ChatMentionMenu
+    var model: ChatModel
 
-    private static let minHeight: CGFloat = 22
-    private static let maxHeight: CGFloat = 160
-
-    final class SendTextView: NSTextView {
-        var onSend: (() -> Void)?
-        var onPasteFiles: (([URL]) -> Bool)?
-        var placeholder = "" { didSet { if placeholder != oldValue { needsDisplay = true } } }
-
-        override func keyDown(with event: NSEvent) {
-            let command = event.modifierFlags.intersection(.deviceIndependentFlagsMask).contains(.command)
-            if event.keyCode == 36, command, isEditable { onSend?(); return }
-            super.keyDown(with: event)
-        }
-
-        /// Pasted files and images become attachments, matching + and drop.
-        /// An image with no file behind it (a copied screenshot) is written to
-        /// a temporary PNG first. Text still pastes as text.
-        override func paste(_ sender: Any?) {
-            if isEditable, let onPasteFiles, let urls = Self.pastedFiles(NSPasteboard.general), onPasteFiles(urls) { return }
-            super.paste(sender)
-        }
-
-        static func pastedFiles(_ board: NSPasteboard) -> [URL]? {
-            if let urls = board.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL], !urls.isEmpty {
-                return urls
+    var body: some View {
+        if let state = menu.state {
+            VStack(alignment: .leading, spacing: 1) {
+                ForEach(Array(state.candidates.enumerated()), id: \.element.id) { index, target in
+                    row(target, index: index, selected: index == state.selected)
+                }
             }
-            // Text wins over an image unless the text is only the image's URL.
-            let text = board.string(forType: .string)?.trimmingCharacters(in: .whitespacesAndNewlines)
-            let textIsLink = text.map { $0.range(of: #"^https?://\S+$"#, options: .regularExpression) != nil } ?? true
-            guard textIsLink, let image = NSImage(pasteboard: board), let tiff = image.tiffRepresentation,
-                  let bitmap = NSBitmapImageRep(data: tiff), let png = bitmap.representation(using: .png, properties: [:]) else { return nil }
-            let directory = FileManager.default.temporaryDirectory.appendingPathComponent("ProviderHubChatPaste", isDirectory: true)
-            let formatter = DateFormatter(); formatter.dateFormat = "yyyy-MM-dd 'at' HH.mm.ss"
-            let stem = "Pasted image " + formatter.string(from: Date())
-            do {
-                try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-                var url = directory.appendingPathComponent(stem + ".png")
-                var copy = 2
-                while FileManager.default.fileExists(atPath: url.path) { url = directory.appendingPathComponent("\(stem) \(copy).png"); copy += 1 }
-                try png.write(to: url)
-                return [url]
-            } catch { return nil }
-        }
-
-        override func draw(_ dirtyRect: NSRect) {
-            super.draw(dirtyRect)
-            guard string.isEmpty, !placeholder.isEmpty else { return }
-            let attributes: [NSAttributedString.Key: Any] = [.font: font ?? NSFont.systemFont(ofSize: 14), .foregroundColor: NSColor.placeholderTextColor]
-            let origin = NSPoint(x: textContainerInset.width + (textContainer?.lineFragmentPadding ?? 0), y: textContainerInset.height)
-            (placeholder as NSString).draw(at: origin, withAttributes: attributes)
+            .padding(4)
+            .frame(width: 270, alignment: .leading)
+            // Opaque, a step above the window, so the transcript never shows through.
+            .background {
+                RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Semantic.surface)
+                    .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Semantic.raisedSurface))
+            }
+            .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(Semantic.hairline, lineWidth: 1))
+            .shadow(color: .black.opacity(0.18), radius: 14, y: 4)
+            .accessibilityElement(children: .contain)
+            .accessibilityLabel("Team members to address")
         }
     }
 
-    final class Coordinator: NSObject, NSTextViewDelegate {
-        var parent: ComposerTextView
-        init(_ parent: ComposerTextView) { self.parent = parent }
-
-        func textDidChange(_ notification: Notification) {
-            guard let view = notification.object as? NSTextView else { return }
-            parent.text = view.string
-            parent.measure(view)
+    private func row(_ target: ChatMentionTarget, index: Int, selected: Bool) -> some View {
+        let route = model.route(named: target.route)
+        return Button { menu.choose?(target) } label: {
+            HStack(spacing: 8) {
+                ChatProviderIcon(presentation: route?.presentation, size: 15)
+                Text(target.name).font(.system(size: 12.5, weight: .semibold)).foregroundStyle(Semantic.ink)
+                Text(route?.label ?? target.route).font(.system(size: 11.5)).foregroundStyle(Semantic.secondaryInk)
+                Spacer(minLength: 8)
+                if selected {
+                    Image(systemName: "return").font(.system(size: 9.5, weight: .semibold)).foregroundStyle(Semantic.secondaryInk)
+                }
+            }
+            .lineLimit(1)
+            .padding(.horizontal, 8).frame(height: 28)
+            .background(RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .fill(selected ? Color(nsColor: ChatMentionStyle.fill(target.accent)) : .clear))
+            .contentShape(Rectangle())
         }
-
-        func textView(_ textView: NSTextView, doCommandBy selector: Selector) -> Bool {
-            guard selector == #selector(NSResponder.insertNewline(_:)) else { return false }
-            let flags = NSApp.currentEvent?.modifierFlags.intersection(.deviceIndependentFlagsMask) ?? []
-            if flags.contains(.shift) || flags.contains(.option) { return false }
-            parent.onSend()
-            return true
-        }
-    }
-
-    func makeCoordinator() -> Coordinator { Coordinator(self) }
-
-    func makeNSView(context: Context) -> NSScrollView {
-        let scroll = NSScrollView()
-        scroll.drawsBackground = false; scroll.borderType = .noBorder
-        scroll.hasVerticalScroller = true; scroll.autohidesScrollers = true
-        let view = SendTextView()
-        view.delegate = context.coordinator
-        view.drawsBackground = false
-        view.font = .systemFont(ofSize: 14); view.textColor = .labelColor
-        view.isRichText = false; view.allowsUndo = true; view.usesFindBar = false
-        view.isAutomaticQuoteSubstitutionEnabled = false; view.isAutomaticDashSubstitutionEnabled = false
-        view.textContainerInset = NSSize(width: 0, height: 3)
-        view.isVerticallyResizable = true; view.isHorizontallyResizable = false
-        view.autoresizingMask = [.width]
-        view.minSize = .zero
-        view.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
-        view.textContainer?.widthTracksTextView = true
-        view.textContainer?.containerSize = NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude)
-        view.setAccessibilityLabel("Message")
-        scroll.documentView = view
-        DispatchQueue.main.async { view.window?.makeFirstResponder(view) }
-        return scroll
-    }
-
-    func updateNSView(_ scroll: NSScrollView, context: Context) {
-        context.coordinator.parent = self
-        guard let view = scroll.documentView as? SendTextView else { return }
-        view.onSend = onSend
-        view.onPasteFiles = onPasteFiles
-        view.placeholder = placeholder
-        view.font = textStyle.editorFont
-        view.isEditable = enabled
-        if view.string != text { view.string = text }
-        measure(view)
-    }
-
-    /// Publish the height the text needs, clamped to a few lines; the SwiftUI
-    /// frame follows and the scroll view takes over past the ceiling.
-    func measure(_ view: NSTextView) {
-        guard let container = view.textContainer, let layout = view.layoutManager else { return }
-        layout.ensureLayout(for: container)
-        let used = layout.usedRect(for: container).height + view.textContainerInset.height * 2
-        // The ceiling grows with zoom (to twice its height) so large print
-        // still shows a few lines before the composer scrolls.
-        let next = min(max(used.rounded(.up), Self.minHeight), Self.maxHeight * min(CGFloat(textStyle.zoom), 2))
-        guard abs(next - height) > 0.5 else { return }
-        DispatchQueue.main.async { height = next }
+        .buttonStyle(.plain)
+        .onHover { if $0 { menu.select(index) } }
+        .accessibilityLabel("Address " + target.name + ", " + (route?.label ?? target.route))
+        .accessibilityAddTraits(selected ? .isSelected : [])
     }
 }

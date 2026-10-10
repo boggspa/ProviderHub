@@ -585,9 +585,20 @@ class ChatService:
         request = command.get("request")
         if request is not None and (not isinstance(request, str) or not request or len(request) > 128):
             raise ValueError("Invalid message submission identity.")
+        team = self.chat["team"] if chat_team.enabled(self.chat) else None
+        # Only the composer decides what is a tag: the chips it drew are the
+        # routing record, and a message without chips is for the whole Team.
+        # Chips drawn from an outdated roster are refused before any attachment
+        # is kept, and the current roster is resent so the tints correct.
+        chips = command.get("mentions")
+        try: tagged = chat_team.claimed(team, text, [] if chips is None else chips)
+        except ValueError:
+            chat_team.publish(self)
+            raise
         attached, blocks = prepare_attachments(inputs, self.store.root / self.chat["id"], vision=self.choice().get("vision") is not False)
         visible = entry("user", text, self.chat["route"], attachments=attached, workspace=self.chat["workspace"])
         if request is not None: visible["clientRequest"] = request
+        if tagged: visible["mentions"] = tagged
         content = [{"type": "text", "text": text if text.strip() else "Please review the attached files."}, *blocks]
         return {"entry": visible, "content": content}
 
@@ -614,15 +625,17 @@ class ChatService:
             team = self.chat.get("team") if chat_team.enabled(self.chat) else None
             previous_team = None
             if team:
-                previous_team = (list(team["queue"]), team["status"], [(m, m["status"]) for m in team["members"]])
-                chat_team.queue_update(team)
+                previous_team = (list(team["queue"]), team["status"], [(m, dict(m)) for m in team["members"]])
+                chat_team.queue_update(team, chat_team.addressees(pending["entry"]))
             try: self.save()
             except Exception:
                 self.chat.pop("pending_update", None)
                 self.chat["entries"] = [row for row in self.chat["entries"] if row["id"] != pending["entry"]["id"]]
                 if previous_team:
-                    team["queue"], team["status"], statuses = previous_team
-                    for member, status in statuses: member["status"] = status
+                    team["queue"], team["status"], saved = previous_team
+                    for member, fields in saved:
+                        for key in set(member) - set(fields): del member[key]
+                        member.update(fields)
                 raise
             if chat_team.enabled(self.chat):
                 # Team input is consumed at a durable member boundary. Do not
