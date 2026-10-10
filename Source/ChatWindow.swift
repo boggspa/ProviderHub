@@ -22,6 +22,7 @@ struct ChatWindow: View {
     @AppStorage("chatFontChoice") private var fontChoice = ""
     @AppStorage("chatCustomFontName") private var customFontName = ""
     @AppStorage("chatTextSize") private var textSize = 13.0
+    @AppStorage(ChatZoom.defaultsKey) private var zoom = 1.0
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var dropTargeted = false
 
@@ -54,7 +55,8 @@ struct ChatWindow: View {
         }
         .frame(minWidth: 720, minHeight: 500)
         .environment(\.chatTextStyle, ChatTextStyle(size: textSize,
-            selection: ChatFonts.selection(fontChoice, legacyMonospaced: monospacedText), customName: customFontName))
+            selection: ChatFonts.selection(fontChoice, legacyMonospaced: monospacedText), customName: customFontName,
+            zoom: ChatZoom.clamp(zoom)))
         .background {
             if windowStyle == .glass { VibrancyBackground().ignoresSafeArea() }
             else { Color(nsColor: .windowBackgroundColor).ignoresSafeArea() }
@@ -197,6 +199,7 @@ private struct ChatHeader: View {
                 Spacer(minLength: 4)
                 usage
                 connection
+                ChatZoomControl()
                 inspectorButton
             }
             if compact, model.selectedID != nil { workspaceControls.padding(.leading, 4) }
@@ -351,6 +354,39 @@ private struct ChatHeader: View {
                 Text("Connecting").font(HubTheme.Typography.detail).foregroundStyle(Semantic.secondaryInk)
             }
         }
+    }
+}
+
+/// "− 100% +" in the header: the reading zoom for transcript and composer
+/// text. The percentage resets to 100%. The View menu offers the same steps
+/// as ⌘+, ⌘− and ⌘0.
+private struct ChatZoomControl: View {
+    @AppStorage(ChatZoom.defaultsKey) private var zoom = 1.0
+
+    var body: some View {
+        let current = ChatZoom.clamp(zoom)
+        HStack(spacing: 0) {
+            step("minus", label: "Zoom out", help: "Smaller text (⌘−)", enabled: current > ChatZoom.steps[0]) { zoom = ChatZoom.smaller(zoom) }
+            Button { zoom = 1 } label: {
+                Text(ChatZoom.percent(current)).font(.system(size: 10.5, design: .monospaced))
+                    .foregroundStyle(current == 1 ? Semantic.secondaryInk : Semantic.ink)
+                    .frame(minWidth: 34).frame(height: 20).contentShape(Rectangle())
+            }
+            .buttonStyle(.plain).help("Text zoom · click for actual size (⌘0)")
+            .accessibilityLabel("Text zoom \(ChatZoom.percent(current))").accessibilityHint("Resets to 100%")
+            step("plus", label: "Zoom in", help: "Larger text (⌘+)", enabled: current < ChatZoom.steps[ChatZoom.steps.count - 1]) { zoom = ChatZoom.larger(zoom) }
+        }
+        .background(Capsule().fill(Semantic.raisedSurface))
+        .fixedSize()
+    }
+
+    private func step(_ icon: String, label: String, help: String, enabled: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: icon).font(.system(size: 9, weight: .semibold)).foregroundStyle(Semantic.secondaryInk)
+                .frame(width: 20, height: 20).contentShape(Rectangle())
+        }
+        .buttonStyle(.plain).disabled(!enabled).opacity(enabled ? 1 : 0.35)
+        .help(help).accessibilityLabel(label)
     }
 }
 
@@ -895,7 +931,9 @@ struct ComposerTextView: NSViewRepresentable {
         guard let container = view.textContainer, let layout = view.layoutManager else { return }
         layout.ensureLayout(for: container)
         let used = layout.usedRect(for: container).height + view.textContainerInset.height * 2
-        let next = min(max(used.rounded(.up), Self.minHeight), Self.maxHeight)
+        // The ceiling grows with zoom (to twice its height) so large print
+        // still shows a few lines before the composer scrolls.
+        let next = min(max(used.rounded(.up), Self.minHeight), Self.maxHeight * min(CGFloat(textStyle.zoom), 2))
         guard abs(next - height) > 0.5 else { return }
         DispatchQueue.main.async { height = next }
     }

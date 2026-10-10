@@ -134,6 +134,15 @@ fonts installed through Font Book. Only the chosen font name is saved; custom
 font files are never copied. An unavailable custom font falls back to System.
 Theme and surface reuse the Hub's existing preferences. Text choices affect
 the transcript and composer; code and diffs keep their monospace treatment.
+
+**Zoom** enlarges the conversation without rescaling the app. Use the header's
+**− 100% +** control (click the percentage for actual size) or View › Zoom In
+(⌘+), Zoom Out (⌘−) and Actual Size (⌘0) while the Chat window is in front.
+Steps run from 85% to 300% on top of the Text size choice. Transcript text,
+tool rows, glyphs, tables and the composer scale, and the reading column
+widens with them; the header, rail, footer and buttons keep their size. The
+zoom is saved across launches.
+
 The send and stop buttons stay monochrome and invert with the theme: a light
 disc on a dark window, a dark disc on a light one.
 

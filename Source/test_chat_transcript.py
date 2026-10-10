@@ -127,6 +127,31 @@ import Combine
         check(narrow == [80, 80, 80, 80], "Narrow table crushed columns instead of overflowing")
         let ideal = ChatTableLayout.columnWidths(available: nil, hints: [8, 60], minimum: 80)
         check(ideal == [80, 80], "Ideal minimum prevents responsive layout")
+
+        // Reading zoom: bounded steps, a stored preference, scaled reading
+        // text, and a View menu that only acts on the Chat window.
+        check(ChatZoom.larger(1) == 1.15 && ChatZoom.smaller(1) == 0.85, "Zoom steps")
+        check(ChatZoom.larger(3) == 3 && ChatZoom.smaller(0.85) == 0.85, "Zoom escaped its bounds")
+        check(ChatZoom.larger(1.2) == 1.3 && ChatZoom.smaller(1.2) == 1.15, "Off-step zoom did not snap")
+        check(ChatZoom.clamp(.nan) == 1 && ChatZoom.clamp(40) == 3 && ChatZoom.percent(1.75) == "175%", "Zoom clamp or label")
+        let zoomSuite = "chat-zoom-tests." + UUID().uuidString
+        let zoomDefaults = UserDefaults(suiteName: zoomSuite)!
+        defer { zoomDefaults.removePersistentDomain(forName: zoomSuite) }
+        check(ChatZoom.stored(zoomDefaults) == 1, "Default zoom")
+        ChatZoom.zoomIn(zoomDefaults); ChatZoom.zoomIn(zoomDefaults)
+        check(ChatZoom.stored(zoomDefaults) == 1.3, "Zoom in")
+        ChatZoom.zoomOut(zoomDefaults)
+        check(ChatZoom.stored(zoomDefaults) == 1.15, "Zoom out")
+        ChatZoom.reset(zoomDefaults)
+        check(ChatZoom.stored(zoomDefaults) == 1, "Actual size")
+        let zoomed = ChatTextStyle(size: 13, zoom: 2)
+        check(zoomed.nsFont.pointSize == 26 && zoomed.editorFont.pointSize == 28 && zoomed.scaled(10) == 20, "Zoom did not scale reading text")
+        check(ChatFonts.font("system", size: 400, scale: 2).pointSize == 64, "Zoom applied before the size bound")
+        let viewMenu = ChatZoomCommands.shared.menu()
+        check(viewMenu.items.map(\.keyEquivalent) == ["+", "=", "-", "0"] && viewMenu.items[1].isHidden
+              && viewMenu.items[1].allowsKeyEquivalentWhenHidden, "View menu shortcuts")
+        check(!ChatZoomCommands.shared.validateMenuItem(viewMenu.items[0]), "Zoom acted without the Chat window")
+
         let started = Date()
         for _ in 0..<50 { _ = ChatTableParser.parse(tooManyRows, streaming: true) }
         print("50 bounded table parses: \(Date().timeIntervalSince(started))s")
