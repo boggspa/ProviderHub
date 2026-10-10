@@ -4,11 +4,13 @@ import json
 from pathlib import Path
 import subprocess
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
 from chat_inspector import (git_changes, git_branches, switch_branch, create_branch,
-                            create_worktree, switch_worktree, decode_branch)
+                            create_worktree, switch_worktree, decode_branch, turn_revision,
+                            _commits_since)
 
 
 class InspectorTests(unittest.TestCase):
@@ -141,6 +143,67 @@ class InspectorTests(unittest.TestCase):
         self.git("add", "new")
         (self.root / "new").unlink()
         self.assertEqual(git_changes(self.root)["files"], [])
+
+    def test_commits_since_turn_baseline_bounds_and_unborn_head(self):
+        self.assertEqual(turn_revision(self.root), "")
+        self.assertIsNone(turn_revision(self.root.parent / "missing-workspace"))
+        (self.root / "a.txt").write_text("a\n")
+        self.git("add", "a.txt")
+        staged = git_changes(self.root, since="")
+        self.assertEqual(staged["files"][0]["added"], 1)
+        self.assertEqual(staged["commits"], [])
+        self.commit()
+        base = self.git("rev-parse", "HEAD").decode().strip()
+        self.assertEqual(turn_revision(self.root), base)
+        self.assertEqual(git_changes(self.root, since=base)["commits"], [])
+        self.assertEqual(git_changes(self.root)["commits"], [])
+        self.assertEqual(git_changes(self.root, since="not-a-sha")["commits"], [])
+        (self.root / "a.txt").write_text("b\n")
+        self.git("add", "a.txt")
+        self.git("commit", "-m", "second subject")
+        second = self.git("rev-parse", "HEAD").decode().strip()
+        result = git_changes(self.root, since=base)
+        self.assertEqual([row["subject"] for row in result["commits"]], ["second subject"])
+        commit = result["commits"][0]
+        self.assertEqual(commit["hash"], second)
+        self.assertEqual(commit["author"], "Test")
+        self.assertIn("T", commit["time"])
+        self.assertEqual(commit["files"][0]["path"], "a.txt")
+        self.assertEqual((commit["files"][0]["added"], commit["files"][0]["deleted"]), (1, 1))
+        self.assertIn("+b", commit["files"][0]["diff"])
+        self.git("checkout", "--detach")
+        (self.root / "c.txt").write_text("c\n")
+        self.git("add", "c.txt")
+        self.git("commit", "-m", "detached subject")
+        detached = git_changes(self.root, since=second)
+        self.assertEqual([row["subject"] for row in detached["commits"]], ["detached subject"])
+        self.assertEqual(detached["commits"][0]["files"][0]["added"], 1)
+        self.git("checkout", "main")
+        self.git("reset", "--hard", base)
+        reset = git_changes(self.root, since=second)
+        self.assertEqual(reset["commits"], [])
+        self.assertIn("files", reset)
+        for index in range(21):
+            (self.root / "n.txt").write_text(f"{index}\n")
+            self.git("add", "n.txt")
+            self.git("commit", "-m", f"bounded {index}")
+        bounded = git_changes(self.root, since=base)
+        self.assertTrue(bounded["truncated"])
+        self.assertEqual(len(bounded["commits"]), 20)
+        self.assertEqual(bounded["commits"][0]["subject"], "bounded 20")
+        previous = self.git("rev-parse", "HEAD").decode().strip()
+        for index in range(41):
+            (self.root / f"f{index}.txt").write_text("x\n")
+        self.git("add", "--all")
+        self.git("commit", "-m", "wide")
+        wide = git_changes(self.root, since=previous)
+        self.assertEqual(len(wide["commits"]), 1)
+        self.assertEqual(len(wide["commits"][0]["files"]), 40)
+        self.assertTrue(wide["truncated"])
+        self.assertTrue(wide["commits"][0]["truncated"])
+        empty, missed = _commits_since(str(self.root), base, time.monotonic() - 1)
+        self.assertEqual(empty, [])
+        self.assertTrue(missed)
 
     def claim(self, text, name=".WORK-IN-PROGRESS-peer.md"):
         (self.root / ".git/info/exclude").write_text(".WORK-IN-PROGRESS*\n.work-guard/\n")

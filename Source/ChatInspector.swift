@@ -49,10 +49,23 @@ struct ChatInspector: View {
 private struct ChatChangesPane: View {
     @ObservedObject var model: ChatModel
     @State private var expanded = Set<String>()
+    @State private var armedFlush = false
+
+    private var summary: String {
+        guard let changes = model.gitChanges else { return "File Changes" }
+        let count = changes.files.count
+        var text = "\(count) changed \(count == 1 ? "file" : "files")"
+        if !changes.commits.isEmpty {
+            let commits = changes.commits.count
+            text += " · \(commits) \(commits == 1 ? "commit" : "commits") this turn"
+        }
+        return text
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             HStack {
-                Text(model.gitChanges.map { "\($0.files.count) changed \($0.files.count == 1 ? "file" : "files")" } ?? "File Changes")
+                Text(summary)
                     .font(.system(size: 11.5)).foregroundStyle(.secondary)
                 Spacer()
                 if model.gitChangesLoading { ProgressView().controlSize(.mini) }
@@ -61,28 +74,19 @@ private struct ChatChangesPane: View {
             }.padding(14)
             if !model.inspectorNotice.isEmpty { inspectorEmpty(model.inspectorNotice) }
             else if let changes = model.gitChanges {
-                if changes.files.isEmpty { inspectorEmpty("No file changes.") }
+                if changes.files.isEmpty && changes.commits.isEmpty { inspectorEmpty("No file changes.") }
                 else {
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: 10) {
                             ForEach(changes.files) { file in
-                                DisclosureGroup(isExpanded: Binding(get: { expanded.contains(file.id) }, set: { value in
-                                    if value { expanded.insert(file.id) } else { expanded.remove(file.id) }
-                                })) {
-                                    if file.binary { Text("Binary file").font(.system(size: 11)).foregroundStyle(.secondary).padding(.vertical, 6) }
-                                    else {
-                                        ScrollView([.horizontal, .vertical]) { PatchText(text: file.diff, onDark: true).padding(10).fixedSize(horizontal: true, vertical: true) }
-                                            .frame(minHeight: 80, maxHeight: 300).background(Color.black.opacity(0.88), in: RoundedRectangle(cornerRadius: 6))
-                                            .padding(.top, 5)
-                                    }
-                                } label: {
-                                    HStack(spacing: 5) {
-                                        Text(file.path).font(.system(size: 11.5)).lineLimit(1).truncationMode(.middle)
-                                        Spacer(minLength: 0)
-                                        Text("+\(file.added)").foregroundStyle(Color(nsColor: .systemGreen))
-                                        Text("−\(file.deleted)").foregroundStyle(Color(nsColor: .systemRed))
-                                    }.font(.system(size: 10.5, design: .monospaced))
-                                        .help(file.oldPath.map { $0 + " → " + file.path } ?? file.path)
+                                fileDisclosure(id: "work:\(file.path)", path: file.path, oldPath: file.oldPath, added: file.added, deleted: file.deleted, binary: file.binary, diff: file.diff, showAuthor: true)
+                            }
+                            if !changes.commits.isEmpty {
+                                Text("Committed this turn")
+                                    .font(.system(size: 11, weight: .medium)).foregroundStyle(.secondary)
+                                    .padding(.top, changes.files.isEmpty ? 0 : 6)
+                                ForEach(changes.commits) { commit in
+                                    commitDisclosure(commit)
                                 }
                             }
                             if changes.truncated { Text("Large changes are truncated.").font(.system(size: 11)).foregroundStyle(.secondary) }
@@ -92,10 +96,110 @@ private struct ChatChangesPane: View {
             } else { inspectorEmpty(model.gitChangesLoading ? "Reading changes…" : "Choose a Git workspace.") }
             Spacer(minLength: 0)
         }
-        .task(id: model.selected?.workspace) { model.refreshChanges() }
+        .task(id: model.selected?.workspace) {
+            model.primeChangesActivity()
+            model.refreshChanges()
+        }
         .onChange(of: model.busy) { _, busy in if !busy { model.refreshChanges() } }
+        .onAppear { model.primeChangesActivity() }
+        .onChange(of: model.fileToolFingerprint) { _, _ in
+            model.noteCompletedFileTools()
+            armedFlush = true
+        }
+        .onChange(of: model.inspectorVisible) { _, visible in
+            guard visible, model.inspectorTab == .changes else { return }
+            model.primeChangesActivity()
+            model.refreshChanges()
+        }
+        .onChange(of: model.inspectorTab) { _, tab in
+            guard tab == .changes, model.inspectorVisible else { return }
+            model.primeChangesActivity()
+            model.refreshChanges()
+        }
+        .task(id: armedFlush) { await flushLiveChanges() }
         .onChange(of: model.gitChanges?.files.map(\.path)) { _, paths in
-            if expanded.isEmpty, let first = paths?.first { expanded.insert(first) }
+            if expanded.isEmpty, let first = paths?.first { expanded.insert("work:\(first)") }
+        }
+    }
+
+    private func flushLiveChanges() async {
+        guard armedFlush else { return }
+        while armedFlush && !Task.isCancelled {
+            try? await Task.sleep(nanoseconds: 2_500_000_000)
+            guard !Task.isCancelled else { return }
+            model.flushScheduledChanges()
+            if !model.changesActivityDirty { break }
+        }
+        armedFlush = false
+    }
+
+    private func expansion(_ id: String) -> Binding<Bool> {
+        Binding(get: { expanded.contains(id) }, set: { value in
+            if value { expanded.insert(id) } else { expanded.remove(id) }
+        })
+    }
+
+    private func commitWhen(_ value: String) -> String {
+        let parser = ISO8601DateFormatter()
+        parser.formatOptions = [.withInternetDateTime]
+        guard let date = parser.date(from: value) else { return value }
+        let formatter = DateFormatter()
+        formatter.timeStyle = .short
+        formatter.dateStyle = .none
+        return formatter.string(from: date)
+    }
+
+    @ViewBuilder private func commitDisclosure(_ commit: ChatCommit) -> some View {
+        let added = commit.files.reduce(0) { $0 + $1.added }
+        let deleted = commit.files.reduce(0) { $0 + $1.deleted }
+        DisclosureGroup(isExpanded: expansion(commit.id)) {
+            if commit.files.isEmpty {
+                Text(commit.truncated ? "File list truncated." : "No files in this commit.")
+                    .font(.system(size: 11)).foregroundStyle(.secondary).padding(.vertical, 4)
+            } else {
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(commit.files) { file in
+                        fileDisclosure(id: commit.hash + ":" + file.path, path: file.path, oldPath: file.oldPath, added: file.added, deleted: file.deleted, binary: file.binary, diff: file.diff, showAuthor: false)
+                    }
+                }.padding(.top, 4)
+            }
+        } label: {
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(commit.subject.isEmpty ? String(commit.hash.prefix(7)) : commit.subject)
+                        .font(.system(size: 11.5)).lineLimit(1)
+                    Text(String(commit.hash.prefix(7)) + " · " + commit.author + " · " + commitWhen(commit.time))
+                        .font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1)
+                }
+                Spacer(minLength: 0)
+                Text("+\(added)").foregroundStyle(Color(nsColor: .systemGreen))
+                Text("−\(deleted)").foregroundStyle(Color(nsColor: .systemRed))
+            }.font(.system(size: 10.5, design: .monospaced))
+        }
+    }
+
+    @ViewBuilder private func fileDisclosure(id: String, path: String, oldPath: String?, added: Int, deleted: Int, binary: Bool, diff: String, showAuthor: Bool) -> some View {
+        DisclosureGroup(isExpanded: expansion(id)) {
+            if binary { Text("Binary file").font(.system(size: 11)).foregroundStyle(.secondary).padding(.vertical, 6) }
+            else {
+                ScrollView([.horizontal, .vertical]) { PatchText(text: diff, onDark: true).padding(10).fixedSize(horizontal: true, vertical: true) }
+                    .frame(minHeight: 80, maxHeight: 300).background(Color.black.opacity(0.88), in: RoundedRectangle(cornerRadius: 6))
+                    .padding(.top, 5)
+            }
+        } label: {
+            HStack(spacing: 5) {
+                Text(path).font(.system(size: 11.5)).lineLimit(1).truncationMode(.middle)
+                if showAuthor, let author = model.fileAuthor(path: path) {
+                    ChatProviderIcon(presentation: model.presentation(for: author), size: 12)
+                    if !author.name.isEmpty {
+                        Text(author.name).font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1)
+                    }
+                }
+                Spacer(minLength: 0)
+                Text("+\(added)").foregroundStyle(Color(nsColor: .systemGreen))
+                Text("−\(deleted)").foregroundStyle(Color(nsColor: .systemRed))
+            }.font(.system(size: 10.5, design: .monospaced))
+                .help(oldPath.map { $0 + " → " + path } ?? path)
         }
     }
 }
