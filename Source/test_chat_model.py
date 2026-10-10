@@ -31,6 +31,7 @@ struct ChatSettingsMenu: View { var model: ChatModel; var body: some View { Text
         cases = r'''
 import AppKit
 import SwiftUI
+import Combine
 @main struct Cases {
     @MainActor static func main() throws {
         var commands: [[String: Any]] = []
@@ -40,7 +41,15 @@ import SwiftUI
         let preferences = UserDefaults(suiteName: preferencesID)!
         defer { preferences.removePersistentDomain(forName: preferencesID) }
         let model = ChatModel(sendCommand: { commands.append($0); return writable }, uptime: { clock }, preferences: preferences)
-        func send(_ event: [String: Any]) throws {
+        func send(_ original: [String: Any]) throws {
+            var event = original
+            if ["state", "error", "rejected", "approval"].contains(event["event"] as? String ?? ""), event["chat"] == nil {
+                event["chat"] = model.selectedID
+            }
+            if var row = event["entry"] as? [String: Any], row["kind"] as? String == "user", row["clientRequest"] == nil,
+               let command = commands.last(where: { $0["chat"] as? String == event["chat"] as? String && $0["text"] as? String == row["text"] as? String }) {
+                row["clientRequest"] = command["request"]; event["entry"] = row
+            }
             model.consume(try JSONSerialization.data(withJSONObject: event) + Data([10]))
         }
         func check(_ yes: Bool, _ text: String) { if !yes { fatalError(text) } }
@@ -57,8 +66,9 @@ import SwiftUI
         model.teamRequest = "team"; check(model.hasActiveWork, "Update ignored Team setup"); model.teamRequest = nil
         model.sideOpening = true; check(model.hasActiveWork, "Update ignored Side Chat startup"); model.sideOpening = false
         model.sideDraft = "Unsent side message"; check(model.hasUnsentDrafts, "Update lost Side Chat draft"); model.sideDraft = ""
-        model.sideDrafts["other"] = "Saved side draft"; check(model.hasUnsentDrafts, "Update lost another chat's Side Chat draft")
-        model.sideDrafts.removeAll(); model.agents = []; model.sideChat = nil
+        model.selectedID = "other"; model.sideDraft = "Saved side draft"; model.selectedID = nil
+        check(model.hasUnsentDrafts, "Update lost another chat's Side Chat draft")
+        model.selectedID = "other"; model.sideDraft = ""; model.selectedID = nil; model.agents = []; model.sideChat = nil
         check(!model.hasActiveWork && !model.hasUnsentDrafts, "Cleared work still blocked restart")
         let route: [String: Any] = ["id":"ollama/test|", "route":"ollama/test", "label":"Test", "provider":"Ollama",
             "account":"", "accountLabel":"Default", "scope":"scope", "efforts":["low","high"], "context":100000, "supportsTools":true]
@@ -193,7 +203,7 @@ import SwiftUI
         check(commands.last?["workspace"] as? String == "/tmp/another-project", "workspace header created in the wrong folder")
         try send(["event":"state", "busy":true, "status":"Working"])
         let beforeBusyNew = commands.count; model.newChat(in: "/tmp/another-project")
-        check(commands.count == beforeBusyNew, "workspace new-chat ignored busy guard")
+        check(commands.count == beforeBusyNew + 1 && commands.last?["command"] as? String == "create", "running chat blocked another workspace's new chat")
         try send(["event":"state", "busy":false, "status":"Ready"])
         try send(["event":"chats", "chats":[]])
         try send(["event":"selected", "id":NSNull(), "entries":[]])
@@ -319,29 +329,31 @@ import SwiftUI
         check(teamEntry.memberName == "Builder" && model.isStreaming(teamEntry, fallback:false), "active member attribution lost")
         try send(["event":"team", "chat":"A", "team":roster("working", "working", "c2")])
         check(!model.isStreaming(teamEntry, fallback:true), "old contribution resumed its streaming layout")
-        var parallel = roster("working", "working", "c2")
-        var builder = (parallel["members"] as! [[String: Any]])[0]
-        var reviewer = builder
-        reviewer["id"] = "reviewer"; reviewer["name"] = "Reviewer"; reviewer["contributionID"] = "review-1"
-        reviewer["usage"] = 1200; reviewer["context"] = 128000
-        parallel["members"] = [builder, reviewer]
-        parallel["activeMemberID"] = "reviewer"; parallel["activeMemberIDs"] = ["builder", "reviewer"]
-        try send(["event":"team", "chat":"A", "team":parallel])
-        check(model.team?.activeMemberIDs == ["builder", "reviewer"], "parallel active IDs not decoded")
-        try send(["event":"entry", "chat":"A", "entry":["id":"build-2", "kind":"assistant", "text":"Building together",
-            "route":"ollama/test", "isError":false, "changedFiles":[], "memberID":"builder", "contributionID":"c2"]])
-        let buildReply = model.entries.last!
-        try send(["event":"entry", "chat":"A", "entry":["id":"review-1", "kind":"assistant", "text":"Reviewing together",
-            "route":"ollama/test", "isError":false, "changedFiles":[], "memberID":"reviewer", "contributionID":"review-1"]])
-        let reviewReply = model.entries.last!
-        check(model.isStreaming(buildReply, fallback:false) && model.isStreaming(reviewReply, fallback:false),
-              "one member's new row stopped another member's streaming layout")
-        check(model.team?.members.map { $0.usage! } == [800, 1200] && model.team?.members.map { $0.context! } == [100000, 128000],
-              "parallel member usage/context lost their identities")
-        reviewer["status"] = "done"; parallel["members"] = [builder, reviewer]
-        try send(["event":"team", "chat":"A", "team":parallel])
-        check(model.isStreaming(buildReply, fallback:false) && !model.isStreaming(reviewReply, fallback:true),
-              "completed member remained live or hid a working peer")
+        do {
+            var parallelTeam = roster("working", "working", "c2")
+            let builder = (parallelTeam["members"] as! [[String: Any]])[0]
+            var reviewer = builder
+            reviewer["id"] = "reviewer"; reviewer["name"] = "Reviewer"; reviewer["contributionID"] = "review-1"
+            reviewer["usage"] = 1200; reviewer["context"] = 128000
+            parallelTeam["members"] = [builder, reviewer]
+            parallelTeam["activeMemberID"] = "reviewer"; parallelTeam["activeMemberIDs"] = ["builder", "reviewer"]
+            try send(["event":"team", "chat":"A", "team":parallelTeam])
+            check(model.team?.activeMemberIDs == ["builder", "reviewer"], "parallel active IDs not decoded")
+            try send(["event":"entry", "chat":"A", "entry":["id":"build-2", "kind":"assistant", "text":"Building together",
+                "route":"ollama/test", "isError":false, "changedFiles":[], "memberID":"builder", "contributionID":"c2"]])
+            let buildReply = model.entries.last!
+            try send(["event":"entry", "chat":"A", "entry":["id":"review-1", "kind":"assistant", "text":"Reviewing together",
+                "route":"ollama/test", "isError":false, "changedFiles":[], "memberID":"reviewer", "contributionID":"review-1"]])
+            let reviewReply = model.entries.last!
+            check(model.isStreaming(buildReply, fallback:false) && model.isStreaming(reviewReply, fallback:false),
+                  "one member's new row stopped another member's streaming layout")
+            check(model.team?.members.map { $0.usage! } == [800, 1200] && model.team?.members.map { $0.context! } == [100000, 128000],
+                  "parallel member usage/context lost their identities")
+            reviewer["status"] = "done"; parallelTeam["members"] = [builder, reviewer]
+            try send(["event":"team", "chat":"A", "team":parallelTeam])
+            check(model.isStreaming(buildReply, fallback:false) && !model.isStreaming(reviewReply, fallback:true),
+                  "completed member remained live or hid a working peer")
+        }
         try send(["event":"state", "busy":false, "status":"Paused"])
         try send(["event":"team", "chat":"A", "team":roster("needs_input", "needs_input")])
         let beforeInputResume = commands.count; model.resumeTeam()
@@ -353,6 +365,178 @@ import SwiftUI
         check(model.team == nil && model.teamRequest == nil, "Team state leaked into another chat")
         try send(["event":"team", "chat":"A", "team":roster("working", "working")])
         check(model.team == nil, "late Team event escaped its chat")
+
+        // A single transport can own independent runs. Background text is
+        // rehydrated by selection snapshots rather than published per delta.
+        var parallelCommands: [[String: Any]] = []
+        var activity: [Bool] = []
+        let parallel = ChatModel(sendCommand: { parallelCommands.append($0); return true }, uptime: { clock }, preferences: preferences)
+        parallel.onActivity = { activity.append($0) }
+        func event(_ payload: [String: Any]) throws {
+            parallel.consume(try JSONSerialization.data(withJSONObject: payload) + Data([10]))
+        }
+        func focus(_ id: String, busy: Bool = false, rows: [[String: Any]] = [], approval: Any = NSNull()) throws {
+            parallel.select(id)
+            check(parallelCommands.last?["chat"] as? String == id, "selection command lacks owner")
+            try event(["event":"selected", "id":id, "chat":id, "entries":rows, "busy":busy, "interrupting":false,
+                       "status":busy ? "Working" : "Ready", "approval":approval, "usage":20])
+        }
+        try event(["event":"catalogue", "models":[route], "folders":["/tmp"]])
+        try event(["event":"chats", "chats":[summary("A"), summary("B")]])
+        try event(["event":"ready"])
+        try focus("A")
+        clock = 8000; parallel.draft = "A request"; parallel.addAttachments([attachmentURL]); parallel.send()
+        check(parallelCommands.last?["chat"] as? String == "A", "A send lacks owner")
+        let userA: [String: Any] = ["id":"shared-user", "kind":"user", "text":"A request", "route":"ollama/test", "isError":false, "changedFiles":[], "clientRequest":parallelCommands.last?["request"] as! String]
+        try focus("B")
+        check(parallel.canSend == false && parallel.attachments.isEmpty && !parallel.busy, "A leaked into idle B")
+        clock = 8010; parallel.draft = "B request"; parallel.send()
+        let userB: [String: Any] = ["id":"shared-user", "kind":"user", "text":"B request", "route":"ollama/test", "isError":false, "changedFiles":[], "clientRequest":parallelCommands.last?["request"] as! String]
+        check(parallel.isBusy("A") && parallel.isBusy("B") && parallel.turnStartedAt == 8010, "simultaneous chats share busy/clock")
+        check(activity == [true] && parallel.hasActiveWork, "second chat changed aggregate activity")
+        parallel.newChat(in: "/tmp/other")
+        check(parallelCommands.last?["command"] as? String == "create", "concurrent new-chat blocked")
+        try event(["event":"entry", "chat":"A", "entry":userA])
+        check(parallel.entries.isEmpty, "background acceptance contaminated visible transcript")
+        let replyA: [String: Any] = ["id":"shared-reply", "kind":"assistant", "text":"A answer", "route":"ollama/test", "isError":false, "changedFiles":[]]
+        let replyB: [String: Any] = ["id":"shared-reply", "kind":"assistant", "text":"B", "route":"ollama/test", "isError":false, "changedFiles":[]]
+        try event(["event":"entry", "chat":"B", "entry":userB])
+        try event(["event":"entry", "chat":"B", "entry":replyB])
+        var publishes = 0
+        let observation = parallel.objectWillChange.sink { publishes += 1 }
+        let beforeBackground = publishes
+        try event(["event":"entry", "chat":"A", "entry":replyA])
+        try event(["event":"delta", "chat":"A", "id":"shared-reply", "text":" discarded offscreen"])
+        try event(["event":"state", "chat":"A", "busy":true, "status":"Thinking", "usage":30])
+        check(publishes == beforeBackground, "offscreen streaming published the visible transcript")
+        try event(["event":"delta", "chat":"B", "id":"shared-reply", "text":" answer"])
+        check(parallel.entries.last?.text == "B answer", "overlapping entry IDs crossed chats")
+        try event(["event":"delta", "chat":"B", "id":"shared-reply", "text":" answer", "offset":1])
+        check(parallel.entries.last?.text == "B answer", "snapshot-overlapping delta duplicated text")
+        try event(["event":"delta", "chat":"B", "id":"shared-reply", "text":"wer ☀︎", "offset":5])
+        check(parallel.entries.last?.text == "B answer ☀︎", "partially overlapping delta lost new text")
+        try event(["event":"delta", "chat":"B", "id":"shared-reply", "text":"!", "offset":11])
+        check(parallel.entries.last?.text == "B answer ☀︎!", "delta offset used graphemes instead of Python code points")
+        let approvalA: [String: Any] = ["id":"approval-A", "summary":"A command", "workspace":"/tmp"]
+        try event(["event":"approval", "chat":"A", "approval":approvalA])
+        check(parallel.needsApproval("A") && parallel.approval == nil && parallel.isActive("A"), "background approval leaked or lost indicator")
+        try focus("A", busy:true, rows:[userA, replyA], approval:approvalA)
+        check(parallel.turnStartedAt == 8000 && parallel.entries.last?.text == "A answer", "selection lost A clock or snapshot")
+        let capturedApproval = parallel.approval!
+        try focus("B", busy:true, rows:[userB, replyB])
+        try event(["event":"approval", "chat":"B", "approval":["id":"approval-B", "summary":"B command", "workspace":"/tmp"]])
+        parallel.decideApproval(allow:true, target:capturedApproval)
+        check(parallelCommands.last?["chat"] as? String == "A" && parallelCommands.last?["id"] as? String == "approval-A", "approval token/owner crossed")
+        check(parallel.approval?.id == "approval-B", "delayed A approval settled B's request")
+        let beforeStaleApproval = parallelCommands.count
+        parallel.decideApproval(allow:false, target:capturedApproval)
+        check(parallelCommands.count == beforeStaleApproval && parallel.approval?.id == "approval-B", "stale approval action targeted another chat")
+        try focus("B", busy:true, rows:[userB, replyB])
+        try event(["event":"state", "chat":"A", "busy":false, "status":"Done", "usage":42])
+        check(!parallel.isBusy("A") && parallel.busy && parallel.tokenUsage == 20 && activity == [true], "A completion stopped B or cleared aggregate activity")
+        try event(["event":"error", "chat":"A", "message":"A failed after acceptance"])
+        try focus("A", rows:[userA, replyA])
+        check(parallel.draft.isEmpty && parallel.attachments.isEmpty, "background acknowledgement duplicated accepted input")
+        parallel.setApprovalMode("yolo", chat:"B")
+        check(parallelCommands.last?["command"] as? String != "configure", "captured approval owner ignored B busy guard")
+        parallel.setApprovalMode("accept_edits", chat:"A")
+        check(parallelCommands.last?["chat"] as? String == "A", "approval configuration lacks owner")
+        parallel.draft = "A rejected input"; parallel.addAttachments([attachmentURL]); parallel.send()
+        try focus("B", busy:true, rows:[userB, replyB])
+        parallel.draft = "B unsent draft"
+        try event(["event":"rejected", "chat":"A", "busy":false, "interrupting":false, "message":"A rejected"])
+        check(parallel.draft == "B unsent draft" && parallel.busy, "background rejection restored into wrong composer")
+        try focus("A", rows:[userA, replyA])
+        check(parallel.draft == "A rejected input" && parallel.attachments.count == 1, "background rejection lost input/attachment")
+        try focus("B", busy:true, rows:[userB, replyB])
+        parallel.stop()
+        check(parallelCommands.last?["chat"] as? String == "B" && parallelCommands.last?["command"] as? String == "stop", "stop lacks selected owner")
+        try event(["event":"error", "message":"Unscoped catalogue error"])
+        check(parallel.busy && parallel.isBusy("B"), "global error stopped an unrelated execution")
+        try event(["event":"state", "chat":"B", "busy":false, "status":"Stopped"])
+        check(activity == [true, false] && !parallel.hasActiveWork, "aggregate activity failed to settle")
+        // A delayed UI confirmation must still configure its captured owner.
+        parallel.setApprovalMode("yolo", chat:"A")
+        check(parallelCommands.last?["chat"] as? String == "A" && parallelCommands.last?["approvalMode"] as? String == "yolo", "captured confirmation configured selected B")
+        let beforeWorkspaceMismatch = parallelCommands.count
+        parallel.setApprovalMode("yolo", chat:"A", workspace:"/tmp/old-workspace")
+        check(parallelCommands.count == beforeWorkspaceMismatch, "stale workspace confirmation changed approval mode")
+        parallel.setApprovalMode("yolo", chat:"A", workspace:"/tmp")
+        check(parallelCommands.last?["chat"] as? String == "A" && parallelCommands.last?["expectedWorkspace"] as? String == "/tmp", "captured workspace precondition omitted")
+
+        // Identical text is not an acknowledgement. Old snapshots and delayed
+        // entries must never settle a new submission with the same wording.
+        try focus("A")
+        parallel.draft = "Continue"; parallel.send()
+        let firstContinueRequest = parallelCommands.last?["request"] as! String
+        let oldContinue: [String: Any] = ["id":"old-continue", "kind":"user", "text":"Continue", "route":"ollama/test", "isError":false, "changedFiles":[], "clientRequest":firstContinueRequest]
+        try event(["event":"entry", "chat":"A", "entry":oldContinue])
+        try event(["event":"state", "chat":"A", "busy":false, "status":"Ready"])
+        parallel.draft = "Continue"; parallel.send()
+        let secondContinueRequest = parallelCommands.last?["request"] as! String
+        check(firstContinueRequest != secondContinueRequest, "submissions reused request identity")
+        try focus("B")
+        try focus("A", busy:true, rows:[oldContinue])
+        try event(["event":"entry", "chat":"A", "entry":oldContinue])
+        parallel.draft = "New draft"
+        check(!parallel.canInterrupt, "historical identical text acknowledged a pending submission")
+        try event(["event":"rejected", "chat":"A", "busy":false, "interrupting":false, "message":"Continue rejected"])
+        check(parallel.draft == "Continue\n\nNew draft", "old snapshot swallowed rejected identical submission")
+        parallel.draft = ""
+        // Snapshot acknowledgement also uses the durable request token.
+        parallel.draft = "Continue"; parallel.send()
+        var acceptedContinue = oldContinue
+        acceptedContinue["id"] = "new-continue"; acceptedContinue["clientRequest"] = parallelCommands.last?["request"]
+        try focus("B")
+        try focus("A", busy:true, rows:[oldContinue, acceptedContinue])
+        try event(["event":"error", "chat":"A", "message":"Failed after accepting new Continue"])
+        check(parallel.draft.isEmpty, "matching snapshot request failed to settle accepted input")
+
+        // Inspector requests survive navigation and settle in their parent.
+        try focus("A", rows:[userA, replyA])
+        parallel.configureTeam(enabled:true, members:[memberSpec])
+        let parallelTeam = parallelCommands.last?["request"] as! String
+        parallel.openSideChat(choice:"ollama/test|", effort:"")
+        let parallelSide = parallelCommands.last?["request"] as! String
+        parallel.refreshChanges()
+        let parallelChanges = parallelCommands.last?["request"] as! String
+        parallel.refreshChanges()
+        try focus("B", rows:[userB, replyB])
+        try event(["event":"team", "chat":"A", "request":parallelTeam, "team":roster("ready")])
+        try event(["event":"side", "chat":"A", "request":parallelSide, "side":side("parallel-side")])
+        try event(["event":"git_changes", "chat":"A", "workspace":"/tmp", "request":parallelChanges, "changes":["files":[], "truncated":false]])
+        let followupChanges = parallelCommands.last?["request"] as! String
+        check(parallelCommands.last?["chat"] as? String == "A" && followupChanges != parallelChanges, "background inspection refresh targeted selected chat")
+        try event(["event":"git_changes", "chat":"A", "workspace":"/tmp", "request":followupChanges, "changes":["files":[], "truncated":false]])
+        check(parallel.team == nil && parallel.sideChat == nil && parallel.gitChanges == nil, "background inspector contaminated B")
+        try focus("A", rows:[userA, replyA])
+        check(parallel.team != nil && parallel.teamRequest == nil && parallel.sideChat?.id == "parallel-side" && !parallel.sideOpening && parallel.gitChanges != nil, "selection lost settled background inspector state")
+        let boundedReply: [String: Any] = ["id":"bounded-reply", "kind":"assistant", "text":String(repeating:"x", count:8000), "textOffset":9000, "route":"ollama/test", "isError":false, "changedFiles":[]]
+        var boundedSide = side("parallel-side")
+        boundedSide["entries"] = [boundedReply]
+        try event(["event":"side", "chat":"A", "request":parallelSide, "side":boundedSide])
+        let beforeBoundedDelta = parallelCommands.count
+        try event(["event":"side_delta", "chat":"A", "request":parallelSide, "side":"parallel-side", "id":"bounded-reply", "offset":16995, "text":"xxxxx more"])
+        check(parallel.sideChat?.entries.last?.text == String(repeating:"x", count:8000) + " more", "bounded snapshot delta lost base offset")
+        try event(["event":"side_delta", "chat":"A", "request":parallelSide, "side":"parallel-side", "id":"bounded-reply", "offset":17000, "text":" more"])
+        check(parallelCommands.count == beforeBoundedDelta && parallel.sideChat?.entries.last?.text.count == 8005, "bounded-tail delta duplicated text or repeatedly reselected")
+        parallel.sideDraft = "A side send"; parallel.sendSide()
+        try focus("B", rows:[userB, replyB])
+        try event(["event":"side_accepted", "chat":"A", "request":parallelSide, "side":"parallel-side", "id":"accepted-side"])
+        try event(["event":"agents", "chat":"A", "agents":agentRows])
+        check(parallel.isActive("A") && parallel.hasActiveWork && parallel.agents.isEmpty, "hidden agent work lost restart protection")
+        try focus("A", rows:[userA, replyA])
+        check(parallel.pendingSideText == nil && parallel.sideDraft.isEmpty, "background side acknowledgement left duplicate draft")
+        parallel.sideDraft = "A unaccepted side"; parallel.sendSide()
+        parallel.draft = "A disconnect input"; parallel.send()
+        try focus("B", rows:[userB, replyB])
+        parallel.draft = "B disconnect input"; parallel.addAttachments([attachmentURL]); parallel.send()
+        parallel.disconnected("Transport gone")
+        check(!parallel.hasActiveWork && !parallel.connected && parallel.draft.contains("B disconnect input") && parallel.attachments.count == 1, "disconnect failed to settle visible owner")
+        try focus("A", rows:[userA, replyA])
+        check(!parallel.busy && parallel.approval == nil && parallel.draft.contains("A disconnect input") && parallel.sideDraft == "A unaccepted side", "disconnect lost hidden input or left hidden work active")
+        check(parallel.hasUnsentDrafts && parallel.turnStartedAt == nil, "disconnect lost aggregate draft protection or clock cleanup")
+        observation.cancel()
         print("ChatModel state transitions passed")
     }
 }

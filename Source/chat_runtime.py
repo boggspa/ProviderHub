@@ -402,6 +402,9 @@ class ChatService:
         self._git_working = False
         self._steering = False
         self._resume_after_interrupt = False
+        self.closing = False
+        self.restart_thread = None
+        self.branch_thread = None
         self.approval = None
         self.approval_event = threading.Event()
         self.approval_allowed = False
@@ -430,6 +433,9 @@ class ChatService:
         return [{key: chat[key] for key in keys} for chat in self.store.headers()]
 
     def publish(self):
+        with self._mutex: self._publish()
+
+    def _publish(self):
         self.emit({"event": "chats", "chats": self.summaries()})
         if self.chat:
             self.emit({"event": "selected", "id": self.chat["id"], "entries": self.chat["entries"], "usage": self.chat.get("usage")})
@@ -457,8 +463,9 @@ class ChatService:
 
     def initialize(self):
         self.publish_workspaces()
-        chats = self.store.all()
-        for chat in chats:
+        chats = self.store.headers()
+        for header in chats:
+            chat = self.store.load(header["id"])
             from chat_agents import recover_agents
             if recover_agents(chat, self.settle): self.store.save(chat)
             if chat_team.recover(chat, self.settle):
@@ -534,8 +541,12 @@ class ChatService:
         inputs = command.get("attachments", [])
         if not isinstance(text, str) or (not text.strip() and not inputs) or len(text) > MAX_TEXT:
             raise ValueError("Enter a message of at most 100,000 characters.")
+        request = command.get("request")
+        if request is not None and (not isinstance(request, str) or not request or len(request) > 128):
+            raise ValueError("Invalid message submission identity.")
         attached, blocks = prepare_attachments(inputs, self.store.root / self.chat["id"], vision=self.choice().get("vision") is not False)
         visible = entry("user", text, self.chat["route"], attachments=attached, workspace=self.chat["workspace"])
+        if request is not None: visible["clientRequest"] = request
         content = [{"type": "text", "text": text if text.strip() else "Please review the attached files."}, *blocks]
         return {"entry": visible, "content": content}
 
@@ -596,7 +607,7 @@ class ChatService:
             if previous is not None: previous.join()
             with self._mutex:
                 self.apply_pending_update(self.chat)
-                resume = self._resume_after_interrupt
+                resume = self._resume_after_interrupt and not self.closing
                 if resume and chat_team.enabled(self.chat):
                     try: chat_team.start_run(self, new_input=True)
                     except (ValueError, KeyError) as exc:
@@ -615,10 +626,13 @@ class ChatService:
                 else:
                     self._working = False
                     self.emit({"event": "state", "busy": False, "interrupting": False, "status": "Stopped"})
-        threading.Thread(target=restart, name="chat-interrupt", daemon=True).start()
+        self.restart_thread = threading.Thread(target=restart, name="chat-interrupt", daemon=True)
+        self.restart_thread.start()
 
     def handle(self, command):
         action = command.get("command")
+        if self.closing and action != "stop":
+            raise ValueError("Chat is closing.")
         if action == "preferences":
             if type(command.get("webSearch")) is not bool:
                 raise ValueError("Web search must be enabled or disabled.")
@@ -674,6 +688,8 @@ class ChatService:
             self.chat = selected
             self.publish_workspaces(); self.publish()
         elif action == "configure":
+            if self.chat and command.get("expectedWorkspace", self.chat["workspace"]) != self.chat["workspace"]:
+                raise ValueError("This chat's workspace changed. Choose its approval mode again.")
             if chat_team.enabled(self.chat) and ("choice" in command or "effort" in command):
                 raise ValueError("Choose each member's model and effort in Team.")
             choice = self.choice(command.get("choice") or (self.models[0]["id"] if not self.chat and self.models else None))
@@ -728,9 +744,9 @@ class ChatService:
             self.chat["status"] = "working"; self.save()
             if action == "send":
                 self.emit({"event": "entry", "chat": self.chat["id"], "entry": accepted_entry})
-            self.publish()
             self.cancel.clear(); self.approval_event.clear()
             self._working = True
+            self.publish()
             self.thread = threading.Thread(target=self.run, name="provider-hub-chat", daemon=True)
             self.thread.start()
         elif action == "rename":
@@ -840,12 +856,12 @@ class ChatService:
 
     def approved(self, summary, detail=None, *, member=None):
         with self._mutex:
+            if self.cancel.is_set() or self.closing: return False
             self.approval_allowed = False; self.approval_event.clear()
             self.approval = {"id": uuid.uuid4().hex, "summary": summary, "workspace": self.chat["workspace"], "detail": detail}
             if member: self.approval.update(memberID=member["id"], memberName=member["name"])
             self.emit({"event": "approval", "approval": self.approval})
-        while not self.cancel.is_set() and not self.approval_event.wait(.1):
-            pass
+        self.approval_event.wait()
         with self._mutex:
             allowed = self.approval_allowed and not self.cancel.is_set(); self.approval = None
         return allowed
@@ -867,8 +883,10 @@ class ChatService:
                 self.emit({"event": "state", "busy": True, "interrupting": False, "status": "Thinking…"})
                 current = self.add(entry("assistant", route=chat["route"], recorded=False))
                 def delta(text):
-                    current["text"] += text
-                    self.emit({"event": "delta", "chat": chat["id"], "id": current["id"], "text": text})
+                    with self._mutex:
+                        offset = len(current["text"])
+                        current["text"] += text
+                        self.emit({"event": "delta", "chat": chat["id"], "id": current["id"], "text": text, "offset": offset})
                 message = self.transport.stream(chat_team.round_payload(self, choice, round_index), self.cancel, delta)
                 content = message["content"]
                 current["text"] = "".join(block.get("text", "") for block in content if block.get("type") == "text")
@@ -1010,6 +1028,7 @@ class ChatService:
 
 
 def main():
+    from chat_sessions import ChatHost
     mutex = threading.Lock()
     def emit(event):
         with mutex:
@@ -1017,7 +1036,7 @@ def main():
     service = None
     try:
         root = state_root()
-        service = ChatService(ChatStore(root), GatewayClient(root), emit)
+        service = ChatHost(ChatStore(root), GatewayClient(root), emit)
         service.initialize()
         for line in sys.stdin:
             command = None
@@ -1026,18 +1045,14 @@ def main():
                 command = json.loads(line)
                 if not isinstance(command, dict): raise ValueError("Chat command must be an object.")
                 service.handle(command)
+                if service.closing: break
             except Exception as exc:
-                kind = "rejected" if isinstance(command, dict) and command.get("command") in {"send", "steer"} else "notice" if service.busy else "error"
-                emit({"event": kind, "message": str(exc), "busy": service.busy, "interrupting": service._steering})
+                service.reject(command, exc)
     except Exception as exc:
         emit({"event": "error", "message": str(exc)})
     finally:
         if service:
-            from chat_agents import close_all_sides
-            service.handle({"command": "stop"})
-            close_all_sides(service)
-            if service.thread:
-                service.thread.join(timeout=10)
+            service.shutdown()
 
 
 if __name__ == "__main__":

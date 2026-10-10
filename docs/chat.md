@@ -25,10 +25,25 @@ its **+** to start a chat there. Folders remain in the picker and sidebar after
 restart or after deleting their last chat. Path aliases share one group;
 different folders with the same name show their paths. Disconnected folders
 stay in the list and their saved chats can still be read. The selected row
-carries a thin bar in its model's provider accent, and shows a small spinner in
-that accent while its turn runs.
+carries a thin bar in its model's provider accent. Each running chat shows a
+small spinner; a hand marks a chat waiting for approval, including chats in
+another folder.
+In a narrow window, the saved-chats button opens the same list in a popover.
 
-Return sends a message; Shift-Return inserts a newline. Stop cancels the current
+You can switch chats or start a new one while other chats run. Each chat keeps
+its own model or Team, workspace, draft, attachments, elapsed time, and pending
+approval. Stop and updates affect the chat you are viewing. Different projects
+can work at the same time. Chats sharing a checkout serialize patches and shell
+commands, and branch changes wait until all chats using that checkout are idle.
+
+One worker hosts the chats. Idle chats have no execution loop, and only the
+visible transcript streams into the window. Selecting a background chat restores
+its latest output. Up to four chats can run at once, with at most eight model
+requests across chats, helpers and Side Chats. When the chat limit is reached,
+the message stays in your draft so you can send it
+after a turn finishes.
+
+Return sends a message; Shift-Return inserts a newline. Stop cancels the selected chat's
 request and local command execution, keeping partial output and recorded
 actions. Closing the window leaves active work running; reopen it from the menu
 bar. Quit the Hub after work has stopped.
@@ -267,8 +282,9 @@ routes and account identities continue to govern requests.
 Provider marks use the Hub's existing icon assets. The four tool glyphs reuse
 TaskWraith's file/search/patch/shell paths as cached native vectors.
 
-Chat is a coding harness with attachments, local tools, persistent parallel Teams
-and bounded delegation. It has no concurrent workspace writers, agent mailboxes, schedules, connector
+Chat is a coding harness with attachments, local tools, concurrent chats,
+persistent parallel Teams and bounded delegation. Mutating tools in one checkout
+run serially. It has no agent mailboxes, schedules, connector
 catalogue, browser automation, or separate IDE.
 
 ## Implementation and verification
@@ -277,7 +293,9 @@ catalogue, browser automation, or separate IDE.
 transport. `chat_memory.py` provides transcript recall and source-linked decision
 notes. `ChatInspector.swift`, `ChatInspectorModel.swift` and
 `ChatBranches.swift` provide the inspector and Git controls. `chat_runtime.py`
-owns the shared conversation/tool loop and saved chats; `chat_team.py` and
+owns each conversation/tool loop and saved chats; `chat_sessions.py` hosts
+independent chat sessions in one process and routes events by chat identity.
+`chat_team.py` and
 `ChatTeam.swift` provide persistent membership, parallel contributions, queued
 workspace writes/approvals and roster UI.
 `chat_agents.py` provides
