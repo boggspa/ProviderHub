@@ -387,6 +387,8 @@ class ChatService:
         self.preferences = {"webSearch": True}
         self.child_factory = child_factory or (lambda: GatewayClient(transport.root))
         self.child = None
+        self.team_children = {}
+        self.team_saved_entries = 0
         self.lanes = []
         self.sides = {}
         self._branch_working = False
@@ -518,6 +520,7 @@ class ChatService:
     def save(self):
         with self._mutex:
             self.chat["updated"] = now(); self.store.save(self.chat)
+            if self.role == "parent": self.team_saved_entries = len(self.chat["entries"])
 
     def reserve_delegations(self, count):
         with self._mutex:
@@ -556,16 +559,33 @@ class ChatService:
             pending = self.prepare_update(command)
             self.chat["pending_update"] = pending
             self.chat["entries"].append(pending["entry"])
+            team = self.chat.get("team") if chat_team.enabled(self.chat) else None
+            previous_team = None
+            if team:
+                previous_team = (list(team["queue"]), team["status"], [(m, m["status"]) for m in team["members"]])
+                chat_team.queue_update(team)
             try: self.save()
             except Exception:
                 self.chat.pop("pending_update", None)
                 self.chat["entries"] = [row for row in self.chat["entries"] if row["id"] != pending["entry"]["id"]]
+                if previous_team:
+                    team["queue"], team["status"], statuses = previous_team
+                    for member, status in statuses: member["status"] = status
                 raise
+            if chat_team.enabled(self.chat):
+                # Team input is consumed at a durable member boundary. Do not
+                # cancel tools or rebuild the scheduler for a deliberate steer.
+                self.apply_pending_update(self.chat)
+                self.emit({"event": "entry", "chat": self.chat["id"], "entry": pending["entry"]})
+                chat_team.publish(self)
+                self.emit({"event": "state", "busy": True, "interrupting": False, "status": "Update sent · Team continuing"})
+                return
             self._steering = True; self._working = True; self._resume_after_interrupt = True
             previous = self.thread
             self.cancel.set(); self.transport.cancel(); self.approval_event.set()
             if self.child:
                 self.child.cancel.set(); self.child.transport.cancel(); self.child.approval_event.set()
+            chat_team.cancel_children(self)
             for lane in self.lanes:
                 lane.cancel.set(); lane.transport.cancel(); lane.approval_event.set()
             self.emit({"event": "entry", "chat": self.chat["id"], "entry": pending["entry"]})
@@ -627,6 +647,7 @@ class ChatService:
                 self.cancel.set(); self.transport.cancel(); self.approval_event.set()
                 if self.child:
                     self.child.cancel.set(); self.child.transport.cancel(); self.child.approval_event.set()
+                chat_team.cancel_children(self)
                 for lane in self.lanes:
                     lane.cancel.set(); lane.transport.cancel(); lane.approval_event.set()
             return
@@ -792,7 +813,9 @@ class ChatService:
             # unbounded private context in an indefinitely continuing Team.
             context = min(context, 200000) if isinstance(context, int) and context > 0 else 128000
         memory_chat = self.team_parent.chat if self.role == "team" else chat
-        memory = chat_memory.memory_message(memory_chat) if self.role in {"parent", "team"} else None
+        memory_owner = self.team_parent if self.role == "team" else self
+        with memory_owner._mutex:
+            memory = chat_memory.memory_message(memory_chat) if self.role in {"parent", "team"} else None
         if memory and isinstance(context, int) and context > 0 and estimated_tokens({"messages": [memory]}) > context // 4:
             memory = {"role": "user", "content": [{"type": "text", "text":
                 "[Saved decision notebook omitted because this model's context is small. "
@@ -815,10 +838,11 @@ class ChatService:
             payload = {**payload, "messages": [memory, *payload["messages"]]}
         return payload
 
-    def approved(self, summary, detail=None):
+    def approved(self, summary, detail=None, *, member=None):
         with self._mutex:
             self.approval_allowed = False; self.approval_event.clear()
             self.approval = {"id": uuid.uuid4().hex, "summary": summary, "workspace": self.chat["workspace"], "detail": detail}
+            if member: self.approval.update(memberID=member["id"], memberName=member["name"])
             self.emit({"event": "approval", "approval": self.approval})
         while not self.cancel.is_set() and not self.approval_event.wait(.1):
             pass
@@ -839,14 +863,16 @@ class ChatService:
             closing_rounds = chat_team.CLOSING_ROUNDS if self.role in {"parent", "team"} else 0
             for round_index in range(self.max_rounds + closing_rounds):
                 if self.cancel.is_set(): raise InterruptedError("Stopped")
+                if self.role == "team": chat_team.consume_update(self, choice)
                 self.emit({"event": "state", "busy": True, "interrupting": False, "status": "Thinking…"})
-                current = self.add(entry("assistant", route=chat["route"]))
+                current = self.add(entry("assistant", route=chat["route"], recorded=False))
                 def delta(text):
                     current["text"] += text
                     self.emit({"event": "delta", "chat": chat["id"], "id": current["id"], "text": text})
                 message = self.transport.stream(chat_team.round_payload(self, choice, round_index), self.cancel, delta)
                 content = message["content"]
                 current["text"] = "".join(block.get("text", "") for block in content if block.get("type") == "text")
+                current["recorded"] = True
                 sources = [link for url, link in search_sources(content).items() if url not in current["text"]]
                 if sources:
                     current["text"] += "\n\nSources: " + ", ".join(sources)
@@ -897,40 +923,41 @@ class ChatService:
                     display_id = uuid.uuid4().hex
                     try:
                         chat_team.check_round_tool(self, name, round_index)
-                        if name == "delegate":
-                            from chat_agents import validate_delegate, delegate_summary
-                            validate_delegate(self, arguments)
-                            description = {"summary": delegate_summary(arguments), "requires_approval": False}
-                        elif name == "team_status" and self.role == "team":
-                            description = {"summary": "Team contribution outcome", "requires_approval": False}
-                        elif name in chat_memory.MEMORY_TOOLS:
-                            if self.role not in {"parent", "team"}:
-                                raise ValueError("Chat memory tools are available only in the main conversation.")
-                            description = chat_memory.describe(name, arguments)
-                        elif self.role in {"side", "lane"} and name not in {"read_file", "search_files"}:
-                            raise ValueError("This read-only conversation only has read_file and search_files.")
-                        else:
-                            description = runner.describe(name, arguments)
-                        must_ask = description["requires_approval"] and needs_approval(chat.get("approvalMode", "manual"), name, arguments, chat["workspace"])
-                        allowed = not must_ask or self.approved(description["summary"], arguments.get("patch"))
-                        if self.cancel.is_set(): raise InterruptedError("Stopped")
-                        if allowed:
-                            self.emit({"event": "state", "busy": True, "status": description["summary"]})
-                            self.add(entry("tool", route=chat["route"], tool=name, summary=description["summary"], detail="Running…", id=display_id))
-                            # Pending tool + working status are durable before execution.
-                            self.save()
+                        with chat_team.tool_gate(self, name):
                             if name == "delegate":
-                                from chat_agents import delegate
-                                result = delegate(self, arguments, call["id"])
+                                from chat_agents import validate_delegate, delegate_summary
+                                validate_delegate(self, arguments)
+                                description = {"summary": delegate_summary(arguments), "requires_approval": False}
                             elif name == "team_status" and self.role == "team":
-                                result = chat_team.decide(self, arguments)
+                                description = {"summary": "Team contribution outcome", "requires_approval": False}
                             elif name in chat_memory.MEMORY_TOOLS:
-                                result = chat_memory.execute(self.team_parent.chat if self.role == "team" else chat, name, arguments)
+                                if self.role not in {"parent", "team"}:
+                                    raise ValueError("Chat memory tools are available only in the main conversation.")
+                                description = chat_memory.describe(name, arguments)
+                            elif self.role in {"side", "lane"} and name not in {"read_file", "search_files"}:
+                                raise ValueError("This read-only conversation only has read_file and search_files.")
                             else:
-                                result = runner.execute(name, arguments)
-                        else:
-                            result = {"content": [{"type": "text", "text": "The user denied this action. It was not executed."}],
-                                      "is_error": True, "summary": description["summary"], "changed_files": []}
+                                description = runner.describe(name, arguments)
+                            must_ask = description["requires_approval"] and needs_approval(chat.get("approvalMode", "manual"), name, arguments, chat["workspace"])
+                            allowed = not must_ask or self.approved(description["summary"], arguments.get("patch"))
+                            if self.cancel.is_set(): raise InterruptedError("Stopped")
+                            if allowed:
+                                self.emit({"event": "state", "busy": True, "status": description["summary"]})
+                                self.add(entry("tool", route=chat["route"], tool=name, summary=description["summary"], detail="Running…", id=display_id, recorded=False))
+                                # Pending tool + working status are durable before execution.
+                                self.save()
+                                if name == "delegate":
+                                    from chat_agents import delegate
+                                    result = delegate(self, arguments, call["id"])
+                                elif name == "team_status" and self.role == "team":
+                                    result = chat_team.decide(self, arguments)
+                                elif name in chat_memory.MEMORY_TOOLS:
+                                    result = chat_team.memory_tool(self, name, arguments)
+                                else:
+                                    result = runner.execute(name, arguments)
+                            else:
+                                result = {"content": [{"type": "text", "text": "The user denied this action. It was not executed."}],
+                                          "is_error": True, "summary": description["summary"], "changed_files": []}
                     except InterruptedError:
                         raise
                     except (ValueError, OSError, TypeError, KeyError) as exc:
@@ -940,7 +967,7 @@ class ChatService:
                                               "is_error": result["is_error"], "content": result["content"]})
                     detail = "\n".join(part.get("text", "") for part in result["content"] if part.get("type") == "text")
                     visible = entry("tool", route=chat["route"], tool=name, id=display_id, summary=result["summary"], detail=detail,
-                                    isError=result["is_error"], changedFiles=result.get("changed_files") or [], workspace=chat["workspace"])
+                                    isError=result["is_error"], changedFiles=result.get("changed_files") or [], workspace=chat["workspace"], recorded=True)
                     if result.get("agent_id"): visible["agentID"] = result["agent_id"]
                     if result.get("agent_ids"): visible["agentIDs"] = result["agent_ids"]
                     index = next((i for i, item in enumerate(chat["entries"]) if item["id"] == display_id), None)
@@ -957,11 +984,15 @@ class ChatService:
             stopped = self.cancel.is_set() or isinstance(exc, InterruptedError)
             chat["status"] = "stopped" if stopped else "error"
             text = "Stopped. Partial output and recorded actions are kept." if stopped else str(exc)
+            if current is not None:
+                current["recorded"] = True
+                self.emit({"event": "entry", "chat": chat["id"], "entry": current})
             chat["messages"] = [item for item in chat["messages"] if item.get("content")]
             self.settle(chat, "Stopped or interrupted before a recorded result. An action may have run; inspect the workspace before retrying.")
             for item in chat["entries"]:
-                if item.get("kind") == "tool" and item.get("detail") == "Running…":
+                if item.get("kind") == "tool" and item.get("detail") == "Running…" and item.get("recorded") is not True:
                     item["detail"] = "Interrupted. Inspect the workspace before running this action again."; item["isError"] = True
+                    item["recorded"] = True
                     self.emit({"event": "entry", "chat": chat["id"], "entry": item})
             self.add(entry("notice" if stopped else "error", text, chat["route"], isError=not stopped))
         finally:

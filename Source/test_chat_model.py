@@ -319,6 +319,29 @@ import SwiftUI
         check(teamEntry.memberName == "Builder" && model.isStreaming(teamEntry, fallback:false), "active member attribution lost")
         try send(["event":"team", "chat":"A", "team":roster("working", "working", "c2")])
         check(!model.isStreaming(teamEntry, fallback:true), "old contribution resumed its streaming layout")
+        var parallel = roster("working", "working", "c2")
+        var builder = (parallel["members"] as! [[String: Any]])[0]
+        var reviewer = builder
+        reviewer["id"] = "reviewer"; reviewer["name"] = "Reviewer"; reviewer["contributionID"] = "review-1"
+        reviewer["usage"] = 1200; reviewer["context"] = 128000
+        parallel["members"] = [builder, reviewer]
+        parallel["activeMemberID"] = "reviewer"; parallel["activeMemberIDs"] = ["builder", "reviewer"]
+        try send(["event":"team", "chat":"A", "team":parallel])
+        check(model.team?.activeMemberIDs == ["builder", "reviewer"], "parallel active IDs not decoded")
+        try send(["event":"entry", "chat":"A", "entry":["id":"build-2", "kind":"assistant", "text":"Building together",
+            "route":"ollama/test", "isError":false, "changedFiles":[], "memberID":"builder", "contributionID":"c2"]])
+        let buildReply = model.entries.last!
+        try send(["event":"entry", "chat":"A", "entry":["id":"review-1", "kind":"assistant", "text":"Reviewing together",
+            "route":"ollama/test", "isError":false, "changedFiles":[], "memberID":"reviewer", "contributionID":"review-1"]])
+        let reviewReply = model.entries.last!
+        check(model.isStreaming(buildReply, fallback:false) && model.isStreaming(reviewReply, fallback:false),
+              "one member's new row stopped another member's streaming layout")
+        check(model.team?.members.map { $0.usage! } == [800, 1200] && model.team?.members.map { $0.context! } == [100000, 128000],
+              "parallel member usage/context lost their identities")
+        reviewer["status"] = "done"; parallel["members"] = [builder, reviewer]
+        try send(["event":"team", "chat":"A", "team":parallel])
+        check(model.isStreaming(buildReply, fallback:false) && !model.isStreaming(reviewReply, fallback:true),
+              "completed member remained live or hid a working peer")
         try send(["event":"state", "busy":false, "status":"Paused"])
         try send(["event":"team", "chat":"A", "team":roster("needs_input", "needs_input")])
         let beforeInputResume = commands.count; model.resumeTeam()
