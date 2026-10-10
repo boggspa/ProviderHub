@@ -13,7 +13,7 @@ struct ChatTeamControls: View {
                 Button(model.team == nil ? "Set up" : "Edit") { editing = true }
                     .controlSize(.small).disabled(!model.canConfigureTeam)
             }
-            Text("Up to 3 members working together. One contribution each; members opt in when more work is needed.")
+            Text("Up to \(ChatTeamSnapshot.maxMembers) members working together. One contribution each; members opt in when more work is needed.")
                 .font(.system(size: 11.5)).foregroundStyle(.secondary)
             if let team = model.team {
                 if !team.enabled { Text("Team is off").font(.system(size: 11.5)).foregroundStyle(.secondary) }
@@ -25,14 +25,16 @@ struct ChatTeamControls: View {
                             Spacer(minLength: 0)
                             if member.status == "working" { ProgressView().controlSize(.mini) }
                             Text(member.status.replacingOccurrences(of: "_", with: " ").capitalized)
-                                .font(.system(size: 10.5)).foregroundStyle(.secondary)
+                                .font(.system(size: 10.5)).foregroundStyle(member.status == "error" ? HubTheme.Semantic.contextCritical : HubTheme.Semantic.secondaryInk)
                         }
                         Text(member.label + (member.account.isEmpty ? "" : " · " + member.account))
                             .font(.system(size: 10.5)).foregroundStyle(.secondary).lineLimit(2)
                         if !member.responsibility.isEmpty {
                             Text(member.responsibility).font(.system(size: 11.5)).lineLimit(3)
                         }
-                        if !member.nextStep.isEmpty, member.status != "done" {
+                        if member.status == "error", let reason = member.failureReason, !reason.isEmpty {
+                            Text(reason).font(.system(size: 11.5)).foregroundStyle(HubTheme.Semantic.contextCritical).lineLimit(2).textSelection(.enabled)
+                        } else if !member.nextStep.isEmpty, member.status != "done" {
                             Text(member.nextStep).font(.system(size: 11.5)).foregroundStyle(.secondary).textSelection(.enabled)
                         }
                         if let usage = member.usage {
@@ -40,7 +42,7 @@ struct ChatTeamControls: View {
                                 .font(.system(size: 10, design: .monospaced)).foregroundStyle(.secondary)
                         }
                     }.padding(8).frame(maxWidth: .infinity, alignment: .leading)
-                        .background(HubTheme.Semantic.surface, in: RoundedRectangle(cornerRadius: 7))
+                        .background(HubTheme.Semantic.raisedSurface, in: RoundedRectangle(cornerRadius: 7))
                 }
                 if team.needsInput {
                     Text("Answer in the main composer to continue.").font(.system(size: 11.5)).foregroundStyle(.secondary)
@@ -86,7 +88,7 @@ private struct ChatTeamEditor: View {
     @State private var drafts: [TeamDraft] = []
     @State private var picking: String?
     private var valid: Bool {
-        (1...3).contains(drafts.count) && drafts.allSatisfy { draft in
+        (1...ChatTeamSnapshot.maxMembers).contains(drafts.count) && drafts.allSatisfy { draft in
             !draft.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && draft.name.count <= 60 &&
             draft.responsibility.count <= 2000 && model.models.contains { $0.id == draft.choice && $0.supportsTools }
         }
@@ -130,7 +132,7 @@ private struct ChatTeamEditor: View {
                 }
             }.frame(maxHeight: 410)
             HStack {
-                Button("Add member") { add() }.disabled(drafts.count >= 3 || model.models.allSatisfy { !$0.supportsTools })
+                Button("Add member") { add() }.disabled(drafts.count >= ChatTeamSnapshot.maxMembers || model.models.allSatisfy { !$0.supportsTools })
                 Spacer()
                 Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
                 Button("Save Team") {

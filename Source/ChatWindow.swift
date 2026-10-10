@@ -58,7 +58,7 @@ struct ChatWindow: View {
             selection: ChatFonts.selection(fontChoice, legacyMonospaced: monospacedText), customName: customFontName,
             zoom: ChatZoom.clamp(zoom)))
         .background {
-            if windowStyle == .glass { VibrancyBackground().ignoresSafeArea() }
+            if windowStyle == .glass { VibrancyBackground().overlay(Semantic.glassScrim).ignoresSafeArea() }
             else { Color(nsColor: .windowBackgroundColor).ignoresSafeArea() }
         }
         // Own the hidden title-bar band, as CompactShell does, so the masthead
@@ -309,7 +309,8 @@ private struct ChatHeader: View {
             // added together. The parent's returns once the Team stops.
             HStack(spacing: 10) {
                 ForEach(team.members) { member in
-                    memberContext(member, active: member.status == "working" || member.id == team.activeMemberID)
+                    memberContext(member, active: member.status == "working" || member.id == team.activeMemberID,
+                                  counted: !compact || team.members.count < 3)
                 }
             }
         } else if let used = model.tokenUsage {
@@ -326,7 +327,9 @@ private struct ChatHeader: View {
         }
     }
 
-    private func memberContext(_ member: ChatTeamMember, active: Bool) -> some View {
+    /// A ring and name per member; the token count drops out on a narrow
+    /// header with a larger Team, and stays in the tooltip.
+    private func memberContext(_ member: ChatTeamMember, active: Bool, counted: Bool) -> some View {
         let accent = model.accent(for: member.route)
         let readout = member.usage.map { tokenCount($0) + (member.context.map { " / " + tokenCount($0) } ?? "") } ?? "not started"
         return HStack(spacing: 5) {
@@ -337,7 +340,7 @@ private struct ChatHeader: View {
             }
             Text(member.name).font(.system(size: 10.5, weight: active ? .semibold : .regular))
                 .foregroundStyle(active ? Semantic.ink : Semantic.secondaryInk)
-            if let used = member.usage {
+            if counted, let used = member.usage {
                 Text(tokenCount(used)).font(.system(size: 10.5, design: .monospaced)).foregroundStyle(Semantic.secondaryInk)
             }
         }
@@ -493,7 +496,8 @@ private struct ChatTranscript: View {
 
     private var content: some View {
         let lastID = model.entries.last?.id
-        let segments = ChatTranscriptSegment<ChatEntry>.outline(model.entries) {
+        // While a turn runs its close-out waits; it appears once the turn ends.
+        let segments = ChatTranscriptSegment<ChatEntry>.outline(model.entries, open: model.busy) {
             model.isStreaming($0, fallback: model.busy && $0.id == lastID)
         }
         let liveSpeaker = model.busy ? segments.last(where: \.isSpeaker)?.id : nil
@@ -508,6 +512,8 @@ private struct ChatTranscript: View {
                                           accent: model.accent(for: entry.route), live: segment.id == liveSpeaker)
                     case .entry(let entry): row(entry, after: segment.previousSpeaker)
                     case .fold(let entries): fold(entries, live: model.busy && segment.id == segments.last?.id)
+                    case .changes(let entries):
+                        ChatTurnChangesRow(entries: entries, workspace: model.selected?.workspace) { expandedBinding($0) }
                     }
                 }
                 .padding(.top, gap(segment.spacing))
@@ -727,6 +733,7 @@ private struct ChatComposer: View {
     private var placeholder: String {
         guard model.selectedID != nil else { return "Start a new chat to begin" }
         guard model.connected else { return "Connecting…" }
+        if model.team?.enabled == true { return "Message the Team…" }
         guard let route = model.selectedRoute else { return "Choose a model above" }
         return "Message " + route.label + "…"
     }
@@ -771,27 +778,40 @@ private struct ChatComposer: View {
         .lineLimit(2).padding(.horizontal, 6).frame(minHeight: 16)
     }
 
-    private var approvalModeMenu: some View {
+    /// A plain-styled menu, so the label keeps its dot and colour: AppKit's
+    /// borderless menu flattens both to label grey. While a turn runs the mode
+    /// cannot change, but it is still in force, so it shows as a plain label
+    /// in full colour rather than a dimmed control.
+    @ViewBuilder private var approvalModeMenu: some View {
         let modes = [("manual", "Manual"), ("accept_edits", "Accept Edits"), ("yolo", "YOLO")]
         let title = modes.first { $0.0 == model.approvalMode }?.1 ?? "Manual"
         let accent = ChatApprovalAccent.color(model.approvalMode)
-        return Menu {
-            ForEach(modes, id: \.0) { mode in
-                Button { chooseApprovalMode(mode.0) } label: {
-                    if model.approvalMode == mode.0 { Label(mode.1, systemImage: "checkmark") }
-                    else { Text(mode.1) }
-                }
-            }
-        } label: {
-            HStack(spacing: 5) {
-                Circle().fill(accent).frame(width: 6, height: 6)
-                Text(title).font(HubTheme.Typography.detail).foregroundStyle(accent)
+        let help = "Manual asks for edits and commands. Accept Edits allows repository patches and asks for commands. YOLO runs tools without prompts."
+        let label = HStack(spacing: 5) {
+            Circle().fill(accent).frame(width: 6, height: 6)
+            Text(title).font(HubTheme.Typography.detail).foregroundStyle(accent)
+            if !model.busy {
+                Image(systemName: "chevron.down").font(.system(size: 7.5, weight: .semibold)).foregroundStyle(accent.opacity(0.7))
             }
         }
-        .menuStyle(.borderlessButton).fixedSize()
-        .disabled(model.busy || model.selectedID == nil)
-        .accessibilityLabel("Approval mode: " + title)
-        .help("Manual asks for edits and commands. Accept Edits allows repository patches and asks for commands. YOLO runs tools without prompts.")
+        if model.busy, model.selectedID != nil {
+            label.fixedSize()
+                .accessibilityElement(children: .ignore).accessibilityLabel("Approval mode: " + title)
+                .help(help + " The mode can change when this turn ends.")
+        } else {
+            Menu {
+                ForEach(modes, id: \.0) { mode in
+                    Button { chooseApprovalMode(mode.0) } label: {
+                        if model.approvalMode == mode.0 { Label(mode.1, systemImage: "checkmark") }
+                        else { Text(mode.1) }
+                    }
+                }
+            } label: { label }
+            .menuStyle(.button).buttonStyle(.plain).menuIndicator(.hidden).fixedSize()
+            .disabled(model.selectedID == nil)
+            .accessibilityLabel("Approval mode: " + title)
+            .help(help)
+        }
     }
 
     /// YOLO asks once per folder before it is first used there; every other

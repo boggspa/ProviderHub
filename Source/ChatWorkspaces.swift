@@ -154,6 +154,9 @@ struct ChatWorkspaceRail: View {
             return iso.date(from: chat.updated)
         }()
         guard let date else { return label }
+        // A working chat saves every few seconds; a ticking "13 sec ago", or
+        // "in 0 sec" when the save lands a moment ahead, only jitters.
+        if date.timeIntervalSinceNow > -60 { return label + " · now" }
         let formatter = RelativeDateTimeFormatter(); formatter.unitsStyle = .short
         return label + " · " + formatter.localizedString(for: date, relativeTo: Date())
     }

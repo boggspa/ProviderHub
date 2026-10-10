@@ -16,6 +16,9 @@ enum HubTheme {
         static let nsInk = NSColor.labelColor
         static let hairline = Color.primary.opacity(0.12)
         static let selection = Color.primary.opacity(0.065)
+        static let raisedSurface = Color.primary.opacity(0.045)
+        static let secondaryInk = Color.secondary
+        static let surface = Color.white
     }
 }
 '''
@@ -198,6 +201,81 @@ import Combine
         textView.message = nil
         check(!textView.menu(for: click)!.items.contains { $0.title == "Copy Message" }, "Copy Message shown without a message")
 
+        // Block Markdown: fences become code blocks in the one parser, and
+        // prose keeps its lines while headings, lists, quotes, rules and
+        // inline code chips gain real layout.
+        func codes(_ blocks: [ChatTextBlock]) -> [ChatMarkdownCode] {
+            blocks.compactMap { if case .code(let code) = $0.content { return code }; return nil }
+        }
+        let reply = "### What Finished\n1. **Unified Step** (`Physics.swift`):\n  - Factored capsule movement\n    - Deeper detail\n\n" +
+            "10. Tenth\n\n```swift\nlet x = 1\n" + header + "```\n\n" + header + body + "\n- Done\n   ~~~\n   indented\n   ~~~\n"
+        let mixed = parse(reply)
+        check(codes(mixed).count == 2 && tables(mixed).count == 1, "Fence/table split: \(mixed.map(\.content))")
+        check(codes(mixed)[0].language == "swift" && codes(mixed)[0].body == "let x = 1\n" + header.dropLast() && codes(mixed)[0].closed,
+              "Fence body or language changed")
+        check(codes(mixed)[1].body == "indented" && codes(mixed)[1].indent == 3, "Indented fence kept its indentation")
+        for end in reply.indices { _ = parse(String(reply[..<end]), streaming: true) }
+        let growing = codes(parse("Intro\n```python\nprint(1)\n``", streaming: true))
+        check(growing.count == 1 && growing[0].body == "print(1)" && !growing[0].closed, "Streaming fence lost or showed a partial close")
+        check(codes(parse("Intro\n```python\nprint(1)\n", streaming: false)).first?.body == "print(1)", "Unclosed final fence")
+        check(codes(parse("```swi", streaming: true)).isEmpty, "Unfinished opening fence committed early")
+        check(codes(parse("Use ```inline``` here\n")).isEmpty, "Inline backticks became a fence")
+        let fencedPresentation = ChatTextPresentation(text: reply, streaming: false)
+        check(fencedPresentation.blocks.map(\.parsed) == mixed.filter { !$0.source.allSatisfy(\.isWhitespace) },
+              "Code presentation dropped or changed a block")
+        let streamed = ChatTextPresentation(text: "Intro\n```swift\nlet a", streaming: true)
+        let introBlock = streamed.blocks[0]
+        streamed.update(text: "Intro\n```swift\nlet a = 1\n", streaming: true)
+        guard case .code(let liveCode) = streamed.blocks.last?.content, case .text = introBlock.content else { fatalError("Live code block missing") }
+        check(liveCode.body == "let a = 1" && streamed.blocks[0].parsed == introBlock.parsed, "Streaming code block did not grow in place")
+
+        let blocksText = ChatMarkdownBlocks.format("### What Finished ###\n1. **Unified** (`Physics.swift`):\n  - Factored capsule\n" +
+            "    - Deeper\n      continued\n10) Tenth\n# Big\n> quoted\n---\nplain *it*\n`chip` first")
+        check(String(blocksText.characters) == "What Finished\n\t1.\tUnified (Physics.swift):\n\t•\tFactored capsule\n\t–\tDeeper\n" +
+              "continued\n\t10)\tTenth\nBig\nquoted\n---\nplain it\nchip first", "Block text: " + String(blocksText.characters))
+        check(ChatMarkdownBlocks.format("No blocks, **bold** only") == ChatMarkdownBlocks.inline("No blocks, **bold** only"), "Plain prose changed")
+        let blockNative = ChatSelectableText.attributed(blocksText, font: base, color: .systemRed)
+        let blockString = blockNative.string as NSString
+        func spot(_ word: String) -> Int { blockString.range(of: word).location }
+        func blockFont(_ word: String) -> NSFont { blockNative.attribute(.font, at: spot(word), effectiveRange: nil) as! NSFont }
+        func paragraph(_ word: String) -> NSParagraphStyle? { blockNative.attribute(.paragraphStyle, at: spot(word), effectiveRange: nil) as? NSParagraphStyle }
+        let weight = { (font: NSFont) in NSFontManager.shared.weight(of: font) }
+        check(blockFont("What").pointSize == 15 && weight(blockFont("What")) > weight(base), "h3 not semibold body size")
+        check(abs(blockFont("Big").pointSize - 18.75) < 0.01, "h1 not larger")
+        check(blockFont("Unified").fontDescriptor.symbolicTraits.contains(.bold), "Bold lost inside a list item")
+        check(blockNative.attribute(.chatCodeChip, at: spot("Physics"), effectiveRange: nil) != nil && blockFont("Physics").isFixedPitch,
+              "Inline code is not a chip")
+        check(blockNative.attribute(.kern, at: spot("(Physics") , effectiveRange: nil) != nil &&
+              blockNative.attribute(.kern, at: spot("swift)"), effectiveRange: nil) == nil &&
+              blockNative.attribute(.kern, at: spot("swift)") + 4, effectiveRange: nil) != nil, "Chip padding kern misplaced")
+        let nested = paragraph("Factored")!
+        check(abs(nested.firstLineHeadIndent - 1.9 * 15) < 0.01 && abs(nested.headIndent - (1.9 + 1.4) * 15) < 0.01,
+              "Nested bullet hanging indent: \(nested.firstLineHeadIndent) \(nested.headIndent)")
+        check(abs(paragraph("Deeper")!.headIndent - (1.9 + 1.4 + 1.4) * 15) < 0.01, "Third level indent")
+        check(abs(paragraph("continued")!.firstLineHeadIndent - paragraph("Deeper")!.headIndent) < 0.01, "Continuation not under its item")
+        let tenth = paragraph("Tenth")!
+        check(tenth.tabStops.first?.alignment == .right && abs(tenth.tabStops[0].location - (1.9 - 0.45) * 15) < 0.01
+              && abs(tenth.headIndent - 1.9 * 15) < 0.01, "Numbers are not right-aligned in their column")
+        check(paragraph("What")!.paragraphSpacingBefore == 0 && paragraph("Big")!.paragraphSpacingBefore > 0, "Heading spacing")
+        check(blockNative.attribute(.chatQuoteBar, at: spot("quoted"), effectiveRange: nil) != nil, "Quote bar missing")
+        check(blockNative.attribute(.chatRule, at: spot("---"), effectiveRange: nil) != nil, "Rule missing")
+        check(paragraph("plain") == nil, "Plain paragraph gained a style")
+        check((paragraph("chip first")?.firstLineHeadIndent ?? 0) > 0, "Leading chip has no room for its fill")
+
+        // The real view stack: chip, quote and rule drawing across wraps,
+        // and the measuring stack using the same layout class.
+        let drawn = ChatSelectableText.makeTextView()
+        check(drawn.layoutManager is ChatLayoutManager, "Text view does not draw chips")
+        drawn.frame = NSRect(x: 0, y: 0, width: 90, height: 600)
+        drawn.textStorage?.setAttributedString(blockNative)
+        let drawnRep = drawn.bitmapImageRepForCachingDisplay(in: drawn.bounds)!
+        drawn.cacheDisplay(in: drawn.bounds, to: drawnRep)
+        let blockSizing = ChatSelectableText.Coordinator()
+        _ = blockSizing.attributed(for: ChatSelectableText(text: blocksText, font: base, color: .systemRed))
+        drawn.layoutManager!.ensureLayout(for: drawn.textContainer!)
+        check(abs(blockSizing.size(width: 90).height - ceil(drawn.layoutManager!.usedRect(for: drawn.textContainer!).height)) < 0.5,
+              "Measured height differs from drawn height")
+
         let started = Date()
         for _ in 0..<50 { _ = ChatTableParser.parse(tooManyRows, streaming: true) }
         print("50 bounded table parses: \(Date().timeIntervalSince(started))s")
@@ -214,6 +292,7 @@ struct Item: ChatTranscriptItem {
     var tool: String? = nil; var summary: String? = nil; var detail: String? = nil
     var memberID: String? = nil; var memberName: String? = nil
     var agentID: String? = nil; var agentIDs: [String]? = nil
+    var changedFiles: [String] = []
 }
 
 @main struct Cases {
@@ -236,7 +315,8 @@ struct Item: ChatTranscriptItem {
             reply("a1", "  \n"), tool("t1"), reply("a1b", ""), tool("t2", "read_file"), tool("t3", "apply_patch"),
             reply("a2", "Found it."), tool("t4"),
             Item(id: "trim", kind: "notice", text: ChatNotice.contextTrimmed),
-            Item(id: "n1", kind: "notice", text: ChatNotice.checkpointPrefix + " Your requested continuation will resume after other members."),
+            Item(id: "routine", kind: "notice", text: ChatNotice.checkpointPrefix + " Your requested continuation will resume after other members."),
+            Item(id: "n1", kind: "notice", text: ChatNotice.checkpointPrefix + " This member did not request continuation; send a message to continue."),
             reply("a3", "", member: opus, route: "claude/opus"), tool("t5", member: opus, route: "claude/opus"),
             tool("d1", "delegate", member: opus, route: "claude/opus", agent: "child"), tool("t6", member: opus, route: "claude/opus"),
         ]
@@ -253,6 +333,33 @@ struct Item: ChatTranscriptItem {
         check(Segment.outline(sameRouteOtherMember) { _ in false }.filter(\.isSpeaker).count == 2, "Members on one route shared a header")
         let continued = [reply("y1", "One"), tool("y2"), reply("y3", "Two")]
         check(Segment.outline(continued) { _ in false }.filter(\.isSpeaker).count == 1, "One speaker repeated its header")
+
+        // A Team turn that changed files closes with one table of them, after
+        // the turn ends: at the next request, or once the Team stops working.
+        let diffA = "Applied patch:\nA.swift\nB.swift\n\n--- a/A.swift\n+++ b/A.swift\n@@ -1 +1,2 @@\n-old\n+new\n+more\n"
+            + "--- /dev/null\n+++ b/B.swift\n@@ -0,0 +1 @@\n+b\n"
+        var p1 = Item(id: "p1", kind: "tool", tool: "apply_patch", summary: "Apply patch:\nUpdate: A.swift\nAdd: B.swift", detail: diffA,
+                      memberID: sol.id, memberName: sol.name)
+        p1.changedFiles = ["A.swift", "B.swift"]
+        var p2 = Item(id: "p2", kind: "tool", route: "claude/opus", tool: "apply_patch", summary: "Apply patch:\nUpdate: A.swift",
+                      detail: "Applied patch:\nA.swift\n\n--- a/A.swift\n+++ b/A.swift\n@@ -2 +2 @@\n-more\n+most\n",
+                      memberID: opus.id, memberName: opus.name)
+        p2.changedFiles = ["A.swift"]
+        let teamTurn = [Item(id: "u", kind: "user", text: "Go"), p1, reply("r1", "Done"), p2, Item(id: "u2", kind: "user", text: "Next")]
+        check(Segment.outline(teamTurn) { _ in false }.map(\.id) == ["u", "speaker-p1", "p1", "r1", "speaker-p2", "p2", "changes-p1", "u2"],
+              "Close-out placement: " + Segment.outline(teamTurn) { _ in false }.map(\.id).joined(separator: ","))
+        let working = Array(teamTurn.dropLast())
+        check(!Segment.outline(working, open: true) { _ in false }.contains { $0.id == "changes-p1" }, "Close-out drawn mid-turn")
+        check(Segment.outline(working) { _ in false }.last?.id == "changes-p1", "Finished turn lost its close-out")
+        var solo = p1; solo.memberID = nil; solo.memberName = nil
+        check(!Segment.outline([teamTurn[0], solo]) { _ in false }.contains { $0.id.hasPrefix("changes-") }, "Solo turn grew a Team close-out")
+        let changes = ChatTurnChanges.collect([p1, p2])
+        check(changes.files.map(\.path) == ["A.swift", "B.swift"], "Changed files: \(changes.files.map(\.path))")
+        check(changes.files[0].members == ["Sol", "Opus"], "Members per file")
+        check(changes.files[0].added == 3 && changes.files[0].removed == 2, "A.swift counts: \(changes.files[0])")
+        check(changes.files[1].added == 1 && changes.files[1].removed == 0, "Created file counts")
+        check(changes.added == 4 && changes.removed == 2, "Turn totals")
+        check(changes.files[0].diff.contains("+most") && !changes.files[0].diff.contains("+b"), "Diff sections crossed files")
 
         // Tool rows lead with what was done, not the shared folder.
         let shell = ChatToolDisplay.describe(tool: "run_shell", summary: "Run in /Users/x/BF2:\ngit status --short")
@@ -296,6 +403,15 @@ struct Item: ChatTranscriptItem {
               == "Checkpoint reached · send a message to continue", "Checkpoint without member")
         // The wording finish_checkpoint writes when the round budget runs out.
         let budget = " The 24-round tool budget was used up. "
+        // Continuing later or finishing as planned is routine; the sign-off
+        // says so. A pause or a question still marks the transcript.
+        check(ChatNotice.style(ChatNotice.checkpointPrefix + budget + "This member's requested continuation will resume after other members.") == .hidden,
+              "Routine continuation checkpoint shown")
+        check(ChatNotice.style(ChatNotice.checkpointPrefix + budget + "This member finished its contribution.") == .hidden, "Routine finish shown")
+        check(ChatNotice.style(ChatNotice.checkpointPrefix + budget + "This member needs your answer before continuing.") == .checkpoint,
+              "Question checkpoint hidden")
+        check(ChatNotice.style(ChatNotice.checkpointPrefix + budget + "This member paused; send a message to continue from the recorded results.")
+              == .checkpoint, "Pause checkpoint hidden")
         check(ChatNotice.checkpointLine(ChatNotice.checkpointPrefix + budget + "This member's requested continuation will resume after other members.", member: "Sol")
               == "Sol reached a checkpoint · round budget used · continues after the other members", "Budget continuation")
         check(ChatNotice.checkpointLine(ChatNotice.checkpointPrefix + budget + "This member finished its contribution.", member: "Opus")
@@ -310,6 +426,13 @@ struct Item: ChatTranscriptItem {
               == "GPT 6.1 Sol reached a checkpoint · round budget used · send a message to continue", "Turn checkpoint")
         check(ChatNotice.checkpointLine(ChatNotice.checkpointPrefix + " Something new happened.", member: "Sol")
               == "Sol reached a checkpoint · Something new happened", "Unknown checkpoint wording lost")
+
+        let failure = ChatNotice.failurePrefix + "5 attempts · connection reset"
+        check(ChatNotice.style(failure) == .failure, "Member failure warning hidden")
+        check(ChatNotice.failureLine(failure, member: "Opus") == "Opus stopped after 5 attempts · connection reset", "Member failure attribution")
+        check(ChatNotice.failureLine(failure, member: nil) == failure, "Missing member lost the warning")
+        let failedRows = Segment.outline([Item(id: "failed", kind: "notice", text: failure)], isLive: { _ in false })
+        check(failedRows.count == 1, "Member failure lost from outline")
 
         // Every glyph a row can ask for exists, and the path parser reads the
         // catalogue's curve syntax, including relative curves.

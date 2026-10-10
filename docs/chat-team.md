@@ -1,9 +1,9 @@
 # Team in Chat
 
-Team lets up to three model/account choices contribute to one Chat transcript.
+Team lets up to four model/account choices contribute to one Chat transcript.
 Open **Team** in the inspector, choose **Set up**, and pick names, models,
 reasoning efforts and optional responsibilities. The first member takes the
-place of the chat's current model. There is no fourth coordinator model or
+place of the chat's current model. There is no separate coordinator model or
 extra inference request to manage the queue. Membership is saved with the chat.
 
 ## Contributions and continuation
@@ -27,7 +27,12 @@ one can use only `team_status` to choose an outcome, and the final reply has no
 tools. Its sign-off explains progress, remaining work and the next step. An
 explicit continuation rejoins the queue; an explicit `done` finishes. Without
 an outcome it pauses with recorded results and asks for a message to continue.
-The checkpoint notice identifies the exhausted tool budget. Solo Chat turns
+The checkpoint notice identifies the exhausted tool budget. In the transcript,
+a member that continues later or finishes as planned closes silently: its
+sign-off already says so. A pause or a question still draws a handoff line.
+Once a Team turn ends, one quiet table lists the files its members changed
+through patches, with line counts, who touched each file, and its diff on
+expansion. Solo Chat turns
 also reserve a closing reply instead of reporting the round limit as an error.
 Closing is bounded even when a model ignores the tool restriction, and no
 workspace actions or additional approvals are allowed there. Output limits
@@ -37,12 +42,25 @@ acknowledgement loop.
 This detects exact repeats, not every possible unproductive conversation.
 
 Parallel execution is the default for existing and new Teams, with the same
-three-member cap. Model requests, file/search reads and transcript recall can
+four-member cap. Model requests, file/search reads and transcript recall can
 overlap. Patches and shell commands take a cancellable FIFO gate for the chosen
 workspace, including their approval wait. Workspace gates are shared with other
 Chat turns in the same worker using that folder. Reads may observe another
 member's edits; models are instructed to re-read current files before changing
 them. Continuing members begin together only after the current wave settles.
+
+## Failed requests
+
+Transient member request failures retry quietly, for up to five attempts total,
+with cancellable waits of roughly 2, 5, 10 and 20 seconds. Only the provider
+request is retried: completed tools and their recorded results are kept.
+Authentication and invalid requests fail immediately. After exhaustion, that
+member is parked while peers continue. One red warning line names the member;
+expand it for error codes, raw errors and attempt timings. The inspector shows
+the short reason. A new user message or Resume unfinished work can resume it.
+Shell timeout accepts seconds; clearly millisecond values (1000–600000) are
+converted and capped at five minutes. Invalid tool arguments remain ordinary
+tool errors that the model can correct.
 
 ## Shared record, private model histories
 
@@ -58,10 +76,12 @@ there is no additional channel. In-flight text and pending tool results stay out
 of model context until their checkpoint. The per-member cursor and deferred
 source IDs are persisted together, so an earlier row finishing later is neither
 skipped nor repeated. Records that do not fit a shared delta wait for the next
-round. New user messages are preserved, while peer excerpts are
-bounded to 48,000 UTF-8 bytes per update and 4,000 characters per record. Source
-IDs lead back to `search_history` and `read_history` for omitted details. Peer
-output is labelled reference material, never new user authorization.
+round, keeping only the newest 32 so a busy Team cannot build an unbounded
+backlog. New user messages are preserved, while peer excerpts are bounded to
+48,000 UTF-8 bytes per update, 4,000 characters per reply and 1,500 per tool
+result, since a member can re-read files itself. Source IDs lead back to
+`search_history` and `read_history` for omitted details. Peer output is
+labelled reference material, never new user authorization.
 
 Members share the chat's source-linked decision notebook. Private model context
 is trimmed using the provider's reported window with a 200,000-token ceiling;
@@ -135,7 +155,7 @@ working. Every member retains its own `status`, `contributionID`, `usage` and
 latest row in its live contribution, even when another member appends a row.
 
 `test_chat_team.py` exercises real ChatService scheduling against scripted
-providers: all three members, long continuation, fairness, private reasoning and
+providers: all four members, long continuation, fairness, private reasoning and
 account isolation, shared recall, serialized approvals/edits, Stop/steer,
 failures, context checkpoints and crash recovery. `test_chat_model.py` runs the
 actual Swift model to check correlated configuration, cross-chat isolation,
