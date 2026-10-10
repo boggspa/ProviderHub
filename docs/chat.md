@@ -223,8 +223,9 @@ provider credentials. Writes are atomic and the directory is held by one Chat
 worker at a time. Saved transcripts remain available if the gateway is offline.
 
 For models with a known context limit, older complete conversation units are
-trimmed before the limit is reached. A notice records this in the transcript;
-the full visible history remains saved. Unknown limits stay unknown. The token
+trimmed before the limit is reached. This is routine on long turns, so it adds
+no transcript notice; the full visible history remains saved and recoverable
+with search_history. Unknown limits stay unknown. The token
 indicator reports the latest request's input usage, rather than a lifetime
 token total. With a known limit, a small ring beside it fills in the provider
 accent, turning amber at 80% and red at 95% of the window; with an unknown
