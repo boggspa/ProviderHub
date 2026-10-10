@@ -151,6 +151,10 @@ def create_manifest(source_dir, app_dir, swift_sources, *, revision=None, reposi
         # "runtime" key, and verify_manifest treats that as "not recorded".
         "runtime": _runtime_facts(app_dir),
     }
+    helper = app_dir / "Contents/MacOS/blackboard-pdf"
+    if helper.exists():
+        if helper.is_symlink(): raise ValueError("Native PDF helper must not be a symbolic link")
+        manifest["native_helpers"] = {"blackboard-pdf": _sha256(helper)}
     destination = app_dir / "Contents/Resources" / MANIFEST_NAME
     destination.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return manifest
@@ -166,6 +170,10 @@ def verify_manifest(app_dir, *, revision=None, require_clean=False):
         raise ValueError("The app requires clean source verified against a Git tree")
     if _worker_hashes(app_dir) != manifest["worker"]["sha256"]:
         raise ValueError("Packaged worker files do not match the build manifest")
+    for name, digest in manifest.get("native_helpers", {}).items():
+        helper = app_dir / "Contents/MacOS" / name
+        if name != "blackboard-pdf" or helper.is_symlink() or not helper.is_file() or _sha256(helper) != digest:
+            raise ValueError("Native PDF helper does not match the build manifest")
     recorded_runtime = manifest.get("runtime")
     if recorded_runtime and recorded_runtime.get("present"):
         if _runtime_facts(app_dir) != recorded_runtime:

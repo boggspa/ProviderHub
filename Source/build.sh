@@ -26,6 +26,12 @@ for module in chat_git chat_memory chat_blackboard chat_history chat_team chat_e
   cp "$SOURCE_DIR/$module.py" "$APP_DIR/Contents/Resources/worker/"
 done
 cp "$SOURCE_DIR/provider_branding.json" "$APP_DIR/Contents/Resources/worker/"
+xcrun swiftc -swift-version 5 -O -target arm64-apple-macosx14.0 \
+  -module-cache-path "$BUILD_DIR/ModuleCache" -framework PDFKit \
+  "$SOURCE_DIR/ChatBlackboardPDF.swift" -o "$APP_DIR/Contents/MacOS/blackboard-pdf"
+if [ "${MISTRAL_BRIDGE_SKIP_CODESIGN:-0}" != "1" ]; then
+  /usr/bin/codesign --force --sign - "$APP_DIR/Contents/MacOS/blackboard-pdf"
+fi
 cp "$SOURCE_DIR/hub_updater.py" "$SOURCE_DIR/update_install.sh" "$APP_DIR/Contents/Resources/worker/"
 cp -R "$SOURCE_DIR/provider-logos" "$APP_DIR/Contents/Resources/worker/"
 cp -R "$SOURCE_DIR/fonts" "$APP_DIR/Contents/Resources/worker/"
@@ -92,7 +98,7 @@ cat > "$APP_DIR/Contents/Info.plist" <<'PLIST'
 PLIST
 if [ -f "$SOURCE_DIR/AppIcon.icns" ]; then cp "$SOURCE_DIR/AppIcon.icns" "$APP_DIR/Contents/Resources/"; fi
 python3 "$SOURCE_DIR/build_provenance.py" write --source-dir "$SOURCE_DIR" \
-  --app-dir "$APP_DIR" --swift-sources "${SWIFT_SOURCES[@]}"
+  --app-dir "$APP_DIR" --swift-sources "${SWIFT_SOURCES[@]}" "$SOURCE_DIR/ChatBlackboardPDF.swift"
 if [ "${MISTRAL_BRIDGE_SKIP_CODESIGN:-0}" = "1" ]; then
   rm -rf "$APP_DIR/Contents/_CodeSignature"
 else
