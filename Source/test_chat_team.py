@@ -65,11 +65,9 @@ class TeamTests(unittest.TestCase):
         self.assertEqual([m["status"] for m in members], ["done"] * 3)
         self.assertEqual(parent.chat["team"]["queue"], [])
         answers = [e for e in parent.chat["entries"] if e["kind"] == "assistant"]
-        self.assertEqual([e["text"] for e in answers], ["First result", "Second result", "Third result"])
-        self.assertEqual([e["memberID"] for e in answers], [m["id"] for m in members])
+        self.assertEqual({e["memberID"]: e["text"] for e in answers},
+                         dict(zip([m["id"] for m in members], ["First result", "Second result", "Third result"])))
         self.assertEqual(len({e["contributionID"] for e in answers}), 3)
-        self.assertIn("First result", json.dumps(self.transports[1].requests[0]))
-        self.assertIn("Member 1", json.dumps(self.transports[1].requests[0]))
         self.assertIn("Inspect the project", json.dumps(self.transports[2].requests[0]))
         self.assertNotIn("messages", json.dumps([e for e in self.events if e["event"] == "team"]))
         self.assertNotIn("team", self.store.headers()[0])
@@ -92,11 +90,18 @@ class TeamTests(unittest.TestCase):
                     if not enabled:
                         self.assertIn("Web search is disabled", system)
 
-    def test_disabling_search_mid_contribution_reaches_active_and_queued_members(self):
+    def test_disabling_search_mid_contribution_reaches_all_active_members(self):
+        requested = threading.Barrier(2)
+        disabled = threading.Event()
         def disable_search(payload, cancel, delta):
+            requested.wait(2)
             parent.handle({"command": "preferences", "webSearch": False})
+            disabled.set()
             return call("read_file", {"path": "missing.txt"})
-        parent = self.service([[disable_search, response("First finished")], [response("Second finished")]])
+        def peer_read(payload, cancel, delta):
+            requested.wait(2); self.assertTrue(disabled.wait(2))
+            return call("read_file", {"path": "peer.txt"})
+        parent = self.service([[disable_search, response("First finished")], [peer_read, response("Second finished")]])
         for choice in parent.models:
             choice["supportsWebSearch"] = True
         self.configure(parent)
@@ -104,7 +109,7 @@ class TeamTests(unittest.TestCase):
         self.assertEqual(len(self.transports[0].requests), 2)
         self.assertIn("_web_search", self.transports[0].requests[0])
         self.assertNotIn("_web_search", self.transports[0].requests[1])
-        self.assertNotIn("_web_search", self.transports[1].requests[0])
+        self.assertNotIn("_web_search", self.transports[1].requests[1])
 
     def test_explicit_continuation_rotates_fairly_and_must_be_renewed(self):
         parent = self.service([[decision("continue", "Verify the tests"), response("Implementation done"), response("Tests passed")],
@@ -112,7 +117,8 @@ class TeamTests(unittest.TestCase):
         members = self.configure(parent)
         self.send(parent); self.finish(parent)
         answers = [e for e in parent.chat["entries"] if e["kind"] == "assistant" and e["text"]]
-        self.assertEqual([e["text"] for e in answers], ["Implementation done", "Review complete", "Tests passed"])
+        self.assertEqual({e["text"] for e in answers[:-1]}, {"Implementation done", "Review complete"})
+        self.assertEqual(answers[-1]["text"], "Tests passed")
         self.assertEqual([m["contributions"] for m in members], [2, 1])
         self.assertEqual([m["status"] for m in members], ["done", "done"])
         self.assertEqual(json.dumps(self.transports[0].requests[-1]).count("Review complete"), 1)
@@ -135,18 +141,18 @@ class TeamTests(unittest.TestCase):
         self.assertEqual(parent.chat["team"]["status"], "stopped")
         self.assertIn("repeated", parent.chat["entries"][-1]["text"])
 
-    def test_needs_input_pauses_rest_of_roster_and_resume_needs_real_answer(self):
+    def test_needs_input_pauses_future_contributions_and_resume_needs_real_answer(self):
         parent = self.service([[decision("needs_input", "Which directory?"), response("Which directory should I use?")],
-                               [response("Answered now")], [response("Other member answered")]])
+                               [response("Independent answer")], [response("Answered now")], [response("Other member answered")]])
         members = self.configure(parent)
         self.send(parent); self.finish(parent)
-        self.assertEqual([m["status"] for m in members], ["needs_input", "queued"])
+        self.assertEqual([m["status"] for m in members], ["needs_input", "done"])
         parent.handle({"command": "team_resume", "id": parent.chat["id"], "request": "resume"})
         self.assertIn("answer", self.events[-1]["notice"])
-        self.assertFalse(self.transports[1].requests)
+        self.assertEqual(len(self.transports[1].requests), 1)
         self.send(parent, "Use the current directory"); self.finish(parent)
         self.assertEqual([m["status"] for m in members], ["done", "done"])
-        self.assertIn("Use the current directory", json.dumps(self.transports[1].requests))
+        self.assertIn("Use the current directory", json.dumps(self.transports[3].requests))
 
     def test_route_accounts_and_opaque_histories_stay_private_across_resume(self):
         first = response("Public A")
@@ -179,13 +185,19 @@ class TeamTests(unittest.TestCase):
     def test_mutations_and_approvals_are_serial_and_attributed(self):
         patch_text = "*** Begin Patch\n*** Add File: result.txt\n+first\n*** End Patch"
         second = "*** Begin Patch\n*** Update File: result.txt\n@@\n-first\n+second\n*** End Patch"
+        second_ready = threading.Event()
+        def second_request(payload, cancel, delta):
+            self.wait_for(lambda: parent.approval is not None)
+            second_ready.set()
+            return call("apply_patch", {"patch": second})
         parent = self.service([[call("apply_patch", {"patch": patch_text}), response("Wrote first")],
-                               [call("apply_patch", {"patch": second}), response("Wrote second")]])
+                               [second_request, response("Wrote second")]])
         self.configure(parent)
         self.send(parent)
         self.wait_for(lambda: parent.approval is not None)
         self.assertIn("Member 1", parent.approval["summary"])
-        self.assertEqual(self.transports[1].requests, [])
+        self.wait_for(lambda: len(self.transports[1].requests) == 1)
+        self.assertTrue(second_ready.wait(2))
         parent.handle({"command": "approve", "id": parent.approval["id"], "allow": True})
         self.wait_for(lambda: parent.approval is not None and "Member 2" in parent.approval["summary"])
         self.assertEqual((self.root / "result.txt").read_text(), "first\n")
@@ -193,7 +205,7 @@ class TeamTests(unittest.TestCase):
         self.finish(parent)
         self.assertEqual((self.root / "result.txt").read_text(), "second\n")
         tools = [e for e in parent.chat["entries"] if e["kind"] == "tool"]
-        self.assertEqual([e["memberName"] for e in tools], ["Member 1", "Member 2"])
+        self.assertEqual({e["memberName"] for e in tools}, {"Member 1", "Member 2"})
 
     def test_stop_cancels_active_and_queued_work_resume_does_not_repeat_finished_member(self):
         started = threading.Event()
@@ -202,6 +214,7 @@ class TeamTests(unittest.TestCase):
         parent = self.service([[response("Done A")], [waiting], [response("Resumed B")]])
         members = self.configure(parent)
         self.send(parent); self.assertTrue(started.wait(2))
+        self.wait_for(lambda: members[0]["status"] == "done")
         parent.handle({"command": "stop"}); self.finish(parent)
         self.assertEqual([m["status"] for m in members], ["done", "stopped"])
         parent.handle({"command": "team_resume", "id": parent.chat["id"], "request": "resume"})
@@ -209,35 +222,195 @@ class TeamTests(unittest.TestCase):
         self.assertEqual([m["contributions"] for m in parent.chat["team"]["members"]], [1, 1])
         self.assertEqual(len(self.transports[0].requests), 1)
 
-    def test_steer_waits_for_cleanup_then_gives_new_input_to_all_members_once(self):
-        started, cleaned = threading.Event(), threading.Event()
+    def test_steer_preserves_run_queue_and_continuation_at_tool_boundary(self):
+        started, release = threading.Event(), threading.Event()
         def waiting(payload, cancel, delta):
-            started.set(); cancel.wait(3); cleaned.set(); raise InterruptedError("Stopped")
+            started.set(); self.assertTrue(release.wait(3))
+            self.assertFalse(cancel.is_set())
+            return call("read_file", {"path": "missing.txt"})
         def restarted(payload, cancel, delta):
-            self.assertTrue(cleaned.is_set())
-            self.assertIn("New direction", json.dumps(payload)); return response("Updated A")
-        parent = self.service([[waiting], [restarted], [response("Updated B")]])
-        self.configure(parent)
+            self.assertIn("New direction", json.dumps(payload))
+            self.assertTrue(any(b.get("type") == "tool_result" for m in payload["messages"] for b in m["content"] if isinstance(b, dict)))
+            return response("Updated B")
+        parent = self.service([[decision("continue", "Verify tests"), response("First A"), response("Continued A")],
+                               [waiting, restarted]])
+        members = self.configure(parent)
         self.send(parent); self.assertTrue(started.wait(2))
-        parent.handle({"command": "steer", "id": parent.chat["id"], "text": "New direction"})
-        self.wait_for(lambda: not parent.busy)
+        self.wait_for(lambda: members[0]["contributions"] == 1)
+        team = parent.chat["team"]
+        run_id, contribution_id, queue = team["runID"], members[1]["contributionID"], list(team["queue"])
+        try:
+            parent.handle({"command": "steer", "id": parent.chat["id"], "text": "New direction"})
+            self.assertTrue(parent.busy)
+            self.assertFalse(parent.cancel.is_set())
+            self.assertEqual(team["queue"], queue)
+            self.assertEqual(members[0]["nextStep"], "Verify tests")
+        finally:
+            release.set()
+        self.finish(parent)
+        self.assertEqual(team["runID"], run_id)
+        self.assertEqual(members[1]["contributionID"], contribution_id)
+        self.assertIn("New direction", json.dumps(self.transports[0].requests[-1]))
+        self.assertEqual([m["contributions"] for m in members], [2, 1])
+        self.assertFalse(any("stopped" in e.get("text", "").lower() for e in parent.chat["entries"]))
         self.assertEqual(parent.chat["team"]["status"], "done")
         self.assertIn("Updated B", json.dumps(parent.chat["entries"]))
 
     def test_checkpoint_round_limit_yields_only_when_opted_in(self):
-        parent = self.service([[decision("continue", "Finish reading"), call("read_file", {"path": "missing"}), response("Finished")]])
+        parent = self.service([[decision("continue", "Finish reading"), call("read_file", {"path": "missing"}),
+                                response("Pausing here; I will finish reading next."), response("Finished")]])
         member = self.configure(parent, 1)[0]
         with patch("chat_runtime.MAX_ROUNDS", 2): self.send(parent); self.finish(parent)
         self.assertEqual(member["contributions"], 2)
         self.assertEqual(member["status"], "done")
 
+    def test_mid_tool_checkpoint_gets_signoff_without_implicit_continuation(self):
+        signoff = "Both reads finished. No edits yet; next I need to update the configuration."
+        parent = self.service([[call("read_file", {"path": "a"}), call("read_file", {"path": "b"}), response(signoff)],
+                               [response("Peer finished its independent work")]])
+        members = self.configure(parent)
+        with patch("chat_runtime.MAX_ROUNDS", 2): self.send(parent); self.finish(parent)
+        self.assertEqual(parent.chat["team"]["status"], "needs_input")
+        self.assertEqual([m["status"] for m in members], ["needs_input", "done"])
+        self.assertEqual(len(self.transports[0].requests), 3)
+        self.assertEqual(len(self.transports[1].requests), 1)
+        closing = self.transports[0].requests[-1]
+        self.assertEqual([t["name"] for t in closing["tools"]], ["team_status"])
+        self.assertIn("1 model/tool round", json.dumps(self.transports[0].requests[1]))
+        stored = self.store.load(parent.chat["id"])
+        self.assertTrue(any(e.get("text") == signoff for e in stored["entries"]))
+        notice = next(e for e in stored["entries"] if e["kind"] == "notice" and e["text"].startswith("Team contribution checkpoint reached."))
+        self.assertTrue(notice["text"].startswith("Team contribution checkpoint reached."))
+        self.assertIn("2-round tool budget", notice["text"])
+        self.assertFalse(any(e["kind"] == "error" for e in stored["entries"]))
+
+    def test_closing_can_request_continuation_then_sign_off_before_next_wave(self):
+        parent = self.service([[call("read_file", {"path": "a"}), decision("continue", "Apply the change"),
+                                response("Read complete; I will apply the change after the review."), response("Change complete")],
+                               [response("Review complete")]])
+        members = self.configure(parent)
+        with patch("chat_runtime.MAX_ROUNDS", 1): self.send(parent); self.finish(parent)
+        self.assertEqual([m["contributions"] for m in members], [2, 1])
+        self.assertEqual([m["status"] for m in members], ["done", "done"])
+        replies = [e["text"] for e in parent.chat["entries"] if e["kind"] == "assistant" and e["text"]]
+        self.assertEqual(set(replies[:-1]), {"Read complete; I will apply the change after the review.", "Review complete"})
+        self.assertEqual(replies[-1], "Change complete")
+        self.assertEqual(self.transports[0].requests[2]["tools"], [])
+        self.assertEqual(members[0]["decision"]["state"], "done")
+
+    def test_explicit_done_during_closing_finishes_instead_of_asking_for_input(self):
+        parent = self.service([[call("read_file", {"path": "a"}), decision("done"), response("Inspection complete")]])
+        member = self.configure(parent, 1)[0]
+        with patch("chat_runtime.MAX_ROUNDS", 1): self.send(parent); self.finish(parent)
+        self.assertEqual(member["status"], "done")
+        self.assertEqual(parent.chat["team"]["status"], "done")
+
+    def test_real_stop_after_steering_still_cancels_active_and_queued_members(self):
+        started = threading.Barrier(3)
+        def waiting(payload, cancel, delta):
+            started.wait(2); cancel.wait(3); raise InterruptedError("Stopped")
+        parent = self.service([[waiting], [waiting]])
+        members = self.configure(parent)
+        self.send(parent); started.wait(2)
+        parent.handle({"command": "steer", "id": parent.chat["id"], "text": "Update before stop"})
+        parent.handle({"command": "stop"}); self.finish(parent)
+        self.assertEqual(parent.chat["team"]["status"], "stopped")
+        self.assertEqual([m["status"] for m in members], ["stopped", "stopped"])
+        self.assertEqual(len(self.transports[1].requests), 1)
+        self.assertIn("Team stopped. Recorded results are kept.", [e.get("text") for e in parent.chat["entries"]])
+
+    def test_steer_queues_completed_member_after_active_member(self):
+        started, release = threading.Event(), threading.Event()
+        def waiting(payload, cancel, delta):
+            started.set(); release.wait(3)
+            return response("Old B result")
+        parent = self.service([[response("Old A result"), response("Updated A")],
+                               [waiting, response("Updated B")]])
+        first, second = self.configure(parent)
+        self.send(parent); self.assertTrue(started.wait(2))
+        self.wait_for(lambda: first["status"] == "done")
+        try:
+            parent.handle({"command": "steer", "id": parent.chat["id"], "text": "New direction for both"})
+            self.assertEqual(parent.chat["team"]["queue"], [second["id"], first["id"]])
+        finally:
+            release.set()
+        self.finish(parent)
+        answers = [e["text"] for e in parent.chat["entries"] if e["kind"] == "assistant"]
+        self.assertEqual(set(answers[:2]), {"Old A result", "Old B result"})
+        self.assertEqual(set(answers[2:]), {"Updated B", "Updated A"})
+        for transport in self.transports:
+            self.assertIn("New direction for both", json.dumps(transport.requests[-1]))
+
+    def test_steer_during_running_tool_records_its_real_result_once(self):
+        started, release = threading.Event(), threading.Event()
+        executed = []
+        (self.root / "input.txt").write_text("Recorded file content")
+        def updated(payload, cancel, delta):
+            self.assertIn("New instruction", json.dumps(payload))
+            self.assertIn("Recorded file content", json.dumps(payload))
+            saved = self.store.load(parent.chat["id"])
+            rows = [e for e in saved["entries"] if e.get("tool") == "read_file"]
+            self.assertEqual(len(rows), 1)
+            self.assertIn("Recorded file content", rows[0]["detail"])
+            self.assertFalse(rows[0]["isError"])
+            return response("Updated result")
+        parent = self.service([[call("read_file", {"path": "input.txt"}), updated], [response("Second result"), response("Updated peer result")]])
+        class HeldRunner(parent.runner_type):
+            def execute(runner, name, args):
+                executed.append(name)
+                started.set(); release.wait(3)
+                return super().execute(name, args)
+        parent.runner_type = HeldRunner
+        members = self.configure(parent)
+        self.send(parent); self.assertTrue(started.wait(2))
+        try:
+            parent.handle({"command": "steer", "id": parent.chat["id"], "text": "New instruction"})
+            self.assertFalse(parent.team_children[members[0]["id"]].cancel.is_set())
+            self.assertFalse(self.events[-1]["interrupting"])
+        finally:
+            release.set()
+        self.finish(parent)
+        self.assertEqual(executed, ["read_file"])
+        self.assertEqual(parent.chat["team"]["status"], "done")
+        self.assertFalse(any("stopped" in e.get("text", "").lower() for e in parent.chat["entries"]))
+
+    def test_steering_at_terminal_checkpoint_recovers_queue_without_replaying_result(self):
+        parent = self.service([[], []]); first, second = self.configure(parent)
+        chat_team.start_run(parent, new_input=True)
+        first.update(status="working", contributionID="steered-contribution", cursor=len(parent.chat["entries"]))
+        parent.chat["team"]["activeMemberID"] = first["id"]
+        parent.chat["entries"].append(entry("user", "New instruction at the final boundary"))
+        parent.save()
+        child = {"messages": [{"role": "assistant", "content": [{"type": "text", "text": "Recorded result"}]}],
+                 "status": "ready", "route": first["route"],
+                 "teamDecision": {"state": "continue", "next_step": "Verify the result"}}
+        chat_team.MemberStore(parent, first, {}).save(child)
+        loaded = self.store.load(parent.chat["id"])
+        chat_team.recover(loaded, ChatService.settle)
+        chat_team.recover(loaded, ChatService.settle)
+        member = loaded["team"]["members"][0]
+        self.assertEqual(member["contributions"], 1)
+        self.assertEqual(member["appliedContributionID"], "steered-contribution")
+        self.assertEqual(member["status"], "queued")
+        self.assertEqual(member["nextStep"], "Verify the result")
+        self.assertEqual(loaded["team"]["queue"], [first["id"], second["id"]])
+        self.assertEqual(loaded["team"]["runID"], parent.chat["team"]["runID"])
+        self.assertTrue(chat_team.has_update(loaded, member))
+
     def test_steer_at_terminal_save_delivers_new_instruction_to_every_member(self):
         final_save, release = threading.Event(), threading.Event()
+        started = threading.Barrier(2)
+        def first_reply(payload, cancel, delta):
+            started.wait(2)
+            return response("Old task finished")
+        def peer_reply(payload, cancel, delta):
+            started.wait(2)
+            return response("Old peer finished")
         def restarted(payload, cancel, delta):
             self.assertIn("New direction at the final boundary", json.dumps(payload))
             return response("Followed new direction")
-        parent = self.service([[response("Old task finished")], [restarted], [restarted]])
-        first = self.configure(parent)[0]
+        parent = self.service([[first_reply, restarted], [peer_reply, restarted]])
+        first, second = self.configure(parent)
         original = chat_team.MemberStore.save
         def held_save(store, chat):
             if store.member["id"] == first["id"] and chat["status"] == "ready" and not final_save.is_set():
@@ -245,23 +418,27 @@ class TeamTests(unittest.TestCase):
             return original(store, chat)
         with patch.object(chat_team.MemberStore, "save", held_save):
             self.send(parent); self.assertTrue(final_save.wait(2))
+            self.wait_for(lambda: second["status"] == "done")
             try:
                 parent.handle({"command": "steer", "id": parent.chat["id"], "text": "New direction at the final boundary"})
             finally:
                 release.set()
             self.wait_for(lambda: not parent.busy)
         self.assertEqual(parent.chat["team"]["status"], "done")
-        self.assertEqual([len(t.requests) for t in self.transports], [1, 1, 1])
+        self.assertEqual([len(t.requests) for t in self.transports], [2, 2])
 
     def test_shared_notebook_uses_main_transcript_source_ids(self):
         def remember(payload, cancel, delta):
             source = next(e["id"] for e in parent.chat["entries"] if e["kind"] == "user")
             return call("record_decision", {"key": "goal", "text": "Use this workspace", "source_ids": [source]})
-        parent = self.service([[remember, response("Recorded")], [response("Read the note")]])
+        def wait_for_note(payload, cancel, delta):
+            self.wait_for(lambda: bool(parent.chat.get("decisions")))
+            return call("read_file", {"path": "missing"})
+        parent = self.service([[remember, response("Recorded")], [wait_for_note, response("Read the note")]])
         self.configure(parent)
         self.send(parent); self.finish(parent)
         self.assertEqual(parent.chat["decisions"][0]["key"], "goal")
-        self.assertIn("Use this workspace", json.dumps(self.transports[1].requests[0]))
+        self.assertIn("Use this workspace", json.dumps(self.transports[1].requests[1]))
         source = next(e for e in parent.chat["entries"] if e["kind"] == "assistant" and e["text"] == "Recorded")
         read = chat_memory.execute(parent.chat, "read_history", {"entry_id": source["id"]})
         self.assertIn("Member 1", read["content"][0]["text"])
@@ -272,7 +449,8 @@ class TeamTests(unittest.TestCase):
         self.send(parent); self.finish(parent)
         self.assertEqual(parent.chat["team"]["status"], "error")
         self.assertEqual(members[0]["status"], "error")
-        self.assertEqual(self.transports[1].requests, [])
+        self.assertEqual(members[1]["status"], "done")
+        self.assertEqual(len(self.transports[1].requests), 1)
 
     def test_all_members_have_host_tools_but_cannot_delegate(self):
         parent = self.service([[call("delegate", {"task": "Spawn fourth member"}), response("No more members")]])
@@ -359,13 +537,19 @@ class TeamTests(unittest.TestCase):
                 self.assertFalse(any(t.requests for t in self.transports))
 
     def test_stop_just_after_final_checkpoint_preserves_completed_member(self):
-        parent = self.service([[response("Finished A")], [response("Finished B")]])
+        started = threading.Event()
+        def finished(payload, cancel, delta):
+            self.assertTrue(started.wait(2))
+            return response("Finished A")
+        def waiting(payload, cancel, delta):
+            started.set(); cancel.wait(3); raise InterruptedError("Stopped")
+        parent = self.service([[finished], [waiting], [response("Finished B")]])
         first, second = self.configure(parent)
         original = chat_team.checkpoint
         def stop_after_final(parent, member=None, dirty=None):
             original(parent, member, dirty)
             if member and member["id"] == first["id"] and member["status"] == "done":
-                parent.cancel.set()
+                parent.handle({"command": "stop"})
         with patch.object(chat_team, "checkpoint", side_effect=stop_after_final):
             self.send(parent); self.finish(parent)
         self.assertEqual(first["status"], "done")
@@ -373,7 +557,7 @@ class TeamTests(unittest.TestCase):
         parent.handle({"command": "team_resume", "id": parent.chat["id"]})
         self.finish(parent)
         self.assertEqual([m["contributions"] for m in parent.chat["team"]["members"]], [1, 1])
-        self.assertEqual([len(t.requests) for t in self.transports], [1, 1])
+        self.assertEqual([len(t.requests) for t in self.transports], [1, 1, 1])
 
     def test_failed_configuration_save_keeps_previous_roster_and_histories(self):
         parent = self.service([[]]); member = self.configure(parent, 1)[0]
@@ -384,16 +568,22 @@ class TeamTests(unittest.TestCase):
         self.assertEqual(parent.chat, old)
         self.assertIn("Disk full", self.events[-1]["notice"])
 
-    def test_failed_final_save_pauses_before_next_member_and_emits_error(self):
-        parent = self.service([[response("Done")], [response("Must wait")]])
+    def test_failed_final_save_cancels_peers_and_emits_error(self):
+        started = threading.Barrier(2)
+        def done(payload, cancel, delta):
+            started.wait(2)
+            return response("Done")
+        def waiting(payload, cancel, delta):
+            started.wait(2); cancel.wait(3); raise InterruptedError("Stopped")
+        parent = self.service([[done], [waiting]])
         self.configure(parent)
         original = chat_team.checkpoint
         def fail_final(parent, member=None, dirty=None):
-            if member and member.get("terminalStatus") == "ready": raise OSError("Disk full")
+            if member and member.get("terminalStatus") == "ready" and member["name"] == "Member 1": raise OSError("Disk full")
             return original(parent, member, dirty)
         with patch.object(chat_team, "checkpoint", side_effect=fail_final):
             self.send(parent); self.finish(parent)
-        self.assertEqual(self.transports[1].requests, [])
+        self.assertEqual(len(self.transports[1].requests), 1)
         self.assertEqual(parent.chat["team"]["status"], "error")
         self.assertEqual(parent.chat["team"]["members"][0]["status"], "done")
         self.assertTrue(any(e["event"] == "error" and "save" in e["message"] for e in self.events))

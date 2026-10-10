@@ -59,6 +59,7 @@ struct ChatTeamMember: Decodable, Identifiable {
 }
 struct ChatTeamSnapshot: Decodable {
     var enabled: Bool; var status: String; var activeMemberID: String?; var members: [ChatTeamMember]
+    var activeMemberIDs: [String]?
     var active: ChatTeamMember? { members.first { $0.id == activeMemberID } }
     var needsInput: Bool { members.contains { $0.status == "needs_input" } }
     var canResume: Bool { enabled && !needsInput && ["stopped", "interrupted", "error"].contains(status) && members.contains { $0.status != "done" } }
@@ -88,8 +89,10 @@ struct ChatTeamSnapshot: Decodable {
     }
     func isStreaming(_ entry: ChatEntry, fallback: Bool) -> Bool {
         guard let memberID = entry.memberID else { return fallback }
-        return busy && team?.enabled == true && team?.activeMemberID == memberID &&
-            team?.active?.contributionID == entry.contributionID && entries.last?.id == entry.id
+        guard busy, team?.enabled == true,
+              let member = team?.members.first(where: { $0.id == memberID && $0.status == "working" }),
+              let contribution = member.contributionID, contribution == entry.contributionID else { return false }
+        return entries.last(where: { $0.memberID == memberID && $0.contributionID == contribution })?.id == entry.id
     }
     var canChangeBranch: Bool { connected && selectedID != nil && !busy && !branchBusy && sideChat?.busy != true && !sideOpening }
     var canSendSide: Bool {

@@ -408,8 +408,10 @@ class ChatHost:
     def all_services(self):
         services = list(self.sessions.values()) + list(self.sides.values())
         for parent in list(services):
-            if parent.child: services.append(parent.child)
-            services.extend(parent.lanes)
+            with parent._mutex:
+                if parent.child: services.append(parent.child)
+                services.extend(parent.lanes)
+                services.extend(parent.team_children.values())
         return list({id(service): service for service in services}.values())
 
     def stop_all(self):

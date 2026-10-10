@@ -281,6 +281,169 @@ class ConcurrentChatTests(unittest.TestCase):
         self.assertEqual(len(self.host.sides), 8)
         self.assertIn("Eight temporary", self.events[-1]["notice"])
 
+    def configure_parallel_team(self, identifier):
+        self.host.handle({"command": "configure_team", "chat": identifier, "request": "team-" + identifier,
+                          "enabled": True, "members": [
+                              {"name": "Member " + str(index), "choice": self.host.models[0]["id"],
+                               "effort": "", "responsibility": "Inspect"} for index in (1, 2)]})
+        return self.host.session(identifier)
+
+    def test_parallel_teams_and_solo_chat_keep_updates_and_stop_scoped(self):
+        from test_chat_agents import call
+        a, b, solo_id = self.create("team-a"), self.create("team-b"), self.create("solo")
+        together = threading.Barrier(5)
+        release_a = threading.Event()
+        self.addCleanup(release_a.set)
+        def active_a(payload, cancel, delta):
+            delta("A partial")
+            together.wait(3); self.assertTrue(release_a.wait(3))
+            self.assertFalse(cancel.is_set())
+            return call("read_file", {"path": "missing"})
+        def updated_a(payload, cancel, delta):
+            self.assertEqual(json.dumps(payload).count("Update only Team A"), 1)
+            return response("A updated")
+        def active_b(payload, cancel, delta):
+            delta("B partial")
+            together.wait(3)
+            self.assertTrue(cancel.wait(3))
+            raise InterruptedError("Stopped")
+        first = self.configure_parallel_team(a)
+        self.pending_children.extend([[active_a, updated_a], [active_a, updated_a]])
+        self.send(a, [])
+        self.wait(lambda: len(first.team_children) == 2)
+        second = self.configure_parallel_team(b)
+        self.pending_children.extend([[active_b], [active_b]])
+        self.send(b, [])
+        self.wait(lambda: len(second.team_children) == 2)
+        solo_run, solo_started, solo_release = self.blocked("Independent solo result")
+        self.addCleanup(solo_release.set)
+        solo = self.send(solo_id, [solo_run])
+        try:
+            together.wait(3); self.assertTrue(solo_started.wait(2))
+            self.assertEqual(self.host._requests.active, 5)
+            self.assertEqual(len(first.chat["team"]["activeMemberIDs"]), 2)
+            self.assertEqual(len(second.chat["team"]["activeMemberIDs"]), 2)
+            self.host.handle({"command": "steer", "chat": a, "text": "Update only Team A"})
+            self.host.handle({"command": "stop", "chat": b})
+            self.wait(lambda: not second.busy)
+            self.assertTrue(first.busy and solo.busy)
+            self.assertFalse(first.cancel.is_set() or solo.cancel.is_set())
+            release_a.set(); solo_release.set()
+            self.wait(lambda: not first.busy and not solo.busy)
+            self.assertEqual(first.chat["team"]["status"], "done")
+            self.assertEqual([m["status"] for m in second.chat["team"]["members"]], ["stopped", "stopped"])
+            self.assertNotIn("Update only Team A", json.dumps(second.chat))
+            self.assertNotIn("Update only Team A", json.dumps(solo.chat))
+            self.assertEqual(self.host.view_id, solo_id)
+        finally:
+            release_a.set(); solo_release.set(); self.host.stop_all()
+
+    def test_parallel_team_approvals_stay_with_their_chat_after_selection_changes(self):
+        from test_chat_agents import call
+        a, b = self.create("approve-a"), self.create("approve-b")
+        patches = ["*** Begin Patch\n*** Add File: allowed-" + str(index) + ".txt\n+saved\n*** End Patch" for index in (1, 2)]
+        first = self.configure_parallel_team(a)
+        self.pending_children.extend([[call("apply_patch", {"patch": patches[0]}), response("A first settled")],
+                                      [call("apply_patch", {"patch": patches[1]}), response("A second settled")]])
+        self.send(a, [])
+        self.wait(lambda: first.approval is not None)
+        second = self.configure_parallel_team(b)
+        self.pending_children.extend([[call("apply_patch", {"patch": patches[0]}), response("B first settled")],
+                                      [call("apply_patch", {"patch": patches[1]}), response("B second settled")]])
+        self.send(b, [])
+        self.wait(lambda: second.approval is not None)
+        a_id, b_id = first.approval["id"], second.approval["id"]
+        self.assertNotEqual(a_id, b_id)
+        self.host.handle({"command": "select", "id": b})
+        with self.assertRaisesRegex(ValueError, "no longer pending"):
+            self.host.handle({"command": "approve", "chat": a, "id": b_id, "allow": True})
+        self.host.handle({"command": "approve", "chat": a, "id": a_id, "allow": False})
+        self.wait(lambda: first.approval is not None and first.approval["id"] != a_id)
+        self.assertEqual(second.approval["id"], b_id)
+        self.assertIn(first.approval["memberID"], first.chat["team"]["activeMemberIDs"])
+        self.host.handle({"command": "approve", "chat": a, "id": first.approval["id"], "allow": False})
+        self.host.handle({"command": "approve", "chat": b, "id": b_id, "allow": True})
+        self.wait(lambda: second.approval is not None and second.approval["id"] != b_id)
+        self.host.handle({"command": "approve", "chat": b, "id": second.approval["id"], "allow": False})
+        self.wait(lambda: not first.busy and not second.busy)
+        self.assertEqual(list((self.root / "approve-a").glob("allowed-*.txt")), [])
+        saved = list((self.root / "approve-b").glob("allowed-*.txt"))
+        self.assertEqual(len(saved), 1)
+        self.assertEqual(saved[0].read_text(), "saved\n")
+        self.assertEqual(first.chat["team"]["status"], "done")
+        self.assertEqual(second.chat["team"]["status"], "done")
+
+    def test_host_shutdown_tracks_all_parallel_members_and_releases_request_slots(self):
+        identifier = self.create("shutdown-team")
+        together = threading.Barrier(3)
+        def active(payload, cancel, delta):
+            together.wait(3)
+            self.assertTrue(cancel.wait(3))
+            raise InterruptedError("Stopped")
+        parent = self.configure_parallel_team(identifier)
+        self.pending_children.extend([[active], [active]])
+        self.send(identifier, [])
+        together.wait(3)
+        children = list(parent.team_children.values())
+        self.assertEqual(len(children), 2)
+        self.assertTrue(all(child in self.host.all_services() for child in children))
+        self.host.shutdown(timeout=3)
+        self.assertFalse(parent.busy or parent.thread.is_alive())
+        self.assertTrue(all(child.closing and child.cancel.is_set() and not child.busy for child in children))
+        self.assertEqual(self.host._requests.active, 0)
+        self.assertEqual(parent.chat["team"]["activeMemberIDs"], [])
+
+    def test_parallel_team_and_solo_writers_share_checkout_gate_across_subfolders(self):
+        from chat_tools import ChatToolRunner
+        from test_chat_agents import call
+        a, b = self.create("shared-repo"), self.create("shared-repo/nested")
+        subprocess.run(["git", "init", "-q", str(self.root / "shared-repo")], check=True)
+        requested = threading.Barrier(4)
+        entered, release = threading.Event(), threading.Event()
+        self.addCleanup(release.set)
+        guard = threading.Lock()
+        active = 0
+        executed = []
+        class Runner(ChatToolRunner):
+            def execute(inner, name, args):
+                nonlocal active
+                with guard:
+                    active += 1
+                    self.assertEqual(active, 1, "Team and solo wrote the same checkout together")
+                    executed.append(args["command"])
+                entered.set()
+                try:
+                    self.assertTrue(release.wait(3))
+                    return {"content": [{"type": "text", "text": "Saved"}], "is_error": False,
+                            "summary": "Controlled write", "changed_files": []}
+                finally:
+                    with guard: active -= 1
+        self.host.runner_type = Runner
+        def write(command):
+            def request(payload, cancel, delta):
+                requested.wait(3)
+                return call("run_shell", {"command": command})
+            return request
+        team = self.configure_parallel_team(a)
+        self.host.handle({"command": "configure", "chat": a, "approvalMode": "yolo"})
+        self.pending_children.extend([[write("Team first"), response("First done")],
+                                      [write("Team second"), response("Second done")]])
+        self.send(a, [])
+        self.wait(lambda: len(team.team_children) == 2)
+        self.host.handle({"command": "configure", "chat": b, "approvalMode": "yolo"})
+        solo = self.send(b, [write("Solo"), response("Solo done")])
+        try:
+            requested.wait(3); self.assertTrue(entered.wait(2))
+            with guard: self.assertEqual(len(executed), 1)
+            release.set()
+            self.wait(lambda: not team.busy and not solo.busy)
+            self.assertEqual(set(executed), {"Team first", "Team second", "Solo"})
+            self.assertEqual(active, 0)
+            self.assertEqual(team.chat["team"]["status"], "done")
+            self.assertEqual(solo.chat["status"], "ready")
+        finally:
+            release.set(); self.host.stop_all()
+
     def test_stream_budget_waits_without_opening_ninth_socket_and_stop_releases_waiter(self):
         release = threading.Event(); entered = [threading.Event() for _ in range(8)]
         self.addCleanup(release.set)

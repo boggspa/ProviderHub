@@ -13,7 +13,7 @@ struct ChatTeamControls: View {
                 Button(model.team == nil ? "Set up" : "Edit") { editing = true }
                     .controlSize(.small).disabled(!model.canConfigureTeam)
             }
-            Text("Up to 3 members. One contribution each; members opt in when more work is needed.")
+            Text("Up to 3 members working together. One contribution each; members opt in when more work is needed.")
                 .font(.system(size: 11.5)).foregroundStyle(.secondary)
             if let team = model.team {
                 if !team.enabled { Text("Team is off").font(.system(size: 11.5)).foregroundStyle(.secondary) }
@@ -54,7 +54,7 @@ struct ChatTeamControls: View {
                     Spacer(minLength: 0)
                 }
             }
-            Text("Contributions and workspace actions run one at a time, using this chat’s approval mode.")
+            Text("Members think and read together. Workspace changes and approvals queue one at a time, using this chat’s approval mode.")
                 .font(.system(size: 10.5)).foregroundStyle(.secondary)
             if !model.teamNotice.isEmpty {
                 Text(model.teamNotice).font(.system(size: 11.5)).foregroundStyle(.secondary).textSelection(.enabled)

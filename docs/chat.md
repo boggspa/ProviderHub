@@ -110,8 +110,9 @@ The right-hand **inspector** has three views, each using the whole pane:
   changes. Reads use the local checkout and never fetch a remote.
 - **Team** configures up to three persistent members, including the current
   chat model. Each contributes once by default and may explicitly continue with
-  a next step. Contributions run serially in one attributed transcript, with
-  separate provider histories and the chat's approval mode. Stop, unfinished
+  a next step. Members think and read in parallel through one attributed
+  transcript, refreshed before every model round, with separate provider histories.
+  Workspace changes and approvals queue one at a time. Stop, unfinished
   work and questions are visible in this pane. See [Team](chat-team.md).
   Earlier delegated tasks remain underneath the roster; choose one to read
   its transcript and tool results. Parallel read-only helper chips remain
@@ -270,12 +271,14 @@ token total. With a known limit, a small ring beside it fills in the provider
 accent, turning amber at 80% and red at 95% of the window; with an unknown
 limit no ring is shown. A solo turn pauses after 24 model/tool rounds and can
 be continued.
-Team uses the same bounded execution slices, but members who explicitly request
-continuation rejoin the queue. There is no lifetime Team contribution quota.
-While a Team works, the header shows every member's own ring, name and token
-count, with working members in bold; queued members that have not run yet show
-an empty ring. Windows are never added together. Once the Team stops, the
-header returns to the chat's own context.
+Team uses the same bounded execution slices with a reserved checkpoint sign-off.
+Members run together; explicit continuations join the next wave after current
+contributions settle. There is no lifetime Team contribution quota. Usage and
+context belong to individual members and are never added together. While a
+Team works, the header shows every member's own ring, name and token count,
+with working members in bold; members that have not run yet show an empty
+ring. Once the Team stops, the header returns to the chat's own context. The
+roster shows every member's status and context separately.
 
 ### Recall and decision notes
 
@@ -324,7 +327,7 @@ Tool glyphs reuse TaskWraith's tool-call icon catalogue (file, shell, search,
 patch, browser, memory, delegate, status and handoff) as cached native vectors.
 
 Chat is a coding harness with attachments, local tools, concurrent chats,
-persistent serial Teams and bounded delegation. Mutating tools in one checkout
+persistent parallel Teams and bounded delegation. Mutating tools in one checkout
 run serially. It has no agent mailboxes, schedules, connector
 catalogue, browser automation, or separate IDE.
 
@@ -339,7 +342,8 @@ notes. `ChatInspector.swift`, `ChatInspectorModel.swift` and
 owns each conversation/tool loop and saved chats; `chat_sessions.py` hosts
 independent chat sessions in one process and routes events by chat identity.
 `chat_team.py` and
-`ChatTeam.swift` provide persistent membership, serial scheduling and roster UI.
+`ChatTeam.swift` provide persistent membership, parallel contributions, queued
+workspace writes/approvals and roster UI.
 `chat_agents.py` provides
 isolated delegates and memory-only Side Chats, and `chat_inspector.py` handles
 bounded Git inspection and explicit branch/worktree actions;
