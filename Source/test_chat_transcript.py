@@ -16,6 +16,9 @@ enum HubTheme {
         static let nsInk = NSColor.labelColor
         static let hairline = Color.primary.opacity(0.12)
         static let selection = Color.primary.opacity(0.065)
+        static let raisedSurface = Color.primary.opacity(0.045)
+        static let secondaryInk = Color.secondary
+        static let surface = Color.white
     }
 }
 '''
@@ -197,6 +200,81 @@ import Combine
         check(board.string(forType: .string) == "Whole message", "Copy Message copied the wrong text")
         textView.message = nil
         check(!textView.menu(for: click)!.items.contains { $0.title == "Copy Message" }, "Copy Message shown without a message")
+
+        // Block Markdown: fences become code blocks in the one parser, and
+        // prose keeps its lines while headings, lists, quotes, rules and
+        // inline code chips gain real layout.
+        func codes(_ blocks: [ChatTextBlock]) -> [ChatMarkdownCode] {
+            blocks.compactMap { if case .code(let code) = $0.content { return code }; return nil }
+        }
+        let reply = "### What Finished\n1. **Unified Step** (`Physics.swift`):\n  - Factored capsule movement\n    - Deeper detail\n\n" +
+            "10. Tenth\n\n```swift\nlet x = 1\n" + header + "```\n\n" + header + body + "\n- Done\n   ~~~\n   indented\n   ~~~\n"
+        let mixed = parse(reply)
+        check(codes(mixed).count == 2 && tables(mixed).count == 1, "Fence/table split: \(mixed.map(\.content))")
+        check(codes(mixed)[0].language == "swift" && codes(mixed)[0].body == "let x = 1\n" + header.dropLast() && codes(mixed)[0].closed,
+              "Fence body or language changed")
+        check(codes(mixed)[1].body == "indented" && codes(mixed)[1].indent == 3, "Indented fence kept its indentation")
+        for end in reply.indices { _ = parse(String(reply[..<end]), streaming: true) }
+        let growing = codes(parse("Intro\n```python\nprint(1)\n``", streaming: true))
+        check(growing.count == 1 && growing[0].body == "print(1)" && !growing[0].closed, "Streaming fence lost or showed a partial close")
+        check(codes(parse("Intro\n```python\nprint(1)\n", streaming: false)).first?.body == "print(1)", "Unclosed final fence")
+        check(codes(parse("```swi", streaming: true)).isEmpty, "Unfinished opening fence committed early")
+        check(codes(parse("Use ```inline``` here\n")).isEmpty, "Inline backticks became a fence")
+        let fencedPresentation = ChatTextPresentation(text: reply, streaming: false)
+        check(fencedPresentation.blocks.map(\.parsed) == mixed.filter { !$0.source.allSatisfy(\.isWhitespace) },
+              "Code presentation dropped or changed a block")
+        let streamed = ChatTextPresentation(text: "Intro\n```swift\nlet a", streaming: true)
+        let introBlock = streamed.blocks[0]
+        streamed.update(text: "Intro\n```swift\nlet a = 1\n", streaming: true)
+        guard case .code(let liveCode) = streamed.blocks.last?.content, case .text = introBlock.content else { fatalError("Live code block missing") }
+        check(liveCode.body == "let a = 1" && streamed.blocks[0].parsed == introBlock.parsed, "Streaming code block did not grow in place")
+
+        let blocksText = ChatMarkdownBlocks.format("### What Finished ###\n1. **Unified** (`Physics.swift`):\n  - Factored capsule\n" +
+            "    - Deeper\n      continued\n10) Tenth\n# Big\n> quoted\n---\nplain *it*\n`chip` first")
+        check(String(blocksText.characters) == "What Finished\n\t1.\tUnified (Physics.swift):\n\t•\tFactored capsule\n\t–\tDeeper\n" +
+              "continued\n\t10)\tTenth\nBig\nquoted\n---\nplain it\nchip first", "Block text: " + String(blocksText.characters))
+        check(ChatMarkdownBlocks.format("No blocks, **bold** only") == ChatMarkdownBlocks.inline("No blocks, **bold** only"), "Plain prose changed")
+        let blockNative = ChatSelectableText.attributed(blocksText, font: base, color: .systemRed)
+        let blockString = blockNative.string as NSString
+        func spot(_ word: String) -> Int { blockString.range(of: word).location }
+        func blockFont(_ word: String) -> NSFont { blockNative.attribute(.font, at: spot(word), effectiveRange: nil) as! NSFont }
+        func paragraph(_ word: String) -> NSParagraphStyle? { blockNative.attribute(.paragraphStyle, at: spot(word), effectiveRange: nil) as? NSParagraphStyle }
+        let weight = { (font: NSFont) in NSFontManager.shared.weight(of: font) }
+        check(blockFont("What").pointSize == 15 && weight(blockFont("What")) > weight(base), "h3 not semibold body size")
+        check(abs(blockFont("Big").pointSize - 18.75) < 0.01, "h1 not larger")
+        check(blockFont("Unified").fontDescriptor.symbolicTraits.contains(.bold), "Bold lost inside a list item")
+        check(blockNative.attribute(.chatCodeChip, at: spot("Physics"), effectiveRange: nil) != nil && blockFont("Physics").isFixedPitch,
+              "Inline code is not a chip")
+        check(blockNative.attribute(.kern, at: spot("(Physics") , effectiveRange: nil) != nil &&
+              blockNative.attribute(.kern, at: spot("swift)"), effectiveRange: nil) == nil &&
+              blockNative.attribute(.kern, at: spot("swift)") + 4, effectiveRange: nil) != nil, "Chip padding kern misplaced")
+        let nested = paragraph("Factored")!
+        check(abs(nested.firstLineHeadIndent - 1.9 * 15) < 0.01 && abs(nested.headIndent - (1.9 + 1.4) * 15) < 0.01,
+              "Nested bullet hanging indent: \(nested.firstLineHeadIndent) \(nested.headIndent)")
+        check(abs(paragraph("Deeper")!.headIndent - (1.9 + 1.4 + 1.4) * 15) < 0.01, "Third level indent")
+        check(abs(paragraph("continued")!.firstLineHeadIndent - paragraph("Deeper")!.headIndent) < 0.01, "Continuation not under its item")
+        let tenth = paragraph("Tenth")!
+        check(tenth.tabStops.first?.alignment == .right && abs(tenth.tabStops[0].location - (1.9 - 0.45) * 15) < 0.01
+              && abs(tenth.headIndent - 1.9 * 15) < 0.01, "Numbers are not right-aligned in their column")
+        check(paragraph("What")!.paragraphSpacingBefore == 0 && paragraph("Big")!.paragraphSpacingBefore > 0, "Heading spacing")
+        check(blockNative.attribute(.chatQuoteBar, at: spot("quoted"), effectiveRange: nil) != nil, "Quote bar missing")
+        check(blockNative.attribute(.chatRule, at: spot("---"), effectiveRange: nil) != nil, "Rule missing")
+        check(paragraph("plain") == nil, "Plain paragraph gained a style")
+        check((paragraph("chip first")?.firstLineHeadIndent ?? 0) > 0, "Leading chip has no room for its fill")
+
+        // The real view stack: chip, quote and rule drawing across wraps,
+        // and the measuring stack using the same layout class.
+        let drawn = ChatSelectableText.makeTextView()
+        check(drawn.layoutManager is ChatLayoutManager, "Text view does not draw chips")
+        drawn.frame = NSRect(x: 0, y: 0, width: 90, height: 600)
+        drawn.textStorage?.setAttributedString(blockNative)
+        let drawnRep = drawn.bitmapImageRepForCachingDisplay(in: drawn.bounds)!
+        drawn.cacheDisplay(in: drawn.bounds, to: drawnRep)
+        let blockSizing = ChatSelectableText.Coordinator()
+        _ = blockSizing.attributed(for: ChatSelectableText(text: blocksText, font: base, color: .systemRed))
+        drawn.layoutManager!.ensureLayout(for: drawn.textContainer!)
+        check(abs(blockSizing.size(width: 90).height - ceil(drawn.layoutManager!.usedRect(for: drawn.textContainer!).height)) < 0.5,
+              "Measured height differs from drawn height")
 
         let started = Date()
         for _ in 0..<50 { _ = ChatTableParser.parse(tooManyRows, streaming: true) }

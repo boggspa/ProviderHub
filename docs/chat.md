@@ -167,11 +167,21 @@ setting does not sandbox network access by shell commands. Provider search
 records appear in expandable transcript rows, and returned source links appear
 with the answer. Source data and citations survive reopening a chat.
 
-### Tables in replies
+### Markdown and tables in replies
 
-Assistant replies support inline emphasis, code and links, plus a small native
-layout for Markdown pipe tables. A header followed by a valid `---` delimiter
-row becomes a table with wrapped cells and the requested column alignment.
+Assistant replies render common Markdown natively. Headings (`#` to `######`)
+drop their hashes and appear in semibold. Bullet (`-`, `*`, `+`) and numbered
+(`1.`, `1)`) lists use a hanging indent, so wrapped lines align under the
+item's text rather than its marker. Nesting follows leading indentation, and
+numbers stay exactly as the model wrote them. Inline code sits in a small
+rounded chip. A fenced code block (` ``` ` or `~~~`) becomes a contained box with its
+language label. Long lines scroll sideways instead of wrapping, and a **Copy**
+button appears on hover. Quotes (`>`) show a quiet bar, and `---` draws a rule.
+Only the display changes: **Copy Message** and the saved chat keep the original
+Markdown. The composer stays plain text.
+
+Markdown pipe tables get a small native layout. A header followed by a valid
+`---` delimiter row becomes a table with wrapped cells and the requested column alignment.
 Wide tables scroll horizontally within the transcript. Right-click a table
 to **Copy table (TSV)** for a spreadsheet or **Copy table as Markdown**.
 
