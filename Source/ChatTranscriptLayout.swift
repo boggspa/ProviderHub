@@ -27,7 +27,8 @@ extension ChatTranscriptItem {
 }
 
 /// Who is speaking, then what they did, the way Claude and Codex Desktop read.
-/// Consecutive replies and tool calls from one speaker share one header; an
+/// Team tools join their member's current section; each text reply opens a
+/// new section. Solo replies and tool calls share one header; an
 /// assistant record with no text (the gap between tool rounds) draws nothing
 /// unless it is the live reply; a run of local tool rows folds into one
 /// "Worked" disclosure; and routine notices that only described housekeeping
@@ -64,8 +65,40 @@ struct ChatTranscriptSegment<Item: ChatTranscriptItem>: Identifiable {
     static var minimumFold: Int { 3 }
     static func foldID(_ items: [Item]) -> String { "fold-" + (items.first?.id ?? "") }
 
+    /// Preserve first-arrival section order while routing later tools back to
+    /// their member. Boundaries include hidden notices, so no work crosses a
+    /// steer/checkpoint. Empty model rounds never open another section.
+    private static func sections(_ items: [Item], isLive: (Item) -> Bool) -> (items: [Item], starts: Set<String>) {
+        var output: [Item] = []
+        var groups: [[Item]] = []
+        var current: [String: Int] = [:]
+        var starts: Set<String> = []
+        func flush() {
+            output.append(contentsOf: groups.flatMap { $0 })
+            groups.removeAll(); current.removeAll()
+        }
+        for item in items {
+            guard let member = item.memberID, item.kind == "assistant" || item.kind == "tool" else {
+                flush(); output.append(item); continue
+            }
+            if item.kind == "assistant", ChatReplySources.isBlank(item.text), !isLive(item) { continue }
+            let key = member + "\u{1F}" + item.route
+            let reply = item.kind == "assistant" && !ChatReplySources.isBlank(item.text)
+            if reply || current[key] == nil {
+                current[key] = groups.count
+                groups.append([])
+                starts.insert(item.id)
+            }
+            groups[current[key]!].append(item)
+        }
+        flush()
+        return (output, starts)
+    }
+
     /// `open` says the last turn is still being worked, so its close-out waits.
     static func outline(_ items: [Item], open: Bool = false, isLive: (Item) -> Bool) -> [ChatTranscriptSegment] {
+        let grouped = sections(items, isLive: isLive)
+        let arrival = Dictionary(items.enumerated().map { ($0.element.id, $0.offset) }, uniquingKeysWith: { first, _ in first })
         var result: [ChatTranscriptSegment] = []
         var speaker: String?
         var lastSpeaker: Item?
@@ -91,20 +124,20 @@ struct ChatTranscriptSegment<Item: ChatTranscriptItem>: Identifiable {
         func closeTurn() {
             defer { turn.removeAll() }
             guard turn.contains(where: { $0.memberID != nil }) else { return }
-            let changed = turn.filter { !$0.changedFiles.isEmpty }
+            let changed = turn.filter { !$0.changedFiles.isEmpty }.sorted { arrival[$0.id, default: 0] < arrival[$1.id, default: 0] }
             guard !changed.isEmpty else { return }
             flush()
             speaker = nil; opened = false
             push(.changes(changed), .speaker)
         }
 
-        for item in items {
+        for item in grouped.items {
             if item.kind == "user" { closeTurn() } else { turn.append(item) }
             switch item.kind {
             case "assistant", "tool":
                 if item.kind == "assistant", ChatReplySources.isBlank(item.text), !isLive(item) { continue }
                 let key = (item.memberID ?? "") + "\u{1F}" + item.route
-                if key != speaker {
+                if key != speaker || grouped.starts.contains(item.id) {
                     flush()
                     speaker = key
                     push(.speaker(item), .speaker)

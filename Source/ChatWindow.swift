@@ -497,7 +497,9 @@ private struct ChatTranscript: View {
                 .onChange(of: model.entries.count) { _, _ in
                     if model.entries.last?.kind == "user" || nearBottom { scrollToEnd(proxy) }
                 }
-                .onChange(of: model.entries.last?.text.count) { _, _ in if nearBottom { scrollToEnd(proxy) } }
+                .onChange(of: model.entries.reduce(0) { $0 + $1.text.count }) { _, _ in
+                    if nearBottom { scrollToEnd(proxy) }
+                }
                 .onChange(of: model.selectedID) { _, _ in scrollToEnd(proxy) }
                 .onAppear { scrollToEnd(proxy) }
             }
@@ -510,7 +512,23 @@ private struct ChatTranscript: View {
         let segments = ChatTranscriptSegment<ChatEntry>.outline(model.entries, open: model.busy) {
             model.isStreaming($0, fallback: model.busy && $0.id == lastID)
         }
-        let liveSpeaker = model.busy ? segments.last(where: \.isSpeaker)?.id : nil
+        // Streaming belongs to a member's current section, which can sit
+        // above sections opened by peers. Do not assume the bottom row is live.
+        var liveSpeakers: Set<String> = []
+        var currentSpeaker: String?
+        for segment in segments {
+            switch segment.content {
+            case .speaker: currentSpeaker = segment.id
+            case .entry(let entry):
+                if model.isStreaming(entry, fallback: model.busy && entry.id == lastID), let currentSpeaker { liveSpeakers.insert(currentSpeaker) }
+            case .fold(let entries):
+                if entries.contains(where: { model.isStreaming($0, fallback: model.busy && $0.id == lastID) }), let currentSpeaker { liveSpeakers.insert(currentSpeaker) }
+            case .changes: currentSpeaker = nil
+            }
+        }
+        if model.team?.enabled != true, model.busy, let speaker = segments.last(where: \.isSpeaker) {
+            liveSpeakers.insert(speaker.id)
+        }
         return LazyVStack(alignment: .leading, spacing: 0) {
             if model.entries.isEmpty { ChatInvitation(model: model) }
             ForEach(segments) { segment in
@@ -519,9 +537,12 @@ private struct ChatTranscript: View {
                     case .speaker(let entry):
                         ChatSpeakerHeader(member: entry.memberName, label: model.label(for: entry.route),
                                           presentation: model.route(named: entry.route)?.presentation,
-                                          accent: model.accent(for: entry.route), live: segment.id == liveSpeaker)
+                                          accent: model.accent(for: entry.route), live: liveSpeakers.contains(segment.id))
                     case .entry(let entry): row(entry, after: segment.previousSpeaker)
-                    case .fold(let entries): fold(entries, live: model.busy && segment.id == segments.last?.id)
+                    case .fold(let entries):
+                        fold(entries, live: model.team?.enabled == true
+                             ? entries.contains { model.isStreaming($0, fallback: false) }
+                             : model.busy && segment.id == segments.last?.id)
                     case .changes(let entries):
                         ChatTurnChangesRow(entries: entries, workspace: model.selected?.workspace) { expandedBinding($0) }
                     }
