@@ -586,16 +586,15 @@ class ChatService:
         if request is not None and (not isinstance(request, str) or not request or len(request) > 128):
             raise ValueError("Invalid message submission identity.")
         team = self.chat["team"] if chat_team.enabled(self.chat) else None
-        if command.get("mentions") is not None:
-            # The chips the composer drew are the routing record. Chips drawn
-            # from an outdated roster are refused before any attachment is
-            # kept, and the current roster is resent so the tints correct.
-            try: tagged = chat_team.claimed(team, text, command["mentions"])
-            except ValueError:
-                chat_team.publish(self)
-                raise
-        else:
-            tagged = chat_team.mentions(team, text)
+        # Only the composer decides what is a tag: the chips it drew are the
+        # routing record, and a message without chips is for the whole Team.
+        # Chips drawn from an outdated roster are refused before any attachment
+        # is kept, and the current roster is resent so the tints correct.
+        chips = command.get("mentions")
+        try: tagged = chat_team.claimed(team, text, [] if chips is None else chips)
+        except ValueError:
+            chat_team.publish(self)
+            raise
         attached, blocks = prepare_attachments(inputs, self.store.root / self.chat["id"], vision=self.choice().get("vision") is not False)
         visible = entry("user", text, self.chat["route"], attachments=attached, workspace=self.chat["workspace"])
         if request is not None: visible["clientRequest"] = request

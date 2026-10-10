@@ -171,140 +171,58 @@ def enabled(chat):
     return isinstance(chat, dict) and isinstance(chat.get("team"), dict) and chat["team"].get("enabled") is True
 
 
-# `@Name` addresses a user message to Team members. A tag starts the text or
-# follows whitespace, an opening bracket or quote, a comma, semicolon or
-# asterisk, so an email address or a URL path never addresses anyone. It names
-# a member whole and case-insensitively, longest name first, and ends before a
-# letter, digit, mark or underscore. A name two members share, and anything in
-# a fenced block or a backtick span on one line, addresses nobody.
-# The composer (ChatMentions.swift) resolves these rules as tags are typed and
-# sends every chip it drew; claimed() keeps those chips as the routing record,
-# so a tinted tag is always the member the message reaches. mentions() resolves
-# the same rules for callers that send no chips, and one shared case file keeps
-# the two resolvers in step.
-MENTION_OPENERS = "([{\"'“‘,;*"
+# `@Name` addresses a user message to Team members. The composer
+# (ChatMentions.swift) is the only resolver: it decides which tags become chips
+# as they are typed, and every chip it draws is sent with the message as its
+# routing record, so a tinted tag always reaches its member, an untinted one is
+# plain text, and a message without chips is for the whole Team. The worker
+# never reads the text for tags. claimed() keeps a chip after checks that need
+# no Unicode tables, so neither side's tables can refuse what the composer drew.
 # A long message records its first 64 tags, plus the first tag of every
 # member, so routing never depends on how much of the text was drawn.
 MAX_RECORDED_MENTIONS = 64
+STALE_TAGS = "The tagged members no longer match this Team. Check the highlighted names and send again."
+# ASCII letters without case; every other character as written.
+_ASCII_LOWER = {code: code + 32 for code in range(ord("A"), ord("Z") + 1)}
 
 
-def _opens(character):
-    return (unicodedata.category(character)[0] == "Z" or character in "\t\n\x0b\x0c\r\x85"
-            or character in MENTION_OPENERS)
-
-
-def _continues_name(character):
-    return unicodedata.category(character)[0] in "LMN" or character == "_"
-
-
-def _key(name):
-    """Case-folded and canonically decomposed, so names compare the way the
-    composer's `folding(.caseInsensitive)` and Swift `==` compare them."""
+def _name_key(name):
+    """A name as a person reads it: without case, however its accents are
+    encoded. No two members may share one (validate_members). Tags never
+    compare this way; see claimed()."""
     return unicodedata.normalize("NFD", unicodedata.normalize("NFD", name).casefold())
 
 
-def _fence(line):
-    """A fence line's character and run length (``` or ~~~), or None."""
-    body = line.lstrip(" ")
-    if body[:3] not in ("```", "~~~"): return None
-    return body[0], len(body) - len(body.lstrip(body[0]))
-
-
-def code_ranges(text):
-    """Sorted [start, end) spans of fenced blocks and same-line backtick code."""
-    ranges, fence, start = [], None, 0
-    for line in text.split("\n"):
-        end = min(start + len(line) + 1, len(text))
-        mark = _fence(line)
-        if fence:
-            if mark and mark[0] == fence[0] and mark[1] >= fence[1]:
-                ranges.append((fence[2], end)); fence = None
-        elif mark:
-            fence = (*mark, start)
-        else:
-            runs, i = [], 0
-            while i < len(line):
-                j = i
-                while j < len(line) and line[j] == "`": j += 1
-                if j > i: runs.append((i, j - i)); i = j
-                else: i += 1
-            k = 0
-            while k < len(runs):
-                close = next((m for m in range(k + 1, len(runs)) if runs[m][1] == runs[k][1]), None)
-                if close is None:
-                    k += 1; continue
-                ranges.append((start + runs[k][0], start + runs[close][0] + runs[close][1])); k = close + 1
-        start = end
-    if fence: ranges.append((fence[2], len(text)))
-    return ranges
-
-
-def mentions(team, text):
-    """The members a user message tags, in textual order, as the transcript draws them.
-
-    Each record is {id, name, route, start, length}; offsets count UTF-16 units
-    because the native text views address text that way. Name and route are
-    kept as sent, so a later rename or model change never recolours history.
-    """
-    if not isinstance(team, dict) or not isinstance(text, str) or "@" not in text: return []
-    named = {}
-    for member in team.get("members", []):
-        key = _key(member["name"])
-        named[key] = None if key in named else member
-    roster = sorted(((key, m) for key, m in named.items() if m), key=lambda pair: -len(pair[1]["name"]))
-    code, c, found, seen, units, counted = code_ranges(text), 0, [], set(), 0, 0
-    i = text.find("@")
-    while i != -1:
-        resume = i + 1
-        while c < len(code) and code[c][1] <= i: c += 1
-        if (i == 0 or _opens(text[i - 1])) and not (c < len(code) and code[c][0] <= i):
-            for key, member in roster:
-                end = i + 1 + len(member["name"])
-                # Bound the slice before folding: a short tail can fold longer ("ß" to "ss").
-                if end > len(text) or _key(text[i + 1:end]) != key: continue
-                if end < len(text) and _continues_name(text[end]): continue
-                if len(found) < MAX_RECORDED_MENTIONS or member["id"] not in seen:
-                    units += len(text[counted:i].encode("utf-16-le")) // 2; counted = i
-                    found.append({"id": member["id"], "name": member["name"], "route": member["route"],
-                                  "start": units, "length": len(text[i:end].encode("utf-16-le")) // 2})
-                    seen.add(member["id"])
-                resume = end
-                break
-        i = text.find("@", resume)
-    return found
-
-
-STALE_TAGS = "The tagged members no longer match this Team. Check the highlighted names and send again."
+def _tag_units(text):
+    """Text as a chip is compared: UTF-16 units, ASCII letters lowercased."""
+    return text.translate(_ASCII_LOWER).encode("utf-16-le", "surrogatepass")
 
 
 def claimed(team, text, chips):
     """The chips the composer drew and sent, kept as the message's tags.
 
-    The composer resolves tags as they are typed, so its chips are what the
-    user saw tinted; the worker never re-decides a tag's boundaries with its
-    own Unicode tables. A chip stands while its member is still in the Team
-    under the name and model it was drawn with, over text that reads `@` and
-    that name. Anything else was drawn from an outdated roster and is refused.
+    Each record is {id, name, route, start, length}, offsets in UTF-16 units
+    as the native text views count them. A chip stands while its member is
+    still in the Team under exactly the name and model it was drawn with (code
+    point for code point), in order and apart from the other chips, over text
+    that reads `@` and that name: ASCII letters in either case and everything
+    else as written, the rule ChatMentions.resolve draws by. Anything else was
+    drawn from an outdated roster, and the message is refused.
     """
     if not isinstance(chips, list) or len(chips) > MAX_RECORDED_MENTIONS + MAX_MEMBERS:
         raise ValueError(STALE_TAGS)
     members = {m["id"]: m for m in team.get("members", [])} if isinstance(team, dict) else {}
-    found, end, units = [], 0, None
+    units, found, end = _tag_units(text), [], 0
     for chip in chips:
         identifier = chip.get("id") if isinstance(chip, dict) else None
         member = members.get(identifier) if isinstance(identifier, str) else None
         if member is None or (chip.get("name"), chip.get("route")) != (member["name"], member["route"]):
             raise ValueError(STALE_TAGS)
-        start, length = chip.get("start"), chip.get("length")
-        if units is None:
-            try: units = text.encode("utf-16-le")
-            except UnicodeError: raise ValueError(STALE_TAGS) from None
-        # In order, apart, and inside the text, in UTF-16 units.
-        if type(start) is not int or type(length) is not int or start < end or length < 2 or 2 * (start + length) > len(units):
+        start, length, tag = chip.get("start"), chip.get("length"), _tag_units("@" + member["name"])
+        # In order, apart, and reading the tag exactly where it was drawn.
+        if (type(start) is not int or type(length) is not int or start < end or 2 * length != len(tag)
+                or units[2 * start:2 * (start + length)] != tag):
             raise ValueError(STALE_TAGS)
-        try: tag = units[2 * start:2 * (start + length)].decode("utf-16-le")
-        except UnicodeDecodeError: raise ValueError(STALE_TAGS) from None  # a split surrogate pair
-        if tag[0] != "@" or _key(tag[1:]) != _key(member["name"]): raise ValueError(STALE_TAGS)
         found.append({"id": member["id"], "name": member["name"], "route": member["route"],
                       "start": start, "length": length})
         end = start + length
@@ -471,7 +389,7 @@ def validate_members(parent, specifications):
                       responsibility=responsibility, workspace=parent.chat["workspace"],
                       context=choice.get("context"), status="ready", nextStep="")
         members.append(member)
-    if len({_key(member["name"]) for member in members}) != len(members):
+    if len({_name_key(member["name"]) for member in members}) != len(members):
         raise ValueError("Give each member a different name, so an @name tag reaches one member.")
     archived.extend(copy.deepcopy(old) for identifier, old in existing.items() if identifier not in used)
     return members, archived

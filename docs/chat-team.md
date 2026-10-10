@@ -91,24 +91,30 @@ that result.
 
 A tag starts the message or follows a space, an opening bracket or quote, a
 comma, semicolon or asterisk, so an email address never addresses anyone. It
-matches a member's whole name, case-insensitively, and ends before another
-letter, mark, number or underscore, so `@Opus 2` and `@Opus` can coexist.
-Tags inside code spans or fenced blocks stay text. Member names must therefore
-differ, ignoring case and how their accents are encoded; a saved Team where two
-members share a name treats that name as plain text.
+matches a member's whole name as written, except that ASCII letters may differ
+in case: `@sol` reaches Sol, but other letters, and how an accent is encoded,
+must match the name exactly. Choosing from the list always inserts the exact
+name. A tag ends before another letter, mark, number or underscore, so
+`@Opus 2` and `@Opus` can coexist, and tags inside code spans or fenced blocks
+stay text. Member names must differ, ignoring case and how their accents are
+encoded; in an older saved Team, names that differ only in the case of ASCII
+letters are plain text.
 
-The composer resolves tags as you type, and each send carries the chips it
-drew. Those chips are the routing record: a tinted tag always reaches its
-member, and an untinted one stays plain text. The worker keeps a chip only
-while its member is still in the Team under the same name and model, over text
-that reads `@` and that name. Otherwise the composer drew from an outdated
-roster, so the worker refuses the message and resends the current roster; Chat
-restores the draft and the tints correct themselves. Messages sent without
-chips by other callers use the worker's own resolver (`chat_team.mentions`),
-which follows the same rules; both resolvers pass one shared set of cases
-(`Source/test_chat_mentions_cases.json`). Sent messages record each tag's
-member, name, route and position, so a later rename or model change never
-recolours history.
+Only the composer decides what is a tag. Each send carries the chips it drew,
+and those chips are the routing record: a tinted tag always reaches its member,
+an untinted one stays plain text, and a message sent without chips reaches the
+whole Team. The worker never reads the text for tags, and its checks use no
+Unicode case or normalization tables, so neither side's Unicode version can
+change a tag. It keeps a chip only while its member is still in the Team under
+exactly that name and model, over text that reads `@` and the name by the rule
+above. Otherwise the composer drew from an outdated roster, so the worker
+refuses the message before storing anything and resends the current roster;
+Chat restores the draft and the tints correct themselves. Sent messages record
+each tag's member, name, route and position, so a later rename or model change
+never recolours history. The composer's cases live in
+`Source/test_chat_mentions_cases.json`; the tests also generate thousands of
+messages full of awkward characters and check that the worker keeps every chip
+the composer draws for them.
 
 ## Failed requests
 

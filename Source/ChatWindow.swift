@@ -1113,7 +1113,9 @@ struct ComposerTextView: NSViewRepresentable {
             view.font = textStyle.editorFont
             repaint = true
         }
-        if view.string != text {
+        // Literally, not Swift `==`: an equivalent but differently encoded
+        // draft would leave the painted chips out of step with the sent ones.
+        if !ChatMentions.same(view.string, text) {
             coordinator.applying = true; view.string = text; coordinator.applying = false
             repaint = true; refresh = true
         }

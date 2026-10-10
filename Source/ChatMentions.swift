@@ -7,8 +7,13 @@ struct ChatMentionTarget: Identifiable, Equatable {
     var name: String
     var route: String
     var accent: NSColor = .secondaryLabelColor
-    /// The accent follows the route, so identity is enough.
-    static func == (lhs: Self, rhs: Self) -> Bool { lhs.id == rhs.id && lhs.name == rhs.name && lhs.route == rhs.route }
+    /// The accent follows the route, so identity is enough, compared
+    /// literally: Swift's `==` equates canonically equivalent strings, but a
+    /// tag reads a name as written, so a rename between two encodings of one
+    /// name must repaint the composer.
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        ChatMentions.same(lhs.id, rhs.id) && ChatMentions.same(lhs.name, rhs.name) && ChatMentions.same(lhs.route, rhs.route)
+    }
 }
 
 /// One tag the worker resolved and routed, in UTF-16 units of the sent text.
@@ -54,18 +59,21 @@ enum ChatMentionAttribute: AttributedStringKey {
 /// `@Name` tags in a Team message: the composer's tint, its list, and the
 /// chips each send carries.
 ///
-/// The composer resolves tags as they are typed, and every chip it draws is
-/// sent as the routing record, so a tinted tag is always the member the
-/// message reaches and an untinted one is plain text. The worker
-/// (chat_team.claimed) keeps a chip while its member is still in the Team
-/// under the name and model it was drawn with, and refuses the message
-/// otherwise. chat_team.mentions resolves the same rules for callers that send
-/// no chips; one shared case file keeps the two in step.
+/// The composer is the only resolver. It resolves tags as they are typed, and
+/// every chip it draws is sent as the routing record, so a tinted tag is always
+/// the member the message reaches and an untinted one is plain text. The worker
+/// (chat_team.claimed) never reads the text for tags: it keeps a chip while its
+/// member is still in the Team under exactly the name and model it was drawn
+/// with, over text that reads `@` and that name, and refuses the message
+/// otherwise.
 /// A tag starts the text or follows whitespace, an opening bracket or quote, a
 /// comma, semicolon or asterisk, so an email address or a URL path never
-/// addresses anyone. It names a member whole and case-insensitively, longest
-/// name first, and ends before a letter, digit, mark or underscore. A name two
-/// members share, and anything in a fenced block or a one-line backtick span,
+/// addresses anyone. It names a member whole, longest name first, and ends
+/// before a letter, digit, mark or underscore. It reads the name as written,
+/// except that ASCII letters may differ in case. No Unicode case or
+/// normalization table takes part, so the worker checks a chip exactly as it
+/// was drawn, whatever Unicode version either side has. A name two members
+/// share that way, and anything in a fenced block or a one-line backtick span,
 /// addresses nobody. Offsets are UTF-16, as NSString and the worker count them.
 enum ChatMentions {
     struct Match: Equatable {
@@ -87,7 +95,7 @@ enum ChatMentions {
     static func resolve(_ text: String, members: [ChatMentionTarget]) -> [Match] {
         let string = text as NSString
         guard string.range(of: "@").location != NSNotFound else { return [] }
-        let roster = addressable(members).sorted { ($0.name as NSString).length > ($1.name as NSString).length }
+        let roster = addressable(members).map { ($0, Array($0.name.utf16)) }.sorted { $0.1.count > $1.1.count }
         let code = codeRanges(string)
         var matches: [Match] = [], seen = Set<String>(), next = 0, c = 0
         while next < string.length {
@@ -96,13 +104,12 @@ enum ChatMentions {
             next = at + 1
             while c < code.count, NSMaxRange(code[c]) <= at { c += 1 }
             guard at == 0 || opens(scalar(endingAt: at, in: string)), !(c < code.count && code[c].location <= at) else { continue }
-            for member in roster {
-                let length = (member.name as NSString).length, end = at + 1 + length
-                guard end <= string.length,
-                      fold(string.substring(with: NSRange(location: at + 1, length: length))) == fold(member.name),
+            for (member, name) in roster {
+                let end = at + 1 + name.count
+                guard end <= string.length, reads(string, at: at + 1, name),
                       end == string.length || !continuesName(scalar(startingAt: end, in: string)) else { continue }
                 if matches.count < recorded || !seen.contains(member.id) {
-                    matches.append(Match(target: member, range: NSRange(location: at, length: length + 1)))
+                    matches.append(Match(target: member, range: NSRange(location: at, length: name.count + 1)))
                     seen.insert(member.id)
                 }
                 next = end
@@ -120,11 +127,12 @@ enum ChatMentions {
         let string = text as NSString
         for mention in mentions {
             // Bounds first, without overflow: a record may come from a damaged file.
-            guard mention.start >= 0, mention.length > 1, mention.start <= string.length,
-                  mention.length <= string.length - mention.start else { continue }
+            let name = Array(mention.name.utf16)
+            guard !name.isEmpty, mention.start >= 0, mention.length == name.count + 1, mention.start <= string.length,
+                  mention.length <= string.length - mention.start, string.character(at: mention.start) == 0x40,
+                  reads(string, at: mention.start + 1, name) else { continue }
             let range = NSRange(location: mention.start, length: mention.length)
-            guard fold(string.substring(with: range)) == fold("@" + mention.name),
-                  let bounds = Range(display(range, in: string), in: text), let span = Range(bounds, in: marked) else { continue }
+            guard let bounds = Range(display(range, in: string), in: text), let span = Range(bounds, in: marked) else { continue }
             marked[span][ChatMentionAttribute.self] = ChatMentionTint(NSColor(accent(mention.route)))
         }
         return marked
@@ -158,6 +166,8 @@ enum ChatMentions {
     }
 
     /// Members whose names start with the query, then those containing it.
+    /// Only suggestions, so case and accents fold the Unicode way; choosing
+    /// one inserts the name exactly, which always reads as its tag.
     static func candidates(_ query: String, members: [ChatMentionTarget]) -> [ChatMentionTarget] {
         let named = addressable(members), key = fold(query)
         guard !key.isEmpty else { return named }
@@ -215,11 +225,25 @@ enum ChatMentions {
         return spans
     }
 
-    /// Members whose names no other member shares, in roster order.
+    /// Two strings with the same UTF-16 units. Swift's `==` treats canonically
+    /// equivalent strings as equal; a tag never does.
+    static func same(_ a: String, _ b: String) -> Bool { a.utf16.elementsEqual(b.utf16) }
+
+    /// Whether the text at `location` reads `name`: ASCII letters in either
+    /// case, every other UTF-16 unit exactly, as chat_team._tag_units compares.
+    /// The caller keeps `location + name.count` inside the string.
+    private static func reads(_ string: NSString, at location: Int, _ name: [UInt16]) -> Bool {
+        for (offset, unit) in name.enumerated() where folded(string.character(at: location + offset)) != folded(unit) { return false }
+        return true
+    }
+
+    private static func folded(_ unit: UInt16) -> UInt16 { (0x41...0x5A).contains(unit) ? unit + 0x20 : unit }
+
+    /// Members whose names no other member shares by that comparison, in roster order.
     private static func addressable(_ members: [ChatMentionTarget]) -> [ChatMentionTarget] {
-        var counts: [String: Int] = [:]
-        for member in members { counts[fold(member.name), default: 0] += 1 }
-        return members.filter { counts[fold($0.name)] == 1 }
+        var counts: [[UInt16]: Int] = [:]
+        for member in members { counts[member.name.utf16.map(folded), default: 0] += 1 }
+        return members.filter { counts[$0.name.utf16.map(folded)] == 1 }
     }
 
     private static func fold(_ text: String) -> String { text.folding(options: .caseInsensitive, locale: nil) }
