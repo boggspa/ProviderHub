@@ -121,6 +121,29 @@ struct ChatTeamMember: Decodable, Identifiable {
         ["id": id, "name": name, "choice": choice, "effort": effort, "responsibility": responsibility]
     }
 }
+extension ChatTeamMember {
+    private enum CodingKeys: String, CodingKey {
+        case id, name, label, choice, route, account, effort, responsibility, status, nextStep, contributions
+        case contributionID, usage, context, failureReason, waitReason, modelContext, checkpoints
+    }
+    init(from decoder: Decoder) throws {
+        let row = try decoder.container(keyedBy: CodingKeys.self)
+        id = try row.decode(String.self, forKey: .id); name = try row.decode(String.self, forKey: .name)
+        label = try row.decode(String.self, forKey: .label); choice = try row.decode(String.self, forKey: .choice)
+        route = try row.decode(String.self, forKey: .route); account = try row.decode(String.self, forKey: .account)
+        effort = try row.decode(String.self, forKey: .effort); responsibility = try row.decode(String.self, forKey: .responsibility)
+        status = try row.decode(String.self, forKey: .status); nextStep = try row.decode(String.self, forKey: .nextStep)
+        contributions = try row.decode(Int.self, forKey: .contributions)
+        // Optional diagnostics must not hide an otherwise valid roster/status update.
+        contributionID = try? row.decodeIfPresent(String.self, forKey: .contributionID)
+        usage = try? row.decodeIfPresent(Int.self, forKey: .usage)
+        context = try? row.decodeIfPresent(Int.self, forKey: .context)
+        failureReason = try? row.decodeIfPresent(String.self, forKey: .failureReason)
+        waitReason = try? row.decodeIfPresent(String.self, forKey: .waitReason)
+        modelContext = try? row.decodeIfPresent(Int.self, forKey: .modelContext)
+        checkpoints = try? row.decodeIfPresent(Int.self, forKey: .checkpoints)
+    }
+}
 struct ChatTeamExecution: Decodable {
     var mode: String = "task"
     var contextTokens: Int = 200_000
@@ -296,12 +319,30 @@ struct ChatTeamSnapshot: Decodable {
                 guard request == teamRequest else { return }
                 teamRequest = nil
             }
-            if let value = event["team"], !(value is NSNull) {
-                guard let snapshot = decoded(value, as: ChatTeamSnapshot.self),
-                      (1...ChatTeamSnapshot.maxMembers).contains(snapshot.members.count), Set(snapshot.members.map(\.id)).count == snapshot.members.count else { return }
-                team = snapshot
+            let notice = event["notice"] as? String ?? ""
+            func rejectTeamUpdate(_ reason: String) {
+                let message = "Team could not refresh. Reopen the chat to reload it."
+                let visibleNotice = notice.isEmpty ? message : notice + "\n" + message
+                // Repeated invalid status polls should not flood the log.
+                if teamNotice != visibleNotice { NSLog("Provider Hub: Team update rejected for %@: %@", chat, reason) }
+                teamNotice = visibleNotice
+            }
+            guard let value = event["team"] else { rejectTeamUpdate("missing team field"); return }
+            if !(value is NSNull) {
+                guard JSONSerialization.isValidJSONObject(value) else { rejectTeamUpdate("invalid snapshot JSON"); return }
+                do {
+                    let snapshot = try JSONDecoder().decode(ChatTeamSnapshot.self, from: JSONSerialization.data(withJSONObject: value))
+                    guard (1...ChatTeamSnapshot.maxMembers).contains(snapshot.members.count) else {
+                        rejectTeamUpdate("expected 1...\(ChatTeamSnapshot.maxMembers) members, received \(snapshot.members.count)"); return
+                    }
+                    guard Set(snapshot.members.map(\.id)).count == snapshot.members.count,
+                          snapshot.members.allSatisfy({ !$0.id.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) else {
+                        rejectTeamUpdate("missing or duplicate member IDs"); return
+                    }
+                    team = snapshot
+                } catch { rejectTeamUpdate(String(describing: error)); return }
             } else { team = nil }
-            teamNotice = event["notice"] as? String ?? ""
+            teamNotice = notice
         case "git_changes":
             if let workspace = event["workspace"] as? String, workspace != selected?.workspace { return }
             guard event["request"] as? String == changesRequest else { return }

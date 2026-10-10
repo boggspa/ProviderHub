@@ -330,8 +330,78 @@ import Combine
             member["id"] = "member-\(number)"; member["name"] = "Member \(number)"
             return member
         }
+        fourMemberTeam["activeMemberID"] = NSNull()
+        let fourMemberSpecs = (1...4).map { number -> [String: Any] in
+            var spec = memberSpec; spec["name"] = "Member \(number)"; return spec
+        }
+        model.configureTeam(enabled: true, members: fourMemberSpecs)
+        let fourMemberRequest = commands.last?["request"] as! String
+        check((commands.last?["members"] as? [[String: Any]])?.count == 4 && model.teamRequest == fourMemberRequest,
+              "four-member configure was not sent")
+        try send(["event":"team", "chat":"A", "request":fourMemberRequest, "team":fourMemberTeam])
+        check(model.team?.members.count == 4 && model.team?.enabled == true && model.teamRequest == nil && model.teamNotice.isEmpty,
+              "four-member configure acknowledgement was rejected")
+        var fourMembers = fourMemberTeam["members"] as! [[String: Any]]
+        fourMembers[3]["status"] = "working"; fourMembers[3]["contributionID"] = "fourth-run"
+        fourMemberTeam["members"] = fourMembers; fourMemberTeam["status"] = "working"
+        fourMemberTeam["activeMemberID"] = "member-4"; fourMemberTeam["activeMemberIDs"] = ["member-4"]
         try send(["event":"team", "chat":"A", "team":fourMemberTeam])
-        check(model.team?.members.count == 4 && model.team?.enabled == true, "four-member Team was rejected")
+        check(model.team?.members.count == 4 && model.team?.members[3].status == "working" && model.team?.status == "working" &&
+              model.team?.activeMemberID == "member-4" && model.team?.activeMemberIDs == ["member-4"], "fourth member status stayed stale")
+        var optionalFields = fourMembers
+        for key in ["contributionID", "usage", "context", "failureReason", "waitReason", "modelContext", "checkpoints"] {
+            optionalFields[3][key] = ["unexpected":true]
+        }
+        var optionalTeam = fourMemberTeam; optionalTeam["members"] = optionalFields
+        try send(["event":"team", "chat":"A", "team":optionalTeam])
+        let tolerantMember = model.team!.members[3]
+        check(model.team?.members.count == 4 && tolerantMember.status == "working" && model.teamNotice.isEmpty,
+              "malformed optional member data hid the roster")
+        check(tolerantMember.contributionID == nil && tolerantMember.usage == nil && tolerantMember.context == nil &&
+              tolerantMember.failureReason == nil && tolerantMember.waitReason == nil && tolerantMember.modelContext == nil &&
+              tolerantMember.checkpoints == nil, "malformed optional fields were retained")
+        var fifthMember = rosterTemplate; fifthMember["id"] = "member-5"
+        var overLimit = fourMemberTeam; overLimit["members"] = fourMembers + [fifthMember]
+        var emptyTeam = fourMemberTeam; emptyTeam["members"] = [[String: Any]]()
+        var duplicateMembers = fourMembers; duplicateMembers[3]["id"] = duplicateMembers[0]["id"]
+        var duplicateTeam = fourMemberTeam; duplicateTeam["members"] = duplicateMembers
+        var missingIdentity = fourMembers; missingIdentity[3]["id"] = "  "
+        var missingIDTeam = fourMemberTeam; missingIDTeam["members"] = missingIdentity
+        var requiredFields = fourMembers; requiredFields[3].removeValue(forKey: "name")
+        var malformedTeam = fourMemberTeam; malformedTeam["members"] = requiredFields
+        for invalidTeam in [overLimit, emptyTeam, duplicateTeam, missingIDTeam, malformedTeam] {
+            model.configureTeam(enabled: true, members: fourMemberSpecs)
+            let pendingRequest = model.teamRequest!
+            try send(["event":"team", "chat":"A", "request":"stale", "team":invalidTeam])
+            try send(["event":"team", "chat":"B", "request":pendingRequest, "team":invalidTeam])
+            check(model.teamRequest == pendingRequest && model.teamNotice.isEmpty, "invalid unrelated reply settled Team setup")
+            let rejected: [String: Any] = ["event":"team", "chat":"A", "request":pendingRequest, "team":invalidTeam,
+                                          "notice":"Worker notice"]
+            try send(rejected)
+            check(model.teamRequest == nil && model.canConfigureTeam && model.team?.members.count == 4 &&
+                  model.teamNotice.contains("could not refresh") && model.teamNotice.contains("Worker notice"),
+                  "invalid Team silently kept stale state or stranded its request")
+            var repeated = rejected; repeated.removeValue(forKey: "request"); try send(repeated)
+            try send(["event":"team", "chat":"A", "team":fourMemberTeam])
+            check(model.team?.members[3].contributionID == "fourth-run" && model.teamNotice.isEmpty, "valid Team update did not recover")
+        }
+        model.configureTeam(enabled: true, members: fourMemberSpecs)
+        let missingTeamRequest = model.teamRequest!
+        try send(["event":"team", "chat":"A", "request":missingTeamRequest])
+        check(model.teamRequest == nil && model.team?.members.count == 4 && model.teamNotice.contains("could not refresh"),
+              "missing snapshot silently cleared Team")
+        try send(["event":"team", "chat":"A", "team":false])
+        check(model.team?.members.count == 4 && model.teamNotice.contains("could not refresh"), "invalid JSON snapshot cleared Team")
+        try send(["event":"team", "chat":"A", "team":NSNull()])
+        check(model.team == nil && model.teamNotice.isEmpty, "explicit null snapshot did not clear Team")
+        try send(["event":"team", "chat":"A", "team":fourMemberTeam])
+        model.configureTeam(enabled: true, members: fourMemberSpecs)
+        let correlatedRequest = model.teamRequest!
+        try send(["event":"team", "chat":"A", "team":overLimit])
+        check(model.teamRequest == correlatedRequest && model.teamNotice.contains("could not refresh"),
+              "unsolicited invalid update settled a pending configure")
+        try send(["event":"team", "chat":"A", "request":correlatedRequest, "team":fourMemberTeam])
+        check(model.teamRequest == nil && model.teamNotice.isEmpty, "matching reply did not settle after an invalid poll")
         var configuredTeam = roster("waiting", "waiting")
         configuredTeam["execution"] = execution.wire
         configuredTeam["runUsage"] = ["started": 100.0, "tokens": 1800, "requests": 4, "usageComplete": false]
@@ -654,6 +724,9 @@ import Combine
             self.assertEqual(compiled.returncode, 0, compiled.stderr)
             ran = subprocess.run([str(binary)], capture_output=True, text=True, timeout=15)
             self.assertEqual(ran.returncode, 0, ran.stderr)
+            # Five invalid rosters, a missing snapshot and an unsolicited invalid
+            # update; repeats within each failure period must not flood the log.
+            self.assertEqual(ran.stderr.count("Team update rejected for"), 7, ran.stderr)
             self.assertIn("state transitions passed", ran.stdout)
 
 

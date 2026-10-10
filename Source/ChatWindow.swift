@@ -307,11 +307,9 @@ private struct ChatHeader: View {
         if let team = model.team, team.enabled, model.busy || team.status == "working" {
             // Every member's own window while the Team works; they are never
             // added together. The parent's returns once the Team stops.
-            HStack(spacing: 10) {
-                ForEach(team.members) { member in
-                    memberContext(member, active: member.status == "working" || member.id == team.activeMemberID,
-                                  counted: !compact || team.members.count < 3)
-                }
+            ViewThatFits(in: .horizontal) {
+                teamContext(team, named: true)
+                teamContext(team, named: false)
             }
         } else if let used = model.tokenUsage {
             let readout = model.contextLimit.map { tokenCount(used) + " / " + tokenCount($0) } ?? tokenCount(used) + " tokens"
@@ -327,9 +325,19 @@ private struct ChatHeader: View {
         }
     }
 
+    private func teamContext(_ team: ChatTeamSnapshot, named: Bool) -> some View {
+        HStack(spacing: 10) {
+            ForEach(team.members) { member in
+                memberContext(member, active: member.status == "working" || member.id == team.activeMemberID,
+                              named: named, counted: named && (!compact || team.members.count < 3))
+            }
+        }
+    }
+
     /// A ring and name per member; the token count drops out on a narrow
-    /// header with a larger Team, and stays in the tooltip.
-    private func memberContext(_ member: ChatTeamMember, active: Bool, counted: Bool) -> some View {
+    /// header with a larger Team. Names also yield to keep every ring visible;
+    /// both remain in the tooltip and accessibility label.
+    private func memberContext(_ member: ChatTeamMember, active: Bool, named: Bool, counted: Bool) -> some View {
         let accent = model.accent(for: member.route)
         let readout = member.usage.map { tokenCount($0) + (member.context.map { " / " + tokenCount($0) } ?? "") } ?? "not started"
         return HStack(spacing: 5) {
@@ -338,8 +346,10 @@ private struct ChatHeader: View {
             } else {
                 Circle().stroke(accent.opacity(0.3), lineWidth: 2).frame(width: 12, height: 12)
             }
-            Text(member.name).font(.system(size: 10.5, weight: active ? .semibold : .regular))
-                .foregroundStyle(active ? Semantic.ink : Semantic.secondaryInk)
+            if named {
+                Text(member.name).font(.system(size: 10.5, weight: active ? .semibold : .regular))
+                    .foregroundStyle(active ? Semantic.ink : Semantic.secondaryInk)
+            }
             if counted, let used = member.usage {
                 Text(tokenCount(used)).font(.system(size: 10.5, design: .monospaced)).foregroundStyle(Semantic.secondaryInk)
             }

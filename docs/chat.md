@@ -328,8 +328,10 @@ reported tokens; these are separate from the per-member context indicators.
 Context indicators use the effective configured window. While a
 Team works, the header shows every member's own ring, name and token count,
 with working members in bold; members that have not run yet show an empty
-ring. Once the Team stops, the header returns to the chat's own context. The
-roster shows every member's status and context separately.
+ring. On narrow headers, counts and then names yield to keep every ring
+visible; tooltips and accessibility labels retain each name and count.
+Once the Team stops, the header returns to the chat's own context. The roster
+shows every member's status and context separately.
 
 ### Recall and decision notes
 
