@@ -27,6 +27,20 @@ extension BridgeModel {
         codexRunning = NSWorkspace.shared.runningApplications.contains { $0.bundleIdentifier == "com.openai.codex" && !$0.isTerminated }
     }
 
+    /// A warning naming Desktop projects whose primary folder is the disk
+    /// root, from the worker's `codex_disk_root_projects`, or nil when there
+    /// are none. Desktop accepts one message in such a project's chats, then
+    /// refuses the rest with “Select a project to continue” (codex_projects.py).
+    func diskRootProjectSummary(_ result: [String: Any]) -> String? {
+        guard let names = result["codex_disk_root_projects"] as? [String], !names.isEmpty else { return nil }
+        let quoted = names.map { "“\($0)”" }
+        let list = quoted.count == 1 ? quoted[0] : quoted.dropLast().joined(separator: ", ") + " and " + quoted[quoted.count - 1]
+        let one = names.count == 1
+        return (one ? "Desktop project \(list) uses" : "Desktop projects \(list) use")
+            + " the whole disk (/) as \(one ? "its" : "their") folder, so Desktop refuses every message after the first in \(one ? "its" : "their") chats with “Select a project to continue”."
+            + " In Desktop, choose Edit project, add a specific folder (your home folder works) and make it primary, then start a new chat; chats already started there can stay blocked."
+    }
+
     func launchCodex() async {
         guard !busy else { return }
         page = .config
@@ -80,7 +94,8 @@ extension BridgeModel {
             if savedSettings.codex_accent_slider || savedSettings.codex_quick_composer {
                 try await launchCodexWithAccentBridge(appPath: appPath)
                 let base = "Codex / ChatGPT is opening with your provider catalogue and desktop preferences. Its previous configuration will be restored after it quits."
-                if let omitted = omissionSummary(prepared) { tell(base + " " + omitted, warning: true) } else { tell(base) }
+                let notes = [omissionSummary(prepared), diskRootProjectSummary(prepared)].compactMap { $0 }
+                if notes.isEmpty { tell(base) } else { tell(([base] + notes).joined(separator: " "), warning: true) }
             } else {
                 let configuration = NSWorkspace.OpenConfiguration()
                 configuration.activates = true
@@ -90,7 +105,8 @@ extension BridgeModel {
                     }
                 }
                 let base = "Codex / ChatGPT is opening with your provider catalogue. Its previous configuration will be restored after it quits."
-                if let omitted = omissionSummary(prepared) { tell(base + " " + omitted, warning: true) } else { tell(base) }
+                let notes = [omissionSummary(prepared), diskRootProjectSummary(prepared)].compactMap { $0 }
+                if notes.isEmpty { tell(base) } else { tell(([base] + notes).joined(separator: " "), warning: true) }
             }
         } catch {
             updateCodexRunning()
@@ -541,6 +557,30 @@ struct CodexNativeCapabilitiesStatus: View {
     }
 }
 
+/// Names Desktop projects rooted at the disk root before a chat in one meets
+/// “Select a project to continue”. Nothing is shown when there are none. The
+/// check reruns when the pane appears and when Desktop starts or stops, so a
+/// project fixed in Desktop clears it.
+struct CodexDiskRootProjectsWarning: View {
+    @ObservedObject var model: BridgeModel
+    @State private var warning: String?
+
+    var body: some View {
+        // A stack, not a Group: a Group with no content has nothing to appear.
+        VStack(alignment: .leading, spacing: 0) {
+            if let warning {
+                Label { Text(warning) } icon: { Image(systemName: "exclamationmark.triangle.fill") }
+                    .font(.caption).foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .task(id: "\(model.codexRunning):\(model.codexProfileActive)") {
+            guard let state = try? await model.command("codex-projects"), !Task.isCancelled else { return }
+            warning = model.diskRootProjectSummary(state)
+        }
+    }
+}
+
 struct CodexConfigPane: View {
     @ObservedObject var model: BridgeModel
 
@@ -570,6 +610,7 @@ struct CodexConfigPane: View {
     var body: some View {
         Panel {
             HubPaneHeading(title: "Codex / ChatGPT", subtitle: "App preferences", icon: "terminal")
+                CodexDiskRootProjectsWarning(model: model)
                 Text("Native ChatGPT capabilities").font(.headline)
                 CodexPreference(isOn: $model.settings.codex_chatgpt_account, disabled: model.busy,
                     title: "Use native ChatGPT capabilities",

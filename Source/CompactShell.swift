@@ -946,6 +946,7 @@ private struct SettingsPage: View {
                 }.frame(maxWidth: .infinity, alignment: .topLeading)
                 VStack(alignment: .leading, spacing: 6) {
                     PaneHeader(presentation: model.providerDefinitions.first { $0.id == "codex" }?.presentation, title: "Codex / ChatGPT", subtitle: "app preferences", accent: Chroma.codex, state: nil)
+                    CodexDiskRootProjectsWarning(model: model)
                     SectionLabel(text: "Native ChatGPT capabilities")
                     option("Use native ChatGPT capabilities", "Keeps ChatGPT sign-in and enables native Voice and image controls. Availability and OpenAI account limits still apply. Save, then launch.", $model.settings.codex_chatgpt_account, Chroma.codex)
                     CodexNativeCapabilitiesStatus(model: model)

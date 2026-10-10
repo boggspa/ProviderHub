@@ -92,3 +92,47 @@ voice availability or a replacement for ChatGPT plan access. With provider
 accent colours enabled, macOS attributes microphone permission to Provider
 Hub, as the preference already explains. This repair does not change voice
 authentication, endpoint routing, permissions, or feature gates.
+
+## "Select a project to continue" after one message
+
+A tester's hub-launched Desktop refused follow-ups with "Unable to send
+message / Select a project to continue". A new chat sent one message and then
+locked again. Their ChatGPT usage was fine; this is not the usage wall, and
+**Keep sending when usage runs out** cannot clear it.
+
+The dialog is Desktop's `missing-workspace` submit block, read from the
+ChatGPT 26.1007.21159 bundle. The composer blocks a local chat whose workspace
+roots contain nothing but `/`, unless Desktop counts the chat as projectless.
+A chat in a project starts in the project's primary folder. The tester's
+project had been created on the whole disk, so its chats started in `/`.
+Before a chat exists, the composer falls back to the home folder, so the
+first message goes through. Every later message is checked against `/` and
+refused. One locked chat used the native `openai` provider, so hub routing
+is not involved. Desktop allows creating a project on `/` but then won't let
+its chats continue; that inconsistency is Desktop's.
+
+Provider Hub now reports it. `codex_projects.py` reads both of Desktop's
+project records read-only and with bounded time: `local-projects` in
+`~/.codex/.codex-global-state.json`, and the app-server's
+`projects`/`project_roots` tables in the newest `state_*.sqlite`. It names
+every local project whose primary folder is `/`. The worker's
+`codex-projects` command and `codex-prepare` return those names. The hub
+then shows a warning in the Codex preferences and appends it to the launch
+notice. It reads no chats or titles, and missing files or schema drift give
+no warning rather than an error.
+
+The hub does not fake a folder to get past the block: that would run a
+full-access agent in a folder the user never chose. The fix is in Desktop.
+Choose **Edit project**, add a specific folder (the home folder works, and a
+full-access agent can still read the rest of the disk from there), make it
+**primary**, save, and start a new chat. Chats started before the change keep
+`/` as their working directory and may stay blocked.
+
+For a composer that refuses to send for another reason, run
+`scripts/diagnose_codex_composer.sh` while the dialog is showing, before
+starting a new chat or relaunching. It is read-only and needs nothing
+installed. It prints app versions and the hub's Codex switches. It also
+prints the global-state inputs the composer reads, projects rooted at `/`,
+each recent chat's working directory and projectless status, and each turn's
+working directory. Message text, titles, tokens and keys are left out;
+project names and folder paths are included.
