@@ -10,7 +10,7 @@ import unittest
 from unittest.mock import patch
 
 from chat_runtime import ChatService, ChatStore
-from chat_agents import close_side, close_all_sides, validate_delegate, make_child
+from chat_agents import close_side, close_all_sides, validate_delegate, make_child, visible
 from test_chat_runtime import FakeTransport, model, response
 
 
@@ -55,6 +55,20 @@ class AgentTests(unittest.TestCase):
         parent.handle({"command": "preferences", "webSearch": True})
         for child in children:
             self.assertIn("_web_search", child.payload(child.choice()))
+
+    def test_bounded_side_snapshot_preserves_unicode_stream_position(self):
+        parent = self.service([], [[]])
+        parent.handle({"command": "open_side", "id": parent.chat["id"], "choice": parent.models[0]["id"]})
+        side = parent.side
+        text = "🧑‍💻" * 3000
+        side.chat["entries"].append({"id": "reply", "kind": "assistant", "text": text, "detail": ""})
+        snapshot = visible(side.chat)["entries"][-1]
+        self.assertEqual(snapshot["text"], text[-8000:])
+        self.assertEqual(snapshot["textOffset"], len(text) - 8000)
+        side.emit({"event": "delta", "id": "reply", "text": "next", "offset": len(text)})
+        forwarded = next(e for e in reversed(self.events) if e["event"] == "side_delta")
+        self.assertEqual(forwarded["offset"], len(text))
+        self.assertEqual(forwarded["chat"], parent.chat["id"])
 
     def finish(self, parent):
         parent.thread.join(3)

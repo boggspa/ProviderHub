@@ -13,6 +13,7 @@ struct ChatModelPicker: View {
     @State private var choiceID = ""
     @State private var effort = ""
     @State private var search = ""
+    @State private var ownerID: String?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private var groups: [String] {
@@ -59,6 +60,7 @@ struct ChatModelPicker: View {
         .padding(8)
         .frame(width: 520, height: 388)
         .onAppear {
+            ownerID = model.selectedID
             let selected = initialChoiceID.flatMap { id in model.models.first { $0.id == id } } ?? model.selectedRoute ?? model.models.first
             provider = selected?.connectionID ?? ""; choiceID = selected?.id ?? ""
             effort = initialEffort ?? model.selected?.effort ?? ""
@@ -179,7 +181,7 @@ struct ChatModelPicker: View {
     }
 
     private func commit() {
-        guard let choice else { return }
+        guard ownerID == model.selectedID, let choice else { dismiss(); return }
         if let onSelect { onSelect(choice.id, effort) }
         else if choice.id == model.selectedRoute?.id && choice.scope == model.selected?.scope { model.setEffort(effort) }
         else { model.setSelection(choice.id, effort: effort) }
