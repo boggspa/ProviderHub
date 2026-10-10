@@ -194,7 +194,7 @@ def public(team):
     if not isinstance(team, dict):
         return None
     keys = ("id", "name", "label", "choice", "route", "account", "effort", "responsibility",
-            "status", "nextStep", "contributions", "contributionID", "usage", "context")
+            "status", "nextStep", "contributions", "contributionID", "usage", "context", "failureReason")
     return {"enabled": team.get("enabled", False), "status": team.get("status", "ready"),
             "activeMemberID": team.get("activeMemberID"),
             "activeMemberIDs": list(team.get("activeMemberIDs", [])),
@@ -320,6 +320,7 @@ def start_run(parent, *, new_input=False, member_id=None):
     for member in team["members"]:
         if member["id"] in queue:
             member["status"] = "queued"
+            member.pop("failureReason", None)
             if new_input: member.update(nextStep="", repeats=0, lastFingerprint=None)
 
 
@@ -603,9 +604,17 @@ class MemberStore:
             self.member["usage"] = chat.get("usage")
             self.member["decision"] = dict(chat.get("teamDecision", {"state": "done", "next_step": ""}))
             self.member["terminalStatus"] = chat["status"]
+            self.member["failureReason"] = chat.get("failureReason", "")
             for index, item in enumerate(self.parent.chat["entries"]):
                 if item["id"] in self.dirty:
                     self.parent.chat["entries"][index] = self.dirty[item["id"]]
+            # A terminal warning belongs to this durable boundary, even if
+            # the child's streaming callback has already closed its lane.
+            failure = chat.get("failureEntry")
+            if failure and not any(item["id"] == failure["id"] for item in self.parent.chat["entries"]):
+                item = self.parent.add({**failure, "memberID": self.member["id"], "memberName": self.member["name"],
+                                        "contributionID": self.member["contributionID"]})
+                self.dirty[item["id"]] = item
             notice = finish_contribution(self.parent.chat, self.member)
             if notice:
                 from chat_runtime import entry

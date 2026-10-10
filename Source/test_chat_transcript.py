@@ -311,6 +311,13 @@ struct Item: ChatTranscriptItem {
         check(ChatNotice.checkpointLine(ChatNotice.checkpointPrefix + " Something new happened.", member: "Sol")
               == "Sol reached a checkpoint · Something new happened", "Unknown checkpoint wording lost")
 
+        let failure = ChatNotice.failurePrefix + "5 attempts · connection reset"
+        check(ChatNotice.style(failure) == .failure, "Member failure warning hidden")
+        check(ChatNotice.failureLine(failure, member: "Opus") == "Opus stopped after 5 attempts · connection reset", "Member failure attribution")
+        check(ChatNotice.failureLine(failure, member: nil) == failure, "Missing member lost the warning")
+        let failedRows = Segment.outline([Item(id: "failed", kind: "notice", text: failure)], isLive: { _ in false })
+        check(failedRows.count == 1, "Member failure lost from outline")
+
         // Every glyph a row can ask for exists, and the path parser reads the
         // catalogue's curve syntax, including relative curves.
         for name in ["run_shell", "apply_patch", "read_file", "search_files", "web_search", "search_history", "record_decision",

@@ -111,6 +111,7 @@ struct ChatTeamMember: Decodable, Identifiable {
     var id: String; var name: String; var label: String; var choice: String; var route: String
     var account: String; var effort: String; var responsibility: String; var status: String
     var nextStep: String; var contributions: Int; var contributionID: String?; var usage: Int?; var context: Int?
+    var failureReason: String?
     var configuration: [String: Any] {
         ["id": id, "name": name, "choice": choice, "effort": effort, "responsibility": responsibility]
     }

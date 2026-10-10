@@ -46,6 +46,17 @@ them. Continuing members begin together only after the current wave settles.
 
 ## Shared record, private model histories
 
+Transient member request failures retry quietly, for up to five attempts total,
+with cancellable waits of roughly 2, 5, 10 and 20 seconds. Only the provider
+request is retried: completed tools and their recorded results are kept.
+Authentication and invalid requests fail immediately. After exhaustion, that
+member is parked while peers continue. One red warning line names the member;
+expand it for error codes, raw errors and attempt timings. The inspector shows
+the short reason. A new user message or Resume unfinished work can resume it.
+Shell timeout accepts seconds; clearly millisecond values (1000–600000) are
+converted and capped at five minutes. Invalid tool arguments remain ordinary
+tool errors that the model can correct.
+
 Replies and tool rows show their member and model in the existing transcript.
 The inspector shows status, next step and individual context usage. It uses
 the existing native transcript, lazy stacks and text/table renderer.

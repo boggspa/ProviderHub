@@ -9,7 +9,7 @@ import time
 import unittest
 from unittest.mock import patch
 
-from chat_tools import ChatToolRunner, MAX_OUTPUT, TOOL_DEFINITIONS
+from chat_tools import ChatToolRunner, MAX_OUTPUT, TOOL_DEFINITIONS, shell_timeout
 
 
 class ChatToolsTests(unittest.TestCase):
@@ -55,6 +55,19 @@ class ChatToolsTests(unittest.TestCase):
         result = self.runner.execute("read_file", {"path": "a"})
         self.assertLessEqual(len(self.text(result)), MAX_OUTPUT)
         self.assertIn("truncated", self.text(result))
+
+    def test_shell_timeout_seconds_and_cli_milliseconds_share_a_bounded_deadline(self):
+        for value, seconds in ((.1, .1), (60, 60), (300, 300), (1000, 1), (120000, 120), (600000, 300)):
+            with self.subTest(value=value):
+                self.assertEqual(shell_timeout(value), seconds)
+                self.runner.describe("run_shell", {"command": "printf ok", "timeout": value})
+        for value in (True, "120000", 0, 301, 999, 600001, float("inf"), 10**400):
+            with self.subTest(invalid=value), self.assertRaises(ValueError): shell_timeout(value)
+        started = time.monotonic()
+        result = self.runner.execute("run_shell", {"command": "sleep 10", "timeout": 1000})
+        self.assertTrue(result["is_error"])
+        self.assertIn("timed out", self.text(result))
+        self.assertLess(time.monotonic() - started, 3)
 
     def test_traversal_symlinks_and_special_files(self):
         with tempfile.TemporaryDirectory() as outside:

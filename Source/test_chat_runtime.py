@@ -13,7 +13,7 @@ import time
 import unittest
 from unittest import mock
 
-from chat_runtime import ChatService, ChatStore, GatewayClient, entry, needs_approval
+from chat_runtime import ChatService, ChatStore, GatewayClient, ModelRequestError, entry, needs_approval, retryable_request
 from chat_tools import ChatToolRunner
 
 
@@ -380,6 +380,30 @@ class MessagesStreamTests(unittest.TestCase):
         self.assertEqual(result["content"][0]["signature"], "sig")
         self.assertEqual(result["content"][1]["input"], {"path": "a"})
         self.assertEqual(result["usage"], {"input_tokens": 20, "output_tokens": 5})
+
+    def test_provider_error_event_preserves_code_for_retry_classification(self):
+        for code, retries in (("overloaded_error", True), ("authentication_error", False), ("invalid_request_error", False)):
+            with self.subTest(code=code), self.assertRaises(ModelRequestError) as caught:
+                self.stream([{"type": "error", "error": {"type": code, "message": "Provider message"}}])
+            self.assertEqual(caught.exception.code, code)
+            self.assertEqual(retryable_request(caught.exception), retries)
+
+    def test_http_error_preserves_status_and_handles_non_json_body(self):
+        for status, body in ((429, b'{"error":{"type":"rate_limit_error","message":"Slow down"}}'), (502, b"Upstream unavailable")):
+            response = io.BytesIO(body); response.status = status
+            class Connection:
+                def request(self, *args): pass
+                def getresponse(self): return response
+                def close(self): pass
+            client = GatewayClient(Path("/unused")); client.connect = Connection; client.headers = lambda: {}
+            with self.subTest(status=status), self.assertRaises(ModelRequestError) as caught:
+                client.stream({}, threading.Event(), lambda text: None)
+            self.assertEqual(caught.exception.status, status)
+            self.assertTrue(retryable_request(caught.exception))
+
+    def test_non_object_tool_input_reaches_recoverable_tool_validation(self):
+        events = self.events(); events[6]["delta"]["partial_json"] = "[]"
+        self.assertEqual(self.stream(events)["content"][1]["input"], [])
 
     def test_native_search_and_streamed_citations_preserved(self):
         citation = {"type": "web_search_result_location", "url": "https://example.com", "title": "Source", "encrypted_index": "opaque"}
