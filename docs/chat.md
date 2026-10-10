@@ -38,8 +38,11 @@ commands, and branch changes wait until all chats using that checkout are idle.
 
 One worker hosts the chats. Idle chats have no execution loop, and only the
 visible transcript streams into the window. Selecting a background chat restores
-its latest output. Up to four chats can run at once, with at most eight model
-requests across chats, helpers and Side Chats. When the chat limit is reached,
+its latest output. Up to four chats can run at once, with at most twelve
+model requests across chats, helpers and Side Chats. The request gate
+(chat_sessions.MAX_ACTIVE_REQUESTS) was raised from eight to twelve so a
+five-member Team leaves the per-turn four-helper budget and open Side Chats
+with room to breathe. When the chat limit is reached,
 the message stays in your draft so you can send it
 after a turn finishes.
 
@@ -284,7 +287,8 @@ needs the same approval as any shell command; reading or stopping the chat's
 own processes does not. Each process runs in its own process group, so Stop
 sends SIGTERM to everything it started and SIGKILL three seconds later; when
 the command itself exits, anything it left in its group is ended too. A chat
-can have four running at once by default, Chat eight in total. Teams can choose
+can have five running at once by default (four for solo chats), Chat eight in
+total. Teams can choose
 one to eight slots in their run settings; extra launches reserve capacity for
 active peers. Each member has an independent output cursor. Output is kept as a
 bounded tail in memory with no separate log file; output a tool call reports

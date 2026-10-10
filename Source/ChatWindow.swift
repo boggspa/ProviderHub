@@ -329,15 +329,17 @@ private struct ChatHeader: View {
         HStack(spacing: 10) {
             ForEach(team.members) { member in
                 memberContext(member, active: member.status == "working" || member.id == team.activeMemberID,
-                              named: named, counted: named && (!compact || team.members.count < 3))
+                              named: named, counted: named && (!compact || team.members.count < 4),
+                              capped: compact && team.members.count > 3)
             }
         }
     }
 
     /// A ring and name per member; the token count drops out on a narrow
-    /// header with a larger Team. Names also yield to keep every ring visible;
+    /// header with a larger Team. On a compact header with four or five
+    /// members the names also yield and truncate to keep every ring visible;
     /// both remain in the tooltip and accessibility label.
-    private func memberContext(_ member: ChatTeamMember, active: Bool, named: Bool, counted: Bool) -> some View {
+    private func memberContext(_ member: ChatTeamMember, active: Bool, named: Bool, counted: Bool, capped: Bool) -> some View {
         let accent = model.accent(for: member.route)
         let readout = member.usage.map { tokenCount($0) + (member.context.map { " / " + tokenCount($0) } ?? "") } ?? "not started"
         return HStack(spacing: 5) {
@@ -347,14 +349,17 @@ private struct ChatHeader: View {
                 Circle().stroke(accent.opacity(0.3), lineWidth: 2).frame(width: 12, height: 12)
             }
             if named {
-                Text(member.name).font(.system(size: 10.5, weight: active ? .semibold : .regular))
+                Text(member.name)
+                    .font(.system(size: 10.5, weight: active ? .semibold : .regular))
                     .foregroundStyle(active ? Semantic.ink : Semantic.secondaryInk)
+                    .lineLimit(1).truncationMode(.tail)
+                    .frame(maxWidth: capped ? 84 : nil, alignment: .leading)
             }
             if counted, let used = member.usage {
                 Text(tokenCount(used)).font(.system(size: 10.5, design: .monospaced)).foregroundStyle(Semantic.secondaryInk)
             }
         }
-        .lineLimit(1).fixedSize()
+        .lineLimit(1)
         .help(member.name + " · " + readout + (active ? " · working" : "") + ". Each member has its own context window.")
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(member.name + " context " + readout + (active ? ", working" : ""))
