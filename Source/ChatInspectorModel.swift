@@ -178,17 +178,26 @@ struct ChatTeamSnapshot: Decodable {
     }
     var active: ChatTeamMember? { members.first { $0.id == activeMemberID } }
     var needsInput: Bool { members.contains { $0.status == "needs_input" } }
-    var canResume: Bool { enabled && !needsInput && ["stopped", "interrupted", "error", "limit_reached"].contains(status) && members.contains { $0.status != "done" } }
+    /// A member standing by (ready) after a message tagged others has nothing to resume.
+    var canResume: Bool { enabled && !needsInput && ["stopped", "interrupted", "error", "limit_reached"].contains(status) && members.contains { !["done", "ready"].contains($0.status) } }
 }
 
 @MainActor extension ChatModel {
     var canConfigureTeam: Bool { connected && selectedID != nil && !busy && !branchBusy && teamRequest == nil }
+    /// Members an `@Name` tag can address, with their accents; none outside a Team.
+    var mentionTargets: [ChatMentionTarget] {
+        guard let team, team.enabled else { return [] }
+        return team.members.map { ChatMentionTarget(id: $0.id, name: $0.name, route: $0.route, accent: NSColor(accent(for: $0.route))) }
+    }
     func configureTeam(enabled: Bool, members: [[String: Any]], execution: ChatTeamExecution? = nil) {
         guard canConfigureTeam, let selectedID = stateChatID else { return }
         guard (1...ChatTeamSnapshot.maxMembers).contains(members.count), members.allSatisfy({ member in
             guard let choice = member["choice"] as? String, let name = member["name"] as? String else { return false }
             return !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && models.contains { $0.id == choice && $0.supportsTools }
         }) else { teamNotice = "Choose one to four named members with enabled models."; return }
+        let names = members.compactMap { ($0["name"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+            .folding(options: .caseInsensitive, locale: nil) }
+        guard Set(names).count == names.count else { teamNotice = "Give each member a different name, so an @name tag reaches one member."; return }
         if let execution, !execution.isValid { teamNotice = "Check the Team run settings."; return }
         let request = UUID().uuidString
         teamRequest = request; teamNotice = ""

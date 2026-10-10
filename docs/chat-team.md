@@ -68,6 +68,37 @@ member's edits; models are instructed to re-read current files before changing
 them. Background commands release the gate after launch, so their later writes
 still require the members' normal path coordination.
 
+## Addressing members
+
+Type `@` in the composer to address members by name. A short list above the
+composer shows each member's mark, name and model. Arrow keys move through it,
+Return or Tab inserts the whole name, Escape closes it, and a click works too.
+A tag that will reach a member is drawn in that member's provider accent, on a
+chip of the same hue, in the composer and again in the sent message. A tag that
+stays plain text addresses nobody.
+
+A message that tags members runs only them, in the order they were first
+tagged. The others stand by and read it as context, marked as addressed to
+their peers. An untagged message still reaches every member. While the Team
+works, a tagged update queues only its members. Untagged members keep working.
+One that is paused for a question, a stop or a run limit stands by instead of
+holding back the tagged members. Tagging a peer in a reply does not schedule
+it; members use `team_status(waiting, member_id=...)` for a real dependency.
+
+A tag starts the message or follows a space, an opening bracket or quote, a
+comma, semicolon or asterisk, so an email address never addresses anyone. It
+matches a member's whole name, case-insensitively, and ends before another
+letter, digit or underscore, so `@Opus 2` and `@Opus` can coexist. Tags inside
+code spans or fenced blocks stay text. Member names must therefore differ; a
+saved Team where two members share a name treats that name as plain text.
+
+The composer previews the worker's resolver, and both pass one shared set of
+cases (`Source/test_chat_mentions_cases.json`). Each send carries the members
+the composer tinted. The worker refuses a message whose tags would reach anyone
+else and resends the current roster. Chat then restores the draft, and the
+tints correct themselves. Sent messages record each tag's member, name, route
+and position, so a later rename or model change never recolours history.
+
 ## Failed requests
 
 Transient member request failures retry quietly, for up to five attempts total,

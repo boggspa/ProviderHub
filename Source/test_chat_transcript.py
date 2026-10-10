@@ -19,6 +19,9 @@ enum HubTheme {
         static let raisedSurface = Color.primary.opacity(0.045)
         static let secondaryInk = Color.secondary
         static let surface = Color.white
+        static func dynamicNS(light: NSColor, dark: NSColor) -> NSColor {
+            NSColor(name: nil) { $0.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? dark : light }
+        }
     }
 }
 '''
@@ -276,6 +279,20 @@ import Combine
         check(abs(blockSizing.size(width: 90).height - ceil(drawn.layoutManager!.usedRect(for: drawn.textContainer!).height)) < 0.5,
               "Measured height differs from drawn height")
 
+        // A recorded @tag is a semibold chip in its member's accent; nothing else in the message changes.
+        let tagged = ChatSelectableText.attributed(ChatMentions.marked("Ship it, @Sol.", mentions: [
+            ChatMention(id: "s", name: "Sol", route: "r", start: 9, length: 4)], accent: { _ in .purple }), font: base, color: .systemRed)
+        let tagAt = (tagged.string as NSString).range(of: "@Sol").location
+        check(tagged.string == "Ship it, @Sol." && tagged.attribute(.chatCodeChip, at: tagAt, effectiveRange: nil) != nil &&
+              weight(tagged.attribute(.font, at: tagAt, effectiveRange: nil) as! NSFont) > weight(base) &&
+              tagged.attribute(.foregroundColor, at: tagAt, effectiveRange: nil) as? NSColor != .systemRed &&
+              tagged.attribute(.chatCodeChip, at: 0, effectiveRange: nil) == nil &&
+              tagged.attribute(.kern, at: tagAt - 1, effectiveRange: nil) != nil, "A recorded tag is not an accent chip")
+        let leading = ChatSelectableText.attributed(ChatMentions.marked("@Sol hi", mentions: [
+            ChatMention(id: "s", name: "Sol", route: "r", start: 0, length: 4)], accent: { _ in .purple }), font: base, color: .systemRed)
+        check(((leading.attribute(.paragraphStyle, at: 0, effectiveRange: nil) as? NSParagraphStyle)?.firstLineHeadIndent ?? 0) > 0,
+              "A leading tag's chip would be clipped")
+
         let started = Date()
         for _ in 0..<50 { _ = ChatTableParser.parse(tooManyRows, streaming: true) }
         print("50 bounded table parses: \(Date().timeIntervalSince(started))s")
@@ -476,7 +493,7 @@ class ChatTranscriptTests(unittest.TestCase):
             self.assertIn(marker, ran.stdout)
 
     def test_parser_streaming_copy_budgets_and_column_layout(self):
-        self.run_native(["ChatFonts.swift", "ChatSelectableText.swift", "ChatTranscriptText.swift"], CASES,
+        self.run_native(["ChatFonts.swift", "ChatMentions.swift", "ChatSelectableText.swift", "ChatTranscriptText.swift"], CASES,
                         "Transcript parser, streaming, copy and layout checks passed", stubs=STUBS)
 
     def test_outline_tool_phrasing_sources_notices_and_glyphs(self):

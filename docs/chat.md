@@ -180,7 +180,9 @@ rounded chip. A fenced code block (` ``` ` or `~~~`) becomes a contained box wit
 language label. Long lines scroll sideways instead of wrapping, and a **Copy**
 button appears on hover. Quotes (`>`) show a quiet bar, and `---` draws a rule.
 Only the display changes: **Copy Message** and the saved chat keep the original
-Markdown. The composer stays plain text.
+Markdown. The composer stays plain text, except that in a Team an `@Name` tag
+is tinted in the accent of the member it will reach; see
+[addressing members](chat-team.md#addressing-members).
 
 Markdown pipe tables get a small native layout. A header followed by a valid
 `---` delimiter row becomes a table with wrapped cells and the requested column alignment.

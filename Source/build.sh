@@ -14,7 +14,7 @@ SWIFT_SOURCES=(
   "$SOURCE_DIR/HubLayout.swift" "$SOURCE_DIR/ProviderViews.swift"
   "$SOURCE_DIR/DevinAgentsView.swift" "$SOURCE_DIR/CodexHarness.swift"
   "$SOURCE_DIR/HubTheme.swift" "$SOURCE_DIR/HubGlass.swift" "$SOURCE_DIR/HubUpdater.swift" "$SOURCE_DIR/QuickComposerPanel.swift" "$SOURCE_DIR/CompactShell.swift"
-  "$SOURCE_DIR/ChatModel.swift" "$SOURCE_DIR/ChatInspectorModel.swift" "$SOURCE_DIR/ChatInspector.swift" "$SOURCE_DIR/ChatTeam.swift" "$SOURCE_DIR/ChatBranches.swift" "$SOURCE_DIR/ChatFonts.swift" "$SOURCE_DIR/ChatSettings.swift" "$SOURCE_DIR/ChatTurnTime.swift" "$SOURCE_DIR/ChatStateAccents.swift" "$SOURCE_DIR/ChatWorkspaces.swift" "$SOURCE_DIR/ChatModelPicker.swift" "$SOURCE_DIR/ChatAttachments.swift" "$SOURCE_DIR/ChatToolGlyph.swift" "$SOURCE_DIR/ChatSelectableText.swift" "$SOURCE_DIR/ChatTranscriptText.swift" "$SOURCE_DIR/ChatTranscriptLayout.swift" "$SOURCE_DIR/ChatTranscriptRows.swift" "$SOURCE_DIR/ChatWindow.swift"
+  "$SOURCE_DIR/ChatModel.swift" "$SOURCE_DIR/ChatMentions.swift" "$SOURCE_DIR/ChatInspectorModel.swift" "$SOURCE_DIR/ChatInspector.swift" "$SOURCE_DIR/ChatTeam.swift" "$SOURCE_DIR/ChatBranches.swift" "$SOURCE_DIR/ChatFonts.swift" "$SOURCE_DIR/ChatSettings.swift" "$SOURCE_DIR/ChatTurnTime.swift" "$SOURCE_DIR/ChatStateAccents.swift" "$SOURCE_DIR/ChatWorkspaces.swift" "$SOURCE_DIR/ChatModelPicker.swift" "$SOURCE_DIR/ChatAttachments.swift" "$SOURCE_DIR/ChatToolGlyph.swift" "$SOURCE_DIR/ChatSelectableText.swift" "$SOURCE_DIR/ChatTranscriptText.swift" "$SOURCE_DIR/ChatTranscriptLayout.swift" "$SOURCE_DIR/ChatTranscriptRows.swift" "$SOURCE_DIR/ChatWindow.swift"
   "$SOURCE_DIR/MistralBridge.swift"
 )
 xcrun swiftc -swift-version 5 -parse-as-library -O -target arm64-apple-macosx14.0 \

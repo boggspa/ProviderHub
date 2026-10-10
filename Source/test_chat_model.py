@@ -130,6 +130,7 @@ import Combine
         check(model.attachments.count == 1 && model.canSend, "attachment-only message not sendable")
         model.send()
         check(model.attachments.isEmpty && (commands.last?["attachments"] as? [[String:Any]])?.count == 1, "attachments not sent")
+        check((commands.last?["mentions"] as? [String])?.isEmpty == true, "a solo send claimed Team tags")
         let commandCount = commands.count
         model.draft = "do not queue this"; model.send()
         check(commands.count == commandCount, "busy chat queued a message")
@@ -322,6 +323,18 @@ import Combine
         check(model.team == nil && model.teamRequest == teamRequest, "cross-chat or stale Team ack accepted")
         try send(["event":"team", "chat":"A", "request":teamRequest, "team":roster("ready")])
         check(model.team?.members.count == 1 && model.teamRequest == nil && model.canSend, "Team ack not applied")
+        // The send carries the members its tags were tinted for; a refusal keeps the draft.
+        model.draft = "Ship it, @builder."
+        model.send()
+        check(commands.last?["command"] as? String == "send" && commands.last?["mentions"] as? [String] == ["builder"],
+              "a tagged send did not carry the member it tinted")
+        try send(["event":"rejected", "chat":"A", "message":"The tagged members no longer match this Team.", "busy":false, "interrupting":false])
+        check(model.draft == "Ship it, @builder." && !model.busy && model.canSend, "a refused tagged send lost its draft")
+        model.draft = ""; model.notice = ""
+        try send(["event":"entry", "chat":"A", "entry":["id":"tagged-row", "kind":"user", "text":"Ship it, @builder.", "route":"ollama/test",
+            "isError":false, "changedFiles":[], "mentions":[["id":"builder", "name":"Builder", "route":"ollama/test", "start":9, "length":8], 7]]])
+        check(model.entries.last?.mentions?.first == ChatMention(id: "builder", name: "Builder", route: "ollama/test", start: 9, length: 8) &&
+              model.entries.last?.mentions?.count == 2, "recorded tags did not survive decoding beside a malformed one")
         check(model.team?.taskMode == false, "legacy roster unexpectedly enabled Task mode")
         var fourMemberTeam = roster("ready")
         let rosterTemplate = (fourMemberTeam["members"] as! [[String: Any]])[0]
@@ -719,7 +732,7 @@ import Combine
             binary = root / "chat-model-tests"
             compiled = subprocess.run(["xcrun", "swiftc", "-swift-version", "5", "-parse-as-library",
                 "-module-cache-path", str(root / "cache"), str(root / "Stubs.swift"),
-                str(Path(__file__).with_name("ChatModel.swift")), str(Path(__file__).with_name("ChatInspectorModel.swift")), str(Path(__file__).with_name("ChatWorkspaces.swift")), str(root / "Cases.swift"),
+                str(Path(__file__).with_name("ChatModel.swift")), str(Path(__file__).with_name("ChatMentions.swift")), str(Path(__file__).with_name("ChatInspectorModel.swift")), str(Path(__file__).with_name("ChatWorkspaces.swift")), str(root / "Cases.swift"),
                 "-framework", "AppKit", "-framework", "SwiftUI", "-framework", "PDFKit", "-o", str(binary)], capture_output=True, text=True, timeout=90)
             self.assertEqual(compiled.returncode, 0, compiled.stderr)
             ran = subprocess.run([str(binary)], capture_output=True, text=True, timeout=15)

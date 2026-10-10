@@ -47,10 +47,13 @@ struct ChatSpeakerHeader: View {
     }
 }
 
-/// The user's turn, as a bubble on the trailing edge.
+/// The user's turn, as a bubble on the trailing edge. In a Team its recorded
+/// `@Name` tags wear their members' accents, as they did in the composer.
 struct UserRow: View {
     var entry: ChatEntry
     var title = "You"
+    /// A route's provider accent; without one, tags read as plain text.
+    var accent: ((String) -> Color)? = nil
     @Environment(\.chatTextStyle) private var textStyle
 
     var body: some View {
@@ -61,7 +64,9 @@ struct UserRow: View {
             VStack(alignment: .leading, spacing: textStyle.scaled(6)) {
                 if let attachments = entry.attachments, !attachments.isEmpty { ChatAttachmentStrip(attachments: attachments) }
                 if !entry.text.isEmpty {
-                    ChatSelectableText(text: AttributedString(entry.text), font: textStyle.nsFont, color: Semantic.nsInk, message: entry.text)
+                    ChatSelectableText(text: accent.map { ChatMentions.marked(entry.text, mentions: entry.mentions ?? [], accent: $0) }
+                                           ?? AttributedString(entry.text),
+                                       font: textStyle.nsFont, color: Semantic.nsInk, message: entry.text)
                 }
             }
             .padding(.horizontal, textStyle.scaled(13)).padding(.vertical, textStyle.scaled(8))

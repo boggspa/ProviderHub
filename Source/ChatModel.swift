@@ -53,6 +53,8 @@ struct ChatEntry: Decodable, Identifiable {
     var contributionID: String?
     var clientRequest: String?
     var textOffset: Int?
+    /// `@Name` tags as the worker resolved and routed them, in UTF-16 units.
+    var mentions: [ChatMention]?
 }
 
 struct ChatAttachment: Decodable, Identifiable {
@@ -319,7 +321,10 @@ final class ChatModel: ObservableObject {
         pendingSend = (selectedID, request, text, files)
         setBusy(true); interrupting = command == "steer"
         status = interrupting ? "Interrupting for your update…" : "Connecting…"
-        if !write(["command": command, "id": selectedID, "chat": selectedID, "request": request, "text": text, "attachments": files.map(\.request)]) { restorePendingSend(); setBusy(false); interrupting = false }
+        // The members its tags were tinted for; the worker refuses any other routing.
+        let mentions = ChatMentions.addressees(ChatMentions.resolve(text, members: mentionTargets))
+        if !write(["command": command, "id": selectedID, "chat": selectedID, "request": request, "text": text,
+                   "attachments": files.map(\.request), "mentions": mentions]) { restorePendingSend(); setBusy(false); interrupting = false }
     }
     func stop() {
         guard busy, let stateChatID else { return }

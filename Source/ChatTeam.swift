@@ -75,7 +75,7 @@ struct ChatTeamControls: View {
                     Spacer(minLength: 0)
                 }
             }
-            Text("Members think and read together. Workspace changes and approvals queue one at a time, using this chat’s approval mode.")
+            Text("Members think and read together. Workspace changes and approvals queue one at a time, using this chat’s approval mode. Tag @Name in a message to address only those members.")
                 .font(.system(size: 10.5)).foregroundStyle(.secondary)
             if !model.teamNotice.isEmpty {
                 Text(model.teamNotice).font(.system(size: 11.5)).foregroundStyle(.secondary).textSelection(.enabled)
