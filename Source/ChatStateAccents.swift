@@ -132,12 +132,13 @@ struct ChatPatchStats: Equatable {
 /// the header count the same way.
 struct ChatPatchStatsLabel: View {
     var stats: ChatPatchStats
+    var size: CGFloat = 11
     var body: some View {
         HStack(spacing: 4) {
             Text("+\(stats.added)").foregroundStyle(Color(nsColor: .systemGreen))
             Text("−\(stats.removed)").foregroundStyle(Color(nsColor: .systemRed))
         }
-        .font(.system(size: 11, weight: .medium, design: .monospaced)).fixedSize()
+        .font(.system(size: size, weight: .medium, design: .monospaced)).fixedSize()
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(stats.added) lines added, \(stats.removed) removed")
     }

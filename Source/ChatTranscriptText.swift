@@ -365,7 +365,7 @@ struct ChatTranscriptTable: View {
     }
 
     private var grid: some View {
-        let nativeFont = ChatFonts.font(textStyle.selection, customName: textStyle.customName, size: textStyle.size)
+        let nativeFont = textStyle.nsFont
         return ChatTableLayout(hints: table.columnHints, minimum: max(80, nativeFont.pointSize * 6)) {
             ForEach(0..<(table.cells.count * columns), id: \.self) { index in
                 let row = index / columns, column = index % columns

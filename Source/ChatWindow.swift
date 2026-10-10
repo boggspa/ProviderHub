@@ -139,10 +139,6 @@ private func tokenCount(_ value: Int) -> String {
     if value >= 1_000 { return String(format: "%.1fK", Double(value) / 1_000) }
     return String(value)
 }
-private func reveal(_ path: String, in workspace: String?) {
-    let full = path.hasPrefix("/") ? path : ((workspace ?? NSHomeDirectory()) as NSString).appendingPathComponent(path)
-    NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: full)])
-}
 
 struct ChatProviderIcon: View {
     var presentation: ProviderPresentation?
@@ -305,17 +301,13 @@ private struct ChatHeader: View {
     }
 
     @ViewBuilder private var usage: some View {
-        if model.team?.enabled == true {
-            if let member = model.team?.active, let used = member.usage {
-                let readout = member.name + " · " + tokenCount(used) + (member.context.map { " / " + tokenCount($0) } ?? "")
-                HStack(spacing: 6) {
-                    if let limit = member.context, limit > 0 {
-                        ChatContextRing(used: used, limit: limit, accent: model.accent(for: member.route))
-                    }
-                    Text(readout).font(.system(size: 10.5, design: .monospaced)).foregroundStyle(Semantic.secondaryInk).lineLimit(1)
+        if let team = model.team, team.enabled, model.busy || team.status == "working" {
+            // Every member's own window while the Team works; they are never
+            // added together. The parent's returns once the Team stops.
+            HStack(spacing: 10) {
+                ForEach(team.members) { member in
+                    memberContext(member, active: member.status == "working" || member.id == team.activeMemberID)
                 }
-                .help("Active member's context; member windows are separate")
-                .accessibilityElement(children: .combine).accessibilityLabel("Active member context used: " + readout)
             }
         } else if let used = model.tokenUsage {
             let readout = model.contextLimit.map { tokenCount(used) + " / " + tokenCount($0) } ?? tokenCount(used) + " tokens"
@@ -329,6 +321,27 @@ private struct ChatHeader: View {
                   ?? "Context used in this chat")
             .accessibilityElement(children: .combine).accessibilityLabel("Context used: " + readout)
         }
+    }
+
+    private func memberContext(_ member: ChatTeamMember, active: Bool) -> some View {
+        let accent = model.accent(for: member.route)
+        let readout = member.usage.map { tokenCount($0) + (member.context.map { " / " + tokenCount($0) } ?? "") } ?? "not started"
+        return HStack(spacing: 5) {
+            if let used = member.usage, let limit = member.context, limit > 0 {
+                ChatContextRing(used: used, limit: limit, accent: accent)
+            } else {
+                Circle().stroke(accent.opacity(0.3), lineWidth: 2).frame(width: 12, height: 12)
+            }
+            Text(member.name).font(.system(size: 10.5, weight: active ? .semibold : .regular))
+                .foregroundStyle(active ? Semantic.ink : Semantic.secondaryInk)
+            if let used = member.usage {
+                Text(tokenCount(used)).font(.system(size: 10.5, design: .monospaced)).foregroundStyle(Semantic.secondaryInk)
+            }
+        }
+        .lineLimit(1).fixedSize()
+        .help(member.name + " · " + readout + (active ? " · working" : "") + ". Each member has its own context window.")
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(member.name + " context " + readout + (active ? ", working" : ""))
     }
 
     @ViewBuilder private var connection: some View {
@@ -414,6 +427,7 @@ private struct ChatTranscript: View {
     /// turn (open while it is the live tail, closed afterwards).
     @State private var foldChoice: [String: Bool] = [:]
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.chatTextStyle) private var textStyle
     /// True while the end of the transcript is within reach of the viewport;
     /// new text follows only then, so reading earlier turns is never yanked.
     @State private var nearBottom = true
@@ -442,55 +456,74 @@ private struct ChatTranscript: View {
     }
 
     private var content: some View {
-        let segments = ChatTranscriptSegment.segments(model.entries)
-        return LazyVStack(alignment: .leading, spacing: 14) {
+        let lastID = model.entries.last?.id
+        let segments = ChatTranscriptSegment<ChatEntry>.outline(model.entries) {
+            model.isStreaming($0, fallback: model.busy && $0.id == lastID)
+        }
+        let liveSpeaker = model.busy ? segments.last(where: \.isSpeaker)?.id : nil
+        return LazyVStack(alignment: .leading, spacing: 0) {
             if model.entries.isEmpty { ChatInvitation(model: model) }
             ForEach(segments) { segment in
-                switch segment {
-                case .entry(let entry): row(entry)
-                case .fold(let entries): fold(entries, live: model.busy && segment.id == segments.last?.id)
+                Group {
+                    switch segment.content {
+                    case .speaker(let entry):
+                        ChatSpeakerHeader(member: entry.memberName, label: model.label(for: entry.route),
+                                          presentation: model.route(named: entry.route)?.presentation,
+                                          accent: model.accent(for: entry.route), live: segment.id == liveSpeaker)
+                    case .entry(let entry): row(entry, after: segment.previousSpeaker)
+                    case .fold(let entries): fold(entries, live: model.busy && segment.id == segments.last?.id)
+                    }
                 }
+                .padding(.top, gap(segment.spacing))
             }
             Color.clear.frame(height: 1).id(bottomID)
         }
-        .frame(maxWidth: 760).frame(maxWidth: .infinity)
+        .frame(maxWidth: textStyle.scaled(760)).frame(maxWidth: .infinity)
         .padding(.horizontal, 20).padding(.vertical, 16)
+    }
+
+    /// Wide between speakers, tight inside one speaker's block.
+    private func gap(_ spacing: ChatTranscriptSegment<ChatEntry>.Spacing) -> CGFloat {
+        switch spacing {
+        case .none: return 0
+        case .speaker: return textStyle.scaled(26)
+        case .header: return textStyle.scaled(6)
+        case .item: return textStyle.scaled(6)
+        }
     }
 
     private func scrollToEnd(_ proxy: ScrollViewProxy) {
         proxy.scrollTo(bottomID, anchor: .bottom)
     }
 
-    @ViewBuilder private func row(_ entry: ChatEntry) -> some View {
+    @ViewBuilder private func row(_ entry: ChatEntry, after speaker: ChatEntry? = nil) -> some View {
         let last = entry.id == model.entries.last?.id
+        let live = model.busy && entry.detail == "Running…"
         switch entry.kind {
         case "user":
             UserRow(entry: entry)
         case "assistant":
-            AssistantRow(entry: entry, label: model.label(for: entry.route), accent: model.accent(for: entry.route),
-                         presentation: model.route(named: entry.route)?.presentation, streaming: model.isStreaming(entry, fallback: model.busy && last))
+            AssistantRow(entry: entry, accent: model.accent(for: entry.route), streaming: model.isStreaming(entry, fallback: model.busy && last))
         case "tool":
             if let ids = entry.agentIDs, !ids.isEmpty {
                 VStack(alignment: .leading, spacing: 4) {
                     ToolRow(entry: entry, accent: model.accent(for: entry.route), expanded: expandedBinding(entry.id), workspace: entry.workspace ?? model.selected?.workspace, onInspect: {
                         model.inspectedAgentID = nil; model.showInspector(.agents)
-                    }, running: model.agents.contains { ids.contains($0.id) && $0.busy })
+                    }, running: model.agents.contains { ids.contains($0.id) && $0.busy }, live: live)
                     ChatParallelLanes(model: model, agentIDs: ids).padding(.leading, 18)
                 }
             } else if let agentID = entry.agentID {
                 ToolRow(entry: entry, accent: model.accent(for: entry.route), expanded: expandedBinding(entry.id), workspace: model.selected?.workspace, onInspect: {
                     model.inspectedAgentID = agentID; model.showInspector(.agents)
-                }, running: model.agents.first { $0.id == agentID }?.busy == true)
+                }, running: model.agents.first { $0.id == agentID }?.busy == true, live: live)
             } else {
-                VStack(alignment: .leading, spacing: 2) {
-                    if let name = entry.memberName { Text(name).font(.system(size: 10.5)).foregroundStyle(Semantic.secondaryInk) }
-                    ToolRow(entry: entry, accent: model.accent(for: entry.route), expanded: expandedBinding(entry.id), workspace: model.selected?.workspace)
-                }
+                ToolRow(entry: entry, accent: model.accent(for: entry.route), expanded: expandedBinding(entry.id),
+                        workspace: entry.workspace ?? model.selected?.workspace, live: live)
             }
         case "error":
             ErrorRow(entry: entry, canRetry: last && !model.busy && model.connected) { model.retry() }
         default:
-            NoticeRow(entry: entry)
+            NoticeRow(entry: entry, member: speaker?.memberName)
         }
     }
 
@@ -501,249 +534,28 @@ private struct ChatTranscript: View {
     /// A run of local tool rows behind one disclosure. The live tail run stays
     /// open so progress is visible; once the reply begins it folds, and a
     /// choice the user makes by hand sticks for that run. Collapsed and live,
-    /// the header carries the latest step so nothing goes dark mid-turn.
+    /// the header carries the latest step so nothing goes dark mid-turn. Open,
+    /// the steps hang from a hairline under the header's glyphs.
     @ViewBuilder private func fold(_ entries: [ChatEntry], live: Bool) -> some View {
-        let id = ChatTranscriptSegment.foldID(entries)
+        let id = ChatTranscriptSegment<ChatEntry>.foldID(entries)
         let open = foldChoice[id] ?? live
-        let files = Set(entries.flatMap(\.changedFiles)).count
-        let counted = entries.compactMap { ChatPatchStats.count(patchText($0)) }
-        let stats = counted.isEmpty ? nil : counted.reduce(ChatPatchStats(), +)
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: textStyle.scaled(4)) {
             Button {
                 if reduceMotion { foldChoice[id] = !open } else { withAnimation(.easeInOut(duration: 0.15)) { foldChoice[id] = !open } }
             } label: {
-                HStack(spacing: 8) {
-                    Image(systemName: "chevron.right").font(.system(size: 9, weight: .semibold)).foregroundStyle(Semantic.secondaryInk)
-                        .rotationEffect(.degrees(open ? 90 : 0)).frame(width: 10)
-                    ChatShimmerText(text: live ? "Working" : "Worked", active: live, accent: model.activeAccent, base: Semantic.ink)
-                        .font(.system(size: 11.5, weight: .medium))
-                    Text("· \(entries.count) steps" + (files > 0 ? " · \(files) \(files == 1 ? "file" : "files")" : ""))
-                        .font(HubTheme.Typography.detail).foregroundStyle(Semantic.secondaryInk)
-                    if let stats { ChatPatchStatsLabel(stats: stats) }
-                    if entries.contains(where: \.isError) {
-                        Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 10)).foregroundStyle(Color(nsColor: .systemRed))
-                    }
-                    if !open, live, let latest = entries.last {
-                        Text(latest.summary ?? latest.text).font(HubTheme.Typography.detail).foregroundStyle(Semantic.secondaryInk)
-                            .lineLimit(1).truncationMode(.middle)
-                    }
-                    Spacer(minLength: 0)
-                }
-                .contentShape(Rectangle())
+                ChatFoldHeader(entries: entries, live: live, open: open, accent: model.accent(for: entries.first?.route ?? ""))
             }
             .buttonStyle(.plain)
-            .accessibilityLabel((live ? "Working, " : "Worked, ") + "\(entries.count) steps")
+            .accessibilityLabel((live ? "Working, " : "Worked, ") + ChatToolDisplay.activity(entries.map(\.tool)))
             .accessibilityValue(open ? "Expanded" : "Collapsed")
             if open {
-                VStack(alignment: .leading, spacing: 14) { ForEach(entries) { entry in row(entry) } }.padding(.leading, 18)
-            }
-        }
-        .padding(.vertical, 4)
-    }
-}
-
-/// The recorded patch of a local patch row, or nothing for every other tool;
-/// shell output that happens to look like a diff never counts as one.
-private func patchText(_ entry: ChatEntry) -> String {
-    guard entry.tool == "apply_patch" else { return "" }
-    return entry.detail?.isEmpty == false ? entry.detail! : entry.text
-}
-
-/// Consecutive local tool rows fold into one "Worked · N steps" disclosure,
-/// as Codex Desktop collapses a run of activity. Delegate rows keep their
-/// lanes and break a run; runs shorter than three stay as plain rows.
-private enum ChatTranscriptSegment: Identifiable {
-    case entry(ChatEntry)
-    case fold([ChatEntry])
-    static let minimumFold = 3
-
-    var id: String {
-        switch self {
-        case .entry(let entry): return entry.id
-        case .fold(let entries): return Self.foldID(entries)
-        }
-    }
-    static func foldID(_ entries: [ChatEntry]) -> String { "fold-" + (entries.first?.id ?? "") }
-
-    static func segments(_ entries: [ChatEntry]) -> [ChatTranscriptSegment] {
-        var result: [ChatTranscriptSegment] = []
-        var run: [ChatEntry] = []
-        func flush() {
-            if run.count >= minimumFold { result.append(.fold(run)) }
-            else { result.append(contentsOf: run.map { ChatTranscriptSegment.entry($0) }) }
-            run.removeAll()
-        }
-        for entry in entries {
-            if entry.kind == "tool", entry.agentID == nil, entry.agentIDs?.isEmpty != false { run.append(entry) }
-            else { flush(); result.append(.entry(entry)) }
-        }
-        flush()
-        return result
-    }
-}
-
-struct UserRow: View {
-    var entry: ChatEntry
-    var title = "You"
-    @Environment(\.chatTextStyle) private var textStyle
-    var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(title).font(.system(size: 10.5, weight: .semibold)).foregroundStyle(Semantic.secondaryInk)
-            if let attachments = entry.attachments, !attachments.isEmpty { ChatAttachmentStrip(attachments: attachments) }
-            if !entry.text.isEmpty { Text(entry.text).font(textStyle.font).foregroundStyle(Semantic.ink).textSelection(.enabled) }
-        }
-        .padding(.vertical, 5)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .accessibilityElement(children: .contain)
-    }
-}
-
-struct AssistantRow: View {
-    var entry: ChatEntry
-    var label: String
-    var accent: Color
-    var presentation: ProviderPresentation?
-    var streaming: Bool
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-                HStack(spacing: 6) {
-                    ChatProviderIcon(presentation: presentation, size: 13)
-                    Text(entry.memberName.map { $0 + " · " + label } ?? label).font(.system(size: 10.5, weight: .semibold)).foregroundStyle(Semantic.secondaryInk).lineLimit(1)
-                    if streaming { ProgressView().controlSize(.mini).tint(accent) }
-                }
-                if entry.text.isEmpty, streaming {
-                    ChatShimmerText(text: "Thinking…", active: true, accent: accent).font(HubTheme.Typography.body)
-                } else {
-                    ChatTranscriptText(text: entry.text, streaming: streaming)
-                }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .contextMenu { Button("Copy reply") { ChatTranscriptTable.copy(entry.text) } }
-        .accessibilityElement(children: .contain)
-    }
-}
-
-struct ToolRow: View {
-    var entry: ChatEntry
-    var accent: Color
-    @Binding var expanded: Bool
-    var workspace: String?
-    var onInspect: (() -> Void)? = nil
-    var running = false
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 8) {
-                header
-                if let onInspect {
-                    Button(action: onInspect) { Image(systemName: "arrow.up.right").font(.system(size: 10)).frame(width: 20, height: 22) }
-                        .buttonStyle(.plain).foregroundStyle(.secondary).help("Inspect subagent transcript")
-                        .accessibilityLabel("Inspect subagent transcript")
-                }
-            }
-            if expanded { body_ }
-        }
-        .padding(.vertical, 4)
-    }
-
-    private var header: some View {
-        Button {
-            if reduceMotion { expanded.toggle() } else { withAnimation(.easeInOut(duration: 0.15)) { expanded.toggle() } }
-        } label: {
-            HStack(spacing: 8) {
-                Image(systemName: "chevron.right").font(.system(size: 9, weight: .semibold)).foregroundStyle(Semantic.secondaryInk)
-                    .rotationEffect(.degrees(expanded ? 90 : 0)).frame(width: 10)
-                if entry.tool == "delegate" { Image(systemName: "person.2").font(.system(size: 12)).foregroundStyle(accent) }
-                else { ChatToolGlyph(name: entry.tool ?? "read_file").foregroundStyle(accent) }
-                Text(entry.tool ?? "tool").font(.system(size: 11.5, weight: .medium, design: .monospaced)).foregroundStyle(Semantic.ink)
-                Text(entry.summary ?? entry.text).font(HubTheme.Typography.detail).foregroundStyle(Semantic.secondaryInk)
-                    .lineLimit(1).truncationMode(.middle)
-                Spacer(minLength: 0)
-                if running { ProgressView().controlSize(.mini).accessibilityHidden(true) }
-                if let stats = ChatPatchStats.count(patchText(entry)) { ChatPatchStatsLabel(stats: stats) }
-                if !entry.changedFiles.isEmpty {
-                    Text(entry.changedFiles.count == 1 ? "1 file" : "\(entry.changedFiles.count) files")
-                        .font(HubTheme.Typography.detail).foregroundStyle(Semantic.secondaryInk)
-                }
-                if entry.isError {
-                    Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 10)).foregroundStyle(Color(nsColor: .systemRed))
-                }
-            }
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel("Tool \(entry.tool ?? ""), \(entry.summary ?? entry.text)")
-        .accessibilityValue((expanded ? "Expanded" : "Collapsed") + (running ? ", Working" : ""))
-    }
-
-    @ViewBuilder private var body_: some View {
-        let detail = entry.detail?.isEmpty == false ? entry.detail! : entry.text
-        if !detail.isEmpty {
-            ScrollView([.vertical, .horizontal]) {
-                PatchText(text: detail).padding(8)
-            }
-            .frame(maxHeight: 260)
-            .background(RoundedRectangle(cornerRadius: 6).fill(Semantic.surface.opacity(0.6)))
-        }
-        if !entry.changedFiles.isEmpty {
-            VStack(alignment: .leading, spacing: 2) {
-                ForEach(entry.changedFiles, id: \.self) { path in
-                    HStack(spacing: 6) {
-                        Image(systemName: "doc").font(.system(size: 10)).foregroundStyle(Semantic.secondaryInk)
-                        Text(path).font(.system(size: 11, design: .monospaced)).foregroundStyle(Semantic.ink)
-                            .lineLimit(1).truncationMode(.middle).textSelection(.enabled)
-                        Spacer(minLength: 0)
-                        Button("Reveal") { reveal(path, in: entry.workspace ?? workspace) }
-                            .buttonStyle(.plain).font(HubTheme.Typography.detail).foregroundStyle(Semantic.secondaryInk)
-                            .accessibilityLabel("Reveal \(path) in Finder")
+                VStack(alignment: .leading, spacing: textStyle.scaled(2)) { ForEach(entries) { entry in row(entry) } }
+                    .padding(.leading, textStyle.scaled(18))
+                    .overlay(alignment: .leading) {
+                        Rectangle().fill(Semantic.hairline).frame(width: 1).padding(.leading, textStyle.scaled(7)).padding(.vertical, 2)
                     }
-                }
             }
-            .padding(.top, 2)
         }
-    }
-}
-
-/// Monospaced output; when it reads as a patch, added and removed lines are
-/// tinted and headers recede. One attributed Text keeps selection and copy plain.
-struct PatchText: View {
-    var text: String
-    var onDark = false
-    private static let lineLimit = 600
-
-    var body: some View {
-        Text(attributed).font(.system(size: 11.5, design: .monospaced)).textSelection(.enabled)
-            .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    private var attributed: AttributedString {
-        let lines = text.split(separator: "\n", omittingEmptySubsequences: false)
-        let isPatch = lines.contains { $0.hasPrefix("@@") || $0.hasPrefix("+++ ") || $0.hasPrefix("--- ") || $0.hasPrefix("*** ") }
-        var result = AttributedString()
-        for (index, line) in lines.prefix(Self.lineLimit).enumerated() {
-            var piece = AttributedString(String(line))
-            piece.foregroundColor = isPatch ? colour(line) : ink
-            result.append(piece)
-            if index < lines.count - 1 { result.append(AttributedString("\n")) }
-        }
-        if lines.count > Self.lineLimit {
-            var more = AttributedString("… \(lines.count - Self.lineLimit) more lines")
-            more.foregroundColor = secondaryInk
-            result.append(more)
-        }
-        return result
-    }
-
-    private var ink: Color { onDark ? .white.opacity(0.88) : Semantic.ink }
-    private var secondaryInk: Color { onDark ? .white.opacity(0.5) : Semantic.secondaryInk }
-
-    private func colour(_ line: Substring) -> Color {
-        if line.hasPrefix("+++") || line.hasPrefix("---") || line.hasPrefix("@@") || line.hasPrefix("*** ") { return secondaryInk }
-        if line.hasPrefix("+") { return Color(nsColor: .systemGreen) }
-        if line.hasPrefix("-") { return Color(nsColor: .systemRed) }
-        return ink
     }
 }
 
@@ -751,11 +563,12 @@ private struct ErrorRow: View {
     var entry: ChatEntry
     var canRetry: Bool
     var retry: () -> Void
+    @Environment(\.chatTextStyle) private var textStyle
 
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
-            Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 11)).foregroundStyle(Color(nsColor: .systemRed)).padding(.top, 2)
-            Text(entry.text).font(HubTheme.Typography.body).foregroundStyle(Semantic.ink).textSelection(.enabled)
+            Image(systemName: "exclamationmark.triangle.fill").font(textStyle.system(11)).foregroundStyle(Color(nsColor: .systemRed)).padding(.top, 2)
+            Text(entry.text).font(textStyle.system(13)).foregroundStyle(Semantic.ink).textSelection(.enabled)
             Spacer(minLength: 0)
             if canRetry {
                 Button("Retry", action: retry).controlSize(.small)
@@ -764,14 +577,6 @@ private struct ErrorRow: View {
         }
         .padding(.vertical, 6)
         .accessibilityElement(children: .contain)
-    }
-}
-
-struct NoticeRow: View {
-    var entry: ChatEntry
-    var body: some View {
-        Text(entry.text).font(HubTheme.Typography.detail).foregroundStyle(Semantic.secondaryInk)
-            .multilineTextAlignment(.center).frame(maxWidth: .infinity).padding(.vertical, 2)
     }
 }
 

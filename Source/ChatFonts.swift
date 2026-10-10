@@ -35,9 +35,12 @@ enum ChatFonts {
         return legacyMonospaced ? "monospaced" : "system"
     }
 
-    static func font(_ selection: String, customName: String = "", size: Double) -> NSFont {
+    /// `size` is the stored preference and stays bounded; `scale` is the
+    /// reading zoom, applied after the bound so a large preference can still
+    /// be zoomed.
+    static func font(_ selection: String, customName: String = "", size: Double, scale: Double = 1) -> NSFont {
         _ = registered
-        let size = size.isFinite ? min(max(size, 10), 32) : 13
+        let size = (size.isFinite ? min(max(size, 10), 32) : 13) * (scale.isFinite && scale > 0 ? scale : 1)
         if selection == "monospaced" { return .monospacedSystemFont(ofSize: size, weight: .regular) }
         let name = selection == "custom" ? customName : choices.first { $0.id == selection }?.postScriptName ?? ""
         return NSFont(name: name, size: size) ?? .systemFont(ofSize: size)
@@ -48,8 +51,18 @@ struct ChatTextStyle {
     var size: Double = 13
     var selection = "system"
     var customName = ""
-    var font: Font { Font(ChatFonts.font(selection, customName: customName, size: size)) }
-    var editorFont: NSFont { ChatFonts.font(selection, customName: customName, size: size + 1) }
+    /// Reading zoom for transcript and composer text; chrome ignores it.
+    var zoom: Double = 1
+    var nsFont: NSFont { ChatFonts.font(selection, customName: customName, size: size, scale: zoom) }
+    var font: Font { Font(nsFont) }
+    var editorFont: NSFont { ChatFonts.font(selection, customName: customName, size: size + 1, scale: zoom) }
+    /// A transcript measurement (row text, glyphs, gaps) at the current zoom.
+    func scaled(_ value: CGFloat) -> CGFloat { value * CGFloat(zoom.isFinite && zoom > 0 ? zoom : 1) }
+    /// System text for transcript rows that is not the reading font: headers,
+    /// tool rows, notices. It zooms with the reading text.
+    func system(_ size: CGFloat, weight: Font.Weight = .regular, design: Font.Design = .default) -> Font {
+        .system(size: scaled(size), weight: weight, design: design)
+    }
 }
 private struct ChatTextStyleKey: EnvironmentKey { static let defaultValue = ChatTextStyle() }
 extension EnvironmentValues {

@@ -135,25 +135,143 @@ import Combine
 }
 '''
 
+LAYOUT_CASES = r'''
+import SwiftUI
+
+struct Item: ChatTranscriptItem {
+    var id: String; var kind: String; var text = ""; var route = "codex/sol"
+    var tool: String? = nil; var summary: String? = nil; var detail: String? = nil
+    var memberID: String? = nil; var memberName: String? = nil
+    var agentID: String? = nil; var agentIDs: [String]? = nil
+}
+
+@main struct Cases {
+    static func main() {
+        func check(_ condition: Bool, _ message: String) { if !condition { fatalError(message) } }
+        let sol = (id: "m1", name: "Sol"), opus = (id: "m2", name: "Opus")
+        func tool(_ id: String, _ name: String = "run_shell", member: (id: String, name: String) = sol, route: String = "codex/sol",
+                  agent: String? = nil) -> Item {
+            Item(id: id, kind: "tool", route: route, tool: name, summary: "Run in /w:\nls", memberID: member.id, memberName: member.name, agentID: agent)
+        }
+        func reply(_ id: String, _ text: String, member: (id: String, name: String) = sol, route: String = "codex/sol") -> Item {
+            Item(id: id, kind: "assistant", text: text, route: route, memberID: member.id, memberName: member.name)
+        }
+        typealias Segment = ChatTranscriptSegment<Item>
+
+        // One header per speaker block; empty rounds vanish; tool runs fold
+        // across them and across hidden notices; a checkpoint ends the block.
+        let items = [
+            Item(id: "u1", kind: "user", text: "Go"),
+            reply("a1", "  \n"), tool("t1"), reply("a1b", ""), tool("t2", "read_file"), tool("t3", "apply_patch"),
+            reply("a2", "Found it."), tool("t4"),
+            Item(id: "trim", kind: "notice", text: ChatNotice.contextTrimmed),
+            Item(id: "n1", kind: "notice", text: ChatNotice.checkpointPrefix + " Your requested continuation will resume after other members."),
+            reply("a3", "", member: opus, route: "claude/opus"), tool("t5", member: opus, route: "claude/opus"),
+            tool("d1", "delegate", member: opus, route: "claude/opus", agent: "child"), tool("t6", member: opus, route: "claude/opus"),
+        ]
+        let segments = Segment.outline(items) { $0.id == "a3" }
+        check(segments.map(\.id) == ["u1", "speaker-t1", "fold-t1", "a2", "t4", "n1", "speaker-a3", "a3", "t5", "d1", "t6"],
+              "Outline order: " + segments.map(\.id).joined(separator: ","))
+        check(segments.map(\.spacing) == [.none, .speaker, .header, .item, .item, .speaker, .speaker, .header, .item, .item, .item],
+              "Speaker and in-block spacing changed")
+        if case .fold(let folded) = segments[2].content { check(folded.map(\.id) == ["t1", "t2", "t3"], "Fold lost a step") }
+        else { fatalError("Three tool rows across an empty round did not fold") }
+        check(segments[5].previousSpeaker?.memberName == "Sol", "Checkpoint does not know whose block it ends")
+        check(Segment.outline(items) { _ in false }.contains { $0.id == "a3" } == false, "Empty finished reply still drawn")
+        let sameRouteOtherMember = [reply("x1", "One"), reply("x2", "Two", member: opus)]
+        check(Segment.outline(sameRouteOtherMember) { _ in false }.filter(\.isSpeaker).count == 2, "Members on one route shared a header")
+        let continued = [reply("y1", "One"), tool("y2"), reply("y3", "Two")]
+        check(Segment.outline(continued) { _ in false }.filter(\.isSpeaker).count == 1, "One speaker repeated its header")
+
+        // Tool rows lead with what was done, not the shared folder.
+        let shell = ChatToolDisplay.describe(tool: "run_shell", summary: "Run in /Users/x/BF2:\ngit status --short")
+        check(shell == ChatToolDisplay(verb: "Ran", subject: "git status --short", code: true, command: "git status --short"), "Shell row")
+        check(ChatToolDisplay.describe(tool: "run_shell", summary: "Run in /w:\ncd a\nmake", live: true).subject == "cd a …", "Multi-line command")
+        check(ChatToolDisplay.describe(tool: "run_shell", summary: "Run in /w:\nls", live: true).verb == "Running", "Live verb")
+        let edit = ChatToolDisplay.describe(tool: "apply_patch", summary: "Apply patch:\nUpdate: Source/A.swift\nAdd: Source/B.swift → Move to: Source/C.swift")
+        check(edit.verb == "Edited" && edit.subject == "A.swift, C.swift", "Patch row: \(edit)")
+        check(ChatToolDisplay.describe(tool: "apply_patch", summary: "Apply patch:\nAdd: a\nAdd: b\nAdd: c\nAdd: d\nAdd: e").subject == "a, b, c +2 more", "Many files")
+        check(ChatToolDisplay.describe(tool: "apply_patch", summary: "Apply patch:\nAdd: new.py").verb == "Created", "Created")
+        check(ChatToolDisplay.describe(tool: "apply_patch", summary: "apply_patch failed") == ChatToolDisplay(verb: "Edited files"), "Failed patch")
+        let read = ChatToolDisplay.describe(tool: "read_file", summary: "Read tools/k.py (line 85, limit 175)")
+        check(read.subject == "tools/k.py" && read.context == "lines 85–259", "Read range")
+        check(ChatToolDisplay.describe(tool: "read_file", summary: "Read k.py (line 1, limit 500)").context == "", "Whole read")
+        let search = ChatToolDisplay.describe(tool: "search_files", summary: "Search BF2 for 'water_height' (glob *.py)")
+        check(search.subject == "water_height" && search.code && search.context == "in BF2 · *.py", "Search: \(search)")
+        check(ChatToolDisplay.describe(tool: "web_search", summary: "Web search: msh format").subject == "msh format", "Web query")
+        check(ChatToolDisplay.describe(tool: "web_search", summary: "Web search").subject == "", "Bare web search")
+        check(ChatToolDisplay.describe(tool: "mystery", summary: "mystery failed").subject == "", "Unknown tool repeated its name")
+        check(ChatToolDisplay.describe(tool: "mystery", summary: "Did a thing\nmore").subject == "Did a thing", "Unknown summary dropped")
+        check(ChatToolDisplay.activity(["run_shell", "run_shell", "apply_patch", "read_file", nil, "search_history", "read_history"])
+              == "2 commands, 1 edit, 1 read, 1 step, 2 recalls", "Fold activity")
+
+        // Source links collapse only when the line is exactly the runtime's list.
+        let cited = ChatReplySources.split("Body\n\nSources: [A \\[x\\]](<https://www.a.com/p>), [B](<https://b.org/q?x=1>)")
+        check(cited.body == "Body" && cited.links.map(\.title) == ["A [x]", "B"] && cited.links.map(\.host) == ["a.com", "b.org"], "Sources split")
+        check(ChatReplySources.split("\n\nSources: [A](<https://a.com>)").body == "", "Sources-only reply")
+        check(ChatReplySources.split("Sources: [A](<https://a.com>)").links.count == 1, "Leading sources line")
+        for literal in ["Body\n\nSources: see the appendix", "Body\n\nSources: [A](<javascript:alert(1)>)",
+                        "Inline Sources: [A](<https://a.com>) here", "Body\n\nSources: [A](<https://a.com>) and more"] {
+            let kept = ChatReplySources.split(literal)
+            check(kept.body == literal && kept.links.isEmpty, "Prose hidden as sources: " + literal)
+        }
+
+        // Notices.
+        check(ChatNotice.style(ChatNotice.contextTrimmed) == .hidden, "Trim notice shown")
+        check(ChatNotice.style("Team stopped. Recorded results are kept.") == .divider, "Plain notice")
+        check(ChatNotice.checkpointLine(ChatNotice.checkpointPrefix + " Your requested continuation will resume after other members.", member: "Sol")
+              == "Sol reached a checkpoint · continues after the other members", "Checkpoint line")
+        check(ChatNotice.checkpointLine(ChatNotice.checkpointPrefix + " This member did not request continuation; send a message to continue.", member: nil)
+              == "Checkpoint reached · send a message to continue", "Checkpoint without member")
+
+        // Every glyph a row can ask for exists, and the path parser reads the
+        // catalogue's curve syntax, including relative curves.
+        for name in ["run_shell", "apply_patch", "read_file", "search_files", "web_search", "search_history", "record_decision",
+                     "delegate", "team_status", nil] {
+            check(ChatToolGlyph.has(ChatToolDisplay.glyph(name)), "Missing glyph for \(name ?? "nil")")
+        }
+        check(ChatToolGlyph.has("handoff"), "Missing handoff glyph")
+        let box = ChatToolGlyph.svg(["M4.9 5.5 19.2 5.2 19 18.6 5.2 18.9Z"]).boundingRect
+        check(abs(box.minX - 4.9) < 0.01 && abs(box.maxX - 19.2) < 0.01 && abs(box.maxY - 18.9) < 0.01, "Polyline parsed wrong: \(box)")
+        let arc = ChatToolGlyph.svg(["M4.5 16.2C5 9.7 8.2 5.7 12.1 5.7c4.1 0 7.1 4 7.5 10.5"]).boundingRect
+        check(abs(arc.maxX - 19.6) < 0.01 && abs(arc.maxY - 16.2) < 0.01 && arc.minY >= 5.6, "Relative curve parsed wrong: \(arc)")
+        check(ChatToolGlyph.svg(["M12 8.3V9.9"]).boundingRect.height > 1.5, "Vertical line lost")
+        check(ChatToolGlyph.svg(["M1 2Z 3 4"]).isEmpty, "Malformed path data drew a shape")
+        print("Transcript outline, tool phrasing, sources, notices and glyph checks passed")
+    }
+}
+'''
+
 
 @unittest.skipUnless(sys.platform == "darwin" and shutil.which("xcrun"), "Native transcript tests need macOS")
 class ChatTranscriptTests(unittest.TestCase):
-    def test_parser_streaming_copy_budgets_and_column_layout(self):
+    def run_native(self, files, cases, marker, stubs=None):
         source = Path(__file__).parent
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            (root / "Stubs.swift").write_text(STUBS)
-            (root / "Cases.swift").write_text(CASES)
+            extra = []
+            if stubs is not None:
+                (root / "Stubs.swift").write_text(stubs)
+                extra.append(str(root / "Stubs.swift"))
+            (root / "Cases.swift").write_text(cases)
             binary = root / "transcript-tests"
             compiled = subprocess.run(["xcrun", "swiftc", "-swift-version", "5", "-parse-as-library",
                 "-target", platform.machine() + "-apple-macosx14.0", "-module-cache-path", str(root / "cache"),
-                str(root / "Stubs.swift"), str(source / "ChatFonts.swift"), str(source / "ChatTranscriptText.swift"),
+                *extra, *(str(source / name) for name in files),
                 str(root / "Cases.swift"), "-framework", "AppKit", "-framework", "SwiftUI", "-o", str(binary)],
                 capture_output=True, text=True, timeout=120)
             self.assertEqual(compiled.returncode, 0, compiled.stderr)
             ran = subprocess.run([str(binary)], capture_output=True, text=True, timeout=30)
             self.assertEqual(ran.returncode, 0, ran.stderr)
-            self.assertIn("Transcript parser, streaming, copy and layout checks passed", ran.stdout)
+            self.assertIn(marker, ran.stdout)
+
+    def test_parser_streaming_copy_budgets_and_column_layout(self):
+        self.run_native(["ChatFonts.swift", "ChatTranscriptText.swift"], CASES,
+                        "Transcript parser, streaming, copy and layout checks passed", stubs=STUBS)
+
+    def test_outline_tool_phrasing_sources_notices_and_glyphs(self):
+        self.run_native(["ChatTranscriptLayout.swift", "ChatToolGlyph.swift"], LAYOUT_CASES,
+                        "Transcript outline, tool phrasing, sources, notices and glyph checks passed")
 
 
 if __name__ == "__main__":
