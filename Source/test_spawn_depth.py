@@ -15,8 +15,9 @@ from unittest.mock import patch
 from bridge_core import SLOTS
 from hub_config import normalize
 from responses_tools import tool_name
-from spawn_depth import (FLATTENED_SPAWN_TOOL, apply_spawn_depth_limit, apply_subagent_model,
-                         filter_spawn_tools, should_strip, strip_spawn_tools)
+from spawn_depth import (FLATTENED_SPAWN_TOOL, SPAWN_CHILD_NOTE, SPAWN_DISABLED_NOTE,
+                         apply_spawn_depth_limit, apply_subagent_model, filter_spawn_tools,
+                         should_strip, strip_spawn_tools, with_note)
 
 
 NAMESPACED_SPAWN = {"type": "namespace", "name": "collaboration", "tools": [
@@ -163,17 +164,61 @@ class ApplyLimitTests(unittest.TestCase):
     def test_non_dict_body_passthrough(self):
         self.assertEqual(apply_spawn_depth_limit([1, 2], 0), ([1, 2], 0))
 
+    def test_a_stripped_request_is_told_what_was_withheld_and_why(self):
+        # Codex's briefing tells every agent it "can spawn sub-agents". A
+        # tasked child whose spawn tool is silently gone reads that as a
+        # broken session ("agent metadata but no direct collaboration
+        # controls", 10 Oct 2026) instead of finishing its own task.
+        child = body_for([{"type": "agent_message", "content": "t"}])
+        child["instructions"] = "You are Codex."
+        edited, stripped = apply_spawn_depth_limit(child, 1)
+        self.assertEqual(stripped, 1)
+        self.assertEqual(edited["instructions"], "You are Codex.\n\n" + SPAWN_CHILD_NOTE)
+        self.assertNotIn("spawn_agent", json.dumps(edited["tools"]))
+        # The input is never mutated; the note lives on the copy only.
+        self.assertEqual(child["instructions"], "You are Codex.")
+        # Delegation switched off on the route says so in its own words.
+        off = body_for([{"type": "message", "role": "user", "content": "hi"}])
+        edited, stripped = apply_spawn_depth_limit(off, 0)
+        self.assertEqual(stripped, 1)
+        self.assertEqual(edited["instructions"], SPAWN_DISABLED_NOTE)
+        self.assertIn("spawn tool", SPAWN_DISABLED_NOTE)
+        self.assertIn("spawn tool", SPAWN_CHILD_NOTE)
+
+    def test_note_never_reaches_a_request_that_kept_its_tool(self):
+        parent = body_for([{"type": "message", "role": "user", "content": "hi"}])
+        parent["instructions"] = "You are Codex."
+        edited, stripped = apply_spawn_depth_limit(parent, 1)
+        self.assertEqual(stripped, 0)
+        self.assertIs(edited, parent)
+        self.assertEqual(parent["instructions"], "You are Codex.")
+
+    def test_with_note_keeps_text_and_leaves_other_shapes_alone(self):
+        self.assertEqual(with_note(None, "note"), "note")
+        self.assertEqual(with_note("", "note"), "note")
+        self.assertEqual(with_note("keep", "note"), "keep\n\nnote")
+        odd = [{"type": "input_text", "text": "x"}]
+        self.assertIs(with_note(odd, "note"), odd)
+        child = body_for([{"type": "agent_message", "content": "t"}])
+        child["instructions"] = odd
+        edited, stripped = apply_spawn_depth_limit(child, 1)
+        self.assertEqual(stripped, 1)
+        self.assertIs(edited["instructions"], odd)
+
 
 class FilterMiddlewareTests(unittest.TestCase):
     SETTINGS = {"providers": {"mistral": {"spawn_depth_limit": 1}}}
 
     def test_strip_rewrites_body_and_records(self):
         body = body_for([{"type": "agent_message", "agent": "a", "content": "task"}])
+        body["instructions"] = "You are Codex."
         handler = stub_handler(json.dumps(body).encode(), self.SETTINGS)
         calls = record_stub(handler)
         self.assertEqual(filter_spawn_tools(handler), 1)
         downstream = json.loads(handler.rfile.read())
         self.assertNotIn("spawn_agent", json.dumps(downstream["tools"]))
+        # The downstream request explains the strip to the model.
+        self.assertEqual(downstream["instructions"], "You are Codex.\n\n" + SPAWN_CHILD_NOTE)
         self.assertEqual(handler.headers["Content-Length"], str(len(json.dumps(
             downstream, ensure_ascii=False).encode())))
         self.assertEqual(len(calls), 1)

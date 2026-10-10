@@ -338,16 +338,41 @@ class CodexCliAgentError(RuntimeError):
         self.http_status = http_status
 
 
-def _tool_alias(name):
-    """Stable wire name, independent of tool order and Codex's reserved names.
+#: Characters an alias stem may carry: the nested runtime's own wire pattern.
+_ALIAS_STEM = re.compile(r"[^A-Za-z0-9_-]+")
+#: Stem budget. "bridge_" + stem + "_" + digest stays under the 64-character
+#: ceiling the providers' tool names share, with room to spare.
+_ALIAS_STEM_LIMIT = 40
 
-    All tools are mapped so a host tool named like one of our aliases cannot
-    collide with another tool. History uses the same mapping on every turn.
-    Context reduction: 16 hex digits (64 bits) rather than 48. Every alias is
-    model-visible and hex tokenizes poorly; a desktop offering ~110 tools paid
-    for 32 surplus digits on each, and 64 bits leaves no practical collision.
+
+def _tool_alias(name):
+    """Stable, readable wire name, independent of tool order and Codex's reserved names.
+
+    The alias keeps the host tool's own name in it: ``spawn_agent`` travels as
+    ``bridge_spawn_agent_<8 hex>``, not as sixteen hex digits. Codex's
+    multi-agent briefing tells the model to "use `spawn_agent`", and on this
+    route that tool is one dynamic tool among some 170, so a purely hashed
+    alias left nothing in the tool list matching any name the model had been
+    told to call. That is the failure responses_tools.tool_name already fixed
+    on the native path, and it was seen again on this one on 10 Oct 2026: a
+    seat that had spawned sixteen helpers through the hashed alias earlier in
+    the day reported "agent metadata but no direct collaboration controls"
+    after a cold 450K-token re-injection, with the desktop still forwarding
+    all 168 tools. The description's "Host tool: spawn_agent" line is the
+    only other clue, and it sits behind the catalogue block. A name the
+    model can read is the cheaper, stronger signal.
+
+    The ``bridge_`` prefix stays, so no alias can shadow a built-in tool of
+    the nested runtime (``apply_patch``, ``exec_command``), and the digest
+    stays, so two host names that reduce to the same stem still map apart
+    and a host tool named like one of our aliases cannot collide with
+    another tool. The alias is a pure function of the name, so history and
+    the offered list agree on every turn. Eight hex digits is the context
+    budget the old 16-digit alias paid back: hex tokenizes poorly, and every
+    alias is model-visible on every turn.
     """
-    return "bridge_" + hashlib.sha256(name.encode("utf-8")).hexdigest()[:16]
+    stem = _ALIAS_STEM.sub("_", name).strip("_")[:_ALIAS_STEM_LIMIT].rstrip("_") or "tool"
+    return "bridge_" + stem + "_" + hashlib.sha256(name.encode("utf-8")).hexdigest()[:8]
 
 
 # --------------------------------------------------------------------------
