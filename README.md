@@ -1,6 +1,6 @@
 # Provider Hub
 
-**Version 0.5.6 (build 64).** Licensed Apache-2.0 — see [LICENSE](LICENSE),
+**Version 0.5.6 (build 65).** Licensed Apache-2.0 — see [LICENSE](LICENSE),
 with attributions in [NOTICE](NOTICE).
 
 A native macOS menu bar app that connects Claude Desktop and the Codex coding workspace to eleven model API connections: Mistral, Kimi Code, MiMo Token Plan, Ollama, DeepSeek, Cerebras, Muse, Grok, Qwen Token Plan, OpenRouter, and the Gemini API. Claude uses the local Messages endpoint. Codex uses Responses: Grok, Ollama, and OpenRouter retain native Responses transports, while the other eight use the local Messages bridge and their provider adapters.
@@ -52,12 +52,16 @@ Provider implementation is split between [registry and connections](Source/provi
 
 Build from the repository root with `bash Source/build.sh` to create `Provider Hub.app` beside the checkout. `Source/build.sh` is the source of truth for both the version and the build stamp. Building from source applies an ad-hoc development signature, which is enough to run locally; distribution builds are signed with an Apple Developer ID and notarized on the maintainer's machine, and those credentials are never committed. See [`CONTRIBUTING.md`](CONTRIBUTING.md) for setup and tests, and [`SECURITY.md`](SECURITY.md) for the signing and threat model. A shorter end-user guide is in `QUICK-START.md`.
 
-Build 64 reworks the lean Chat harness: concurrent chats, Team members that
-run in parallel and sign off at checkpoints, a regrouped transcript with a
-reading zoom and native text selection, and a Background Processes inspector
-tab. Since build 63, an **Update** pill in the compact Hub and lean Chat
-mastheads installs newer notarized GitHub releases and defers restart while
-desktop apps or Chat work are active. See [Updating Provider Hub](docs/updater.md).
+Build 65 polishes lean Chat Teams (four members, quiet checkpoints, a turn
+close-out table of changed files, retried member requests) and renders block
+Markdown in replies. The Codex tab now warns when a Desktop project uses the
+whole disk as its folder, which makes Desktop refuse follow-up messages; see
+[Codex route friction repairs](docs/codex-frictions.md). Build 64 reworked the
+lean Chat harness with concurrent chats, parallel Team members, a regrouped
+transcript and a Background Processes inspector tab. Since build 63, an
+**Update** pill in the compact Hub and lean Chat mastheads installs newer
+notarized GitHub releases and defers restart while desktop apps or Chat work
+are active. See [Updating Provider Hub](docs/updater.md).
 
 **Provider connections**
 
