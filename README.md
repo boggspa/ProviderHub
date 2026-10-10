@@ -54,7 +54,9 @@ Build from the repository root with `bash Source/build.sh` to create `Provider H
 
 Build 66 keeps lean Chat Team work running across checkpoints: new Teams keep
 their tools, members resume independently, and a member can wait on a process
-or a peer without polling. Optional time and reported-token limits sit in the
+or a peer without polling. Build 66 raises the Team cap to five members and the
+worker-wide model-request gate to twelve, so a five-member Team leaves the
+per-turn four-helper budget and open Side Chats with room to breathe. Optional time and reported-token limits sit in the
 Team's Run settings. Type `@Name` to address members; a tag that reaches a
 member is drawn in that member's provider accent, and only tagged members run.
 See [Team in Chat](docs/chat-team.md). Build 65 brought four-member Teams, a

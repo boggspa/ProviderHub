@@ -120,7 +120,7 @@ private struct ChatTeamEditor: View {
     @State private var minutes = ""
     @State private var tokens = ""
     @State private var contextTokens = "200000"
-    @State private var processSlots = 4
+    @State private var processSlots = 5
     private var execution: ChatTeamExecution? {
         let minuteText = minutes.trimmingCharacters(in: .whitespacesAndNewlines)
         let tokenText = tokens.trimmingCharacters(in: .whitespacesAndNewlines)

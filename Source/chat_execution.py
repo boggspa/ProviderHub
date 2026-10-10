@@ -11,7 +11,7 @@ import hashlib
 import time
 
 
-DEFAULTS = {"mode": "task", "contextTokens": 200000, "processes": 4,
+DEFAULTS = {"mode": "task", "contextTokens": 200000, "processes": 5,
             "minutes": None, "tokens": None}
 
 
