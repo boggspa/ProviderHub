@@ -294,6 +294,22 @@ struct Item: ChatTranscriptItem {
               == "Sol reached a checkpoint · continues after the other members", "Checkpoint line")
         check(ChatNotice.checkpointLine(ChatNotice.checkpointPrefix + " This member did not request continuation; send a message to continue.", member: nil)
               == "Checkpoint reached · send a message to continue", "Checkpoint without member")
+        // The wording finish_checkpoint writes when the round budget runs out.
+        let budget = " The 24-round tool budget was used up. "
+        check(ChatNotice.checkpointLine(ChatNotice.checkpointPrefix + budget + "This member's requested continuation will resume after other members.", member: "Sol")
+              == "Sol reached a checkpoint · round budget used · continues after the other members", "Budget continuation")
+        check(ChatNotice.checkpointLine(ChatNotice.checkpointPrefix + budget + "This member finished its contribution.", member: "Opus")
+              == "Opus reached a checkpoint · round budget used · contribution finished", "Budget finished")
+        check(ChatNotice.checkpointLine(ChatNotice.checkpointPrefix + budget + "This member needs your answer before continuing.", member: "Opus")
+              == "Opus reached a checkpoint · round budget used · needs your answer", "Budget question")
+        check(ChatNotice.checkpointLine(ChatNotice.checkpointPrefix + budget + "This member paused; send a message to continue from the recorded results.", member: "Muse")
+              == "Muse reached a checkpoint · round budget used · send a message to continue", "Budget pause")
+        let turn = ChatNotice.turnCheckpointPrefix + budget + "Recorded results are kept; send a message to continue if work remains."
+        check(ChatNotice.style(turn) == .checkpoint, "Solo turn checkpoint drawn as a plain divider")
+        check(ChatNotice.checkpointLine(turn, member: "GPT 6.1 Sol")
+              == "GPT 6.1 Sol reached a checkpoint · round budget used · send a message to continue", "Turn checkpoint")
+        check(ChatNotice.checkpointLine(ChatNotice.checkpointPrefix + " Something new happened.", member: "Sol")
+              == "Sol reached a checkpoint · Something new happened", "Unknown checkpoint wording lost")
 
         // Every glyph a row can ask for exists, and the path parser reads the
         // catalogue's curve syntax, including relative curves.

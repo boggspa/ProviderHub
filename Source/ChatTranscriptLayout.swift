@@ -261,8 +261,9 @@ enum ChatReplySources {
     }
 }
 
-/// Transcript notices: most read as a quiet divider; a Team checkpoint
-/// becomes a handoff line naming the member; a few routine ones are hidden.
+/// Transcript notices: most read as a quiet divider; a Team or turn
+/// checkpoint becomes a handoff line naming the speaker; a few routine ones
+/// are hidden.
 enum ChatNotice {
     enum Style: Equatable { case hidden, checkpoint, divider }
 
@@ -270,21 +271,28 @@ enum ChatNotice {
     /// runtime no longer writes it; older chats still contain it.
     static let contextTrimmed = "Older model context trimmed. The full visible transcript is kept."
     static let checkpointPrefix = "Team contribution checkpoint reached."
+    static let turnCheckpointPrefix = "Turn checkpoint reached."
 
     static func style(_ text: String) -> Style {
         if text == contextTrimmed { return .hidden }
-        if text.hasPrefix(checkpointPrefix) { return .checkpoint }
+        if text.hasPrefix(checkpointPrefix) || text.hasPrefix(turnCheckpointPrefix) { return .checkpoint }
         return .divider
     }
 
-    /// "Sol reached a checkpoint · continues after the other members".
+    /// "Sol reached a checkpoint · round budget used · continues after the
+    /// other members". Known runtime wording maps to short phrases; anything
+    /// else is kept as written so a new outcome is never lost.
     static func checkpointLine(_ text: String, member: String?) -> String {
-        let rest = text.dropFirst(checkpointPrefix.count).trimmingCharacters(in: .whitespaces)
-        let next: String
-        if rest.contains("resume after other members") { next = "continues after the other members" }
-        else if rest.contains("send a message") { next = "send a message to continue" }
-        else { next = rest.hasSuffix(".") ? String(rest.dropLast()) : rest }
+        let prefix = [checkpointPrefix, turnCheckpointPrefix].first { text.hasPrefix($0) } ?? ""
+        let rest = text.dropFirst(prefix.count).trimmingCharacters(in: .whitespaces)
+        var parts: [String] = []
+        if rest.contains("budget was used up") { parts.append("round budget used") }
+        if rest.contains("resume after other members") { parts.append("continues after the other members") }
+        else if rest.contains("finished its contribution") { parts.append("contribution finished") }
+        else if rest.contains("needs your answer") { parts.append("needs your answer") }
+        else if rest.contains("send a message") { parts.append("send a message to continue") }
+        else if parts.isEmpty, !rest.isEmpty { parts.append(rest.hasSuffix(".") ? String(rest.dropLast()) : rest) }
         let head = (member.map { $0 + " reached a checkpoint" } ?? "Checkpoint reached")
-        return next.isEmpty ? head : head + " · " + next
+        return ([head] + parts).joined(separator: " · ")
     }
 }
