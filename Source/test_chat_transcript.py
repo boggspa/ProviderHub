@@ -363,6 +363,9 @@ struct Item: ChatTranscriptItem {
         let continued = [reply("y1", "One"), tool("y2"), reply("y3", "Two")]
         check(Segment.outline(continued) { _ in false }.filter(\.isSpeaker).count == 2, "Team text reply did not open a section")
         check(Segment.outline([tool("thinkingTool"), reply("thinking", "")]) { $0.id == "thinking" }.filter(\.isSpeaker).count == 1, "Blank live round opened a text section")
+        let blankInterleaved = [tool("blank-s"), tool("blank-o", member: opus), reply("blank-live", "")]
+        check(Segment.outline(blankInterleaved) { $0.id == "blank-live" }.map(\.id) == ["speaker-blank-s", "blank-s", "blank-live", "speaker-blank-o", "blank-o"], "Blank live placeholder opened an interleaved section")
+        check(Segment.outline([reply("first-blank", "")]) { _ in true }.map(\.id) == ["speaker-first-blank", "first-blank"], "First live placeholder lost needed section")
         let soloContinued = continued.map { item -> Item in var item = item; item.memberID = nil; item.memberName = nil; return item }
         check(Segment.outline(soloContinued) { _ in false }.map(\.id) == ["speaker-y1", "y1", "y2", "y3"], "Solo layout changed")
 

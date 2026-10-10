@@ -127,6 +127,29 @@ import Combine
         check(model.entries.last?.text == "hello ☀︎", "fragmented worker output lost text")
         try send(["event":"delta", "chat":"A", "id":"reply-1", "text":"wrong chat"])
         check(model.entries.last?.text == "hello ☀︎", "cross-chat delta contaminated visible transcript")
+        let priorVersion = model.transcriptVersion
+        try send(["event":"entry", "chat":"B", "entry":["id":"peer-tail", "kind":"assistant", "text":"Peer", "route":"ollama/test", "isError":false, "changedFiles":[]]])
+        check(model.transcriptVersion == priorVersion + 1, "Append did not invalidate transcript")
+        let beforeEarlierDelta = model.transcriptVersion
+        try send(["event":"delta", "chat":"B", "id":"reply-1", "text":" earlier"])
+        check(model.transcriptVersion == beforeEarlierDelta + 1 && model.entries.first(where: { $0.id == "reply-1" })?.text.hasSuffix(" earlier") == true,
+              "Earlier streaming member did not invalidate transcript")
+        try send(["event":"delta", "chat":"A", "id":"reply-1", "text":"ignored"])
+        check(model.transcriptVersion == beforeEarlierDelta + 1, "Other chat invalidated selected transcript")
+
+        // Measure the scalar observation on a long Unicode transcript. This
+        // deliberately measures observation, not existing entry mutation costs.
+        let measured = ChatModel(sendCommand: { _ in true }, preferences: preferences)
+        let largeText = String(repeating: "👩🏽‍💻é東京", count: 4096)
+        measured.entries = (0..<2000).map { index in
+            var row = timed; row.id = "history-\(index)"; row.text = largeText; return row
+        }
+        let measurementStart = ProcessInfo.processInfo.systemUptime
+        var observed: UInt64 = 0
+        for _ in 0..<100000 { observed &+= measured.transcriptVersion }
+        let observationTime = ProcessInfo.processInfo.systemUptime - measurementStart
+        check(observed == 100000, "Long transcript version reads changed state")
+        print("Long fixture: 2000 Unicode rows, 100000 version reads in \(observationTime)s")
         let attachmentURL = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".txt")
         try Data("attachment text".utf8).write(to: attachmentURL)
         defer { try? FileManager.default.removeItem(at: attachmentURL) }
@@ -498,12 +521,22 @@ import Combine
             let reviewReply = model.entries.last!
             check(model.isStreaming(buildReply, fallback:false) && model.isStreaming(reviewReply, fallback:false),
                   "one member's new row stopped another member's streaming layout")
+            check(model.streamingEntryIDs() == Set(["build-2", "review-1"]), "Active-ID set lost interleaved member")
+            let originalEntries = model.entries
+            model.entries = measured.entries + originalEntries
+            let activeStart = ProcessInfo.processInfo.systemUptime
+            for _ in 0..<10000 {
+                check(model.streamingEntryIDs() == Set(["build-2", "review-1"]), "Long fixture active IDs changed")
+            }
+            print("Long fixture: 2000 Unicode history rows, 10000 active-ID passes in \(ProcessInfo.processInfo.systemUptime - activeStart)s")
+            model.entries = originalEntries
             check(model.team?.members.map { $0.usage! } == [800, 1200] && model.team?.members.map { $0.context! } == [100000, 128000],
                   "parallel member usage/context lost their identities")
             reviewer["status"] = "done"; parallelTeam["members"] = [builder, reviewer]
             try send(["event":"team", "chat":"A", "team":parallelTeam])
             check(model.isStreaming(buildReply, fallback:false) && !model.isStreaming(reviewReply, fallback:true),
                   "completed member remained live or hid a working peer")
+            check(model.streamingEntryIDs() == Set(["build-2"]), "Completed member remained in active-ID set")
         }
         try send(["event":"state", "busy":false, "status":"Paused"])
         try send(["event":"team", "chat":"A", "team":roster("needs_input", "needs_input")])
@@ -772,6 +805,7 @@ import Combine
             # update; repeats within each failure period must not flood the log.
             self.assertEqual(ran.stderr.count("Team update rejected for"), 7, ran.stderr)
             self.assertIn("state transitions passed", ran.stdout)
+            print(ran.stdout.strip())
 
 
 if __name__ == "__main__": unittest.main()
