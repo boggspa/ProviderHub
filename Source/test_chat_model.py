@@ -501,6 +501,38 @@ import Combine
             check(model.isStreaming(buildReply, fallback:false) && !model.isStreaming(reviewReply, fallback:true),
                   "completed member remained live or hid a working peer")
         }
+        // A working Team stays editable; a change shows as pending until it lands.
+        do {
+            check(model.busy && !model.canConfigureTeam && model.canEditTeam, "a working Team could not be edited")
+            var editing = roster("working", "working", "c2")
+            var builder = (editing["members"] as! [[String: Any]])[0]
+            builder["pendingChange"] = ["name":"Builder", "label":"Other", "choice":"ollama/other|work", "route":"ollama/other",
+                                        "account":"work", "effort":"", "responsibility":"Build"]
+            editing["members"] = [builder]
+            try send(["event":"team", "chat":"A", "team":editing])
+            check(model.team?.members[0].statusLabel == "Applying…" && model.team?.members[0].route == "ollama/test" &&
+                  model.team?.members[0].pendingChange?.label == "Other", "pending change was not shown as applying")
+            check(model.mentionTargets.first?.route == "ollama/test", "chips drew from a change that has not landed")
+            let beforeOff = commands.count
+            model.configureTeam(enabled: false, members: [memberSpec])
+            check(commands.count == beforeOff && model.teamNotice.contains("Stop the Team"), "a working Team was turned off")
+            model.configureTeam(enabled: true, members: [memberSpec.merging(["id":"builder"]) { $1 }])
+            let liveRequest = commands.last?["request"] as? String ?? ""
+            check(commands.last?["command"] as? String == "configure_team" && model.teamRequest == liveRequest &&
+                  !model.canEditTeam && model.teamNotice.isEmpty, "live Team edit was not sent once")
+            try send(["event":"team", "chat":"A", "request":liveRequest, "team":editing])
+            check(model.teamRequest == nil && model.canEditTeam && model.busy, "live Team edit acknowledgement did not settle")
+            builder["pendingChange"] = ["remove": true]; editing["members"] = [builder]
+            try send(["event":"team", "chat":"A", "team":editing])
+            check(model.team?.members[0].statusLabel == "Removing…", "pending removal was not shown")
+            builder.removeValue(forKey: "pendingChange")
+            builder["route"] = "ollama/other"; builder["label"] = "Other"; builder["choice"] = "ollama/other|work"
+            editing["members"] = [builder]
+            try send(["event":"team", "chat":"A", "team":editing])
+            check(model.team?.members[0].pendingChange == nil && model.team?.members[0].statusLabel == "Working" &&
+                  model.mentionTargets.first?.route == "ollama/other", "a landed change did not re-resolve the chips")
+            try send(["event":"team", "chat":"A", "team":roster("working", "working", "c2")])
+        }
         try send(["event":"state", "busy":false, "status":"Paused"])
         try send(["event":"team", "chat":"A", "team":roster("needs_input", "needs_input")])
         let beforeInputResume = commands.count; model.resumeTeam()

@@ -919,6 +919,7 @@ class ChatService:
     def approved(self, summary, detail=None, *, member=None):
         with self._mutex:
             if self.cancel.is_set() or self.closing: return False
+            if member and member.get("pendingChange"): return False
             self.approval_allowed = False; self.approval_event.clear()
             self.approval = {"id": uuid.uuid4().hex, "summary": summary, "workspace": self.chat["workspace"], "detail": detail}
             if member: self.approval.update(memberID=member["id"], memberName=member["name"])
@@ -985,6 +986,7 @@ class ChatService:
                             self.team_parent.chat["team"]["limitReason"] = reason
                             chat["status"] = "limit_reached"
                             break
+                if self.role == "team": chat_team.boundary(self)
                 if self.role == "team": chat_team.consume_update(self, choice)
                 self.emit({"event": "state", "busy": True, "interrupting": False, "status": "Thinking…"})
                 current = self.add(entry("assistant", route=chat["route"], recorded=False))
@@ -993,7 +995,8 @@ class ChatService:
                         offset = len(current["text"])
                         current["text"] += text
                         self.emit({"event": "delta", "chat": chat["id"], "id": current["id"], "text": text, "offset": offset})
-                message = self.request_round(chat_team.round_payload(self, choice, round_index), current, delta)
+                with chat_team.model_request(self):
+                    message = self.request_round(chat_team.round_payload(self, choice, round_index), current, delta)
                 content = message["content"]
                 current["text"] = "".join(block.get("text", "") for block in content if block.get("type") == "text")
                 current["recorded"] = True
@@ -1044,7 +1047,8 @@ class ChatService:
                     break
                 results = {"role": "user", "content": []}
                 chat["messages"].append(results)
-                for call in calls:
+                for position, call in enumerate(calls):
+                    chat_team.skip_remaining(self, results, calls[position:])
                     if self.cancel.is_set(): raise InterruptedError("Stopped")
                     name, arguments = call.get("name"), call.get("input")
                     # Provider call IDs belong to that provider context and may
@@ -1077,6 +1081,7 @@ class ChatService:
                                 description = runner.describe(name, arguments)
                             must_ask = description["requires_approval"] and needs_approval(chat.get("approvalMode", "manual"), name, arguments, chat["workspace"])
                             allowed = not must_ask or self.approved(description["summary"], arguments.get("patch"))
+                            chat_team.start_tool(self, results, calls[position:])
                             if self.cancel.is_set(): raise InterruptedError("Stopped")
                             if allowed:
                                 if name != "team_status": chat_execution.guard(self)
@@ -1113,6 +1118,7 @@ class ChatService:
                     if index is not None: chat["entries"][index] = visible; self.emit({"event": "entry", "chat": chat["id"], "entry": visible})
                     else: self.add(visible)
                     self.save()
+                    chat_team.end_tool(self)
                 current = None
                 if self.role == "team" and chat["teamDecision"]["state"] == "waiting":
                     chat["status"] = "yielded"
@@ -1123,20 +1129,29 @@ class ChatService:
                 current["recorded"] = True
                 self.emit({"event": "entry", "chat": chat["id"], "entry": current})
         except Exception as exc:
+            # A Team edit ends this contribution at a boundary; it is not a stop or a failure.
+            changed = isinstance(exc, chat_team.MemberChanged) or (isinstance(exc, InterruptedError) and
+                      self.role == "team" and getattr(self, "team_phase", None) != "tool" and
+                      chat_team._changing(self) and not self.team_parent.cancel.is_set())
             stopped = self.cancel.is_set() or isinstance(exc, InterruptedError)
-            chat["status"] = "stopped" if stopped else "error"
+            chat["status"] = "retired" if changed else "stopped" if stopped else "error"
             text = "Stopped. Partial output and recorded actions are kept." if stopped else str(exc)
             if current is not None:
                 current["recorded"] = True
                 self.emit({"event": "entry", "chat": chat["id"], "entry": current})
             chat["messages"] = [item for item in chat["messages"] if item.get("content")]
-            self.settle(chat, "Stopped or interrupted before a recorded result. An action may have run; inspect the workspace before retrying.")
+            if changed and "results" in locals() and "calls" in locals():
+                chat_team.record_unstarted(results, calls)
+            self.settle(chat, chat_team.NOT_STARTED if changed else
+                        "Stopped or interrupted before a recorded result. An action may have run; inspect the workspace before retrying.")
             for item in chat["entries"]:
                 if item.get("kind") == "tool" and item.get("detail") == "Running…" and item.get("recorded") is not True:
                     item["detail"] = "Interrupted. Inspect the workspace before running this action again."; item["isError"] = True
                     item["recorded"] = True
                     self.emit({"event": "entry", "chat": chat["id"], "entry": item})
-            if self.role == "team" and not stopped:
+            if changed:
+                pass
+            elif self.role == "team" and not stopped:
                 attempts = getattr(exc, "attempts", [])
                 count = len(attempts) or 1
                 reason = " ".join(text.split())[:120] or "Request failed"

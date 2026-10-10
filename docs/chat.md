@@ -115,6 +115,10 @@ The right-hand **inspector** has four views, each using the whole pane:
   transcript, refreshed before every model round, with separate provider histories.
   Workspace changes and approvals queue one at a time. Stop, unfinished
   work and questions are visible in this pane. See [Team](chat-team.md).
+  **Edit** works while the Team runs. Each member changes at its next safe
+  boundary: a model request is cancelled, while a running tool finishes and
+  records its result first. A replaced member keeps its place and resumes its
+  work on the new model.
   Earlier delegated tasks remain underneath the roster; choose one to read
   its transcript and tool results. Parallel read-only helper chips remain
   beside their originating delegate row in the main transcript.
