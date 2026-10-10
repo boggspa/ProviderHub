@@ -1004,9 +1004,13 @@ struct ComposerTextView: NSViewRepresentable {
             }
             let matches = ChatMentions.resolve(view.string, members: parent.mentions)
             guard !stale.isEmpty || !matches.isEmpty else { return }
+            let string = view.string as NSString
             storage.beginEditing()
             for range in stale { storage.setAttributes(plain, range: range) }
-            for match in matches { storage.addAttributes(ChatMentionStyle.attributes(match.target.accent, font: font), range: match.range) }
+            for match in matches {
+                storage.addAttributes(ChatMentionStyle.attributes(match.target.accent, font: font),
+                                      range: ChatMentions.display(match.range, in: string))
+            }
             ChatLayoutManager.padChips(storage)
             storage.endEditing()
         }

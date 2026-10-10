@@ -722,5 +722,67 @@ class TeamTests(unittest.TestCase):
         self.assertEqual(parent.chat["team"]["status"], "done")
         self.assertEqual(self.served(self.transports[2]), "Member 2")
 
+    def test_waiting_on_a_member_standing_by_is_refused(self):
+        roster = {}
+        def wait_on_second(payload, cancel, delta):
+            return call("team_status", {"state": "waiting", "next_step": "Use Member 2's audit", "member_id": roster["second"]})
+        parent = self.service([[wait_on_second, response("Finished without Member 2")]])
+        first, second = self.configure(parent)
+        roster["second"] = second["id"]
+        self.send(parent, "@Member 1 go"); self.finish(parent)
+        # Member 2 will not run until a message addresses it, so it is no dependency.
+        self.assertEqual([first["status"], second["status"]], ["done", "ready"])
+        self.assertIn("standing by", json.dumps(self.transports[0].requests[-1]))
+
+    def test_late_question_after_a_tagged_update_stands_by_and_releases_its_waiter(self):
+        roster, release = {}, threading.Event()
+        def wait_on_second(payload, cancel, delta):
+            return call("team_status", {"state": "waiting", "next_step": "Use Member 2's audit", "member_id": roster["second"]})
+        def held_question(payload, cancel, delta):
+            release.wait(3)
+            return decision("needs_input", "Which directory?")
+        parent = self.service([[wait_on_second, response("Waiting for Member 2"), response("Continued without Member 2")],
+                               [held_question, response("Which directory should I use?")],
+                               [response("Initial third"), response("Handled the update")]])
+        first, second, third = self.configure(parent, 3)
+        roster["second"] = second["id"]
+        self.send(parent)
+        self.wait_for(lambda: first["status"] == "waiting" and third["status"] == "done")
+        try:
+            parent.handle({"command": "steer", "id": parent.chat["id"], "text": "@Member 3 handle the update",
+                           "mentions": [third["id"]]})
+        finally:
+            release.set()
+        self.finish(parent)
+        # Member 2's question does not hold back the member the user addressed;
+        # it stays Member 2's next step, and Member 1 stops waiting on it.
+        self.assertEqual([m["status"] for m in (first, second, third)], ["done", "ready", "done"])
+        self.assertEqual(second["nextStep"], "Which directory?")
+        self.assertEqual(parent.chat["team"]["status"], "done")
+        self.assertIn("standing by", json.dumps(self.transports[0].requests[-1]))
+        self.assertIn("handle the update", json.dumps(self.transports[2].requests[-1]))
+
+    def test_tagged_update_queues_its_members_in_tag_order(self):
+        started, release = threading.Event(), threading.Event()
+        def held(text, signal=None):
+            def reply(payload, cancel, delta):
+                if signal: signal.set()
+                release.wait(3)
+                return response(text)
+            return reply
+        parent = self.service([[response("First"), held("First again")], [response("Second"), held("Second again")],
+                               [held("Third", started)]])
+        first, second, third = self.configure(parent, 3)
+        self.send(parent); self.assertTrue(started.wait(2))
+        self.wait_for(lambda: first["status"] == "done" and second["status"] == "done")
+        try:
+            parent.handle({"command": "steer", "id": parent.chat["id"], "text": "@Member 2 then @Member 1: compare notes",
+                           "mentions": [second["id"], first["id"]]})
+            self.assertEqual(parent.chat["team"]["queue"], [third["id"], second["id"], first["id"]])
+        finally:
+            release.set()
+        self.finish(parent)
+        self.assertEqual([len(t.requests) for t in self.transports], [2, 2, 1])
+
 
 if __name__ == "__main__": unittest.main()

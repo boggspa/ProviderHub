@@ -252,7 +252,8 @@ def mentions(team, text):
         if (i == 0 or _opens(text[i - 1])) and not (c < len(code) and code[c][0] <= i):
             for member in roster:
                 end = i + 1 + len(member["name"])
-                if text[i + 1:end].casefold() != member["name"].casefold(): continue
+                # Bound the slice before folding: a short tail can fold longer ("ß" to "ss").
+                if end > len(text) or text[i + 1:end].casefold() != member["name"].casefold(): continue
                 if end < len(text) and _continues_name(text[end]): continue
                 if len(found) < MAX_RECORDED_MENTIONS or member["id"] not in seen:
                     units += len(text[counted:i].encode("utf-16-le")) // 2; counted = i
@@ -581,6 +582,9 @@ def decide(child, args):
                 peers = {m["id"]: m for m in parent.chat["team"]["members"]}
                 if identifier == member["id"] or identifier not in peers:
                     raise ValueError("Choose another current Team member as the dependency.")
+                if peers[identifier]["status"] == "ready":
+                    raise ValueError(peers[identifier]["name"] + " is standing by: the latest message does not address it, "
+                                     "so it will not run until one does. Choose another outcome.")
                 cursor, seen = identifier, {member["id"]}
                 while cursor in peers:
                     if cursor in seen: raise ValueError("That member dependency would create a waiting cycle.")
@@ -734,19 +738,21 @@ def _checkpoint(parent, member=None, dirty=None):
 def queue_update(team, targets=()):
     """Keep active/continuing work in place; completed members follow it.
 
-    An update that tags members queues only them. Untagged members keep
-    working, waiting or queued; a paused one stands by rather than holding
-    the tagged members back.
+    An update that tags members queues only them, in tag order. Untagged
+    members keep working, waiting or queued; a paused one stands by rather
+    than holding the tagged members back.
     """
+    members = {member["id"]: member for member in team["members"]}
     for member in team["members"]:
-        if targets and member["id"] not in targets:
-            if member["status"] in {"needs_input", "stopped", "limit_reached"}: _stand_by(team, member)
-            continue
-        if member["status"] != "working":
-            if member["id"] not in team["queue"]: team["queue"].append(member["id"])
-            member["status"] = "queued"
-            member.pop("waitFor", None)
-            member.pop("waitReason", None)
+        if targets and member["id"] not in targets and member["status"] in {"needs_input", "stopped", "limit_reached"}:
+            _stand_by(team, member)
+    for identifier in targets or list(members):
+        member = members.get(identifier)
+        if member is None or member["status"] == "working": continue
+        if identifier not in team["queue"]: team["queue"].append(identifier)
+        member["status"] = "queued"
+        member.pop("waitFor", None)
+        member.pop("waitReason", None)
     if team["queue"]: team["status"] = "working"
 
 
@@ -754,6 +760,14 @@ def has_update(chat, member):
     """A user message this member has not read yet and that addresses it."""
     return any(row.get("kind") == "user" and _addresses(row, member)
                for row in chat["entries"][member.get("cursor", 0):])
+
+
+def _passed_over(chat, member):
+    """The latest user message addresses only this member's peers.
+
+    Read or not: a question raised after it would otherwise hold them back.
+    """
+    return not _addresses(latest_request(chat), member)
 
 
 def consume_update(child, choice):
@@ -782,8 +796,13 @@ def finish_contribution(chat, member):
     decision = member.get("decision") or {"state": "done", "next_step": ""}
     member["appliedContributionID"] = contribution
     if terminal in {"stopped", "error", "limit_reached"} or terminal == "needs_input" and not has_update(chat, member):
-        member["status"] = terminal; team["status"] = terminal
         member["nextStep"] = decision.get("next_step", "")
+        # A question raised after the user addressed other members must not
+        # hold them back. It stays the next step, for a message to this member.
+        if terminal == "needs_input" and _passed_over(chat, member):
+            _stand_by(team, member)
+            return
+        member["status"] = terminal; team["status"] = terminal
         return
     member["contributions"] += 1
     member["nextStep"] = decision["next_step"]
@@ -801,6 +820,9 @@ def finish_contribution(chat, member):
     # Own output is filtered on the next read, so skipping to the end here
     # would lose that new instruction for this member.
     if decision["state"] == "needs_input":
+        if _passed_over(chat, member):
+            _stand_by(team, member)
+            return
         member["status"] = "needs_input"; team["status"] = "needs_input"
         return
     if decision["state"] == "waiting":
@@ -1006,7 +1028,11 @@ def wake_dependencies(parent):
                 result = json.dumps(process, ensure_ascii=False)
         else:
             peer = peers.get(wait.get("id"))
-            if peer and peer["status"] in {"done", "error", "stopped", "interrupted", "needs_input", "limit_reached"}:
+            if peer and peer["status"] == "ready":
+                # Standing by until a message addresses it: this work will not finish.
+                result = (f"Member {peer['name']} is standing by: the latest message does not address it, "
+                          "so it will not finish this work. " + peer.get("nextStep", ""))
+            elif peer and peer["status"] in {"done", "error", "stopped", "interrupted", "needs_input", "limit_reached"}:
                 result = f"Member {peer['name']} finished with status {peer['status']}. " + peer.get("nextStep", "")
         if result is not None:
             member.update(status="continuing", dependencyResult=result)

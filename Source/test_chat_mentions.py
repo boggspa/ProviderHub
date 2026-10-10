@@ -56,7 +56,8 @@ import SwiftUI
         }
         check(ChatMentions.candidates("o", members: members).map(\.id) == ["o", "o2", "s", "z"], "candidates: prefix first, then contains")
         check(ChatMentions.candidates("", members: members).map(\.id) == ["s", "o", "o2", "k", "z"], "a bare @ lists the roster in order")
-        check(ChatMentions.candidates("", members: roster((fixture["cases"] as! [[String: Any]]).last { $0["members"] != nil }!["members"]!)).map(\.id) == ["k"],
+        let shared = (fixture["cases"] as! [[String: Any]]).first { $0["text"] as? String == "@Sol and @Kimi" }!
+        check(ChatMentions.candidates("", members: roster(shared["members"]!)).map(\.id) == ["k"],
               "a name two members share was offered")
 
         let menu = ChatMentionMenu()
@@ -85,6 +86,16 @@ import SwiftUI
             ChatMention(id: "o", name: "Opus", route: "r", start: -1, length: 5)], accent: { _ in .red })
         let tinted = marked.runs.filter { $0[ChatMentionAttribute.self] != nil }.map { String(marked[$0.range].characters) }
         check(tinted == ["@Sol"] && String(marked.characters) == message, "marked \(tinted): only the matching recorded tag may be tinted")
+        let thumbs = ChatMentions.marked("@👍🏽 ok", mentions: [ChatMention(id: "t", name: "👍", route: "r", start: 0, length: 3)],
+                                         accent: { _ in .red })
+        let whole = thumbs.runs.filter { $0[ChatMentionAttribute.self] != nil }.map { String(thumbs[$0.range].characters) }
+        check(whole == ["@👍🏽"], "a tag ending inside a composed character was not drawn whole: \(whole)")
+        let damaged = ChatMentions.marked(message, mentions: [
+            ChatMention(id: "s", name: "Sol", route: "r", start: Int.max, length: 4),
+            ChatMention(id: "s", name: "Sol", route: "r", start: 3, length: Int.max),
+            ChatMention(id: "s", name: "Sol", route: "r", start: Int.max - 1, length: Int.max)], accent: { _ in .red })
+        check(!damaged.runs.contains { $0[ChatMentionAttribute.self] != nil } && String(damaged.characters) == message,
+              "an out-of-range tag record was drawn")
         let decoded = try JSONDecoder().decode([ChatMention].self, from: Data(#"[{"id":"s","name":"Sol","route":"r","start":3,"length":4},{"start":"x"},7]"#.utf8))
         check(decoded.count == 3 && decoded[0] == ChatMention(id: "s", name: "Sol", route: "r", start: 3, length: 4) &&
               decoded[1].start == -1 && decoded[2].id.isEmpty, "a malformed tag record failed its entry")

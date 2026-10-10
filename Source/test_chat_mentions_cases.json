@@ -33,6 +33,10 @@
     {"text": "“@Sol” ‘@Kimi’", "tags": [["s", 1, 4], ["k", 8, 5]]},
     {"text": "line\n@Kimi", "tags": [["k", 5, 5]]},
     {"text": "\t@Sol", "tags": [["s", 1, 4]]},
+    {"text": " @Sol  @Kimi \u0085@Opus", "tags": [["s", 1, 4], ["k", 7, 5], ["o", 14, 5]]},
+    {"text": "​@Sol", "tags": []},
+    {"text": "@Soĺ no", "tags": []},
+    {"text": "@Sol2 @Sol² @Sol^", "tags": [["s", 12, 4]]},
     {"text": "hi @Sol", "tags": [["s", 3, 4]]},
     {"text": "🙂 @Kimi", "tags": [["k", 3, 5]]},
     {"text": "@Zoë, ready?", "tags": [["z", 0, 4]]},
@@ -47,6 +51,9 @@
     {"text": "````\n@Sol\n```\n@Kimi\n````\n@Opus", "tags": [["o", 25, 5]]},
     {"text": "@Sol and @Kimi", "tags": [["k", 9, 5]],
      "members": [{"id": "a", "name": "Sol", "route": "r1"}, {"id": "b", "name": "SOL", "route": "r2"},
-                 {"id": "k", "name": "Kimi", "route": "kimi/kimi-for-coding"}]}
+                 {"id": "k", "name": "Kimi", "route": "kimi/kimi-for-coding"}]},
+    {"text": "@ß", "tags": [], "members": [{"id": "ss", "name": "SS", "route": "r"}]},
+    {"text": "@ß and @ss", "tags": [["ss", 7, 3]], "members": [{"id": "ss", "name": "SS", "route": "r"}]},
+    {"text": "@👍🏽 ok", "tags": [["t", 0, 3]], "members": [{"id": "t", "name": "👍", "route": "r"}]}
   ]
 }

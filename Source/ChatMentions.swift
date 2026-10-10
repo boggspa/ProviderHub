@@ -71,7 +71,10 @@ enum ChatMentions {
 
     /// A long message records its first 64 tags plus each member's first tag.
     static let recorded = 64
-    private static let openers = CharacterSet(charactersIn: "\t([{\"'\u{201C}\u{2018},;*")
+    /// Besides space separators: the controls and punctuation chat_team.py
+    /// lists, spelled out rather than taken from a Foundation set, whose
+    /// whitespace includes U+200B where Python's categories do not.
+    private static let openers = Set("\t\n\u{0B}\u{0C}\r\u{85}([{\"'\u{201C}\u{2018},;*".unicodeScalars)
 
     static func resolve(_ text: String, members: [ChatMentionTarget]) -> [Match] {
         let string = text as NSString
@@ -115,13 +118,21 @@ enum ChatMentions {
         var marked = AttributedString(text)
         let string = text as NSString
         for mention in mentions {
+            // Bounds first, without overflow: a record may come from a damaged file.
+            guard mention.start >= 0, mention.length > 1, mention.start <= string.length,
+                  mention.length <= string.length - mention.start else { continue }
             let range = NSRange(location: mention.start, length: mention.length)
-            guard mention.start >= 0, mention.length > 1, NSMaxRange(range) <= string.length,
-                  fold(string.substring(with: range)) == fold("@" + mention.name),
-                  let bounds = Range(range, in: text), let span = Range(bounds, in: marked) else { continue }
+            guard fold(string.substring(with: range)) == fold("@" + mention.name),
+                  let bounds = Range(display(range, in: string), in: text), let span = Range(bounds, in: marked) else { continue }
             marked[span][ChatMentionAttribute.self] = ChatMentionTint(NSColor(accent(mention.route)))
         }
         return marked
+    }
+
+    /// A tag as drawn: whole characters, so a name ending inside a composed
+    /// character (`@👍` before a skin tone) takes the whole of it.
+    static func display(_ range: NSRange, in string: NSString) -> NSRange {
+        string.rangeOfComposedCharacterSequences(for: range)
     }
 
     /// The tag being typed just before the caret: the `@` offset and the
@@ -214,12 +225,20 @@ enum ChatMentions {
 
     private static func opens(_ scalar: Unicode.Scalar?) -> Bool {
         guard let scalar else { return false }
-        return CharacterSet.whitespacesAndNewlines.contains(scalar) || openers.contains(scalar)
+        switch scalar.properties.generalCategory {
+        case .spaceSeparator, .lineSeparator, .paragraphSeparator: return true
+        default: return openers.contains(scalar)
+        }
     }
 
+    /// A letter, mark or number (any general category L, M or N), or `_`.
     private static func continuesName(_ scalar: Unicode.Scalar?) -> Bool {
         guard let scalar else { return false }
-        return CharacterSet.alphanumerics.contains(scalar) || scalar == "_"
+        switch scalar.properties.generalCategory {
+        case .uppercaseLetter, .lowercaseLetter, .titlecaseLetter, .modifierLetter, .otherLetter,
+             .nonspacingMark, .spacingMark, .enclosingMark, .decimalNumber, .letterNumber, .otherNumber: return true
+        default: return scalar == "_"
+        }
     }
 
     private static func scalar(endingAt end: Int, in string: NSString) -> Unicode.Scalar? {
