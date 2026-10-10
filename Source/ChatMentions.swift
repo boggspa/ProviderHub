@@ -51,12 +51,16 @@ enum ChatMentionAttribute: AttributedStringKey {
     static let name = "ProviderHub.ChatMention"
 }
 
-/// `@Name` tags in a Team message, for the composer's tint and its list.
+/// `@Name` tags in a Team message: the composer's tint, its list, and the
+/// chips each send carries.
 ///
-/// chat_team.py's resolver is the authority: it routes the message and records
-/// the ranges the transcript draws. The composer sends the members it tinted
-/// and the worker refuses a message that would reach anyone else, so a tinted
-/// tag is always the member the message reaches. Both follow the same rules.
+/// The composer resolves tags as they are typed, and every chip it draws is
+/// sent as the routing record, so a tinted tag is always the member the
+/// message reaches and an untinted one is plain text. The worker
+/// (chat_team.claimed) keeps a chip while its member is still in the Team
+/// under the name and model it was drawn with, and refuses the message
+/// otherwise. chat_team.mentions resolves the same rules for callers that send
+/// no chips; one shared case file keeps the two in step.
 /// A tag starts the text or follows whitespace, an opening bracket or quote, a
 /// comma, semicolon or asterisk, so an email address or a URL path never
 /// addresses anyone. It names a member whole and case-insensitively, longest
@@ -67,6 +71,10 @@ enum ChatMentions {
     struct Match: Equatable {
         var target: ChatMentionTarget
         var range: NSRange
+        /// The chip as sent: the routing record the worker checks and keeps.
+        var wire: [String: Any] {
+            ["id": target.id, "name": target.name, "route": target.route, "start": range.location, "length": range.length]
+        }
     }
 
     /// A long message records its first 64 tags plus each member's first tag.
@@ -102,13 +110,6 @@ enum ChatMentions {
             }
         }
         return matches
-    }
-
-    /// Members the matches address, first tag first; empty means the whole Team.
-    static func addressees(_ matches: [Match]) -> [String] {
-        var ids: [String] = []
-        for match in matches where !ids.contains(match.target.id) { ids.append(match.target.id) }
-        return ids
     }
 
     /// A sent message as the transcript draws it, each recorded tag marked

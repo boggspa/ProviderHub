@@ -321,8 +321,9 @@ final class ChatModel: ObservableObject {
         pendingSend = (selectedID, request, text, files)
         setBusy(true); interrupting = command == "steer"
         status = interrupting ? "Interrupting for your update…" : "Connecting…"
-        // The members its tags were tinted for; the worker refuses any other routing.
-        let mentions = ChatMentions.addressees(ChatMentions.resolve(text, members: mentionTargets))
+        // Every chip the composer drew is the routing record; the worker
+        // refuses chips drawn from a roster it no longer has.
+        let mentions = ChatMentions.resolve(text, members: mentionTargets).map(\.wire)
         if !write(["command": command, "id": selectedID, "chat": selectedID, "request": request, "text": text,
                    "attachments": files.map(\.request), "mentions": mentions]) { restorePendingSend(); setBusy(false); interrupting = false }
     }

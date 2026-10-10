@@ -585,14 +585,17 @@ class ChatService:
         request = command.get("request")
         if request is not None and (not isinstance(request, str) or not request or len(request) > 128):
             raise ValueError("Invalid message submission identity.")
-        # The composer sends the members its @tags were tinted for. Refuse a
-        # message that would reach anyone else, before any attachment is kept.
-        tagged = chat_team.mentions(self.chat["team"], text) if chat_team.enabled(self.chat) else []
-        claimed = command.get("mentions")
-        if claimed is not None and claimed != chat_team.addressees({"mentions": tagged}):
-            # The composer previewed another roster; resend the current one.
-            chat_team.publish(self)
-            raise ValueError("The tagged members no longer match this Team. Check the highlighted names and send again.")
+        team = self.chat["team"] if chat_team.enabled(self.chat) else None
+        if command.get("mentions") is not None:
+            # The chips the composer drew are the routing record. Chips drawn
+            # from an outdated roster are refused before any attachment is
+            # kept, and the current roster is resent so the tints correct.
+            try: tagged = chat_team.claimed(team, text, command["mentions"])
+            except ValueError:
+                chat_team.publish(self)
+                raise
+        else:
+            tagged = chat_team.mentions(team, text)
         attached, blocks = prepare_attachments(inputs, self.store.root / self.chat["id"], vision=self.choice().get("vision") is not False)
         visible = entry("user", text, self.chat["route"], attachments=attached, workspace=self.chat["workspace"])
         if request is not None: visible["clientRequest"] = request

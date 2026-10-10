@@ -639,6 +639,14 @@ class TeamTests(unittest.TestCase):
         """The member a scripted transport ran for, from its system prompt."""
         return transport.requests[0]["system"].split("Your member name: ", 1)[1].split("\n", 1)[0]
 
+    def chips(self, parent, text):
+        """The chips a composer drawing from the current roster sends with text."""
+        return chat_team.mentions(parent.chat["team"], text)
+
+    def steer(self, parent, text):
+        """An update as the composer sends it, with the chips it drew."""
+        parent.handle({"command": "steer", "id": parent.chat["id"], "text": text, "mentions": self.chips(parent, text)})
+
     def test_tagged_message_runs_only_its_members_in_tag_order(self):
         # Child transports are taken in scheduling order, one set per run.
         parent = self.service([[response("Third")], [response("Second")],
@@ -674,8 +682,7 @@ class TeamTests(unittest.TestCase):
         self.send(parent); self.assertTrue(started.wait(2))
         self.wait_for(lambda: first["status"] == "done")
         try:
-            parent.handle({"command": "steer", "id": parent.chat["id"], "text": "@Member 1 also check the tests",
-                           "mentions": [first["id"]]})
+            self.steer(parent, "@Member 1 also check the tests")
             self.assertEqual(parent.chat["team"]["queue"], [second["id"], first["id"]])
         finally:
             release.set()
@@ -685,30 +692,52 @@ class TeamTests(unittest.TestCase):
         self.assertIn("[Addressed to you.]", json.dumps(self.transports[0].requests[-1]))
         self.assertEqual([first["status"], second["status"]], ["done", "done"])
 
-    def test_send_whose_tags_disagree_with_the_composer_is_refused_untouched(self):
+    def test_chips_from_an_outdated_roster_are_refused_untouched(self):
         parent = self.service([[response("Only the tagged member")], []])
         first, second = self.configure(parent)
         attachment = self.root / "notes.txt"; attachment.write_text("notes")
         before = copy.deepcopy(parent.chat["entries"])
-        with self.assertRaisesRegex(ValueError, "no longer match"):
-            parent.handle({"command": "send", "id": parent.chat["id"], "text": "@Member 2 go",
-                           "attachments": [{"path": str(attachment)}], "mentions": [first["id"]]})
+        text = "@Member 2 go"
+        [chip] = self.chips(parent, text)
+        # Drawn for a member since renamed, removed or moved to another model,
+        # or over text that does not read as its member's name.
+        for chips in ([{**chip, "name": "Old name"}], [{**chip, "id": "gone"}], [{**chip, "route": "other/model"}],
+                      [{**chip, "id": first["id"], "name": first["name"], "route": first["route"]}],
+                      [{**chip, "start": 1}], [{**chip, "length": 5}], [{**chip, "length": 40}],
+                      [{**chip, "start": "0"}], [chip, chip], [7], "chips"):
+            with self.subTest(chips=str(chips)[:80]):
+                with self.assertRaisesRegex(ValueError, "no longer match"):
+                    parent.handle({"command": "send", "id": parent.chat["id"], "text": text,
+                                   "attachments": [{"path": str(attachment)}], "mentions": chips})
+                # The composer is sent the current roster so its tints can be corrected.
+                self.assertEqual(self.events[-1]["event"], "team")
+                self.assertEqual(len(self.events[-1]["team"]["members"]), 2)
         self.assertEqual(parent.chat["entries"], before)
         self.assertFalse((self.root / parent.chat["id"] / "attachments").exists())
         self.assertFalse(any(t.requests for t in self.transports))
-        # The composer is sent the current roster so its tints can be corrected.
-        self.assertEqual(self.events[-1]["event"], "team")
-        self.assertEqual(len(self.events[-1]["team"]["members"]), 2)
-        parent.handle({"command": "send", "id": parent.chat["id"], "text": "@Member 2 go", "mentions": [second["id"]]})
+        parent.handle({"command": "send", "id": parent.chat["id"], "text": text, "mentions": [chip]})
         self.finish(parent)
         self.assertEqual([len(t.requests) for t in self.transports], [1, 0])
         self.assertEqual(self.served(self.transports[0]), "Member 2")
 
+    def test_an_untinted_tag_is_plain_text(self):
+        # The composer drew no chip, so the message is for the whole Team,
+        # whatever the worker's own resolver or Unicode tables would make of it.
+        parent = self.service([[response("First")], [response("Second")]])
+        members = self.configure(parent)
+        parent.handle({"command": "send", "id": parent.chat["id"], "text": "@Member 2 go", "mentions": []})
+        self.finish(parent)
+        self.assertEqual([len(t.requests) for t in self.transports], [1, 1])
+        self.assertEqual([m["status"] for m in members], ["done", "done"])
+        self.assertNotIn("mentions", [e for e in parent.chat["entries"] if e["kind"] == "user"][-1])
+
     def test_member_names_must_differ_so_each_tag_reaches_one_member(self):
         parent = self.service([[], []])
-        specs = [{"choice": parent.models[0]["id"], "name": "Sol"}, {"choice": parent.models[1]["id"], "name": "sol"}]
-        parent.handle({"command": "configure_team", "id": parent.chat["id"], "enabled": True, "members": specs})
-        self.assertIn("different name", self.events[-1]["notice"]); self.assertNotIn("team", parent.chat)
+        # Case aside, and however their accents are composed.
+        for names in (("Sol", "sol"), ("Zoë", "ZOË")):
+            specs = [{"choice": parent.models[0]["id"], "name": names[0]}, {"choice": parent.models[1]["id"], "name": names[1]}]
+            parent.handle({"command": "configure_team", "id": parent.chat["id"], "enabled": True, "members": specs})
+            self.assertIn("different name", self.events[-1]["notice"]); self.assertNotIn("team", parent.chat)
 
     def test_tagged_message_stands_by_a_member_awaiting_input(self):
         parent = self.service([[decision("needs_input", "Which directory?"), response("Which directory should I use?")],
@@ -749,8 +778,7 @@ class TeamTests(unittest.TestCase):
         self.send(parent)
         self.wait_for(lambda: first["status"] == "waiting" and third["status"] == "done")
         try:
-            parent.handle({"command": "steer", "id": parent.chat["id"], "text": "@Member 3 handle the update",
-                           "mentions": [third["id"]]})
+            self.steer(parent, "@Member 3 handle the update")
         finally:
             release.set()
         self.finish(parent)
@@ -776,8 +804,7 @@ class TeamTests(unittest.TestCase):
         self.send(parent); self.assertTrue(started.wait(2))
         self.wait_for(lambda: first["status"] == "done" and second["status"] == "done")
         try:
-            parent.handle({"command": "steer", "id": parent.chat["id"], "text": "@Member 2 then @Member 1: compare notes",
-                           "mentions": [second["id"], first["id"]]})
+            self.steer(parent, "@Member 2 then @Member 1: compare notes")
             self.assertEqual(parent.chat["team"]["queue"], [third["id"], second["id"], first["id"]])
         finally:
             release.set()

@@ -44,8 +44,10 @@ import SwiftUI
             let expected = (item["tags"] as! [[Any]]).map { "\($0[0]):\($0[1]):\($0[2])" }
             check(found == expected, "resolve \(text.debugDescription): \(found) != \(expected)")
         }
-        check(ChatMentions.addressees(ChatMentions.resolve("@Kimi @Sol @kimi", members: members)) == ["k", "s"],
-              "addressees lost tag order or repeated a member")
+        let chip = ChatMentions.resolve("hi @sol", members: members).map(\.wire)
+        check(chip.count == 1 && chip[0]["id"] as? String == "s" && chip[0]["name"] as? String == "Sol" &&
+              chip[0]["route"] as? String == "codex/gpt-6.1-sol" && chip[0]["start"] as? Int == 3 && chip[0]["length"] as? Int == 4,
+              "a chip's record lost its member, name or range")
 
         func typing(_ text: String, _ caret: Int) -> String {
             ChatMentions.typing(text, caret: caret).map { "\($0.start):\($0.query)" } ?? "none"
@@ -127,6 +129,27 @@ class MentionResolverTests(unittest.TestCase):
         self.assertEqual(chat_team.mentions(team, "no tags"), [])
         self.assertEqual(chat_team.addressees({"mentions": chat_team.mentions(team, "@Sol @sol")}), ["s"])
         self.assertEqual(chat_team.addressees(None), [])
+
+    def test_chips_a_resolver_draws_are_kept_and_others_refused(self):
+        # Whatever the shared rules draw comes back unchanged as the routing record.
+        data = fixture()
+        for case in data["cases"]:
+            with self.subTest(text=case["text"][:40]):
+                team = {"members": case.get("members", data["members"])}
+                drawn = chat_team.mentions(team, case["text"])
+                self.assertEqual(chat_team.claimed(team, case["text"], drawn), drawn)
+        team = {"members": [{"id": "t", "name": "👍", "route": "r"}, {"id": "s", "name": "Sol", "route": "r"}]}
+        text = "@👍 @Sol"
+        thumb, sol = chat_team.mentions(team, text)
+        self.assertEqual((thumb["start"], thumb["length"], sol["start"], sol["length"]), (0, 3, 4, 4))
+        self.assertEqual(chat_team.claimed(team, text, [thumb, sol]), [thumb, sol])
+        self.assertEqual(chat_team.claimed(None, text, []), [])
+        # Out of order, overlapping, splitting a surrogate pair, outside the
+        # text, too many, or not chips at all.
+        for chips in ([sol, thumb], [sol, sol], [{**thumb, "length": 2}], [{**sol, "length": 9}],
+                      [{**thumb, "start": -1}], [thumb] + [sol] * 68, "chips", [None]):
+            with self.subTest(chips=str(chips)[:60]), self.assertRaisesRegex(ValueError, "no longer match"):
+                chat_team.claimed(team, text, chips)
 
     @unittest.skipUnless(sys.platform == "darwin" and shutil.which("xcrun"), "Swift resolver test needs macOS")
     def test_composer_resolves_every_shared_case_and_completes_tags(self):

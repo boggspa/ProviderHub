@@ -130,7 +130,7 @@ import Combine
         check(model.attachments.count == 1 && model.canSend, "attachment-only message not sendable")
         model.send()
         check(model.attachments.isEmpty && (commands.last?["attachments"] as? [[String:Any]])?.count == 1, "attachments not sent")
-        check((commands.last?["mentions"] as? [String])?.isEmpty == true, "a solo send claimed Team tags")
+        check((commands.last?["mentions"] as? [[String: Any]])?.isEmpty == true, "a solo send drew Team chips")
         let commandCount = commands.count
         model.draft = "do not queue this"; model.send()
         check(commands.count == commandCount, "busy chat queued a message")
@@ -323,11 +323,13 @@ import Combine
         check(model.team == nil && model.teamRequest == teamRequest, "cross-chat or stale Team ack accepted")
         try send(["event":"team", "chat":"A", "request":teamRequest, "team":roster("ready")])
         check(model.team?.members.count == 1 && model.teamRequest == nil && model.canSend, "Team ack not applied")
-        // The send carries the members its tags were tinted for; a refusal keeps the draft.
+        // The send carries the chip it drew; a refusal keeps the draft.
         model.draft = "Ship it, @builder."
         model.send()
-        check(commands.last?["command"] as? String == "send" && commands.last?["mentions"] as? [String] == ["builder"],
-              "a tagged send did not carry the member it tinted")
+        let chips = commands.last?["mentions"] as? [[String: Any]] ?? []
+        check(commands.last?["command"] as? String == "send" && chips.count == 1 && chips[0]["id"] as? String == "builder" &&
+              chips[0]["name"] as? String == "Builder" && chips[0]["route"] as? String == "ollama/test" &&
+              chips[0]["start"] as? Int == 9 && chips[0]["length"] as? Int == 8, "a tagged send did not carry the chip it drew")
         try send(["event":"rejected", "chat":"A", "message":"The tagged members no longer match this Team.", "busy":false, "interrupting":false])
         check(model.draft == "Ship it, @builder." && !model.busy && model.canSend, "a refused tagged send lost its draft")
         model.draft = ""; model.notice = ""
