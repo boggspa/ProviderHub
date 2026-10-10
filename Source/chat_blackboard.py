@@ -252,11 +252,11 @@ def member_attach(chat, store_root, workspace, author, *, paths=None, links=None
     runner = ChatToolRunner(workspace) if paths else None
     sources = []
     for raw in paths:
-        # The file tools' policy: no absolute path elsewhere, no "..", no
-        # symbolic link anywhere on the path, and O_NOFOLLOW at every step.
-        relative = runner._relative(raw)
+        # Use the same root resolution and descriptor traversal as file tools.
+        # This runner grants only the primary workspace, never arbitrary roots.
+        anchor, relative = runner._resolve(raw)
         try:
-            parent = runner._parent(relative)
+            parent = runner._parent(anchor, relative)
             try: fd = os.open(relative.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
             finally: os.close(parent)
             try:
