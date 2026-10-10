@@ -11,6 +11,7 @@ import uuid
 from bridge_core import BridgeError, private_token
 from cli_images import recover_tool_content, responses_content
 from responses_tools import APPLY_PATCH_PARAM, APPLY_PATCH_TOOL_NAME, is_custom_tool, repair_apply_patch
+from responses_visualize import VisualizeRewriter, wrap_text
 
 
 ENVELOPE_PREFIX = "ph_reasoning_v1."
@@ -375,8 +376,9 @@ class MessagesResponsesAdapter:
     def item(self, block):
         kind = block.get("type")
         if kind == "text":
+            # Repair a bare reference when a provider omits its delimiters.
             return {"id": "msg_" + uuid.uuid4().hex, "type": "message", "role": "assistant", "status": "completed",
-                    "content": [{"type": "output_text", "text": block.get("text", ""), "annotations": []}]}
+                    "content": [{"type": "output_text", "text": wrap_text(block.get("text", "")), "annotations": []}]}
         if kind == "tool_use":
             if not isinstance(block.get("input"), dict):
                 raise BridgeError("The provider returned invalid function arguments.")
@@ -468,6 +470,11 @@ class MessagesResponsesAdapter:
                     item["arguments"] = ""
             self.output.append(item)
             self.blocks[value["index"]] = {"block": block, "output_index": index, "partial": "", "closed": False}
+            if block.get("type") == "text":
+                rewriter = self.blocks[value["index"]]["visualize"] = VisualizeRewriter()
+                # Opening text is a prefix of the same stream. Hold a partial
+                # reference here too, otherwise it is duplicated on release.
+                item["content"][0]["text"] = rewriter.feed(block.get("text", ""))
             events = [self.event("response.output_item.added", output_index=index, item=copy.deepcopy(item))]
             if item["type"] == "message":
                 events.append(self.event("response.content_part.added", item_id=item["id"], output_index=index,
@@ -497,9 +504,13 @@ class MessagesResponsesAdapter:
             dtype = delta.get("type")
             if dtype == "text_delta":
                 block["text"] = block.get("text", "") + delta["text"]
-                item["content"][0]["text"] = block["text"]
+                text = state["visualize"].feed(delta["text"])
+                item["content"][0]["text"] += text
+                if not text:
+                    # A line that may still become a reference is held back.
+                    return []
                 return [self.event("response.output_text.delta", item_id=item["id"], output_index=index,
-                                   content_index=0, delta=delta["text"])]
+                                   content_index=0, delta=text)]
             if dtype == "input_json_delta":
                 state["partial"] += delta["partial_json"]
                 if item["type"] in {"custom_tool_call", "web_search_call"}:
@@ -539,6 +550,12 @@ class MessagesResponsesAdapter:
             final["id"] = self.output[index]["id"]
             self.output[index] = final
             events = []
+            if final["type"] == "message" and "visualize" in state:
+                # Release a held last line so the deltas add up to the item.
+                tail = state["visualize"].flush()
+                if tail:
+                    events.append(self.event("response.output_text.delta", item_id=final["id"], output_index=index,
+                                             content_index=0, delta=tail))
             if final["type"] == "function_call":
                 events.append(self.event("response.function_call_arguments.done", item_id=final["id"], output_index=index, arguments=final["arguments"]))
             elif final["type"] == "message":
