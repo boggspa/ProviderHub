@@ -8,15 +8,15 @@ extra inference request to manage the queue. Membership is saved with the chat.
 
 ## Contributions and continuation
 
-Each new user message schedules one contribution from each member in roster
-order. A contribution includes its model replies and tool calls. Finishing
+Each new user message starts one contribution from each member together.
+A contribution includes its model replies and tool calls. Finishing
 normally means **Done**. A member may call `team_status` with:
 
 | Outcome | Effect |
 | --- | --- |
 | `done` | Finish this contribution; do not queue another. This is the default. |
-| `continue` | Supply a concrete `next_step` and rejoin the back of the queue after finishing. Renew this choice on every contribution that needs another. |
-| `needs_input` | Supply the blocking question. Pause the Team after this contribution and wait for a real user message. |
+| `continue` | Supply a concrete `next_step` and join the next contribution wave when the current members finish. Renew this choice on every contribution that needs another. |
+| `needs_input` | Supply the blocking question. Running peers finish their contributions, then the Team waits for a real user message. |
 
 Only the member requesting continuation is queued again. Peers that have
 finished remain finished. There is no fixed lifetime turn quota. Each execution
@@ -36,11 +36,13 @@ contributions by one member pause the Team for review, preventing a simple
 acknowledgement loop.
 This detects exact repeats, not every possible unproductive conversation.
 
-Scheduling is deliberately serial. One member's contribution finishes before
-another starts, so there is one workspace writer and one approval slot. The
-members are peers, but this version does not provide simultaneous execution or
-member-to-member mailboxes. Models are instructed to read current files and
-use transcript recall when more context is needed.
+Parallel execution is the default for existing and new Teams, with the same
+three-member cap. Model requests, file/search reads and transcript recall can
+overlap. Patches and shell commands take a cancellable FIFO gate for the chosen
+workspace, including their approval wait. Workspace gates are shared with other
+Chat turns in the same worker using that folder. Reads may observe another
+member's edits; models are instructed to re-read current files before changing
+them. Continuing members begin together only after the current wave settles.
 
 ## Shared record, private model histories
 
@@ -49,8 +51,14 @@ The inspector shows status, next step and individual context usage. It uses
 the existing native transcript, lazy stacks and text/table renderer.
 
 Each member has its own native provider history, reasoning state and exact
-model/account connection. Only attributed visible transcript updates cross
-between members. The latest user request is preserved, while peer excerpts are
+model/account connection. Before every model round, the existing shared-context
+logic supplies newly recorded peer replies, tool results and contribution outcomes.
+Members coordinate through that attributed transcript and the shared notebook;
+there is no additional channel. In-flight text and pending tool results stay out
+of model context until their checkpoint. The per-member cursor and deferred
+source IDs are persisted together, so an earlier row finishing later is neither
+skipped nor repeated. Records that do not fit a shared delta wait for the next
+round. New user messages are preserved, while peer excerpts are
 bounded to 48,000 UTF-8 bytes per update and 4,000 characters per record. Source
 IDs lead back to `search_history` and `read_history` for omitted details. Peer
 output is labelled reference material, never new user authorization.
@@ -72,21 +80,29 @@ attributed public record. Normal model switching is available again in solo mode
 
 All members have the four workspace tools plus recall/notebook tools and
 `team_status`. They inherit Manual, Accept Edits or YOLO from the chat. Approvals
-identify the requesting member; denial is returned as a denied tool result.
+are queued one at a time and identify the requesting member and approval ID.
+Allow or Deny resolves only that request; denial is returned to that member as
+a denied tool result. Waiting for an approval holds the workspace write gate,
+while other members can continue model work and reads.
 Team members cannot recursively delegate or create a fourth member.
 
-**Stop Team** cancels the active request/tool and leaves queued work paused.
+**Stop Team** cancels every active request/tool, approval wait and queued write.
 **Resume unfinished work** schedules incomplete members only; completed members
 are not replayed. A question needs a composer reply, not Resume. Sending a new
-message while work is active cancels and settles the current action before
-queuing the new instruction for all members. No queued member starts while the
-previous action or approval is still being cleaned up.
+message while work is active preserves the run. Every active member receives it
+before its next model request, after its current tool outcomes are recorded.
+Members that already finished are queued for the next wave. Steering preserves
+the original contribution and continuation identities; Stop still cancels all work.
 
 Reopening Chat does not restart Team automatically. Recorded successful
 contributions retain their outcome and queue position. Interrupted tool calls
 receive an uncertainty result instructing the member to inspect the workspace
 before retrying; a host cannot prove whether an external side effect happened
-immediately before a crash. Provider and persistence errors pause further work.
+immediately before a crash. A provider failure, including HTTP 429, pauses only
+that member; healthy peers can finish their work and explicit continuations.
+There is no automatic rate-limit retry. When healthy work finishes, the Team
+shows the failed member for review or Resume. Persistence failures stop all
+members because their shared journal can no longer be trusted to record work.
 For the Codex CLI route, a pending host call can outlive its native turn during
 a checkpoint pause. If `turn/steer` confirms there is no active turn, the host
 starts a fresh thread and replays the recorded call, result and new user input
@@ -98,9 +114,12 @@ steering errors still surface normally.
 The chat's atomic JSONL snapshot stores a Team record and individual member
 records; private histories are excluded from UI state and sidebar headers.
 While running, an adjacent `<chat-id>.team-log` appends changed public rows,
-the active member's private history, queue metadata and decision notes. Every
+one member's private history, all member statuses, queue metadata and decision notes. Every
 checkpoint is flushed and synced. A terminal reply and its scheduling outcome
 share one checkpoint, with contribution IDs preventing duplicate settlement.
+New public rows, including peer rows still streaming, are checkpointed in their
+original append order so persisted index cursors retain their meaning after a
+crash. Unfinished rows remain unavailable to peer model context until recorded.
 The log folds into an atomic snapshot at 8 MiB and when the Team pauses/finishes.
 The growing transcript and other members' private histories are not rewritten
 for every tool call. Saved attachments remain in the existing chat directory.
@@ -109,6 +128,11 @@ Recovery replays sequence-checked records once and ignores an incomplete trailin
 append. An invalid complete record fails closed and its source remains available
 for recovery. Journals and snapshots use the existing chat identity checks and
 reject symlink paths. No new database, web view or service is needed.
+The UI receives `activeMemberIDs` for all currently working members, alongside
+the compatible `activeMemberID` naming the most recently started one still
+working. Every member retains its own `status`, `contributionID`, `usage` and
+`context`; histories stay private. Streaming identity uses each working member's
+latest row in its live contribution, even when another member appends a row.
 
 `test_chat_team.py` exercises real ChatService scheduling against scripted
 providers: all three members, long continuation, fairness, private reasoning and
@@ -116,5 +140,8 @@ account isolation, shared recall, serialized approvals/edits, Stop/steer,
 failures, context checkpoints and crash recovery. `test_chat_model.py` runs the
 actual Swift model to check correlated configuration, cross-chat isolation,
 member attribution, contribution streaming identity and resume controls. The
-full native app is typechecked alongside the repository Python suite. Live
+`test_chat_team_parallel.py` uses barriers to prove model/read overlap, FIFO
+write and approval ownership, shared-record delivery across cursor holes,
+concurrent notebook writes, Stop/steer fan-out, isolated failures and recovery
+with two pending tool calls. The full native app is typechecked alongside the repository Python suite. Live
 provider behaviour still depends on each model following the Team tool contract.
