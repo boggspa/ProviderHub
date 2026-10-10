@@ -201,6 +201,14 @@ import Combine
         check(menu.items.contains { $0.action == #selector(NSText.copy(_:)) }, "System Copy missing: \(menu.items.map(\.title))")
         textView.copyMessage(nil)
         check(board.string(forType: .string) == "Whole message", "Copy Message copied the wrong text")
+        var pinned = 0
+        textView.blackboardPin = { pinned += 1 }
+        _ = textView.menu(for: click)
+        check(textView.menu(for: click)!.items.filter { $0.title == "Pin to Blackboard" }.count == 1, "Pin missing or repeated")
+        textView.pinToBlackboard(nil)
+        check(pinned == 1, "Pin did not call the owning entry action")
+        textView.blackboardPin = nil
+        check(!textView.menu(for: click)!.items.contains { $0.title == "Pin to Blackboard" }, "Pin shown outside a Team entry")
         textView.message = nil
         check(!textView.menu(for: click)!.items.contains { $0.title == "Copy Message" }, "Copy Message shown without a message")
 

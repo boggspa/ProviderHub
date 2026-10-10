@@ -349,6 +349,48 @@ class BlackboardTeamTests(unittest.TestCase):
         self.assertEqual([item["name"] for item in self.store.load(parent.chat["id"])["blackboard"]["attachments"]], ["example.com/spec"])
         self.assertNotEqual(second["id"], first["id"])
 
+    def test_member_removal_is_durable_before_file_cleanup_and_next_checkpoint(self):
+        parent = self.team([[response("Unused")]])
+        member = parent.chat["team"]["members"][0]
+        (self.root / "report.txt").write_text("keep these results")
+        rows = blackboard.member_attach(parent.chat, self.store.root, str(self.root), member,
+                                        paths=["report.txt"], now=NOW)
+        retained = blackboard.member_attach(parent.chat, self.store.root, str(self.root), member,
+                                            paths=["report.txt"], now=NOW)[0]
+        parent.save()
+        chat_team.start_run(parent, new_input=True)
+        parent._working = True
+        service = type("MemberService", (), {"role": "team", "team_parent": parent, "team_member": member})()
+        cleanup = blackboard.discard_files
+        def crash_boundary(root, chat_id, removed):
+            # A fresh store replays the journal, as after process death. No
+            # subsequent tool-result checkpoint or final Team save has run.
+            reopened = ChatStore(self.root, lock=False).load(chat_id)
+            self.assertEqual([row["id"] for row in reopened["blackboard"]["attachments"]], [retained["id"]])
+            self.assertTrue(Path(removed["path"]).exists())
+            cleanup(root, chat_id, removed)
+        with patch.object(blackboard, "discard_files", side_effect=crash_boundary):
+            blackboard.execute(service, "blackboard_remove", {"attachment_id": rows[0]["id"]})
+        self.assertFalse(Path(rows[0]["path"]).exists())
+        self.assertEqual(Path(retained["path"]).read_text(), "keep these results")
+
+    def test_member_removal_save_failure_restores_metadata_and_retains_file(self):
+        parent = self.team([[response("Unused")]])
+        member = parent.chat["team"]["members"][0]
+        (self.root / "report.txt").write_text("results")
+        row = blackboard.member_attach(parent.chat, self.store.root, str(self.root), member,
+                                       paths=["report.txt"], now=NOW)[0]
+        parent.save()
+        chat_team.start_run(parent, new_input=True)
+        parent._working = True
+        service = type("MemberService", (), {"role": "team", "team_parent": parent, "team_member": member})()
+        with patch.object(chat_team, "checkpoint", side_effect=OSError("disk full")):
+            with self.assertRaisesRegex(OSError, "disk full"):
+                blackboard.execute(service, "blackboard_remove", {"attachment_id": row["id"]})
+        self.assertEqual(parent.chat["blackboard"]["attachments"][0]["id"], row["id"])
+        self.assertEqual(self.store.load(parent.chat["id"])["blackboard"]["attachments"][0]["id"], row["id"])
+        self.assertEqual(Path(row["path"]).read_text(), "results")
+
     def test_helpers_and_side_chats_cannot_run_blackboard_tools(self):
         for role in ("parent", "side", "lane"):
             service = ChatService(self.store, FakeTransport([]), lambda event: None, role=role)

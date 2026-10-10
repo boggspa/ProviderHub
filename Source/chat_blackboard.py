@@ -452,7 +452,15 @@ def execute(service, name, args):
             if args.get("key") is not None: raise ValueError("Remove a post by key or an attachment by attachment_id, not both.")
             identifier = args["attachment_id"]
             if not isinstance(identifier, str) or not identifier: raise ValueError("attachment_id must be a Blackboard attachment ID.")
+            previous = chat.get("blackboard")
             row = detach(chat, parent.store.root, identifier, by=member["id"])
+            try:
+                # Persist the absence before unlinking: a crash before the next
+                # tool-result checkpoint must never leave a durable dangling ref.
+                _persist(parent)
+            except BaseException:
+                chat["blackboard"] = previous
+                raise
             discard_files(parent.store.root, chat["id"], row)
             output = {"status": "removed", "attachment": row["name"]}
             summary = "Removed " + row["name"]
