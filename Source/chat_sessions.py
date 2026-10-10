@@ -12,6 +12,7 @@ import threading
 import time
 
 from chat_runtime import ChatService, GatewayClient
+from chat_processes import ProcessRegistry
 from chat_tools import ChatToolRunner
 from chat_workspaces import ChatWorkspaces
 
@@ -103,6 +104,7 @@ class WorkspaceRunner:
     def __init__(self, host, workspace, cancel_event):
         self.host, self.cancel = host, cancel_event
         self.runner = host.runner_type(workspace, cancel_event=cancel_event)
+        self.runner.processes = host.processes
         self.workspace, self.lock = workspace, None
 
     def describe(self, name, args):
@@ -133,6 +135,7 @@ class ChatHost:
         self._output = threading.RLock()
         self._requests = ResourceGate(MAX_ACTIVE_REQUESTS)
         self._writers = {}
+        self.processes = ProcessRegistry(self.publish_processes)
         self.headers = {row["id"]: {key: row.get(key) for key in HEADER_KEYS} for row in store.headers()}
         self.workspaces = SharedWorkspaces(store.root, (row["workspace"] for row in self.headers.values()))
         self.models = []
@@ -191,6 +194,13 @@ class ChatHost:
             if summaries != self._last_summaries:
                 self._last_summaries = summaries
                 self.emit({"event": "chats", "chats": summaries})
+
+    def publish_processes(self, chat, notice=None):
+        # Output tails go only to the chat on screen; others get the rows.
+        with self._output:
+            event = {"event": "processes", "chat": chat, "processes": self.processes.snapshot(chat, output=chat == self.view_id)}
+            if notice: event["notice"] = notice
+            self.emit(event)
 
     def state(self, service):
         status = "Needs approval" if service.approval else getattr(service, "display_status", "Thinking…") if service.busy else {
@@ -284,6 +294,10 @@ class ChatHost:
         action = command.get("command")
         identifier = command.get("chat") or (command.get("id") if action != "approve" else self.view_id)
         service = self.sessions.get(identifier)
+        if action in {"processes", "stop_process", "clear_processes"}:
+            # The tab's own notice: a chat error would reset the composer.
+            if identifier is not None: self.publish_processes(identifier, str(error))
+            return
         if action in {"configure_team", "team_resume"}:
             if service:
                 import chat_team
@@ -347,6 +361,13 @@ class ChatHost:
         if identifier is None: raise ValueError("Choose a chat.")
         if command.get("chat") and action != "approve" and command.get("id", identifier) != identifier:
             raise ValueError("This command names two different chats.")
+        if action in {"processes", "stop_process", "clear_processes"}:
+            # Polled by the inspector: never loads or wakes a saved chat.
+            notice = None
+            if action == "stop_process": notice = self.processes.stop_by_user(identifier, command.get("process"))
+            elif action == "clear_processes": self.processes.clear(identifier)
+            self.publish_processes(identifier, notice)
+            return
         if action == "delete":
             service = self.sessions.get(identifier)
             if service and self.active(service): raise ValueError("Stop this chat and its Side Chat before changing it.")
@@ -355,6 +376,7 @@ class ChatHost:
                 close_side(service, owner=identifier)
             self.session_store.delete(identifier)
             self.sessions.pop(identifier, None)
+            self.processes.forget(identifier)
             self.publish_summaries()
             if self.view_id == identifier:
                 rows = self.session_store.headers()
@@ -420,12 +442,17 @@ class ChatHost:
     def shutdown(self, timeout=10):
         if self.closing: return
         self.closing = True
-        self.wake_waiters()
-        services = self.all_services()
-        for service in services: service.closing = True
-        for service in services: service.handle({"command": "stop"})
-        from chat_agents import close_all_sides
-        for service in list(self.sessions.values()): close_all_sides(service)
+        try:
+            self.wake_waiters()
+            services = self.all_services()
+            for service in services: service.closing = True
+            for service in services: service.handle({"command": "stop"})
+            from chat_agents import close_all_sides
+            for service in list(self.sessions.values()): close_all_sides(service)
+        finally:
+            # A closed UI pipe can fail the events above; processes still end,
+            # because a later shutdown call returns early.
+            self.processes.shutdown()
         deadline = time.monotonic() + timeout
         for service in services:
             for thread in (service.thread, service.restart_thread, service.branch_thread):

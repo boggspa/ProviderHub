@@ -537,6 +537,70 @@ import Combine
         check(!parallel.busy && parallel.approval == nil && parallel.draft.contains("A disconnect input") && parallel.sideDraft == "A unaccepted side", "disconnect lost hidden input or left hidden work active")
         check(parallel.hasUnsentDrafts && parallel.turnStartedAt == nil, "disconnect lost aggregate draft protection or clock cleanup")
         observation.cancel()
+
+        // Background processes are per-chat inspector state that never blocks quit or updates.
+        var processCommands: [[String: Any]] = []
+        let procs = ChatModel(sendCommand: { processCommands.append($0); return true }, uptime: { clock }, preferences: preferences)
+        func processEvent(_ payload: [String: Any]) throws {
+            procs.consume(try JSONSerialization.data(withJSONObject: payload) + Data([10]))
+        }
+        try processEvent(["event":"catalogue", "models":[route], "folders":["/tmp"]])
+        try processEvent(["event":"chats", "chats":[summary("A"), summary("B")]])
+        try processEvent(["event":"ready"])
+        procs.select("A")
+        try processEvent(["event":"selected", "id":"A", "chat":"A", "entries":[], "busy":false, "interrupting":false, "status":"Ready", "usage":0])
+        let runningRow: [String: Any] = ["id":"p1", "pid":4242, "command":"npm run dev", "workspace":"/tmp", "owner":"Sol", "route":"ollama/test",
+            "account":"", "memberID":"m1", "status":"running", "started":1000.0, "output":"ready on :3000\n", "truncated":true]
+        let sparseRow: [String: Any] = ["id":"p2", "pid":4243, "command":"make test", "workspace":"/tmp", "owner":"Test", "route":"ollama/test",
+            "status":"exited", "code":2, "started":900, "output":"", "truncated":false]
+        let brokenRow: [String: Any] = ["id":"p3", "pid":"not a pid", "status":7]
+        try processEvent(["event":"processes", "chat":"A", "processes":[runningRow, brokenRow, sparseRow], "notice":"One process could not be read."])
+        check(procs.processes.map(\.id) == ["p1", "p2"] && procs.processesNotice == "One process could not be read.", "processes snapshot dropped rows or notice")
+        check(procs.processes[0].running && procs.processes[0].truncated && procs.processes[0].memberID == "m1" && procs.processes[0].ended == nil, "running process decoded wrongly")
+        check(procs.processes[1].failed && procs.processes[1].account == nil && procs.processes[1].stoppedBy == nil && procs.processes[1].ended == nil, "sparse process lost optional fields")
+        check(procs.processes[1].statusText() == "Failed (exit 2) · 0s" && procs.runningProcessCount == 1, "process status or running count wrong")
+        check(!procs.hasActiveWork && !procs.isActive("A"), "running background process blocked quit or update")
+        try processEvent(["event":"processes", "chat":"B", "processes":[["id":"p1", "pid":7, "command":"tail -f log", "workspace":"/tmp", "owner":"Test",
+            "route":"ollama/test", "status":"stopped", "code":-15, "started":10, "ended":145, "output":"", "truncated":false, "stoppedBy":"user"]]])
+        check(procs.processes.map(\.command) == ["npm run dev", "make test"] && procs.processesNotice == "One process could not be read.", "background chat processes replaced selected chat")
+        procs.select("B")
+        try processEvent(["event":"selected", "id":"B", "chat":"B", "entries":[], "busy":false, "interrupting":false, "status":"Ready", "usage":0])
+        check(procs.processes.count == 1 && procs.processes[0].stoppedBy == "user" && procs.processes[0].statusText() == "Stopped · 2m 15s" && procs.processesNotice.isEmpty, "background chat processes not kept per chat")
+        let beforeFinishedStop = processCommands.count
+        procs.stopProcess("p1")
+        check(processCommands.count == beforeFinishedStop, "stop sent for a finished process")
+        procs.select("A")
+        try processEvent(["event":"selected", "id":"A", "chat":"A", "entries":[], "busy":false, "interrupting":false, "status":"Ready", "usage":0])
+        procs.refreshProcesses()
+        check(processCommands.last?["command"] as? String == "processes" && processCommands.last?["chat"] as? String == "A" && processCommands.last?["id"] as? String == "A", "refresh lacks processes command or owner")
+        check(procs.processesNotice == "One process could not be read.", "a poll cleared the notice")
+        let unchanged = procs.processes
+        var republished = 0
+        let watcher = procs.objectWillChange.sink { republished += 1 }
+        try processEvent(["event":"processes", "chat":"A", "processes":[runningRow, sparseRow]])
+        check(procs.processes == unchanged && procs.processesNotice == "One process could not be read." && republished == 0,
+              "an unchanged snapshot without a notice republished Chat or cleared the notice")
+        watcher.cancel()
+        procs.refreshProcesses(userInitiated: true)
+        check(procs.processesNotice.isEmpty && processCommands.last?["command"] as? String == "processes", "refresh button kept a stale notice")
+        try processEvent(["event":"processes", "chat":"A", "processes":[runningRow, sparseRow], "notice":"That process has already finished."])
+        procs.stopProcess("p1")
+        let stopCommand = processCommands.last
+        check(stopCommand?["command"] as? String == "stop_process" && stopCommand?["process"] as? String == "p1" && stopCommand?["chat"] as? String == "A", "stop_process command malformed")
+        check(procs.processes[0].status == "stopping" && procs.runningProcessCount == 1 && !procs.hasActiveWork && procs.processesNotice.isEmpty, "stopping process state wrong")
+        procs.clearFinishedProcesses()
+        check(processCommands.last?["command"] as? String == "clear_processes" && processCommands.last?["chat"] as? String == "A", "clear_processes command malformed")
+        try processEvent(["event":"processes", "chat":"A", "processes":[]])
+        check(procs.processes.isEmpty && procs.processesNotice.isEmpty && procs.runningProcessCount == 0, "empty processes snapshot did not clear the list")
+        let beforeEmptyClear = processCommands.count
+        procs.clearFinishedProcesses()
+        check(processCommands.count == beforeEmptyClear, "clear sent with nothing finished")
+        let signalled = try JSONDecoder().decode(ChatProcess.self, from: JSONSerialization.data(withJSONObject:
+            ["id":"p9", "command":"sleep 30", "status":"exited", "code":-9, "started":0, "ended":4]))
+        check(signalled.failed && signalled.statusText() == "Failed (signal 9) · 4s", "a signal death read as an exit code")
+        try processEvent(["event":"processes", "chat":"A", "processes":[runningRow]])
+        procs.disconnected("Transport gone")
+        check(procs.processes.isEmpty && procs.processesNotice.contains("may still be running"), "disconnect kept rows or hid possible orphans")
         print("ChatModel state transitions passed")
     }
 }

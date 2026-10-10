@@ -123,6 +123,10 @@ private struct ChatSessionState {
     var sideNotice = ""
     var sideOpening = false
     var pendingSideText: String?
+    // Background processes deliberately stay out of `active`: a dev server
+    // must not block quitting or updates, and the worker stops them at quit.
+    var processes: [ChatProcess] = []
+    var processesNotice = ""
     var pendingSend: (chat: String, request: String, text: String, attachments: [ChatAttachment])?
     var active: Bool {
         busy || approval != nil || branchBusy || teamRequest != nil || sideOpening || sideChat?.busy == true || agents.contains(where: \.busy)
@@ -198,6 +202,8 @@ final class ChatModel: ObservableObject {
     var sideNotice: String { get { value(\.sideNotice) } set { update(\.sideNotice, newValue) } }
     var sideOpening: Bool { get { value(\.sideOpening) } set { update(\.sideOpening, newValue, background: true) } }
     var pendingSideText: String? { get { value(\.pendingSideText) } set { update(\.pendingSideText, newValue) } }
+    var processes: [ChatProcess] { get { value(\.processes) } set { update(\.processes, newValue, background: true) } }
+    var processesNotice: String { get { value(\.processesNotice) } set { update(\.processesNotice, newValue) } }
     private var pendingSend: (chat: String, request: String, text: String, attachments: [ChatAttachment])? { get { value(\.pendingSend) } set { update(\.pendingSend, newValue) } }
     var sideRequests: [String: String] = [:]
     var onActivity: ((Bool) -> Void)?
@@ -432,8 +438,11 @@ final class ChatModel: ObservableObject {
         connected = false
         for id in Array(sessions.keys) {
             withChat(id) {
+                let orphaned = runningProcessCount > 0
                 restorePendingSend(); setBusy(false); approval = nil
                 resetInspector(clearSessions: true); notice = message
+                // Only an orderly worker shutdown is known to end them.
+                if orphaned { processesNotice = "Chat disconnected while background processes were running. They may still be running." }
             }
         }
         unselected.notice = message; objectWillChange.send()

@@ -8,7 +8,7 @@ same gateway, run loop and inspector for both forms.
 
 The blocking `delegate` tool lets the parent ask another model to
 complete a self-contained task, waits for its result, then continues. One child
-at a time, one level deep. The child receives the existing four local tools but
+at a time, one level deep. The child receives the existing local tools but
 cannot delegate. Use the existing Messages gateway and provider adapters.
 
 This gives a second opinion, focused investigation or bounded implementation

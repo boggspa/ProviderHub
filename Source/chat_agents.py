@@ -101,6 +101,8 @@ def make_child(parent, choice, effort, role, emit):
                         runner=parent.runner_type, workspaces=parent.workspaces,
                         child_factory=parent.child_factory, role=role)
     child.models = copy.deepcopy(parent.models)
+    # Background processes a helper starts belong to the parent chat.
+    child.helper_parent = parent
     # One live preference for the parent and all existing/new helpers and Side Chats.
     child.preferences = parent.preferences
     child.chat = {"id": uuid.uuid4().hex, "title": "Helper" if role == "delegate" else "Side Chat",

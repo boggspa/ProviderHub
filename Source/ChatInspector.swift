@@ -5,26 +5,44 @@ struct ChatInspector: View {
     @ObservedObject var model: ChatModel
     var body: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 12) {
-                ForEach(ChatInspectorTab.allCases) { tab in
-                    Button { model.inspectorTab = tab } label: {
-                        VStack(spacing: 8) {
-                            Label(tab == .changes ? "Changes" : tab == .agents ? "Team" : "Side Chat", systemImage: tab.icon)
-                                .font(.system(size: 11.5, weight: model.inspectorTab == tab ? .medium : .regular)).lineLimit(1)
-                            Rectangle().fill(model.inspectorTab == tab ? model.activeAccent : .clear).frame(height: 2)
-                        }.contentShape(Rectangle())
-                    }.buttonStyle(.plain).foregroundStyle(model.inspectorTab == tab ? .primary : .secondary)
-                        .accessibilityLabel(tab.title).accessibilityAddTraits(model.inspectorTab == tab ? .isSelected : [])
-                }
-                Spacer(minLength: 0)
-            }.padding(.horizontal, 14).padding(.top, 12)
+            // The inspector can be 290 pt wide; when every label will not fit,
+            // only the selected tab keeps its label.
+            ViewThatFits(in: .horizontal) {
+                tabBar(compact: false)
+                tabBar(compact: true)
+            }.frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 14).padding(.top, 12)
             Divider()
             switch model.inspectorTab {
             case .changes: ChatChangesPane(model: model)
             case .agents: ChatAgentsPane(model: model)
             case .side: ChatSidePane(model: model)
+            case .processes: ChatProcessesPane(model: model)
             }
         }.frame(maxHeight: .infinity, alignment: .top)
+    }
+    private func tabBar(compact: Bool) -> some View {
+        HStack(spacing: compact ? 14 : 12) {
+            ForEach(ChatInspectorTab.allCases) { tab in tabButton(tab, compact: compact) }
+        }
+    }
+    private func tabButton(_ tab: ChatInspectorTab, compact: Bool) -> some View {
+        let selected = model.inspectorTab == tab
+        let running = tab == .processes ? model.runningProcessCount : 0
+        return Button { model.inspectorTab = tab } label: {
+            VStack(spacing: 8) {
+                HStack(spacing: 4) {
+                    if selected || !compact { Label(tab.label, systemImage: tab.icon) } else { Image(systemName: tab.icon) }
+                    if running > 0 {
+                        Text("\(running)").font(.system(size: 9.5, weight: .semibold)).monospacedDigit()
+                            .foregroundStyle(model.activeAccent).padding(.horizontal, 4.5).padding(.vertical, 1)
+                            .background(model.activeAccent.opacity(0.14), in: Capsule())
+                    }
+                }.font(.system(size: 11.5, weight: selected ? .medium : .regular)).lineLimit(1).fixedSize()
+                Rectangle().fill(selected ? model.activeAccent : .clear).frame(height: 2)
+            }.contentShape(Rectangle())
+        }.buttonStyle(.plain).foregroundStyle(selected ? .primary : .secondary).help(tab.title)
+            .accessibilityLabel(tab.title).accessibilityValue(running > 0 ? "\(running) running" : "")
+            .accessibilityAddTraits(selected ? .isSelected : [])
     }
 }
 
@@ -286,4 +304,145 @@ struct ChatParallelLanes: View {
 private func inspectorEmpty(_ text: String) -> some View {
     Text(text).font(.system(size: 12)).foregroundStyle(.secondary).multilineTextAlignment(.center)
         .padding(24).frame(maxWidth: .infinity, maxHeight: .infinity)
+}
+
+/// Commands agents left running between turns. The worker owns the processes
+/// and publishes snapshots; this pane only asks it to refresh, stop or clear.
+private struct ChatProcessesPane: View {
+    @ObservedObject var model: ChatModel
+    @State private var expanded = Set<String>()
+    private var running: [ChatProcess] { model.processes.filter(\.running) }
+    private var finished: [ChatProcess] { model.processes.filter { !$0.running } }
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 10) {
+                Text(model.processes.isEmpty ? "Background Processes" : "\(running.count) running · \(finished.count) finished")
+                    .font(.system(size: 11.5)).foregroundStyle(.secondary)
+                Spacer()
+                Button { model.clearFinishedProcesses() } label: { Image(systemName: "trash") }
+                    .buttonStyle(.plain).disabled(finished.isEmpty || !model.connected)
+                    .help("Clear finished processes").accessibilityLabel("Clear finished processes")
+                Button { model.refreshProcesses(userInitiated: true) } label: { Image(systemName: "arrow.clockwise") }
+                    .buttonStyle(.plain).disabled(!model.connected).help("Refresh processes").accessibilityLabel("Refresh background processes")
+            }.padding(14)
+            if !model.processesNotice.isEmpty {
+                Text(model.processesNotice).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(3)
+                    .padding(.horizontal, 14).padding(.bottom, 8)
+            }
+            if model.processes.isEmpty {
+                VStack(spacing: 6) {
+                    Text("No background processes.").font(.system(size: 12)).foregroundStyle(.secondary)
+                    Text("When an agent starts a server, watcher or long job in the background, it appears here.")
+                        .font(.system(size: 10.5)).foregroundStyle(.tertiary)
+                }.multilineTextAlignment(.center).padding(24).frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 12) {
+                        ForEach(running) { row($0) }
+                        if !finished.isEmpty {
+                            Text("Finished").font(.system(size: 11.5, weight: .medium)).foregroundStyle(.secondary)
+                                .padding(.top, running.isEmpty ? 0 : 6).accessibilityAddTraits(.isHeader)
+                        }
+                        ForEach(finished) { row($0) }
+                    }.padding(.horizontal, 14).padding(.bottom, 14)
+                }
+            }
+            Text("Background processes keep running between turns. They stop when you stop them here, delete this chat or quit Provider Hub.")
+                .font(.system(size: 10.5)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true).padding(14)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .task(id: model.selectedID) { expanded = []; model.refreshProcesses() }
+        // Poll only while something is alive; the task is cancelled when the
+        // pane disappears, the chat changes or the last process finishes.
+        .task(id: "\(model.selectedID ?? "")|\(model.runningProcessCount > 0)") {
+            guard model.runningProcessCount > 0 else { return }
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(2))
+                if Task.isCancelled { break }
+                model.refreshProcesses()
+            }
+        }
+    }
+    private func route(_ process: ChatProcess) -> ChatRoute? {
+        if let account = process.account, let match = model.models.first(where: { $0.route == process.route && $0.account == account }) { return match }
+        return model.models.first { $0.route == process.route }
+    }
+    private func row(_ process: ChatProcess) -> some View {
+        let route = route(process)
+        let owner = process.owner.isEmpty ? route?.label ?? "Agent" : process.owner
+        let isExpanded = expanded.contains(process.id)
+        return VStack(alignment: .leading, spacing: 7) {
+            HStack(alignment: .top, spacing: 6) {
+                Button {
+                    if isExpanded { expanded.remove(process.id) } else { expanded.insert(process.id) }
+                } label: {
+                    HStack(alignment: .top, spacing: 6) {
+                        Image(systemName: "chevron.right").font(.system(size: 8.5, weight: .semibold)).foregroundStyle(.secondary)
+                            .rotationEffect(.degrees(isExpanded ? 90 : 0)).frame(width: 10, height: 15)
+                        ChatProviderIcon(presentation: route?.presentation).padding(.top, 0.5)
+                        VStack(alignment: .leading, spacing: 3) {
+                            HStack(spacing: 6) {
+                                Text(owner).font(.system(size: 11.5, weight: .medium)).lineLimit(1)
+                                Spacer(minLength: 4)
+                                status(process, accent: route?.accent ?? model.activeAccent)
+                            }
+                            Text(process.command).font(.system(size: 11, design: .monospaced)).lineLimit(2).truncationMode(.middle)
+                                .foregroundStyle(HubTheme.Semantic.ink).frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                    }.contentShape(Rectangle())
+                }.buttonStyle(.plain).help(process.command)
+                    .accessibilityLabel("\(owner): \(process.command), \(process.statusText())")
+                    .accessibilityHint(isExpanded ? "Hides output" : "Shows output")
+                if process.status == "running" {
+                    Button { model.stopProcess(process.id) } label: { Image(systemName: "stop.circle").font(.system(size: 13)) }
+                        .buttonStyle(.plain).foregroundStyle(.secondary).disabled(!model.connected).padding(.top, 0.5)
+                        .help("Stop this process").accessibilityLabel("Stop \(process.command)")
+                }
+            }
+            if isExpanded { detail(process).padding(.leading, 16) }
+        }
+    }
+    @ViewBuilder private func status(_ process: ChatProcess, accent: Color) -> some View {
+        switch process.status {
+        case "running":
+            TimelineView(.periodic(from: .now, by: 1)) { context in
+                HStack(spacing: 4) {
+                    Circle().fill(accent).frame(width: 6, height: 6).accessibilityHidden(true)
+                    Text(process.statusText(now: context.date)).foregroundStyle(.secondary)
+                }
+            }.font(.system(size: 10.5)).monospacedDigit().lineLimit(1).fixedSize()
+        case "stopping":
+            HStack(spacing: 4) {
+                ProgressView().controlSize(.mini).scaleEffect(0.7).frame(width: 10, height: 10).accessibilityHidden(true)
+                Text(process.statusText()).foregroundStyle(.secondary)
+            }.font(.system(size: 10.5)).lineLimit(1).fixedSize()
+        default:
+            Text(process.statusText()).font(.system(size: 10.5)).monospacedDigit().lineLimit(1).fixedSize()
+                .foregroundStyle(process.failed ? Color(nsColor: .systemRed) : .secondary)
+                .help(stoppedHelp(process))
+        }
+    }
+    private func stoppedHelp(_ process: ChatProcess) -> String {
+        switch process.stoppedBy {
+        case "user": "Stopped by you"
+        case "agent": "Stopped by agent"
+        case "chat": "Stopped with the chat"
+        default: process.code.map { "Exit status \($0)" } ?? process.statusText()
+        }
+    }
+    private func detail(_ process: ChatProcess) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text("PID \(process.pid) · " + (process.workspace as NSString).abbreviatingWithTildeInPath)
+                .font(.system(size: 10.5)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle).help(process.workspace)
+            if process.truncated { Text("Earlier output not shown.").font(.system(size: 10.5)).foregroundStyle(.secondary) }
+            ScrollView {
+                Text(process.output.isEmpty ? (process.running ? "(no output yet)" : "(no output)") : process.output)
+                    .font(.system(size: 11, design: .monospaced)).foregroundStyle(Color.white.opacity(process.output.isEmpty ? 0.5 : 0.88))
+                    .textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading).padding(10)
+            }.defaultScrollAnchor(.bottom)
+                .frame(minHeight: 44, maxHeight: 220)
+                .background(Color.black.opacity(0.88), in: RoundedRectangle(cornerRadius: 6))
+                .accessibilityLabel("Output")
+        }
+    }
 }

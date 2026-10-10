@@ -97,7 +97,7 @@ worktree keeps this chat, records the workspace change, archives its old provide
 context and starts fresh portable context for the new directory. Changes are
 available only between turns, including Side Chats using that workspace.
 
-The right-hand **inspector** has three views, each using the whole pane:
+The right-hand **inspector** has four views, each using the whole pane:
 
 - **File Changes** lists file diff counts and expandable patches with three
   context lines. It includes untracked files and reports binary or truncated
@@ -117,6 +117,11 @@ The right-hand **inspector** has three views, each using the whole pane:
   while you switch parent chats, keep their original workspace and are discarded
   on explicit close, deletion of their parent, or quitting the app. They are not
   written to Chat's saved JSONL history. At most eight can be open at once.
+- **Background Processes** lists the shell commands this chat's model, its Team
+  members and its helpers left running, then the last ten that finished. Each
+  row names its owner and shows the command, status and running time; expand it
+  for the pid, folder and recent output, or stop it. The tab's badge counts
+  running processes. See background shells under Files and commands.
 
 The inspector collapses the left workspace rail on narrower windows to keep the
 conversation usable. The main turn clock and context count describe the parent;
@@ -173,9 +178,11 @@ windowing is a separate optimization to consider after measuring long chats.
 
 ## Files and commands
 
-The local tools are read file, search files, apply patch, and run shell. In solo
+The local tools are read file, search files, apply patch, and run shell, which
+can also start a background process followed with read process and stop
+process. In solo
 mode the parent also has **delegate**, which runs one helper at a time and returns its
-recorded result. Helpers inherit the workspace and approval mode, get the four
+recorded result. Helpers inherit the workspace and approval mode, get the
 local tools and cannot delegate. A turn can launch at most four helpers, with
 twelve model/tool rounds per serial helper. Its alternative `tasks` form runs
 two or three read-only lanes together, with eight rounds per lane; all count
@@ -209,6 +216,27 @@ Shell commands use the user's normal macOS permissions, with the workspace as
 their working directory. They are not sandboxed. Output is bounded and commands
 time out after at most five minutes. Stopping a command cannot undo changes it
 already made.
+
+A shell command started with `background` (a dev server, watcher or long
+build) keeps running after the call returns and between turns. The call
+returns its first second of output and an id such as `p1`; **read process**
+returns only output the model has not yet seen, optionally waiting up to 30
+seconds for the process to finish, and **stop process** ends it. Starting one
+needs the same approval as any shell command; reading or stopping the chat's
+own processes does not. Each process runs in its own process group, so Stop
+sends SIGTERM to everything it started and SIGKILL three seconds later; when
+the command itself exits, anything it left in its group is ended too. A chat
+can have four running at once, Chat eight in total. Output is kept as a
+bounded tail in memory and never written to disk. Stopping a turn does not
+stop its background processes: stop them in the inspector, or they end when
+their chat is deleted or Chat quits. Read-only Side Chats and lanes cannot
+start them. If the worker is killed outright, macOS does not end these
+process groups for it; when Chat disconnects with processes running, the tab
+says they may still be running.
+Background processes need a Python runtime that can see a process exit
+without reaping it (`os.waitid` with `WNOWAIT`; Python 3.13 or later on
+macOS, as Provider Hub bundles). Without it, Chat refuses background launches
+rather than risk signalling a process group whose id has been reused.
 
 After an interruption, Chat keeps recorded results and marks unanswered tools
 as interrupted. Retry resumes from those results instead of replaying completed

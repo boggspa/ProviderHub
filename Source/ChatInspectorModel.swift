@@ -2,10 +2,11 @@ import AppKit
 import SwiftUI
 
 enum ChatInspectorTab: String, CaseIterable, Identifiable {
-    case changes, agents, side
+    case changes, agents, side, processes
     var id: String { rawValue }
-    var title: String { switch self { case .changes: "File Changes"; case .agents: "Team"; case .side: "Side Chat" } }
-    var icon: String { switch self { case .changes: "filemenu.and.selection"; case .agents: "person.2"; case .side: "bubble.left.and.bubble.right" } }
+    var title: String { switch self { case .changes: "File Changes"; case .agents: "Team"; case .side: "Side Chat"; case .processes: "Background Processes" } }
+    var label: String { switch self { case .changes: "Changes"; case .agents: "Team"; case .side: "Side Chat"; case .processes: "Processes" } }
+    var icon: String { switch self { case .changes: "filemenu.and.selection"; case .agents: "person.2"; case .side: "bubble.left.and.bubble.right"; case .processes: "terminal" } }
 }
 
 struct ChatChange: Decodable, Identifiable {
@@ -47,6 +48,63 @@ struct ChatSide: Decodable, Identifiable {
     var interrupting: Bool?
     var workspace: String?
     var truncated: Bool?
+}
+/// A shell command an agent left running in the background. The worker owns
+/// the process; this is its latest published snapshot.
+struct ChatProcess: Decodable, Identifiable, Equatable {
+    var id: String; var pid: Int; var command: String; var workspace: String; var owner: String; var route: String
+    var account: String?; var memberID: String?
+    var status: String; var code: Int?; var started: Double; var ended: Double?
+    var output: String; var truncated: Bool; var stoppedBy: String?
+    private enum CodingKeys: String, CodingKey {
+        case id, pid, command, workspace, owner, route, account, memberID, status, code, started, ended, output, truncated, stoppedBy
+    }
+    init(id: String, pid: Int = 0, command: String, workspace: String = "", owner: String = "", route: String = "", account: String? = nil,
+         memberID: String? = nil, status: String, code: Int? = nil, started: Double = 0, ended: Double? = nil,
+         output: String = "", truncated: Bool = false, stoppedBy: String? = nil) {
+        self.id = id; self.pid = pid; self.command = command; self.workspace = workspace; self.owner = owner; self.route = route
+        self.account = account; self.memberID = memberID; self.status = status; self.code = code; self.started = started
+        self.ended = ended; self.output = output; self.truncated = truncated; self.stoppedBy = stoppedBy
+    }
+    init(from decoder: Decoder) throws {
+        let row = try decoder.container(keyedBy: CodingKeys.self)
+        id = try row.decode(String.self, forKey: .id); command = try row.decode(String.self, forKey: .command)
+        status = try row.decode(String.self, forKey: .status)
+        pid = try row.decodeIfPresent(Int.self, forKey: .pid) ?? 0
+        workspace = try row.decodeIfPresent(String.self, forKey: .workspace) ?? ""
+        owner = try row.decodeIfPresent(String.self, forKey: .owner) ?? ""
+        route = try row.decodeIfPresent(String.self, forKey: .route) ?? ""
+        account = try? row.decodeIfPresent(String.self, forKey: .account)
+        memberID = try? row.decodeIfPresent(String.self, forKey: .memberID)
+        code = try? row.decodeIfPresent(Int.self, forKey: .code)
+        started = try row.decodeIfPresent(Double.self, forKey: .started) ?? 0
+        ended = try? row.decodeIfPresent(Double.self, forKey: .ended)
+        output = try row.decodeIfPresent(String.self, forKey: .output) ?? ""
+        truncated = try row.decodeIfPresent(Bool.self, forKey: .truncated) ?? false
+        stoppedBy = try? row.decodeIfPresent(String.self, forKey: .stoppedBy)
+    }
+    /// "stopping" is still alive: SIGTERM has been sent but the process has not exited.
+    var running: Bool { status == "running" || status == "stopping" }
+    var failed: Bool { status == "exited" && (code ?? 0) != 0 }
+    func elapsed(now: Date = Date()) -> String {
+        let end = ended ?? (running ? now.timeIntervalSince1970 : started)
+        let seconds = Int(max(0, min(end - started, Double(Int.max / 2))))
+        if seconds < 60 { return "\(seconds)s" }
+        if seconds < 3600 { return "\(seconds / 60)m \(seconds % 60)s" }
+        return "\(seconds / 3600)h \((seconds / 60) % 60)m"
+    }
+    func statusText(now: Date = Date()) -> String {
+        switch status {
+        case "running": "Running · " + elapsed(now: now)
+        case "stopping": "Stopping…"
+        case "stopped": "Stopped · " + elapsed(now: now)
+        // A negative code is the signal that ended it outside Provider Hub.
+        case "exited" where (code ?? 0) < 0: "Failed (signal \(-(code ?? 0))) · " + elapsed(now: now)
+        case "exited" where failed: "Failed (exit \(code ?? 0)) · " + elapsed(now: now)
+        case "exited": "Completed · " + elapsed(now: now)
+        default: status.capitalized
+        }
+    }
 }
 
 struct ChatTeamMember: Decodable, Identifiable {
@@ -109,6 +167,24 @@ struct ChatTeamSnapshot: Decodable {
         gitChangesLoading = true; inspectorNotice = ""
         if !inspectorCommand(["command": "inspect_git", "id": selectedID, "request": request]) { gitChangesLoading = false; changesRequest = nil }
     }
+    var runningProcessCount: Int { processes.filter(\.running).count }
+    /// The pane's poll leaves a notice in place; the refresh button clears it.
+    func refreshProcesses(userInitiated: Bool = false) {
+        guard connected, let selectedID = stateChatID else { return }
+        if userInitiated { processesNotice = "" }
+        inspectorCommand(["command": "processes", "id": selectedID])
+    }
+    func stopProcess(_ id: String) {
+        guard connected, let selectedID = stateChatID, let index = processes.firstIndex(where: { $0.id == id && $0.status == "running" }) else { return }
+        processesNotice = ""
+        if inspectorCommand(["command": "stop_process", "id": selectedID, "process": id]) { processes[index].status = "stopping" }
+        else { processesNotice = "Chat is disconnected." }
+    }
+    func clearFinishedProcesses() {
+        guard connected, let selectedID = stateChatID, processes.contains(where: { !$0.running }) else { return }
+        processesNotice = ""
+        if !inspectorCommand(["command": "clear_processes", "id": selectedID]) { processesNotice = "Chat is disconnected." }
+    }
     func refreshBranches() {
         guard connected, let selectedID = stateChatID, !branchBusy else { return }
         if branchesLoading { branchesRefreshPending = true; return }
@@ -168,6 +244,7 @@ struct ChatTeamSnapshot: Decodable {
         inspectorNotice = ""; branchNotice = ""; agents = []; inspectedAgentID = nil
         team = nil; teamNotice = ""; teamRequest = nil
         sideChat = nil; sideNotice = ""; sideOpening = false; pendingSideText = nil
+        processes = []; processesNotice = ""
     }
     func consumeInspector(_ event: [String: Any]) {
         guard let chat = event["chat"] as? String, chat == stateChatID else { return }
@@ -244,6 +321,14 @@ struct ChatTeamSnapshot: Decodable {
             guard sideOpening || (event["side"] as? String) == sideChat?.id else { return }
             sideNotice = event["message"] as? String ?? "Side Chat could not complete the request."
             sideOpening = false; pendingSideText = nil
+        case "processes":
+            // Decode row by row so one malformed process cannot hide the rest.
+            let rows = (event["processes"] as? [Any] ?? []).compactMap { decoded($0, as: ChatProcess.self) }
+            // An unchanged poll must not republish the whole Chat window.
+            if rows != processes { processes = rows }
+            // A snapshot without a notice keeps the last one, so a poll cannot
+            // wipe a Stop result before it is read. Actions in the tab clear it.
+            if let notice = event["notice"] as? String { processesNotice = notice }
         default: break
         }
     }
