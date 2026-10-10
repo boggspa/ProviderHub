@@ -108,7 +108,7 @@ The right-hand **inspector** has four views, each using the whole pane:
 - **File Changes** lists file diff counts and expandable patches with three
   context lines. It includes untracked files and reports binary or truncated
   changes. Reads use the local checkout and never fetch a remote.
-- **Team** configures up to three persistent members, including the current
+- **Team** configures up to four persistent members, including the current
   chat model. Each contributes once by default and may explicitly continue with
   a next step. Members think and read in parallel through one attributed
   transcript, refreshed before every model round, with separate provider histories.
@@ -134,7 +134,9 @@ conversation usable. The main turn clock and context count describe the parent;
 Side Chat runs independently.
 
 The small gear at the bottom-left of the sidebar offers Allow web search, Theme, Glass/Solid,
-Font, and Text size. Font choices include System, System Mono, Inter, Source
+Font, and Text size. Glass lays a 10% scrim over the window material (black in
+Dark, white in Light) so text holds on a busy wallpaper. Font choices include
+System, System Mono, Inter, Source
 Serif 4 and JetBrains Mono. **Custom…** opens the native macOS font panel for
 fonts installed through Font Book. Only the chosen font name is saved; custom
 font files are never copied. An unavailable custom font falls back to System.
@@ -222,7 +224,9 @@ below the composer selects one of three modes, saved per chat:
 New chats default to Manual. Modes can be changed between turns. Expand a
 proposed patch to review it before allowing.
 The mode menu shows its state in colour: Manual is blue, Accept Edits neutral,
-and YOLO red, which also tints the composer outline faintly. Choosing YOLO in a
+and YOLO red, which also tints the composer outline faintly. While a turn runs
+the mode cannot change, but it stays in full colour beneath the composer.
+Choosing YOLO in a
 folder for the first time asks once to confirm; that answer is remembered per
 folder on this Mac and never sent to the worker.
 
@@ -246,9 +250,11 @@ revealed in Finder.
 
 Web search sources collapse into one pill under the reply (**12 sources ·
 github.com · …**) that opens into a numbered list; copied and saved text keeps
-the original **Sources:** line. Notices are quiet dividers, and a Team
-checkpoint reads as a handoff naming the member who paused, with the runtime's
-full wording in its tooltip. Older chats saved an "Older model context trimmed"
+the original **Sources:** line. Notices are quiet dividers. A Team checkpoint
+that only continues later or finishes is not drawn; a pause or question reads
+as a handoff naming the member, with the runtime's full wording in its
+tooltip. A finished Team turn ends with a table of the files it changed.
+Older chats saved an "Older model context trimmed"
 notice on most rounds of a long turn; those are no longer drawn.
 
 Shell commands use the user's normal macOS permissions, with the workspace as

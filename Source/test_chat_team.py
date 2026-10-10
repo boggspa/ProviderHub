@@ -173,7 +173,7 @@ class TeamTests(unittest.TestCase):
     def test_invalid_or_changed_roster_starts_nothing(self):
         parent = self.service([[], []])
         good = {"choice": parent.models[0]["id"], "name": "One"}
-        for specs in ([], [good] * 4, [good, {"choice": "missing", "name": "Other"}]):
+        for specs in ([], [good] * (chat_team.MAX_MEMBERS + 1), [good, {"choice": "missing", "name": "Other"}]):
             parent.handle({"command": "configure_team", "id": parent.chat["id"], "enabled": True, "members": specs})
             self.assertIn("notice", self.events[-1]); self.assertNotIn("team", parent.chat)
         members = self.configure(parent)

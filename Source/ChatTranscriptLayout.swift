@@ -18,6 +18,12 @@ protocol ChatTranscriptItem {
     var memberName: String? { get }
     var agentID: String? { get }
     var agentIDs: [String]? { get }
+    /// Files a recorded patch changed; empty for every other record.
+    var changedFiles: [String] { get }
+}
+
+extension ChatTranscriptItem {
+    var changedFiles: [String] { [] }
 }
 
 /// Who is speaking, then what they did, the way Claude and Codex Desktop read.
@@ -32,6 +38,9 @@ struct ChatTranscriptSegment<Item: ChatTranscriptItem>: Identifiable {
         case speaker(Item)
         case entry(Item)
         case fold([Item])
+        /// The close of a Team's collective turn: the records that changed
+        /// files, summarised as one table (see ChatTurnChanges).
+        case changes([Item])
     }
     /// The space above a row: wide between speakers, tight inside a block.
     enum Spacing: Equatable { case none, speaker, header, item }
@@ -47,6 +56,7 @@ struct ChatTranscriptSegment<Item: ChatTranscriptItem>: Identifiable {
         case .speaker(let item): return "speaker-" + item.id
         case .entry(let item): return item.id
         case .fold(let items): return Self.foldID(items)
+        case .changes(let items): return "changes-" + (items.first?.id ?? "")
         }
     }
     var isSpeaker: Bool { if case .speaker = content { return true }; return false }
@@ -54,12 +64,14 @@ struct ChatTranscriptSegment<Item: ChatTranscriptItem>: Identifiable {
     static var minimumFold: Int { 3 }
     static func foldID(_ items: [Item]) -> String { "fold-" + (items.first?.id ?? "") }
 
-    static func outline(_ items: [Item], isLive: (Item) -> Bool) -> [ChatTranscriptSegment] {
+    /// `open` says the last turn is still being worked, so its close-out waits.
+    static func outline(_ items: [Item], open: Bool = false, isLive: (Item) -> Bool) -> [ChatTranscriptSegment] {
         var result: [ChatTranscriptSegment] = []
         var speaker: String?
         var lastSpeaker: Item?
         var opened = false
         var run: [Item] = []
+        var turn: [Item] = []
 
         func push(_ content: Content, _ spacing: Spacing) {
             result.append(ChatTranscriptSegment(content: content, spacing: result.isEmpty ? .none : spacing,
@@ -74,8 +86,20 @@ struct ChatTranscriptSegment<Item: ChatTranscriptItem>: Identifiable {
             if run.count >= minimumFold { pushInBlock(.fold(run)) } else { run.forEach { pushInBlock(.entry($0)) } }
             run.removeAll()
         }
+        /// A Team turn that changed files ends with one table of them, so the
+        /// handoffs along the way can stay silent.
+        func closeTurn() {
+            defer { turn.removeAll() }
+            guard turn.contains(where: { $0.memberID != nil }) else { return }
+            let changed = turn.filter { !$0.changedFiles.isEmpty }
+            guard !changed.isEmpty else { return }
+            flush()
+            speaker = nil; opened = false
+            push(.changes(changed), .speaker)
+        }
 
         for item in items {
+            if item.kind == "user" { closeTurn() } else { turn.append(item) }
             switch item.kind {
             case "assistant", "tool":
                 if item.kind == "assistant", ChatReplySources.isBlank(item.text), !isLive(item) { continue }
@@ -99,6 +123,75 @@ struct ChatTranscriptSegment<Item: ChatTranscriptItem>: Identifiable {
             }
         }
         flush()
+        if !open { closeTurn() }
+        return result
+    }
+}
+
+/// What a Team's collective turn did to files, read from its recorded patches:
+/// one row per file, in first-touched order, with the members who changed it,
+/// its line counts and its diff sections. Edits made through shell commands
+/// are not seen here; the Changes tab reads the workspace itself.
+struct ChatTurnChanges: Equatable {
+    struct File: Equatable, Identifiable {
+        var path: String
+        var members: [String] = []
+        var added = 0
+        var removed = 0
+        var diff = ""
+        var id: String { path }
+    }
+    var files: [File] = []
+    var added: Int { files.reduce(0) { $0 + $1.added } }
+    var removed: Int { files.reduce(0) { $0 + $1.removed } }
+
+    static func collect<Item: ChatTranscriptItem>(_ items: [Item]) -> ChatTurnChanges {
+        var result = ChatTurnChanges()
+        func index(_ path: String) -> Int {
+            if let found = result.files.firstIndex(where: { $0.path == path }) { return found }
+            result.files.append(File(path: path)); return result.files.count - 1
+        }
+        for item in items where !item.changedFiles.isEmpty {
+            let member = item.memberName ?? "Chat"
+            let sections = item.tool == "apply_patch" ? self.sections(item.detail ?? item.text) : []
+            for path in item.changedFiles + sections.map(\.path) where !path.isEmpty {
+                let at = index(path)
+                if !result.files[at].members.contains(member) { result.files[at].members.append(member) }
+            }
+            for section in sections {
+                let at = index(section.path)
+                result.files[at].added += section.added; result.files[at].removed += section.removed
+                result.files[at].diff += (result.files[at].diff.isEmpty ? "" : "\n") + section.text
+            }
+        }
+        return result
+    }
+
+    /// Splits apply_patch's unified diff ("--- a/x" then "+++ b/x" per file)
+    /// into per-file sections. A deleted file is named by its "--- a/" line.
+    static func sections(_ diff: String) -> [(path: String, text: String, added: Int, removed: Int)] {
+        var result: [(path: String, text: String, added: Int, removed: Int)] = []
+        let lines = diff.split(separator: "\n", omittingEmptySubsequences: false)
+        func name(_ line: Substring, _ marker: String) -> String? {
+            let value = line.dropFirst(4).split(separator: "\t").first.map(String.init) ?? ""
+            if value == "/dev/null" { return nil }
+            return value.hasPrefix(marker) ? String(value.dropFirst(marker.count)) : value
+        }
+        var index = 0
+        while index < lines.count {
+            let line = lines[index]
+            if line.hasPrefix("--- "), index + 1 < lines.count, lines[index + 1].hasPrefix("+++ "),
+               let path = name(lines[index + 1], "b/") ?? name(line, "a/") {
+                result.append((path, String(line) + "\n" + lines[index + 1], 0, 0))
+                index += 2; continue
+            }
+            if !result.isEmpty {
+                let at = result.count - 1
+                result[at].text += "\n" + line
+                if line.hasPrefix("+") { result[at].added += 1 } else if line.hasPrefix("-") { result[at].removed += 1 }
+            }
+            index += 1
+        }
         return result
     }
 }
@@ -263,7 +356,9 @@ enum ChatReplySources {
 
 /// Transcript notices: most read as a quiet divider; a Team or turn
 /// checkpoint becomes a handoff line naming the speaker; a few routine ones
-/// are hidden.
+/// are hidden, including a Team member's checkpoint that only continues later
+/// or finished as planned. The member's sign-off says the same, and the
+/// turn's close-out table carries what changed.
 enum ChatNotice {
     enum Style: Equatable { case hidden, checkpoint, divider }
 
@@ -272,9 +367,11 @@ enum ChatNotice {
     static let contextTrimmed = "Older model context trimmed. The full visible transcript is kept."
     static let checkpointPrefix = "Team contribution checkpoint reached."
     static let turnCheckpointPrefix = "Turn checkpoint reached."
+    static let routineCheckpoints = ["resume after other members", "finished its contribution"]
 
     static func style(_ text: String) -> Style {
         if text == contextTrimmed { return .hidden }
+        if text.hasPrefix(checkpointPrefix), routineCheckpoints.contains(where: text.contains) { return .hidden }
         if text.hasPrefix(checkpointPrefix) || text.hasPrefix(turnCheckpointPrefix) { return .checkpoint }
         return .divider
     }

@@ -214,6 +214,7 @@ struct Item: ChatTranscriptItem {
     var tool: String? = nil; var summary: String? = nil; var detail: String? = nil
     var memberID: String? = nil; var memberName: String? = nil
     var agentID: String? = nil; var agentIDs: [String]? = nil
+    var changedFiles: [String] = []
 }
 
 @main struct Cases {
@@ -236,7 +237,8 @@ struct Item: ChatTranscriptItem {
             reply("a1", "  \n"), tool("t1"), reply("a1b", ""), tool("t2", "read_file"), tool("t3", "apply_patch"),
             reply("a2", "Found it."), tool("t4"),
             Item(id: "trim", kind: "notice", text: ChatNotice.contextTrimmed),
-            Item(id: "n1", kind: "notice", text: ChatNotice.checkpointPrefix + " Your requested continuation will resume after other members."),
+            Item(id: "routine", kind: "notice", text: ChatNotice.checkpointPrefix + " Your requested continuation will resume after other members."),
+            Item(id: "n1", kind: "notice", text: ChatNotice.checkpointPrefix + " This member did not request continuation; send a message to continue."),
             reply("a3", "", member: opus, route: "claude/opus"), tool("t5", member: opus, route: "claude/opus"),
             tool("d1", "delegate", member: opus, route: "claude/opus", agent: "child"), tool("t6", member: opus, route: "claude/opus"),
         ]
@@ -253,6 +255,33 @@ struct Item: ChatTranscriptItem {
         check(Segment.outline(sameRouteOtherMember) { _ in false }.filter(\.isSpeaker).count == 2, "Members on one route shared a header")
         let continued = [reply("y1", "One"), tool("y2"), reply("y3", "Two")]
         check(Segment.outline(continued) { _ in false }.filter(\.isSpeaker).count == 1, "One speaker repeated its header")
+
+        // A Team turn that changed files closes with one table of them, after
+        // the turn ends: at the next request, or once the Team stops working.
+        let diffA = "Applied patch:\nA.swift\nB.swift\n\n--- a/A.swift\n+++ b/A.swift\n@@ -1 +1,2 @@\n-old\n+new\n+more\n"
+            + "--- /dev/null\n+++ b/B.swift\n@@ -0,0 +1 @@\n+b\n"
+        var p1 = Item(id: "p1", kind: "tool", tool: "apply_patch", summary: "Apply patch:\nUpdate: A.swift\nAdd: B.swift", detail: diffA,
+                      memberID: sol.id, memberName: sol.name)
+        p1.changedFiles = ["A.swift", "B.swift"]
+        var p2 = Item(id: "p2", kind: "tool", route: "claude/opus", tool: "apply_patch", summary: "Apply patch:\nUpdate: A.swift",
+                      detail: "Applied patch:\nA.swift\n\n--- a/A.swift\n+++ b/A.swift\n@@ -2 +2 @@\n-more\n+most\n",
+                      memberID: opus.id, memberName: opus.name)
+        p2.changedFiles = ["A.swift"]
+        let teamTurn = [Item(id: "u", kind: "user", text: "Go"), p1, reply("r1", "Done"), p2, Item(id: "u2", kind: "user", text: "Next")]
+        check(Segment.outline(teamTurn) { _ in false }.map(\.id) == ["u", "speaker-p1", "p1", "r1", "speaker-p2", "p2", "changes-p1", "u2"],
+              "Close-out placement: " + Segment.outline(teamTurn) { _ in false }.map(\.id).joined(separator: ","))
+        let working = Array(teamTurn.dropLast())
+        check(!Segment.outline(working, open: true) { _ in false }.contains { $0.id == "changes-p1" }, "Close-out drawn mid-turn")
+        check(Segment.outline(working) { _ in false }.last?.id == "changes-p1", "Finished turn lost its close-out")
+        var solo = p1; solo.memberID = nil; solo.memberName = nil
+        check(!Segment.outline([teamTurn[0], solo]) { _ in false }.contains { $0.id.hasPrefix("changes-") }, "Solo turn grew a Team close-out")
+        let changes = ChatTurnChanges.collect([p1, p2])
+        check(changes.files.map(\.path) == ["A.swift", "B.swift"], "Changed files: \(changes.files.map(\.path))")
+        check(changes.files[0].members == ["Sol", "Opus"], "Members per file")
+        check(changes.files[0].added == 3 && changes.files[0].removed == 2, "A.swift counts: \(changes.files[0])")
+        check(changes.files[1].added == 1 && changes.files[1].removed == 0, "Created file counts")
+        check(changes.added == 4 && changes.removed == 2, "Turn totals")
+        check(changes.files[0].diff.contains("+most") && !changes.files[0].diff.contains("+b"), "Diff sections crossed files")
 
         // Tool rows lead with what was done, not the shared folder.
         let shell = ChatToolDisplay.describe(tool: "run_shell", summary: "Run in /Users/x/BF2:\ngit status --short")
@@ -296,6 +325,15 @@ struct Item: ChatTranscriptItem {
               == "Checkpoint reached · send a message to continue", "Checkpoint without member")
         // The wording finish_checkpoint writes when the round budget runs out.
         let budget = " The 24-round tool budget was used up. "
+        // Continuing later or finishing as planned is routine; the sign-off
+        // says so. A pause or a question still marks the transcript.
+        check(ChatNotice.style(ChatNotice.checkpointPrefix + budget + "This member's requested continuation will resume after other members.") == .hidden,
+              "Routine continuation checkpoint shown")
+        check(ChatNotice.style(ChatNotice.checkpointPrefix + budget + "This member finished its contribution.") == .hidden, "Routine finish shown")
+        check(ChatNotice.style(ChatNotice.checkpointPrefix + budget + "This member needs your answer before continuing.") == .checkpoint,
+              "Question checkpoint hidden")
+        check(ChatNotice.style(ChatNotice.checkpointPrefix + budget + "This member paused; send a message to continue from the recorded results.")
+              == .checkpoint, "Pause checkpoint hidden")
         check(ChatNotice.checkpointLine(ChatNotice.checkpointPrefix + budget + "This member's requested continuation will resume after other members.", member: "Sol")
               == "Sol reached a checkpoint · round budget used · continues after the other members", "Budget continuation")
         check(ChatNotice.checkpointLine(ChatNotice.checkpointPrefix + budget + "This member finished its contribution.", member: "Opus")

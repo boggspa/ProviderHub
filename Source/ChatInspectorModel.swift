@@ -116,6 +116,8 @@ struct ChatTeamMember: Decodable, Identifiable {
     }
 }
 struct ChatTeamSnapshot: Decodable {
+    /// The runtime's MAX_MEMBERS (chat_team.py), including the chat's own model.
+    static let maxMembers = 4
     var enabled: Bool; var status: String; var activeMemberID: String?; var members: [ChatTeamMember]
     var activeMemberIDs: [String]?
     var active: ChatTeamMember? { members.first { $0.id == activeMemberID } }
@@ -127,10 +129,10 @@ struct ChatTeamSnapshot: Decodable {
     var canConfigureTeam: Bool { connected && selectedID != nil && !busy && !branchBusy && teamRequest == nil }
     func configureTeam(enabled: Bool, members: [[String: Any]]) {
         guard canConfigureTeam, let selectedID = stateChatID else { return }
-        guard (1...3).contains(members.count), members.allSatisfy({ member in
+        guard (1...ChatTeamSnapshot.maxMembers).contains(members.count), members.allSatisfy({ member in
             guard let choice = member["choice"] as? String, let name = member["name"] as? String else { return false }
             return !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && models.contains { $0.id == choice && $0.supportsTools }
-        }) else { teamNotice = "Choose one to three named members with enabled models."; return }
+        }) else { teamNotice = "Choose one to four named members with enabled models."; return }
         let request = UUID().uuidString
         teamRequest = request; teamNotice = ""
         if !inspectorCommand(["command": "configure_team", "id": selectedID, "request": request,

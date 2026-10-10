@@ -55,6 +55,18 @@ class ParallelTeamTests(unittest.TestCase):
         self.assertTrue(any(any(m["usage"] == 12 for m in s["members"]) and
                             any(m["status"] == "working" for m in s["members"]) for s in live))
 
+    def test_four_members_contribute_in_one_wave(self):
+        together = threading.Barrier(chat_team.MAX_MEMBERS)
+        def meet(payload, cancel, delta):
+            together.wait(2)
+            return response("Contributed")
+        parent = self.service([[meet] for _ in range(chat_team.MAX_MEMBERS)])
+        members = self.configure(parent, count=chat_team.MAX_MEMBERS)
+        self.assertEqual(len(members), 4)
+        self.send(parent); self.finish(parent)
+        self.assertEqual(parent.chat["team"]["status"], "done")
+        self.assertEqual([m["contributions"] for m in members], [1, 1, 1, 1])
+
     def test_write_fifo_never_overlaps_but_read_tools_do(self):
         models = threading.Barrier(3)
         reads = threading.Barrier(2)
@@ -262,6 +274,29 @@ class ParallelTeamTests(unittest.TestCase):
             second = chat_team.shared_context(parent.chat, reader, parent.choice(reader["choice"]))
             self.assertIn("Earlier finding", json.dumps(second))
             self.assertNotIn("Newer finding", json.dumps(second))
+            self.assertEqual(chat_team.shared_context(parent.chat, reader, parent.choice(reader["choice"])), [])
+
+    def test_shared_delta_shortens_peer_tool_output_and_bounds_the_backlog(self):
+        from chat_runtime import entry
+        parent = self.service([[], []])
+        writer, reader = self.configure(parent)
+        tool = entry("tool", tool="run_shell", summary="ls", detail="T" * 3000 + "TAIL", memberID=writer["id"], recorded=True)
+        reply = entry("assistant", "R" * 3000 + "KEPT", memberID=writer["id"], recorded=True)
+        parent.chat["entries"] += [tool, reply]
+        delta = json.dumps(chat_team.shared_context(parent.chat, reader, parent.choice(reader["choice"])))
+        self.assertNotIn("TAIL", delta)
+        self.assertIn("T" * chat_team.MAX_SHARED_TOOL, delta)
+        self.assertIn("KEPT", delta)
+        self.assertIn("shortened", delta)
+        parent.chat["entries"] += [entry("assistant", f"Finding {i} " + "x" * 300, memberID=writer["id"], recorded=True)
+                                   for i in range(60)]
+        with patch.object(chat_team, "MAX_SHARED_BYTES", 500), patch.object(chat_team, "MAX_SHARED_BACKLOG", 5):
+            first = json.dumps(chat_team.shared_context(parent.chat, reader, parent.choice(reader["choice"])))
+            self.assertIn("Finding 59 ", first)
+            self.assertIn("54 older peer records were omitted", first)
+            self.assertEqual(len(reader["sharedDeferred"]), 5)
+            delivered = [json.dumps(chat_team.shared_context(parent.chat, reader, parent.choice(reader["choice"]))) for _ in range(5)]
+            self.assertIn("Finding 58 ", delivered[0])
             self.assertEqual(chat_team.shared_context(parent.chat, reader, parent.choice(reader["choice"])), [])
 
     def test_parallel_notebook_writes_keep_both_source_linked_notes(self):

@@ -393,3 +393,103 @@ struct NoticeRow: View {
         Rectangle().fill(Semantic.hairline).frame(height: 1).frame(minWidth: 12, maxWidth: .infinity)
     }
 }
+
+/// The close of a Team's collective turn: one quiet table of the files its
+/// members changed, with line counts and who touched each. A row opens its
+/// diff; a long list shows the first few and offers the rest.
+struct ChatTurnChangesRow: View {
+    var entries: [ChatEntry]
+    var workspace: String?
+    var expanded: (String) -> Binding<Bool>
+    @State private var showAll = false
+    @Environment(\.chatTextStyle) private var textStyle
+    private static let preview = 6
+
+    var body: some View {
+        let changes = ChatTurnChanges.collect(entries)
+        let files = showAll ? changes.files : Array(changes.files.prefix(Self.preview))
+        let key = "changes-" + (entries.first?.id ?? "") + "-"
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: textStyle.scaled(7)) {
+                ChatToolGlyph(name: "apply_patch", size: textStyle.scaled(14)).foregroundStyle(Semantic.secondaryInk)
+                Text(changes.files.count == 1 ? "1 file changed" : "\(changes.files.count) files changed")
+                    .font(textStyle.system(12, weight: .medium)).foregroundStyle(Semantic.ink)
+                Text("this turn").font(textStyle.system(11.5)).foregroundStyle(Semantic.secondaryInk)
+                Spacer(minLength: 0)
+                if changes.added + changes.removed > 0 {
+                    ChatPatchStatsLabel(stats: ChatPatchStats(added: changes.added, removed: changes.removed), size: textStyle.scaled(11))
+                }
+            }
+            .padding(.horizontal, 10).padding(.vertical, textStyle.scaled(7))
+            .accessibilityElement(children: .combine)
+            ForEach(files) { file in
+                Rectangle().fill(Semantic.hairline).frame(height: 1)
+                ChatTurnChangeFile(file: file, workspace: workspace, expanded: expanded(key + file.path))
+            }
+            if changes.files.count > files.count {
+                Rectangle().fill(Semantic.hairline).frame(height: 1)
+                Button("Show \(changes.files.count - files.count) more") { showAll = true }
+                    .buttonStyle(.plain).font(textStyle.system(11.5)).foregroundStyle(Semantic.secondaryInk)
+                    .padding(.horizontal, 10).padding(.vertical, textStyle.scaled(6))
+            }
+        }
+        .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Semantic.raisedSurface))
+        .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).stroke(Semantic.hairline, lineWidth: 1))
+    }
+}
+
+private struct ChatTurnChangeFile: View {
+    var file: ChatTurnChanges.File
+    var workspace: String?
+    @Binding var expanded: Bool
+    @State private var hovering = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.chatTextStyle) private var textStyle
+
+    var body: some View {
+        let name = (file.path as NSString).lastPathComponent
+        let folder = (file.path as NSString).deletingLastPathComponent
+        VStack(alignment: .leading, spacing: textStyle.scaled(6)) {
+            Button {
+                if reduceMotion { expanded.toggle() } else { withAnimation(.easeInOut(duration: 0.15)) { expanded.toggle() } }
+            } label: {
+                HStack(spacing: textStyle.scaled(6)) {
+                    Text(name).font(textStyle.system(11.5, weight: .medium, design: .monospaced)).foregroundStyle(Semantic.ink)
+                        .lineLimit(1).layoutPriority(1)
+                    if !folder.isEmpty {
+                        Text(folder).font(textStyle.system(11, design: .monospaced)).foregroundStyle(.tertiary)
+                            .lineLimit(1).truncationMode(.head)
+                    }
+                    Spacer(minLength: 6)
+                    Text(file.members.joined(separator: ", ")).font(textStyle.system(11)).foregroundStyle(Semantic.secondaryInk)
+                        .lineLimit(1)
+                    if file.added + file.removed > 0 {
+                        ChatPatchStatsLabel(stats: ChatPatchStats(added: file.added, removed: file.removed), size: textStyle.scaled(11))
+                    }
+                    Image(systemName: "chevron.right").font(textStyle.system(8.5, weight: .semibold)).foregroundStyle(Semantic.secondaryInk)
+                        .rotationEffect(.degrees(expanded ? 90 : 0)).opacity(hovering || expanded ? 1 : 0.4)
+                }
+                .padding(.horizontal, 10).padding(.vertical, textStyle.scaled(5))
+                .background(hovering ? Semantic.raisedSurface : .clear)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .onHover { hovering = $0 }
+            .help(file.path)
+            .accessibilityLabel(file.path + ", changed by " + file.members.joined(separator: ", "))
+            .accessibilityValue(expanded ? "Expanded" : "Collapsed")
+            if expanded {
+                VStack(alignment: .leading, spacing: textStyle.scaled(6)) {
+                    if file.diff.isEmpty {
+                        Text("No textual diff was recorded for this file.").font(textStyle.system(11.5)).foregroundStyle(Semantic.secondaryInk)
+                    } else {
+                        ScrollView(.horizontal, showsIndicators: false) { PatchText(text: file.diff, size: textStyle.scaled(11)) }
+                    }
+                    Button("Reveal in Finder") { chatReveal(file.path, in: workspace) }
+                        .buttonStyle(.plain).font(HubTheme.Typography.detail).foregroundStyle(Semantic.secondaryInk)
+                }
+                .padding(.horizontal, 10).padding(.bottom, textStyle.scaled(8))
+            }
+        }
+    }
+}
