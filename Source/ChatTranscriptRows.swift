@@ -364,6 +364,37 @@ struct PatchText: View {
     }
 }
 
+/// A parked member's warning uses one line; attempt diagnostics are optional.
+struct MemberFailureRow: View {
+    var entry: ChatEntry
+    @State private var expanded = false
+    @Environment(\.chatTextStyle) private var textStyle
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: textStyle.scaled(6)) {
+            Button { expanded.toggle() } label: {
+                HStack(spacing: textStyle.scaled(6)) {
+                    Image(systemName: "exclamationmark.circle").font(textStyle.system(11))
+                    Text(ChatNotice.failureLine(entry.text, member: entry.memberName))
+                        .font(textStyle.system(11)).lineLimit(1).truncationMode(.tail)
+                        .layoutPriority(1)
+                    Image(systemName: expanded ? "chevron.down" : "chevron.right")
+                        .font(textStyle.system(8.5, weight: .semibold))
+                    Rectangle().fill(Semantic.hairline).frame(height: 1).frame(minWidth: 12)
+                }.foregroundStyle(Semantic.contextCritical)
+                    .frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
+            }.buttonStyle(.plain)
+                .help(ChatNotice.failureLine(entry.text, member: entry.memberName))
+                .accessibilityValue(expanded ? "Expanded" : "Collapsed")
+            if expanded {
+                Text(entry.detail ?? entry.text).font(textStyle.system(10.5, design: .monospaced))
+                    .foregroundStyle(Semantic.secondaryInk).textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true).padding(.leading, textStyle.scaled(17))
+            }
+        }
+    }
+}
+
 /// A notice as a quiet divider. A Team checkpoint reads as a handoff that
 /// names the member who paused; the runtime's full wording stays in the tooltip.
 struct NoticeRow: View {
@@ -372,8 +403,16 @@ struct NoticeRow: View {
     @Environment(\.chatTextStyle) private var textStyle
 
     var body: some View {
+        if ChatNotice.style(entry.text) == .failure {
+            MemberFailureRow(entry: entry)
+        } else {
+            divider
+        }
+    }
+
+    private var divider: some View {
         let checkpoint = ChatNotice.style(entry.text) == .checkpoint
-        HStack(spacing: textStyle.scaled(10)) {
+        return HStack(spacing: textStyle.scaled(10)) {
             rule
             HStack(spacing: textStyle.scaled(6)) {
                 if checkpoint { ChatToolGlyph(name: "handoff", size: textStyle.scaled(14)) }

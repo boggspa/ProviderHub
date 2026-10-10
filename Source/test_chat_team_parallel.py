@@ -168,9 +168,12 @@ class ParallelTeamTests(unittest.TestCase):
             together.wait(2)
             self.assertFalse(cancel.is_set())
             return decision("continue", "Finish independent verification")
-        parent = self.service([[throttled], [running, response("Progress saved"), response("Verification complete")]])
+        parent = self.service([[throttled, *[ValueError("Provider returned HTTP 429; retry later") for _ in range(4)]],
+                               [running, response("Progress saved"), response("Verification complete")]])
         members = self.configure(parent)
-        self.send(parent); self.finish(parent)
+        with patch("chat_runtime.REQUEST_BACKOFF", (0, 0, 0, 0)), patch("chat_runtime.random.uniform", return_value=0):
+            self.send(parent); self.finish(parent)
+        self.assertEqual(len(self.transports[0].requests), 5)
         self.assertEqual([m["status"] for m in members], ["error", "done"])
         self.assertEqual([m["contributions"] for m in members], [0, 2])
         self.assertEqual(parent.chat["team"]["status"], "error")

@@ -25,14 +25,16 @@ struct ChatTeamControls: View {
                             Spacer(minLength: 0)
                             if member.status == "working" { ProgressView().controlSize(.mini) }
                             Text(member.status.replacingOccurrences(of: "_", with: " ").capitalized)
-                                .font(.system(size: 10.5)).foregroundStyle(.secondary)
+                                .font(.system(size: 10.5)).foregroundStyle(member.status == "error" ? HubTheme.Semantic.contextCritical : HubTheme.Semantic.secondaryInk)
                         }
                         Text(member.label + (member.account.isEmpty ? "" : " · " + member.account))
                             .font(.system(size: 10.5)).foregroundStyle(.secondary).lineLimit(2)
                         if !member.responsibility.isEmpty {
                             Text(member.responsibility).font(.system(size: 11.5)).lineLimit(3)
                         }
-                        if !member.nextStep.isEmpty, member.status != "done" {
+                        if member.status == "error", let reason = member.failureReason, !reason.isEmpty {
+                            Text(reason).font(.system(size: 11.5)).foregroundStyle(HubTheme.Semantic.contextCritical).lineLimit(2).textSelection(.enabled)
+                        } else if !member.nextStep.isEmpty, member.status != "done" {
                             Text(member.nextStep).font(.system(size: 11.5)).foregroundStyle(.secondary).textSelection(.enabled)
                         }
                         if let usage = member.usage {

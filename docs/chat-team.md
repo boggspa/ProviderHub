@@ -3,7 +3,7 @@
 Team lets up to four model/account choices contribute to one Chat transcript.
 Open **Team** in the inspector, choose **Set up**, and pick names, models,
 reasoning efforts and optional responsibilities. The first member takes the
-place of the chat's current model. There is no fourth coordinator model or
+place of the chat's current model. There is no separate coordinator model or
 extra inference request to manage the queue. Membership is saved with the chat.
 
 ## Contributions and continuation
@@ -42,12 +42,25 @@ acknowledgement loop.
 This detects exact repeats, not every possible unproductive conversation.
 
 Parallel execution is the default for existing and new Teams, with the same
-three-member cap. Model requests, file/search reads and transcript recall can
+four-member cap. Model requests, file/search reads and transcript recall can
 overlap. Patches and shell commands take a cancellable FIFO gate for the chosen
 workspace, including their approval wait. Workspace gates are shared with other
 Chat turns in the same worker using that folder. Reads may observe another
 member's edits; models are instructed to re-read current files before changing
 them. Continuing members begin together only after the current wave settles.
+
+## Failed requests
+
+Transient member request failures retry quietly, for up to five attempts total,
+with cancellable waits of roughly 2, 5, 10 and 20 seconds. Only the provider
+request is retried: completed tools and their recorded results are kept.
+Authentication and invalid requests fail immediately. After exhaustion, that
+member is parked while peers continue. One red warning line names the member;
+expand it for error codes, raw errors and attempt timings. The inspector shows
+the short reason. A new user message or Resume unfinished work can resume it.
+Shell timeout accepts seconds; clearly millisecond values (1000–600000) are
+converted and capped at five minutes. Invalid tool arguments remain ordinary
+tool errors that the model can correct.
 
 ## Shared record, private model histories
 

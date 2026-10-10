@@ -39,9 +39,9 @@ TOOL_DEFINITIONS = [
         "glob": {"type": "string"}, "max_results": {"type": "integer", "minimum": 1, "maximum": 500}}, ["pattern"]),
     _tool("apply_patch", "Apply a Codex *** Begin Patch patch (Add/Update/Delete File, optional Move to). All hunks are validated first. The host applies the selected approval mode.", {
         "patch": {"type": "string"}}, ["patch"]),
-    _tool("run_shell", "Run a command with /bin/sh in the workspace under the host's selected approval mode. This is not sandboxed. Output is bounded; timeout is in seconds. "
+    _tool("run_shell", "Run a command with /bin/sh in the workspace under the host's selected approval mode. This is not sandboxed. Output is bounded; timeout is seconds (0.1–300). For CLI compatibility, values 1000–600000 are treated as milliseconds and capped at 300 seconds. "
           "Set background to true for servers, watchers or long jobs: the command keeps running between turns, the call returns its first output and an id for read_process and stop_process, and timeout is not used. Stop background processes you no longer need.", {
-        "command": {"type": "string"}, "timeout": {"type": "number", "minimum": 0.1, "maximum": 300},
+        "command": {"type": "string"}, "timeout": {"type": "number", "minimum": 0.1, "maximum": 600000},
         "background": {"type": "boolean"}}, ["command"]),
     _tool("read_process", "Read new output and the status of a background process this chat started. wait is seconds (at most 30) to wait for it to finish first; it returns early when the process exits.", {
         "id": {"type": "string"}, "wait": {"type": "number", "minimum": 0, "maximum": 30}}, ["id"]),
@@ -49,6 +49,14 @@ TOOL_DEFINITIONS = [
         "id": {"type": "string"}}, ["id"]),
 ]
 PROCESS_TOOLS = ("read_process", "stop_process")
+
+
+def shell_timeout(value):
+    if type(value) not in (int, float) or isinstance(value, float) and not math.isfinite(value):
+        raise ValueError("Invalid timeout")
+    if 1000 <= value <= 600000: return min(value / 1000, 300)
+    if .1 <= value <= 300: return value
+    raise ValueError("timeout must be 0.1–300 seconds, or 1000–600000 milliseconds")
 
 
 def _bounded(text):
@@ -144,6 +152,9 @@ class ChatToolRunner:
         for key, value in args.items():
             spec = schema["properties"][key]
             kind = spec["type"]
+            if name == "run_shell" and key == "timeout":
+                shell_timeout(value)
+                continue
             if kind == "string":
                 if not isinstance(value, str) or not value or "\x00" in value:
                     raise ValueError(f"{key} must be a nonempty string without NUL")
@@ -428,7 +439,7 @@ class ChatToolRunner:
 
     def _shell(self, args):
         env = _environment()
-        timeout = args.get("timeout", 60)
+        timeout = shell_timeout(args.get("timeout", 60))
         self._cancel()
         process = subprocess.Popen(["/bin/sh", "-c", args["command"]], cwd=self.workspace,
                                    env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,

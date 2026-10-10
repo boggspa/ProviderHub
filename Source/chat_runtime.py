@@ -8,17 +8,20 @@ from __future__ import annotations
 
 import copy
 from datetime import datetime, timezone
+import errno
 import fcntl
 import http.client
 import json
 import os
 from pathlib import Path
+import random
 import re
 import shutil
 import socket
 import subprocess
 import sys
 import threading
+import time
 import uuid
 from urllib.parse import urlsplit
 
@@ -35,6 +38,7 @@ from protocol import compact_conversation, estimated_tokens
 
 MAX_ROUNDS = 24
 MAX_TEXT = 100_000
+REQUEST_BACKOFF = (2, 5, 10, 20)  # Five attempts total, including the first.
 CHAT_ID = re.compile(r"[0-9a-f]{32}\Z")
 APPROVAL_MODES = {"manual", "accept_edits", "yolo"}
 SYSTEM = """You are an assistant in Provider Hub Chat, a small local coding harness.
@@ -57,6 +61,37 @@ def now():
 def entry(kind, text="", route="", **extra):
     return {"id": uuid.uuid4().hex, "kind": kind, "text": text, "route": route,
             "isError": False, "changedFiles": [], **extra}
+
+
+class ModelRequestError(ValueError):
+    def __init__(self, message, *, status=None, code=None, retryable=None):
+        super().__init__(message)
+        self.status, self.code, self.retryable = status, code, retryable
+        self.attempts = []
+
+
+def retryable_request(exc):
+    status, code = getattr(exc, "status", None), str(getattr(exc, "code", "") or "").lower()
+    text = str(exc).lower()
+    if (status is not None and 400 <= status < 500 and status not in {408, 429}
+            or code in {"invalid_request_error", "authentication_error", "permission_error", "not_found_error", "-32600", "-32602"}
+            or any(word in text for word in ("authentication", "unauthorized", "forbidden", "invalid api key",
+                "invalid request", "invalid_request", "permission denied", "not logged in", "login required",
+                "credit balance", "insufficient_quota", "quota exceeded", "context length", "prompt is too long",
+                "model not found", "not installed", "no such file"))):
+        return False
+    hint = getattr(exc, "retryable", None)
+    if hint is not None: return hint
+    if status in {408, 429} or status is not None and 500 <= status < 600:
+        return True
+    if code in {"api_error", "overloaded_error", "rate_limit_error"}:
+        return True
+    if isinstance(exc, (TimeoutError, ConnectionError, http.client.IncompleteRead)):
+        return True
+    if isinstance(exc, OSError) and exc.errno in {errno.ECONNRESET, errno.ECONNREFUSED, errno.ECONNABORTED, errno.ETIMEDOUT, errno.EPIPE}:
+        return True
+    return any(word in text for word in ("timed out", "connection reset", "connection failed", "overloaded",
+        "rate limit", "http 429", "http 5", "exited with code", "produced no output", "stream ended", "empty response"))
 
 
 def search_sources(content):
@@ -288,8 +323,9 @@ class GatewayClient:
                     error = json.loads(body).get("error", {})
                     message = error.get("message") if isinstance(error, dict) else error
                 except (ValueError, AttributeError):
-                    message = None
-                raise ValueError(message or f"Gateway request failed ({response.status}).")
+                    message, error = None, {}
+                code = error.get("code") or error.get("type") if isinstance(error, dict) else None
+                raise ModelRequestError(message or f"Gateway request failed ({response.status}).", status=response.status, code=code)
             if "text/event-stream" not in response.getheader("Content-Type", ""):
                 raise ValueError("The gateway did not return a Messages stream.")
             for event in self.events(response):
@@ -297,13 +333,14 @@ class GatewayClient:
                     raise InterruptedError("Stopped")
                 kind = event.get("type")
                 if kind == "error":
-                    raise ValueError((event.get("error") or {}).get("message", "Model request failed."))
+                    error = event.get("error") or {}
+                    raise ModelRequestError(error.get("message", "Model request failed."), code=error.get("code") or error.get("type"))
                 if kind == "message_start":
                     usage.update((event.get("message") or {}).get("usage") or {})
                 elif kind == "content_block_start":
                     index = event["index"]
                     if index in blocks:
-                        raise ValueError("The model stream repeated a content block.")
+                        raise ModelRequestError("The model stream repeated a content block.", code="invalid_stream", retryable=True)
                     blocks[index] = copy.deepcopy(event["content_block"])
                     fragments[index] = ""
                     open_blocks.add(index)
@@ -312,7 +349,7 @@ class GatewayClient:
                 elif kind == "content_block_delta":
                     block = blocks.get(event.get("index"))
                     if block is None or event.get("index") not in open_blocks:
-                        raise ValueError("The model stream supplied an unknown content block.")
+                        raise ModelRequestError("The model stream supplied an unknown content block.", code="invalid_stream", retryable=True)
                     change = event.get("delta") or {}
                     dtype = change.get("type")
                     if dtype == "text_delta":
@@ -325,38 +362,38 @@ class GatewayClient:
                     elif dtype == "citations_delta":
                         citation = change.get("citation")
                         if block.get("type") != "text" or not isinstance(citation, dict):
-                            raise ValueError("The model stream supplied an invalid citation.")
+                            raise ModelRequestError("The model stream supplied an invalid citation.", code="invalid_stream", retryable=True)
                         block.setdefault("citations", []).append(copy.deepcopy(citation))
                     elif dtype == "input_json_delta":
                         fragments[event["index"]] += change.get("partial_json", "")
                     else:
-                        raise ValueError("The model stream used an unsupported content delta.")
+                        raise ModelRequestError("The model stream used an unsupported content delta.", code="invalid_stream", retryable=True)
                 elif kind == "content_block_stop":
                     index = event["index"]
                     if index not in open_blocks:
-                        raise ValueError("The model stream ended an unknown content block.")
+                        raise ModelRequestError("The model stream ended an unknown content block.", code="invalid_stream", retryable=True)
                     if fragments.get(index):
                         value = json.loads(fragments[index])
-                        if not isinstance(value, dict):
-                            raise ValueError("The model returned invalid tool arguments.")
                         blocks[index]["input"] = value
                     open_blocks.remove(index)
                 elif kind == "message_delta":
                     usage.update(event.get("usage") or {}); reason = (event.get("delta") or {}).get("stop_reason")
                 elif kind == "message_stop":
                     if open_blocks:
-                        raise ValueError("The model stream ended with incomplete content. No pending tool was executed.")
+                        raise ModelRequestError("The model stream ended with incomplete content. No pending tool was executed.", code="incomplete_stream", retryable=True)
                     stopped = True; break
                 if sum(len(json.dumps(b)) for b in blocks.values()) + sum(len(s) for s in fragments.values()) > 4_000_000:
                     raise ValueError("The model response exceeded Chat's 4 MB limit.")
             if cancel.is_set():
                 raise InterruptedError("Stopped")
             if not stopped:
-                raise ValueError("The model stream ended before its response completed. No pending tool was executed.")
+                raise ModelRequestError("The model stream ended before its response completed. No pending tool was executed.", code="incomplete_stream", retryable=True)
             content = [blocks[index] for index in sorted(blocks)]
             if not content:
-                raise ValueError("The model returned an empty response.")
+                raise ModelRequestError("The model returned an empty response.", code="empty_response", retryable=True)
             return {"role": "assistant", "content": content, "usage": usage, "stop_reason": reason}
+        except (json.JSONDecodeError, UnicodeError) as exc:
+            raise ModelRequestError("Invalid model stream: " + str(exc), code="invalid_stream", retryable=True) from exc
         finally:
             connection.close()
             with self._mutex:
@@ -868,6 +905,34 @@ class ChatService:
             allowed = self.approval_allowed and not self.cancel.is_set(); self.approval = None
         return allowed
 
+    def request_round(self, payload, current, delta):
+        """Retry only a provider round; no history or host action is replayed."""
+        attempts = []
+        limit = len(REQUEST_BACKOFF) + 1 if self.role == "team" else 1
+        for index in range(limit):
+            if self.cancel.is_set(): raise InterruptedError("Stopped")
+            started, stamp = time.monotonic(), now()
+            try:
+                message = self.transport.stream(payload, self.cancel, delta)
+                if not any(block.get("type") == "tool_use" or block.get("type") == "text" and block.get("text", "").strip()
+                           for block in message["content"]):
+                    raise ModelRequestError("The model returned an empty response.", code="empty_response", retryable=True)
+                return message
+            except Exception as exc:
+                if self.cancel.is_set() or isinstance(exc, InterruptedError): raise InterruptedError("Stopped") from exc
+                failure = exc if isinstance(exc, ModelRequestError) else ModelRequestError(str(exc), code=type(exc).__name__)
+                attempts.append({"attempt": index + 1, "at": stamp, "elapsed": round(time.monotonic() - started, 3),
+                                 "code": failure.code, "status": failure.status, "error": str(exc)})
+                failure.attempts = attempts
+                if index + 1 == limit or not retryable_request(exc): raise failure from exc
+                delay = REQUEST_BACKOFF[index] + random.uniform(0, .3)
+                attempts[-1]["wait"] = round(delay, 3)
+                with self._mutex:
+                    current.update(text="", recorded=False)
+                    self.emit({"event": "entry", "chat": self.chat["id"], "entry": current})
+                self.emit({"event": "state", "busy": True, "status": f"Retrying ({index + 2}/{limit})…"})
+                if self.cancel.wait(delay): raise InterruptedError("Stopped")
+
     def run(self):
         if self.role == "parent" and chat_team.enabled(self.chat):
             return chat_team.run(self)
@@ -889,7 +954,7 @@ class ChatService:
                         offset = len(current["text"])
                         current["text"] += text
                         self.emit({"event": "delta", "chat": chat["id"], "id": current["id"], "text": text, "offset": offset})
-                message = self.transport.stream(chat_team.round_payload(self, choice, round_index), self.cancel, delta)
+                message = self.request_round(chat_team.round_payload(self, choice, round_index), current, delta)
                 content = message["content"]
                 current["text"] = "".join(block.get("text", "") for block in content if block.get("type") == "text")
                 current["recorded"] = True
@@ -916,7 +981,11 @@ class ChatService:
                 ids = [call.get("id") for call in calls]
                 if len(calls) > 32 or len(set(ids)) != len(ids) or any(not isinstance(i, str) or not i for i in ids):
                     raise ValueError("The model returned invalid or too many tool calls. No action was executed.")
-                chat["messages"].append({"role": "assistant", "content": content})
+                history = copy.deepcopy(content)
+                for block in history:
+                    if block.get("type") == "tool_use" and not isinstance(block.get("input"), dict):
+                        block["input"] = {}  # Keep the next provider history valid; the tool result explains the mistake.
+                chat["messages"].append({"role": "assistant", "content": history})
                 counts = message.get("usage") or {}
                 chat["usage"] = (counts.get("input_tokens") or 0) + (counts.get("cache_read_input_tokens") or 0) + (counts.get("cache_creation_input_tokens") or 0)
                 # A Team final reply and its queue outcome share one durable
@@ -942,6 +1011,7 @@ class ChatService:
                     # repeat after switching routes. Visible row identity is local.
                     display_id = uuid.uuid4().hex
                     try:
+                        if not isinstance(arguments, dict): raise ValueError("Tool arguments must be an object.")
                         chat_team.check_round_tool(self, name, round_index)
                         with chat_team.tool_gate(self, name):
                             if name == "delegate":
@@ -1014,7 +1084,18 @@ class ChatService:
                     item["detail"] = "Interrupted. Inspect the workspace before running this action again."; item["isError"] = True
                     item["recorded"] = True
                     self.emit({"event": "entry", "chat": chat["id"], "entry": item})
-            self.add(entry("notice" if stopped else "error", text, chat["route"], isError=not stopped))
+            if self.role == "team" and not stopped:
+                attempts = getattr(exc, "attempts", [])
+                count = len(attempts) or 1
+                reason = " ".join(text.split())[:120] or "Request failed"
+                chat["failureReason"] = reason
+                detail = "\n".join(f"Attempt {a['attempt']} · {a['at']} · {a['elapsed']:g}s · "
+                    f"{a['code'] or 'request error'}" + (f" · HTTP {a['status']}" if a['status'] else "") +
+                    f"\n{a['error']}" + (f"\nWaited {a['wait']:g}s before retrying." if 'wait' in a else "") for a in attempts) or text
+                chat["failureEntry"] = entry("notice", f"Team member stopped after {count} attempt{'s' if count != 1 else ''} · {reason}",
+                    chat["route"], noticeKind="team_failure", detail=detail, isError=True, recorded=True)
+            else:
+                self.add(entry("notice" if stopped else "error", text, chat["route"], isError=not stopped))
         finally:
             self.approval = None
             try:

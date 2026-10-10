@@ -358,9 +358,10 @@ enum ChatReplySources {
 /// checkpoint becomes a handoff line naming the speaker; a few routine ones
 /// are hidden, including a Team member's checkpoint that only continues later
 /// or finished as planned. The member's sign-off says the same, and the
-/// turn's close-out table carries what changed.
+/// turn's close-out table carries what changed. A member whose requests kept
+/// failing gets one red line that expands to the attempts.
 enum ChatNotice {
-    enum Style: Equatable { case hidden, checkpoint, divider }
+    enum Style: Equatable { case hidden, checkpoint, divider, failure }
 
     /// Saved by earlier builds on nearly every round of a long turn. The
     /// runtime no longer writes it; older chats still contain it.
@@ -368,12 +369,19 @@ enum ChatNotice {
     static let checkpointPrefix = "Team contribution checkpoint reached."
     static let turnCheckpointPrefix = "Turn checkpoint reached."
     static let routineCheckpoints = ["resume after other members", "finished its contribution"]
+    static let failurePrefix = "Team member stopped after "
 
     static func style(_ text: String) -> Style {
+        if text.hasPrefix(failurePrefix) { return .failure }
         if text == contextTrimmed { return .hidden }
         if text.hasPrefix(checkpointPrefix), routineCheckpoints.contains(where: text.contains) { return .hidden }
         if text.hasPrefix(checkpointPrefix) || text.hasPrefix(turnCheckpointPrefix) { return .checkpoint }
         return .divider
+    }
+
+    static func failureLine(_ text: String, member: String?) -> String {
+        guard text.hasPrefix(failurePrefix), let member else { return text }
+        return member + " stopped after " + text.dropFirst(failurePrefix.count)
     }
 
     /// "Sol reached a checkpoint · round budget used · continues after the
