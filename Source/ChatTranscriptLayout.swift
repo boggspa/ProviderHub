@@ -86,6 +86,23 @@ struct ChatTranscriptSegment<Item: ChatTranscriptItem>: Identifiable {
     static var minimumFold: Int { 3 }
     static func foldID(_ items: [Item]) -> String { "fold-" + (items.first?.id ?? "") }
 
+    /// Paging may cut into a member section. Keep its header with the visible
+    /// tail so the first message still has an author and its recorded time.
+    static func visibleTail(_ segments: [Self], limit: Int) -> [Self] {
+        let start = max(0, segments.count - max(1, limit))
+        var tail = Array(segments[start...])
+        guard start > 0, let first = tail.first, let speaker = first.previousSpeaker else { return tail }
+        switch first.content {
+        case .entry(let item) where item.kind == "assistant" || item.kind == "tool": break
+        case .fold: break
+        default: return tail
+        }
+        if let header = segments[..<start].last(where: { $0.id == "speaker-" + speaker.id }) {
+            tail.insert(header, at: 0)
+        }
+        return tail
+    }
+
     /// Preserve first-arrival section order while routing later tools back to
     /// their member. Boundaries include hidden notices, so no work crosses a
     /// steer/checkpoint. Empty model rounds never open another section.

@@ -371,6 +371,10 @@ struct Item: ChatTranscriptItem {
                            tool("o3", member: opus), tool("s4", "team_status")]
         let grouped = Segment.outline(interleaved, open: true) { $0.id == "sReply" }
         check(grouped.map(\.id) == ["speaker-s1", "fold-s1", "speaker-o1", "fold-o1", "speaker-sReply", "sReply", "s4"], "Interleaved sections lost first-arrival order")
+        check(Segment.visibleTail(grouped, limit: 2).map(\.id) == ["speaker-sReply", "sReply", "s4"], "Paged text lost its author header")
+        check(Segment.visibleTail(Array(grouped.prefix(4)), limit: 1).map(\.id) == ["speaker-o1", "fold-o1"], "Paged tools lost their member header")
+        check(Segment.visibleTail(grouped, limit: 100).map(\.id) == grouped.map(\.id), "Unpaged transcript changed")
+        check(Segment.visibleTail([], limit: 100).isEmpty, "Empty transcript paging failed")
         if case .fold(let tools) = grouped[1].content { check(tools.map(\.id) == ["s1", "s2", "s3"], "Sol tools crossed sections") }
         else { fatalError("Sol tools did not fold") }
         if case .fold(let tools) = grouped[3].content { check(tools.map(\.id) == ["o1", "o2", "o3"], "Opus tools crossed sections") }

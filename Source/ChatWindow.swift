@@ -547,7 +547,7 @@ private struct ChatTranscript: View {
                 }
                 .frame(maxWidth: .infinity).padding(.bottom, 16)
             }
-            ForEach(Array(segments.suffix(visibleSegmentLimit))) { segment in
+            ForEach(ChatTranscriptSegment<ChatEntry>.visibleTail(segments, limit: visibleSegmentLimit)) { segment in
                 Group {
                     switch segment.content {
                     case .speaker(let entry):

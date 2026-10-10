@@ -126,7 +126,7 @@ The right-hand **inspector** has four views, each using the whole pane:
   about every few seconds, and again when the turn finishes. A team member
   who last edited a path is marked on that row. Reads use the local checkout
   and never fetch a remote.
-- **Team** configures up to four persistent members, including the current
+- **Team** configures up to five persistent members, including the current
   chat model. Each contributes once by default and may explicitly continue with
   a next step. Members think and read in parallel through one attributed
   transcript, refreshed before every model round, with separate provider histories.
