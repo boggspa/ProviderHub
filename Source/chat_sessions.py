@@ -52,6 +52,15 @@ class SharedWorkspaces(ChatWorkspaces):
     def remember(self, *args, **kwargs):
         with self._lock: return super().remember(*args, **kwargs)
 
+    def secondaries(self, *args):
+        with self._lock: return super().secondaries(*args)
+
+    def attach(self, *args):
+        with self._lock: return super().attach(*args)
+
+    def detach(self, *args):
+        with self._lock: return super().detach(*args)
+
 
 class SessionStore:
     """The process owns storage; sessions update only their own snapshot."""
@@ -105,27 +114,49 @@ class SessionTransport:
 class WorkspaceRunner:
     def __init__(self, host, workspace, cancel_event):
         self.host, self.cancel = host, cancel_event
-        self.runner = host.runner_type(workspace, cancel_event=cancel_event)
+        roots = host.workspaces.secondaries(workspace)
+        self.runner = host.runner_type(workspace, cancel_event=cancel_event, **({"roots": roots} if roots else {}))
         self.runner.processes = host.processes
-        self.workspace, self.lock = workspace, None
+        self.workspace = workspace
 
     def describe(self, name, args):
+        self.refresh_roots()
         return self.runner.describe(name, args)
 
+    def refresh_roots(self):
+        # Refresh at tool boundaries, including after waiting for approval.
+        # A detached folder must not remain authorized in a turn's cached runner.
+        if isinstance(self.runner, ChatToolRunner):
+            roots = self.host.workspaces.secondaries(self.workspace)
+            self.runner.extra_roots = tuple(Path(root).resolve() for root in roots if Path(root).is_dir())
+            self.runner.roots = (self.runner.workspace, *self.runner.extra_roots)
+
     def execute(self, name, args):
+        self.refresh_roots()
         if name not in {"apply_patch", "run_shell"}: return self.runner.execute(name, args)
-        if self.lock is None:
-            key = self.host.workspace_key(self.workspace)
-            with self.host._metadata: self.lock = self.host._writers.setdefault(key, ResourceGate(1))
+        keys = sorted(self.host.workspace_keys(self.workspace))
+        with self.host._metadata:
+            locks = [self.host._writers.setdefault(key, ResourceGate(1)) for key in keys]
         # Never hold the checkout while waiting for a user's approval. The
         # service calls execute only after approval; Stop can release a waiter.
-        self.lock.take(self.cancel, lambda: self.host.closing)
+        acquired = []
         try:
+            for lock in locks:
+                lock.take(self.cancel, lambda: self.host.closing)
+                acquired.append(lock)
             if self.cancel.is_set() or self.host.closing: raise InterruptedError("Stopped")
+            if self.host.workspace_busy(self.workspace, branch_only=True):
+                raise ValueError("Wait for this checkout's branch operation to finish.")
             chat_execution.guard(getattr(self.cancel, "owner", None))
+            self.refresh_roots()
+            if isinstance(self.runner, ChatToolRunner):
+                # Attach may occur while a writer waits: newly granted roots
+                # become usable on the next call after taking their gates.
+                self.runner.roots = tuple(root for root in self.runner.roots if self.host.workspace_key(root) in keys)
+                self.runner.extra_roots = self.runner.roots[1:]
             return self.runner.execute(name, args)
         finally:
-            self.lock.release()
+            for lock in reversed(acquired): lock.release()
 
 
 class ChatHost:
@@ -161,8 +192,23 @@ class ChatHost:
         with self._metadata: writers = list(self._writers.values())
         for writer in writers: writer.wake()
 
-    def runner(self, workspace, *, cancel_event):
+    def runner(self, workspace, *, cancel_event, roots=()):
         return WorkspaceRunner(self, workspace, cancel_event)
+
+    def publish_workspaces(self):
+        with self.workspaces._lock:
+            event = {"event": "catalogue", "models": self.models, "folders": self.workspaces.folders[:],
+                     "projects": copy.deepcopy(self.workspaces.projects)}
+        with self._output: self.emit(event)
+
+    def workspace_keys(self, workspace):
+        with self.workspaces._lock:
+            roots = [Path(root).resolve() for root in [workspace, *self.workspaces.secondaries(workspace)]]
+            known = [*self.workspaces.folders, *(root for values in self.workspaces.projects.values() for root in values)]
+        # Nested folders overlap even outside Git. Include their registered
+        # identities so a primary and an attached subfolder share writer gates.
+        overlapping = [root for root in known if any(Path(root).is_relative_to(candidate) or candidate.is_relative_to(Path(root)) for candidate in roots)]
+        return {self.workspace_key(root) for root in [*roots, *overlapping]}
 
     @staticmethod
     def workspace_key(workspace):
@@ -287,12 +333,19 @@ class ChatHost:
         candidates = [service for identifier, service in list(self.sessions.items())
                       if identifier != excluding and service.chat and (service._branch_working if branch_only else self.active(service))]
         sides = [side for side in list(self.sides.values()) if side.busy] if not branch_only else []
-        if not candidates and not sides: return False
-        key = self.workspace_key(workspace)
+        if not candidates and not sides:
+            with self._metadata:
+                if branch_only or not any(gate.active for gate in self._writers.values()): return False
+        keys = self.workspace_keys(workspace)
+        # An in-flight mutation may finish after detach. Keep its checkout
+        # protected until execution releases the already-acquired writer gate.
+        if not branch_only:
+            with self._metadata:
+                if any(self._writers.get(key) and self._writers[key].active for key in keys): return True
         for service in candidates:
-            if self.workspace_key(service.chat["workspace"]) == key: return True
+            if self.workspace_keys(service.chat["workspace"]) & keys: return True
         for side in sides:
-            if self.workspace_key(side.chat["workspace"]) == key: return True
+            if self.workspace_keys(side.chat["workspace"]) & keys: return True
         return False
 
     def reject(self, command, error):
@@ -340,8 +393,18 @@ class ChatHost:
         if action == "refresh":
             self.models = self.catalogue_transport.catalogue()
             for service in list(self.sessions.values()): service.models = self.models
-            self.emit({"event": "catalogue", "models": self.models, "folders": self.workspaces.folders[:]})
+            self.publish_workspaces()
             self.publish_summaries()
+            return
+        if action in {"attach_workspace", "detach_workspace"}:
+            identifier = command.get("chat") or command.get("id") or self.view_id
+            workspace = command.get("workspace")
+            if not workspace:
+                if identifier is None: raise ValueError("Choose a workspace.")
+                workspace = self.session(identifier).chat["workspace"]
+            if action == "attach_workspace": self.workspaces.attach(workspace, command["folder"])
+            else: self.workspaces.detach(workspace, command["folder"])
+            self.publish_workspaces()
             return
         if action == "select":
             identifier = command["id"]
