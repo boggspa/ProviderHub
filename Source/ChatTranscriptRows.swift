@@ -61,8 +61,7 @@ struct UserRow: View {
             VStack(alignment: .leading, spacing: textStyle.scaled(6)) {
                 if let attachments = entry.attachments, !attachments.isEmpty { ChatAttachmentStrip(attachments: attachments) }
                 if !entry.text.isEmpty {
-                    Text(entry.text).font(textStyle.font).foregroundStyle(Semantic.ink).textSelection(.enabled)
-                        .fixedSize(horizontal: false, vertical: true)
+                    ChatSelectableText(text: AttributedString(entry.text), font: textStyle.nsFont, color: Semantic.nsInk, message: entry.text)
                 }
             }
             .padding(.horizontal, textStyle.scaled(13)).padding(.vertical, textStyle.scaled(8))
@@ -76,7 +75,9 @@ struct UserRow: View {
 }
 
 /// A reply's text, its live "Thinking…" state, and any source links the
-/// runtime appended. The speaker header is drawn separately.
+/// runtime appended. The speaker header is drawn separately. The text is
+/// natively selectable; its right-click menu adds **Copy Message**, which
+/// copies the reply as saved, sources line included.
 struct AssistantRow: View {
     var entry: ChatEntry
     var accent: Color
@@ -89,12 +90,11 @@ struct AssistantRow: View {
             if ChatReplySources.isBlank(reply.body) {
                 if streaming { ChatShimmerText(text: "Thinking…", active: true, accent: accent).font(textStyle.font) }
             } else {
-                ChatTranscriptText(text: reply.body, streaming: streaming)
+                ChatTranscriptText(text: reply.body, streaming: streaming, message: entry.text)
             }
             if !reply.links.isEmpty { ChatSourcesRow(links: reply.links) }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .contextMenu { Button("Copy reply") { ChatTranscriptTable.copy(entry.text) } }
         .accessibilityElement(children: .contain)
     }
 }

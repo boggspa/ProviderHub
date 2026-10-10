@@ -167,8 +167,14 @@ Assistant replies support inline emphasis, code and links, plus a small native
 layout for Markdown pipe tables. A header followed by a valid `---` delimiter
 row becomes a table with wrapped cells and the requested column alignment.
 Wide tables scroll horizontally within the transcript. Right-click a table
-to **Copy table (TSV)** for a spreadsheet or **Copy table as Markdown**; the
-reply's context menu also offers **Copy reply** with its original text.
+to **Copy table (TSV)** for a spreadsheet or **Copy table as Markdown**.
+
+Transcript text behaves like text in any Mac app: click and drag to select
+within a message, double-click a word, ⌘A to select a whole message, and ⌘C
+to copy. Each message is selected on its own.
+Right-click offers the native menu (Copy, Look Up, Translate, Share and
+Services) plus **Copy Message**, which copies the whole message with its
+original Markdown, whether or not anything is selected.
 This applies to the main transcript, Side Chat and agent inspector.
 
 During streaming, only complete table lines become cells. The line currently

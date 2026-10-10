@@ -13,6 +13,7 @@ import SwiftUI
 enum HubTheme {
     enum Semantic {
         static let ink = Color.primary
+        static let nsInk = NSColor.labelColor
         static let hairline = Color.primary.opacity(0.12)
         static let selection = Color.primary.opacity(0.065)
     }
@@ -151,6 +152,51 @@ import Combine
         check(viewMenu.items.map(\.keyEquivalent) == ["+", "=", "-", "0"] && viewMenu.items[1].isHidden
               && viewMenu.items[1].allowsKeyEquivalentWhenHidden, "View menu shortcuts")
         check(!ChatZoomCommands.shared.validateMenuItem(viewMenu.items[0]), "Zoom acted without the Chat window")
+
+        // Selectable transcript text: inline Markdown becomes real fonts and
+        // links, short text hugs its width, long text wraps, and the native
+        // menu keeps the system Copy and adds Copy Message exactly once.
+        let inline = try AttributedString(markdown: "Plain **bold** *it* `code` ~~gone~~ [link](https://example.com)",
+                                          options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))
+        let base = NSFont.systemFont(ofSize: 15)
+        let native = ChatSelectableText.attributed(inline, font: base, color: .systemRed)
+        check(native.string == "Plain bold it code gone link", "Selectable text changed characters: " + native.string)
+        func at(_ word: String) -> Int { (native.string as NSString).range(of: word).location }
+        func font(_ word: String) -> NSFont { native.attribute(.font, at: at(word), effectiveRange: nil) as! NSFont }
+        check(font("Plain") == base, "Base font lost")
+        check(font("bold").fontDescriptor.symbolicTraits.contains(.bold), "Strong text not bold")
+        check(font("it").fontDescriptor.symbolicTraits.contains(.italic) || native.attribute(.obliqueness, at: at("it"), effectiveRange: nil) != nil,
+              "Emphasis lost")
+        check(font("code").isFixedPitch, "Inline code not monospaced")
+        check(native.attribute(.strikethroughStyle, at: at("gone"), effectiveRange: nil) != nil, "Strikethrough lost")
+        check((native.attribute(.link, at: at("link"), effectiveRange: nil) as? URL)?.absoluteString == "https://example.com", "Link lost")
+        check(native.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor == .systemRed, "Ink lost")
+
+        let sizing = ChatSelectableText.Coordinator()
+        _ = sizing.attributed(for: ChatSelectableText(text: AttributedString("Hi"), font: base, color: .systemRed))
+        let short = sizing.size(width: 400)
+        check(short.width < 60 && short.height > 10 && short.height < 30, "Short text size \(short)")
+        _ = sizing.attributed(for: ChatSelectableText(text: AttributedString(String(repeating: "word ", count: 200)), font: base, color: .systemRed))
+        let long = sizing.size(width: 300)
+        check(long.width <= 300 && long.height > short.height * 5, "Long text did not wrap: \(long)")
+
+        let textView = ChatSelectableText.TextView(usingTextLayoutManager: false)
+        textView.isEditable = false
+        textView.string = "Selected"
+        textView.message = "Whole message"
+        let board = NSPasteboard(name: NSPasteboard.Name("chat-selectable-tests." + UUID().uuidString))
+        defer { board.releaseGlobally() }
+        textView.pasteboard = board
+        let click = NSEvent.mouseEvent(with: .rightMouseDown, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: 0,
+                                       context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!
+        _ = textView.menu(for: click)
+        let menu = textView.menu(for: click)!
+        check(menu.items.filter { $0.title == "Copy Message" }.count == 1, "Copy Message missing or repeated: \(menu.items.map(\.title))")
+        check(menu.items.contains { $0.action == #selector(NSText.copy(_:)) }, "System Copy missing: \(menu.items.map(\.title))")
+        textView.copyMessage(nil)
+        check(board.string(forType: .string) == "Whole message", "Copy Message copied the wrong text")
+        textView.message = nil
+        check(!textView.menu(for: click)!.items.contains { $0.title == "Copy Message" }, "Copy Message shown without a message")
 
         let started = Date()
         for _ in 0..<50 { _ = ChatTableParser.parse(tooManyRows, streaming: true) }
@@ -291,7 +337,7 @@ class ChatTranscriptTests(unittest.TestCase):
             self.assertIn(marker, ran.stdout)
 
     def test_parser_streaming_copy_budgets_and_column_layout(self):
-        self.run_native(["ChatFonts.swift", "ChatTranscriptText.swift"], CASES,
+        self.run_native(["ChatFonts.swift", "ChatSelectableText.swift", "ChatTranscriptText.swift"], CASES,
                         "Transcript parser, streaming, copy and layout checks passed", stubs=STUBS)
 
     def test_outline_tool_phrasing_sources_notices_and_glyphs(self):
