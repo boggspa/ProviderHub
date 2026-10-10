@@ -96,7 +96,7 @@ struct ChatWorkspaceRail: View {
                 .accessibilityLabel(label).accessibilityValue(collapsed.contains(group.id) ? "Collapsed" : "Expanded")
             Button { model.newChat(in: group.id) } label: {
                 Image(systemName: "plus").font(.system(size: 11)).frame(width: 20, height: 24)
-            }.buttonStyle(.plain).disabled(model.busy || !model.connected)
+            }.buttonStyle(.plain).disabled(!model.connected)
                 .help("New chat here").accessibilityLabel("New chat in \(label)")
         }.foregroundStyle(Semantic.ink).padding(.horizontal, 6).padding(.top, 8).padding(.bottom, 3)
     }
@@ -120,9 +120,11 @@ struct ChatWorkspaceRail: View {
                         Text(chat.title).font(.system(size: 12.5)).foregroundStyle(Semantic.ink).lineLimit(1)
                         Text(subtitle(chat, route: route)).font(.system(size: 10.5)).foregroundStyle(Semantic.secondaryInk).lineLimit(1)
                     }.frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
-                }.buttonStyle(.plain).disabled(model.busy && !selected)
-                // One worker, one turn: the busy chat is the selected one.
-                if selected, model.busy {
+                }.buttonStyle(.plain).disabled(!model.connected)
+                if model.needsApproval(chat.id) {
+                    Image(systemName: "hand.raised.fill").font(.system(size: 11))
+                        .foregroundStyle(Semantic.secondaryInk).accessibilityLabel("Needs approval")
+                } else if model.isActive(chat.id) {
                     ProgressView().controlSize(.mini).tint(route?.accent ?? Semantic.secondaryInk).accessibilityLabel("Working")
                 }
             }
@@ -139,8 +141,8 @@ struct ChatWorkspaceRail: View {
         }
         .accessibilityAddTraits(selected ? .isSelected : [])
         .contextMenu {
-            Button("Rename") { renameText = chat.title; renaming = chat.id }
-            Button("Delete…") { pendingDelete = chat }
+            Button("Rename") { renameText = chat.title; renaming = chat.id }.disabled(model.isActive(chat.id))
+            Button("Delete…") { pendingDelete = chat }.disabled(model.isActive(chat.id))
         }
     }
 

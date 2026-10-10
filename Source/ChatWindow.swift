@@ -183,6 +183,7 @@ private struct ChatHeader: View {
     var compact: Bool
     var toggleRail: () -> Void
     @State private var showingModels = false
+    @State private var showingChats = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
@@ -229,14 +230,20 @@ private struct ChatHeader: View {
     }
 
     private var railButton: some View {
-        Button(action: toggleRail) {
+        Button {
+            if railAvailable { toggleRail() } else { showingChats.toggle() }
+        } label: {
             Image(systemName: "sidebar.left").font(.system(size: 13)).foregroundStyle(Semantic.secondaryInk)
                 .frame(width: 24, height: 22).contentShape(Rectangle())
         }
-        .buttonStyle(.plain).disabled(!railAvailable)
+        .buttonStyle(.plain)
         .keyboardShortcut("s", modifiers: [.command, .control])
         .accessibilityLabel(railVisible ? "Hide saved chats" : "Show saved chats")
-        .help(railAvailable ? (railVisible ? "Hide saved chats (⌃⌘S)" : "Show saved chats (⌃⌘S)") : "Widen the window to show saved chats")
+        .help(railVisible ? "Hide saved chats (⌃⌘S)" : "Show saved chats (⌃⌘S)")
+        .popover(isPresented: $showingChats, arrowEdge: .bottom) {
+            ChatWorkspaceRail(model: model).frame(width: 260, height: 420)
+        }
+        .onChange(of: model.selectedID) { _, _ in showingChats = false }
     }
 
     private var newChatButton: some View {
@@ -244,7 +251,7 @@ private struct ChatHeader: View {
             Image(systemName: "square.and.pencil").font(.system(size: 13)).foregroundStyle(Semantic.secondaryInk)
                 .frame(width: 24, height: 22).contentShape(Rectangle())
         }
-        .buttonStyle(.plain).disabled(model.busy || model.branchBusy || !model.connected)
+        .buttonStyle(.plain).disabled(!model.connected)
         .keyboardShortcut("n", modifiers: .command)
         .accessibilityLabel("New chat").help("New chat (⌘N)")
     }
@@ -355,7 +362,7 @@ private struct ChatWelcome: View {
             }
             Button("New chat") { model.newChat() }
                 .buttonStyle(HubTheme.Control.prominentButton).controlSize(.regular)
-                .disabled(model.busy || !model.connected || model.models.isEmpty)
+                .disabled(!model.connected || model.models.isEmpty)
             Button("Choose Folder…") { model.chooseFolder() }
                 .buttonStyle(.plain).font(HubTheme.Typography.detail).foregroundStyle(Semantic.secondaryInk)
                 .disabled(model.busy || model.branchBusy || !model.connected || model.models.isEmpty)
@@ -791,9 +798,9 @@ private struct ApprovalStrip: View {
             if let detail = approval.detail, !detail.isEmpty { detailDisclosure(detail) }
             HStack {
                 Spacer()
-                Button("Deny") { model.decideApproval(allow: false) }
+                Button("Deny") { model.decideApproval(allow: false, target: approval) }
                     .controlSize(.small).keyboardShortcut("d", modifiers: .command).help("Deny (⌘D)")
-                Button("Allow once") { model.decideApproval(allow: true) }
+                Button("Allow once") { model.decideApproval(allow: true, target: approval) }
                     .buttonStyle(HubTheme.Control.prominentButton).controlSize(.small)
                     .keyboardShortcut("y", modifiers: .command).help("Allow this once (⌘Y)")
             }
@@ -821,6 +828,7 @@ private struct ChatComposer: View {
     @State private var height: CGFloat = 22
     /// The workspace waiting on a first-time YOLO confirmation, while shown.
     @State private var yoloWorkspace: String?
+    @State private var yoloChatID: String?
 
     var body: some View {
         VStack(spacing: 5) {
@@ -855,13 +863,16 @@ private struct ChatComposer: View {
         }
         .padding(.horizontal, 16).padding(.top, 8).padding(.bottom, 10)
         .confirmationDialog("Run tools without approval prompts?", isPresented: Binding(
-            get: { yoloWorkspace != nil }, set: { if !$0 { yoloWorkspace = nil } }
+            get: { yoloWorkspace != nil }, set: { if !$0 { yoloWorkspace = nil; yoloChatID = nil } }
         ), titleVisibility: .visible) {
             Button("Use YOLO") {
-                if let yoloWorkspace { ChatYoloAcknowledgement.record(yoloWorkspace); model.setApprovalMode("yolo") }
-                yoloWorkspace = nil
+                if let yoloWorkspace, let yoloChatID {
+                    ChatYoloAcknowledgement.record(yoloWorkspace)
+                    model.setApprovalMode("yolo", chat: yoloChatID, workspace: yoloWorkspace)
+                }
+                yoloWorkspace = nil; yoloChatID = nil
             }
-            Button("Cancel", role: .cancel) { yoloWorkspace = nil }
+            Button("Cancel", role: .cancel) { yoloWorkspace = nil; yoloChatID = nil }
         } message: {
             Text("YOLO edits files and runs commands in \(folderName(yoloWorkspace ?? "")) without asking first. This is asked once per folder.")
         }
@@ -946,7 +957,7 @@ private struct ChatComposer: View {
     /// change, and a repeat choice, applies at once.
     private func chooseApprovalMode(_ mode: String) {
         if mode == "yolo", let workspace = model.selected?.workspace, !ChatYoloAcknowledgement.contains(workspace) {
-            yoloWorkspace = workspace; return
+            yoloWorkspace = workspace; yoloChatID = model.selectedID; return
         }
         model.setApprovalMode(mode)
     }

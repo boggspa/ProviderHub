@@ -60,7 +60,9 @@ def visible(chat):
     result["entries"] = copy.deepcopy(chat["entries"][-100:])
     for item in result["entries"]:
         for field in ("text", "detail"):
-            if isinstance(item.get(field), str): item[field] = item[field][-8000:]
+            if isinstance(item.get(field), str):
+                if field == "text": item["textOffset"] = max(0, len(item[field]) - 8000)
+                item[field] = item[field][-8000:]
     remaining = 64_000
     bounded = []
     for item in reversed(result["entries"]):
@@ -115,7 +117,7 @@ def _helper(parent, args, choice, effort, call_id, *, parallel):
     def emit(event):
         if event["event"] == "delta":
             parent.emit({"event": "agent_delta", "chat": owner, "agent": child.chat["id"],
-                         "id": event["id"], "text": event["text"]})
+                         "id": event["id"], "text": event["text"], **({"offset": event["offset"]} if "offset" in event else {})})
         elif event["event"] == "entry":
             parent.emit({"event": "agent_entry", "chat": owner, "agent": child.chat["id"], "entry": event["entry"]})
     child = make_child(parent, choice, effort, "lane" if parallel else "delegate", emit)
@@ -255,7 +257,7 @@ def side_command(parent, command):
         def emit(event):
             if parent.sides.get(side.parent_id) is not side: return
             if event["event"] == "delta":
-                parent.emit({"event": "side_delta", "chat": side.parent_id, "request": side.side_request, "side": side.chat["id"], "id": event["id"], "text": event["text"]})
+                parent.emit({"event": "side_delta", "chat": side.parent_id, "request": side.side_request, "side": side.chat["id"], "id": event["id"], "text": event["text"], **({"offset": event["offset"]} if "offset" in event else {})})
             elif event["event"] in {"entry", "state", "selected"}:
                 if event["event"] == "entry" and event["entry"].get("kind") == "user":
                     parent.emit({"event": "side_accepted", "chat": side.parent_id, "request": side.side_request, "side": side.chat["id"], "id": event["entry"]["id"]})
@@ -392,5 +394,7 @@ def handle_auxiliary(parent, command):
             if mutation:
                 parent._branch_working = False
                 parent.emit({"event": "branch_state", "chat": identifier, "request": command.get("request"), "workspace": parent.chat["workspace"], "busy": False, "notice": notice})
-    threading.Thread(target=execute, daemon=True, name="chat-inspector").start()
+    thread = threading.Thread(target=execute, daemon=True, name="chat-inspector")
+    if mutation: parent.branch_thread = thread
+    thread.start()
     return True
