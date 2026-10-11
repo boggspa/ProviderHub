@@ -17,6 +17,8 @@ enum HubTheme {
         static let hairline = Color.primary.opacity(0.12)
         static let selection = Color.primary.opacity(0.065)
         static let raisedSurface = Color.primary.opacity(0.045)
+        static let cardFill = Color.black.opacity(0.065)
+        static let cardRim = Color.orange.opacity(0.20)
         static let secondaryInk = Color.secondary
         static let surface = Color.white
         static func dynamicNS(light: NSColor, dark: NSColor) -> NSColor {
