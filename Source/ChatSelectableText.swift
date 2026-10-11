@@ -102,8 +102,18 @@ struct ChatSelectableText: NSViewRepresentable {
             if let size = measured[width] { return size }
             container.size = CGSize(width: width, height: .greatestFiniteMagnitude)
             layout.ensureLayout(for: container)
-            let used = layout.usedRect(for: container)
-            let size = CGSize(width: fillsWidth ? width : min(width, ceil(used.width)), height: ceil(used.height))
+            var used = layout.usedRect(for: container)
+            // A leading mention indents the first line to make room for its
+            // chip. The used rect's width excludes that origin; maxX keeps it.
+            let fittedWidth = fillsWidth ? width : min(width, ceil(used.maxX))
+            if fittedWidth < width {
+                // SwiftUI allocates the returned width. Measure height there,
+                // too, so tightening the bubble cannot add an uncounted line.
+                container.size = CGSize(width: fittedWidth, height: .greatestFiniteMagnitude)
+                layout.ensureLayout(for: container)
+                used = layout.usedRect(for: container)
+            }
+            let size = CGSize(width: fittedWidth, height: ceil(used.maxY))
             measured[width] = size
             return size
         }
