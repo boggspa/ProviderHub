@@ -1430,12 +1430,15 @@ class RunTurnTests(unittest.TestCase):
                             codex._tool_alias("spawn_agent"))
         self.assertEqual(codex._tool_alias("..."), "bridge_tool_" + codex._tool_alias("...")[-8:])
 
-    def test_collaboration_tools_survive_the_whole_cli_handoff_with_their_schema_keywords(self):
+    def test_collaboration_tools_survive_the_whole_cli_handoff_without_the_seal_keyword(self):
         # The desktop's spawn_agent, followup_task and send_message carry a
         # non-standard "encrypted" keyword on their message argument. No
-        # layer between the desktop and the nested runtime may validate it
-        # away or drop the tool for carrying it: those three are exactly the
-        # dispatch set a seat loses when "collaboration controls" vanish.
+        # layer between the desktop and the nested runtime may drop the tool
+        # for carrying it: those three are exactly the dispatch set a seat
+        # loses when "collaboration controls" vanish. The keyword itself must
+        # not arrive: this runtime honours it, OpenAI returns the message as
+        # a token only its servers can open, and the child is handed that
+        # token as its task.
         from cli_tool_call import normalize_tools
         from responses_bridge import to_messages
         from responses_tools import flatten_tools
@@ -1463,8 +1466,10 @@ class RunTurnTests(unittest.TestCase):
             self.assertTrue(offered[alias]["description"].startswith(f"Host tool: {name}."))
         for name in dispatch:
             schema = offered[codex._tool_alias(name)]["inputSchema"]
-            self.assertIs(schema["properties"]["message"]["encrypted"], True)
+            self.assertEqual(schema["properties"]["message"], {"type": "string", "description": "Task text."})
             self.assertEqual(schema["required"], ["message"])
+        # The backstop copies: the caller's schemas are not edited underneath it.
+        self.assertIs(normalized[0]["input_schema"]["properties"]["message"]["encrypted"], True)
 
     def test_host_execution_note_is_sent_once(self):
         import cli_routes

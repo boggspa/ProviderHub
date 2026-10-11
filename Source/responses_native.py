@@ -19,7 +19,8 @@ from protocol import mask_effort_rejection
 from providers import PROVIDERS, ProviderError, _auth_headers, _chat_effort, validate_connection
 from catalogue import image_input_blocked
 from responses_tools import (flatten_tools, input_names, normalize_custom_calls, output_names, register,
-                             restore_custom_call, split_hosted_search, strip_goal_budget)
+                             restore_custom_call, split_hosted_search, strip_goal_budget,
+                             strip_sealed_keyword)
 from responses_bridge import ENVELOPE_PREFIX, MessagesResponsesAdapter, ReasoningEnvelope, image_generation_message, to_messages
 from responses_compact import expand_items
 from responses_visualize import VisualizeRewriter, wrap_message_item, wrap_output, wrap_text
@@ -270,6 +271,24 @@ _WIRE_FOOTER = "[END_OF_MESSAGE]"
 # stripped by shape rather than guarded by exact match.
 _SUBAGENT_PREFIX_RE = re.compile(r"\[subagent_[^\[\]]+\]\s*:\s*", re.IGNORECASE)
 
+# OpenAI's sealed form of a message argument the desktop marked "encrypted".
+# Only OpenAI's servers can open it, and no route here hands it back to them,
+# so a child given one as text has no task at all. Ingress no longer asks for
+# the seal; this explains any that still arrive (children already running).
+# The shape is a Fernet token's, which a real task could also be, so the text
+# is kept after the explanation rather than replaced by it.
+_OPENAI_SEALED_RE = re.compile(r"gAAAAA[A-Za-z0-9_-]{60,}={0,2}")
+
+
+def _openai_sealed(text):
+    return isinstance(text, str) and _OPENAI_SEALED_RE.fullmatch(text.strip()) is not None
+
+
+def _sealed_notice(sender, text):
+    return (f"[This message from {sender} has the form of a message sealed by OpenAI, which no route here "
+            f"can open. Unless it is meant to be a token, ask {sender} to resend it as plain text.] "
+            f"{text.strip()}")
+
 
 def _strip_subagent_prefixes(text):
     """Strip stacked `[subagent_*]:` prefixes so attribution is idempotent.
@@ -487,6 +506,8 @@ def _normalize_multi_agent_items(input_list):
             args = item.get("arguments") or item.get("input") or {}
             call_id = item.get("id", item.get("call_id", ""))
             task = _extract_subagent_task(args)
+            if _openai_sealed(task):
+                task = _sealed_notice("the parent agent", task)
             content = f"[Task from parent agent for subagent_{agent_name} ({call_id})]: {task}"
             normalized.append({
                 "type": "message",
@@ -515,7 +536,9 @@ def _normalize_multi_agent_items(input_list):
         # trap (see multi_agent_call above) so the model reads it as
         # received history instead of continuing it as its own prefill.
         elif item_type == "agent_message":
-            agent_name = item.get("agent") or item.get("sender") or "subagent"
+            # The desktop names the sender `author` (and the receiver
+            # `recipient`); `agent` and `sender` are older shapes.
+            agent_name = item.get("author") or item.get("agent") or item.get("sender") or "subagent"
             content = item.get("content") or ""
             if isinstance(content, str):
                 # Break the echo chamber: a previous turn's leaked envelope
@@ -523,12 +546,17 @@ def _normalize_multi_agent_items(input_list):
                 # repeats it. Unwrap it instead of amplifying it.
                 content = _clean_wire_text(content) if content else ""
                 content = _strip_subagent_prefixes(content)
+                if _openai_sealed(content):
+                    content = _sealed_notice(agent_name, content)
                 prefix = f"[subagent_{agent_name}]"
                 content = f"{prefix}: {content}" if content else prefix
             elif isinstance(content, (dict, list)):
                 extracted = _extract_wire_value(content)
                 if extracted:
-                    content = f"[subagent_{agent_name}]: {_strip_subagent_prefixes(extracted)}"
+                    extracted = _strip_subagent_prefixes(extracted)
+                    if _openai_sealed(extracted):
+                        extracted = _sealed_notice(agent_name, extracted)
+                    content = f"[subagent_{agent_name}]: {extracted}"
                 else:
                     # Stringify non-string content
                     content = f"{agent_name}: {json.dumps(content)}"
@@ -575,7 +603,7 @@ def _request_shape(payload):
             elif kind in ("multi_agent_call_output", "subagent_call_output"):
                 entry["call_id"] = str(item.get("call_id") or item.get("id") or "")[:80]
             elif kind == "agent_message":
-                entry["agent"] = str(item.get("agent") or item.get("sender") or "")[:80]
+                entry["agent"] = str(item.get("author") or item.get("agent") or item.get("sender") or "")[:80]
                 entry["role"] = str(item.get("role") or "")[:20]
             elif kind == "function_call":
                 entry["name"] = str(item.get("name") or "")[:80]
@@ -775,6 +803,9 @@ def prepare_native(runtime, payload):
     # rather than only where the description happened to land.
     if runtime.settings.get("codex_goal_budget") is not True:
         strip_goal_budget(tools)
+    # The desktop asks for its delegated messages to be sealed, and only
+    # OpenAI can open the seal. Children on every route need plaintext.
+    strip_sealed_keyword(tools)
     advertise_subagent_models(tools, runtime.settings, getattr(runtime, "catalogue", None))
     body["tools"], tool_map = flatten_tools(tools)
     if tools and spec.get("tools") is False:
