@@ -2,6 +2,9 @@
 
 No real model requests, credentials, user config changes, or workspace tools.
 Run with uv run python scripts/probe_codex_subagents.py.
+``--tool-mode code_mode_only`` marks every probe card the way OpenAI's gpt-6
+cards are marked, reproducing the exec-only tool surface that hid the host
+spawn tool (see docs/codex-provider-subagents.md).
 """
 from __future__ import annotations
 
@@ -23,7 +26,7 @@ from bridge_core import SLOTS
 
 
 def probe(binary, *, controls=(), fork_turns="none", target_index=6, multi_agent_version="v2",
-          forward_host=False, ephemeral=False):
+          forward_host=False, ephemeral=False, tool_mode=None):
     routes = [f"mistral/probe-{n}" for n in range(7)]
     routes[-1] = "gemini/probe-flash"
     target = routes[target_index]
@@ -35,6 +38,9 @@ def probe(binary, *, controls=(), fork_turns="none", target_index=6, multi_agent
         for n, route in enumerate(routes)]})
     for row in catalogue["models"]:
         row["multi_agent_version"] = multi_agent_version
+        if tool_mode:
+            # OpenAI's gpt-6 cards pair tool_mode "code_mode_only" with a unified_exec shell.
+            row.update(tool_mode=tool_mode, shell_type="unified_exec")
     requests = []
     host_calls = []
 
@@ -138,8 +144,18 @@ def probe(binary, *, controls=(), fork_turns="none", target_index=6, multi_agent
                         spawn.append(child)
             outputs = [item.get("output") for body in requests for item in body.get("input", [])
                        if isinstance(item, dict) and item.get("type") == "function_call_output"]
+            first = requests[0] if requests else {}
+            surface = []
+            for tool in first.get("tools", []):
+                if isinstance(tool.get("tools"), list):
+                    surface.extend(f"{tool.get('name')}.{child.get('name')}" for child in tool["tools"])
+                else:
+                    surface.append(tool.get("name"))
+            exec_binds_host = any(tool.get("name") == "exec" and _tool_alias("spawn_agent") in str(tool.get("description", ""))
+                                  for tool in first.get("tools", []))
             return {"controls": controls, "fork_turns": fork_turns, "target": target,
-                    "forward_host": forward_host, "host_calls": host_calls,
+                    "forward_host": forward_host, "host_calls": host_calls, "tool_mode": tool_mode,
+                    "tool_surface": surface, "exec_binds_host_tools": exec_binds_host,
                     "multi_agent_version": multi_agent_version,
                     "effective_agents": effective.get("agents"),
                     "effective_features": {key: value for key, value in effective.get("features", {}).items()
@@ -163,8 +179,11 @@ if __name__ == "__main__":
                         help="Reproduce nested CLI history-fork failures with an ephemeral parent.")
     parser.add_argument("--transport-controls", action="store_true",
                         help="Use the Codex CLI adapter's actual transport configuration.")
+    parser.add_argument("--tool-mode", choices=("direct", "code_mode_only"),
+                        help="Mark every probe card with this tool_mode; OpenAI's gpt-6 cards carry code_mode_only.")
     args = parser.parse_args()
     controls = [*(_TRANSPORT_CONFIG if args.transport_controls else ()), *args.control]
     print(json.dumps(probe(args.binary or runtime_binary(), controls=controls,
                            fork_turns=args.fork_turns, target_index=args.target_index,
-                           forward_host=args.forward_host, ephemeral=args.ephemeral), indent=2))
+                           forward_host=args.forward_host, ephemeral=args.ephemeral,
+                           tool_mode=args.tool_mode), indent=2))

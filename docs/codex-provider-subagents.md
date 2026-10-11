@@ -137,3 +137,59 @@ Changes:
   per-request record: tool names when the set changes, counts, item types and
   the spawn-depth strip count. The next report of a missing tool can be
   attributed to the desktop or to the middleware from that file alone.
+
+## Code-mode cards hide host tools (2026-10-11)
+
+ChatGPT 26.1007 (bundled `codex-cli 0.162.0-alpha.17.2`, installed on
+11 Oct 2026) refreshed `~/.codex/models_cache.json` with
+`tool_mode = "code_mode_only"` and `shell_type = "unified_exec"` on the
+gpt-6 family. A Codex Desktop seat on `codex/gpt-6.1-sol` then reported:
+"The spawn tool is visible now, but the session instruction still forbids
+collaboration calls through `functions.exec`—the only exposed route."
+
+Measured with the probe below against the installed runtime: a card in
+`code_mode_only` makes the nested app-server advertise one native `exec`
+custom tool (plus `wait` and `request_user_input`), and every dynamic host
+tool, the `host` namespace included, appears only as a binding inside that
+tool's description, `tools.host__bridge_spawn_agent_<8 hex>(...)`. The
+desktop's own multi-agent briefing, forwarded verbatim as developer
+instructions, says collaboration tools "cannot be called from inside
+`functions.exec`", so the model correctly refused the only route it had. The
+same card with `tool_mode = "direct"` registers
+`host.bridge_spawn_agent_<8 hex>` as an ordinary function tool.
+`features.code_mode`, `features.code_mode_only` and
+`features.code_mode_host` do not change the surface; the card decides. The
+desktop never sent an `exec` tool of its own (`responses-shapes.jsonl` lists
+`collaboration.spawn_agent` and `exec_command` as direct tools on every
+Codex turn), which is why Claude, Grok and the other native routes kept
+delegating normally.
+
+Code mode is also the wrong shape for this transport: one `exec` script can
+call several tools before it yields, while the bridge hands off exactly one
+host call per leg and restores it as a function call.
+
+Changes:
+
+- `_openai_catalog_override` points the nested runtime at
+  `~/.codex/provider-hub-direct-catalog.json`, a copy of the runtime's own
+  fetched cache with every card pinned to `tool_mode = "direct"`. The copy
+  is rewritten atomically only when the cache changes, and it is used
+  whenever a configured catalogue needs neutralizing or any card would
+  select code mode. An unwritable copy falls back to the previous behaviour.
+- `scripts/probe_codex_subagents.py --tool-mode code_mode_only` reproduces
+  the exec-only surface. The output's `tool_surface` lists what the fake
+  provider was offered and `exec_binds_host_tools` says whether the spawn
+  alias was hidden inside `exec`.
+
+Reproduce:
+
+```sh
+uv run --python 3.13 python scripts/probe_codex_subagents.py --transport-controls --forward-host --tool-mode code_mode_only
+uv run --python 3.13 python scripts/probe_codex_subagents.py --transport-controls --forward-host --tool-mode direct
+```
+
+The first lists `exec`, `wait` and `request_user_input` with
+`exec_binds_host_tools: true`; the second lists
+`host.bridge_spawn_agent_<8 hex>` and `request_user_input`.
+
+Rebuild the Hub and restart its gateway to activate the change.

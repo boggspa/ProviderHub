@@ -88,10 +88,12 @@ routed to ``https://api.openai.com/v1/responses`` even when the user's real
 ``~/.codex/config.toml`` has been pointed at the hub. The same override is
 applied to the coarse ``exec`` fallback. When the real config's
 ``model_catalog_json`` has been pointed at the hub's catalog, the argv also
-points it back at the CLI's own fetched OpenAI catalog so :func:`catalogue`
-advertises models this route can actually run. Only then: every Codex client
-on the machine rewrites that cache with the list the backend serves *its*
-version, so with no configured catalog the runtime lists its own.
+points it back at a direct-tool-mode copy of the CLI's own fetched OpenAI
+catalog so :func:`catalogue` advertises models this route can actually run.
+Only then: every Codex client on the machine rewrites that cache with the
+list the backend serves *its* version, so with no configured catalog the
+runtime lists its own - unless a card would select code mode (see
+:func:`_openai_catalog_override`).
 
 Nested process isolation and host permissions
 ---------------------------------------------
@@ -99,6 +101,10 @@ The nested sandbox does not describe host tool permissions. Workspace reads
 and writes are forwarded to the host, which enforces its own settings. Native
 shell, image viewing, plugins, and multi-agent features are disabled;
 unexpected native tool activity is an error, never silently discarded.
+Host tools are registered as direct function tools: the catalogue copy the
+child reads pins every card to ``tool_mode = "direct"``, because a code-mode
+card hides them inside the runtime's native ``exec`` (see
+:func:`_openai_catalog_override`).
 
 Web search and image generation can run as native hosted tools. The latter
 is enabled only on the Responses surface that can render its output items;
@@ -560,6 +566,16 @@ def _models_cache(home=None):
     return _codex_home(home) / "models_cache.json"
 
 
+#: The model-card tool surface the nested runtime must present. A card in
+#: ``direct`` mode registers dynamic tools as ordinary function tools, the
+#: surface every other provider route offers; see _openai_catalog_override
+#: for the ``code_mode_only`` cards OpenAI's catalogue now carries.
+_DIRECT_TOOL_MODE = "direct"
+#: The direct-mode copy of the cache, beside it in the home the child reads,
+#: under a name no Codex client rewrites.
+_DIRECT_CATALOG_NAME = "provider-hub-direct-catalog.json"
+
+
 def _configured_catalog(home=None):
     """Whether the real Codex config selects a ``model_catalog_json``.
 
@@ -578,6 +594,56 @@ def _configured_catalog(home=None):
     profile, profiles = config.get("profile"), config.get("profiles")
     table = profiles.get(profile) if isinstance(profile, str) and isinstance(profiles, dict) else None
     return isinstance(table, dict) and "model_catalog_json" in table
+
+
+def _usable_catalog(cache):
+    """The cache's parsed payload when it is a non-empty catalog, else None."""
+    try:
+        if not cache.is_file():
+            return None
+        payload = json.loads(cache.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if isinstance(payload, dict) and isinstance(payload.get("models"), list) and payload["models"]:
+        return payload
+    return None
+
+
+def _code_mode_cards(payload):
+    """Whether any card would put the runtime's tools behind its native exec."""
+    return any(isinstance(card, dict) and card.get("tool_mode") not in (None, _DIRECT_TOOL_MODE)
+               for card in payload["models"])
+
+
+def _direct_catalog(cache, payload):
+    """``cache`` rewritten with every card in direct tool mode; None if unwritable.
+
+    Written only when its content would change, so a long session does not
+    churn the file, and atomically, so the runtime never reads a torn copy.
+    """
+    models = [{**card, "tool_mode": _DIRECT_TOOL_MODE} if isinstance(card, dict) else card
+              for card in payload["models"]]
+    rendered = json.dumps({**payload, "models": models}, ensure_ascii=False)
+    path = cache.with_name(_DIRECT_CATALOG_NAME)
+    try:
+        if path.is_symlink():
+            return None
+        if path.is_file() and path.read_text(encoding="utf-8") == rendered:
+            return path
+        fd, name = tempfile.mkstemp(prefix=".provider-hub-direct-", dir=str(path.parent))
+        try:
+            os.fchmod(fd, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                stream.write(rendered)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(name, path)
+        finally:
+            if os.path.exists(name):
+                os.unlink(name)
+    except (OSError, TypeError, ValueError):
+        return None
+    return path
 
 
 def _openai_catalog_override(home=None):
@@ -601,21 +667,40 @@ def _openai_catalog_override(home=None):
     route and blocked launch). With no configured catalog the runtime lists, and
     re-caches, its own.
 
-    Returns ``("model_catalog_json", <path>)`` when a configured catalog needs
-    neutralizing and the cache is usable, else None.
+    The child reads a copy of the cache that pins every card to direct tool
+    mode, not the cache itself. OpenAI's catalogue marks the gpt-6 family
+    ``tool_mode = "code_mode_only"`` (seen in the cache written by ChatGPT
+    26.1007's bundled codex-cli 0.162.0-alpha.17.2 on 11 Oct 2026), and a
+    runtime reading such a card advertises one native ``exec`` custom tool
+    with every other tool, the host namespace included, reachable only as a
+    JavaScript binding inside it (``tools.host__bridge_spawn_agent_<hex>``).
+    No feature control changes that - ``features.code_mode``,
+    ``code_mode_only`` and ``code_mode_host`` were each measured with
+    ``scripts/probe_codex_subagents.py --tool-mode code_mode_only`` - the
+    card decides. That surface breaks this route twice over: the desktop's own
+    briefing, forwarded verbatim, forbids collaboration calls through
+    ``functions.exec``, so a Codex seat reported the spawn tool visible but
+    unreachable; and a script may call several tools before it yields, while
+    this transport hands off exactly one call per leg. So a cache carrying any
+    code-mode card is copied even with no configured catalog to neutralize,
+    and the copy lives beside the cache under a name no Codex client touches.
+
+    Returns ``("model_catalog_json", <path>)`` to the direct-mode copy when
+    the cache is usable and either a configured catalog needs neutralizing or
+    a card would select code mode; to the raw cache when that copy cannot be
+    written but a configured catalog still needs neutralizing; else None.
     """
-    if not _configured_catalog(home):
-        return None
     cache = _models_cache(home)
-    try:
-        if not cache.is_file():
-            return None
-        payload = json.loads(cache.read_text(encoding="utf-8"))
-        if isinstance(payload, dict) and isinstance(payload.get("models"), list) and payload["models"]:
-            return ("model_catalog_json", str(cache))
-    except (OSError, ValueError):
-        pass
-    return None
+    payload = _usable_catalog(cache)
+    if payload is None:
+        return None
+    configured = _configured_catalog(home)
+    if not configured and not _code_mode_cards(payload):
+        return None
+    direct = _direct_catalog(cache, payload)
+    if direct is not None:
+        return ("model_catalog_json", str(direct))
+    return ("model_catalog_json", str(cache)) if configured else None
 
 
 def _app_server_argv(*, model=None, effort=None, binary=None, codex_home=None):

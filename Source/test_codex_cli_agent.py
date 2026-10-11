@@ -360,9 +360,14 @@ class CodexTurnWorkspaceTests(unittest.TestCase):
             cache = base / ".codex" / "models_cache.json"
             cache.write_text('{"models": [{"slug": "gpt-5.6-sol"}]}',
                              encoding="utf-8")
+            direct = base / ".codex" / codex._DIRECT_CATALOG_NAME
             with mock.patch.object(codex.Path, "home", return_value=base):
                 self.assertEqual(codex._openai_catalog_override(),
-                                 ("model_catalog_json", str(cache)))
+                                 ("model_catalog_json", str(direct)))
+            # The child reads a copy pinned to direct tool mode, never the
+            # shared cache itself (see the code-mode test below).
+            self.assertEqual(json.loads(direct.read_text(encoding="utf-8")),
+                             {"models": [{"slug": "gpt-5.6-sol", "tool_mode": "direct"}]})
             # A present-but-empty catalog must not be used: pointing the
             # app-server at it would make startup fail.
             cache.write_text('{"models": []}', encoding="utf-8")
@@ -380,7 +385,7 @@ class CodexTurnWorkspaceTests(unittest.TestCase):
             cache.write_text('{"client_version": "0.153.0", "models": [{"slug": "gpt-6-astra"}]}',
                              encoding="utf-8")
             config = base / ".codex" / "config.toml"
-            override = ("model_catalog_json", str(cache))
+            override = ("model_catalog_json", str(base / ".codex" / codex._DIRECT_CATALOG_NAME))
             for text, expected in (
                     (None, None),
                     ('model = "gpt-6-astra"\n', None),
@@ -399,6 +404,79 @@ class CodexTurnWorkspaceTests(unittest.TestCase):
                         argv = codex._app_server_argv()
                     self.assertEqual(any(part.startswith("model_catalog_json=") for part in argv),
                                      expected is not None)
+
+    def test_code_mode_cards_are_pinned_to_direct_tool_mode(self):
+        # Seen live on 11 Oct 2026: ChatGPT 26.1007's bundled codex-cli
+        # 0.162.0-alpha.17.2 cached the gpt-6 family as tool_mode
+        # "code_mode_only", and the nested runtime then listed the host
+        # namespace only as a binding inside its native exec tool. A Codex
+        # seat, told by the forwarded desktop briefing never to call
+        # collaboration tools through functions.exec, reported the spawn tool
+        # visible but unreachable. No feature control changes the surface;
+        # the card the runtime reads does.
+        with tempfile.TemporaryDirectory() as tmp:
+            base = codex.Path(tmp)
+            cache = base / ".codex" / "models_cache.json"
+            cache.parent.mkdir()
+            cards = [{"slug": "gpt-6.1-sol", "tool_mode": "code_mode_only", "shell_type": "unified_exec",
+                      "context_window": 272000, "max_context_window": 1000000},
+                     {"slug": "gpt-5.5", "tool_mode": None}, {"slug": "gpt-5.4"}, "not-a-card"]
+            cache.write_text(json.dumps({"client_version": "0.162.0", "models": cards}), encoding="utf-8")
+            direct = base / ".codex" / codex._DIRECT_CATALOG_NAME
+            with mock.patch.object(codex.Path, "home", return_value=base), \
+                    mock.patch.object(codex, "runtime_binary", return_value="/fake/codex"):
+                # No configured catalog to neutralize: the code-mode card alone selects the copy.
+                self.assertEqual(codex._openai_catalog_override(), ("model_catalog_json", str(direct)))
+                argv = codex.build_argv("gpt-6.1-sol")
+            self.assertIn("model_catalog_json=" + json.dumps(str(direct)), argv)
+            # Context metadata is read from the copy's cards, as from the cache before.
+            self.assertIn("model_context_window=1000000", argv)
+            written = json.loads(direct.read_text(encoding="utf-8"))
+            self.assertEqual(written["client_version"], "0.162.0")
+            self.assertEqual(written["models"], [
+                {**cards[0], "tool_mode": "direct"}, {"slug": "gpt-5.5", "tool_mode": "direct"},
+                {"slug": "gpt-5.4", "tool_mode": "direct"}, "not-a-card"])
+            self.assertEqual(direct.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(sorted(path.name for path in cache.parent.iterdir()),
+                             sorted([cache.name, direct.name]))
+            # The shared cache is never written, and an unchanged one does not rewrite the copy.
+            self.assertEqual(json.loads(cache.read_text(encoding="utf-8"))["models"], cards)
+            with mock.patch.object(codex.Path, "home", return_value=base), \
+                    mock.patch.object(codex.tempfile, "mkstemp", side_effect=AssertionError("rewrote an unchanged copy")):
+                self.assertEqual(codex._openai_catalog_override(), ("model_catalog_json", str(direct)))
+            # A refreshed cache refreshes the copy.
+            cache.write_text(json.dumps({"models": [{"slug": "gpt-7", "tool_mode": "code_mode_only"}]}),
+                             encoding="utf-8")
+            with mock.patch.object(codex.Path, "home", return_value=base):
+                self.assertEqual(codex._openai_catalog_override(), ("model_catalog_json", str(direct)))
+            self.assertEqual(json.loads(direct.read_text(encoding="utf-8"))["models"],
+                             [{"slug": "gpt-7", "tool_mode": "direct"}])
+
+    def test_unwritable_direct_copy_falls_back_only_for_a_configured_catalog(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = codex.Path(tmp)
+            cache = base / ".codex" / "models_cache.json"
+            cache.parent.mkdir()
+            cache.write_text(json.dumps({"models": [{"slug": "gpt-6.1-sol", "tool_mode": "code_mode_only"}]}),
+                             encoding="utf-8")
+            config = base / ".codex" / "config.toml"
+            direct = base / ".codex" / codex._DIRECT_CATALOG_NAME
+            with mock.patch.object(codex.Path, "home", return_value=base), \
+                    mock.patch.object(codex.tempfile, "mkstemp", side_effect=OSError("read-only home")):
+                # Nothing to neutralize and no copy: the runtime keeps its own catalog.
+                self.assertIsNone(codex._openai_catalog_override())
+                config.write_text('model_catalog_json = "/hub/codex-models.json"\n', encoding="utf-8")
+                # The hub catalog still needs neutralizing: the raw cache, as before.
+                self.assertEqual(codex._openai_catalog_override(), ("model_catalog_json", str(cache)))
+            self.assertFalse(direct.exists())
+            # A symlinked copy is neither followed nor replaced.
+            elsewhere = base / "elsewhere.json"
+            elsewhere.write_text("{}", encoding="utf-8")
+            direct.symlink_to(elsewhere)
+            with mock.patch.object(codex.Path, "home", return_value=base):
+                self.assertEqual(codex._openai_catalog_override(), ("model_catalog_json", str(cache)))
+            self.assertEqual(elsewhere.read_text(encoding="utf-8"), "{}")
+            self.assertTrue(direct.is_symlink())
 
 
 class DiscoverAuthStateTests(unittest.TestCase):
