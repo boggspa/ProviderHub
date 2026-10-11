@@ -36,7 +36,8 @@ class FanoutTests(unittest.TestCase):
         self.assertEqual([record["status"] for record in records], ["ready", "ready"])
         self.assertEqual([record["account"] for record in records], ["", "work"])
         for index, transport in enumerate(self.children):
-            self.assertEqual({tool["name"] for tool in transport.requests[0]["tools"]}, {"read_file", "search_files"})
+            self.assertEqual({tool["name"] for tool in transport.requests[0]["tools"]},
+                             {"read_file", "search_files", "request_user_input", "request_user_input_async", "wait_for_user_input"})
             self.assertIn(f"Independent task {index}", json.dumps(transport.requests[0]["messages"]))
             self.assertNotIn(f"Independent task {1-index}", json.dumps(transport.requests[0]["messages"]))
         self.assertIn("first-signature", json.dumps(records[0]["messages"]))

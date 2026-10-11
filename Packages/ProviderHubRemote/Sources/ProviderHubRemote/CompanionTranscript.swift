@@ -3,6 +3,8 @@ import SwiftUI
 struct CompanionTranscript: View {
     let entries: [RemoteEntry]
     let chat: RemoteChat
+    var connected = false
+    var answer: (RemoteQuestion, [String: [String]], Bool) -> Void = { _, _, _ in }
     @State private var followsLatest = true
 
     var body: some View {
@@ -13,7 +15,7 @@ struct CompanionTranscript: View {
                         .font(.caption2).foregroundStyle(CompanionTheme.secondary)
                         .frame(maxWidth: .infinity).padding(.vertical, 8)
                     ForEach(entries) { entry in
-                        CompanionTranscriptRow(entry: entry, chat: chat)
+                        CompanionTranscriptRow(entry: entry, chat: chat, connected: connected, answer: answer)
                             .id(entry.id)
                     }
                     if chat.busy && entries.last?.isLive != true {
@@ -43,10 +45,18 @@ struct CompanionTranscript: View {
 private struct CompanionTranscriptRow: View {
     let entry: RemoteEntry
     let chat: RemoteChat
+    var connected: Bool
+    var answer: (RemoteQuestion, [String: [String]], Bool) -> Void
     @State private var expanded = false
     var body: some View {
         Group {
             switch entry.role {
+            case "question":
+                if let question = entry.question {
+                    CompanionQuestionCard(question: question, accent: chat.providerAccent, enabled: connected) { values, dismiss in
+                        answer(question, values, dismiss)
+                    }
+                }
             case "user":
                 HStack {
                     Spacer(minLength: 36)

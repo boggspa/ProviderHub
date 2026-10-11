@@ -15,6 +15,7 @@ protocol ChatTranscriptItem {
     var tool: String? { get }
     var summary: String? { get }
     var detail: String? { get }
+    var isError: Bool { get }
     var memberID: String? { get }
     var memberName: String? { get }
     var agentID: String? { get }
@@ -24,6 +25,7 @@ protocol ChatTranscriptItem {
 }
 
 extension ChatTranscriptItem {
+    var isError: Bool { false }
     var time: Double? { nil }
     var changedFiles: [String] { [] }
 }
@@ -170,6 +172,7 @@ struct ChatTranscriptSegment<Item: ChatTranscriptItem>: Identifiable {
         }
 
         for item in grouped.items {
+            if item.kind == "tool", ["request_user_input", "request_user_input_async", "wait_for_user_input"].contains(item.tool ?? ""), item.isError != true { continue }
             if item.kind == "user" { closeTurn() } else { turn.append(item) }
             switch item.kind {
             case "assistant", "tool":

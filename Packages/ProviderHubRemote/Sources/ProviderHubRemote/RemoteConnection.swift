@@ -216,6 +216,9 @@ public final class RemoteConnection: CompanionLink {
                 if let value = command.text { params["text"] = value }
                 if let value = command.approvalId { params["approvalId"] = value }
                 if let value = command.allow { params["allow"] = value }
+                if let value = command.questionId { params["questionId"] = value }
+                if let value = command.answers { params["answers"] = value }
+                if let value = command.dismiss { params["dismiss"] = value }
                 try self.channel?.send(method: command.method, params: params)
             } catch { self.onStatus?("Command failed: \(error)", nil) }
         }

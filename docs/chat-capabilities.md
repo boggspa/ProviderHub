@@ -150,6 +150,35 @@ trip pass. Physical-camera scanning and an on-device network trial remain unveri
 
 ## Verification
 
+### Questions from agents
+
+Every tool-capable Chat, helper and Team member can use `request_user_input`
+to ask and wait, or `request_user_input_async` to post a card and continue
+independent work. `wait_for_user_input` waits for a previously posted request;
+its bounded timeout leaves the question open and returns `pending`.
+
+The transcript card names the asker, offers choices or free text, and supports
+multiple selections when requested. No answer is preselected. Send answer
+records the result; Dismiss records that no answer was given. The card stays
+in history after settlement. Draft answers survive pane changes and row
+remounts for the running app session. The paired iOS companion can answer the
+same question; the first durable reply wins across devices.
+
+Waiting affects only the asking worker and does not hold a workspace or
+provider-request slot. Async answers enter the asking agent's context at a
+model boundary, or resume an idle chat; Team replies target the named member
+without cancelling peers. Finished helper answers return to the owning chat
+with attribution. Stop cancels that worker's questions; stopping the whole
+chat cancels all its questions. Restart cancels unanswered saved cards rather
+than reattaching them to a new worker. Answered cards remain the record if a
+connection or restart interrupts delivery. These tools cannot grant tool
+permissions or replace Allow once.
+
+The native layout follows TaskWraith's `AgentQuestionCard`/settled-card pattern
+in AGBench, implemented with the harness's SwiftUI card surfaces and existing
+host routing. It adds no package dependency. At most 16 questions can remain
+open in a chat, with up to four prompts and six choices per card.
+
 Use the repository's uv CPython 3.13 test command. Targeted suites include
 `test_chat_model`, `test_chat_concurrency`, `test_chat_capabilities`,
 `test_chat_plugins`, `test_chat_plugin_mcp`, `test_chat_browser`,

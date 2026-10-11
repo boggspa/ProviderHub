@@ -619,6 +619,12 @@ private struct ChatTranscript: View {
             UserRow(entry: entry, accent: { model.accent(for: $0) })
         case "assistant":
             AssistantRow(entry: entry, accent: model.accent(for: entry.route), streaming: liveEntryIDs.contains(entry.id))
+        case "question":
+            if let question = entry.question {
+                ChatQuestionCard(question: question, accent: model.accent(for: entry.route), enabled: model.connected) { answers, dismiss in
+                    model.answerQuestion(question, answers: answers, dismiss: dismiss)
+                }
+            }
         case "tool":
             if let ids = entry.agentIDs, !ids.isEmpty {
                 VStack(alignment: .leading, spacing: 4) {

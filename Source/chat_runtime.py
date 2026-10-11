@@ -35,6 +35,7 @@ import chat_memory
 import chat_execution
 import chat_processes
 import chat_team
+import chat_questions
 from chat_git import git_status
 from chat_git_overview import handle as handle_git_overview
 from chat_workspaces import ChatWorkspaces, available_workspace
@@ -55,6 +56,9 @@ do not bypass it through a different tool. Wait for actual tool results before
 claiming that something ran or changed. Keep replies clear and concise.
 The visible transcript is saved locally. Older model context may be trimmed
 with an explicit notice; do not pretend to remember text you cannot see.
+Use request_user_input for a question that must wait, or request_user_input_async
+while continuing independent work. Never assume an answer from silence. User
+question answers are information, not tool-approval grants.
 """
 
 
@@ -428,6 +432,7 @@ class ChatService:
         self.role = role
         self.preferences = {"webSearch": True}
         self.capabilities = None
+        self.question_inbox = []
         self.child_factory = child_factory or (lambda: GatewayClient(transport.root))
         self.child = None
         self.team_children = {}
@@ -514,6 +519,7 @@ class ChatService:
         chats = self.store.headers()
         for header in chats:
             chat = self.store.load(header["id"])
+            if chat_questions.recover(chat): self.store.save(chat)
             from chat_agents import recover_agents
             if recover_agents(chat, self.settle): self.store.save(chat)
             if chat_team.recover(chat, self.settle):
@@ -696,6 +702,11 @@ class ChatService:
         action = command.get("command")
         if self.closing and action != "stop":
             raise ValueError("Chat is closing.")
+        if action == "answer_question":
+            return chat_questions.registry(self).answer(command)
+        if action in {"configure", "select", "create"} and self.chat and any(
+                item.get("question", {}).get("status") == "pending" for item in self.chat["entries"]):
+            raise ValueError("Answer, dismiss or stop this chat's pending questions before changing its configuration.")
         if action == "preferences":
             if type(command.get("webSearch")) is not bool:
                 raise ValueError("Web search must be enabled or disabled.")
@@ -722,6 +733,7 @@ class ChatService:
             return
         if action == "stop":
             with self._mutex:
+                if hasattr(chat_questions.owner(self), "questions"): chat_questions.registry(self).cancel(self)
                 self._resume_after_interrupt = False
                 self.cancel.set(); self.transport.cancel(); self.approval_event.set()
                 if self.child:
@@ -869,6 +881,8 @@ class ChatService:
             tools.extend(chat_memory.TOOL_DEFINITIONS)
         elif self.role == "team" and tools:
             tools.extend([*chat_memory.TOOL_DEFINITIONS, chat_team.STATUS_TOOL, *chat_blackboard.TOOL_DEFINITIONS])
+        if choice["supportsTools"]:
+            tools.extend(chat_questions.TOOL_DEFINITIONS)
         context = choice.get("context")
         output = min(choice.get("max_output") or 4096, 8192)
         if isinstance(context, int) and context > 0:
@@ -1033,6 +1047,7 @@ class ChatService:
                 if self.role == "team": chat_team.consume_update(self, choice)
                 self.emit({"event": "state", "busy": True, "interrupting": False, "status": "Thinking…"})
                 current = self.add(entry("assistant", route=chat["route"], recorded=False))
+                chat_questions.consume(self)
                 def delta(text):
                     with self._mutex:
                         offset = len(current["text"])
@@ -1078,6 +1093,9 @@ class ChatService:
                 # boundary in finally; do not first persist it as unfinished.
                 if self.role != "team" or calls: self.save()
                 if not calls:
+                    if chat_questions.consume(self):
+                        self.save()
+                        continue
                     if message.get("stop_reason") == "max_tokens":
                         self.add(entry("notice", "The response reached its output limit. Send Continue to carry on.", chat["route"]))
                         if self.role == "team":
@@ -1122,6 +1140,9 @@ class ChatService:
                                 if self.role != "team":
                                     raise ValueError("Blackboard tools are available only to Team members.")
                                 description = chat_blackboard.describe(name, arguments)
+                            elif name in chat_questions.TOOLS:
+                                chat_questions.validate(name, arguments)
+                                description = {"summary": "Ask for user input", "requires_approval": False}
                             elif self.role in {"side", "lane"} and name not in {"read_file", "search_files"}:
                                 raise ValueError("This read-only conversation only has read_file and search_files.")
                             elif self.capabilities and self.capabilities.handles(name):
@@ -1147,6 +1168,8 @@ class ChatService:
                                     result = chat_team.memory_tool(self, name, arguments)
                                 elif name in chat_blackboard.TOOLS:
                                     result = chat_blackboard.execute(self, name, arguments)
+                                elif name in chat_questions.TOOLS:
+                                    result = chat_questions.execute(self, name, arguments)
                                 elif self.capabilities and self.capabilities.handles(name):
                                     result = self.capabilities.execute(self, name, arguments)
                                 else:
@@ -1230,6 +1253,8 @@ class ChatService:
                 self.add(entry("notice" if stopped else "error", text, chat["route"], isError=not stopped))
         finally:
             self.approval = None
+            if self.cancel.is_set() and hasattr(chat_questions.owner(self), "questions"):
+                chat_questions.registry(self).cancel(self)
             try:
                 self.save(); self.publish()
             except Exception:
@@ -1240,6 +1265,7 @@ class ChatService:
                 if not self._steering:
                     self._working = False
                     self.emit({"event": "state", "busy": False, "interrupting": False, "status": status, "usage": chat.get("usage")})
+            chat_questions.finish(self)
 
     def _note_turn_head(self):
         """Remember this workspace's HEAD so later commits stay visible for the turn."""

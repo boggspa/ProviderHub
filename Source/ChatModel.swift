@@ -34,6 +34,15 @@ struct ChatRoute: Decodable, Identifiable {
     var connectionAccent: Color { connectionPresentation?.color ?? accent }
 }
 
+struct ChatQuestionRecord: Decodable, Identifiable {
+    struct Option: Decodable, Identifiable { var label: String; var description: String; var id: String { label } }
+    struct Item: Decodable, Identifiable {
+        var id: String; var header: String; var question: String; var options: [Option]; var multiSelect: Bool
+    }
+    var id: String; var status: String; var mode: String; var asker: String
+    var questions: [Item]; var answers: [String: [String]]
+}
+
 struct ChatEntry: Decodable, Identifiable {
     var id: String
     var time: Double?
@@ -54,6 +63,7 @@ struct ChatEntry: Decodable, Identifiable {
     var contributionID: String?
     var clientRequest: String?
     var textOffset: Int?
+    var question: ChatQuestionRecord?
     /// `@Name` tags as the worker resolved and routed them, in UTF-16 units.
     var mentions: [ChatMention]?
 }
@@ -538,6 +548,11 @@ final class ChatModel: ObservableObject {
                 approval = nil; status = allow ? "Working…" : "Denied"
             }
         }
+    }
+    func answerQuestion(_ question: ChatQuestionRecord, answers: [String: [String]], dismiss: Bool = false) {
+        guard let owner = stateChatID, connected else { return }
+        write(["command": "answer_question", "chat": owner, "question_id": question.id,
+               "answers": answers, "dismiss": dismiss])
     }
     func chooseAttachments() {
         let owner = selectedID

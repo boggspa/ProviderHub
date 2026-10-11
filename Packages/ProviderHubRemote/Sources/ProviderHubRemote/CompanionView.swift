@@ -107,6 +107,12 @@ public final class CompanionModel: ObservableObject {
         guard let approval = store.approval, let chat = approval.chat else { return }
         link?.send(RemoteCommand(method: "chat.approve", requestId: UUID().uuidString, chat: chat, approvalId: approval.id, allow: allow))
     }
+    public func answerQuestion(_ question: RemoteQuestion, chat: String, answers: [String: [String]], dismiss: Bool) {
+        guard isConnected else { return }
+        var command = RemoteCommand(method: "chat.answer_question", requestId: UUID().uuidString, chat: chat)
+        command.questionId = question.id; command.answers = answers; command.dismiss = dismiss
+        link?.send(command)
+    }
 }
 
 @MainActor
@@ -134,7 +140,9 @@ public struct CompanionView: View {
                     CompanionTheme.hairline.frame(height: 1)
                     if let chat = model.selectedChat {
                         if model.store.selectedID == chat.id {
-                            CompanionTranscript(entries: model.store.entries, chat: chat).id(chat.id)
+                            CompanionTranscript(entries: model.store.entries, chat: chat, connected: model.isConnected) { question, answers, dismiss in
+                                model.answerQuestion(question, chat: chat.id, answers: answers, dismiss: dismiss)
+                            }.id(chat.id)
                         } else {
                             VStack(spacing: 10) { ProgressView(); Text("Opening conversation…").font(.caption).foregroundStyle(CompanionTheme.secondary) }
                                 .frame(maxWidth: .infinity, maxHeight: .infinity)
