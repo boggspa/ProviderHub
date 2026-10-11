@@ -481,6 +481,51 @@ class FailedHandoffTests(unittest.TestCase):
         self.assertIn("do not perform that work again", correction)
         self.assertIn("tool-call delimiters", correction)
 
+    def test_live_narration_reaches_the_client_before_the_step_ends(self):
+        progress = []
+        def run(request, **kwargs):
+            yield {"type": "text_delta", "text": "I'll list the files first.\n"}
+            progress.append("narrated")
+            yield {"type": "text_delta", "text": envelope()}
+            yield {"type": "message_stop", "stop_reason": "end_turn"}
+        request = {"tools": TOOLS, "messages": [{"role": "user", "content": "Read file"}]}
+        for live in (True, False):
+            with self.subTest(live=live):
+                progress.clear()
+                stream = cli_routes._tool_turn(SimpleNamespace(run_turn=run, LIVE_NARRATION=live), request, timeout=10)
+                first = next(event for event in stream if event["type"] != "ping")
+                self.assertEqual(first, {"type": "text_delta", "text": "I'll list the files first.\n"})
+                # Held narration waits for the call; live narration does not.
+                self.assertEqual(progress, [] if live else ["narrated"])
+                self.assertEqual([event["type"] for event in stream if event["type"] != "ping"],
+                                 ["tool_call", "message_stop"])
+
+    def test_a_retry_after_live_narration_holds_its_text_and_is_told_what_was_shown(self):
+        requests = []
+        def run(request, **kwargs):
+            requests.append(request)
+            if len(requests) == 1:
+                yield {"type": "text_delta", "text": "I'll list the files first.\n"}
+                yield {"type": "text_delta", "text": OPEN_SENTINEL + "{broken}" + CLOSE_SENTINEL}
+            else:
+                yield {"type": "text_delta", "text": "Listing now.\n"}
+                yield {"type": "text_delta", "text": envelope()}
+            yield {"type": "message_stop", "stop_reason": "end_turn"}
+        request = {"tools": TOOLS, "messages": [{"role": "user", "content": "Read file"}]}
+        events = [event for event in cli_routes._tool_turn(SimpleNamespace(run_turn=run, LIVE_NARRATION=True),
+                                                          request, timeout=10) if event["type"] != "ping"]
+        self.assertEqual([(event["type"], event.get("text")) for event in events],
+                         [("text_delta", "I'll list the files first.\n"), ("text_delta", "Listing now.\n"),
+                          ("tool_call", None), ("message_stop", None)])
+        self.assertEqual(len(requests), 2)
+        correction = requests[1]["messages"][-1]["content"]
+        self.assertIn("nothing in it was executed", correction)
+        self.assertIn("already been shown to the user; do not repeat it", correction)
+
+    def test_claude_route_streams_its_narration(self):
+        import claude_cli_agent
+        self.assertIs(claude_cli_agent.LIVE_NARRATION, True)
+
     def test_repeated_invalid_calls_stop_after_one_retry_and_cancellation_never_retries(self):
         for cancelled in (False, True):
             requests = []
