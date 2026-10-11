@@ -130,6 +130,7 @@ route the turn back through the hub.
 from __future__ import annotations
 
 import atexit
+import copy
 import hashlib
 import json
 import os
@@ -149,6 +150,7 @@ from codex_session_pool import SessionPool, digest as _digest, history_blocks as
 from cli_lifecycle import cleanup_after_exit
 from cli_tool_call import HOST_EXECUTION_NOTE, ToolCallError, normalize_tools, validate_host_call
 from cli_images import normalize_images, recover_tool_content, responses_content
+from responses_tools import drop_schema_keyword
 
 
 PROVIDER_ID = "codex"
@@ -1262,6 +1264,20 @@ def _handshake(session, *, timeout):
     session.notify("initialized", {})
 
 
+def _unsealed(schema):
+    """The schema without the desktop's `"encrypted"` keyword.
+
+    This runtime is the one place proven to honour it: OpenAI returns the
+    marked argument as a token only its servers can open, and the desktop
+    hands that token to a child as its task. Request ingress already strips
+    the keyword (responses_tools.strip_sealed_keyword); this covers any
+    caller that reaches the runtime another way.
+    """
+    schema = copy.deepcopy(schema)
+    drop_schema_keyword(schema)
+    return schema
+
+
 def _thread_params(payload, workspace):
     params = {
         "cwd": str(workspace.cwd),
@@ -1277,7 +1293,7 @@ def _thread_params(payload, workspace):
             "description": "Tools executed by the host application under its permissions.",
             "tools": [{"type": "function", "name": _tool_alias(tool["name"]),
                        "description": f"Host tool: {tool['name']}.\n{tool['description']}",
-                       "inputSchema": tool["input_schema"]}
+                       "inputSchema": _unsealed(tool["input_schema"])}
                       for tool in payload["tools"]],
         }]
     if payload["effort"] is not None:

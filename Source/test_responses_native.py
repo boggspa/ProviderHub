@@ -100,7 +100,7 @@ class CustomApplyPatchUnitTests(unittest.TestCase):
          "parameters": {"type": "object", "properties": {}}},
     ]
 
-    def _goal_plan(self, *, allow_budget):
+    def _goal_plan(self, *, allow_budget, tools=None):
         from types import SimpleNamespace
         import responses_native
         route = "grok/grok-4.6"
@@ -111,7 +111,7 @@ class CustomApplyPatchUnitTests(unittest.TestCase):
             replay_key="replay", token="token", upstream_url=None,
             provider_key=lambda provider_id: "provider-key")
         payload = {"model": route, "store": False, "stream": False,
-                   "tools": copy.deepcopy(self.GOAL_TOOLS),
+                   "tools": copy.deepcopy(self.GOAL_TOOLS if tools is None else tools),
                    "input": [{"role": "user", "content": "ship it"}]}
         with patch.object(responses_native, "validate_connection",
                           return_value={"base_url": "https://x.invalid"}), \
@@ -173,6 +173,23 @@ class CustomApplyPatchUnitTests(unittest.TestCase):
                                      "arguments": json.dumps(arguments)}, plan["tool_map"])
                 self.assertEqual(item["name"], name)
                 self.assertNotIn("namespace", item)
+
+    def test_delegated_messages_are_no_longer_offered_for_sealing(self):
+        """The desktop's "encrypted" keyword asks OpenAI to seal a child's task.
+
+        No route opens the seal, so the keyword goes and the tools stay whole."""
+        collaboration = {"type": "namespace", "name": "collaboration", "description": "Multi-agent tools", "tools": [
+            {"type": "function", "name": name, "parameters": {"type": "object", "properties": {
+                "message": {"type": "string", "encrypted": True, "description": "Task text."},
+                "encrypted": {"type": "boolean"}}, "required": ["message"]}}
+            for name in ("spawn_agent", "followup_task", "send_message")]}
+        tools, payload = self._goal_plan(allow_budget=False, tools=[collaboration])
+        self.assertEqual(sorted(tools), ["followup_task", "send_message", "spawn_agent"])
+        for tool in tools.values():
+            self.assertEqual(tool["parameters"], {"type": "object", "properties": {
+                "message": {"type": "string", "description": "Task text."},
+                "encrypted": {"type": "boolean"}}, "required": ["message"]})
+        self.assertIs(payload["tools"][0]["tools"][0]["parameters"]["properties"]["message"]["encrypted"], True)
 
     def test_goal_tools_keep_their_token_budget_when_the_switch_is_on(self):
         tools, _ = self._goal_plan(allow_budget=True)
@@ -1675,6 +1692,32 @@ class MultiAgentNormalizationTests(unittest.TestCase):
         self.assertNotIn("[END_OF_MESSAGE]", normalized[0]["content"])
         self.assertIn("Return the list of files found.", normalized[1]["content"])
         self.assertNotIn("[END_OF_MESSAGE]", normalized[1]["content"])
+
+    def test_sealed_subagent_messages_are_explained_and_senders_named(self):
+        from responses_native import _normalize_multi_agent_items
+        token = "gAAAAABpLx" + "Q3vK9_wZ-" * 14 + "=="
+        header = {"type": "input_text", "text": "Message Type: NEW_TASK\nSender: orchestrator"}
+        items = _normalize_multi_agent_items([
+            {"type": "agent_message", "author": "orchestrator", "recipient": "explorer", "role": "assistant",
+             "content": [header, {"type": "encrypted_content", "encrypted_content": token}]},
+            {"type": "agent_message", "author": "orchestrator", "recipient": "explorer", "content": token},
+            {"type": "multi_agent_call", "recipient": "explorer", "id": "call-1",
+             "arguments": json.dumps([header, {"type": "encrypted_content", "encrypted_content": token}])},
+            {"type": "agent_message", "author": "orchestrator", "recipient": "explorer",
+             "content": [header, {"type": "encrypted_content", "encrypted_content": "Map the repository."}]},
+            {"type": "agent_message", "author": "orchestrator", "content": "gAAAAA is how the token starts."},
+        ])
+        notice = ("[This message from orchestrator was sealed by OpenAI and cannot be read on this route, "
+                  "so its text is not shown. Ask orchestrator to resend it as plain text.]")
+        self.assertEqual(items[0]["content"], "[subagent_orchestrator]: " + notice)
+        self.assertEqual(items[1]["content"], "[subagent_orchestrator]: " + notice)
+        self.assertEqual(items[2]["content"], "[Task from parent agent for subagent_explorer (call-1)]: "
+                         "[This message from the parent agent was sealed by OpenAI and cannot be read on this "
+                         "route, so its text is not shown. Ask the parent agent to resend it as plain text.]")
+        self.assertNotIn(token, json.dumps(items))
+        # Plaintext is unchanged, and the sender is the author, not "subagent".
+        self.assertEqual(items[3]["content"], "[subagent_orchestrator]: Map the repository.")
+        self.assertEqual(items[4]["content"], "[subagent_orchestrator]: gAAAAA is how the token starts.")
 
     def test_agent_message_maps_to_user_role(self):
         """Synthetic subagent speech is received history, never a Mistral prefill."""
