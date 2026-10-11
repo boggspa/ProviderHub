@@ -1390,6 +1390,7 @@ def contribution(parent, member, transport):
     child.process_registry = parent.process_registry
     child.models = copy.deepcopy(parent.models)
     child.preferences = parent.preferences
+    child.capabilities = parent.capabilities
     messages = copy.deepcopy(member.get("messages", []))
     messages.extend(shared_context(chat, member, choice))
     if member.get("dependencyResult"):

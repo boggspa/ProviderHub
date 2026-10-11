@@ -482,9 +482,9 @@ struct ChatTranscriptCode: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(shape.fill(HubTheme.Semantic.raisedSurface))
+        .background(shape.fill(HubTheme.Semantic.cardFill))
         .clipShape(shape)
-        .overlay(shape.strokeBorder(HubTheme.Semantic.hairline, lineWidth: 1))
+        .overlay(shape.strokeBorder(HubTheme.Semantic.cardRim, lineWidth: 0.5))
         .overlay(alignment: .topTrailing) {
             if code.language.isEmpty { copyButton.padding(textStyle.scaled(5)) }
         }

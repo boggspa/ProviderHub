@@ -124,7 +124,34 @@ final class ChatZoomCommands: NSObject, NSMenuItemValidation {
         add("Zoom In", #selector(zoomIn(_:)), "=", hidden: true)
         add("Zoom Out", #selector(zoomOut(_:)), "-")
         add("Actual Size", #selector(actualSize(_:)), "0")
+        ChatPaneCommands.shared.add(to: menu)
         return menu
+    }
+}
+
+/// Window-scoped actions remain reachable without adding permanent toolbar UI.
+@MainActor
+final class ChatPaneCommands: NSObject, NSMenuItemValidation {
+    static let shared = ChatPaneCommands()
+    var perform: ((String) -> Void)?
+    var enabled: ((String) -> Bool)?
+    @objc private func invoke(_ sender: NSMenuItem) { if let command = sender.representedObject as? String { perform?(command) } }
+    func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        guard ChatZoomCommands.shared.window?.isKeyWindow == true, let command = item.representedObject as? String else { return false }
+        return enabled?(command) ?? false
+    }
+    func add(to menu: NSMenu) {
+        menu.addItem(.separator())
+        for (title, command, key, modifiers) in [
+            ("New Pane Right", "right", "d", NSEvent.ModifierFlags([.command, .option])),
+            ("New Pane Below", "below", "d", NSEvent.ModifierFlags([.command, .option, .shift])),
+            ("Close Pane", "close", "w", NSEvent.ModifierFlags([.command, .option])),
+            ("Focus / Restore Pane", "focus", "f", NSEvent.ModifierFlags([.command, .option, .control]))
+        ] {
+            let item = NSMenuItem(title: title, action: #selector(invoke(_:)), keyEquivalent: key)
+            item.keyEquivalentModifierMask = modifiers; item.target = self; item.representedObject = command
+            menu.addItem(item)
+        }
     }
 }
 private struct ChatTextStyleKey: EnvironmentKey { static let defaultValue = ChatTextStyle() }

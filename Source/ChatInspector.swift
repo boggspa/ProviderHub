@@ -3,6 +3,8 @@ import SwiftUI
 
 struct ChatInspector: View {
     @ObservedObject var model: ChatModel
+    var browserStore: ChatBrowserStore? = nil
+    var browserInPane = false
     var body: some View {
         VStack(spacing: 0) {
             // The inspector can be 290 pt wide; when every label will not fit,
@@ -17,6 +19,10 @@ struct ChatInspector: View {
             case .agents: ChatAgentsPane(model: model)
             case .side: ChatSidePane(model: model)
             case .processes: ChatProcessesPane(model: model)
+            case .browser:
+                if browserInPane { Text("Browser is open in a workspace pane.").font(.caption).foregroundStyle(.secondary).padding() }
+                else if let browserStore, let chat = model.selectedID { ChatBrowserPane(chatID: chat, store: browserStore) }
+                else { Text("Choose a chat to open its browser.").font(.caption).foregroundStyle(.secondary).padding() }
             }
         }.frame(maxHeight: .infinity, alignment: .top)
     }
@@ -298,7 +304,7 @@ private struct ChatSidePane: View {
                         Button { model.stopSide() } label: { Image(systemName: "stop.fill").frame(width: 24, height: 24) }
                             .buttonStyle(.plain).accessibilityLabel("Stop Side Chat")
                     } else { sideSendButton("arrow.up", label: "Send to Side Chat") }
-                }.padding(8).background(HubTheme.Semantic.raisedSurface, in: RoundedRectangle(cornerRadius: 10)).padding(.horizontal, 12)
+                }.padding(8).hubCard(cornerRadius: 10, accent: model.activeAccent).padding(.horizontal, 12)
                 Text(model.sideNotice.isEmpty ? "Temporary · Read only" : model.sideNotice)
                     .font(.system(size: 10.5)).foregroundStyle(.secondary).lineLimit(3).padding(12)
             } else {

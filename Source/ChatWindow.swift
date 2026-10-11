@@ -27,6 +27,10 @@ struct ChatWindow: View {
     @AppStorage(ChatZoom.defaultsKey) private var zoom = 1.0
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var dropTargeted = false
+    @StateObject private var workspace = ChatWorkspaceController()
+    @StateObject private var browser = ChatBrowserStore(storageRoot: FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        .appendingPathComponent(Bundle.main.object(forInfoDictionaryKey: "BridgeStateName") as? String ?? "Provider Hub", isDirectory: true)
+        .appendingPathComponent("browser", isDirectory: true))
 
     var body: some View {
         VStack(spacing: 0) {
@@ -41,14 +45,16 @@ struct ChatWindow: View {
                             resize: { railWidth = Double(ChatPaneSizing.clamp($0, 150, 360)) },
                             reset: { railWidth = Double(ChatPaneSizing.railDefault) })
                     }
-                    ChatPane(model: model, railVisible: panes.rail > 0, railAvailable: panes.railAvailable,
-                             compactHeader: panes.transcript < 860) { railPreferred.toggle() }
+                    ChatWorkspaceContent(model: model, workspace: workspace, browser: browser,
+                                         railVisible: panes.rail > 0, railAvailable: panes.railAvailable) { railPreferred.toggle() }
                     if model.inspectorVisible {
                         ChatPaneDivider(label: "Inspector width", width: panes.inspector, direction: -1,
                             resize: { inspectorWidth = Double(ChatPaneSizing.clamp($0, 260,
                                 min(600, proxy.size.width - ChatPaneSizing.transcriptMinimum - ChatPaneSizing.divider))) },
                             reset: { inspectorWidth = 0 })
-                        ChatInspector(model: model).frame(width: panes.inspector)
+                        ChatInspector(model: model, browserStore: browser,
+                                      browserInPane: model.selectedID.flatMap { workspace.browserPane(for: $0) } != nil)
+                            .frame(width: panes.inspector)
                     }
                 }
                 .animation(reduceMotion ? nil : .easeInOut(duration: 0.18), value: railPreferred)
@@ -68,6 +74,19 @@ struct ChatWindow: View {
         .ignoresSafeArea()
         .dropDestination(for: URL.self, action: { urls, _ in acceptFolder(urls) }, isTargeted: { dropTargeted = $0 })
         .overlay { if dropTargeted { dropHint } }
+        .onAppear {
+            if !model.chats.isEmpty { workspace.reconcile(model) }
+            model.nativeActionHandler = { event in
+                guard model.browserUseEnabled, let request = event["id"] as? String, let chat = event["chat"] as? String,
+                      model.chats.contains(where: { $0.id == chat }), let tool = event["tool"] as? String,
+                      let arguments = event["arguments"] as? [String: Any] else {
+                    return ChatBrowserResult.failure("Browser unavailable", "Browser Use is disabled or its chat is unavailable.")
+                }
+                if model.selectedID == chat, workspace.browserPane(for: chat) == nil { model.showInspector(.browser) }
+                return await browser.perform(chatID: chat, requestID: request, tool: tool, arguments: arguments)
+            }
+            model.nativeCancelHandler = { request, chat in browser.cancel(chatID: chat, requestID: request) }
+        }
     }
 
     private var titleBar: some View {
@@ -90,7 +109,7 @@ struct ChatWindow: View {
                 Text(model.busy || model.branchBusy ? "Drop files to attach" : "Drop files to attach, or a folder to change workspace")
                     .font(HubTheme.Typography.rowTitle).foregroundStyle(Semantic.ink)
                     .padding(.horizontal, 12).padding(.vertical, 8)
-                    .background(RoundedRectangle(cornerRadius: HubTheme.Radius.row).fill(Semantic.raisedSurface))
+                    .hubCard(cornerRadius: HubTheme.Radius.row, accent: model.activeAccent)
             }
             .allowsHitTesting(false)
     }
@@ -155,7 +174,7 @@ struct ChatProviderIcon: View {
 
 // MARK: - Pane
 
-private struct ChatPane: View {
+struct ChatPane: View {
     @ObservedObject var model: ChatModel
     var railVisible: Bool
     var railAvailable: Bool
@@ -227,7 +246,7 @@ private struct ChatHeader: View {
             Image(systemName: "sidebar.right").font(.system(size: 13))
                 .foregroundStyle(model.inspectorVisible ? Semantic.ink : Semantic.secondaryInk)
                 .frame(width: 24, height: 22).contentShape(Rectangle())
-        }.buttonStyle(.plain).keyboardShortcut("i", modifiers: [.command, .control])
+        }.buttonStyle(.plain).keyboardShortcut(model.hasPaneFocus ? KeyboardShortcut("i", modifiers: [.command, .control]) : nil)
             .accessibilityLabel(model.inspectorVisible ? "Hide inspector" : "Show inspector")
             .help("Inspector (⌃⌘I)")
     }
@@ -240,7 +259,7 @@ private struct ChatHeader: View {
                 .frame(width: 24, height: 22).contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .keyboardShortcut("s", modifiers: [.command, .control])
+        .keyboardShortcut(model.hasPaneFocus ? KeyboardShortcut("s", modifiers: [.command, .control]) : nil)
         .accessibilityLabel(railVisible ? "Hide saved chats" : "Show saved chats")
         .help(railVisible ? "Hide saved chats (⌃⌘S)" : "Show saved chats (⌃⌘S)")
         .popover(isPresented: $showingChats, arrowEdge: .bottom) {
@@ -255,7 +274,7 @@ private struct ChatHeader: View {
                 .frame(width: 24, height: 22).contentShape(Rectangle())
         }
         .buttonStyle(.plain).disabled(!model.connected)
-        .keyboardShortcut("n", modifiers: .command)
+        .keyboardShortcut(model.hasPaneFocus ? KeyboardShortcut("n", modifiers: .command) : nil)
         .accessibilityLabel("New chat").help("New chat (⌘N)")
     }
 
@@ -718,10 +737,10 @@ private struct ApprovalStrip: View {
             HStack {
                 Spacer()
                 Button("Deny") { model.decideApproval(allow: false, target: approval) }
-                    .controlSize(.small).keyboardShortcut("d", modifiers: .command).help("Deny (⌘D)")
+                    .controlSize(.small).keyboardShortcut(model.hasPaneFocus ? KeyboardShortcut("d", modifiers: .command) : nil).help("Deny (⌘D)")
                 Button("Allow once") { model.decideApproval(allow: true, target: approval) }
                     .buttonStyle(HubTheme.Control.prominentButton).controlSize(.small)
-                    .keyboardShortcut("y", modifiers: .command).help("Allow this once (⌘Y)")
+                    .keyboardShortcut(model.hasPaneFocus ? KeyboardShortcut("y", modifiers: .command) : nil).help("Allow this once (⌘Y)")
             }
         }
         .padding(.horizontal, 20).padding(.top, 12).padding(.bottom, 6)
@@ -735,7 +754,7 @@ private struct ApprovalStrip: View {
                 .frame(maxHeight: 220)
                 .background(RoundedRectangle(cornerRadius: 6).fill(Semantic.surface.opacity(0.6)))
         } label: {
-            Text("Proposed change").font(HubTheme.Typography.detail).foregroundStyle(Semantic.secondaryInk)
+            Text("Action details").font(HubTheme.Typography.detail).foregroundStyle(Semantic.secondaryInk)
         }
     }
 }
@@ -776,9 +795,7 @@ private struct ChatComposer: View {
                 }
             }
             .padding(.leading, 14).padding(.trailing, 7).padding(.vertical, 7)
-            .background(RoundedRectangle(cornerRadius: HubTheme.Radius.panel).fill(Semantic.raisedSurface))
-            .overlay(RoundedRectangle(cornerRadius: HubTheme.Radius.panel)
-                .stroke(yolo ? Semantic.approvalYolo.opacity(0.4) : Semantic.hairline, lineWidth: 1))
+            .hubCard(cornerRadius: HubTheme.Radius.panel, accent: yolo ? Semantic.approvalYolo : model.activeAccent)
             .overlay(alignment: .topLeading) {
                 ChatMentionList(menu: mentionMenu, model: model).padding(.leading, 6).alignmentGuide(.top) { $0[.bottom] + 6 }
             }
@@ -828,7 +845,7 @@ private struct ChatComposer: View {
             Image(systemName: "stop.fill").font(.system(size: 11, weight: .bold)).foregroundStyle(Semantic.surface)
                 .frame(width: 28, height: 28).background(Circle().fill(Semantic.ink))
         }
-        .buttonStyle(.plain).keyboardShortcut(".", modifiers: .command)
+        .buttonStyle(.plain).keyboardShortcut(model.hasPaneFocus ? KeyboardShortcut(".", modifiers: .command) : nil)
         .accessibilityLabel("Stop").help("Stop and keep what has arrived (⌘.)")
     }
     private var interruptButton: some View {
@@ -919,9 +936,9 @@ private struct ChatMentionList: View {
             // Opaque, a step above the window, so the transcript never shows through.
             .background {
                 RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Semantic.surface)
-                    .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Semantic.raisedSurface))
+                    .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Semantic.cardFill))
             }
-            .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(Semantic.hairline, lineWidth: 1))
+            .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(model.activeAccent.opacity(0.22), lineWidth: 0.5))
             .shadow(color: .black.opacity(0.18), radius: 14, y: 4)
             .accessibilityElement(children: .contain)
             .accessibilityLabel("Team members to address")

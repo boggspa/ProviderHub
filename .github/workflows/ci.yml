@@ -27,6 +27,10 @@ jobs:
       # rather than letting the documented command rot.
       - name: pytest (Source)
         run: uv run python -m pytest Source/ -q
+      - name: Companion protocol and pairing tests
+        run: swift test --package-path Packages/ProviderHubRemote --scratch-path "$RUNNER_TEMP/providerhub-remote-build"
+      - name: iOS companion source typecheck
+        run: xcrun --sdk iphonesimulator swiftc -typecheck -swift-version 5 -target arm64-apple-ios17.0-simulator -module-name ProviderHubRemote Packages/ProviderHubRemote/Sources/ProviderHubRemote/*.swift
       - name: work_guard unit tests
         run: uv run python scripts/test_work_guard.py
       - name: runtime neutralizer unit tests

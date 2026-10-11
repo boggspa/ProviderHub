@@ -69,7 +69,7 @@ struct ChatTeamControls: View {
                                       (member.modelContext.map { " Model window: \($0.formatted()) tokens." } ?? ""))
                         }
                     }.padding(8).frame(maxWidth: .infinity, alignment: .leading)
-                        .background(HubTheme.Semantic.raisedSurface, in: RoundedRectangle(cornerRadius: 7))
+                        .hubCard(cornerRadius: 7, accent: model.activeAccent)
                 }
                 if team.needsInput {
                     Text("Answer in the main composer to continue.").font(.system(size: 11.5)).foregroundStyle(.secondary)
@@ -198,7 +198,7 @@ private struct ChatTeamEditor: View {
                                 }
                             TextField("Responsibility (optional)", text: $member.responsibility, axis: .vertical)
                                 .lineLimit(2...4).textFieldStyle(.roundedBorder)
-                        }.padding(10).background(HubTheme.Semantic.surface, in: RoundedRectangle(cornerRadius: 8))
+                        }.padding(10).hubCard(cornerRadius: 8, accent: model.activeAccent)
                     }
                     runSettings
                 }

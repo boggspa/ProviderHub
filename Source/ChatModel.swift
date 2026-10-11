@@ -144,21 +144,64 @@ private struct ChatSessionState {
 }
 
 @MainActor
+private final class ChatSessionStorage {
+    var sessions: [String: ChatSessionState] = [:]
+    var unselected = ChatSessionState()
+    var sideRequests: [String: String] = [:]
+}
+
+@MainActor
 final class ChatModel: ObservableObject {
     @Published var chats: [ChatSummary] = []
-    @Published var selectedID: String?
+    @Published var selectedID: String? { didSet { for pane in paneModels.values { pane.objectWillChange.send() } } }
+    private var pendingSelection: String?
+    private var pendingSelectionRequest: String?
+    private var paneFocusManaged = false
+    private var focusedViewChatID: String?
     @Published var models: [ChatRoute] = []
     @Published var connected = false
     @Published private(set) var webSearchEnabled: Bool
+    @Published private(set) var browserUseEnabled = false
+    @Published private(set) var pluginStatus: [[String: Any]] = []
+    @Published private(set) var pluginNotice = ""
+    @Published private(set) var pluginStarting = false
+    @Published private(set) var computerUseDependency: [String: Any] = [:]
+    @Published private(set) var remoteStatus: [String: Any] = [:]
+    @Published private(set) var remoteNotice = ""
+    var nativeActionHandler: (([String: Any]) async -> [String: Any])?
+    var nativeCancelHandler: ((String, String) -> Void)?
+    private var nativeTasks: [String: Task<Void, Never>] = [:]
     @Published var recentFolders: [String] = []
     // Workspaces with attached secondary folders: primary path -> secondary paths.
     @Published var workspaceProjects: [String: [String]] = [:]
-    @Published var inspectorVisible = false
-    @Published var inspectorTab: ChatInspectorTab = .changes
-    // Only the selected session publishes transcript changes. Background chats
-    // retain control state; the worker rehydrates their transcripts on selection.
-    private var sessions: [String: ChatSessionState] = [:]
-    private var unselected = ChatSessionState()
+    @Published private var inspectorPreferred = false
+    @Published private var inspectorSelection: ChatInspectorTab = .changes
+    var inspectorVisible: Bool {
+        get { paneOwner?.inspectorVisible ?? inspectorPreferred }
+        set {
+            if let paneOwner { paneOwner.inspectorVisible = newValue }
+            else { inspectorPreferred = newValue; for pane in paneModels.values { pane.objectWillChange.send() } }
+        }
+    }
+    var inspectorTab: ChatInspectorTab {
+        get { paneOwner?.inspectorTab ?? inspectorSelection }
+        set {
+            if let paneOwner { paneOwner.inspectorTab = newValue }
+            else { inspectorSelection = newValue; for pane in paneModels.values { pane.objectWillChange.send() } }
+        }
+    }
+    // Pane facades share session state and the single worker, but retain their
+    // own selection. A layout change can never retarget a pane's composer.
+    private var storage = ChatSessionStorage()
+    private weak var paneOwner: ChatModel?
+    private var paneModels: [String: ChatModel] = [:]
+    private var observedChats: Set<String> = []
+    private var sessions: [String: ChatSessionState] {
+        get { storage.sessions } set { storage.sessions = newValue }
+    }
+    private var unselected: ChatSessionState {
+        get { storage.unselected } set { storage.unselected = newValue }
+    }
     private var routedChatID: String?
     var stateChatID: String? { routedChatID ?? selectedID }
     private func value<T>(_ key: KeyPath<ChatSessionState, T>) -> T {
@@ -171,11 +214,12 @@ final class ChatModel: ObservableObject {
         var state = previous; state[keyPath: key] = value
         if key == \ChatSessionState.entries { state.transcriptVersion &+= 1 }
         let rowChanged = previous.busy != state.busy || previous.active != state.active || previous.approval?.id != state.approval?.id
-        if stateChatID == selectedID || (background && rowChanged) { objectWillChange.send() }
+        let owner = paneOwner ?? self
+        owner.invalidateSession(stateChatID, rowChanged: background && rowChanged)
         if let id = stateChatID {
             sessions[id] = state
         } else { unselected = state }
-        if hasActiveWork != wasActive { onActivity?(hasActiveWork) }
+        if hasActiveWork != wasActive { owner.onActivity?(hasActiveWork) }
     }
     /// A scalar scroll invalidation signal, independent of history/text size.
     var transcriptVersion: UInt64 { value(\.transcriptVersion) }
@@ -218,9 +262,12 @@ final class ChatModel: ObservableObject {
     var processes: [ChatProcess] { get { value(\.processes) } set { update(\.processes, newValue, background: true) } }
     var processesNotice: String { get { value(\.processesNotice) } set { update(\.processesNotice, newValue) } }
     private var pendingSend: (chat: String, request: String, text: String, attachments: [ChatAttachment])? { get { value(\.pendingSend) } set { update(\.pendingSend, newValue) } }
-    var sideRequests: [String: String] = [:]
+    var sideRequests: [String: String] {
+        get { storage.sideRequests } set { storage.sideRequests = newValue }
+    }
     /// Per-chat Team Blackboard (ChatBlackboardModel.swift).
-    let blackboard = ChatBlackboardModel()
+    private let ownedBlackboard = ChatBlackboardModel()
+    var blackboard: ChatBlackboardModel { paneOwner?.blackboard ?? ownedBlackboard }
     var onActivity: ((Bool) -> Void)?
     var onSurfaceChange: (() -> Void)?
     private weak var bridge: BridgeModel?
@@ -247,6 +294,59 @@ final class ChatModel: ObservableObject {
         commandSink = sendCommand; self.uptime = uptime
         self.preferences = preferences
         webSearchEnabled = preferences.object(forKey: "chatAllowWebSearch") as? Bool ?? true
+    }
+
+    func paneModel(for chat: String) -> ChatModel {
+        if let paneOwner { return paneOwner.paneModel(for: chat) }
+        if let existing = paneModels[chat] { return existing }
+        let pane = ChatModel(sendCommand: { [weak self] in self?.write($0) ?? false }, uptime: uptime, preferences: preferences)
+        pane.storage = storage; pane.paneOwner = self; pane.selectedID = chat
+        paneModels[chat] = pane
+        synchronizePaneMetadata()
+        return pane
+    }
+    var hasPaneFocus: Bool {
+        guard let owner = paneOwner else { return true }
+        return (owner.paneFocusManaged ? owner.focusedViewChatID : owner.selectedID) == selectedID
+    }
+    func setPaneFocus(_ chat: String?) {
+        paneFocusManaged = true; focusedViewChatID = chat
+        for pane in paneModels.values { pane.objectWillChange.send() }
+    }
+
+    func observe(chats: Set<String>) {
+        if let paneOwner { paneOwner.observe(chats: chats); return }
+        let valid = chats.intersection(Set(self.chats.map(\.id)))
+        guard valid != observedChats else { return }
+        observedChats = valid
+        if connected { write(["command": "subscribe", "client": "desktop", "chats": valid.sorted()]) }
+        for id in Array(paneModels.keys) where !valid.contains(id) { paneModels[id] = nil }
+        for id in Array(sessions.keys) where !valid.contains(id) && id != selectedID { sessions[id]?.entries = [] }
+    }
+
+    func isObserved(_ chat: String?) -> Bool {
+        guard let chat else { return false }
+        let owner = paneOwner ?? self
+        return chat == owner.selectedID || owner.observedChats.contains(chat)
+    }
+
+    private func invalidateSession(_ chat: String?, rowChanged: Bool) {
+        if chat == selectedID || rowChanged { objectWillChange.send() }
+        if let chat { paneModels[chat]?.objectWillChange.send() }
+    }
+
+    private func synchronizePaneMetadata() {
+        for pane in paneModels.values {
+            pane.chats = chats
+            pane.models = models; pane.connected = connected
+            pane.recentFolders = recentFolders; pane.workspaceProjects = workspaceProjects
+            pane.webSearchEnabled = webSearchEnabled
+            pane.browserUseEnabled = browserUseEnabled; pane.pluginStatus = pluginStatus
+            pane.pluginNotice = pluginNotice; pane.pluginStarting = pluginStarting
+            pane.computerUseDependency = computerUseDependency
+            pane.remoteStatus = remoteStatus; pane.remoteNotice = remoteNotice
+            pane.onSurfaceChange = onSurfaceChange
+        }
     }
     var turnElapsed: TimeInterval { turnStartedAt.map { max(0, uptime() - $0) } ?? 0 }
     var turnTimecode: String {
@@ -313,10 +413,24 @@ final class ChatModel: ObservableObject {
         input = nil
     }
     func refresh() { write(["command": "refresh"]) }
+    func refreshPlugins() { write(["command": "plugins"]) }
+    func refreshDevices() { write(["command": "remote_status"]) }
+    func startRemote(host: String) { write(["command": "remote_start", "host": host, "port": 8765]) }
+    func stopRemote() { write(["command": "remote_stop"]) }
+    func confirmDevice(identity: String, code: String, allow: Bool) {
+        write(["command": "remote_confirm", "identity": identity, "code": code, "allow": allow])
+    }
+    func revokeDevice(identity: String) { write(["command": "remote_revoke", "identity": identity]) }
+    func setBrowserUseEnabled(_ enabled: Bool) { write(["command": "browser_enable", "enabled": enabled]) }
+    func configureComputerUse(_ executable: String) { write(["command": "plugin_configure", "executable": executable]) }
+    func setComputerUseEnabled(_ enabled: Bool) { write(["command": "plugin_enable", "plugin": "peekaboo", "enabled": enabled]) }
+    func startComputerUse() { write(["command": "plugin_start", "plugin": "peekaboo"]) }
     func setWebSearchEnabled(_ enabled: Bool) {
+        if let paneOwner { paneOwner.setWebSearchEnabled(enabled); return }
         webSearchEnabled = enabled
         preferences.set(enabled, forKey: "chatAllowWebSearch")
         if connected { write(["command": "preferences", "webSearch": enabled]) }
+        synchronizePaneMetadata()
     }
     func refreshGitStatus() {
         if connected, let stateChatID { write(["command": "git_status", "id": stateChatID, "chat": stateChatID]) }
@@ -325,12 +439,21 @@ final class ChatModel: ObservableObject {
         newChat(in: selected?.workspace ?? recentFolders.first ?? NSHomeDirectory())
     }
     func newChat(in workspace: String) {
+        if let paneOwner { paneOwner.newChat(in: workspace); return }
+        pendingSelection = nil
+        pendingSelectionRequest = nil
         let choice = selectedRoute ?? models.first
         guard let choice else { notice = "Configure a provider and refresh its models in Provider Hub."; return }
         write(["command": "create", "choice": choice.id, "workspace": workspace])
     }
     func select(_ id: String) {
-        write(["command": "select", "id": id, "chat": id])
+        if let paneOwner { paneOwner.select(id); return }
+        pendingSelection = id
+        let request = UUID().uuidString
+        pendingSelectionRequest = request
+        if !write(["command": "select", "id": id, "chat": id, "request": request]) {
+            pendingSelection = nil; pendingSelectionRequest = nil
+        }
     }
     func send() {
         guard canSend || canInterrupt, let selectedID else { return }
@@ -474,6 +597,9 @@ final class ChatModel: ObservableObject {
     /// in hidden chats. Accepted input has already cleared its pending record.
     func disconnected(_ message: String) {
         connected = false
+        pendingSelection = nil; pendingSelectionRequest = nil
+        for task in nativeTasks.values { task.cancel() }
+        nativeTasks.removeAll()
         for id in Array(sessions.keys) {
             withChat(id) {
                 let orphaned = runningProcessCount > 0
@@ -483,7 +609,7 @@ final class ChatModel: ObservableObject {
                 if orphaned { processesNotice = "Chat disconnected while background processes were running. They may still be running." }
             }
         }
-        unselected.notice = message; objectWillChange.send()
+        unselected.notice = message; objectWillChange.send(); synchronizePaneMetadata()
     }
     @discardableResult private func write(_ message: [String: Any]) -> Bool {
         if let commandSink { return commandSink(message) }
@@ -523,11 +649,40 @@ final class ChatModel: ObservableObject {
             let event = parsed.event
             eventLine = parsed.line
             preparedFields = parsed.fields
-            defer { preparedFields = [:]; eventLine = Data() }
+            defer {
+                preparedFields = [:]; eventLine = Data()
+                if ["ready", "catalogue", "chats", "plugins", "remote"].contains(event["event"] as? String ?? "") { synchronizePaneMetadata() }
+            }
             switch event["event"] as? String {
             case "ready":
                 connected = true
                 write(["command": "preferences", "webSearch": webSearchEnabled])
+                if !observedChats.isEmpty { write(["command": "subscribe", "client": "desktop", "chats": observedChats.sorted()]) }
+            case "plugins":
+                browserUseEnabled = event["browserUse"] as? Bool ?? false
+                pluginStatus = event["plugins"] as? [[String: Any]] ?? []
+                pluginNotice = event["notice"] as? String ?? ""
+                pluginStarting = event["starting"] as? Bool ?? false
+                computerUseDependency = event["computerUseDependency"] as? [String: Any] ?? [:]
+            case "remote":
+                remoteStatus = event["status"] as? [String: Any] ?? [:]
+                remoteNotice = event["notice"] as? String ?? ""
+            case "native_action":
+                guard let id = event["id"] as? String, let chat = event["chat"] as? String,
+                      nativeTasks[id] == nil else { return }
+                nativeTasks[id] = Task { [weak self] in
+                    guard let self else { return }
+                    let result: [String: Any]
+                    if let handler = self.nativeActionHandler { result = await handler(event) }
+                    else { result = ["content": [["type": "text", "text": "Open the Chat window to use its browser."]],
+                                     "is_error": true, "summary": "Browser unavailable", "changed_files": []] }
+                    if !Task.isCancelled { self.write(["command": "native_result", "id": id, "chat": chat, "result": result]) }
+                    self.nativeTasks[id] = nil
+                }
+            case "native_cancel":
+                guard let id = event["id"] as? String, let chat = event["chat"] as? String else { return }
+                nativeTasks[id]?.cancel(); nativeTasks[id] = nil
+                nativeCancelHandler?(id, chat)
             case "catalogue":
                 models = (try? payload([ChatRoute].self, "models")) ?? []; recentFolders = event["folders"] as? [String] ?? []
                 workspaceProjects = (event["projects"] as? [String: [String]]) ?? [:]
@@ -544,21 +699,24 @@ final class ChatModel: ObservableObject {
                 }
                 let remaining = Set(chats.map(\.id))
                 for id in previous.keys where !remaining.contains(id) && !isActive(id) { sessions[id] = nil; sideRequests[id] = nil }
+            case "snapshot":
+                guard let id = event["chat"] as? String, isObserved(id) else { return }
+                withChat(id) { applySnapshot(event) }
+            case "selection_rejected":
+                guard event["id"] as? String == pendingSelection,
+                      event["request"] as? String == pendingSelectionRequest else { return }
+                pendingSelection = nil; pendingSelectionRequest = nil
+                notice = event["message"] as? String ?? "Could not open that chat."
             case "selected":
                 let id = event["id"] as? String
+                if let pendingSelection, id != pendingSelection { return }
+                pendingSelection = nil; pendingSelectionRequest = nil
                 if id != selectedID {
                     // Keep control state and drafts; only the visible transcript
                     // needs a Swift cache. Selection snapshots rebuild it.
-                    if let selectedID { sessions[selectedID]?.entries = [] }
+                    if let selectedID, !observedChats.contains(selectedID) { sessions[selectedID]?.entries = [] }
                 }
-                selectedID = id; entries = (try? payload([ChatEntry].self, "entries")) ?? []
-                tokenUsage = event["usage"] as? Int; contextLimit = selectedRoute?.context
-                if let current = event["busy"] as? Bool { setBusy(current) }
-                if let current = event["interrupting"] as? Bool { interrupting = current }
-                if let current = event["status"] as? String { status = current }
-                if event.keys.contains("approval") { approval = decodeApproval(event["approval"]) }
-                if !busy || interrupting { approval = nil }
-                if let pendingSend, entries.contains(where: { $0.kind == "user" && $0.clientRequest == pendingSend.request }) { self.pendingSend = nil }
+                selectedID = id; applySnapshot(event)
             default:
                 if let chat = event["chat"] as? String { withChat(chat) { consumeChatEvent(event) } }
                 else if ["error", "notice", "rejected"].contains(event["event"] as? String ?? "") {
@@ -569,15 +727,26 @@ final class ChatModel: ObservableObject {
             }
     }
 
+    private func applySnapshot(_ event: [String: Any]) {
+        entries = (try? payload([ChatEntry].self, "entries")) ?? []
+        tokenUsage = event["usage"] as? Int; contextLimit = selectedRoute?.context
+        if let current = event["busy"] as? Bool { setBusy(current) }
+        if let current = event["interrupting"] as? Bool { interrupting = current }
+        if let current = event["status"] as? String { status = current }
+        if event.keys.contains("approval") { approval = decodeApproval(event["approval"]) }
+        if !busy || interrupting { approval = nil }
+        if let pendingSend, entries.contains(where: { $0.kind == "user" && $0.clientRequest == pendingSend.request }) { self.pendingSend = nil }
+    }
+
     private func consumeChatEvent(_ event: [String: Any]) {
         switch event["event"] as? String {
         case "entry":
             guard let entry = try? payload(ChatEntry.self, "entry") else { return }
             if entry.kind == "user", let pendingSend, entry.clientRequest == pendingSend.request { self.pendingSend = nil }
-            guard stateChatID == selectedID else { return }
+            guard isObserved(stateChatID) else { return }
             if let index = entries.firstIndex(where: { $0.id == entry.id }) { entries[index] = entry } else { entries.append(entry) }
         case "delta":
-            guard stateChatID == selectedID, let id = event["id"] as? String,
+            guard isObserved(stateChatID), let id = event["id"] as? String,
                   let index = entries.firstIndex(where: { $0.id == id }) else { return }
             entries[index].text = streamedText(entries[index].text, event: event, baseOffset: entries[index].textOffset ?? 0)
         case "approval": approval = decodeApproval(event["approval"]); status = "Needs approval"
@@ -608,7 +777,10 @@ final class ChatModel: ObservableObject {
         let overlap = current.unicodeScalars.count + baseOffset - offset
         guard overlap >= 0 else {
             // Request a fresh snapshot if a stream chunk arrives across a gap.
-            if let selectedID, stateChatID == selectedID { select(selectedID) }
+            if let stateChatID, isObserved(stateChatID) {
+                let owner = paneOwner ?? self
+                write(["command": "subscribe", "client": "desktop", "chats": owner.observedChats.union([stateChatID]).sorted()])
+            }
             return current
         }
         return current + String(String.UnicodeScalarView(delta.unicodeScalars.dropFirst(overlap)))

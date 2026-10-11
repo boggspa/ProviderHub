@@ -70,6 +70,25 @@ class AttachmentTests(unittest.TestCase):
         self.assertEqual(sum(block["type"] == "image" for block in history[0]["content"]), 22)
         self.assertEqual(sum(block["type"] == "image" for block in bounded[0]["content"]), 20)
 
+    def test_tool_images_normalize_persist_and_participate_in_context_budget(self):
+        from chat_attachments import prepare_tool_content
+        image = {"type": "image", "mimeType": "image/png", "data": base64.b64encode(PNG).decode()}
+        visual, blocks = prepare_tool_content([image], self.store)
+        self.assertEqual(Path(visual[0]["path"]).read_bytes(), PNG)
+        self.assertEqual(blocks[0]["source"]["media_type"], "image/png")
+        history = [{"role": "user", "content": [{"type": "tool_result", "tool_use_id": str(i), "content": blocks}]} for i in range(22)]
+        bounded, count = bound_image_history(history)
+        self.assertEqual(count, 2)
+        self.assertEqual(bounded[0]["content"][0]["content"][0]["type"], "text")
+        self.assertEqual(history[0]["content"][0]["content"][0]["type"], "image")
+        visual, blocks = prepare_tool_content([image], self.store, vision=False)
+        self.assertEqual(len(visual), 1)
+        self.assertEqual(blocks[0]["type"], "text")
+        before = set((self.store / "attachments").iterdir())
+        with self.assertRaises(ValueError):
+            prepare_tool_content([image, {"type": "image", "mimeType": "image/png", "data": "bad"}], self.store)
+        self.assertEqual(set((self.store / "attachments").iterdir()), before)
+
     def test_image_only_turn_is_saved_and_sent_with_pixels(self):
         fixture = fixtures.ChatRuntimeTests(); fixture.setUp()
         try:

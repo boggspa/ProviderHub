@@ -165,8 +165,13 @@ class WorkspaceRunner:
 
 class ChatHost:
     def __init__(self, store, transport, emit, *, child_factory=None, runner=ChatToolRunner,
-                 max_active=MAX_ACTIVE_CHATS):
-        self.store, self.catalogue_transport, self.emit = store, transport, emit
+                 max_active=MAX_ACTIVE_CHATS, dispatch=None, dispatch_event=None):
+        self.store, self.catalogue_transport, self._emit = store, transport, emit
+        self.dispatch = dispatch
+        self.dispatch_event = dispatch_event
+        self.remote = None
+        self.remote_host = None
+        self.remote_overflow = False
         self.client_factory = child_factory or (lambda: GatewayClient(transport.root))
         self.runner_type, self.max_active = runner, max_active
         self._metadata = threading.RLock()
@@ -181,12 +186,69 @@ class ChatHost:
         self.sessions = {}
         self.sides = {}
         self.view_id = None
+        # Selection is presentation only. Each client may watch several chats.
+        self.subscriptions = {}
         self.closing = False
         self._initializing = False
         self._creating = None
         self._replacing = None
         self._last_summaries = None
         self.session_store = SessionStore(self)
+        from chat_capabilities import ChatCapabilities
+        self.capabilities = ChatCapabilities(store.root, self.emit)
+
+    def emit(self, event):
+        self._emit(event)
+        if self.remote is not None and event.get("event") != "remote":
+            # Never take a network lock while a chat/output lock is held. All
+            # remote state and commands are reconciled on the main queue.
+            saved = copy.deepcopy(event)
+            def publish():
+                if self.remote is None: return
+                if self.remote_overflow:
+                    self.remote_overflow = False
+                    self.remote.stop()
+                    self.publish_remote("Remote updates fell behind. Reconnect to refresh the device.")
+                    return
+                try: self.remote.publish(saved)
+                except Exception as exc:
+                    self.remote.stop()
+                    self.publish_remote("Remote access stopped: " + str(exc)[:300])
+            if self.dispatch_event is not None and not self.dispatch_event(publish):
+                self.remote_overflow = True
+
+    def publish_remote(self, notice=""):
+        status = self.remote.status() if self.remote is not None else {"listening": False, "connected": False}
+        if self.remote is not None:
+            if status.get("listening") and self.remote_host:
+                status["bootstrap"] = self.remote.bootstrap(self.remote_host)
+        self._emit({"event": "remote", "status": status, "notice": notice})
+
+    def remote_command(self, command):
+        action = command.get("command")
+        if action not in {"remote_status", "remote_start", "remote_stop", "remote_confirm", "remote_revoke"}: return False
+        if action == "remote_start":
+            if self.dispatch is None or self.dispatch_event is None: raise ValueError("Remote access needs the serial Chat worker")
+            if self.remote is None:
+                from chat_remote import RemoteServer
+                self.remote = RemoteServer(self.handle, self.store.root / "remote.json", dispatch=self.dispatch)
+            self.remote.start(host=command.get("host"), port=command.get("port", 8765))
+            self.remote_host = command.get("host")
+            self._last_summaries = None
+            self.publish_summaries()
+        elif action == "remote_stop" and self.remote is not None:
+            self.remote.stop()
+            self.subscriptions.pop("remote", None)
+        elif action == "remote_confirm":
+            if self.remote is None: raise ValueError("No device is pairing")
+            allow = command.get("allow")
+            if type(allow) is not bool: raise ValueError("Pairing decision must be yes or no")
+            self.remote.confirm_pairing(command.get("identity"), command.get("code"), allow)
+        elif action == "remote_revoke":
+            if self.remote is None: raise ValueError("No paired devices")
+            self.remote.revoke(command.get("identity"))
+        self.publish_remote()
+        return True
 
     def transport(self):
         return SessionTransport(self, self.client_factory())
@@ -243,6 +305,13 @@ class ChatHost:
             row["busy"] = bool(service and service.busy)
             row["active"] = bool(service and self.active(service))
             row["pendingApproval"] = bool(service and service.approval)
+            choice = next((item for item in self.models if item.get("route") == row.get("route")
+                           and item.get("account") == row.get("account")), None)
+            if choice:
+                presentation = choice.get("presentation") or {}
+                row["modelLabel"] = choice.get("label") or ""
+                row["providerLabel"] = presentation.get("displayProvider") or choice.get("provider") or ""
+                row["accent"] = presentation.get("accent") or ""
         with self._output:
             if summaries != self._last_summaries:
                 self._last_summaries = summaries
@@ -283,11 +352,12 @@ class ChatHost:
                 if ((self._initializing and self.view_id is None) or self._creating is service
                         or self._replacing is not None and self._replacing == (service, self.view_id)):
                     self.view_id = identifier
-                if identifier != self.view_id: return
+                if identifier != self.view_id and identifier not in self.watched_chats(): return
                 event = {**event, "chat": identifier, **(self.state(service) if service.chat else {})}
+                if identifier != self.view_id: event = {**event, "event": "snapshot"}
             elif identifier is not None:
                 event = {**event, "chat": identifier}
-                if identifier != self.view_id:
+                if identifier != self.view_id and identifier not in self.watched_chats():
                     if kind in {"delta", "agent_delta", "side_delta"}: return
                     if kind == "entry" and event.get("entry", {}).get("kind") != "user": return
                     if kind == "agents":
@@ -304,6 +374,7 @@ class ChatHost:
         holder["service"] = service
         service.chat, service.models, service.preferences, service.sides = chat, self.models, self.preferences, self.sides
         service.process_registry = self.processes
+        service.capabilities = self.capabilities
         return service
 
     def initialize(self):
@@ -320,15 +391,19 @@ class ChatHost:
         finally:
             self._initializing = False
         with self._output: self.emit({"event": "ready"})
+        self.capabilities.publish()
 
     def session(self, identifier):
         if identifier not in self.sessions:
             self.sessions[identifier] = self.new_session(self.store.load(identifier))
         return self.sessions[identifier]
 
+    def watched_chats(self):
+        return set().union(*self.subscriptions.values()) if self.subscriptions else set()
+
     def prune(self, keep=None):
         for identifier, service in list(self.sessions.items()):
-            if (identifier not in {self.view_id, keep} and not self.active(service) and identifier not in self.sides
+            if (identifier not in {self.view_id, keep} | self.watched_chats() and not self.active(service) and identifier not in self.sides
                     and not service._git_working and not (service.thread and service.thread.is_alive())
                     and not (service.restart_thread and service.restart_thread.is_alive())):
                 self.sessions.pop(identifier, None)
@@ -353,6 +428,18 @@ class ChatHost:
         return False
 
     def reject(self, command, error):
+        if isinstance(command, dict) and str(command.get("command", "")).startswith("remote_"):
+            self.publish_remote(str(error))
+            return
+        if isinstance(command, dict) and command.get("command") == "select":
+            with self._output:
+                self.emit({"event": "selection_rejected", "id": command.get("id"),
+                           "request": command.get("request"), "message": str(error)})
+            return
+        if isinstance(command, dict) and command.get("command") in {"plugins", "browser_enable", "plugin_configure", "plugin_enable", "plugin_start", "native_result"}:
+            self.capabilities.notice = str(error)
+            self.capabilities.publish()
+            return
         command = command if isinstance(command, dict) else {}
         action = command.get("command")
         identifier = command.get("chat") or (command.get("id") if action != "approve" else self.view_id)
@@ -394,6 +481,27 @@ class ChatHost:
             else: self.stop_all()
             return
         if self.closing: raise ValueError("Chat is closing.")
+        if self.remote_command(command): return
+        if self.capabilities.handle(command): return
+        if action == "subscribe":
+            client, identifiers = command.get("client", "desktop"), command.get("chats")
+            if (not isinstance(client, str) or not client or len(client) > 128 or
+                    not isinstance(identifiers, list) or len(identifiers) > 256 or
+                    any(not isinstance(item, str) or item not in self.headers for item in identifiers)):
+                raise ValueError("Invalid chat subscription.")
+            watched = set(identifiers)
+            self.subscriptions[client] = watched
+            for identifier in sorted(watched):
+                service = self.session(identifier)
+                with service._mutex:
+                    with self._output:
+                        self.emit({"event": "snapshot", "chat": identifier, "id": identifier,
+                                   "entries": copy.deepcopy(service.chat["entries"]), "usage": service.chat.get("usage"),
+                                   **self.state(service)})
+                    # Inspector snapshots also retain their owning chat.
+                    service.publish()
+            self.prune()
+            return
         self.prune(keep=command.get("chat") or command.get("id"))
         if action == "preferences":
             if type(command.get("webSearch")) is not bool: raise ValueError("Web search must be enabled or disabled.")
@@ -454,6 +562,7 @@ class ChatHost:
                 close_side(service, owner=identifier)
             self.session_store.delete(identifier)
             self.sessions.pop(identifier, None)
+            for watched in self.subscriptions.values(): watched.discard(identifier)
             self.processes.forget(identifier)
             self.publish_summaries()
             if self.view_id == identifier:
@@ -532,6 +641,8 @@ class ChatHost:
             # A closed UI pipe can fail the events above; processes still end,
             # because a later shutdown call returns early.
             self.processes.shutdown()
+            self.capabilities.close()
+            if self.remote is not None: self.remote.stop()
         deadline = time.monotonic() + timeout
         for service in services:
             for thread in (service.thread, service.restart_thread, service.branch_thread):

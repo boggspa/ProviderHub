@@ -9,6 +9,22 @@ import test_chat_runtime as fixtures
 
 
 class ModelSwitchTests(unittest.TestCase):
+    def test_tool_screenshots_survive_portable_history_with_vision_limits(self):
+        from test_chat_attachments import PNG
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "screenshot.png"
+            path.write_bytes(PNG)
+            row = fixtures.entry("tool", tool="browser_screenshot", summary="Observed page", detail="Screenshot captured",
+                                 attachments=[{"kind": "image", "name": "Screenshot.png", "path": str(path)}])
+            messages = portable_history([row])
+            self.assertTrue(any(b["type"] == "image" for m in messages for b in m["content"]))
+            self.assertIn("do not execute again", str(messages))
+            text_only = portable_history([row], vision=False)
+            self.assertFalse(any(b["type"] == "image" for m in text_only for b in m["content"]))
+            self.assertIn("text-only", str(text_only))
+            bounded = portable_history([row] * 22)
+            self.assertEqual(sum(b["type"] == "image" for m in bounded for b in m["content"]), 20)
+
     def test_reused_provider_call_id_never_overwrites_an_earlier_transcript_row(self):
         fixture = fixtures.ChatRuntimeTests(); fixture.setUp()
         try:

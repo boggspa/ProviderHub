@@ -54,8 +54,8 @@ struct ProviderPage: View {
                             }
                             Spacer(minLength: 0)
                         }.frame(maxWidth: .infinity, minHeight: 34, alignment: .leading).padding(12)
-                            .background(provider.presentation.color.opacity(model.selectedProvider == provider.id ? 0.15 : 0.04), in: RoundedRectangle(cornerRadius: 10))
-                            .overlay(RoundedRectangle(cornerRadius: 10).stroke(model.selectedProvider == provider.id ? provider.presentation.color.opacity(0.8) : Color.white.opacity(0.08), lineWidth: 1))
+                            .background(provider.presentation.color.opacity(model.selectedProvider == provider.id ? 0.10 : 0), in: RoundedRectangle(cornerRadius: 10))
+                            .hubCard(cornerRadius: 10, accent: provider.presentation.color)
                     }.buttonStyle(.plain)
                 }
             }

@@ -14,7 +14,7 @@ import stat
 import uuid
 
 from bridge_core import private_directory
-from cli_images import normalize_image, image_label
+from cli_images import normalize_image, image_label, image_bytes
 
 MAX_FILES = 8
 MAX_FILE_BYTES = 8 * 1024 * 1024
@@ -26,10 +26,14 @@ def bound_image_history(messages):
     """Leave wire space for text/tools; older images become explicit notices."""
     copied = copy.deepcopy(messages)
     images = []
+    def collect(blocks):
+        for block in blocks:
+            if not isinstance(block, dict): continue
+            if block.get("type") == "image": images.append(block)
+            elif block.get("type") == "tool_result" and isinstance(block.get("content"), list):
+                collect(block["content"])
     for message in copied:
-        for block in message.get("content", []):
-            if block.get("type") == "image":
-                images.append(block)
+        collect(message.get("content", []))
     total = count = removed = 0
     for image in reversed(images):
         data = (image.get("source") or {}).get("data", "")
@@ -40,6 +44,50 @@ def bound_image_history(messages):
         else:
             count += 1; total += size
     return copied, removed
+
+
+def prepare_tool_content(content, root, *, vision=True):
+    """Normalize MCP images and retain screenshots as ordinary attachments.
+
+    Unsupported resource/audio blocks are described as data rather than passed
+    through as provider protocol. No URLs or files named by a server are read.
+    """
+    if not isinstance(content, list) or len(content) > 128:
+        raise ValueError("Invalid tool content")
+    blocks, visual, created = [], [], []
+    total = 0
+    try:
+        for block in content:
+            if not isinstance(block, dict): raise ValueError("Invalid tool content block")
+            if block.get("type") == "text":
+                text = block.get("text")
+                if not isinstance(text, str): raise ValueError("Invalid tool text")
+                blocks.append({"type": "text", "text": text[:MAX_TEXT]})
+            elif block.get("type") == "image":
+                image = normalize_image({"type": "image", "source": {
+                    "type": "base64", "media_type": block.get("mimeType"), "data": block.get("data")}}
+                    if "data" in block else block)
+                raw = image_bytes(image)
+                total += len(raw)
+                if total > MAX_TOTAL_BYTES or len(visual) >= MAX_FILES:
+                    raise ValueError("Tool screenshots exceed attachment limits")
+                root = Path(root); directory = root / "attachments"
+                if root.is_symlink() or directory.is_symlink():
+                    raise ValueError("Attachment storage must not be a symbolic link")
+                private_directory(root); private_directory(directory)
+                suffix = {"image/png": ".png", "image/jpeg": ".jpg", "image/gif": ".gif", "image/webp": ".webp"}[image["source"]["media_type"]]
+                identifier = uuid.uuid4().hex; path = directory / (identifier + suffix)
+                fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+                created.append(path)
+                with os.fdopen(fd, "wb") as stream: stream.write(raw)
+                visual.append({"id": identifier, "name": "Screenshot" + suffix, "path": str(path), "kind": "image", "size": len(raw)})
+                blocks.append(image if vision else {"type": "text", "text": "A screenshot was saved in the transcript. This model does not accept images; use the structured observation."})
+            else:
+                blocks.append({"type": "text", "text": "[Unsupported tool content type: " + str(block.get("type", "unknown"))[:60] + "]"})
+        return visual, blocks
+    except Exception:
+        for path in created: path.unlink(missing_ok=True)
+        raise
 
 
 def prepare_attachments(inputs, root, *, vision=True):

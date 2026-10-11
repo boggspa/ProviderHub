@@ -14,6 +14,54 @@ from test_chat_runtime import FakeTransport, response
 
 
 class ConcurrentChatTests(unittest.TestCase):
+    def test_browser_approval_revocation_and_native_roundtrip(self):
+        from test_chat_agents import call
+        identifier = self.create()
+        self.host.handle({"command": "browser_enable", "enabled": True})
+        service = self.send(identifier, [call("browser_open", {"url": "https://example.com/page"}), response("Finished")])
+        self.wait(lambda: service.approval is not None)
+        self.assertIn("https://example.com/page", service.approval["detail"])
+        self.assertIn("browser_open", [tool["name"] for tool in service.transport.client.requests[0]["tools"]])
+        self.host.handle({"command": "browser_enable", "enabled": False})
+        self.host.handle({"command": "approve", "chat": identifier, "id": service.approval["id"], "allow": True})
+        self.wait(lambda: not service.busy)
+        self.assertFalse(any(e.get("event") == "native_action" for e in self.events))
+        self.assertTrue([e for e in service.chat["entries"] if e["kind"] == "tool"][-1]["isError"])
+
+        self.host.handle({"command": "browser_enable", "enabled": True})
+        self.host.handle({"command": "configure", "chat": identifier, "approvalMode": "yolo"})
+        service = self.send(identifier, [call("browser_open", {"url": "http://localhost:3000"}), response("Loaded")])
+        self.wait(lambda: any(e.get("event") == "native_action" for e in self.events))
+        action = next(e for e in self.events if e.get("event") == "native_action")
+        self.assertEqual(action["arguments"], {"url": "http://localhost:3000"})
+        result = {"content": [{"type": "text", "text": "Page loaded."}], "is_error": False,
+                  "summary": "Open browser", "changed_files": []}
+        self.host.handle({"command": "native_result", "id": action["id"], "chat": identifier, "result": result})
+        self.wait(lambda: not service.busy)
+        tool = [e for e in service.chat["entries"] if e["kind"] == "tool"][-1]
+        self.assertFalse(tool["isError"])
+        self.assertEqual(tool["detail"], "Page loaded.")
+
+    def test_multiple_subscriptions_keep_streams_independent_of_selection(self):
+        first, second = self.create("one"), self.create("two")
+        self.host.handle({"command": "subscribe", "client": "desktop", "chats": [first, second]})
+        self.assertEqual(self.host.view_id, second)
+        self.assertTrue(any(e.get("event") == "snapshot" and e.get("chat") == first for e in self.events))
+        self.events.clear()
+        service = self.send(first, [response("Visible in another pane")])
+        self.wait(lambda: not service.busy)
+        self.assertEqual(self.host.view_id, second)
+        self.assertTrue(any(e.get("event") == "entry" and e.get("chat") == first
+                            and e.get("entry", {}).get("kind") == "assistant" for e in self.events))
+        self.host.prune()
+        self.assertIn(first, self.host.sessions)
+        self.host.handle({"command": "subscribe", "client": "desktop", "chats": [second]})
+        self.host.prune()
+        self.assertNotIn(first, self.host.sessions)
+        with self.assertRaises(ValueError):
+            self.host.handle({"command": "subscribe", "client": "desktop", "chats": ["missing-chat"]})
+        self.assertEqual(self.host.subscriptions["desktop"], {second})
+
     def test_attached_folder_real_session_tools_and_detach(self):
         from test_chat_agents import call
         identifier = self.create()

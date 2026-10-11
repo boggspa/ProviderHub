@@ -18,15 +18,22 @@ SWIFT_SOURCES=(
   "$SOURCE_DIR/MistralBridge.swift"
   "$SOURCE_DIR/ChatPaneSizing.swift" "$SOURCE_DIR/ChatPaneDivider.swift"
   "$SOURCE_DIR/ChatGitOverview.swift" "$SOURCE_DIR/ChatTeamControls.swift"
+  "$SOURCE_DIR/ChatWorkspaceLayout.swift" "$SOURCE_DIR/ChatSplitWorkspace.swift" "$SOURCE_DIR/ChatWorkspaceUI.swift"
+  "$SOURCE_DIR/ChatCapabilities.swift" "$SOURCE_DIR/ChatBrowser.swift"
+  "$SOURCE_DIR/ChatDevices.swift"
+  "$SOURCE_DIR/ChatPairingCode.swift"
 )
 xcrun swiftc -swift-version 5 -parse-as-library -O -target arm64-apple-macosx14.0 \
   -module-cache-path "$BUILD_DIR/ModuleCache" \
-  -framework AppKit -framework SwiftUI -framework Security -framework PDFKit \
+  -framework AppKit -framework SwiftUI -framework Security -framework PDFKit -framework WebKit -framework CryptoKit \
   "${SWIFT_SOURCES[@]}" \
   -o "$APP_DIR/Contents/MacOS/MistralBridge"
-for module in chat_git chat_git_overview chat_memory chat_blackboard chat_history chat_team chat_execution chat_attachments chat_catalogue chat_runtime chat_sessions chat_agents chat_inspector chat_processes chat_workspaces chat_tools bridge_core protocol gateway model_names fast_models catalogue hub_config providers provider_registry provider_discovery provider_requests devin_agent qwen_provider minimax_provider openrouter_provider gemini_provider branding cerebras_replay catalogue_lifecycle launch_selection responses_native responses_tools responses_bridge responses_compact responses_visualize codex_catalogue codex_profile codex_projects codex_token codex_runtime codex_accent codex_quick_composer codex_recent_threads codex_desktop_actions codex_quick_bridge codex_quick_window codex_quick_host claude_accent effort_map chat_tool_order rate_limit spawn_depth subagent_catalogue ollama_lifecycle cli_session cli_lifecycle codex_session_pool cli_routes cli_auth_probe cli_tool_call cli_host_mcp cli_host_bridge cli_live_session host_tools_mcp cli_structured_reply cli_images cli_image_history claude_cli_agent codex_cli_agent agy_cli_agent agy_context muse_cli_agent grok_cli_agent claude_context; do
+for module in chat_remote chat_capabilities chat_browser chat_plugins chat_plugin_mcp chat_git chat_git_overview chat_memory chat_blackboard chat_history chat_team chat_execution chat_attachments chat_catalogue chat_runtime chat_sessions chat_agents chat_inspector chat_processes chat_workspaces chat_tools bridge_core protocol gateway model_names fast_models catalogue hub_config providers provider_registry provider_discovery provider_requests devin_agent qwen_provider minimax_provider openrouter_provider gemini_provider branding cerebras_replay catalogue_lifecycle launch_selection responses_native responses_tools responses_bridge responses_compact responses_visualize codex_catalogue codex_profile codex_projects codex_token codex_runtime codex_accent codex_quick_composer codex_recent_threads codex_desktop_actions codex_quick_bridge codex_quick_window codex_quick_host claude_accent effort_map chat_tool_order rate_limit spawn_depth subagent_catalogue ollama_lifecycle cli_session cli_lifecycle codex_session_pool cli_routes cli_auth_probe cli_tool_call cli_host_mcp cli_host_bridge cli_live_session host_tools_mcp cli_structured_reply cli_images cli_image_history claude_cli_agent codex_cli_agent agy_cli_agent agy_context muse_cli_agent grok_cli_agent claude_context; do
   cp "$SOURCE_DIR/$module.py" "$APP_DIR/Contents/Resources/worker/"
 done
+# Optional capabilities use the same worker; their external executables are
+# configured separately and are never downloaded during build or launch.
+cp "$SOURCE_DIR/plugin-dependencies.lock.json" "$APP_DIR/Contents/Resources/worker/"
 # The launch-decision policy is now canonical in Swift
 # (Source/LaunchPlan.swift). There is no Python policy to ship.
 cp "$SOURCE_DIR/provider_branding.json" "$APP_DIR/Contents/Resources/worker/"
@@ -98,6 +105,7 @@ cat > "$APP_DIR/Contents/Info.plist" <<'PLIST'
   <key>LSUIElement</key><true/>
   <key>NSHighResolutionCapable</key><true/>
   <key>NSAppleEventsUsageDescription</key><string>Open Mistral Vibe in Terminal when you choose Open Vibe.</string>
+  <key>NSLocalNetworkUsageDescription</key><string>Connect your paired Provider Hub companion over your private network when Remote access is enabled.</string>
 </dict></plist>
 PLIST
 if [ -f "$SOURCE_DIR/AppIcon.icns" ]; then cp "$SOURCE_DIR/AppIcon.icns" "$APP_DIR/Contents/Resources/"; fi

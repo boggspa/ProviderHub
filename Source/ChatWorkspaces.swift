@@ -226,6 +226,15 @@ struct ChatWorkspaceRail: View {
             }
         }
         .accessibilityAddTraits(selected ? .isSelected : [])
+        .onDrag {
+            let provider = NSItemProvider()
+            guard renaming != chat.id else { return provider }
+            provider.registerDataRepresentation(forTypeIdentifier: "com.mistralbridge.providerhub.chat-id", visibility: .ownProcess) { completion in
+                completion(Data(chat.id.utf8), nil)
+                return nil
+            }
+            return provider
+        }
         .contextMenu {
             Button("Rename") { renameText = chat.title; renaming = chat.id }.disabled(model.isActive(chat.id))
             Button("Delete…") { pendingDelete = chat }.disabled(model.isActive(chat.id))

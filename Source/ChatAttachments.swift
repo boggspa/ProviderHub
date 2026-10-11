@@ -67,7 +67,7 @@ struct ChatAttachmentStrip: View {
     private func thumbnail(_ image: NSImage) -> some View {
         Image(nsImage: image).resizable().scaledToFill().frame(width: 78, height: 54)
             .clipShape(RoundedRectangle(cornerRadius: HubTheme.Radius.row))
-            .overlay(RoundedRectangle(cornerRadius: HubTheme.Radius.row).stroke(Semantic.hairline, lineWidth: 1))
+            .overlay(RoundedRectangle(cornerRadius: HubTheme.Radius.row).strokeBorder(Semantic.cardRim, lineWidth: 0.5))
     }
 
     private func chip(_ file: ChatAttachment) -> some View {
@@ -80,8 +80,7 @@ struct ChatAttachmentStrip: View {
             }
         }
         .padding(.horizontal, 9).padding(.vertical, 5).frame(maxWidth: 190)
-        .background(RoundedRectangle(cornerRadius: HubTheme.Radius.row).fill(Semantic.raisedSurface))
-        .overlay(RoundedRectangle(cornerRadius: HubTheme.Radius.row).stroke(Semantic.hairline, lineWidth: 1))
+        .hubCard(cornerRadius: HubTheme.Radius.row)
     }
 
     /// A type glyph by extension; anything unrecognised is a plain document.

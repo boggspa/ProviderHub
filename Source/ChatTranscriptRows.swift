@@ -247,6 +247,7 @@ struct ToolRow: View {
         let detail = entry.detail?.isEmpty == false ? entry.detail! : entry.text
         let command = display.command
         VStack(alignment: .leading, spacing: textStyle.scaled(6)) {
+            if let attachments = entry.attachments, !attachments.isEmpty { ChatAttachmentStrip(attachments: attachments) }
             if !detail.isEmpty || command != nil {
                 VStack(alignment: .leading, spacing: 0) {
                     if let command {
@@ -263,8 +264,7 @@ struct ToolRow: View {
                         .frame(maxHeight: textStyle.scaled(260))
                     }
                 }
-                .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Semantic.surface.opacity(0.6)))
-                .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).stroke(Semantic.hairline, lineWidth: 1))
+                .hubCard(cornerRadius: 8)
             }
             if !entry.changedFiles.isEmpty {
                 VStack(alignment: .leading, spacing: 2) {
@@ -482,8 +482,7 @@ struct ChatTurnChangesRow: View {
                     .padding(.horizontal, 10).padding(.vertical, textStyle.scaled(6))
             }
         }
-        .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Semantic.raisedSurface))
-        .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).stroke(Semantic.hairline, lineWidth: 1))
+        .hubCard(cornerRadius: 8)
     }
 }
 

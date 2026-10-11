@@ -1,0 +1,34 @@
+{
+  "lock_version": 1,
+  "python": {"runtime": "3.13", "third_party_packages": []},
+  "plugins": {
+    "peekaboo": {
+      "version": "4.9.0",
+      "license": "MIT",
+      "optional": true,
+      "installation": "external-only; never automatically install or launch",
+      "minimum_macos": "15.0",
+      "command_args": ["mcp", "serve", "--transport", "stdio"],
+      "node_required_for_native_binary": false,
+      "excluded_tools": ["agent", "analyze"],
+      "excluded_tools_reason": "Provider Hub owns model execution. Peekaboo's optional independent agent and model-backed image analysis are not part of this CUA adapter.",
+      "verified_executables": {
+        "darwin-arm64": "sha256:292ccf9066a4515a2570d65dbdab1f77badcdb493dc270f0ed227640c017faa2"
+      },
+      "local_qualification": "On 2026-10-11, independently matched the arm64 archive SHA-256, verified the extracted executable signature, and ran MCP initialize/tools-list (26 upstream tools, 24 admitted), permissions status, and exact-PID inspection/image capture of a temporary native fixture. Semantic set_value returned success, matched the fixture's own field receipt and was confirmed by a fresh accessibility read. A fixture-button pointer click incremented its receipt but returned an upstream indeterminate final target-generation validation error; that error is preserved and the action was not retried.",
+      "release": "https://github.com/openclaw/Peekaboo/releases/tag/v4.9.0",
+      "verification_source": "https://api.github.com/repos/openclaw/Peekaboo/releases/tags/v4.9.0",
+      "verification_date": "2026-10-11",
+      "artifacts": {
+        "peekaboo-macos-arm64.tar.gz": "sha256:f56fcf948075aeca875d8c16d012db55f4a3d6b84d2c542fed205eea86699886",
+        "peekaboo-macos-x86_64.tar.gz": "sha256:c717313f49ee3f4b59f0f65995c100e291695d2cedc7c1d04342a45b7a9b77fd",
+        "peekaboo-macos-universal.tar.gz": "sha256:64884da09af4f707267ee5ee7364f31c34bfeb8a6f1404478e1babc9ff412230"
+      },
+      "hash_scope": "GitHub-published release archive digests. The arm64 archive was downloaded and independently hashed; other archive digests are upstream metadata. Extracted executable hashes are recorded separately in verified_executables.",
+      "source_revision": "7020aedd362038043e4fc1988a8634657270e476",
+      "cli_source": "https://github.com/openclaw/Peekaboo/blob/v4.9.0/Apps/CLI/Sources/PeekabooCLI/Commands/MCP/MCPCommand.swift",
+      "schema_source": "https://github.com/openclaw/Peekaboo/tree/v4.9.0/Core/PeekabooCore/Sources/PeekabooAgentRuntime/MCP/Tools",
+      "qualification": "Release-tag MCP CLI arguments and actual returned schemas inspected, including uniqueItems array declarations. Fake transport, actual arm64 MCP/observation checks and semantic field editing with independent readback passed. Pointer actuation remains qualification-limited by the recorded upstream final target-generation error. Host approvals apply to every call. Digest provenance does not establish vulnerability-free software. Unsupported JSON Schema assertions fail closed."
+    }
+  }
+}

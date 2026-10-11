@@ -2,11 +2,11 @@ import AppKit
 import SwiftUI
 
 enum ChatInspectorTab: String, CaseIterable, Identifiable {
-    case changes, agents, side, processes
+    case changes, agents, side, processes, browser
     var id: String { rawValue }
-    var title: String { switch self { case .changes: "File Changes"; case .agents: "Team"; case .side: "Side Chat"; case .processes: "Background Processes" } }
-    var label: String { switch self { case .changes: "Changes"; case .agents: "Team"; case .side: "Side Chat"; case .processes: "Processes" } }
-    var icon: String { switch self { case .changes: "filemenu.and.selection"; case .agents: "person.2"; case .side: "bubble.left.and.bubble.right"; case .processes: "terminal" } }
+    var title: String { switch self { case .changes: "File Changes"; case .agents: "Team"; case .side: "Side Chat"; case .processes: "Background Processes"; case .browser: "Browser" } }
+    var label: String { switch self { case .changes: "Changes"; case .agents: "Team"; case .side: "Side Chat"; case .processes: "Processes"; case .browser: "Browser" } }
+    var icon: String { switch self { case .changes: "filemenu.and.selection"; case .agents: "person.2"; case .side: "bubble.left.and.bubble.right"; case .processes: "terminal"; case .browser: "globe" } }
 }
 
 struct ChatChange: Decodable, Identifiable {
@@ -553,12 +553,12 @@ struct ChatTeamSnapshot: Decodable {
         case "agents":
             agents = decoded(event["agents"], as: [ChatAgent].self) ?? []
         case "agent_entry":
-            guard chat == selectedID, let id = event["agent"] as? String, let index = agents.firstIndex(where: { $0.id == id }),
+            guard isObserved(chat), let id = event["agent"] as? String, let index = agents.firstIndex(where: { $0.id == id }),
                   let entry = decoded(event["entry"], as: ChatEntry.self) else { return }
             if let row = agents[index].entries.firstIndex(where: { $0.id == entry.id }) { agents[index].entries[row] = entry }
             else { agents[index].entries.append(entry) }
         case "agent_delta":
-            guard chat == selectedID, let id = event["agent"] as? String, let index = agents.firstIndex(where: { $0.id == id }),
+            guard isObserved(chat), let id = event["agent"] as? String, let index = agents.firstIndex(where: { $0.id == id }),
                   let entryID = event["id"] as? String, let row = agents[index].entries.firstIndex(where: { $0.id == entryID }) else { return }
             agents[index].entries[row].text = streamedText(agents[index].entries[row].text, event: event, baseOffset: agents[index].entries[row].textOffset ?? 0)
         case "side":
@@ -575,7 +575,7 @@ struct ChatTeamSnapshot: Decodable {
             }
             if !sideNotice.isEmpty { pendingSideText = nil }
         case "side_delta":
-            guard chat == selectedID, let request = event["request"] as? String, request == sideRequests[chat] else { return }
+            guard isObserved(chat), let request = event["request"] as? String, request == sideRequests[chat] else { return }
             guard let id = event["side"] as? String, sideChat?.id == id, let entryID = event["id"] as? String,
                   let index = sideChat?.entries.firstIndex(where: { $0.id == entryID }) else { return }
             if let text = sideChat?.entries[index].text { sideChat?.entries[index].text = streamedText(text, event: event, baseOffset: sideChat?.entries[index].textOffset ?? 0) }
