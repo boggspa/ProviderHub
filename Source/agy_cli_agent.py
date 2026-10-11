@@ -867,8 +867,13 @@ def _host_reply_for_native(name, parameters, tools, tool_choice=None):
                         arguments["offset"] = start or 1
                     if end is not None:
                         arguments["limit"] = end - (start or 1) + 1
-                elif "read_file" in offered and start is None and end is None:
+                elif "read_file" in offered and (start is None and end is None or
+                        {"offset", "limit"} <= set((offered["read_file"].get("input_schema") or {}).get("properties", {}))):
                     target, arguments = "read_file", {"path": path}
+                    if start is not None or end is not None:
+                        arguments["offset"] = start or 1
+                    if end is not None:
+                        arguments["limit"] = end - (start or 1) + 1
                 else:
                     command = ("sed -n " + shlex.quote(f"{start or 1},{end if end is not None else '$'}p")
                                + " " + shlex.quote(path) if start is not None or end is not None
@@ -889,8 +894,14 @@ def _host_reply_for_native(name, parameters, tools, tool_choice=None):
                 elif "run_shell_command" in offered:
                     target, arguments = "run_shell_command", {"command":
                         "cd " + shlex.quote(cwd) + " && " + command if isinstance(cwd, str) and cwd else command}
+                elif "run_shell" in offered:
+                    # Lean Chat owns execution and approvals, just like the
+                    # desktop tool hosts above. Native SafeToAutoRun is not
+                    # authority to bypass the selected host policy.
+                    target, arguments = "run_shell", {"command":
+                        "cd " + shlex.quote(cwd) + " && " + command if isinstance(cwd, str) and cwd else command}
             if target not in offered:
-                raise ToolCallError("the native request has no supported host tool mapping")
+                raise ToolCallError(f"native tool {str(name)[:100]!r} has no supported host tool mapping")
         reply = json.dumps({"text": "", "tool_calls": [
             {"name": target, "arguments": json.dumps(arguments, allow_nan=False)}]}, allow_nan=False)
     # Preserve tool-choice constraints, offered names, batch and argument limits.
