@@ -494,6 +494,13 @@ class ChatService:
             self.emit({"event": "selected", "id": self.chat["id"], "entries": self.chat["entries"], "usage": self.chat.get("usage")})
         else:
             self.emit({"event": "selected", "id": None, "entries": [], "usage": None})
+        self._publish_inspector()
+
+    def publish_inspector(self):
+        """Republish helper, Side Chat and Team state without the transcript."""
+        with self._mutex: self._publish_inspector()
+
+    def _publish_inspector(self):
         if self.role == "parent" and self.chat and self.chat.get("agents"):
             from chat_agents import publish_agents
             publish_agents(self)
@@ -538,6 +545,8 @@ class ChatService:
                 chat["status"] = "interrupted"; self.store.save(chat)
         if chats:
             self.chat = self.store.load(chats[0]["id"])
+        # Saved chats show before the gateway answers. This is the only
+        # transcript sent before ready: the window decodes each copy in full.
         self.publish()
         try:
             self.refresh()
@@ -548,7 +557,7 @@ class ChatService:
                 self.create(self.models[0]["id"], self.current_workspace())
             except (ValueError, OSError) as exc:
                 self.emit({"event": "notice", "message": str(exc)})
-        self.publish(); self.emit({"event": "ready"})
+        self.emit({"event": "ready"})
 
     def choice(self, identifier=None):
         identifier = identifier or (self.chat["route"] + "|" + self.chat["account"] if self.chat else "")

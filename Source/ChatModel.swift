@@ -284,7 +284,7 @@ final class ChatModel: ObservableObject {
     private var process: Process?
     private var input: Pipe?
     private var output: Pipe?
-    private var buffer = Data()
+    private var framer = ChatLineFramer()
     /// The worker line being consumed, for `payload`.
     private(set) var eventLine = Data()
     private var preparedFields: [String: Any] = [:]
@@ -412,7 +412,7 @@ final class ChatModel: ObservableObject {
                     owner.disconnected("Chat disconnected. Reopen Chat to reconnect; saved work is kept.")
                 }
             }
-            buffer = Data(); input = stdin; output = stdout; process = child
+            framer = ChatLineFramer(); input = stdin; output = stdout; process = child
             try child.run()
         } catch { notice = error.localizedDescription; connected = false; process = nil; input = nil }
     }
@@ -653,10 +653,8 @@ final class ChatModel: ObservableObject {
         return approval
     }
     func consume(_ data: Data) {
-        buffer.append(data)
-        while let newline = buffer.firstIndex(of: 10) {
-            let line = buffer.prefix(upTo: newline); buffer.removeSubrange(...newline)
-            if let parsed = ChatParsedEvent(line: Data(line)) { apply(parsed) }
+        for line in framer.lines(appending: data) {
+            if let parsed = ChatParsedEvent(line: line) { apply(parsed) }
         }
     }
 
@@ -832,17 +830,41 @@ struct ChatParsedEvent {
     }
 }
 
+/// Newline framing for the worker's JSONL stream. A transcript snapshot is one
+/// line that the pipe delivers in 16 KB reads, so each byte is searched once:
+/// rescanning the whole buffer on every read took minutes on a 35 MB line.
+struct ChatLineFramer {
+    private var pending = Data()
+    private var searched = 0
+
+    /// Adds one read and returns the lines it completed, without newlines.
+    mutating func lines(appending data: Data) -> [Data] {
+        pending.append(data)
+        var lines: [Data] = [], consumed = 0, cursor = searched
+        pending.withUnsafeBytes { (bytes: UnsafeRawBufferPointer) in
+            guard let base = bytes.baseAddress else { return }
+            while cursor < bytes.count, let newline = memchr(base + cursor, 10, bytes.count - cursor) {
+                let end = base.distance(to: UnsafeRawPointer(newline))
+                lines.append(Data(bytes: base + consumed, count: end - consumed))
+                consumed = end + 1; cursor = consumed
+            }
+        }
+        // A line that ended in this read leaves only bytes from this read
+        // behind it, so dropping the framed prefix copies at most one read.
+        if consumed > 0 { pending.removeSubrange(pending.startIndex ..< pending.startIndex + consumed) }
+        searched = pending.count
+        return lines
+    }
+}
+
 /// Each worker owns a serial reader. FIFO dispatch onto the main queue keeps
 /// snapshots, stream offsets and inspector request acknowledgements ordered.
 final class ChatEventReader {
     private let queue = DispatchQueue(label: "ProviderHub.chat.events", qos: .userInitiated)
-    private var buffer = Data()
+    private var framer = ChatLineFramer()
     func consume(_ data: Data, apply: @escaping @MainActor (ChatParsedEvent) -> Void) {
         queue.async {
-            self.buffer.append(data)
-            while let newline = self.buffer.firstIndex(of: 10) {
-                let line = Data(self.buffer.prefix(upTo: newline))
-                self.buffer.removeSubrange(...newline)
+            for line in self.framer.lines(appending: data) {
                 guard let parsed = ChatParsedEvent(line: line) else { continue }
                 DispatchQueue.main.async { apply(parsed) }
             }

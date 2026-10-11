@@ -936,14 +936,21 @@ import Combine
              "route":"test", "isError":false, "changedFiles":[]]
         }
         let largeLine = try JSONSerialization.data(withJSONObject: ["event":"selected", "id":"large", "entries":largeEntries]) + Data([10])
+        // The worker's pipe delivers a snapshot line in 16 KB reads. Each byte
+        // must be searched once: rescanning the buffer per read took minutes
+        // on a 35 MB transcript and would exceed this binary's time limit.
+        func pipeReads(_ data: Data) -> [Data] {
+            stride(from: 0, to: data.count, by: 16_384).map { data.subdata(in: $0 ..< min($0 + 16_384, data.count)) }
+        }
         let began = ProcessInfo.processInfo.systemUptime
         let reader = ChatEventReader()
         var applySeconds: TimeInterval = 0
         var mainQueueRan = false
         DispatchQueue.main.async { mainQueueRan = true }
+        let reads = pipeReads(largeLine)
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            reader.consume(largeLine.prefix(1024)) { _ in fatalError("partial line applied") }
-            reader.consume(largeLine.dropFirst(1024)) { parsed in
+            for read in reads.dropLast() { reader.consume(read) { _ in fatalError("partial line applied") } }
+            reader.consume(reads.last!) { parsed in
                 let start = ProcessInfo.processInfo.systemUptime
                 model.apply(parsed)
                 applySeconds = ProcessInfo.processInfo.systemUptime - start
@@ -953,6 +960,21 @@ import Combine
         }
         print("Large snapshot total seconds: \(ProcessInfo.processInfo.systemUptime - began); main actor apply seconds: \(applySeconds)")
         check(model.entries.count == 5000 && model.entries.last?.id == "large-4999", "large transcript lost entries")
+        // Lines split anywhere, several share a read, and a partial line waits for its newline.
+        var framer = ChatLineFramer()
+        let small = Data("{\"a\":1}\n\n{\"b\":2}\n".utf8)
+        var framed: [Data] = []
+        let framingBegan = ProcessInfo.processInfo.systemUptime
+        for read in pipeReads(small + largeLine + Data("{\"c\":3}\n{\"d\"".utf8)) { framed += framer.lines(appending: read) }
+        let framingSeconds = ProcessInfo.processInfo.systemUptime - framingBegan
+        check(framed == [Data("{\"a\":1}".utf8), Data(), Data("{\"b\":2}".utf8), largeLine.dropLast(), Data("{\"c\":3}".utf8)],
+              "framing split, merged or lost lines")
+        check(framer.lines(appending: Data()).isEmpty && framer.lines(appending: Data(":4}\n".utf8)) == [Data("{\"d\":4}".utf8)],
+              "a partial line was not held for its newline")
+        check(framingSeconds < 2, "framing \(largeLine.count) bytes in pipe-sized reads took \(framingSeconds) s")
+        var bytewise = ChatLineFramer(), single: [Data] = []
+        for byte in small { single += bytewise.lines(appending: Data([byte])) }
+        check(single == [Data("{\"a\":1}".utf8), Data(), Data("{\"b\":2}".utf8)], "byte-sized reads lost a line boundary")
         let ordered = try JSONSerialization.data(withJSONObject: ["event":"delta", "chat":"large", "id":"large-4999", "text":"after snapshot", "offset":model.entries.last!.text.unicodeScalars.count]) + Data([10])
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             reader.consume(largeLine + ordered) { parsed in
