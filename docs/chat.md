@@ -196,7 +196,7 @@ The main turn clock and context count describe the parent;
 Side Chat runs independently.
 
 The small gear at the bottom-left of the sidebar offers Allow web search, Theme, Glass/Solid,
-Font, and Text size. Glass lays a 10% scrim over the window material (black in
+Font, and Text size. Glass lays a 75% scrim over the window material (black in
 Dark, white in Light) so text holds on a busy wallpaper. Font choices include
 System, System Mono, Inter, Source
 Serif 4 and JetBrains Mono. **Custom…** opens the native macOS font panel for
