@@ -141,9 +141,12 @@ upstream tools. The initial CUA adapter excludes upstream `agent` and `analyze`,
 which run a separate model pipeline; model execution remains in Provider Hub.
 The admitted 24-tool catalogue also completed a read-only permissions-status
 call and exact-PID inspection/image capture of a temporary native fixture.
-A button click incremented that fixture's counter but the helper reported an
+Semantic `set_value` returned success, changed the fixture's own field receipt
+and was confirmed by a fresh accessibility read. The adapter accepts the pinned
+catalogue's `uniqueItems` array declarations, enforcing uniqueness when requested.
+A pointer-button click incremented that fixture's counter but the helper reported an
 indeterminate final target-generation validation error. The adapter preserves
-the error and did not retry the action. General desktop actuation remains
+the error and did not retry the action. Pointer actuation remains
 qualification-limited; a positive counter change is not a clean success receipt.
 Executable WKWebView loopback tests cover observation, action targets,
 navigation and cancellation. Native split tests exercise both axes and stable

@@ -71,7 +71,7 @@ def validate_arguments(value, schema, depth=0):
         raise ValueError("Invalid or excessively nested tool schema")
     supported = {"type", "properties", "required", "additionalProperties", "items", "enum",
                  "const", "minimum", "maximum", "minLength", "maxLength", "minItems", "maxItems",
-                 "anyOf", "oneOf", "allOf", "description", "title", "default", "examples",
+                 "anyOf", "oneOf", "allOf", "uniqueItems", "description", "title", "default", "examples",
                  "$schema", "$id", "$comment", "deprecated", "readOnly", "writeOnly"}
     if set(schema) - supported:
         raise ValueError("Unsupported tool schema assertion: " + sorted(set(schema) - supported)[0])
@@ -113,6 +113,18 @@ def validate_arguments(value, schema, depth=0):
     if isinstance(value, list):
         if not schema.get("minItems", 0) <= len(value) <= schema.get("maxItems", MAX_MESSAGE):
             raise ValueError("Tool array size outside bounds")
+        unique = schema.get("uniqueItems", False)
+        if type(unique) is not bool:
+            raise ValueError("Invalid uniqueItems assertion")
+        if unique:
+            def identity(item):
+                if isinstance(item, dict):
+                    return ("object", tuple((k, identity(v)) for k, v in sorted(item.items())))
+                if isinstance(item, list): return ("array", tuple(identity(v) for v in item))
+                if type(item) in (int, float): return ("number", item)
+                return (type(item).__name__, item)
+            if len({identity(item) for item in value}) != len(value):
+                raise ValueError("Tool array requires unique items")
         if "items" in schema:
             for item in value:
                 validate_arguments(item, schema["items"], depth + 1)

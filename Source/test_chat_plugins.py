@@ -105,6 +105,20 @@ class PluginTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.registry.configure(PluginConfig("peekaboo", config.executable, expected_version="4.8.0", minimum_macos="15.0"))
 
+    def test_release_array_schema_unique_items(self):
+        # The actual v4.9.0 press/click/verify_state schemas declare this key.
+        schema = {"type": "array", "items": {"type": "string"}, "uniqueItems": False}
+        validate_arguments(["cmd", "cmd"], schema)
+        schema["uniqueItems"] = True
+        validate_arguments(["cmd", "shift"], schema)
+        with self.assertRaisesRegex(ValueError, "unique"):
+            validate_arguments(["cmd", "cmd"], schema)
+        with self.assertRaisesRegex(ValueError, "unique"):
+            validate_arguments([{"x": 1}, {"x": 1.0}], {"type": "array", "uniqueItems": True})
+        validate_arguments([True, 1], {"type": "array", "uniqueItems": True})
+        with self.assertRaisesRegex(ValueError, "Invalid uniqueItems"):
+            validate_arguments([], {"type": "array", "uniqueItems": "yes"})
+
     def test_symlink_configuration_pins_resolved_target(self):
         link = Path(self.temp.name) / "launcher"
         link.symlink_to(sys.executable)

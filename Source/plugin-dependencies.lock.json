@@ -15,7 +15,7 @@
       "verified_executables": {
         "darwin-arm64": "sha256:292ccf9066a4515a2570d65dbdab1f77badcdb493dc270f0ed227640c017faa2"
       },
-      "local_qualification": "On 2026-10-11, independently matched the arm64 archive SHA-256, verified the extracted executable signature, and ran MCP initialize/tools-list (26 upstream tools, 24 admitted), permissions status, and exact-PID inspection/image capture of a temporary native fixture. A fixture-button click incremented its receipt but returned an upstream indeterminate final target-generation validation error; that error is preserved and the action was not retried.",
+      "local_qualification": "On 2026-10-11, independently matched the arm64 archive SHA-256, verified the extracted executable signature, and ran MCP initialize/tools-list (26 upstream tools, 24 admitted), permissions status, and exact-PID inspection/image capture of a temporary native fixture. Semantic set_value returned success, matched the fixture's own field receipt and was confirmed by a fresh accessibility read. A fixture-button pointer click incremented its receipt but returned an upstream indeterminate final target-generation validation error; that error is preserved and the action was not retried.",
       "release": "https://github.com/openclaw/Peekaboo/releases/tag/v4.9.0",
       "verification_source": "https://api.github.com/repos/openclaw/Peekaboo/releases/tags/v4.9.0",
       "verification_date": "2026-10-11",
@@ -28,7 +28,7 @@
       "source_revision": "7020aedd362038043e4fc1988a8634657270e476",
       "cli_source": "https://github.com/openclaw/Peekaboo/blob/v4.9.0/Apps/CLI/Sources/PeekabooCLI/Commands/MCP/MCPCommand.swift",
       "schema_source": "https://github.com/openclaw/Peekaboo/tree/v4.9.0/Core/PeekabooCore/Sources/PeekabooAgentRuntime/MCP/Tools",
-      "qualification": "Release-tag MCP CLI arguments and schemas inspected. Fake transport and actual arm64 MCP/observation checks passed. Actuation remains qualification-limited by the recorded upstream final target-generation error. Host approvals apply to every call. Digest provenance does not establish vulnerability-free software. Unsupported JSON Schema assertions fail closed."
+      "qualification": "Release-tag MCP CLI arguments and actual returned schemas inspected, including uniqueItems array declarations. Fake transport, actual arm64 MCP/observation checks and semantic field editing with independent readback passed. Pointer actuation remains qualification-limited by the recorded upstream final target-generation error. Host approvals apply to every call. Digest provenance does not establish vulnerability-free software. Unsupported JSON Schema assertions fail closed."
     }
   }
 }
