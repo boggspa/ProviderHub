@@ -49,7 +49,6 @@ struct ChatInspector: View {
 private struct ChatChangesPane: View {
     @ObservedObject var model: ChatModel
     @State private var expanded = Set<String>()
-    @State private var armedFlush = false
 
     private var summary: String {
         guard let changes = model.gitChanges else { return "File Changes" }
@@ -96,41 +95,25 @@ private struct ChatChangesPane: View {
             } else { inspectorEmpty(model.gitChangesLoading ? "Reading changes…" : "Choose a Git workspace.") }
             Spacer(minLength: 0)
         }
-        .task(id: model.selected?.workspace) {
+        .task(id: "\(model.selectedID ?? "")|\(model.selected?.workspace ?? "")|\(model.connected)") {
             model.primeChangesActivity()
             model.refreshChanges()
         }
         .onChange(of: model.busy) { _, busy in if !busy { model.refreshChanges() } }
-        .onAppear { model.primeChangesActivity() }
-        .onChange(of: model.fileToolFingerprint) { _, _ in
-            model.noteCompletedFileTools()
-            armedFlush = true
+        .task(id: "\(model.selectedID ?? "")|\(model.selected?.workspace ?? "")|\(model.busy)|\(model.connected)|\(model.inspectorVisible)|\(model.inspectorTab)") {
+            await pollLiveChanges()
         }
-        .onChange(of: model.inspectorVisible) { _, visible in
-            guard visible, model.inspectorTab == .changes else { return }
-            model.primeChangesActivity()
-            model.refreshChanges()
-        }
-        .onChange(of: model.inspectorTab) { _, tab in
-            guard tab == .changes, model.inspectorVisible else { return }
-            model.primeChangesActivity()
-            model.refreshChanges()
-        }
-        .task(id: armedFlush) { await flushLiveChanges() }
         .onChange(of: model.gitChanges?.files.map(\.path)) { _, paths in
             if expanded.isEmpty, let first = paths?.first { expanded.insert("work:\(first)") }
         }
     }
 
-    private func flushLiveChanges() async {
-        guard armedFlush else { return }
-        while armedFlush && !Task.isCancelled {
-            try? await Task.sleep(nanoseconds: 2_500_000_000)
-            guard !Task.isCancelled else { return }
-            model.flushScheduledChanges()
-            if !model.changesActivityDirty { break }
+    private func pollLiveChanges() async {
+        guard model.busy, let chat = model.selectedID, let workspace = model.selected?.workspace else { return }
+        while !Task.isCancelled {
+            do { try await Task.sleep(nanoseconds: 2_500_000_000) } catch { return }
+            guard !Task.isCancelled, model.pollChangesActivity(chat: chat, workspace: workspace) else { return }
         }
-        armedFlush = false
     }
 
     private func expansion(_ id: String) -> Binding<Bool> {
