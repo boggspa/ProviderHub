@@ -184,6 +184,7 @@ private struct ChatHeader: View {
     var toggleRail: () -> Void
     @State private var showingModels = false
     @State private var showingChats = false
+    private var workspaceOnSecondRow: Bool { compact || model.team?.enabled == true }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
@@ -196,7 +197,7 @@ private struct ChatHeader: View {
                             Label("Team · \(model.team?.members.count ?? 0)", systemImage: "person.3")
                         }.buttonStyle(.plain).font(HubTheme.Typography.rowTitle).help("Team members and progress")
                     } else { modelMenu }
-                    if !compact { workspaceControls }
+                    if !workspaceOnSecondRow { workspaceControls }
                 }
                 Spacer(minLength: 4)
                 usage
@@ -204,7 +205,7 @@ private struct ChatHeader: View {
                 ChatZoomControl()
                 inspectorButton
             }
-            if compact, model.selectedID != nil { workspaceControls.padding(.leading, 4) }
+            if workspaceOnSecondRow, model.selectedID != nil { workspaceControls.padding(.leading, 4) }
         }
         .padding(.horizontal, HubTheme.Spacing.md).padding(.vertical, 7)
     }
@@ -215,6 +216,7 @@ private struct ChatHeader: View {
             ChatBranchChip(model: model)
             Spacer(minLength: 0)
             ChatGitIndicator(model: model).contentShape(Rectangle())
+                .layoutPriority(1)
                 .onTapGesture { model.showInspector(.changes) }
                 .accessibilityAction(named: Text("Inspect file changes")) { model.showInspector(.changes) }
         }

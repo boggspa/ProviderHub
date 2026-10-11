@@ -129,7 +129,7 @@ struct ChatBlackboardBoard: View {
     }
 }
 
-/// One post: author chip in the provider's accent, key, category, time and body.
+/// One post: author in the provider's accent, key, category, time and body.
 struct ChatBlackboardPostCard: View {
     @ObservedObject var model: ChatModel
     var chat: String
@@ -156,12 +156,11 @@ struct ChatBlackboardPostCard: View {
                     Text(post.authorName).lineLimit(1)
                 }
                 .font(.system(size: 10.5, weight: .medium)).foregroundStyle(accent)
-                .padding(.horizontal, 6).padding(.vertical, 2).background(Capsule().fill(accent.opacity(0.14)))
                 Text(post.key).font(.system(size: 11, weight: .medium, design: .monospaced)).lineLimit(1).truncationMode(.middle)
                 Spacer(minLength: 4)
                 Text(ChatBlackboardSnapshot.label(post.category)).font(.system(size: 9.5, weight: .medium))
                     .foregroundStyle(Self.tint(post.category))
-                    .padding(.horizontal, 5).padding(.vertical, 1).background(Capsule().fill(Self.tint(post.category).opacity(0.13)))
+                    .fixedSize()
             }
             Text(post.body).font(.system(size: 11.5)).foregroundStyle(Semantic.ink)
                 .lineLimit(expanded ? nil : 3).fixedSize(horizontal: false, vertical: true)

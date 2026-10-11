@@ -102,6 +102,8 @@ lines, and gold/blue ahead/behind counts against the cached upstream. It never
 fetches a remote. With no upstream, only a positive local-commit count appears;
 its tooltip labels that distinction. Git inspection runs separately from the
 conversation loop so it cannot block Stop.
+Team chats keep the folder, branch and Git totals together on a second header
+row, leaving room for every member's context ring.
 
 The **branch/worktree** chip beside the folder picker lists local branches and
 worktrees and can create either. Branch switching and creation require a clean
@@ -128,6 +130,14 @@ The right-hand **inspector** has four views, each using the whole pane:
   refresh, without waiting for another edit or the end of the turn. A team member
   who last edited a path is marked on that row. Reads use the local checkout
   and never fetch a remote.
+  A separate lower **Repository** viewport shows unpushed commits against the
+  cached upstream, or explicitly labelled local commits when no upstream is
+  set, and open GitHub pull requests. Both lists load twenty rows at a time,
+  up to two hundred, in a lazy scroll view. Git and PR lookups run in worker
+  threads with time and output bounds. PR reads use an existing GitHub CLI
+  login; an Open GitHub link remains available if that CLI is absent or the
+  lookup fails. Refresh reloads repository information without changing Git
+  state or fetching a remote.
 - **Team** configures up to five persistent members, including the current
   chat model. Each contributes once by default and may explicitly continue with
   a next step. Members think and read in parallel through one attributed
@@ -138,6 +148,12 @@ The right-hand **inspector** has four views, each using the whole pane:
   boundary: a model request is cancelled, while a running tool finishes and
   records its result first. A replaced member keeps its place and resumes its
   work on the new model.
+  Each working member has a small Stop control that cancels only its run;
+  healthy peers continue. Done, Ready and stopped members have a Play control
+  to contribute again using current Team context. Joining an active run keeps
+  its allowance, and questions or safety pauses still need to be resolved.
+  Blackboard author and category labels remain plain accented text within
+  their cards.
   Earlier delegated tasks remain underneath the roster; choose one to read
   its transcript and tool results. Parallel read-only helper chips remain
   beside their originating delegate row in the main transcript.
@@ -439,6 +455,8 @@ workspace writes/approvals and roster UI.
 `chat_agents.py` provides
 isolated delegates and memory-only Side Chats, and `chat_inspector.py` handles
 bounded Git inspection and explicit branch/worktree actions;
+`chat_git_overview.py` and `ChatGitOverview.swift` provide paged repository
+metadata and the independently scrolling Git pane;
 `chat_tools.py` executes the four local tools. The existing authenticated
 gateway serves `/_bridge/chat/models` and accepts Chat requests through
 `/v1/messages`, keeping all API and CLI provider adaptation in its current

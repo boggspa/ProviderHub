@@ -361,7 +361,7 @@ class ChatHost:
             # The tab's own notice: a chat error would reset the composer.
             if identifier is not None: self.publish_processes(identifier, str(error))
             return
-        if action in {"configure_team", "team_resume"}:
+        if action in {"configure_team", "team_resume", "team_member_stop", "team_member_start"}:
             if service:
                 import chat_team
                 chat_team.publish(service, request=command.get("request"), notice=str(error))
@@ -473,10 +473,10 @@ class ChatHost:
         service = self.session(identifier)
         if action in {"send", "retry"} and service.busy:
             raise ValueError("This chat is already running. Use an update to interrupt it.")
-        if action in {"send", "retry", "steer", "team_resume"} and not service.busy:
+        if action in {"send", "retry", "steer", "team_resume", "team_member_start"} and not service.busy:
             if sum(current.busy for current in list(self.sessions.values())) >= self.max_active:
                 raise ValueError(f"{self.max_active} chats are already running. Send this draft after a chat finishes.")
-        if action in {"send", "retry", "steer", "team_resume", "side_send", "open_side"}:
+        if action in {"send", "retry", "steer", "team_resume", "team_member_start", "side_send", "open_side"}:
             if self.workspace_busy(service.chat["workspace"], branch_only=True):
                 raise ValueError("Wait for this checkout's branch operation to finish.")
         if action == "branch_action" and self.workspace_busy(service.chat["workspace"], excluding=identifier):

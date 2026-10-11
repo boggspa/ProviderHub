@@ -107,6 +107,7 @@ private struct ChatSessionState {
     var gitStatus: ChatGitStatus?
     var gitChanges: ChatChanges?
     var gitChangesLoading = false
+    var gitOverview = ChatGitOverviewState()
     var changesRequest: String?
     var changesRefreshPending = false
     let changesActivity = ChangesLiveClock()
@@ -192,6 +193,7 @@ final class ChatModel: ObservableObject {
     var gitStatus: ChatGitStatus? { get { value(\.gitStatus) } set { update(\.gitStatus, newValue) } }
     var gitChanges: ChatChanges? { get { value(\.gitChanges) } set { update(\.gitChanges, newValue) } }
     var gitChangesLoading: Bool { get { value(\.gitChangesLoading) } set { update(\.gitChangesLoading, newValue) } }
+    var gitOverview: ChatGitOverviewState { get { value(\.gitOverview) } set { update(\.gitOverview, newValue) } }
     var changesRequest: String? { get { value(\.changesRequest) } set { update(\.changesRequest, newValue) } }
     var changesActivity: ChangesLiveClock { value(\.changesActivity) }
     var changesRefreshPending: Bool { get { value(\.changesRefreshPending) } set { update(\.changesRefreshPending, newValue) } }
@@ -535,7 +537,7 @@ final class ChatModel: ObservableObject {
                 chats = (try? payload([ChatSummary].self, "chats")) ?? []
                 for chat in chats where previous[chat.id] != nil && previous[chat.id] != chat.workspace {
                     withChat(chat.id) {
-                        gitStatus = nil; gitChanges = nil; gitChangesLoading = false; branches = nil; branchesLoading = false
+                        gitStatus = nil; gitChanges = nil; gitChangesLoading = false; gitOverview = ChatGitOverviewState(); branches = nil; branchesLoading = false
                         changesRequest = nil; changesRefreshPending = false; branchesRefreshPending = false
                         if !branchBusy { branchesRequest = nil }
                     }
@@ -592,6 +594,7 @@ final class ChatModel: ObservableObject {
         case "notice": notice = event["message"] as? String ?? ""
         case "git_status":
             if (event["workspace"] as? String).map({ $0 == selected?.workspace }) ?? true { gitStatus = decode(ChatGitStatus.self, event["status"]) }
+        case "git_overview", "git_pull_requests": consumeGitOverview(event)
         default: consumeInspector(event)
         }
     }

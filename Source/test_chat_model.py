@@ -1032,6 +1032,67 @@ import Combine
         model.detachFolder(from: "/tmp", "/var/tmp/shared")
         check(commands.last?["command"] as? String == "detach_workspace" && commands.last?["workspace"] as? String == "/tmp" &&
               commands.last?["folder"] as? String == "/var/tmp/shared", "disconnect command malformed")
+        // Git metadata pages must be isolated by chat, workspace and request.
+        var gitCommands: [[String: Any]] = []
+        let gitModel = ChatModel(sendCommand: { gitCommands.append($0); return true }, preferences: preferences)
+        gitModel.connected = true
+        gitModel.chats = [railChat("A", "today", workspace: "/tmp"), railChat("B", "today", workspace: "/other")]
+        gitModel.selectedID = "A"
+        func gitEvent(_ value: [String: Any]) throws { gitModel.consume(try JSONSerialization.data(withJSONObject: value) + Data([10])) }
+        let repo: [String: Any] = ["host":"github.com", "owner":"test", "name":"repo", "url":"https://github.com/test/repo"]
+        let commitA: [String: Any] = ["hash":"a", "subject":"First", "author":"Test", "time":"today"]
+        let commitB: [String: Any] = ["hash":"b", "subject":"Second", "author":"Test", "time":"today"]
+        var gitPage: [String: Any] = ["root":"/tmp", "head":"head", "branch":"main", "upstream":"origin/main", "repository":repo,
+                                    "commits":[commitA], "nextCursor":["head":"head", "upstream":"upstream", "root":"/tmp", "repository":"https://github.com/test/repo", "offset":20], "truncated":false]
+        gitModel.refreshGitOverview()
+        let initialGitRequest = gitModel.gitOverview.request!
+        gitModel.refreshGitOverview()
+        check(gitCommands.count == 1, "Concurrent Git refresh was not coalesced")
+        try gitEvent(["event":"git_overview", "chat":"A", "workspace":"/wrong", "request":initialGitRequest, "overview":gitPage])
+        check(gitModel.gitOverview.request == initialGitRequest && gitModel.gitOverview.snapshot == nil, "Wrong workspace Git result was accepted")
+        try gitEvent(["event":"git_overview", "chat":"A", "workspace":"/tmp", "request":"stale", "overview":gitPage])
+        check(gitModel.gitOverview.snapshot == nil, "Stale Git request was accepted")
+        try gitEvent(["event":"git_overview", "chat":"A", "workspace":"/tmp", "request":initialGitRequest, "overview":gitPage])
+        check(gitModel.gitOverview.snapshot?.commits.count == 1 && gitModel.gitOverview.request == nil, "Git snapshot failed to settle")
+        gitModel.refreshGitOverview(more: true)
+        let nextGitRequest = gitModel.gitOverview.request!
+        check((gitCommands.last?["cursor"] as? [String: Any])?["offset"] as? Int == 20, "Git page cursor was lost")
+        gitPage["commits"] = [commitA, commitB]; gitPage["nextCursor"] = NSNull()
+        try gitEvent(["event":"git_overview", "chat":"A", "workspace":"/tmp", "request":nextGitRequest, "overview":gitPage])
+        check(gitModel.gitOverview.snapshot?.commits.map(\.hash) == ["a", "b"], "Git page append duplicated or lost commits")
+        gitModel.gitOverview.snapshot?.nextCursor = ChatGitCommitCursor(head: "head", upstream: "upstream", root: "/tmp", repository: "https://github.com/test/repo", offset: 40)
+        gitModel.refreshGitOverview(more: true)
+        let remoteChangeRequest = gitModel.gitOverview.request!
+        var changedPage = gitPage
+        changedPage["repository"] = ["host":"github.com", "owner":"test", "name":"changed", "url":"https://github.com/test/changed"]
+        try gitEvent(["event":"git_overview", "chat":"A", "workspace":"/tmp", "request":remoteChangeRequest, "overview":changedPage])
+        check(gitModel.gitOverview.snapshot?.repository?.url == "https://github.com/test/repo" && !gitModel.gitOverview.notice.isEmpty,
+              "Changing remote appended old commits under another repository")
+        gitModel.refreshPullRequests()
+        let pullsRequest = gitModel.gitOverview.pullRequest!
+        let pull: [String: Any] = ["number":1,"title":"PR","url":"https://github.com/test/repo/pull/1","branch":"topic","author":"Test","draft":false]
+        try gitEvent(["event":"git_pull_requests", "chat":"A", "workspace":"/tmp", "request":pullsRequest,
+                      "pullRequests":["items":[pull],"repository":repo,"nextCursor":NSNull(),"notice":""]])
+        check(gitModel.gitOverview.pullRequests?.items.count == 1, "PR page was not decoded")
+        gitModel.selectedID = "B"
+        check(gitModel.gitOverview.snapshot == nil && gitModel.gitOverview.pullRequests == nil, "Git metadata leaked into another chat")
+        gitModel.selectedID = "A"
+        check(gitModel.gitOverview.snapshot?.commits.count == 2, "Returning to a chat lost its Git metadata")
+        gitModel.resetInspector()
+        check(gitModel.gitOverview.snapshot == nil && gitModel.gitOverview.request == nil, "Disconnect retained Git metadata requests")
+
+        let stoppingMember: [String: Any] = ["id":"member", "name":"Member", "label":"Test", "choice":"test|", "route":"test", "account":"", "effort":"", "responsibility":"", "status":"working", "nextStep":"", "contributions":1, "memberStoppedByUser":true]
+        let controlsSnapshot: [String: Any] = ["enabled":true, "status":"working", "members":[stoppingMember]]
+        gitModel.team = try decoder.decode(ChatTeamSnapshot.self, from: JSONSerialization.data(withJSONObject: controlsSnapshot))
+        check(gitModel.team?.members.first?.statusLabel == "Stopping…", "Stopped member flag did not decode or show Stopping")
+        gitModel.controlTeamMember("member", start: false)
+        check(gitCommands.last?["command"] as? String == "team_member_stop" && gitCommands.last?["id"] as? String == "A", "Member stop did not carry its owning chat")
+        let stopRequest = gitModel.teamRequest!
+        try gitEvent(["event":"team", "chat":"A", "request":stopRequest, "team":controlsSnapshot])
+        check(gitModel.teamRequest == nil, "Member stop acknowledgment did not settle")
+        gitModel.controlTeamMember("member", start: true)
+        check(gitCommands.last?["command"] as? String == "team_member_start", "Member play did not issue a start")
+
         print("ChatModel state transitions passed")
     }
 }
@@ -1043,7 +1104,7 @@ import Combine
             binary = root / "chat-model-tests"
             compiled = subprocess.run(["xcrun", "swiftc", "-swift-version", "5", "-parse-as-library",
                 "-module-cache-path", str(root / "cache"), str(root / "Stubs.swift"),
-                str(Path(__file__).with_name("ChatModel.swift")), str(Path(__file__).with_name("ChatMentions.swift")), str(Path(__file__).with_name("ChatInspectorModel.swift")), str(Path(__file__).with_name("ChatWorkspaces.swift")), str(Path(__file__).with_name("ChatBlackboardModel.swift")), str(root / "Cases.swift"),
+                str(Path(__file__).with_name("ChatModel.swift")), str(Path(__file__).with_name("ChatMentions.swift")), str(Path(__file__).with_name("ChatInspectorModel.swift")), str(Path(__file__).with_name("ChatWorkspaces.swift")), str(Path(__file__).with_name("ChatBlackboardModel.swift")), str(Path(__file__).with_name("ChatGitOverview.swift")), str(Path(__file__).with_name("ChatTeamControls.swift")), str(root / "Cases.swift"),
                 "-framework", "AppKit", "-framework", "SwiftUI", "-framework", "PDFKit", "-o", str(binary)], capture_output=True, text=True, timeout=90)
             self.assertEqual(compiled.returncode, 0, compiled.stderr)
             ran = subprocess.run([str(binary)], capture_output=True, text=True, timeout=15)

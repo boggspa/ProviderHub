@@ -160,8 +160,10 @@ struct ChatTeamMember: Decodable, Identifiable {
     var waitReason: String?; var modelContext: Int?; var checkpoints: Int?
     /// An edit accepted while this member works; it lands at the member's next safe boundary.
     var pendingChange: ChatTeamPendingChange?
+    var memberStoppedByUser: Bool?
     var statusLabel: String {
         if let pendingChange { return pendingChange.remove ? "Removing…" : "Applying…" }
+        if status == "working", memberStoppedByUser == true { return "Stopping…" }
         let text = status.replacingOccurrences(of: "_", with: " ")
         return text.prefix(1).uppercased() + text.dropFirst()
     }
@@ -173,6 +175,7 @@ extension ChatTeamMember {
     private enum CodingKeys: String, CodingKey {
         case id, name, label, choice, route, account, effort, responsibility, status, nextStep, contributions
         case contributionID, usage, context, failureReason, waitReason, modelContext, checkpoints, pendingChange
+        case memberStoppedByUser
     }
     init(from decoder: Decoder) throws {
         let row = try decoder.container(keyedBy: CodingKeys.self)
@@ -191,6 +194,7 @@ extension ChatTeamMember {
         modelContext = try? row.decodeIfPresent(Int.self, forKey: .modelContext)
         checkpoints = try? row.decodeIfPresent(Int.self, forKey: .checkpoints)
         pendingChange = try? row.decodeIfPresent(ChatTeamPendingChange.self, forKey: .pendingChange)
+        memberStoppedByUser = try? row.decodeIfPresent(Bool.self, forKey: .memberStoppedByUser)
     }
 }
 /// The target of a Team edit still waiting for its member's boundary.
@@ -481,6 +485,7 @@ struct ChatTeamSnapshot: Decodable {
     func resetInspector(clearSessions: Bool = false) {
         if clearSessions, let stateChatID { sideRequests[stateChatID] = nil }
         changesActivity.reset()
+        gitOverview = ChatGitOverviewState()
         gitChanges = nil; gitChangesLoading = false; branches = nil; branchesLoading = false; branchBusy = false
         changesRequest = nil; changesRefreshPending = false; branchesRequest = nil; branchesRefreshPending = false; branchRequest = nil
         inspectorNotice = ""; branchNotice = ""; agents = []; inspectedAgentID = nil

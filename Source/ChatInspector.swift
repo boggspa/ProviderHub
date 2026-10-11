@@ -62,6 +62,17 @@ private struct ChatChangesPane: View {
     }
 
     var body: some View {
+        GeometryReader { geometry in
+            VStack(spacing: 0) {
+                changesBody.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                Divider()
+                ChatGitOverviewPane(model: model)
+                    .frame(height: min(320, max(120, geometry.size.height * 0.4)))
+            }
+        }
+    }
+
+    private var changesBody: some View {
         VStack(spacing: 0) {
             HStack {
                 Text(summary)
