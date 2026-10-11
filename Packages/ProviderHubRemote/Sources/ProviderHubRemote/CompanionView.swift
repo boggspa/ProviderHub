@@ -21,6 +21,13 @@ public final class CompanionModel: ObservableObject {
     public weak var link: CompanionLink?
     @Published public var pairingText = ""
     private let connection = RemoteConnection()
+    public var selectedChat: RemoteChat? { store.chats.first { $0.id == selectedChatID } }
+    public var isConnected: Bool { status == "Connected" }
+    public var canSend: Bool {
+        isConnected && selectedChat != nil && selectedChat?.busy != true &&
+            !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+            !pendingDrafts.values.contains(where: { $0.0 == selectedChatID && $0.1 == draft })
+    }
 
     public init() {
         link = connection
@@ -84,7 +91,7 @@ public final class CompanionModel: ObservableObject {
 
     public func sendDraft() {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard status == "Connected", let chat = selectedChatID, !text.isEmpty,
+        guard canSend, let chat = selectedChatID, !text.isEmpty,
               !pendingDrafts.values.contains(where: { $0.0 == chat && $0.1 == draft }) else { return }
         let id = UUID().uuidString
         pendingDrafts[id] = (chat, draft)
@@ -102,70 +109,56 @@ public final class CompanionModel: ObservableObject {
     }
 }
 
+@MainActor
 public struct CompanionView: View {
     @ObservedObject var model: CompanionModel
     @State private var scanning = false
+    @State private var settings = false
+    @State private var scanAfterSettings = false
+    @State private var chatList = false
+    @AppStorage("companionAppearance") private var appearance = "system"
+    @AppStorage("companionSurface") private var surfaceStyle = "solid"
 
     public init(model: CompanionModel) { self.model = model }
 
     public var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Provider Hub").font(.title2.bold())
-            Text(model.status).font(.subheadline).foregroundStyle(.secondary)
-            TextField("Paste pairing text from your Mac", text: $model.pairingText)
-                .textFieldStyle(.roundedBorder)
-            HStack {
-                Button("Connect", action: model.connect)
-                Button("Disconnect", action: model.disconnect)
-                #if os(iOS)
-                Spacer()
-                Button { scanning = true } label: { Label("Scan QR code", systemImage: "qrcode.viewfinder") }
-                #endif
-            }
-            Text("Provider keys stay on the Mac. This phone only sends, stops, and answers the approval already pending there.")
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-            if let code = model.confirmCode {
-                Text("Pairing code \(code)").font(.title3.monospaced())
-            }
-            if model.store.chats.isEmpty {
-                Text("No chats yet").foregroundStyle(.secondary)
-            } else {
-                Picker("Chat", selection: Binding(get: { model.selectedChatID }, set: { if let id = $0 { model.select(id) } })) {
-                    ForEach(model.store.chats) { chat in
-                        Text(chat.title + (chat.busy ? " · Running" : "")).tag(Optional(chat.id))
-                    }
-                }.pickerStyle(.menu)
-            }
-            ScrollView { Text(model.store.transcript).frame(maxWidth: .infinity, alignment: .leading).textSelection(.enabled) }
-            ForEach(Array(model.store.notices.suffix(3).enumerated()), id: \.offset) { _, notice in
-                Text(notice).font(.caption)
-            }
-            if let approval = model.store.approval {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Approval").font(.headline)
-                    Text(approval.summary)
-                    if !approval.detail.isEmpty { Text(approval.detail).font(.caption) }
-                    HStack {
-                        Button("Allow") { model.decide(true) }
-                        Button("Deny") { model.decide(false) }
-                    }
+        GeometryReader { geometry in
+            let wide = geometry.size.width >= 800
+            HStack(spacing: 0) {
+                if wide && !model.store.chats.isEmpty {
+                    sidebar.frame(width: 250)
+                    CompanionTheme.hairline.frame(width: 1)
                 }
-                .padding(8)
-                .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
-            }
-            TextField("Message", text: $model.draft)
-                .textFieldStyle(.roundedBorder)
-            HStack {
-                Button("Send", action: model.sendDraft)
-                Button("Stop", action: model.stop)
-            }
-            if model.store.needsSnapshot {
-                Text("Missed events. Waiting for a fresh snapshot.").font(.caption)
+                VStack(spacing: 0) {
+                    header(showsRailButton: !wide)
+                    CompanionTheme.hairline.frame(height: 1)
+                    if let chat = model.selectedChat {
+                        if model.store.selectedID == chat.id {
+                            CompanionTranscript(entries: model.store.entries, chat: chat).id(chat.id)
+                        } else {
+                            VStack(spacing: 10) { ProgressView(); Text("Opening conversation…").font(.caption).foregroundStyle(CompanionTheme.secondary) }
+                                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        }
+                        if let approval = model.store.approval { approvalStrip(approval) }
+                        composer(chat)
+                    } else { welcome }
+                }.frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        .padding()
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .foregroundStyle(CompanionTheme.ink)
+        .background {
+            if surfaceStyle == "glass" { Rectangle().fill(.ultraThinMaterial).ignoresSafeArea() }
+            else { CompanionTheme.surface.ignoresSafeArea() }
+        }
+        .preferredColorScheme(appearance == "light" ? .light : appearance == "dark" ? .dark : nil)
+        .sheet(isPresented: $chatList) {
+            NavigationStack { sidebar.navigationTitle("Chats").toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Done") { chatList = false } }
+            } }.presentationDetents([.medium, .large])
+        }
+        .sheet(isPresented: $settings, onDismiss: {
+            if scanAfterSettings { scanAfterSettings = false; scanning = true }
+        }) { settingsSheet }
         #if os(iOS)
         .sheet(isPresented: $scanning) {
             PairingScannerView { text in
@@ -174,5 +167,183 @@ public struct CompanionView: View {
             }
         }
         #endif
+    }
+
+    private func header(showsRailButton: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 8) {
+                if showsRailButton && !model.store.chats.isEmpty {
+                    Button { chatList = true } label: { Image(systemName: "sidebar.left").frame(width: 40, height: 40) }
+                        .accessibilityLabel("Show chats")
+                }
+                Image(systemName: "square.stack.3d.up.fill").font(.caption).foregroundStyle(CompanionTheme.brand)
+                Text("Provider Hub").font(.subheadline.weight(.semibold))
+                Spacer(minLength: 4)
+                Circle().fill(model.isConnected ? Color.green : CompanionTheme.secondary).frame(width: 6, height: 6)
+                Text(model.isConnected ? "Mac connected" : "Offline").font(.caption2).foregroundStyle(CompanionTheme.secondary)
+                Button { settings = true } label: { Image(systemName: "gearshape").frame(width: 40, height: 40) }
+                    .accessibilityLabel("Connection and appearance settings")
+            }.buttonStyle(.plain)
+            if let chat = model.selectedChat {
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(chat.title).font(.headline).lineLimit(1)
+                    HStack(spacing: 6) {
+                        Circle().fill(chat.providerAccent).frame(width: 6, height: 6)
+                        Text(chat.displayModel).font(.caption.weight(.medium))
+                        Text("· On your Mac").font(.caption).foregroundStyle(CompanionTheme.secondary)
+                    }.lineLimit(1)
+                }.padding(.bottom, 12)
+            }
+        }.padding(.horizontal, CompanionTheme.margin)
+    }
+
+    private var sidebar: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text("Recents").font(.caption.weight(.semibold)).foregroundStyle(CompanionTheme.secondary)
+                .padding(.horizontal, 18).padding(.top, 22).padding(.bottom, 12)
+            ScrollView {
+                LazyVStack(spacing: 3) {
+                    ForEach(model.store.chats) { chat in
+                        Button {
+                            model.select(chat.id); chatList = false
+                        } label: {
+                            HStack(spacing: 10) {
+                                Image(systemName: "bubble.left").font(.caption).foregroundStyle(chat.providerAccent)
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(chat.title).font(.subheadline.weight(.medium)).lineLimit(1)
+                                    Text(chat.displayModel).font(.caption2).foregroundStyle(CompanionTheme.secondary).lineLimit(1)
+                                }
+                                Spacer(minLength: 0)
+                                if chat.pendingApproval { Image(systemName: "hand.raised").font(.caption).foregroundStyle(chat.providerAccent) }
+                                else if chat.busy { ProgressView().controlSize(.mini).tint(chat.providerAccent) }
+                            }.padding(.horizontal, 12).padding(.vertical, 11)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .background(chat.id == model.selectedChatID ? CompanionTheme.selection : .clear, in: RoundedRectangle(cornerRadius: 8))
+                                .overlay(alignment: .leading) {
+                                    if chat.id == model.selectedChatID { RoundedRectangle(cornerRadius: 1).fill(chat.providerAccent).frame(width: 2).padding(.vertical, 9) }
+                                }
+                        }.buttonStyle(.plain)
+                    }
+                }.padding(.horizontal, 8)
+            }
+            HStack(spacing: 7) { Image(systemName: "desktopcomputer"); Text(model.isConnected ? "Connected to your Mac" : "Saved connection") }
+                .font(.caption).foregroundStyle(CompanionTheme.secondary).padding(18)
+        }.background(CompanionTheme.surface).foregroundStyle(CompanionTheme.ink)
+    }
+
+    private var welcome: some View {
+        ScrollView {
+            VStack(spacing: 20) {
+                Image(systemName: "desktopcomputer.and.iphone").font(.system(size: 38, weight: .light))
+                    .foregroundStyle(CompanionTheme.secondary).padding(.top, 60)
+                VStack(spacing: 8) {
+                    Text(model.isConnected ? "Your chats, here" : "Your Mac, within reach").font(.title2.weight(.semibold))
+                    Text(model.isConnected ? "Start a chat in Provider Hub on your Mac. It will appear here." : "Continue a conversation, check on work and answer approvals from your phone.")
+                        .font(.callout).foregroundStyle(CompanionTheme.secondary).multilineTextAlignment(.center)
+                }
+                if !model.isConnected { pairingControls }
+                if !model.isConnected && !["Not paired", "Disconnected"].contains(model.status) {
+                    Text(model.status).font(.caption).foregroundStyle(CompanionTheme.secondary).multilineTextAlignment(.center)
+                }
+            }.padding(22).frame(maxWidth: 440).frame(maxWidth: .infinity)
+        }
+    }
+
+    private var pairingControls: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            #if os(iOS)
+            Button {
+                if settings { scanAfterSettings = true; settings = false }
+                else { scanning = true }
+            } label: {
+                Label("Scan your Mac’s QR code", systemImage: "qrcode.viewfinder")
+                    .font(.subheadline.weight(.semibold)).frame(maxWidth: .infinity).padding(.vertical, 8)
+            }.buttonStyle(.borderedProminent).tint(CompanionTheme.ink).foregroundStyle(CompanionTheme.surface)
+            #endif
+            DisclosureGroup("Use pairing text") {
+                VStack(spacing: 10) {
+                    TextField("Paste from Devices on your Mac", text: $model.pairingText, axis: .vertical)
+                        .lineLimit(2...4).font(.system(.caption, design: .monospaced)).textFieldStyle(.plain)
+                        .padding(12).background(CompanionTheme.raised, in: RoundedRectangle(cornerRadius: 8))
+                    Button("Connect", action: model.connect).buttonStyle(.bordered).frame(maxWidth: .infinity, alignment: .trailing)
+                }.padding(.top, 10)
+            }.font(.subheadline).tint(CompanionTheme.secondary)
+            if let code = model.confirmCode, !model.isConnected {
+                VStack(spacing: 6) {
+                    Text(code).font(.system(.title, design: .monospaced).weight(.semibold))
+                    Text("Match this code and approve pairing on your Mac.").font(.caption).foregroundStyle(CompanionTheme.secondary)
+                }.frame(maxWidth: .infinity).padding(.top, 4)
+            }
+        }.padding(16).companionCard(cornerRadius: CompanionTheme.panelRadius)
+    }
+
+    private func approvalStrip(_ approval: RemoteApproval) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 7) {
+                Image(systemName: "hand.raised.fill").foregroundStyle(CompanionTheme.manual)
+                Text("Approval needed").font(.subheadline.weight(.semibold))
+                Spacer()
+                if approval.chat != model.selectedChatID { Text(model.store.chats.first { $0.id == approval.chat }?.title ?? "Another chat").font(.caption).lineLimit(1) }
+            }
+            ScrollView { Text(approval.summary).font(.system(.caption, design: .monospaced)).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading) }
+                .frame(maxHeight: 90)
+            if !approval.detail.isEmpty {
+                DisclosureGroup("Action details") { ScrollView { Text(approval.detail).font(.system(.caption2, design: .monospaced)).textSelection(.enabled) }.frame(maxHeight: 100) }
+                    .font(.caption).tint(CompanionTheme.secondary)
+            }
+            HStack { Spacer(); Button("Deny") { model.decide(false) }.buttonStyle(.bordered)
+                Button("Allow once") { model.decide(true) }.buttonStyle(.borderedProminent).tint(CompanionTheme.ink).foregroundStyle(CompanionTheme.surface) }
+                .disabled(!model.isConnected)
+        }.padding(14).companionCard(cornerRadius: CompanionTheme.panelRadius, accent: CompanionTheme.manual)
+            .padding(.horizontal, 14).padding(.bottom, 8)
+    }
+
+    private func composer(_ chat: RemoteChat) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if !model.isConnected || model.store.needsSnapshot {
+                Text(model.store.needsSnapshot ? "Refreshing after a missed update…" : model.status)
+                    .font(.caption).foregroundStyle(CompanionTheme.secondary).lineLimit(2)
+            } else if let notice = model.store.notices.last {
+                Text(notice).font(.caption).foregroundStyle(CompanionTheme.secondary).lineLimit(2)
+            }
+            HStack(alignment: .bottom, spacing: 10) {
+                TextField("Message…", text: $model.draft, axis: .vertical)
+                    .textFieldStyle(.plain).lineLimit(1...6).font(.body).padding(.vertical, 10)
+                    .accessibilityLabel("Message to \(chat.title)")
+                Button { if chat.busy { model.stop() } else { model.sendDraft() } } label: {
+                    Image(systemName: chat.busy ? "stop.fill" : "arrow.up")
+                        .font(.system(size: 16, weight: .bold)).foregroundStyle(CompanionTheme.surface)
+                        .frame(width: 36, height: 36).background(CompanionTheme.ink, in: Circle()).padding(.vertical, 4)
+                }.buttonStyle(.plain).disabled(!model.isConnected || !chat.busy && !model.canSend)
+                    .opacity(!chat.busy && !model.canSend ? 0.4 : 1)
+                    .accessibilityLabel(chat.busy ? "Stop this chat" : "Send message")
+            }.padding(.horizontal, 14).padding(.vertical, 4)
+                .companionCard(cornerRadius: 20, accent: chat.approvalMode == "yolo" ? .red : chat.providerAccent)
+            HStack(spacing: 6) {
+                Circle().fill(chat.approvalColor).frame(width: 5, height: 5)
+                Text(chat.approvalLabel).foregroundStyle(chat.approvalColor)
+                Text(chat.busy ? "Working…" : "Ready").foregroundStyle(CompanionTheme.secondary)
+                Spacer()
+                Text("Runs on your Mac").foregroundStyle(CompanionTheme.secondary)
+            }.font(.caption2).padding(.horizontal, 5)
+        }.padding(.horizontal, 14).padding(.top, 8).padding(.bottom, 10)
+    }
+
+    private var settingsSheet: some View {
+        NavigationStack {
+            Form {
+                Section("Your Mac") {
+                    LabeledContent("Connection", value: model.isConnected ? "Connected" : "Offline")
+                    if model.isConnected { Button("Disconnect", action: model.disconnect) }
+                    else { pairingControls }
+                    Text("Provider keys and execution stay on your Mac. Remote actions use the chat’s existing approval mode.").font(.caption).foregroundStyle(.secondary)
+                }
+                Section("Appearance") {
+                    Picker("Theme", selection: $appearance) { Text("System").tag("system"); Text("Light").tag("light"); Text("Dark").tag("dark") }
+                    Picker("Surface", selection: $surfaceStyle) { Text("Solid").tag("solid"); Text("Glass").tag("glass") }
+                }
+            }.navigationTitle("Settings")
+                .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Done") { settings = false } } }
+        }.presentationDetents([.medium, .large])
     }
 }

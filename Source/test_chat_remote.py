@@ -22,6 +22,48 @@ from chat_remote import (
     verify_transcript, x25519_public,
 )
 from chat_remote import RemoteServer, encode_line
+from chat_remote import project_event
+
+
+class PresentationProjectionTests(unittest.TestCase):
+    def test_long_stream_and_midstream_subscription_keep_bounded_offsets(self):
+        bridge = MacBridge(lambda _: None, "projection")
+        bridge.publish({"event":"snapshot", "chat":"ab"*16, "entries":[{
+            "id":"a1", "kind":"assistant", "text":"Hello ☀", "recorded":False}]})
+        self.assertTrue(bridge.view["selected"]["entries"][0]["isLive"])
+        bridge.publish({"event":"delta", "chat":"ab"*16, "id":"a1", "offset":7, "text":" again"})
+        self.assertEqual(bridge.view["selected"]["live"], "Hello ☀ again")
+        first = project_event({"event":"delta", "id":"a1", "offset":0, "text":"😀"*10000})
+        second = project_event({"event":"delta", "id":"a1", "offset":10000, "text":" end"})
+        self.assertEqual(len(first["text"]), 8000)
+        self.assertEqual(second["offset"], len(first["text"]))
+        self.assertEqual(second["text"], "")
+
+    def test_display_metadata_has_no_connection_or_reasoning_fields(self):
+        projected = project_event({"event":"chats", "chats":[{
+            "id":"ab"*16, "title":"Task", "modelLabel":"Sol", "providerLabel":"Codex", "accent":"#705AFF",
+            "approvalMode":"manual", "account":"secret", "scope":"private", "workspace":"/private/home"}]})
+        row = projected["chats"][0]
+        self.assertEqual(row["modelLabel"], "Sol")
+        self.assertEqual(row["accent"], "#705AFF")
+        self.assertFalse(set(row) & {"account", "scope", "workspace"})
+        entry = project_event({"event":"entry", "chat":"ab"*16, "entry":{
+            "id":"tool1", "kind":"tool", "summary":"Read source", "detail":"Returned file", "tool":"read_file",
+            "thinking":"secret reasoning", "signature":"opaque", "attachments":[{"path":"/private/home"}]}})["entry"]
+        self.assertEqual(entry["id"], "tool1")
+        self.assertEqual(entry["detail"], "Returned file")
+        self.assertFalse(set(entry) & {"thinking", "signature", "attachments"})
+
+    def test_snapshot_is_byte_bounded_and_tools_update_in_place(self):
+        event = project_event({"event":"snapshot", "chat":"ab"*16, "entries":[{
+            "id":str(i), "kind":"assistant", "text":"é"*4000, "detail":"é"*2000} for i in range(30)]})
+        self.assertLess(len(json.dumps(event,ensure_ascii=False).encode()), 50000)
+        bridge = MacBridge(lambda _: None, "projection")
+        bridge.publish({"event":"snapshot", "chat":"ab"*16, "entries":[]})
+        for detail in ("Running…", "Tests passed"):
+            bridge.publish({"event":"entry", "chat":"ab"*16, "entry":{"id":"t1", "kind":"tool", "summary":"Test", "detail":detail}})
+        self.assertEqual(len(bridge.view["selected"]["entries"]),1)
+        self.assertEqual(bridge.view["selected"]["entries"][0]["detail"],"Tests passed")
 
 
 class NetworkTests(unittest.TestCase):

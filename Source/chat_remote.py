@@ -58,6 +58,7 @@ SESSION_ID = re.compile(r"[A-Za-z0-9._:-]{1,128}\Z")
 MAX_TEXT = 100_000
 MAX_LOG = 200
 MAX_REQUESTS = 64
+DISPLAY_TEXT_LIMIT = 8000
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
 
 
@@ -436,6 +437,28 @@ class Session:
             self.on_app(message)
 
 
+def project_entry(entry, fallback="legacy"):
+    """Visible transcript data only; omit provider reasoning and private metadata."""
+    return {"id": str(entry.get("id") or fallback)[:128],
+            "role": str(entry.get("role") or entry.get("kind") or "note")[:40],
+            "text": str(entry.get("text") or "")[:DISPLAY_TEXT_LIMIT],
+            "summary": str(entry.get("summary") or "")[:500],
+            "detail": str(entry.get("detail") or "")[:2000],
+            "tool": str(entry.get("tool") or "")[:100],
+            "memberName": str(entry.get("memberName") or "")[:100],
+            "isError": entry.get("isError") is True,
+            "isLive": (entry.get("role") or entry.get("kind")) == "assistant" and entry.get("recorded") is False}
+
+
+def bound_entries(entries):
+    kept, size = [], 0
+    for row in reversed(entries[-30:]):
+        length = len(json.dumps(row, ensure_ascii=False).encode("utf8"))
+        if size + length > 48000: break
+        kept.append(row); size += length
+    return list(reversed(kept))
+
+
 def project_event(event):
     """Whitelist host events. Drop catalogue, processes, and credential-bearing rows."""
     if not isinstance(event, dict):
@@ -453,6 +476,10 @@ def project_event(event):
                 "busy": bool(row.get("busy")),
                 "active": bool(row.get("active")),
                 "pendingApproval": bool(row.get("pendingApproval")),
+                "modelLabel": str(row.get("modelLabel") or "")[:120],
+                "providerLabel": str(row.get("providerLabel") or "")[:60],
+                "accent": row.get("accent") if isinstance(row.get("accent"), str) and re.fullmatch(r"#[0-9A-Fa-f]{6}", row["accent"]) else "",
+                "approvalMode": row.get("approvalMode") if row.get("approvalMode") in {"manual", "accept_edits", "yolo"} else "manual",
             })
         return {"event": "chats", "chats": rows}
     if kind == "approval":
@@ -467,24 +494,21 @@ def project_event(event):
             "detail": str(approval.get("detail") or "")[:2000],
         }}
     if kind == "delta" and isinstance(event.get("text"), str):
+        # Offsets address the bounded prefix shown on the phone. Continuing a
+        # long reply must not create a permanent gap or a snapshot request loop.
+        offset = max(0, min(DISPLAY_TEXT_LIMIT, event.get("offset", 0))) if type(event.get("offset")) is int else 0
         return {"event": "delta", "chat": event.get("chat"), "id": event.get("id"),
-                "text": event["text"][:8000], "offset": event.get("offset") if type(event.get("offset")) is int else 0}
+                "text": event["text"][:DISPLAY_TEXT_LIMIT - offset], "offset": offset}
     if kind == "entry" and isinstance(event.get("entry"), dict):
         entry = event["entry"]
-        return {"event": "entry", "chat": event.get("chat"), "entry": {
-            "role": str(entry.get("role") or entry.get("kind") or "note")[:40],
-            "text": str(entry.get("text") or "")[:4000],
-        }}
+        return {"event": "entry", "chat": event.get("chat"), "entry": project_entry(entry)}
     if kind in {"selected", "snapshot"}:
         entries = []
-        for entry in (event.get("entries") or [])[-30:]:
+        for index, entry in enumerate((event.get("entries") or [])[-30:]):
             if isinstance(entry, dict):
-                entries.append({
-                    "role": str(entry.get("role") or entry.get("kind") or "note")[:40],
-                    "text": str(entry.get("text") or "")[:4000],
-                })
+                entries.append(project_entry(entry, "snapshot-" + str(index)))
         return {"event": kind, "chat": event.get("chat") or event.get("id"), "id": event.get("id"),
-                "entries": entries, "busy": bool(event.get("busy")), "status": str(event.get("status") or "")[:80]}
+                "entries": bound_entries(entries), "busy": bool(event.get("busy")), "status": str(event.get("status") or "")[:80]}
     if kind in {"notice", "rejected", "error"} and isinstance(event.get("message"), str):
         return {"event": kind, "chat": event.get("chat"), "message": event["message"][:500]}
     return None
@@ -594,15 +618,30 @@ class MacBridge:
                 "busy": projected.get("busy"),
                 "status": projected.get("status") or "",
                 "live": "",
+                "liveID": None,
             }
         elif kind == "delta" and self.view.get("selected") and self.view["selected"].get("id") == projected.get("chat"):
-            live = self.view["selected"].get("live") or ""
-            self.view["selected"]["live"] = (live + projected.get("text", ""))[-8000:]
+            selected = self.view["selected"]
+            identifier = projected.get("id") or "live"
+            if selected.get("liveID") == identifier:
+                live = selected.get("live") or ""
+            else:
+                live = next((row["text"] for row in selected.get("entries", []) if row.get("id") == identifier), "")
+            offset = projected.get("offset", len(live))
+            addition = projected.get("text", "")
+            overlap = max(0, len(live) - offset)
+            selected["live"] = (live + addition[overlap:])[:DISPLAY_TEXT_LIMIT]
+            selected["liveID"] = identifier
         elif kind == "entry" and self.view.get("selected") and self.view["selected"].get("id") == projected.get("chat"):
-            self.view["selected"].setdefault("entries", []).append(projected["entry"])
-            self.view["selected"]["entries"] = self.view["selected"]["entries"][-30:]
+            rows = self.view["selected"].setdefault("entries", [])
+            updated = projected["entry"]
+            index = next((i for i, row in enumerate(rows) if row.get("id") == updated["id"] and updated["id"] != "legacy"), None)
+            if index is None: rows.append(updated)
+            else: rows[index] = updated
+            self.view["selected"]["entries"] = bound_entries(rows)
             if projected["entry"].get("role") == "assistant":
                 self.view["selected"]["live"] = ""
+                self.view["selected"]["liveID"] = None
 
     def _snapshot(self):
         return {"cursor": self.cursor, "chats": self.view["chats"], "approval": self.view["approval"],

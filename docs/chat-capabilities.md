@@ -115,6 +115,15 @@ the desktop's focused pane. Commands enter the same serial host queue; the Mac
 owns credentials, execution, approvals and recorded results. A paused/closed
 phone does not execute work. Keep the Mac running and connected.
 
+The companion follows the Mac's semantic surfaces, provider accents and
+compact conversation layout. iPhone opens the chat list as a sheet; wide iPad
+layouts keep a chat rail alongside the transcript. Assistant, user and tool
+rows retain their identities as results arrive. Tool details expand in place;
+code blocks are selectable and scroll horizontally. Approvals sit above the
+composer. Settings offers System/Light/Dark and Glass/Solid appearances.
+Both apps use darker card fills with a subtle 0.5-point accent rim, keeping
+the existing control geometry and hover treatments.
+
 The application uses the TaskWraith E2EE primitives with a pinned Mac identity
 and human-confirmed phone trust. The phone identity uses device-only Keychain
 storage. Mac identity/trust use a private 0600 file. Reconnect retrieves a
@@ -123,6 +132,12 @@ resent. Duplicate request IDs are retained for the latest 64 requests per
 device within the Mac process lifetime; this does not promise exactly-once
 execution after a process restart. Full history, media preview, push, background
 phone connections and a cloud relay remain separate follow-ups.
+The visible projection is limited to the latest 30 entries within a 48 KB
+serialized entry budget, with an 8,000-character prefix per message/live reply.
+Long-stream offsets stay within that prefix so reconnects do not repeatedly
+request the same snapshot. Provider/account identifiers, reasoning and local
+attachment records are excluded; visible message and tool text can still
+contain paths or other information already shown in the chat.
 
 See [the companion guide](../ios/ProviderHubCompanion/README.md) for iOS build
 and pairing details. A signed Simulator app completed pairing, transcript

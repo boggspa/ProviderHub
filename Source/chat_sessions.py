@@ -305,6 +305,13 @@ class ChatHost:
             row["busy"] = bool(service and service.busy)
             row["active"] = bool(service and self.active(service))
             row["pendingApproval"] = bool(service and service.approval)
+            choice = next((item for item in self.models if item.get("route") == row.get("route")
+                           and item.get("account") == row.get("account")), None)
+            if choice:
+                presentation = choice.get("presentation") or {}
+                row["modelLabel"] = choice.get("label") or ""
+                row["providerLabel"] = presentation.get("displayProvider") or choice.get("provider") or ""
+                row["accent"] = presentation.get("accent") or ""
         with self._output:
             if summaries != self._last_summaries:
                 self._last_summaries = summaries

@@ -6,6 +6,16 @@ chats, watches a selected transcript, sends text, stops that chat, and answers
 the exact pending approval. Text drafts are local to each chat and clear only
 after a successful acknowledgement.
 
+## Appearance and layout
+
+The companion uses the Mac's semantic colours, provider accents, compact
+header and rounded composer. Cards have the same darker fill and subtle
+accent hairline. System, Light/Dark and Glass/Solid choices are in Settings.
+iPhone uses a chat-list sheet; wide iPad layouts show a persistent chat rail.
+Text uses native Dynamic Type. Tool rows expand for detail; code blocks are
+selectable and scroll horizontally. Approvals stay beside the composer and
+always target the exact chat and action shown.
+
 ## Pair
 
 1. In Provider Hub's remote settings, explicitly start the listener on the
@@ -65,7 +75,10 @@ Reconnect refreshes state; unacknowledged messages remain drafts and are not
 automatically resent. Request deduplication is bounded to the last 64 request
 IDs per device during the Mac process lifetime, including socket reconnects;
 it does not guarantee exactly-once execution across a Mac process restart.
-Transcript projection sends the latest 30 entries and capped live text.
+Transcript projection sends up to 30 recent entries within a 48 KB serialized
+entry budget, with up to 8,000 Unicode scalars of each message/live reply.
+Tool updates replace the existing row and stream offsets remain valid after
+truncation or reconnect. Full history stays on the Mac.
 Transport flushes have a two-second upper bound before disconnecting a slow
 peer. iPhone installation/signing and an on-device network trial require a
 user's signing team and device. A signed Simulator app has completed actual
