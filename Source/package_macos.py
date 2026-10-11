@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Sign a generated Apple Silicon app and optionally submit it to Apple."""
 import argparse
+import hashlib
 import json
 from pathlib import Path
+import plistlib
 import re
 import struct
 import subprocess
@@ -86,8 +88,12 @@ def main():
     # bytes. Otherwise refreshing its digest could bless a preexisting edit.
     manifest = verify_manifest(app, require_clean=True)
     identity = resolve_identity(args.identity)
+    # The outer app signature signs its main executable, but additional
+    # executables (such as the PDF reader) need their own Developer ID signature.
+    metadata = plistlib.loads((app / "Contents/Info.plist").read_bytes())
+    main_executable = app / "Contents/MacOS" / metadata.get("CFBundleExecutable", "MistralBridge")
     components = sorted((path for path in (app / "Contents").rglob("*")
-                         if loadable_macho(path) and "MacOS" not in path.relative_to(app / "Contents").parts[:1]),
+                         if loadable_macho(path) and path != main_executable),
                         key=lambda path: len(path.parts), reverse=True)
     print(f"Signing {len(components)} embedded native components…", flush=True)
     for index, path in enumerate(components, 1):
@@ -97,6 +103,8 @@ def main():
     # Developer ID signatures alter the embedded CPython files. Record those
     # final bytes before the outer app signature seals the manifest itself.
     manifest["runtime"] = _runtime_facts(app)
+    for name in manifest.get("native_helpers", {}):
+        manifest["native_helpers"][name] = hashlib.sha256((app / "Contents/MacOS" / name).read_bytes()).hexdigest()
     (app / "Contents/Resources" / MANIFEST_NAME).write_text(
         json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     verify_manifest(app, require_clean=True)
