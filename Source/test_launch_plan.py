@@ -1,573 +1,363 @@
-"""Swift test harness for the launch-plan resolver.
+"""Drive the Hub's production launch orchestration on macOS.
 
-This file is a Python test driver; it embeds the Swift test program as
-a string, writes it to a temporary file, compiles it with ``xcrun swiftc``
-together with the production ``Source/LaunchPlan.swift`` module, runs
-the resulting binary, and asserts the exit code. The Swift program
-exercises the actual production ``LaunchPlanResolver.resolve(...)`` /
-``.mayStop(...)`` / ``.snapshotsMatch(...)`` functions — no Python
-mirror, no parallel policy, no Swift stub of the production code.
-
-Pattern follows ``Source/test_chat_model.py`` (which exercises the
-production Swift ``ChatModel`` against a fake JSONL worker).
+Source/LaunchPlan.swift holds the code BridgeModel runs for launchClaude,
+launchCodex, restore and the poll-driven auto-restore: pending-settings
+writes, the gateway snapshot check and restart, rollback of a refused launch
+and the auto-stop. It is compiled here unchanged with HubModels.swift and a
+scripted LaunchHost standing in for the worker, the gateway's /_bridge/status
+and the restart alert. The scripted gateway serves the snapshot of the
+settings it last started from, listens on the port it started with, and
+records any stop that would sever in-flight requests.
 """
-from __future__ import annotations
-
+from pathlib import Path
 import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
-from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-PRODUCTION_MODULE = REPO_ROOT / "Source" / "LaunchPlan.swift"
+SOURCE = Path(__file__).resolve().parent
 
-# The Swift test program. It is compiled together with the production
-# ``Source/LaunchPlan.swift`` (the only Swift file in the compilation
-# unit that defines ``LaunchPlanResolver``) and exercises the actual
-# public functions. The program exits 0 on success and 1 on the first
-# failed assertion; the Python driver asserts the exit code.
-SWIFT_PROGRAM = r'''
+CASES = r'''
 import Foundation
 
-// Test harness for the production launch-plan resolver. Compiled
-// together with Source/LaunchPlan.swift, which provides the public
-// functions ``LaunchPlanResolver.resolve`` / ``.mayStop`` / ``.snapshotsMatch``
-// and the ``ChangeKind`` / ``LaunchAction`` / ``LaunchPlan`` types.
-
-func fail(_ message: String) -> Never {
-    FileHandle.standardError.write(Data("FAIL: \(message)\n".utf8))
-    exit(1)
+func check(_ yes: Bool, _ text: String) {
+    if !yes { FileHandle.standardError.write(Data("FAIL: \(text)\n".utf8)); exit(1) }
 }
 
-func expectEqual<T: Equatable>(_ actual: T, _ expected: T, _ label: String) {
-    if actual != expected {
-        fail("\(label): expected \(expected), got \(actual)")
+@MainActor final class ScriptedHost: LaunchHost {
+    var busy = false
+    var activeRequests = 0
+    var settings = RouteSettings()
+    var savedSettings = RouteSettings()
+    var chatWindowOpen = false
+    var chatWorking = false
+    var chatHasActiveWork = false
+    var claudeLive = false
+    var codexLive = false
+    // settings.json, and the gateway process.
+    var disk = RouteSettings()
+    var gatewayUp = true
+    var listeningPort = 0
+    var servingFingerprint = ""
+    var servingDigest = ""
+    var inFlight = 0
+    var confirmAnswer = true
+    var onConfirm: (() -> Void)?
+    var onPrepare: (() async -> Void)?
+    var prepareError: String?
+    // One entry per upcoming write: "fail" throws before the disk changes,
+    // "lost" changes the disk and then throws, as when the worker's reply is
+    // lost. Writes past the script succeed. startFailures fails that many starts.
+    var writeScript: [String] = []
+    var startFailures = 0
+    var events: [String] = []
+    var running: Bool { gatewayUp }
+
+    init() { load() }
+    // Stand-ins for catalogue_fingerprint and catalogue_digest: each reads
+    // only the settings its real counterpart reads. Codex's desktop helper
+    // preferences change neither.
+    static func fingerprint(_ s: RouteSettings) -> String { "fp:" + (s.mappings["claude-opus-5"] ?? "") }
+    static func digest(_ s: RouteSettings) -> String { "dg:" + (s.codex_model ?? "") + ":\(s.codex_goal_budget)" }
+    func load() {
+        listeningPort = disk.port
+        servingFingerprint = Self.fingerprint(disk)
+        servingDigest = Self.digest(disk)
     }
-}
 
-func expectNil<T>(_ actual: T?, _ label: String) {
-    if actual != nil {
-        fail("\(label): expected nil, got \(String(describing: actual!))")
+    func refreshDesktopState() {}
+    func waitForCatalogueRefresh() async {}
+    func writeSettings() async throws {
+        events.append("write")
+        let step = writeScript.isEmpty ? "ok" : writeScript.removeFirst()
+        if step == "fail" { throw LaunchRefusal(message: "Could not save the settings.") }
+        disk = settings
+        if step == "lost" { throw LaunchRefusal(message: "Could not save the settings.") }
+        savedSettings = settings
     }
+    func gatewayStatus() async throws -> GatewayStatus? {
+        events.append("status")
+        // The Hub's endpoint is the saved port.
+        guard gatewayUp, savedSettings.port == listeningPort else { throw LaunchRefusal(message: "Could not connect to the server.") }
+        return GatewayStatus(active: inFlight, fingerprint: servingFingerprint, digest: servingDigest)
+    }
+    func startGateway() async throws {
+        if gatewayUp { return }
+        events.append("start")
+        if startFailures > 0 { startFailures -= 1; throw LaunchRefusal(message: "The gateway could not start.") }
+        gatewayUp = true; load()
+    }
+    func stopGateway() async {
+        guard gatewayUp else { return }
+        events.append(inFlight > 0 ? "stop-SEVERED" : "stop")
+        gatewayUp = false; activeRequests = 0
+    }
+    func confirmGatewayRestart(peersConnected: Bool, otherHarness: String) -> Bool {
+        events.append("confirm"); onConfirm?(); return confirmAnswer
+    }
+
+    /// What launchClaude / launchCodex pass to prepareGatewayForLaunch: the
+    /// worker prepares from the saved settings on disk.
+    func launch(_ surface: LaunchSurface) async -> String? {
+        do {
+            _ = try await prepareGatewayForLaunch(surface) {
+                events.append("prepare")
+                await onPrepare?()
+                if let prepareError { throw LaunchRefusal(message: prepareError) }
+                return surface == .claude ? ["catalogue_fingerprint": Self.fingerprint(disk)]
+                                          : ["catalogue_digest": Self.digest(disk)]
+            }
+            return nil
+        } catch { return error.localizedDescription }
+    }
+    var stopped: Bool { events.contains { $0.hasPrefix("stop") } }
+    var severed: Bool { events.contains("stop-SEVERED") }
 }
 
-func expectNonNil<T>(_ actual: T?, _ label: String) -> T {
-    if let value = actual { return value }
-    fail("\(label): expected non-nil")
-}
-
-func resolve(surface: String = "claude",
-            gatewayRunning: Bool = true,
-            gatewayFingerprint: String? = "fp-A",
-            gatewayDigest: String? = nil,
-            preparedFingerprint: String? = "fp-A",
-            preparedDigest: String? = nil,
-            chatWorking: Bool = false,
-            chatHasActiveWork: Bool = false,
-            chatWindowOpen: Bool = false,
-            activeRequests: Int = 0,
-            changeKind: ChangeKind = .unchanged,
-            liveClaude: Bool = false,
-            liveCodex: Bool = false) -> LaunchPlan {
-    return LaunchPlanResolver.resolve(
-        surface: surface,
-        gatewayRunning: gatewayRunning,
-        gatewayFingerprint: gatewayFingerprint,
-        gatewayDigest: gatewayDigest,
-        preparedFingerprint: preparedFingerprint,
-        preparedDigest: preparedDigest,
-        chatWorking: chatWorking,
-        chatHasActiveWork: chatHasActiveWork,
-        chatWindowOpen: chatWindowOpen,
-        activeRequests: activeRequests,
-        changeKind: changeKind,
-        liveClaude: liveClaude,
-        liveCodex: liveCodex)
+@MainActor func host(_ configure: (ScriptedHost) -> Void = { _ in }) -> ScriptedHost {
+    let host = ScriptedHost()
+    configure(host)
+    return host
 }
 
 @main struct Cases {
-    static func main() {
-
-        // --- open_directly ---------------------------------------------------------
-
-        do {
-            let plan = resolve(surface: "claude")
-            expectEqual(plan.action, .openDirectly, "open_directly/idle_claude")
-            expectEqual(plan.mustSave, false, "open_directly/idle_claude/mustSave")
-            expectEqual(plan.mustRestart, false, "open_directly/idle_claude/mustRestart")
-            expectNil(plan.blockReason, "open_directly/idle_claude/blockReason")
-            expectEqual(plan.surface, "claude", "open_directly/idle_claude/surface")
-            expectEqual(plan.otherHarness, "Codex / ChatGPT", "open_directly/idle_claude/otherHarness")
+    @MainActor static func main() async throws {
+        // Unchanged adjacent launches open while every peer is busy.
+        for surface in [LaunchSurface.claude, .codex] {
+            let h = host { $0.claudeLive = surface == .codex; $0.codexLive = surface == .claude
+                           $0.chatWorking = true; $0.chatWindowOpen = true; $0.inFlight = 2; $0.activeRequests = 2 }
+            let error = await h.launch(surface)
+            check(error == nil, "adjacent \(surface) launch refused: \(error ?? "")")
+            check(!h.stopped && !h.events.contains("write") && !h.events.contains("confirm"), "adjacent launch disturbed the gateway: \(h.events)")
         }
 
+        // Dirty config for the idle target while a peer is busy: the new
+        // selection needs a reload the busy gateway cannot take, so the launch
+        // is refused with the gateway's count and nothing stays saved.
         do {
-            // Codex is live but the gateway snapshot already matches what
-            // Claude needs — Claude can launch without disrupting Codex.
-            // This is the user's primary complaint: chat work in another
-            // surface must not block launching the next app.
-            let plan = resolve(surface: "claude", liveCodex: true)
-            expectEqual(plan.action, .openDirectly, "open_directly/claude_while_codex_live")
+            let h = host { $0.claudeLive = true; $0.inFlight = 1 }
+            let previous = h.savedSettings
+            h.settings.codex_model = "mistral/new-model"
+            let error = await h.launch(.codex) ?? ""
+            check(error.hasPrefix("The gateway has 1 request in flight."), "busy-peer refusal: \(error)")
+            check(error.contains("were not saved"), "refusal does not say the edit is pending: \(error)")
+            check(h.disk == previous && h.savedSettings == previous, "refused launch left settings saved")
+            check(h.settings.codex_model == "mistral/new-model", "refused launch dropped the draft")
+            check(!h.stopped, "busy gateway was stopped: \(h.events)")
+        }
+        // A Codex desktop preference leaves the digest alone, so it is saved
+        // and the launch opens on the running gateway.
+        do {
+            let h = host { $0.claudeLive = true; $0.inFlight = 1 }
+            h.settings.codex_accent_slider = true
+            let error = await h.launch(.codex)
+            check(error == nil, "snapshot-neutral Codex preference refused: \(error ?? "")")
+            check(h.disk.codex_accent_slider && !h.stopped, "preference not saved or gateway disturbed: \(h.events)")
+        }
+        // A live app's own profile is never rewritten, and nothing is written.
+        do {
+            let h = host { $0.codexLive = true }
+            h.settings.codex_model = "mistral/new-model"
+            let error = await h.launch(.codex) ?? ""
+            check(error.hasPrefix("Quit Codex / ChatGPT"), "live Codex edit: \(error)")
+            check(h.events.isEmpty, "live Codex edit touched the gateway or disk: \(h.events)")
+            let c = host { $0.claudeLive = true }
+            c.settings.mappings["claude-opus-5"] = "kimi/k3"
+            let claudeError = await c.launch(.codex) ?? ""
+            check(claudeError.hasPrefix("Quit Claude"), "live Claude edit: \(claudeError)")
+            check(c.events.isEmpty, "live Claude edit was written: \(c.events)")
         }
 
-        do {
-            // Codex-side launch compares the digest dimension.
-            let plan = LaunchPlanResolver.resolve(
-                surface: "codex",
-                gatewayRunning: true,
-                gatewayFingerprint: nil,
-                gatewayDigest: "digest-A",
-                preparedFingerprint: nil,
-                preparedDigest: "digest-A",
-                chatWorking: false,
-                chatHasActiveWork: false,
-                chatWindowOpen: false,
-                activeRequests: 0,
-                changeKind: .unchanged,
-                liveClaude: false,
-                liveCodex: false)
-            expectEqual(plan.action, .openDirectly, "open_directly/codex_digest_dimension")
-            expectEqual(plan.otherHarness, "Claude", "open_directly/codex/otherHarness")
+        // Mixed settings while Chat is working and no desktop app is live: the
+        // refusal names what is actually busy, never a desktop session.
+        for (inFlight, expected) in [(1, "The gateway has 1 request in flight."), (0, "Chat is working.")] {
+            let h = host { $0.chatWorking = true; $0.chatWindowOpen = true; $0.inFlight = inFlight; $0.activeRequests = inFlight }
+            let previous = h.savedSettings
+            h.settings.mappings["claude-opus-5"] = "kimi/k3"
+            h.settings.codex_model = "mistral/new-model"
+            let draft = h.settings
+            let error = await h.launch(.claude) ?? ""
+            check(error.hasPrefix(expected), "mixed + Chat refusal: \(error)")
+            check(!error.contains("desktop session"), "mixed + Chat blamed a desktop session: \(error)")
+            check(h.disk == previous && h.settings == draft && !h.stopped, "mixed + Chat left a partial change: \(h.events)")
         }
 
+        // Port change with Chat idle: the old server stops before the new
+        // port is saved, and the restarted gateway is reachable at it.
         do {
-            // chatWindowOpen without chat work is fine.
-            let plan = resolve(surface: "claude", chatWindowOpen: true)
-            expectEqual(plan.action, .openDirectly, "open_directly/chat_window_open")
+            let h = host { $0.chatWindowOpen = true }
+            let old = h.disk.port
+            h.settings.port = old + 1
+            let error = await h.launch(.claude)
+            check(error == nil, "port change refused: \(error ?? "")")
+            check(h.events == ["status", "stop", "write", "prepare", "start", "status"], "port change order: \(h.events)")
+            check(h.listeningPort == old + 1 && h.savedSettings.port == old + 1, "gateway not on the saved port")
+            check(((try? await h.gatewayStatus()) ?? nil) != nil, "saved endpoint unreachable after port change")
+        }
+        // ...is refused before anything is written while a request is in
+        // flight, even if the poll has not seen it yet.
+        do {
+            let h = host { $0.inFlight = 1; $0.activeRequests = 0 }
+            let old = h.disk.port
+            h.settings.port = old + 1
+            let error = await h.launch(.codex) ?? ""
+            check(error.hasPrefix("The gateway has 1 request in flight."), "busy port change: \(error)")
+            check(!h.stopped && !h.events.contains("write") && h.disk.port == old && h.settings.port == old + 1, "busy port change: \(h.events)")
+        }
+        // ...is refused outright while a desktop app is live on the gateway.
+        do {
+            let h = host { $0.codexLive = true }
+            h.settings.port += 1
+            let error = await h.launch(.claude) ?? ""
+            check(error.hasPrefix("Quit the desktop sessions"), "live port change: \(error)")
+            check(h.events.isEmpty, "live port change touched the gateway: \(h.events)")
+        }
+        // ...rolls back, and serves the old port again, if preparation fails.
+        do {
+            let h = host { $0.chatWindowOpen = true; $0.prepareError = "No selected model is available for Claude right now." }
+            let old = h.disk.port
+            h.settings.port = old + 1
+            let error = await h.launch(.claude) ?? ""
+            check(error.hasPrefix("No selected model") && error.contains("were not saved"), "failed port launch: \(error)")
+            check(h.disk.port == old && h.savedSettings.port == old && h.settings.port == old + 1, "failed port launch kept the port")
+            check(h.gatewayUp && h.listeningPort == old, "failed port launch left the gateway down or moved")
+        }
+        // ...and the same after the old gateway has stopped, if the disk write
+        // throws, whether or not it reached the disk.
+        for step in ["fail", "lost"] {
+            let h = host { $0.chatWindowOpen = true; $0.writeScript = [step] }
+            let old = h.disk.port
+            h.settings.port = old + 1
+            let draft = h.settings
+            let error = await h.launch(.claude) ?? ""
+            check(error.hasPrefix("Could not save the settings.") && error.contains("were not saved"), "\(step) shared write: \(error)")
+            check(h.events == ["status", "stop", "write", "write", "start"], "\(step) shared write order: \(h.events)")
+            check(h.disk.port == old && h.savedSettings.port == old && h.settings == draft, "\(step) shared write kept a partial change")
+            check(h.gatewayUp && h.listeningPort == old, "\(step) shared write left the old gateway down")
+        }
+        // ...if the new gateway cannot start, the old settings are saved and
+        // served again.
+        do {
+            let h = host { $0.chatWindowOpen = true; $0.startFailures = 1 }
+            let old = h.disk.port
+            h.settings.port = old + 1
+            let error = await h.launch(.claude) ?? ""
+            check(error.hasPrefix("The gateway could not start.") && error.contains("were not saved"), "failed shared start: \(error)")
+            check(h.events == ["status", "stop", "write", "prepare", "start", "write", "start"], "failed shared start order: \(h.events)")
+            check(h.gatewayUp && h.listeningPort == old && h.savedSettings.port == old && h.settings.port == old + 1, "failed shared start not restored")
+        }
+        // ...if the rollback write fails too, the new settings that did land
+        // are served, so the gateway matches the Hub's saved endpoint.
+        do {
+            let h = host { $0.chatWindowOpen = true; $0.startFailures = 1; $0.writeScript = ["ok", "fail"] }
+            let old = h.disk.port
+            h.settings.port = old + 1
+            let error = await h.launch(.claude) ?? ""
+            check(error.contains("stay saved, and the gateway has loaded them."), "kept shared change: \(error)")
+            check(h.gatewayUp && h.listeningPort == old + 1 && h.savedSettings.port == old + 1 && h.settings == h.savedSettings, "kept shared change not served")
+        }
+        // ...and when neither write is confirmed the disk may disagree with the
+        // saved endpoint, so the gateway stays stopped and the launch says so.
+        do {
+            let h = host { $0.chatWindowOpen = true; $0.writeScript = ["fail", "fail"] }
+            let old = h.disk.port
+            h.settings.port = old + 1
+            let draft = h.settings
+            let error = await h.launch(.claude) ?? ""
+            check(error.contains("could not confirm which settings are saved") && error.contains("choose Start gateway"), "unconfirmed shared write: \(error)")
+            check(!h.gatewayUp && h.savedSettings.port == old && h.settings == draft, "unconfirmed shared write: \(h.events)")
         }
 
+        // A selection that needs a reload asks first; cancelling saves nothing.
         do {
-            // Gateway not running -> not a match -> restart_and_open (with
-            // restart alert, not a hard block, because no in-flight work is
-            // implied).
-            let plan = resolve(surface: "claude", gatewayRunning: false)
-            expectEqual(plan.action, .restartAndOpen, "restart_and_open/gateway_not_running")
-            expectEqual(plan.mustRestart, true, "restart_and_open/gateway_not_running/mustRestart")
-            expectEqual(plan.requiresUserConfirm, true, "restart_and_open/gateway_not_running/confirmation")
+            let h = host { $0.chatWindowOpen = true; $0.confirmAnswer = false }
+            let previous = h.savedSettings
+            h.settings.mappings["claude-opus-5"] = "kimi/k3"
+            let error = await h.launch(.claude) ?? ""
+            check(error.hasPrefix("Launch cancelled."), "cancelled restart: \(error)")
+            check(h.disk == previous && h.settings.mappings["claude-opus-5"] == "kimi/k3" && !h.stopped, "cancelled restart: \(h.events)")
+        }
+        // Work that starts while the alert is up is checked again before the
+        // restart, so it is never severed.
+        for (label, arrive) in [("request", { (h: ScriptedHost) in h.inFlight = 1 }), ("chat", { (h: ScriptedHost) in h.chatWorking = true })] {
+            let h = host()
+            h.onConfirm = { arrive(h) }
+            let previous = h.savedSettings
+            h.settings.mappings["claude-opus-5"] = "kimi/k3"
+            let error = await h.launch(.claude) ?? ""
+            let expected = label == "request" ? "The gateway has 1 request in flight." : "Chat is working."
+            check(error.hasPrefix(expected), "\(label) during confirmation: \(error)")
+            check(!h.stopped && h.disk == previous, "\(label) during confirmation: \(h.events)")
+        }
+        // A confirmed restart reloads the gateway and keeps the settings.
+        do {
+            let h = host()
+            h.settings.mappings["claude-opus-5"] = "kimi/k3"
+            let error = await h.launch(.claude)
+            check(error == nil, "confirmed restart: \(error ?? "")")
+            check(h.events == ["write", "prepare", "status", "confirm", "status", "stop", "start", "status"], "confirmed restart order: \(h.events)")
+            check(h.servingFingerprint == "fp:kimi/k3" && h.disk.mappings["claude-opus-5"] == "kimi/k3", "restart did not load the selection")
         }
 
-        // --- save_and_open ---------------------------------------------------------
-
+        // An app that quits while a sibling launch holds busy is not restored
+        // over it, and the gateway the launch is using stays up.
         do {
-            // claudeRouting change with Codex live -> save without disturbing
-            // the gateway. The gateway snapshot already matches.
-            let plan = resolve(surface: "claude", changeKind: .claudeRouting, liveCodex: true)
-            expectEqual(plan.action, .saveAndOpen, "save_and_open/claude_routing_with_codex_live")
-            expectEqual(plan.mustSave, true, "save_and_open/mustSave")
-            expectEqual(plan.mustRestart, false, "save_and_open/mustRestart")
-            expectNil(plan.blockReason, "save_and_open/blockReason")
+            let h = host()
+            var resume: CheckedContinuation<Void, Never>?
+            h.onPrepare = { await withCheckedContinuation { resume = $0 } }
+            h.busy = true  // launchClaude / launchCodex hold busy for the whole launch
+            let launch = Task { await h.launch(.codex) }
+            while resume == nil { await Task.yield() }
+            let finished = try await h.finishClosedSession(autoStop: true) { h.events.append("restore") }
+            check(!finished && !h.events.contains("restore") && h.gatewayUp, "auto-restore ran during a launch: \(h.events)")
+            resume?.resume()
+            let error = await launch.value
+            h.busy = false
+            check(error == nil && h.gatewayUp, "launch failed after deferred restore: \(error ?? "")")
+            var heldBusy = false
+            let restored = try await h.finishClosedSession(autoStop: false) { heldBusy = h.busy }
+            check(restored && heldBusy && !h.busy, "auto-restore did not hold busy for its duration")
         }
-
+        // Auto-stop re-reads the in-flight count and keeps a used gateway.
         do {
-            let plan = resolve(surface: "codex", changeKind: .codexOnly, liveClaude: true)
-            expectEqual(plan.action, .saveAndOpen, "save_and_open/codex_only_with_claude_live")
+            let h = host { $0.inFlight = 1; $0.activeRequests = 0 }
+            _ = try await h.finishClosedSession(autoStop: true) {}
+            check(h.gatewayUp && !h.severed, "auto-stop severed a request the poll had not seen: \(h.events)")
+            h.inFlight = 0
+            _ = try await h.finishClosedSession(autoStop: true) {}
+            check(!h.gatewayUp, "idle unused gateway was not stopped: \(h.events)")
+            let chat = host { $0.chatWindowOpen = true }
+            await chat.stopGatewayIfUnused()
+            check(chat.gatewayUp, "auto-stop stopped the gateway under an open Chat")
         }
-
-        do {
-            let plan = resolve(changeKind: .prefs)
-            expectEqual(plan.action, .saveAndOpen, "save_and_open/prefs_only")
-        }
-
-        do {
-            let plan = resolve(changeKind: .mixed)
-            expectEqual(plan.action, .saveAndOpen, "save_and_open/mixed_no_harness_live")
-        }
-
-        // --- restart_and_open ------------------------------------------------------
-
-        do {
-            let plan = resolve(gatewayFingerprint: "fp-OLD", preparedFingerprint: "fp-NEW")
-            expectEqual(plan.action, .restartAndOpen, "restart_and_open/fingerprint_mismatch")
-            expectEqual(plan.mustRestart, true, "restart_and_open/mustRestart")
-            expectEqual(plan.requiresUserConfirm, true, "restart_and_open/confirmation")
-            expectEqual(plan.mustSave, false, "restart_and_open/unchanged_mustSave")
-        }
-
-        do {
-            let plan = resolve(
-                gatewayFingerprint: "fp-OLD",
-                preparedFingerprint: "fp-NEW",
-                changeKind: .claudeRouting)
-            expectEqual(plan.action, .restartAndOpen, "restart_and_open/fingerprint_mismatch_with_settings")
-            expectEqual(plan.mustSave, true, "restart_and_open/mustSave")
-        }
-
-        do {
-            let plan = LaunchPlanResolver.resolve(
-                surface: "codex",
-                gatewayRunning: true,
-                gatewayFingerprint: nil,
-                gatewayDigest: "digest-OLD",
-                preparedFingerprint: nil,
-                preparedDigest: "digest-NEW",
-                chatWorking: false,
-                chatHasActiveWork: false,
-                chatWindowOpen: false,
-                activeRequests: 0,
-                changeKind: .unchanged,
-                liveClaude: false,
-                liveCodex: false)
-            expectEqual(plan.action, .restartAndOpen, "restart_and_open/codex_digest_mismatch")
-        }
-
-        // --- blocked by activeRequests --------------------------------------------
-        //
-        // Block messages must name "the gateway", never a specific harness,
-        // because ``/_bridge/status`` returns a global count.
-
-        do {
-            let plan = resolve(
-                surface: "claude",
-                gatewayFingerprint: "fp-OLD",
-                preparedFingerprint: "fp-NEW",
-                activeRequests: 2,
-                liveCodex: true)
-            expectEqual(plan.action, .blocked, "blocked/active_requests_2")
-            let reason = expectNonNil(plan.blockReason, "blocked/active_requests_2/reason")
-            if !reason.contains("The gateway has 2 requests in flight") {
-                fail("blocked/active_requests_2: reason did not name 'the gateway'. Got: \(reason)")
-            }
-            if reason.contains("Codex / ChatGPT has") {
-                fail("blocked/active_requests_2: reason attributed the count to Codex. Got: \(reason)")
-            }
-            if !reason.contains("Claude") {
-                fail("blocked/active_requests_2: reason did not name the launching surface. Got: \(reason)")
-            }
-        }
-
-        do {
-            let plan = LaunchPlanResolver.resolve(
-                surface: "codex",
-                gatewayRunning: true,
-                gatewayFingerprint: nil,
-                gatewayDigest: "digest-OLD",
-                preparedFingerprint: nil,
-                preparedDigest: "digest-NEW",
-                chatWorking: false,
-                chatHasActiveWork: false,
-                chatWindowOpen: false,
-                activeRequests: 1,
-                changeKind: .unchanged,
-                liveClaude: true,
-                liveCodex: false)
-            expectEqual(plan.action, .blocked, "blocked/codex_active_request_1")
-            let reason = expectNonNil(plan.blockReason, "blocked/codex_active_request_1/reason")
-            if !reason.contains("The gateway has 1 request in flight") {
-                fail("blocked/codex_active_request_1: expected singular 'request' phrasing. Got: \(reason)")
-            }
-            if reason.contains("Claude has") {
-                fail("blocked/codex_active_request_1: reason attributed the count to Claude. Got: \(reason)")
-            }
-        }
-
-        do {
-            // activeRequests blocks even when Chat is idle.
-            let plan = resolve(
-                gatewayFingerprint: "fp-OLD",
-                preparedFingerprint: "fp-NEW",
-                activeRequests: 1)
-            expectEqual(plan.action, .blocked, "blocked/active_requests_chat_idle")
-        }
-
-        // --- blocked by chat work --------------------------------------------------
-
-        do {
-            let plan = resolve(
-                gatewayFingerprint: "fp-OLD",
-                preparedFingerprint: "fp-NEW",
-                chatWorking: true)
-            expectEqual(plan.action, .blocked, "blocked/chat_working")
-            let reason = expectNonNil(plan.blockReason, "blocked/chat_working/reason")
-            if !reason.hasPrefix("Chat is working.") {
-                fail("blocked/chat_working: reason did not start with 'Chat is working.'. Got: \(reason)")
-            }
-        }
-
-        do {
-            let plan = resolve(
-                gatewayFingerprint: "fp-OLD",
-                preparedFingerprint: "fp-NEW",
-                chatHasActiveWork: true)
-            expectEqual(plan.action, .blocked, "blocked/chat_has_active_work")
-        }
-
-        do {
-            // activeRequests outranks chat in the named holder.
-            let plan = resolve(
-                gatewayFingerprint: "fp-OLD",
-                preparedFingerprint: "fp-NEW",
-                chatWorking: true,
-                activeRequests: 3)
-            let reason = expectNonNil(plan.blockReason, "blocked/outrank_precedence/reason")
-            if !reason.contains("3 requests") {
-                fail("blocked/outrank_precedence: reason did not lead with request count. Got: \(reason)")
-            }
-        }
-
-        // --- blocked by change policy (live-app profile safety) --------------------
-
-        do {
-            let plan = resolve(surface: "codex", changeKind: .codexOnly, liveCodex: true)
-            expectEqual(plan.action, .blocked, "blocked/codex_only_while_codex_live")
-            let reason = expectNonNil(plan.blockReason, "blocked/codex_only_while_codex_live/reason")
-            if !reason.contains("Quit Codex / ChatGPT") {
-                fail("blocked/codex_only_while_codex_live: reason did not name Codex / ChatGPT. Got: \(reason)")
-            }
-        }
-
-        do {
-            let plan = resolve(surface: "claude", changeKind: .claudeRouting, liveClaude: true)
-            expectEqual(plan.action, .blocked, "blocked/claude_routing_while_claude_live")
-        }
-
-        do {
-            let plan = resolve(changeKind: .mixed, liveClaude: true)
-            expectEqual(plan.action, .blocked, "blocked/mixed_while_claude_live")
-        }
-
-        do {
-            let plan = resolve(changeKind: .mixed)
-            expectEqual(plan.action, .saveAndOpen, "save_and_open/mixed_with_no_harness_live")
-        }
-
-        do {
-            let plan = resolve(changeKind: .prefs, liveClaude: true, liveCodex: true)
-            expectEqual(plan.action, .saveAndOpen, "save_and_open/prefs_with_any_harness_live")
-        }
-
-        // --- chat activity is NOT a block when snapshot matches -------------------
-
-        do {
-            // The user's primary complaint: a working Chat must not block a
-            // launch whose gateway snapshot already matches what the new
-            // surface needs.
-            let plan = resolve(chatWorking: true)
-            expectEqual(plan.action, .openDirectly, "open_directly/chat_working_with_match")
-            expectNil(plan.blockReason, "open_directly/chat_working_with_match/reason")
-        }
-
-        do {
-            let plan = resolve(activeRequests: 2)
-            expectEqual(plan.action, .openDirectly, "open_directly/active_requests_with_match")
-        }
-
-        do {
-            let plan = resolve(chatWorking: true, activeRequests: 1, liveCodex: true)
-            expectEqual(plan.action, .openDirectly, "open_directly/everything_live_but_match")
-        }
-
-        do {
-            let plan = resolve(chatWindowOpen: true)
-            expectEqual(plan.action, .openDirectly, "open_directly/chat_window_idle")
-        }
-
-        // --- surface switch (cross-surface launches) -------------------------------
-
-        do {
-            let plan = resolve(surface: "claude", liveCodex: true)
-            expectEqual(plan.action, .openDirectly, "open_directly/launching_claude_while_codex_live")
-        }
-
-        do {
-            let plan = LaunchPlanResolver.resolve(
-                surface: "codex",
-                gatewayRunning: true,
-                gatewayFingerprint: nil,
-                gatewayDigest: "digest-A",
-                preparedFingerprint: nil,
-                preparedDigest: "digest-A",
-                chatWorking: false,
-                chatHasActiveWork: false,
-                chatWindowOpen: false,
-                activeRequests: 0,
-                changeKind: .unchanged,
-                liveClaude: true,
-                liveCodex: false)
-            expectEqual(plan.action, .openDirectly, "open_directly/launching_codex_while_claude_live")
-        }
-
-        do {
-            let plan = resolve(
-                surface: "claude",
-                gatewayFingerprint: "fp-OLD",
-                preparedFingerprint: "fp-NEW",
-                activeRequests: 0,
-                liveCodex: true)
-            expectEqual(plan.action, .restartAndOpen, "restart_and_open/launching_claude_with_codex_and_mismatch")
-        }
-
-        // --- surface validation ----------------------------------------------------
-        //
-        // Unknown surfaces are allowed to fall through; production policy
-        // documents the assumption in the comment on resolveLaunchPlan.
-
-        do {
-            let plan = LaunchPlanResolver.resolve(
-                surface: "gemini",
-                gatewayRunning: true,
-                gatewayFingerprint: "fp-A",
-                gatewayDigest: nil,
-                preparedFingerprint: "fp-A",
-                preparedDigest: nil,
-                chatWorking: false,
-                chatHasActiveWork: false,
-                chatWindowOpen: false,
-                activeRequests: 0,
-                changeKind: .unchanged,
-                liveClaude: false,
-                liveCodex: false)
-            expectEqual(plan.action, .openDirectly, "open_directly/unknown_surface_falls_through")
-        }
-
-        // --- snapshotsMatch --------------------------------------------------------
-
-        do {
-            expectEqual(
-                LaunchPlanResolver.snapshotsMatch(
-                    surface: "claude",
-                    gatewayRunning: false,
-                    gatewayFingerprint: "fp-A",
-                    gatewayDigest: nil,
-                    preparedFingerprint: "fp-A",
-                    preparedDigest: nil),
-                false,
-                "snapshots_match/gateway_not_running")
-            expectEqual(
-                LaunchPlanResolver.snapshotsMatch(
-                    surface: "claude",
-                    gatewayRunning: true,
-                    gatewayFingerprint: "fp-A",
-                    gatewayDigest: nil,
-                    preparedFingerprint: nil,
-                    preparedDigest: nil),
-                true,
-                "snapshots_match/no_prepared_fingerprint")
-            expectEqual(
-                LaunchPlanResolver.snapshotsMatch(
-                    surface: "codex",
-                    gatewayRunning: true,
-                    gatewayFingerprint: nil,
-                    gatewayDigest: "digest-A",
-                    preparedFingerprint: nil,
-                    preparedDigest: "digest-NEW"),
-                false,
-                "snapshots_match/codex_digest_mismatch")
-        }
-
-        // --- mayStopGateway --------------------------------------------------------
-
-        do {
-            expectEqual(
-                LaunchPlanResolver.mayStop(
-                    liveClaude: false, liveCodex: false,
-                    chatWorking: false, chatHasActiveWork: false,
-                    chatWindowOpen: false, activeRequests: 0),
-                true, "may_stop/idle")
-            expectEqual(
-                LaunchPlanResolver.mayStop(
-                    liveClaude: false, liveCodex: false,
-                    chatWorking: true, chatHasActiveWork: false,
-                    chatWindowOpen: false, activeRequests: 0),
-                false, "may_stop/chat_working")
-            expectEqual(
-                LaunchPlanResolver.mayStop(
-                    liveClaude: false, liveCodex: false,
-                    chatWorking: false, chatHasActiveWork: true,
-                    chatWindowOpen: false, activeRequests: 0),
-                false, "may_stop/chat_has_active_work")
-            expectEqual(
-                LaunchPlanResolver.mayStop(
-                    liveClaude: false, liveCodex: false,
-                    chatWorking: false, chatHasActiveWork: false,
-                    chatWindowOpen: true, activeRequests: 0),
-                false, "may_stop/chat_window_open")
-            expectEqual(
-                LaunchPlanResolver.mayStop(
-                    liveClaude: true, liveCodex: false,
-                    chatWorking: false, chatHasActiveWork: false,
-                    chatWindowOpen: false, activeRequests: 0),
-                false, "may_stop/live_claude")
-            expectEqual(
-                LaunchPlanResolver.mayStop(
-                    liveClaude: false, liveCodex: true,
-                    chatWorking: false, chatHasActiveWork: false,
-                    chatWindowOpen: false, activeRequests: 0),
-                false, "may_stop/live_codex")
-            expectEqual(
-                LaunchPlanResolver.mayStop(
-                    liveClaude: false, liveCodex: false,
-                    chatWorking: false, chatHasActiveWork: false,
-                    chatWindowOpen: false, activeRequests: 1),
-                false, "may_stop/active_requests")
-        }
-
-        // --- launchPlan equality & raw values --------------------------------------
-
-        do {
-            let a = LaunchPlan(
-                action: .openDirectly, blockReason: nil, requiresUserConfirm: false,
-                mustRestart: false, mustSave: false, otherHarness: "Claude", surface: "claude")
-            let b = LaunchPlan(
-                action: .openDirectly, blockReason: nil, requiresUserConfirm: false,
-                mustRestart: false, mustSave: false, otherHarness: "Claude", surface: "claude")
-            expectEqual(a, b, "launch_plan/equatable")
-            expectEqual(a.action.rawValue, "open_directly", "launch_plan/raw_value")
-            expectEqual(ChangeKind.codexOnly.rawValue, "codexOnly", "change_kind/raw_value")
-        }
-
-        FileHandle.standardError.write(Data("PASS\n".utf8))
-        exit(0)
+        print("ok")
     }
 }
 '''
 
 
-@unittest.skipUnless(sys.platform == "darwin" and shutil.which("xcrun"),
-                     "Swift launch-plan harness needs macOS + xcrun")
-class LaunchPlanSwiftTests(unittest.TestCase):
-    def test_resolver_exercises_production_swift(self):
-        """Compile the Swift test program against the production
-        ``Source/LaunchPlan.swift`` module, run it, and require exit 0.
-        The Swift program asserts every cell of the 3x3 surface x
-        intent table, the named-block-message policy (no per-harness
-        attribution of the gateway's active count), the
-        ``mayStopGateway`` predicate, and the ``snapshotsMatch``
-        dimension logic. If this test passes, the resolver on disk
-        is byte-for-byte the policy under test.
-        """
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
-            swift_path = tmp_path / "launch_plan_tests.swift"
-            swift_path.write_text(SWIFT_PROGRAM)
-            binary_path = tmp_path / "launch_plan_tests"
-            proc = subprocess.run(
-                [
-                    "xcrun", "swiftc",
-                    "-swift-version", "5",
-                    "-O",
-                    str(PRODUCTION_MODULE),
-                    str(swift_path),
-                    "-o", str(binary_path),
-                ],
-                capture_output=True, text=True, timeout=120,
-            )
-            if proc.returncode != 0:
-                self.fail(
-                    "Swift compile failed:\n"
-                    f"stdout:\n{proc.stdout}\n"
-                    f"stderr:\n{proc.stderr}"
-                )
-            run = subprocess.run([str(binary_path)],
-                                 capture_output=True, text=True, timeout=30)
-            self.assertEqual(
-                run.returncode, 0,
-                "Swift launch-plan harness failed.\n"
-                f"stdout:\n{run.stdout}\n"
-                f"stderr:\n{run.stderr}",
-            )
-            self.assertEqual(run.stderr.strip(), "PASS",
-                             f"unexpected stderr: {run.stderr!r}")
+@unittest.skipUnless(sys.platform == "darwin" and shutil.which("xcrun"), "Swift launch orchestration test needs macOS")
+class LaunchOrchestrationTests(unittest.TestCase):
+    def test_production_launch_orchestration(self):
+        bridge = (SOURCE / "MistralBridge.swift").read_text()
+        slots = bridge[bridge.index("let slots:"):bridge.index("/// Family tier")]
+        with tempfile.TemporaryDirectory(prefix="hub-launch-plan-") as tmp:
+            root = Path(tmp)
+            (root / "Slots.swift").write_text("import Foundation\n" + slots)
+            (root / "Cases.swift").write_text(CASES)
+            executable = root / "cases"
+            build = subprocess.run([
+                "xcrun", "swiftc", "-swift-version", "5", "-parse-as-library",
+                "-module-cache-path", str(root / "ModuleCache"),
+                str(SOURCE / "CatalogueSelection.swift"), str(SOURCE / "HubModels.swift"),
+                str(SOURCE / "LaunchPlan.swift"), str(root / "Slots.swift"), str(root / "Cases.swift"),
+                "-o", str(executable),
+            ], capture_output=True, text=True, timeout=240)
+            self.assertEqual(build.returncode, 0, build.stderr)
+            result = subprocess.run([str(executable)], capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "ok")
 
 
 if __name__ == "__main__":

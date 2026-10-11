@@ -1,328 +1,273 @@
-// LaunchPlan — the Hub's launch-decision policy, isolated so the Swift
-// test harness can exercise the actual production code (no Python
-// mirror, no parallel policy). The resolver is pure: it takes the
-// state the orchestrator already knows and returns one of four
-// actions the orchestrator then executes.
+// The Hub's launch orchestration for the shared gateway: which pending
+// settings may be written while peers are served, when the gateway must be
+// restarted, and when an idle gateway may stop. Claude Desktop, Codex /
+// ChatGPT Desktop and Chat share one gateway, so a launch must not refuse
+// an adjacent app merely because a peer is busy, must never restart or
+// stop the gateway under in-flight work, and must never rewrite a live
+// app's profile.
 //
-// The four actions:
-//
-//   open_directly       — gateway snapshot already matches the prepared
-//                         plan. Activate the app's profile and open it;
-//                         no save, no restart, no chat block. The
-//                         "open directly" verb is the relaxed-launch win.
-//
-//   save_and_open       — settings need persisting but the gateway
-//                         snapshot already matches. Save without
-//                         disturbing the gateway and open.
-//
-//   restart_and_open    — gateway snapshot does not match. The
-//                         orchestrator offers a restart alert (no
-//                         in-flight work) or blocks with a named
-//                         reason.
-//
-//   blocked             — launch cannot proceed; ``blockReason`` names
-//                         what is in the way.
-//
-// Two named-block-message rules the resolver enforces:
-//
-//   * The gateway's ``active`` count is global, not per-harness. The
-//     block reason names "the gateway", never "Codex / ChatGPT" or
-//     "Claude", unless the orchestrator passes an attributed count.
-//     Attribution is not measured by ``/_bridge/status``; the message
-//     would be wrong during a brief restart transition when both
-//     harnesses share the gateway.
-//
-//   * "Chat is working" is the only chat-attributed block. The
-//     orchestrator passes ``chatWorking`` and ``chatHasActiveWork``
-//     separately so the resolver can name which signal tripped.
+// This file holds the production code paths themselves. BridgeModel conforms
+// to LaunchHost and supplies the AppKit/worker primitives; test_launch_plan.py
+// compiles this file against a scripted host and drives the same methods.
 
 import Foundation
 
-/// The settings-change categories the Settings UI and the resolver
-/// share. Top-level so LaunchPlan.swift (a pure module) can take it
-/// as a parameter; the ``BridgeModel`` side computes the value and
-/// passes it through. Raw values are stable for JSON / IPC and for
-/// the Python ``launch_plan`` mirror's string constants, should a
-/// worker-side entry point ever be added.
-public enum ChangeKind: String, Equatable {
-    case unchanged = "unchanged"
-    case prefs = "prefs"
-    case codexOnly = "codexOnly"
-    case claudeRouting = "claudeRouting"
-    case mixed = "mixed"
+/// The category of a pending settings change, which decides who must be idle
+/// before it is written.
+enum ChangeKind: String, Equatable {
+    case unchanged
+    /// Read live or at the next activation; never needs a gateway restart.
+    case prefs
+    /// Only Codex / ChatGPT's selection or desktop preferences.
+    case codexOnly
+    /// Claude's model selection (mappings, catalogue, branding).
+    case claudeRouting
+    /// Both selections.
+    case mixed
+    /// The port or a provider connection. The running gateway listens on the
+    /// saved port, Chat reads connections live, and both desktop snapshots
+    /// sign every connection, so these are written only to a stopped gateway.
+    case shared
 }
 
-/// The four actions the orchestrator dispatches on. Kept as a
-/// String-rawvalue enum so the values double as IPC payloads if the
-/// Swift orchestrator ever asks the worker for a plan.
-public enum LaunchAction: String, Equatable {
-    case openDirectly = "open_directly"
-    case saveAndOpen = "save_and_open"
-    case restartAndOpen = "restart_and_open"
-    case blocked = "blocked"
-}
-
-/// The Hub's decision for one launch attempt. ``otherHarness`` and
-/// ``surface`` are display strings the orchestrator may surface in
-/// UI copy; the policy itself lives in ``action`` and ``blockReason``.
-public struct LaunchPlan: Equatable {
-    public var action: LaunchAction
-    public var blockReason: String?
-    public var requiresUserConfirm: Bool = false
-    public var mustRestart: Bool = false
-    public var mustSave: Bool = false
-    /// The other harness's display name, used in alert copy.
-    public var otherHarness: String
-    /// The surface being launched ("claude" or "codex").
-    public var surface: String
-
-    public init(action: LaunchAction,
-                blockReason: String? = nil,
-                requiresUserConfirm: Bool = false,
-                mustRestart: Bool = false,
-                mustSave: Bool = false,
-                otherHarness: String,
-                surface: String) {
-        self.action = action
-        self.blockReason = blockReason
-        self.requiresUserConfirm = requiresUserConfirm
-        self.mustRestart = mustRestart
-        self.mustSave = mustSave
-        self.otherHarness = otherHarness
-        self.surface = surface
+func classifyChange(_ settings: RouteSettings, from saved: RouteSettings) -> ChangeKind {
+    if settings == saved { return .unchanged }
+    // The gateway re-reads the active CLI account on every turn, so adding,
+    // renaming or switching accounts is a preference, not a connection.
+    var connections = settings.providers
+    for id in connections.keys {
+        connections[id]?.cli_accounts = saved.providers[id]?.cli_accounts
+        connections[id]?.cli_account = saved.providers[id]?.cli_account
     }
+    if settings.port != saved.port || connections != saved.providers { return .shared }
+    var mine = settings
+    mine.codex_model = saved.codex_model
+    mine.codex_catalogue = saved.codex_catalogue
+    mine.codex_chatgpt_account = saved.codex_chatgpt_account
+    mine.codex_apply_patch_all = saved.codex_apply_patch_all
+    mine.codex_apply_patch = saved.codex_apply_patch
+    mine.codex_apply_patch_exclude = saved.codex_apply_patch_exclude
+    mine.codex_accent_slider = saved.codex_accent_slider
+    mine.codex_quick_composer = saved.codex_quick_composer
+    mine.codex_quick_composer_window = saved.codex_quick_composer_window
+    mine.codex_hide_usage_banner = saved.codex_hide_usage_banner
+    mine.codex_unlock_composer = saved.codex_unlock_composer
+    mine.codex_goal_budget = saved.codex_goal_budget
+    mine.codex_subagent_rank = saved.codex_subagent_rank
+    mine.codex_subagent_route = saved.codex_subagent_route
+    let codexChanged = mine != settings
+    var prefsOnly = mine
+    prefsOnly.providers = saved.providers  // only CLI accounts can differ here
+    prefsOnly.auto_stop = saved.auto_stop
+    prefsOnly.auto_mode = saved.auto_mode
+    prefsOnly.claude_features = saved.claude_features
+    prefsOnly.claude_code_settings = saved.claude_code_settings
+    prefsOnly.claude_workflows = saved.claude_workflows
+    if prefsOnly == saved { return codexChanged ? .codexOnly : .prefs }
+    return codexChanged ? .mixed : .claudeRouting
 }
 
-/// Pure resolver; the orchestrator's only entry point.
-///
-/// - Parameters:
-///   - surface: "claude" or "codex".
-///   - gatewayRunning: whether the gateway process is currently up.
-///   - gatewayFingerprint / gatewayDigest: the live gateway's
-///     ``/_bridge/status`` snapshot values, or ``nil`` when the
-///     gateway is not running.
-///   - preparedFingerprint / preparedDigest: the values returned by
-///     ``prepare-launch`` / ``codex-prepare``; ``nil`` means "do not
-///     compare this dimension".
-///   - chatWorking / chatHasActiveWork: the two ChatModel signals.
-///     The orchestrator passes them separately so the block reason can
-///     name whichever is hot.
-///   - chatWindowOpen: true when the Chat window is on screen; the
-///     may-stop-gateway predicate folds it in.
-///   - activeRequests: the gateway's global active count.
-///   - changeKind: the same enum the Settings UI surfaces
-///     (.unchanged / .prefs / .codexOnly / .claudeRouting / .mixed).
-///   - liveClaude: Claude is the live harness on this gateway
-///     (running AND on the Hub-owned 3P profile).
-///   - liveCodex: Codex / ChatGPT is the live harness (running AND
-///     recovery-pending — the marker that the worker activated Codex's
-///     profile for this gateway).
-public func resolveLaunchPlan(
-    surface: String,
-    gatewayRunning: Bool,
-    gatewayFingerprint: String?,
-    gatewayDigest: String?,
-    preparedFingerprint: String?,
-    preparedDigest: String?,
-    chatWorking: Bool,
-    chatHasActiveWork: Bool,
-    chatWindowOpen: Bool,
-    activeRequests: Int,
-    changeKind: ChangeKind,
-    liveClaude: Bool,
-    liveCodex: Bool
-) -> LaunchPlan {
-    let otherHarness = surface == "claude" ? "Codex / ChatGPT" : "Claude"
-    let surfaceLabel = surface == "claude" ? "Claude" : "Codex"
-    let chatBusy = chatWorking || chatHasActiveWork
+enum LaunchSurface {
+    case claude, codex
 
-    // 1. Live-harness-vs-change refusal. Hard block: a live app's
-    // profile is never rewritten from under it (AGENTS.md: "never
-    // rewrite a live app's profile under it"). The names in the block
-    // reasons quote the harness directly, which is safe because the
-    // change-vs-live test is per-harness.
-    if changeKind != .unchanged {
-        switch changeKind {
-        case .codexOnly where liveCodex:
-            return LaunchPlan(action: .blocked,
-                             blockReason: "Quit Codex / ChatGPT before changing its model catalogue or default.",
-                             otherHarness: otherHarness, surface: surface)
-        case .claudeRouting where liveClaude:
-            return LaunchPlan(action: .blocked,
-                             blockReason: "Quit Claude before changing its provider settings.",
-                             otherHarness: otherHarness, surface: surface)
-        case .mixed where liveClaude || liveCodex:
-            return LaunchPlan(action: .blocked,
-                             blockReason: "Quit the desktop sessions using this gateway before changing provider settings.",
-                             otherHarness: otherHarness, surface: surface)
+    var label: String { self == .claude ? "Claude" : "Codex / ChatGPT" }
+    var otherLabel: String { self == .claude ? "Codex / ChatGPT" : "Claude" }
+    /// The prepare command's result key for the snapshot this surface needs,
+    /// and the gateway's own value for it.
+    var preparedKey: String { self == .claude ? "catalogue_fingerprint" : "catalogue_digest" }
+    func serving(_ status: GatewayStatus) -> String? { self == .claude ? status.fingerprint : status.digest }
+}
+
+/// The parts of `/_bridge/status` the launch flow reads. `active` is the
+/// gateway's global in-flight count; it is not attributed to any one app.
+struct GatewayStatus {
+    var active: Int?
+    var fingerprint: String?
+    var digest: String?
+}
+
+struct LaunchRefusal: LocalizedError {
+    let message: String
+    var errorDescription: String? { message }
+}
+
+@MainActor
+protocol LaunchHost: AnyObject {
+    var busy: Bool { get set }
+    var running: Bool { get }
+    var activeRequests: Int { get set }
+    var settings: RouteSettings { get set }
+    var savedSettings: RouteSettings { get set }
+    var chatWindowOpen: Bool { get }
+    var chatWorking: Bool { get }
+    var chatHasActiveWork: Bool { get }
+    /// Running on the profile the Hub activated for this gateway.
+    var claudeLive: Bool { get }
+    var codexLive: Bool { get }
+    func refreshDesktopState()
+    func waitForCatalogueRefresh() async
+    /// Persist `settings` and make it the saved state.
+    func writeSettings() async throws
+    /// nil when the gateway answered but not with a readable status.
+    func gatewayStatus() async throws -> GatewayStatus?
+    func startGateway() async throws
+    func stopGateway() async
+    func confirmGatewayRestart(peersConnected: Bool, otherHarness: String) -> Bool
+}
+
+extension LaunchHost {
+    var changeKind: ChangeKind { classifyChange(settings, from: savedSettings) }
+    var chatBusy: Bool { chatWorking || chatHasActiveWork }
+
+    /// No surface is keeping the gateway alive and nothing is in flight.
+    func mayStopGateway() -> Bool {
+        !(claudeLive || codexLive || chatWindowOpen || chatBusy) && activeRequests == 0
+    }
+
+    /// A refusal naming what keeps the gateway from reloading, or nil.
+    func reloadBlocker(_ goal: String) -> String? {
+        if activeRequests > 0 {
+            let noun = activeRequests == 1 ? "request" : "requests"
+            return "The gateway has \(activeRequests) \(noun) in flight. Wait for \(activeRequests == 1 ? "it" : "them") to finish, then launch again so the gateway can load \(goal)."
+        }
+        if chatBusy { return "Chat is working. Stop the Chat turn, then launch again so the gateway can load \(goal)." }
+        return nil
+    }
+
+    /// Re-read the gateway's in-flight count rather than trusting the poll.
+    func refreshActiveRequests() async throws {
+        guard let active = try await gatewayStatus()?.active else {
+            throw LaunchRefusal(message: "Could not verify that the gateway is idle.")
+        }
+        activeRequests = active
+    }
+
+    /// A live app's profile is never rewritten from under it.
+    func liveProfileRefusal(_ kind: ChangeKind) -> String? {
+        switch kind {
+        case .codexOnly where codexLive:
+            return "Quit Codex / ChatGPT before changing its model catalogue or default."
+        case .claudeRouting where claudeLive:
+            return "Quit Claude before changing its model or provider settings."
+        case .mixed where claudeLive || codexLive:
+            return "Quit the desktop sessions using this gateway before changing both apps' model settings."
+        case .shared where claudeLive || codexLive:
+            return "Quit the desktop sessions using this gateway before changing its port or provider connections."
         default:
-            break
+            return nil
         }
     }
 
-    // 2. Snapshot comparison. If the gateway already carries what this
-    //    launch needs, no save is needed unless settings changed, and
-    //    no restart is ever needed.
-    let mustSave = changeKind != .unchanged
-    let matches = snapshotsMatchFn(
-        surface: surface,
-        gatewayRunning: gatewayRunning,
-        gatewayFingerprint: gatewayFingerprint,
-        gatewayDigest: gatewayDigest,
-        preparedFingerprint: preparedFingerprint,
-        preparedDigest: preparedDigest)
-    if matches {
-        return LaunchPlan(action: mustSave ? .saveAndOpen : .openDirectly,
-                         mustRestart: false, mustSave: mustSave,
-                         otherHarness: otherHarness, surface: surface)
+    /// Save pending settings, prepare `surface`, and leave the gateway serving
+    /// the prepared snapshot. Peers keep being served unless a reload is
+    /// needed and confirmed while nothing is in flight. When the launch fails
+    /// before the gateway reloads, the saved settings are rolled back and the
+    /// edits stay pending, so a refused or cancelled launch changes nothing.
+    func prepareGatewayForLaunch(_ surface: LaunchSurface,
+                                 prepare: () async throws -> [String: Any]) async throws -> [String: Any] {
+        await waitForCatalogueRefresh()
+        refreshDesktopState()
+        let kind = changeKind
+        if let refusal = liveProfileRefusal(kind) { throw LaunchRefusal(message: refusal) }
+        let previous = savedSettings, draft = settings
+        var writing = false, wrote = false, reloaded = false, stoppedForShared = false
+        do {
+            if kind == .shared && running {
+                // The saved port is the Hub's endpoint, so it may only change
+                // once the old server is gone.
+                try await refreshActiveRequests()
+                if let blocker = reloadBlocker("the new provider settings") { throw LaunchRefusal(message: blocker) }
+                await stopGateway()
+                stoppedForShared = true
+            }
+            // Selection changes are safe to write while peers are served: the
+            // running gateway serves the snapshot it loaded at startup, and
+            // the live app (refused above) is never the one being changed.
+            if kind != .unchanged { writing = true; try await writeSettings(); wrote = true }
+            let prepared = try await prepare()
+            if !running { try await startGateway(); reloaded = true }
+            try await ensureGatewaySnapshot(surface, expected: prepared[surface.preparedKey] as? String, reloaded: &reloaded)
+            return prepared
+        } catch {
+            guard !reloaded else { throw error }
+            // Put back what was saved before this launch. A write that threw
+            // may still have reached the disk, so roll back after any attempt.
+            var reverted = true, keptNew = false
+            if writing {
+                let pending = settings
+                settings = previous
+                do { try await writeSettings(); settings = draft }
+                catch _ { settings = pending; reverted = false; keptNew = wrote }
+            }
+            // A shared change stopped the old gateway before writing. Bring a
+            // gateway back for the peers on whatever is saved now, unless the
+            // disk may disagree with the Hub's saved endpoint.
+            var gatewayDown = false
+            if stoppedForShared && !running {
+                if reverted || keptNew { _ = try? await startGateway() }
+                gatewayDown = !running
+            }
+            var message = error.localizedDescription
+            if keptNew {
+                message += stoppedForShared && running ? " The new settings stay saved, and the gateway has loaded them."
+                                                       : " The new settings stay saved but are not loaded yet."
+            } else if !reverted {
+                message += " Provider Hub could not confirm which settings are saved."
+            } else if writing {
+                message += " Your settings changes were not saved; they are still pending."
+            }
+            if gatewayDown { message += " The gateway is stopped; choose Start gateway to start it again." }
+            if message == error.localizedDescription { throw error }
+            throw LaunchRefusal(message: message)
+        }
     }
 
-    // 3. Snapshot mismatch — a gateway restart is needed. Name the
-    //    holders rather than refusing generically. The gateway's
-    //    ``active`` count is GLOBAL — a request in flight could be
-    //    either harness's during a brief restart transition — so the
-    //    block reason names "the gateway", not a specific harness.
-    if activeRequests > 0 {
-        let noun = activeRequests == 1 ? "request" : "requests"
-        return LaunchPlan(
-            action: .blocked,
-            blockReason: "The gateway has \(activeRequests) \(noun) in flight. Wait for them to finish, then launch again so the gateway can load \(surfaceLabel)'s selection.",
-            mustRestart: true, mustSave: mustSave,
-            otherHarness: otherHarness, surface: surface)
-    }
-    if chatBusy {
-        return LaunchPlan(
-            action: .blocked,
-            blockReason: "Chat is working. Stop the Chat turn, then launch again so the gateway can load \(surfaceLabel)'s selection.",
-            mustRestart: true, mustSave: mustSave,
-            otherHarness: otherHarness, surface: surface)
-    }
-
-    // 4. No in-flight work; surface the existing restart alert.
-    return LaunchPlan(action: .restartAndOpen,
-                      requiresUserConfirm: true,
-                      mustRestart: true, mustSave: mustSave,
-                      otherHarness: otherHarness, surface: surface)
-}
-
-/// Static accessors so call sites outside this file can use the
-/// resolver without depending on module-level functions. ``BridgeModel``
-/// forwards its state through ``resolve(...)`` and ``mayStop(...)``;
-/// Swift test harnesses import the same module and call the same
-/// static functions, so the policy under test is the production
-/// policy byte-for-byte.
-public enum LaunchPlanResolver {
-    /// See ``resolveLaunchPlan(_:gatewayRunning:gatewayFingerprint:
-    /// gatewayDigest:preparedFingerprint:preparedDigest:chatWorking:
-    /// chatHasActiveWork:chatWindowOpen:activeRequests:changeKind:
-    /// liveClaude:liveCodex:)`` for parameter documentation.
-    public static func resolve(
-        surface: String,
-        gatewayRunning: Bool,
-        gatewayFingerprint: String?,
-        gatewayDigest: String?,
-        preparedFingerprint: String?,
-        preparedDigest: String?,
-        chatWorking: Bool,
-        chatHasActiveWork: Bool,
-        chatWindowOpen: Bool,
-        activeRequests: Int,
-        changeKind: ChangeKind,
-        liveClaude: Bool,
-        liveCodex: Bool
-    ) -> LaunchPlan {
-        return resolveLaunchPlan(
-            surface: surface,
-            gatewayRunning: gatewayRunning,
-            gatewayFingerprint: gatewayFingerprint,
-            gatewayDigest: gatewayDigest,
-            preparedFingerprint: preparedFingerprint,
-            preparedDigest: preparedDigest,
-            chatWorking: chatWorking,
-            chatHasActiveWork: chatHasActiveWork,
-            chatWindowOpen: chatWindowOpen,
-            activeRequests: activeRequests,
-            changeKind: changeKind,
-            liveClaude: liveClaude,
-            liveCodex: liveCodex)
+    /// Restart the running gateway only when it serves a different snapshot
+    /// than `expected`, nothing is in flight, and the user confirms. The
+    /// in-flight check is repeated after the confirmation, which is modal.
+    func ensureGatewaySnapshot(_ surface: LaunchSurface, expected: String?, reloaded: inout Bool) async throws {
+        guard running, let expected else { return }
+        let status = try await gatewayStatus()
+        if let active = status?.active { activeRequests = active }
+        if let status, surface.serving(status) == expected { return }
+        let goal = "\(surface.label)'s selection"
+        if let blocker = reloadBlocker(goal) { throw LaunchRefusal(message: blocker) }
+        let peers = claudeLive || codexLive || chatWindowOpen || chatBusy
+        guard confirmGatewayRestart(peersConnected: peers, otherHarness: surface.otherLabel) else {
+            throw LaunchRefusal(message: "Launch cancelled. The gateway keeps its earlier selection until it is restarted.")
+        }
+        try await refreshActiveRequests()
+        if let blocker = reloadBlocker(goal) { throw LaunchRefusal(message: blocker) }
+        await stopGateway()
+        try await startGateway()
+        reloaded = true
+        guard let restarted = try await gatewayStatus(), surface.serving(restarted) == expected else {
+            throw LaunchRefusal(message: "The restarted gateway did not load the prepared selection. Reconnect and try again.")
+        }
     }
 
-    /// See ``mayStopGateway(liveClaude:liveCodex:chatWorking:
-    /// chatHasActiveWork:chatWindowOpen:activeRequests:)`` for parameter
-    /// documentation.
-    public static func mayStop(
-        liveClaude: Bool,
-        liveCodex: Bool,
-        chatWorking: Bool,
-        chatHasActiveWork: Bool,
-        chatWindowOpen: Bool,
-        activeRequests: Int
-    ) -> Bool {
-        return mayStopGateway(
-            liveClaude: liveClaude,
-            liveCodex: liveCodex,
-            chatWorking: chatWorking,
-            chatHasActiveWork: chatHasActiveWork,
-            chatWindowOpen: chatWindowOpen,
-            activeRequests: activeRequests)
+    /// Stop the gateway when nothing uses it, checking the live in-flight
+    /// count first. A gateway whose status cannot be read is left running.
+    func stopGatewayIfUnused() async {
+        // The poll's cached count may be stale either way, so read it live.
+        guard !(claudeLive || codexLive || chatWindowOpen || chatBusy) else { return }
+        if running {
+            guard let active = (try? await gatewayStatus())?.active else { return }
+            activeRequests = active
+        }
+        guard mayStopGateway() else { return }
+        await stopGateway()
     }
 
-    /// True when the live gateway already has the snapshot the launch
-    /// needs. ``nil`` on either side means "do not compare this
-    /// dimension". Exposed so test harnesses can exercise the
-    /// snapshot comparison directly.
-    public static func snapshotsMatch(
-        surface: String,
-        gatewayRunning: Bool,
-        gatewayFingerprint: String?,
-        gatewayDigest: String?,
-        preparedFingerprint: String?,
-        preparedDigest: String?
-    ) -> Bool {
-        return snapshotsMatchFn(
-            surface: surface,
-            gatewayRunning: gatewayRunning,
-            gatewayFingerprint: gatewayFingerprint,
-            gatewayDigest: gatewayDigest,
-            preparedFingerprint: preparedFingerprint,
-            preparedDigest: preparedDigest)
+    /// Restore a desktop app that quit on its own. Holds `busy` so a launch
+    /// cannot start while the restore and auto-stop run, and does nothing
+    /// while another Hub operation holds it.
+    @discardableResult
+    func finishClosedSession(autoStop: Bool, restore: () async throws -> Void) async throws -> Bool {
+        guard !busy else { return false }
+        busy = true; defer { busy = false }
+        try await restore()
+        if autoStop { await stopGatewayIfUnused() }
+        return true
     }
-}
-
-/// True when the live gateway already has the snapshot the launch needs.
-/// ``nil`` on either side means "do not compare this dimension".
-public func snapshotsMatchFn(
-    surface: String,
-    gatewayRunning: Bool,
-    gatewayFingerprint: String?,
-    gatewayDigest: String?,
-    preparedFingerprint: String?,
-    preparedDigest: String?
-) -> Bool {
-    guard gatewayRunning else { return false }
-    if surface == "claude" {
-        // Claude-side launch compares catalogue_fingerprint; codex-side
-        // digest is irrelevant here.
-        guard let expected = preparedFingerprint else { return true }
-        return gatewayFingerprint == expected
-    }
-    // surface == "codex"
-    guard let expected = preparedDigest else { return true }
-    return gatewayDigest == expected
-}
-
-/// True when no surface (desktop harness or chat) is keeping the
-/// gateway alive and no requests are in flight. The restore / auto-stop
-/// paths share this predicate so the policy lives in one place.
-public func mayStopGateway(
-    liveClaude: Bool,
-    liveCodex: Bool,
-    chatWorking: Bool,
-    chatHasActiveWork: Bool,
-    chatWindowOpen: Bool,
-    activeRequests: Int
-) -> Bool {
-    let chatBusy = chatWorking || chatHasActiveWork
-    let anyOwned = liveClaude || liveCodex || chatWindowOpen || chatBusy
-    return !anyOwned && activeRequests == 0
 }

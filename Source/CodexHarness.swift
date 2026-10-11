@@ -8,11 +8,11 @@ struct CodexModelOption: Decodable, Identifiable {
     var description: String
 }
 
-extension BridgeModel {
-    var desktopOwnedHarnessRunning: Bool {
-        (claudeRunning && profileActive) || (codexRunning && codexRecoveryNeeded)
-    }
-    var anyOwnedHarnessRunning: Bool { desktopOwnedHarnessRunning || chatWindowOpen || chatWorking }
+extension BridgeModel: LaunchHost {
+    var claudeLive: Bool { claudeRunning && profileActive }
+    var codexLive: Bool { codexRunning && codexRecoveryNeeded }
+    var desktopOwnedHarnessRunning: Bool { claudeLive || codexLive }
+    var anyOwnedHarnessRunning: Bool { desktopOwnedHarnessRunning || chatWindowOpen || chatBusy }
 
     func readCodexState(_ object: [String: Any]) {
         if let raw = object["codex_models"], let data = try? JSONSerialization.data(withJSONObject: raw),
@@ -58,16 +58,11 @@ extension BridgeModel {
                 codexRecoveryNeeded = false; codexProfileActive = false
             }
             tell("Preparing the Codex / ChatGPT model catalogue…")
-            await waitForCatalogueRefresh()
-            // ``saveForLaunch`` persists Codex-only edits without stopping
-            // the gateway and without blocking on Chat. The live-harness
-            // refusal (``codexLive`` while editing Codex) still applies —
-            // see ``resolveLaunchPlan`` for the named rules.
-            try await saveForLaunch()
-            let prepared = try await command("codex-prepare")
-            readCatalogue(prepared, modelsKey: "models")
-            try await startGateway()
-            try await ensureGatewaySnapshot(fingerprint: nil, digest: prepared["catalogue_digest"] as? String, otherHarness: "Claude")
+            let prepared = try await prepareGatewayForLaunch(.codex) {
+                let prepared = try await command("codex-prepare")
+                readCatalogue(prepared, modelsKey: "models")
+                return prepared
+            }
             updateCodexRunning()
             if codexRunning {
                 let alert = NSAlert()
@@ -76,7 +71,7 @@ extension BridgeModel {
                 alert.addButton(withTitle: "Cancel")
                 alert.addButton(withTitle: "Restart with Provider Hub")
                 guard alert.runModal() == .alertSecondButtonReturn else {
-                    if mayStopGateway() { await stopGateway() }
+                    await stopGatewayIfUnused()
                     tell("Codex / ChatGPT setup is ready. Launch it here when you are ready to restart.")
                     return
                 }
@@ -197,11 +192,7 @@ extension BridgeModel {
         do {
             let result = try await command("codex-restore")
             codexRecoveryNeeded = false; codexProfileActive = false; observedOwnedCodex = false
-            // ``mayStopGateway`` is the explicit predicate that honours
-            // ChatModel's ``hasActiveWork`` in addition to ``chatWorking``.
-            // Closing Codex while a Chat turn is in flight must NOT tear
-            // the gateway down underneath it.
-            if mayStopGateway() { await stopGateway() }
+            await stopGatewayIfUnused()
             let preserved = result["preserved_external_changes"] as? Int ?? 0
             tell(preserved > 0 ? "Codex / ChatGPT setup restored. Later configuration edits were preserved." : "The previous Codex / ChatGPT configuration was restored. Conversations remain saved.")
         } catch { tell(error.localizedDescription, error: true) }
@@ -213,13 +204,11 @@ extension BridgeModel {
         guard codexRecoveryNeeded && !codexRunning && (observedOwnedCodex || failedLaunch) && !busy && !finishingSession else { return }
         finishingSession = true; defer { finishingSession = false }
         do {
-            _ = try await command("codex-restore")
-            codexRecoveryNeeded = false; codexProfileActive = false; observedOwnedCodex = false
-            // See the matching comment in MistralBridge.swift's ``poll()``:
-            // ``mayStopGateway`` honours ChatModel's ``hasActiveWork`` so
-            // an in-flight Chat turn keeps the gateway alive.
-            if savedSettings.auto_stop && mayStopGateway() { await stopGateway() }
-            tell("Codex / ChatGPT closed. Its previous configuration has been restored.")
+            let finished = try await finishClosedSession(autoStop: savedSettings.auto_stop) {
+                _ = try await command("codex-restore")
+                codexRecoveryNeeded = false; codexProfileActive = false; observedOwnedCodex = false
+            }
+            if finished { tell("Codex / ChatGPT closed. Its previous configuration has been restored.") }
         } catch { tell(error.localizedDescription, error: true) }
     }
 }
