@@ -369,7 +369,9 @@ class HostProcessTests(unittest.TestCase):
                 chat_host.connect(self.root, client="wrong", **options)
             self.assertEqual(refused.exception.reply["reason"], reason)
             self.assertEqual(refused.exception.reply["protocol"], chat_host.PROTOCOL)
-        for payload in (b"not json\n", b"{" + b"x" * 70_000):
+        # One byte over the hello limit: the Host must read every byte before
+        # it can refuse, so the client's send cannot race the refusal's close.
+        for payload in (b"not json\n", b"{" + b"x" * chat_host.HELLO_LIMIT):
             raw = socket.socket(socket.AF_UNIX); raw.connect(str(paths.socket)); raw.sendall(payload)
             reply = chat_host.HostConnection(raw).read(10)
             raw.close()
