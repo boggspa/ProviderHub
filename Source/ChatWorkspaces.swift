@@ -65,6 +65,9 @@ struct ChatWorkspaceRail: View {
         VStack(alignment: .leading, spacing: 0) {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 2) {
+                    // A chat appears in both its workspace and Recents. Give
+                    // each placement its own lazy-stack identity; commands
+                    // continue to use the original ChatSummary.id.
                     if !rail.projects.isEmpty {
                         sectionHeader("Projects")
                         ForEach(rail.projects) { group in
@@ -73,7 +76,7 @@ struct ChatWorkspaceRail: View {
                                 ForEach(group.secondaries, id: \.self) { folder in
                                     secondaryRow(folder, primary: group.id)
                                 }
-                                ForEach(group.chats) { chat in chatRow(chat) }
+                                ForEach(group.chats) { chat in chatRow(chat).id("project:\(group.id):\(chat.id)") }
                                 if group.chats.isEmpty {
                                     Text("No chats yet").font(.system(size: 11))
                                         .foregroundStyle(Semantic.secondaryInk).padding(.leading, 24).padding(.bottom, 8)
@@ -84,14 +87,14 @@ struct ChatWorkspaceRail: View {
                     if !rail.recents.isEmpty {
                         recentsHeader
                         if !collapsed.contains(Self.recentsKey) {
-                            ForEach(rail.recents) { chat in chatRow(chat, showWorkspace: true) }
+                            ForEach(rail.recents) { chat in chatRow(chat, showWorkspace: true).id("recent:\(chat.id)") }
                         }
                     }
                     sectionHeader("Workspaces")
                     ForEach(rail.workspaces) { group in
                         workspaceHeader(group)
                         if !collapsed.contains(group.id) {
-                            ForEach(group.chats) { chat in chatRow(chat) }
+                            ForEach(group.chats) { chat in chatRow(chat).id("workspace:\(group.id):\(chat.id)") }
                             if group.chats.isEmpty {
                                 Text("No chats yet").font(.system(size: 11))
                                     .foregroundStyle(Semantic.secondaryInk).padding(.leading, 24).padding(.bottom, 8)
