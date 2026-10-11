@@ -275,6 +275,8 @@ _SUBAGENT_PREFIX_RE = re.compile(r"\[subagent_[^\[\]]+\]\s*:\s*", re.IGNORECASE)
 # Only OpenAI's servers can open it, and no route here hands it back to them,
 # so a child given one as text has no task at all. Ingress no longer asks for
 # the seal; this explains any that still arrive (children already running).
+# The shape is a Fernet token's, which a real task could also be, so the text
+# is kept after the explanation rather than replaced by it.
 _OPENAI_SEALED_RE = re.compile(r"gAAAAA[A-Za-z0-9_-]{60,}={0,2}")
 
 
@@ -282,9 +284,10 @@ def _openai_sealed(text):
     return isinstance(text, str) and _OPENAI_SEALED_RE.fullmatch(text.strip()) is not None
 
 
-def _sealed_notice(sender):
-    return (f"[This message from {sender} was sealed by OpenAI and cannot be read on this route, "
-            f"so its text is not shown. Ask {sender} to resend it as plain text.]")
+def _sealed_notice(sender, text):
+    return (f"[This message from {sender} has the form of a message sealed by OpenAI, which no route here "
+            f"can open. Unless it is meant to be a token, ask {sender} to resend it as plain text.] "
+            f"{text.strip()}")
 
 
 def _strip_subagent_prefixes(text):
@@ -504,7 +507,7 @@ def _normalize_multi_agent_items(input_list):
             call_id = item.get("id", item.get("call_id", ""))
             task = _extract_subagent_task(args)
             if _openai_sealed(task):
-                task = _sealed_notice("the parent agent")
+                task = _sealed_notice("the parent agent", task)
             content = f"[Task from parent agent for subagent_{agent_name} ({call_id})]: {task}"
             normalized.append({
                 "type": "message",
@@ -544,7 +547,7 @@ def _normalize_multi_agent_items(input_list):
                 content = _clean_wire_text(content) if content else ""
                 content = _strip_subagent_prefixes(content)
                 if _openai_sealed(content):
-                    content = _sealed_notice(agent_name)
+                    content = _sealed_notice(agent_name, content)
                 prefix = f"[subagent_{agent_name}]"
                 content = f"{prefix}: {content}" if content else prefix
             elif isinstance(content, (dict, list)):
@@ -552,7 +555,7 @@ def _normalize_multi_agent_items(input_list):
                 if extracted:
                     extracted = _strip_subagent_prefixes(extracted)
                     if _openai_sealed(extracted):
-                        extracted = _sealed_notice(agent_name)
+                        extracted = _sealed_notice(agent_name, extracted)
                     content = f"[subagent_{agent_name}]: {extracted}"
                 else:
                     # Stringify non-string content

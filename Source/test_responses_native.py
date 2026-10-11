@@ -1707,14 +1707,15 @@ class MultiAgentNormalizationTests(unittest.TestCase):
              "content": [header, {"type": "encrypted_content", "encrypted_content": "Map the repository."}]},
             {"type": "agent_message", "author": "orchestrator", "content": "gAAAAA is how the token starts."},
         ])
-        notice = ("[This message from orchestrator was sealed by OpenAI and cannot be read on this route, "
-                  "so its text is not shown. Ask orchestrator to resend it as plain text.]")
-        self.assertEqual(items[0]["content"], "[subagent_orchestrator]: " + notice)
-        self.assertEqual(items[1]["content"], "[subagent_orchestrator]: " + notice)
+        notice = ("[This message from orchestrator has the form of a message sealed by OpenAI, which no route "
+                  "here can open. Unless it is meant to be a token, ask orchestrator to resend it as plain text.] ")
+        self.assertEqual(items[0]["content"], "[subagent_orchestrator]: " + notice + token)
+        self.assertEqual(items[1]["content"], "[subagent_orchestrator]: " + notice + token)
+        # The text is explained, never dropped: a real Fernet token stays usable.
         self.assertEqual(items[2]["content"], "[Task from parent agent for subagent_explorer (call-1)]: "
-                         "[This message from the parent agent was sealed by OpenAI and cannot be read on this "
-                         "route, so its text is not shown. Ask the parent agent to resend it as plain text.]")
-        self.assertNotIn(token, json.dumps(items))
+                         "[This message from the parent agent has the form of a message sealed by OpenAI, which "
+                         "no route here can open. Unless it is meant to be a token, ask the parent agent to "
+                         "resend it as plain text.] " + token)
         # Plaintext is unchanged, and the sender is the author, not "subagent".
         self.assertEqual(items[3]["content"], "[subagent_orchestrator]: Map the repository.")
         self.assertEqual(items[4]["content"], "[subagent_orchestrator]: gAAAAA is how the token starts.")
