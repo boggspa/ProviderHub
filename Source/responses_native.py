@@ -1305,7 +1305,13 @@ def handle_responses(handler):
             slot_held = True
             if not active_counted:
                 with runtime.lock:
-                    runtime.active += 1
+                    # An idle stop closes admission under this same lock.
+                    stopping = runtime.stopping.is_set()
+                    if not stopping: runtime.active += 1
+                if stopping:
+                    handler.error(503, "The gateway is stopping. Retry once it is running again.",
+                                  headers={"Retry-After": "1", "X-Provider-Hub-Origin": "gateway"})
+                    return False
                 active_counted = True
             return True
 

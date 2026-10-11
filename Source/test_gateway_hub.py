@@ -541,6 +541,19 @@ class GatewayHubHTTPTests(unittest.TestCase):
         self.assertEqual(shape, {"route": route, "keys": ["error"], "type": "None", "content": "NoneType", "error_type": "rate_limit_error"})
         self.assertNotIn("slow down", json.dumps(shape))
 
+    def test_a_stopping_gateway_refuses_new_admissions_before_any_upstream_call(self):
+        self.start_gateway("deepseek", "deepseek-flash", {"reasoning_history": "native", "context": 1100000})
+        MockProvider.reset("native_null_content")
+        # An idle stop sets this under the admission lock; later requests are refused, not torn down.
+        self.runtime.stopping.set()
+        probe = {"model": "claude-haiku-4-5[1m]", "max_tokens": 1, "messages": [{"role": "user", "content": "."}]}
+        status, raw, headers = self.request(probe)
+        self.assertEqual(status, 503, raw)
+        self.assertIn(b"The gateway is stopping", raw)
+        self.assertEqual(headers.get("Retry-After"), "1")
+        self.assertEqual(MockProvider.requests, [])
+        self.assertEqual(self.runtime.status()["active"], 0)
+
     def test_native_json_qualified_route_raw_model_auth_and_complete_tool_cycle(self):
         route = self.start_gateway("deepseek", "deepseek-flash", {
             "effort_modes": ["none", "low", "high", "max"],

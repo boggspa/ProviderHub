@@ -261,6 +261,10 @@ class ProcessRegistry:
             if process.thread and process.thread is not threading.current_thread():
                 process.thread.join(max(0, deadline - time.monotonic()))
 
+    def running(self):
+        with self._condition:
+            return sum(1 for record in self._chats.values() for process in record["processes"] if process.alive)
+
     def snapshot(self, chat, *, output=True):
         with self._condition:
             processes = list(self._chats.get(chat, {}).get("processes", []))
