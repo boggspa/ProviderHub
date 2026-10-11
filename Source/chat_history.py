@@ -7,6 +7,32 @@ from pathlib import Path
 from cli_images import normalize_image, MAX_IMAGE_BYTES
 
 
+def attachment_content(attachments, *, vision=True):
+    content = []
+    for attachment in attachments or []:
+        name = attachment["name"]
+        if attachment.get("kind") == "image":
+            if vision is False:
+                content.append({"type": "text", "text": f"[Earlier image: {name}. Pixels excluded for this text-only model; the original is kept in the transcript.]"})
+                continue
+            try:
+                with Path(attachment["path"]).open("rb") as stream:
+                    raw = stream.read(MAX_IMAGE_BYTES + 1)
+                if len(raw) > MAX_IMAGE_BYTES:
+                    raise ValueError("The saved image exceeds the attachment limit.")
+                media = ("image/png" if raw.startswith(b"\x89PNG") else "image/jpeg" if raw.startswith(b"\xff\xd8")
+                         else "image/gif" if raw.startswith(b"GIF") else "image/webp")
+                image = normalize_image({"type": "image", "source": {"type": "base64", "media_type": media, "data": base64.b64encode(raw).decode()}})
+                content.extend([{"type": "text", "text": "Earlier image attachment: " + name}, image])
+            except (OSError, ValueError):
+                content.append({"type": "text", "text": f"[Earlier image: {name}. Its saved pixels are unavailable or invalid; reattach the image if needed.]"})
+        elif attachment.get("contextText"):
+            content.append({"type": "text", "text": attachment["contextText"]})
+        else:
+            content.append({"type": "text", "text": "[Earlier attachment: " + name + ". Original available in the saved transcript.]"})
+    return content
+
+
 def portable_history(entries, *, vision=True, reason="The user switched models in this chat."):
     """Project only visible dialogue, file contents and recorded tool results.
 
@@ -29,28 +55,7 @@ read from the old Messages history. That history stays intact in an archive.
         if kind == "user":
             if text:
                 content.append({"type": "text", "text": text})
-            for attachment in item.get("attachments") or []:
-                if attachment.get("kind") == "image":
-                    name = attachment["name"]
-                    if vision is False:
-                        content.append({"type": "text", "text": f"[Earlier image: {name}. Pixels excluded for this text-only model; the original is kept in the transcript.]"})
-                    else:
-                        path = Path(attachment["path"])
-                        try:
-                            with path.open("rb") as stream:
-                                raw = stream.read(MAX_IMAGE_BYTES + 1)
-                            if len(raw) > MAX_IMAGE_BYTES:
-                                raise ValueError("The saved image exceeds the attachment limit.")
-                            media = ("image/png" if raw.startswith(b"\x89PNG") else "image/jpeg" if raw.startswith(b"\xff\xd8")
-                                     else "image/gif" if raw.startswith(b"GIF") else "image/webp")
-                            image = normalize_image({"type": "image", "source": {"type": "base64", "media_type": media, "data": base64.b64encode(raw).decode()}})
-                            content.extend([{"type": "text", "text": "Earlier image attachment: " + name}, image])
-                        except (OSError, ValueError):
-                            content.append({"type": "text", "text": f"[Earlier image: {name}. Its saved pixels are unavailable or invalid; reattach the image if needed.]"})
-                elif attachment.get("contextText"):
-                    content.append({"type": "text", "text": attachment["contextText"]})
-                else:
-                    content.append({"type": "text", "text": "[Earlier attachment: " + attachment["name"] + ". Original available in the saved transcript.]"})
+            content.extend(attachment_content(item.get("attachments"), vision=vision))
             add("user", content)
         elif kind == "assistant" and text:
             if item.get("memberID"):
@@ -63,9 +68,10 @@ read from the old Messages history. That history stays intact in an archive.
             if item.get("memberID"):
                 record = f"[Team member {item.get('memberName') or item['memberID']} · source {item['id']}]\n" + record
             record += "\n" + (item.get("detail") or text or "No result was recorded; inspect the workspace before retrying.")
-            add("user", [{"type": "text", "text": record}])
+            add("user", [{"type": "text", "text": record}, *attachment_content(item.get("attachments"), vision=vision)])
         elif kind == "error" and text:
             add("user", [{"type": "text", "text": "Earlier harness error: " + text}])
         elif kind == "notice" and text:
             add("user", [{"type": "text", "text": "Earlier recorded harness notice: " + text}])
-    return messages
+    from chat_attachments import bound_image_history
+    return bound_image_history(messages)[0]

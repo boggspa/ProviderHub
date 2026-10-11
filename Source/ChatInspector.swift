@@ -3,6 +3,8 @@ import SwiftUI
 
 struct ChatInspector: View {
     @ObservedObject var model: ChatModel
+    var browserStore: ChatBrowserStore? = nil
+    var browserInPane = false
     var body: some View {
         VStack(spacing: 0) {
             // The inspector can be 290 pt wide; when every label will not fit,
@@ -17,6 +19,10 @@ struct ChatInspector: View {
             case .agents: ChatAgentsPane(model: model)
             case .side: ChatSidePane(model: model)
             case .processes: ChatProcessesPane(model: model)
+            case .browser:
+                if browserInPane { Text("Browser is open in a workspace pane.").font(.caption).foregroundStyle(.secondary).padding() }
+                else if let browserStore, let chat = model.selectedID { ChatBrowserPane(chatID: chat, store: browserStore) }
+                else { Text("Choose a chat to open its browser.").font(.caption).foregroundStyle(.secondary).padding() }
             }
         }.frame(maxHeight: .infinity, alignment: .top)
     }

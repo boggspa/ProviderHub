@@ -247,6 +247,7 @@ struct ToolRow: View {
         let detail = entry.detail?.isEmpty == false ? entry.detail! : entry.text
         let command = display.command
         VStack(alignment: .leading, spacing: textStyle.scaled(6)) {
+            if let attachments = entry.attachments, !attachments.isEmpty { ChatAttachmentStrip(attachments: attachments) }
             if !detail.isEmpty || command != nil {
                 VStack(alignment: .leading, spacing: 0) {
                     if let command {

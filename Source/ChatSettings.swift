@@ -9,6 +9,8 @@ struct ChatSettingsMenu: View {
     @AppStorage("chatFontChoice") private var fontChoice = ""
     @AppStorage("chatCustomFontName") private var customFontName = ""
     @AppStorage("chatTextSize") private var textSize = 13.0
+    @State private var showPlugins = false
+    @State private var showDevices = false
     var body: some View {
         Menu {
             Toggle("Allow web search", isOn: Binding(get: { model.webSearchEnabled }, set: { model.setWebSearchEnabled($0) }))
@@ -16,6 +18,9 @@ struct ChatSettingsMenu: View {
             if model.webSearchEnabled, let route = model.selectedRoute, route.supportsWebSearch != true {
                 Text("Native search unavailable for this model").font(.caption)
             }
+            Divider()
+            Button("Plugins…") { showPlugins = true; model.refreshPlugins() }
+            Button("Devices…") { showDevices = true; model.refreshDevices() }
             Divider()
             Menu("Theme") {
                 ForEach(HubTheme.Appearance.Mode.allCases, id: \.self) { mode in
@@ -58,6 +63,8 @@ struct ChatSettingsMenu: View {
         } label: {
             Image(systemName: "gearshape").font(.system(size: 13)).foregroundStyle(.secondary)
         }.menuStyle(.borderlessButton).fixedSize().accessibilityLabel("Chat settings")
+            .sheet(isPresented: $showPlugins) { ChatCapabilitiesSettings(model: model) }
+            .sheet(isPresented: $showDevices) { ChatDevicesSettings(model: model) }
     }
     private var selectedFont: String { ChatFonts.selection(fontChoice, legacyMonospaced: monospaced) }
     private var customFontTitle: String {

@@ -13,6 +13,7 @@ import fcntl
 import http.client
 import json
 import os
+import queue
 from pathlib import Path
 import random
 import re
@@ -27,7 +28,7 @@ from urllib.parse import urlsplit
 
 from bridge_core import gateway_token, load_settings, private_directory, state_root
 from chat_tools import ChatToolRunner, TOOL_DEFINITIONS
-from chat_attachments import prepare_attachments, bound_image_history
+from chat_attachments import prepare_attachments, prepare_tool_content, bound_image_history
 from chat_history import portable_history
 import chat_blackboard
 import chat_memory
@@ -426,6 +427,7 @@ class ChatService:
         self.workspaces = workspaces or ChatWorkspaces(store.root, (chat["workspace"] for chat in store.headers()))
         self.role = role
         self.preferences = {"webSearch": True}
+        self.capabilities = None
         self.child_factory = child_factory or (lambda: GatewayClient(transport.root))
         self.child = None
         self.team_children = {}
@@ -732,7 +734,7 @@ class ChatService:
             return self.interrupt_with_update(command)
         if action == "approve":
             with self._mutex:
-                if self.approval is None or command.get("id") != self.approval["id"]:
+                if self.approval is None or command.get("id") != self.approval["id"] or self.approval_event.is_set():
                     raise ValueError("This approval is no longer pending.")
                 self.approval_allowed = command.get("allow") is True
                 self.approval_event.set()
@@ -857,6 +859,8 @@ class ChatService:
             self.add(entry("notice", "Older images removed from model context. Their thumbnails and original files are kept here.", chat["route"]))
             self.save()
         tools = list(TOOL_DEFINITIONS) if choice["supportsTools"] else []
+        if tools and self.capabilities:
+            tools.extend(self.capabilities.definitions(self))
         if self.role in {"side", "lane"}:
             tools = [tool for tool in tools if tool["name"] in {"read_file", "search_files"}]
         elif self.role == "parent" and tools:
@@ -1120,10 +1124,12 @@ class ChatService:
                                 description = chat_blackboard.describe(name, arguments)
                             elif self.role in {"side", "lane"} and name not in {"read_file", "search_files"}:
                                 raise ValueError("This read-only conversation only has read_file and search_files.")
+                            elif self.capabilities and self.capabilities.handles(name):
+                                description = self.capabilities.describe(self, name, arguments)
                             else:
                                 description = runner.describe(name, arguments)
                             must_ask = description["requires_approval"] and needs_approval(chat.get("approvalMode", "manual"), name, arguments, chat["workspace"])
-                            allowed = not must_ask or self.approved(description["summary"], arguments.get("patch"))
+                            allowed = not must_ask or self.approved(description["summary"], description.get("detail", arguments.get("patch")))
                             chat_team.start_tool(self, results, calls[position:])
                             if self.cancel.is_set(): raise InterruptedError("Stopped")
                             if allowed:
@@ -1141,6 +1147,8 @@ class ChatService:
                                     result = chat_team.memory_tool(self, name, arguments)
                                 elif name in chat_blackboard.TOOLS:
                                     result = chat_blackboard.execute(self, name, arguments)
+                                elif self.capabilities and self.capabilities.handles(name):
+                                    result = self.capabilities.execute(self, name, arguments)
                                 else:
                                     result = runner.execute(name, arguments)
                             else:
@@ -1151,6 +1159,17 @@ class ChatService:
                     except (ValueError, OSError, TypeError, KeyError) as exc:
                         result = {"content": [{"type": "text", "text": str(exc)}], "is_error": True,
                                   "summary": str(name or "Invalid tool"), "changed_files": []}
+                    tool_attachments = []
+                    if self.capabilities and self.capabilities.handles(name):
+                        try:
+                            attachment_owner = self
+                            while getattr(attachment_owner, "team_parent", None) or getattr(attachment_owner, "helper_parent", None):
+                                attachment_owner = getattr(attachment_owner, "team_parent", None) or attachment_owner.helper_parent
+                            tool_attachments, result["content"] = prepare_tool_content(
+                                result["content"], self.store.root / attachment_owner.chat["id"], vision=choice.get("vision") is not False)
+                        except (ValueError, OSError, TypeError) as exc:
+                            result = {"content": [{"type": "text", "text": "The tool completed but its output could not be retained: " + str(exc)}],
+                                      "is_error": True, "summary": str(name), "changed_files": []}
                     results["content"].append({"type": "tool_result", "tool_use_id": call["id"],
                                               "is_error": result["is_error"], "content": result["content"]})
                     detail = "\n".join(part.get("text", "") for part in result["content"] if part.get("type") == "text")
@@ -1159,6 +1178,7 @@ class ChatService:
                                     isError=result["is_error"], changedFiles=result.get("changed_files") or [], workspace=chat["workspace"], recorded=True)
                     if result.get("agent_id"): visible["agentID"] = result["agent_id"]
                     if result.get("agent_ids"): visible["agentIDs"] = result["agent_ids"]
+                    if tool_attachments: visible["attachments"] = tool_attachments
                     index = next((i for i, item in enumerate(chat["entries"]) if item["id"] == display_id), None)
                     if index is not None: chat["entries"][index] = visible; self.emit({"event": "entry", "chat": chat["id"], "entry": visible})
                     else: self.add(visible)
@@ -1239,21 +1259,62 @@ class ChatService:
 
 def main():
     from chat_sessions import ChatHost
+    from concurrent.futures import Future
     mutex = threading.Lock()
     def emit(event):
         with mutex:
             print(json.dumps(event, ensure_ascii=False), flush=True)
     service = None
+    commands = queue.Queue(maxsize=256)
+    closing = threading.Event()
+    def dispatch(callback):
+        """Network callbacks wait for the same serial command owner as stdin."""
+        future = Future()
+        if closing.is_set(): raise ValueError("Chat is closing")
+        try: commands.put(("callback", (callback, future)), timeout=5)
+        except queue.Full: raise ValueError("Chat command queue is busy") from None
+        try: return future.result(timeout=30)
+        except TimeoutError:
+            future.cancel()
+            raise ValueError("Remote command timed out; inspect its receipt before retrying") from None
+    def dispatch_event(callback):
+        if closing.is_set(): return False
+        try:
+            commands.put_nowait(("event_callback", callback))
+            return True
+        except queue.Full:
+            return False
+    def read_commands():
+        try:
+            for line in sys.stdin:
+                if closing.is_set(): break
+                commands.put(("line", line))
+        finally: commands.put(("eof", None))
     try:
         root = state_root()
-        service = ChatHost(ChatStore(root), GatewayClient(root), emit)
+        service = ChatHost(ChatStore(root), GatewayClient(root), emit, dispatch=dispatch, dispatch_event=dispatch_event)
         service.initialize()
-        for line in sys.stdin:
+        threading.Thread(target=read_commands, daemon=True, name="chat-stdin").start()
+        while not service.closing:
+            kind, item = commands.get()
+            if kind == "eof": break
+            if kind == "event_callback":
+                item()
+                continue
+            if kind == "callback":
+                callback, future = item
+                if future.set_running_or_notify_cancel():
+                    try: future.set_result(callback())
+                    except Exception as exc: future.set_exception(exc)
+                continue
+            line = item
             command = None
             try:
-                if len(line) > 2_000_000: raise ValueError("Chat command is too large.")
+                if len(line) > 12_000_000: raise ValueError("Chat command is too large.")
                 command = json.loads(line)
                 if not isinstance(command, dict): raise ValueError("Chat command must be an object.")
+                if len(line) > 2_000_000 and command.get("command") != "native_result":
+                    raise ValueError("Chat command is too large.")
                 service.handle(command)
                 if service.closing: break
             except Exception as exc:
@@ -1261,6 +1322,7 @@ def main():
     except Exception as exc:
         emit({"event": "error", "message": str(exc)})
     finally:
+        closing.set()
         if service:
             service.shutdown()
 

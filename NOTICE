@@ -35,6 +35,26 @@ blocks and degrade gracefully. Provider Hub runs without them.
 file named in the error shown when `cryptography` is missing from a runtime.
 `pyproject.toml` mirrors it for development and CI.
 
+## Optional desktop automation
+
+Computer Use can connect to a separately installed Peekaboo 4.9.0 native
+executable (Peter Steinberger and contributors, MIT). Peekaboo is not bundled
+with Provider Hub. Exact release source and upstream archive digests are
+recorded in `Source/plugin-dependencies.lock.json`; its licence is available
+at https://github.com/openclaw/Peekaboo/blob/v4.9.0/LICENSE.
+The native Browser pane uses Apple's system WebKit framework and does not
+bundle Chromium, Playwright or a browser extension.
+
+## Remote transport provenance
+
+The Provider Hub remote transport's TaskWraith E2EE primitive byte layout and
+golden test vectors are adapted from TaskWraith (the AGBench reference
+repository), licensed Apache-2.0. They use X25519, Ed25519, HKDF-SHA256 and
+AES-256-GCM through the existing Python cryptography dependency and Apple's
+CryptoKit. Protocol source provenance and compatibility boundaries are
+documented in `ios/ProviderHubCompanion/README.md`. The Swift companion adds
+no third-party Swift packages.
+
 ## Chat fonts
 
 Inter (The Inter Project Authors), Source Serif 4 (The Source Serif 4 Project

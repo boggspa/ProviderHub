@@ -1,0 +1,22 @@
+name: ProviderHubCompanion
+options:
+  deploymentTarget:
+    iOS: "17.0"
+packages:
+  ProviderHubRemote:
+    path: ../../Packages/ProviderHubRemote
+targets:
+  ProviderHubCompanion:
+    type: application
+    platform: iOS
+    sources:
+      - Sources/ProviderHubCompanion
+    dependencies:
+      - package: ProviderHubRemote
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.providerhub.companion
+        SWIFT_VERSION: "5.0"
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_NSLocalNetworkUsageDescription: Connect to your paired Mac on your private network.
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES

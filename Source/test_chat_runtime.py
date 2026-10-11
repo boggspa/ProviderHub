@@ -47,6 +47,15 @@ class FakeTransport:
 
 
 class ChatRuntimeTests(unittest.TestCase):
+    def test_first_approval_response_wins_before_worker_resumes(self):
+        service, _ = self.service([])
+        service.approval = {"id": "same-action", "summary": "Run action", "workspace": str(self.root)}
+        service.approval_event.clear()
+        service.handle({"command": "approve", "id": "same-action", "allow": True})
+        with self.assertRaisesRegex(ValueError, "no longer pending"):
+            service.handle({"command": "approve", "id": "same-action", "allow": False})
+        self.assertTrue(service.approval_allowed)
+
     def test_entry_records_wall_clock_time(self):
         first, second = entry("assistant"), entry("tool")
         self.assertIsInstance(first["time"], float)

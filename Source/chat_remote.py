@@ -1,0 +1,1083 @@
+"""Encrypted companion bridge for Provider Hub. Mac executes; the phone does not.
+
+Crypto framing is TaskWraith ``taskwraith-e2ee-v1`` from AGBench
+``src/shared/e2ee/{protocol,keys,keyschedule,cipher}.ts``. Golden outputs are
+the 2026-06-11 cross-implementation vectors (also locked by TaskWraithKit).
+This is that handshake and AES-256-GCM channel, not a new scheme, and it is
+not the TaskWraith relay, push, or resolve stack.
+
+Nothing in this module binds a socket on import. ``RemoteServer.start``
+requires an explicit loopback, LAN or Tailscale interface IP. Provider
+credentials are never written into a frame or a device record.
+
+Root attaches the desktop host. This module does not import it::
+
+    server = RemoteServer(host.handle, state_path, dispatch=enqueue_on_host_queue)
+    server.start("192.168.1.10", 8765)
+    pairing_text = server.bootstrap("192.168.1.10")
+    server.publish(event)          # enqueue from host emit path
+    pending = server.status()["pendingPairing"]
+    server.confirm_pairing(pending["identity"], pending["confirmCode"], True)
+    server.revoke(identity_b64)
+    server.stop()
+
+``host.handle`` sees ``send``, ``stop``, ``subscribe``, and ``approve``.
+``approve`` binds both the exact pending chat and approval id. Both ends use
+the session id from the bootstrap. Compare the six-digit code on both screens
+before confirming an unknown phone. Trusted reconnects authenticate signatures.
+"""
+from __future__ import annotations
+
+import base64
+import hashlib
+import json
+import os
+import re
+import socket
+import threading
+import ipaddress
+import tempfile
+from pathlib import Path
+from collections import OrderedDict
+
+from cryptography.exceptions import InvalidSignature, InvalidTag
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
+from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey, X25519PublicKey
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+
+E2EE_PROTOCOL = "taskwraith-e2ee-v1"
+APP_PROTOCOL = "providerhub-remote-app-v1"
+HKDF_INFO_MAC_TO_IPHONE = f"{E2EE_PROTOCOL} mac->iphone"
+HKDF_INFO_IPHONE_TO_MAC = f"{E2EE_PROTOCOL} iphone->mac"
+NONCE_PREFIX = {"mac->iphone": 0x00000001, "iphone->mac": 0x00000002}
+CHAT_ID = re.compile(r"[0-9a-f]{32}\Z")
+TOKEN = re.compile(r"[0-9a-f]{16,64}\Z")
+SESSION_ID = re.compile(r"[A-Za-z0-9._:-]{1,128}\Z")
+MAX_TEXT = 100_000
+MAX_LOG = 200
+MAX_REQUESTS = 64
+LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
+
+
+class RemoteError(Exception):
+    pass
+
+
+def b64e(data: bytes) -> str:
+    return base64.b64encode(data).decode("ascii")
+
+
+def b64d(text, *, limit=200_000) -> bytes:
+    if not isinstance(text, str) or not text or len(text) > limit:
+        raise RemoteError("bad encoding")
+    try:
+        return base64.b64decode(text, validate=True)
+    except Exception as exc:
+        raise RemoteError("bad encoding") from exc
+
+
+def _raw_public(key) -> bytes:
+    return key.public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+
+
+def x25519_public(private: X25519PrivateKey) -> bytes:
+    return _raw_public(private.public_key())
+
+
+def ed25519_public(private: Ed25519PrivateKey) -> bytes:
+    return _raw_public(private.public_key())
+
+
+def shared_secret(private: X25519PrivateKey, peer_raw: bytes) -> bytes:
+    if len(peer_raw) != 32:
+        raise RemoteError("bad peer key")
+    secret = private.exchange(X25519PublicKey.from_public_bytes(peer_raw))
+    if secret == bytes(32):
+        raise RemoteError("invalid peer point")
+    return secret
+
+
+def transcript_hash(session_id, client_eph_b64, server_eph_b64, client_nonce_b64,
+                    server_nonce_b64, mac_identity_b64, iphone_identity_b64) -> bytes:
+    transcript = "|".join((
+        E2EE_PROTOCOL, session_id, client_eph_b64, server_eph_b64,
+        client_nonce_b64, server_nonce_b64, mac_identity_b64, iphone_identity_b64,
+    ))
+    return hashlib.sha256(transcript.encode("utf8")).digest()
+
+
+def confirm_code(transcript: bytes) -> str:
+    return f"{int.from_bytes(transcript[:4], 'big') % 1_000_000:06d}"
+
+
+def derive_session_keys(private: X25519PrivateKey, peer_raw: bytes,
+                        client_nonce: bytes, server_nonce: bytes) -> dict:
+    ikm = shared_secret(private, peer_raw)
+    salt = hashlib.sha256(client_nonce + server_nonce).digest()
+    def expand(info):
+        return HKDF(algorithm=hashes.SHA256(), length=32, salt=salt, info=info.encode("utf8")).derive(ikm)
+    return {"mac->iphone": expand(HKDF_INFO_MAC_TO_IPHONE), "iphone->mac": expand(HKDF_INFO_IPHONE_TO_MAC)}
+
+
+def build_nonce(direction: str, seq: int) -> bytes:
+    if type(seq) is not int or seq < 0 or seq > 0xFFFFFFFFFFFFFFFF:
+        raise RemoteError("bad sequence")
+    return NONCE_PREFIX[direction].to_bytes(4, "big") + seq.to_bytes(8, "big")
+
+
+def build_aad(session_id: str, seq: int) -> bytes:
+    return f"{session_id}:{seq}".encode("utf8")
+
+
+def seal(key: bytes, direction: str, session_id: str, seq: int, plaintext: bytes) -> dict:
+    if len(key) != 32:
+        raise RemoteError("bad key")
+    nonce = build_nonce(direction, seq)
+    blob = AESGCM(key).encrypt(nonce, plaintext, build_aad(session_id, seq))
+    return {"nonce": nonce, "ct": blob[:-16], "tag": blob[-16:]}
+
+
+def open_frame(key: bytes, direction: str, session_id: str, seq: int, frame: dict) -> bytes:
+    if len(key) != 32:
+        raise RemoteError("bad key")
+    expected = build_nonce(direction, seq)
+    nonce, ct, tag = frame.get("nonce"), frame.get("ct"), frame.get("tag")
+    if nonce != expected:
+        raise RemoteError("nonce mismatch")
+    if not isinstance(tag, (bytes, bytearray)) or len(tag) != 16:
+        raise RemoteError("bad tag")
+    if not isinstance(ct, (bytes, bytearray)):
+        raise RemoteError("bad ciphertext")
+    try:
+        return AESGCM(key).decrypt(expected, bytes(ct) + bytes(tag), build_aad(session_id, seq))
+    except InvalidTag as exc:
+        raise RemoteError("tampered frame") from exc
+
+
+def sign_transcript(private: Ed25519PrivateKey, transcript: bytes) -> bytes:
+    return private.sign(transcript)
+
+
+def verify_transcript(public_raw: bytes, transcript: bytes, signature: bytes) -> bool:
+    if len(public_raw) != 32 or len(signature) != 64:
+        return False
+    try:
+        Ed25519PublicKey.from_public_bytes(public_raw).verify(signature, transcript)
+        return True
+    except InvalidSignature:
+        return False
+
+
+def _session_ok(value) -> str:
+    if not isinstance(value, str) or not SESSION_ID.fullmatch(value):
+        raise RemoteError("bad session")
+    return value
+
+
+def _obj(value):
+    if not isinstance(value, dict):
+        raise RemoteError("bad frame")
+    return value
+
+
+class DeviceRegistry:
+    """Paired phone identities. Revocation is immediate and one-way."""
+
+    def __init__(self):
+        self._devices = {}
+
+    def pair(self, identity_b64: str, label="iPhone"):
+        row = self._devices.get(identity_b64, {"label": label, "revoked": False})
+        if row["revoked"]:
+            raise RemoteError("device revoked")
+        row["label"] = label
+        self._devices[identity_b64] = row
+
+    def revoke(self, identity_b64: str):
+        row = self._devices.setdefault(identity_b64, {"label": "iPhone", "revoked": False})
+        row["revoked"] = True
+
+    def trusted(self, identity_b64: str) -> bool:
+        row = self._devices.get(identity_b64)
+        return bool(row and not row["revoked"])
+
+    def revoked(self, identity_b64: str) -> bool:
+        row = self._devices.get(identity_b64)
+        return bool(row and row["revoked"])
+
+
+class Session:
+    """One E2EE role. Outbound frames stay in a queue; the caller moves bytes."""
+
+    def __init__(self, role, identity: Ed25519PrivateKey, session_id, trust):
+        if role not in {"mac", "iphone"}:
+            raise RemoteError("bad role")
+        self.role = role
+        self.identity = identity
+        self.session_id = _session_ok(session_id)
+        self.trust = trust
+        self.on_app = None
+        self.outbox = []
+        self.confirm = None
+        self.peer_raw = None
+        self.failed = None
+        self._reset()
+
+    def _reset(self):
+        self.established = False
+        self.keys = None
+        self.send_seq = 0
+        self.last_recv = -1
+        self.ephemeral = None
+        self.client_eph_b64 = ""
+        self.server_eph_b64 = ""
+        self.client_nonce = b""
+        self.server_nonce = b""
+        self.client_nonce_b64 = ""
+        self.server_nonce_b64 = ""
+        self.awaiting_auth = False
+        self.transcript = None
+        self.pending_auth = None
+
+    def take(self):
+        frames, self.outbox = self.outbox, []
+        return frames
+
+    def _send(self, frame):
+        self.outbox.append(frame)
+
+    def start(self):
+        if self.role != "iphone":
+            raise RemoteError("only the phone opens")
+        self._reset()
+        self.ephemeral = X25519PrivateKey.generate()
+        nonce = os.urandom(16)
+        self.client_eph_b64 = b64e(x25519_public(self.ephemeral))
+        self.client_nonce, self.client_nonce_b64 = nonce, b64e(nonce)
+        self._send({
+            "t": "clientHello", "protocol": E2EE_PROTOCOL, "sessionId": self.session_id,
+            "role": "iphone", "ephemeralPubKey": self.client_eph_b64, "nonce": self.client_nonce_b64,
+        })
+
+    def close(self):
+        self._reset()
+        self.keys = None
+
+    def send_app(self, method, params, msg_id):
+        if not self.established or not self.keys:
+            raise RemoteError("not established")
+        direction = "mac->iphone" if self.role == "mac" else "iphone->mac"
+        body = {"v": 1, "proto": APP_PROTOCOL, "msgId": msg_id, "method": method, "params": params or {}}
+        sealed = seal(self.keys[direction], direction, self.session_id, self.send_seq,
+                      json.dumps(body, separators=(",", ":")).encode("utf8"))
+        frame = {
+            "t": "enc", "sessionId": self.session_id, "seq": self.send_seq,
+            "nonce": b64e(sealed["nonce"]), "ct": b64e(sealed["ct"]), "tag": b64e(sealed["tag"]),
+        }
+        self.send_seq += 1
+        self._send(frame)
+
+    def feed(self, frame):
+        frame = _obj(frame)
+        kind = frame.get("t")
+        try:
+            if kind == "clientHello":
+                self._client_hello(frame)
+            elif kind == "serverHello":
+                self._server_hello(frame)
+            elif kind == "clientAuth":
+                self._client_auth(frame)
+            elif kind == "serverAuth":
+                self._server_auth(frame)
+            elif kind == "enc":
+                self._encrypted(frame)
+            else:
+                raise RemoteError("unknown frame")
+        except RemoteError as exc:
+            self.failed = str(exc)
+            if kind == "enc":
+                self.close()
+            raise
+
+    def _require_session(self, frame):
+        if frame.get("protocol", E2EE_PROTOCOL) != E2EE_PROTOCOL:
+            raise RemoteError("protocol mismatch")
+        if frame.get("sessionId") != self.session_id:
+            raise RemoteError("session mismatch")
+
+    def _client_hello(self, frame):
+        if self.role != "mac":
+            raise RemoteError("unexpected hello")
+        self._require_session(frame)
+        if frame.get("role") != "iphone":
+            raise RemoteError("unexpected role")
+        if self.awaiting_auth and not self.peer_raw:
+            raise RemoteError("handshake already in flight")
+        pinned = self.peer_raw
+        self._reset()
+        self.peer_raw = pinned
+        self.client_eph_b64 = frame.get("ephemeralPubKey")
+        self.client_nonce_b64 = frame.get("nonce")
+        self.client_nonce = b64d(self.client_nonce_b64, limit=64)
+        if len(self.client_nonce) != 16 or len(b64d(self.client_eph_b64, limit=80)) != 32:
+            raise RemoteError("bad hello")
+        self.ephemeral = X25519PrivateKey.generate()
+        server_nonce = os.urandom(16)
+        self.server_eph_b64 = b64e(x25519_public(self.ephemeral))
+        self.server_nonce, self.server_nonce_b64 = server_nonce, b64e(server_nonce)
+        self.keys = derive_session_keys(
+            self.ephemeral, b64d(self.client_eph_b64, limit=80), self.client_nonce, self.server_nonce)
+        self.awaiting_auth = True
+        self._send({
+            "t": "serverHello", "protocol": E2EE_PROTOCOL, "sessionId": self.session_id,
+            "ephemeralPubKey": self.server_eph_b64, "nonce": self.server_nonce_b64,
+            "macIdentityPubKey": b64e(ed25519_public(self.identity)),
+        })
+
+    def _server_hello(self, frame):
+        if self.role != "iphone" or not self.ephemeral:
+            raise RemoteError("unexpected server hello")
+        self._require_session(frame)
+        self.server_eph_b64 = frame.get("ephemeralPubKey")
+        self.server_nonce_b64 = frame.get("nonce")
+        self.server_nonce = b64d(self.server_nonce_b64, limit=64)
+        mac_raw = b64d(frame.get("macIdentityPubKey"), limit=80)
+        if len(self.server_nonce) != 16 or len(b64d(self.server_eph_b64, limit=80)) != 32 or len(mac_raw) != 32:
+            raise RemoteError("bad server hello")
+        if self.peer_raw and self.peer_raw != mac_raw:
+            raise RemoteError("Mac identity changed")
+        self.peer_raw = mac_raw
+        self.keys = derive_session_keys(
+            self.ephemeral, b64d(self.server_eph_b64, limit=80), self.client_nonce, self.server_nonce)
+        self.transcript = transcript_hash(
+            self.session_id, self.client_eph_b64, self.server_eph_b64,
+            self.client_nonce_b64, self.server_nonce_b64,
+            b64e(mac_raw), b64e(ed25519_public(self.identity)))
+        self.confirm = confirm_code(self.transcript)
+        signature = sign_transcript(self.identity, self.transcript)
+        self._send({
+            "t": "clientAuth", "sessionId": self.session_id,
+            "iphoneIdentityPubKey": b64e(ed25519_public(self.identity)),
+            "confirmCode": self.confirm, "transcriptSig": b64e(signature),
+        })
+
+    def _client_auth(self, frame):
+        if self.role != "mac" or not self.awaiting_auth or not self.keys:
+            raise RemoteError("unexpected client auth")
+        self.awaiting_auth = False
+        if frame.get("sessionId") != self.session_id:
+            raise RemoteError("session mismatch")
+        phone_raw = b64d(frame.get("iphoneIdentityPubKey"), limit=80)
+        signature = b64d(frame.get("transcriptSig"), limit=120)
+        if len(phone_raw) != 32:
+            raise RemoteError("bad phone identity")
+        self.transcript = transcript_hash(
+            self.session_id, self.client_eph_b64, self.server_eph_b64,
+            self.client_nonce_b64, self.server_nonce_b64,
+            b64e(ed25519_public(self.identity)), b64e(phone_raw))
+        self.confirm = confirm_code(self.transcript)
+        if not verify_transcript(phone_raw, self.transcript, signature):
+            raise RemoteError("bad transcript signature")
+        if frame.get("confirmCode") != self.confirm:
+            raise RemoteError("confirm code mismatch")
+        if self.peer_raw and self.peer_raw != phone_raw:
+            raise RemoteError("phone identity changed")
+        trusted = self.trust(phone_raw, self.confirm)
+        if trusted is None:
+            self.pending_auth = frame
+            return
+        if not trusted:
+            raise RemoteError("pairing rejected")
+        self.peer_raw = phone_raw
+        self._send({
+            "t": "serverAuth", "sessionId": self.session_id,
+            "transcriptSig": b64e(sign_transcript(self.identity, self.transcript)),
+        })
+        self.established = True
+
+    def _server_auth(self, frame):
+        if self.role != "iphone" or not self.transcript or not self.peer_raw:
+            raise RemoteError("unexpected server auth")
+        if frame.get("sessionId") != self.session_id:
+            raise RemoteError("session mismatch")
+        signature = b64d(frame.get("transcriptSig"), limit=120)
+        if not verify_transcript(self.peer_raw, self.transcript, signature):
+            raise RemoteError("bad Mac signature")
+        self.established = True
+
+    def _encrypted(self, frame):
+        if not self.established or not self.keys:
+            raise RemoteError("encrypted frame before session")
+        if frame.get("sessionId") != self.session_id:
+            raise RemoteError("session mismatch")
+        seq = frame.get("seq")
+        if type(seq) is not int or seq <= self.last_recv:
+            return
+        direction = "iphone->mac" if self.role == "mac" else "mac->iphone"
+        plaintext = open_frame(self.keys[direction], direction, self.session_id, seq, {
+            "nonce": b64d(frame.get("nonce"), limit=64),
+            "ct": b64d(frame.get("ct"), limit=300_000),
+            "tag": b64d(frame.get("tag"), limit=64),
+        })
+        self.last_recv = seq
+        if len(plaintext) > 196608:
+            raise RemoteError("frame too large")
+        try:
+            message = json.loads(plaintext.decode("utf8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise RemoteError("bad app payload") from exc
+        if not isinstance(message, dict) or message.get("proto") != APP_PROTOCOL or message.get("v") != 1:
+            raise RemoteError("bad app protocol")
+        if not isinstance(message.get("method"), str):
+            raise RemoteError("bad method")
+        if self.on_app:
+            self.on_app(message)
+
+
+def project_event(event):
+    """Whitelist host events. Drop catalogue, processes, and credential-bearing rows."""
+    if not isinstance(event, dict):
+        return None
+    kind = event.get("event")
+    if kind == "chats" and isinstance(event.get("chats"), list):
+        rows = []
+        for row in event["chats"][:256]:
+            if not isinstance(row, dict) or not isinstance(row.get("id"), str):
+                continue
+            rows.append({
+                "id": row["id"],
+                "title": str(row.get("title") or "Chat")[:120],
+                "status": str(row.get("status") or "")[:80],
+                "busy": bool(row.get("busy")),
+                "active": bool(row.get("active")),
+                "pendingApproval": bool(row.get("pendingApproval")),
+            })
+        return {"event": "chats", "chats": rows}
+    if kind == "approval":
+        approval = event.get("approval")
+        if approval is None:
+            return {"event": "approval", "approval": None, "chat": event.get("chat")}
+        if not isinstance(approval, dict) or not isinstance(approval.get("id"), str):
+            return None
+        return {"event": "approval", "chat": event.get("chat"), "approval": {
+            "id": approval["id"],
+            "summary": str(approval.get("summary") or "")[:500],
+            "detail": str(approval.get("detail") or "")[:2000],
+        }}
+    if kind == "delta" and isinstance(event.get("text"), str):
+        return {"event": "delta", "chat": event.get("chat"), "id": event.get("id"),
+                "text": event["text"][:8000], "offset": event.get("offset") if type(event.get("offset")) is int else 0}
+    if kind == "entry" and isinstance(event.get("entry"), dict):
+        entry = event["entry"]
+        return {"event": "entry", "chat": event.get("chat"), "entry": {
+            "role": str(entry.get("role") or entry.get("kind") or "note")[:40],
+            "text": str(entry.get("text") or "")[:4000],
+        }}
+    if kind in {"selected", "snapshot"}:
+        entries = []
+        for entry in (event.get("entries") or [])[-30:]:
+            if isinstance(entry, dict):
+                entries.append({
+                    "role": str(entry.get("role") or entry.get("kind") or "note")[:40],
+                    "text": str(entry.get("text") or "")[:4000],
+                })
+        return {"event": kind, "chat": event.get("chat") or event.get("id"), "id": event.get("id"),
+                "entries": entries, "busy": bool(event.get("busy")), "status": str(event.get("status") or "")[:80]}
+    if kind in {"notice", "rejected", "error"} and isinstance(event.get("message"), str):
+        return {"event": kind, "chat": event.get("chat"), "message": event["message"][:500]}
+    return None
+
+
+class MacBridge:
+    """Authoritative Mac side. ``execute`` is ``ChatHost.handle`` or a test double."""
+
+    def __init__(self, execute, session_id, *, identity=None, auto_accept=False, retain=MAX_LOG):
+        self.execute = execute
+        self.identity = identity or Ed25519PrivateKey.generate()
+        self.registry = DeviceRegistry()
+        self.auto_accept = auto_accept
+        self.session = Session("mac", self.identity, session_id, self._trust)
+        self.session.on_app = self._on_app
+        self.view = {"chats": [], "selected": None, "approval": None}
+        self.pending_pairing = None
+        self.hold_pairing = False
+        self.selected_chat = None
+        self.cursor = 0
+        self.log = []
+        self.retain = retain
+        self._requests = {}
+        self._decisions = {}
+        self._msg = 0
+        self._peer_msg = 0
+
+    @property
+    def established(self):
+        return self.session.established
+
+    @property
+    def confirm(self):
+        return self.session.confirm
+
+    @property
+    def peer(self):
+        return b64e(self.session.peer_raw) if self.session.peer_raw else None
+
+    def identity_b64(self):
+        return b64e(ed25519_public(self.identity))
+
+    def take(self):
+        return self.session.take()
+
+    def feed(self, frame):
+        if isinstance(frame, dict) and frame.get("t") == "clientHello":
+            self._peer_msg = 0
+            self.pending_pairing = None
+        peer = self.peer
+        if peer and self.registry.revoked(peer):
+            self.session.close()
+            raise RemoteError("device revoked")
+        self.session.feed(frame)
+
+    def revoke(self, identity_b64: str):
+        self.registry.revoke(identity_b64)
+        if self.peer == identity_b64:
+            self.session.close()
+
+    def publish(self, event):
+        if (self.selected_chat and event.get("event") in {"selected", "snapshot"}
+                and (event.get("chat") or event.get("id")) != self.selected_chat):
+            return None
+        projected = project_event(event)
+        if projected is None:
+            return None
+        self._apply_view(projected)
+        self.cursor += 1
+        self.log.append((self.cursor, projected))
+        if len(self.log) > self.retain:
+            self.log = self.log[-self.retain:]
+        if self.established and not (self.peer and self.registry.revoked(self.peer)):
+            self._emit("session.delta", {"cursor": self.cursor, "event": projected})
+        return projected
+
+    def _trust(self, peer_raw, code):
+        identity = b64e(peer_raw)
+        if self.registry.revoked(identity):
+            return False
+        if self.registry.trusted(identity):
+            return True
+        if not self.auto_accept:
+            if self.hold_pairing:
+                self.pending_pairing = {"identity": identity, "confirmCode": code}
+                return None
+            return False
+        self.registry.pair(identity)
+        return True
+
+    def _emit(self, method, params):
+        self._msg += 1
+        self.session.send_app(method, params, self._msg)
+
+    def _apply_view(self, projected):
+        kind = projected["event"]
+        if kind == "chats":
+            self.view["chats"] = projected["chats"]
+        elif kind == "approval":
+            self.view["approval"] = projected.get("approval")
+            if self.view["approval"]:
+                self.view["approval"]["chat"] = projected.get("chat")
+        elif kind in {"selected", "snapshot"}:
+            self.view["selected"] = {
+                "id": projected.get("id") or projected.get("chat"),
+                "entries": projected.get("entries") or [],
+                "busy": projected.get("busy"),
+                "status": projected.get("status") or "",
+                "live": "",
+            }
+        elif kind == "delta" and self.view.get("selected") and self.view["selected"].get("id") == projected.get("chat"):
+            live = self.view["selected"].get("live") or ""
+            self.view["selected"]["live"] = (live + projected.get("text", ""))[-8000:]
+        elif kind == "entry" and self.view.get("selected") and self.view["selected"].get("id") == projected.get("chat"):
+            self.view["selected"].setdefault("entries", []).append(projected["entry"])
+            self.view["selected"]["entries"] = self.view["selected"]["entries"][-30:]
+            if projected["entry"].get("role") == "assistant":
+                self.view["selected"]["live"] = ""
+
+    def _snapshot(self):
+        return {"cursor": self.cursor, "chats": self.view["chats"], "approval": self.view["approval"],
+                "selected": self.view["selected"]}
+
+    def _on_app(self, message):
+        msg_id = message.get("msgId")
+        if type(msg_id) is not int or msg_id < 1:
+            raise RemoteError("bad message id")
+        if msg_id <= self._peer_msg:
+            return
+        self._peer_msg = msg_id
+        method, params = message.get("method"), message.get("params") or {}
+        if not isinstance(params, dict):
+            raise RemoteError("bad params")
+        peer = self.peer
+        if not peer or not self.registry.trusted(peer):
+            raise RemoteError("device not trusted")
+        if method == "session.resume":
+            after = params.get("afterCursor")
+            if type(after) is int and self.log and after >= self.log[0][0]:
+                for cursor, event in self.log:
+                    if cursor > after:
+                        self._emit("session.delta", {"cursor": cursor, "event": event})
+            else:
+                self._emit("session.snapshot", self._snapshot())
+            return
+        if method not in {"chat.send", "chat.stop", "chat.approve", "chat.select"}:
+            self._ack(params.get("requestId"), False, "unsupported command")
+            return
+        request_id = params.get("requestId")
+        if not isinstance(request_id, str) or not request_id or len(request_id) > 128:
+            raise RemoteError("request id required")
+        cache = self._requests.setdefault(peer, OrderedDict())
+        if request_id in cache:
+            self._emit("session.ack", cache[request_id])
+            return
+        try:
+            ack = self._command(peer, method, params, request_id)
+        except RemoteError as exc:
+            ack = {"requestId": request_id, "ok": False, "error": str(exc)}
+        cache[request_id] = ack
+        while len(cache) > MAX_REQUESTS:
+            cache.popitem(last=False)
+        self._emit("session.ack", ack)
+
+    def _ack(self, request_id, ok, error=None):
+        if not isinstance(request_id, str):
+            return
+        body = {"requestId": request_id, "ok": ok}
+        if error:
+            body["error"] = error
+        self._emit("session.ack", body)
+
+    def _command(self, peer, method, params, request_id):
+        if method == "chat.approve":
+            return self._approve(peer, params, request_id)
+        chat = params.get("chat") if method != "chat.select" else params.get("chat")
+        if method == "chat.select":
+            chat = params.get("chat")
+        if not isinstance(chat, str) or not CHAT_ID.fullmatch(chat):
+            raise RemoteError("chat id required")
+        if method == "chat.send":
+            text = params.get("text")
+            if not isinstance(text, str) or not text.strip() or len(text) > MAX_TEXT:
+                raise RemoteError("message required")
+            self._execute({"command": "send", "chat": chat, "id": chat, "text": text, "request": request_id})
+        elif method == "chat.stop":
+            self._execute({"command": "stop", "chat": chat, "id": chat})
+        elif method == "chat.select":
+            self.selected_chat = chat
+            self._execute({"command": "subscribe", "client": "remote", "chats": [chat]})
+        else:
+            raise RemoteError("unsupported command")
+        return {"requestId": request_id, "ok": True}
+
+    def _execute(self, command):
+        try:
+            self.execute(command)
+        except RemoteError:
+            raise
+        except Exception as exc:
+            raise RemoteError(str(exc)[:300]) from exc
+
+    def _approve(self, peer, params, request_id):
+        approval_id = params.get("approvalId")
+        chat = params.get("chat")
+        allow = params.get("allow")
+        if not isinstance(approval_id, str) or not TOKEN.fullmatch(approval_id):
+            raise RemoteError("approval id required")
+        if not isinstance(chat, str) or not CHAT_ID.fullmatch(chat):
+            raise RemoteError("chat id required")
+        if allow is not True and allow is not False:
+            raise RemoteError("approval must be exactly true or false")
+        prior = self._decisions.get((chat, approval_id))
+        if prior:
+            return {"requestId": request_id, "ok": True, "allow": prior["allow"], "duplicate": True}
+        pending = self.view.get("approval")
+        if not pending or pending.get("id") != approval_id or pending.get("chat") != chat:
+            raise RemoteError("This approval is no longer pending.")
+        self._execute({"command": "approve", "chat": chat, "id": approval_id, "allow": allow})
+        self._decisions[(chat, approval_id)] = {"device": peer, "allow": allow, "requestId": request_id}
+        return {"requestId": request_id, "ok": True, "allow": allow}
+
+
+class PhoneClient:
+    """Thin companion state machine. It stores no provider credentials."""
+
+    def __init__(self, session_id, *, identity=None):
+        self.identity = identity or Ed25519PrivateKey.generate()
+        self.session = Session("iphone", self.identity, session_id, lambda *_: True)
+        self.session.on_app = self._on_app
+        self.cursor = 0
+        self.chats = []
+        self.approval = None
+        self.selected = None
+        self.notices = []
+        self.acks = {}
+        self.needs_snapshot = False
+        self._msg = 0
+        self._seen = 0
+
+    @property
+    def established(self):
+        return self.session.established
+
+    @property
+    def confirm(self):
+        return self.session.confirm
+
+    def identity_b64(self):
+        return b64e(ed25519_public(self.identity))
+
+    def take(self):
+        return self.session.take()
+
+    def feed(self, frame):
+        before = self.session.established
+        self.session.feed(frame)
+        if self.session.established and not before:
+            self.resume()
+
+    def start(self):
+        self._seen = 0
+        self.session.start()
+
+    def resume(self):
+        self._send("session.resume", {"afterCursor": self.cursor})
+
+    def send_text(self, chat, text, request_id):
+        self._send("chat.send", {"chat": chat, "text": text, "requestId": request_id})
+
+    def stop(self, chat, request_id):
+        self._send("chat.stop", {"chat": chat, "requestId": request_id})
+
+    def approve(self, chat, approval_id, allow, request_id):
+        self._send("chat.approve", {
+            "chat": chat, "approvalId": approval_id, "allow": allow, "requestId": request_id,
+        })
+
+    def select(self, chat, request_id):
+        self._send("chat.select", {"chat": chat, "requestId": request_id})
+
+    def _send(self, method, params):
+        self._msg += 1
+        self.session.send_app(method, params, self._msg)
+
+    def _on_app(self, message):
+        msg_id = message.get("msgId")
+        if type(msg_id) is not int or msg_id <= self._seen:
+            return
+        self._seen = msg_id
+        method, params = message["method"], message.get("params") or {}
+        if method == "session.snapshot":
+            self.cursor = params.get("cursor") or 0
+            self.chats = params.get("chats") or []
+            self.approval = params.get("approval")
+            self.selected = params.get("selected")
+            self.needs_snapshot = False
+        elif method == "session.delta":
+            cursor, event = params.get("cursor"), params.get("event")
+            if type(cursor) is not int or not isinstance(event, dict):
+                return
+            if cursor <= self.cursor:
+                return
+            if cursor != self.cursor + 1:
+                self.needs_snapshot = True
+                return
+            self.cursor = cursor
+            self._apply(event)
+        elif method == "session.ack":
+            request_id = params.get("requestId")
+            if isinstance(request_id, str):
+                self.acks[request_id] = params
+
+    def _apply(self, event):
+        kind = event.get("event")
+        if kind == "chats":
+            self.chats = event.get("chats") or []
+        elif kind == "approval":
+            self.approval = event.get("approval")
+        elif kind in {"selected", "snapshot"}:
+            self.selected = event
+        elif kind == "delta" and isinstance(self.selected, dict):
+            live = self.selected.get("live") or ""
+            self.selected["live"] = live + (event.get("text") or "")
+        elif kind in {"notice", "rejected", "error"}:
+            self.notices.append(event.get("message") or "")
+
+
+def exchange(mac: MacBridge, phone: PhoneClient, rounds=12):
+    for _ in range(rounds):
+        moved = False
+        for frame in phone.take():
+            mac.feed(frame)
+            moved = True
+        for frame in mac.take():
+            phone.feed(frame)
+            moved = True
+        if not moved:
+            return
+
+
+def validate_bind_host(host: str) -> str:
+    if host not in LOOPBACK_HOSTS:
+        raise ValueError("remote bridge refuses a non-loopback bind")
+    return "::1" if host == "::1" else "127.0.0.1"
+
+
+class LoopbackAdapter:
+    """Explicit loopback byte pipe. Construction does not listen."""
+
+    def __init__(self):
+        self._server = None
+        self.port = None
+        self._lock = threading.Lock()
+
+    def start(self, host="127.0.0.1", port=0):
+        bound = validate_bind_host(host)
+        if type(port) is not int or port < 0 or port > 65535:
+            raise ValueError("bad port")
+        with self._lock:
+            if self._server is not None:
+                raise RuntimeError("already listening")
+            server = socket.socket(socket.AF_INET6 if bound == "::1" else socket.AF_INET, socket.SOCK_STREAM)
+            try:
+                if bound == "::1":
+                    server.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+                server.bind((bound, port))
+                server.listen(1)
+                server.settimeout(2)
+                self.port = server.getsockname()[1]
+                self._server = server
+            except Exception:
+                server.close()
+                raise
+        return self.port
+
+    def accept(self, timeout=2):
+        if self._server is None:
+            raise RuntimeError("not listening")
+        self._server.settimeout(timeout)
+        conn, addr = self._server.accept()
+        peer = addr[0]
+        if peer not in {"127.0.0.1", "::1"}:
+            conn.close()
+            raise RemoteError("refusing non-loopback peer")
+        return conn
+
+    def stop(self):
+        with self._lock:
+            server, self._server = self._server, None
+        if server is not None:
+            server.close()
+
+
+def encode_line(frame: dict) -> bytes:
+    return json.dumps(frame, separators=(",", ":")).encode("utf8") + b"\n"
+
+
+class RemoteServer:
+    """Explicit private TCP listener; newline-delimited TaskWraith E2EE frames.
+
+    dispatch must enqueue a callable on the desktop's serial command queue.
+    One phone at a time. The listener never owns provider credentials.
+    """
+
+    def __init__(self, execute, state_path, session_id="providerhub-phone", *, dispatch):
+        self.path = Path(state_path)
+        self.dispatch = dispatch
+        self.lock = threading.RLock()
+        self.listener = self.connection = None
+        self.port = None
+        self.error = None
+        if self.path.is_symlink():
+            raise RemoteError("remote identity state must not be a symlink")
+        if self.path.exists():
+            fd = os.open(self.path, os.O_RDONLY | os.O_NOFOLLOW)
+            with os.fdopen(fd, "r") as stream:
+                state = json.loads(stream.read(65536))
+            identity = Ed25519PrivateKey.from_private_bytes(b64d(state["identity"]))
+        else:
+            state = {"devices": {}}
+            identity = Ed25519PrivateKey.generate()
+        self.bridge = MacBridge(execute, session_id, identity=identity)
+        self.bridge.hold_pairing = True
+        self.bridge.registry._devices = state.get("devices", {})
+        self._save()
+
+    def _save(self):
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        raw = self.bridge.identity.private_bytes(serialization.Encoding.Raw,
+            serialization.PrivateFormat.Raw, serialization.NoEncryption())
+        data = json.dumps({"identity": b64e(raw), "devices": self.bridge.registry._devices})
+        fd, temporary_name = tempfile.mkstemp(prefix=".remote-", dir=self.path.parent)
+        temporary = Path(temporary_name)
+        try:
+            os.fchmod(fd, 0o600)
+            with os.fdopen(fd, "w") as stream:
+                stream.write(data)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, self.path)
+        except Exception:
+            temporary.unlink(missing_ok=True)
+            raise
+
+    def start(self, host, port=8765):
+        address = ipaddress.ip_address(host)
+        # Explicit interfaces only. Never wildcard, public, multicast or link-local.
+        allowed = address.is_loopback or (address.version == 4 and
+            any(address in ipaddress.ip_network(net) for net in
+                ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10")))
+        if not allowed:
+            raise ValueError("choose an explicit LAN, Tailscale or loopback IP")
+        if type(port) is not int or not 0 <= port <= 65535:
+            raise ValueError("bad port")
+        with self.lock:
+            if self.listener:
+                raise RemoteError("already listening")
+            listener = socket.socket(socket.AF_INET6 if address.version == 6 else socket.AF_INET)
+            listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                listener.bind((host, port))
+                listener.listen(2)
+                listener.settimeout(0.5)
+            except Exception:
+                listener.close()
+                raise
+            self.listener = listener
+            self.port = listener.getsockname()[1]
+            threading.Thread(target=self._listen, args=(listener,), daemon=True).start()
+            return self.port
+
+    def bootstrap(self, host):
+        if not self.listener:
+            raise RemoteError("not listening")
+        return {"host": host, "port": self.port, "sessionId": self.bridge.session.session_id,
+                "macIdentityPubKey": self.bridge.identity_b64()}
+
+    def status(self):
+        with self.lock:
+            return {"listening": self.listener is not None, "port": self.port,
+                    "connected": self.bridge.established,
+                    "pendingPairing": self.bridge.pending_pairing, "error": self.error,
+                    "devices": [{"identity": identity, **row} for identity, row in self.bridge.registry._devices.items()]}
+
+    def _flush(self):
+        frames = self.bridge.take()
+        if self.connection:
+            payload = b"".join(encode_line(frame) for frame in frames)
+            if payload:
+                self.connection.sendall(payload)
+
+    def _receive(self, connection, frame):
+        with self.lock:
+            if connection is not self.connection:
+                return
+            try:
+                self.bridge.feed(frame)
+                self._flush()
+            except Exception as exc:
+                self.error = str(exc)[:300]
+                self._disconnect()
+
+    def _disconnect(self):
+        connection, self.connection = self.connection, None
+        if connection:
+            try:
+                connection.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            connection.close()
+        self.bridge.session.close()
+        self.bridge.session.peer_raw = None
+        self.bridge.session.outbox.clear()
+        self.bridge.pending_pairing = None
+
+    def _listen(self, listener):
+        while self.listener is listener:
+            try:
+                conn, _ = listener.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                return
+            with self.lock:
+                if self.connection is not None:
+                    conn.close()
+                    continue
+                self.connection = conn
+                conn.settimeout(2)
+                self.error = None
+            threading.Thread(target=self._reader, args=(conn,), daemon=True).start()
+
+    def _reader(self, connection):
+        try:
+            buffer = b""
+            while True:
+                try:
+                    chunk = connection.recv(65536)
+                except socket.timeout:
+                    continue
+                if not chunk:
+                    break
+                buffer += chunk
+                if len(buffer) > 262144:
+                    raise RemoteError("frame too large")
+                while b"\n" in buffer:
+                    line, buffer = buffer.split(b"\n", 1)
+                    frame = json.loads(line)
+                    self.dispatch(lambda frame=frame: self._receive(connection, frame))
+        except (OSError, ValueError, RemoteError) as exc:
+            self.error = str(exc)[:300]
+        finally:
+            def closed():
+                with self.lock:
+                    if self.connection is connection:
+                        self._disconnect()
+            self.dispatch(closed)
+
+    def publish(self, event):
+        with self.lock:
+            self.bridge.publish(event)
+            try:
+                self._flush()
+            except OSError:
+                self._disconnect()
+
+    def confirm_pairing(self, identity, code, allow):
+        with self.lock:
+            pending = self.bridge.pending_pairing
+            if not pending or pending != {"identity": identity, "confirmCode": code}:
+                raise RemoteError("pairing no longer pending")
+            if allow is not True:
+                self._disconnect()
+                return
+            self.bridge.registry.pair(identity)
+            self._save()
+            frame = self.bridge.session.pending_auth
+            self.bridge.session.awaiting_auth = True
+            self.bridge.pending_pairing = None
+            self.bridge.session._client_auth(frame)
+            self._flush()
+
+    def revoke(self, identity):
+        with self.lock:
+            self.bridge.revoke(identity)
+            self._save()
+            if self.bridge.peer == identity:
+                self._disconnect()
+
+    def stop(self):
+        with self.lock:
+            listener, self.listener = self.listener, None
+            if listener:
+                listener.close()
+            self._disconnect()

@@ -1093,6 +1093,49 @@ import Combine
         gitModel.controlTeamMember("member", start: true)
         check(gitCommands.last?["command"] as? String == "team_member_start", "Member play did not issue a start")
 
+        // Two panes share the worker/session store, never the selected view.
+        var paneCommands: [[String: Any]] = []
+        let shared = ChatModel(sendCommand: { paneCommands.append($0); return true }, preferences: preferences)
+        func paneEvent(_ raw: [String: Any]) throws {
+            shared.consume(try JSONSerialization.data(withJSONObject: raw) + Data([10]))
+        }
+        try paneEvent(["event":"catalogue", "models":[route], "folders":["/tmp"]])
+        try paneEvent(["event":"chats", "chats":[summary("A"), summary("B")]])
+        try paneEvent(["event":"ready"])
+        try paneEvent(["event":"selected", "id":"B", "entries":[], "busy":false])
+        shared.observe(chats: ["A", "B"])
+        let paneA = shared.paneModel(for: "A"), paneB = shared.paneModel(for: "B")
+        try paneEvent(["event":"snapshot", "chat":"A", "entries":[], "busy":false])
+        paneA.draft = "From A"; paneB.draft = "From B"
+        paneA.send()
+        check(paneCommands.last?["chat"] as? String == "A" && paneA.busy && !paneB.busy, "Pane send crossed ownership")
+        check(paneB.draft == "From B" && shared.selectedID == "B", "Pane A send stole focus or B draft")
+        let paneRequest = paneCommands.last?["request"] as! String
+        try paneEvent(["event":"entry", "chat":"A", "entry":["id":"pane-user", "kind":"user", "text":"From A", "route":"ollama/test", "isError":false, "changedFiles":[], "clientRequest":paneRequest]])
+        try paneEvent(["event":"entry", "chat":"A", "entry":["id":"pane-reply", "kind":"assistant", "text":"One", "route":"ollama/test", "isError":false, "changedFiles":[]]])
+        try paneEvent(["event":"delta", "chat":"A", "id":"pane-reply", "text":" two", "offset":3])
+        check(paneA.entries.last?.text == "One two" && paneB.entries.isEmpty, "Subscribed stream escaped pane")
+        try paneEvent(["event":"approval", "chat":"A", "approval":["id":"pane-approval", "summary":"click", "workspace":"/tmp"]])
+        check(paneA.approval?.id == "pane-approval" && paneB.approval == nil, "Pane approval crossed ownership")
+        paneA.decideApproval(allow: true)
+        check(paneCommands.last?["chat"] as? String == "A" && paneCommands.last?["id"] as? String == "pane-approval", "Approval response not bound to pane")
+        paneA.stop()
+        check(paneCommands.last?["command"] as? String == "stop" && paneCommands.last?["chat"] as? String == "A", "Stop targeted another pane")
+        shared.observe(chats: ["B"])
+        check(paneA.entries.isEmpty && paneB.draft == "From B", "Closing view destroyed another draft")
+        shared.select("deleted-chat")
+        let failedSelection = paneCommands.last?["request"] as! String
+        try paneEvent(["event":"selection_rejected", "id":"deleted-chat", "request":failedSelection, "message":"Chat was deleted."])
+        try paneEvent(["event":"selected", "id":"A", "entries":[], "busy":false])
+        check(shared.selectedID == "A", "Failed selection kept filtering later snapshots")
+        shared.select("deleted-chat")
+        let olderSelection = paneCommands.last?["request"] as! String
+        shared.select("B")
+        try paneEvent(["event":"selection_rejected", "id":"deleted-chat", "request":olderSelection, "message":"Old rejection"])
+        try paneEvent(["event":"selected", "id":"A", "entries":[], "busy":false])
+        check(shared.selectedID == "A", "Old rejection cleared a newer pending selection")
+        try paneEvent(["event":"selected", "id":"B", "entries":[], "busy":false])
+        check(shared.selectedID == "B", "New selection was lost after an older rejection")
         print("ChatModel state transitions passed")
     }
 }

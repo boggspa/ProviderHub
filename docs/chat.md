@@ -436,8 +436,11 @@ patch, browser, memory, delegate, status and handoff) as cached native vectors.
 
 Chat is a coding harness with attachments, local tools, concurrent chats,
 persistent parallel Teams and bounded delegation. Mutating tools in one checkout
-run serially. It has no agent mailboxes, schedules, connector
-catalogue, browser automation, or separate IDE.
+run serially. Development follow-ups add recursive panes, a native shared
+browser and optional Browser Use / Computer Use plugins; see
+[Chat capabilities and panes](chat-capabilities.md) for dependencies,
+interaction details and qualification limits. It has no agent mailboxes,
+schedules, connector catalogue or separate IDE.
 
 ## Implementation and verification
 
@@ -473,6 +476,9 @@ Build the native app with `bash Source/build.sh`.
 ## Transcript loading
 
 Worker events retain the existing JSONL `selected` snapshot semantics. Swift
+also accepts `snapshot` events for each chat subscribed by a visible pane,
+without changing the selected chat. Selection failures include the originating
+request identity so a deleted chat cannot leave later selections blocked. Swift
 frames and parses events and decodes transcript, catalogue, chat-list and Team
 payloads on a serial background queue, then applies them in FIFO order on the
 main actor. Each worker gets a new reader; queued events from an older process

@@ -105,6 +105,7 @@ def make_child(parent, choice, effort, role, emit):
     child.helper_parent = parent
     # One live preference for the parent and all existing/new helpers and Side Chats.
     child.preferences = parent.preferences
+    child.capabilities = parent.capabilities
     child.chat = {"id": uuid.uuid4().hex, "title": "Helper" if role == "delegate" else "Side Chat",
                   "updated": now(), "route": choice["route"], "account": choice["account"],
                   "scope": choice["scope"], "label": choice["label"], "effort": effort,

@@ -155,8 +155,12 @@ import Combine
         check(zoomed.nsFont.pointSize == 26 && zoomed.editorFont.pointSize == 28 && zoomed.scaled(10) == 20, "Zoom did not scale reading text")
         check(ChatFonts.font("system", size: 400, scale: 2).pointSize == 64, "Zoom applied before the size bound")
         let viewMenu = ChatZoomCommands.shared.menu()
-        check(viewMenu.items.map(\.keyEquivalent) == ["+", "=", "-", "0"] && viewMenu.items[1].isHidden
+        check(viewMenu.items.prefix(4).map(\.keyEquivalent) == ["+", "=", "-", "0"] && viewMenu.items[1].isHidden
               && viewMenu.items[1].allowsKeyEquivalentWhenHidden, "View menu shortcuts")
+        let paneRight = viewMenu.items.first { $0.title == "New Pane Right" }
+        let paneBelow = viewMenu.items.first { $0.title == "New Pane Below" }
+        check(paneRight?.keyEquivalent == "d" && paneRight?.keyEquivalentModifierMask == [.command, .option], "New pane right shortcut")
+        check(paneBelow?.keyEquivalent == "d" && paneBelow?.keyEquivalentModifierMask == [.command, .option, .shift], "New pane below shortcut")
         check(!ChatZoomCommands.shared.validateMenuItem(viewMenu.items[0]), "Zoom acted without the Chat window")
 
         // Selectable transcript text: inline Markdown becomes real fonts and
