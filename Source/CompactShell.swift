@@ -27,6 +27,9 @@ private typealias Semantic = HubTheme.Semantic
 
 private let subscriptionProviders: Set<String> = ["claude", "codex", "antigravity", "devin"]
 private let cliAccountProviders: Set<String> = ["codex", "claude"]
+/// Providers with both an API-key source and an installed-CLI source, which
+/// Chat can list side by side. Mirrors `hub_config.CHAT_SOURCE_PROVIDERS`.
+private let chatSourceProviders: Set<String> = ["codex", "claude", "muse", "grok"]
 private let tierOrder = ["fable", "opus", "sonnet", "haiku"]
 
 // MARK: - Model helpers the shell needs that the classic panes keep in views
@@ -616,6 +619,7 @@ private struct ProviderShellPane: View {
                 default:
                     Text("Reads \(provider.credential_env ?? "the provider key") from the app’s launch environment.").foregroundStyle(.secondary)
                 }
+                if chatSourceProviders.contains(provider.id) { ChatSourceRow(model: model, provider: provider) }
             }
         }
     }
@@ -669,6 +673,7 @@ private struct SubscriptionPane: View {
                 } else {
                     Text("Sign in through the \(provider.presentation.displayProvider) CLI itself, then save.").foregroundStyle(.secondary)
                 }
+                if chatSourceProviders.contains(provider.id) { ChatSourceRow(model: model, provider: provider) }
             }
             SectionLabel(text: "Routes", trailing: "\(model.providerModels(provider.id).count)")
             if model.providerModels(provider.id).isEmpty {
@@ -681,6 +686,25 @@ private struct SubscriptionPane: View {
                 }
             }
         }
+    }
+}
+
+/// Chat's second credential source (`chat_both_sources`): the Keychain key
+/// while the CLI is active, the installed CLI otherwise. Claude Desktop and
+/// Codex keep following the picker above; the worker drops an explicit false.
+private struct ChatSourceRow: View {
+    @ObservedObject var model: BridgeModel
+    var provider: ProviderDefinition
+    var body: some View {
+        let cli = model.settings.providers[provider.id]?.credential_mode == "cli"
+        VStack(alignment: .leading, spacing: 2) {
+            OptionRow(title: cli ? "Also list this provider’s API key models in Chat" : "Also list this provider’s installed CLI models in Chat",
+                      isOn: Binding(get: { model.settings.providers[provider.id]?.chat_both_sources ?? false },
+                                    set: { model.settings.providers[provider.id]?.chat_both_sources = $0 ? true : nil }),
+                      accent: provider.presentation.color)
+            Text("Chat shows both sources side by side, each row labelled with its source; Claude Desktop and Codex keep the source chosen above. Refresh after turning this on.")
+                .font(.system(size: 10.5)).foregroundStyle(.tertiary).fixedSize(horizontal: false, vertical: true)
+        }.padding(.top, 2)
     }
 }
 
