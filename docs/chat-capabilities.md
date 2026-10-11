@@ -134,6 +134,9 @@ execution after a process restart. Full history, media preview, push, background
 phone connections and a cloud relay remain separate follow-ups.
 The visible projection is limited to the latest 30 entries within a 48 KB
 serialized entry budget, with an 8,000-character prefix per message/live reply.
+Chat summaries have a separate 32 KB budget and a maximum of 256 recent chats.
+JSON text uses UTF-8 on the encrypted channel so these budgets also hold for
+non-ASCII transcripts and stay within the transport frame limit.
 Long-stream offsets stay within that prefix so reconnects do not repeatedly
 request the same snapshot. Provider/account identifiers, reasoning and local
 attachment records are excluded; visible message and tool text can still

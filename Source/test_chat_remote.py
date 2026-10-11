@@ -219,6 +219,33 @@ class GoldenVectorTests(unittest.TestCase):
 
 
 class BridgeTests(unittest.TestCase):
+    def test_unicode_and_escaped_display_snapshots_fit_the_encrypted_frame(self):
+        for character in ("😀", "\u0000"):
+            with self.subTest(character=repr(character)):
+                host, mac, phone = pair()
+                mac.publish({"event":"chats", "chats":[{
+                    "id":f"{i:032x}", "title":character*120, "status":character*80,
+                    "modelLabel":character*120, "providerLabel":character*60} for i in range(256)]})
+                mac.publish({"event":"snapshot", "chat":CHAT, "entries":[{
+                    "id":f"a{i}", "kind":"assistant", "text":character*8000,
+                    "detail":character*2000} for i in range(30)]})
+                mac.publish({"event":"delta", "chat":CHAT, "id":"a29", "offset":0, "text":character*8000})
+                mac.publish({"event":"approval", "chat":CHAT, "approval":{
+                    "id":APPROVAL, "summary":character*500, "detail":character*2000}})
+                for frame in mac.take():
+                    self.assertLess(len(frame["ct"]), 200000)
+                    self.assertLess(len(encode_line(frame)), 262144)
+                    phone.feed(frame)
+                phone._send("session.resume", {"afterCursor":-1})
+                for frame in phone.take(): mac.feed(frame)
+                for frame in mac.take():
+                    self.assertLess(len(frame["ct"]), 200000)
+                    self.assertLess(len(encode_line(frame)), 262144)
+                    phone.feed(frame)
+                self.assertEqual(phone.selected["live"], character*8000)
+                self.assertTrue(0 < len(phone.chats) < 256)
+                self.assertEqual(phone.chats[0]["id"], "0"*32)
+
     def test_pair_snapshot_send_stop_select_and_exact_approval(self):
         host, mac, phone = pair()
         self.assertTrue(mac.established and phone.established)

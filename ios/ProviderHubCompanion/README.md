@@ -77,6 +77,7 @@ IDs per device during the Mac process lifetime, including socket reconnects;
 it does not guarantee exactly-once execution across a Mac process restart.
 Transcript projection sends up to 30 recent entries within a 48 KB serialized
 entry budget, with up to 8,000 Unicode scalars of each message/live reply.
+The chat list includes up to 256 recent chats within a 32 KB summary budget.
 Tool updates replace the existing row and stream offsets remain valid after
 truncation or reconnect. Full history stays on the Mac.
 Transport flushes have a two-second upper bound before disconnecting a slow

@@ -272,7 +272,7 @@ class Session:
         direction = "mac->iphone" if self.role == "mac" else "iphone->mac"
         body = {"v": 1, "proto": APP_PROTOCOL, "msgId": msg_id, "method": method, "params": params or {}}
         sealed = seal(self.keys[direction], direction, self.session_id, self.send_seq,
-                      json.dumps(body, separators=(",", ":")).encode("utf8"))
+                      json.dumps(body, separators=(",", ":"), ensure_ascii=False).encode("utf8"))
         frame = {
             "t": "enc", "sessionId": self.session_id, "seq": self.send_seq,
             "nonce": b64e(sealed["nonce"]), "ct": b64e(sealed["ct"]), "tag": b64e(sealed["tag"]),
@@ -465,11 +465,11 @@ def project_event(event):
         return None
     kind = event.get("event")
     if kind == "chats" and isinstance(event.get("chats"), list):
-        rows = []
+        rows, size = [], 0
         for row in event["chats"][:256]:
             if not isinstance(row, dict) or not isinstance(row.get("id"), str):
                 continue
-            rows.append({
+            projected = {
                 "id": row["id"],
                 "title": str(row.get("title") or "Chat")[:120],
                 "status": str(row.get("status") or "")[:80],
@@ -480,7 +480,10 @@ def project_event(event):
                 "providerLabel": str(row.get("providerLabel") or "")[:60],
                 "accent": row.get("accent") if isinstance(row.get("accent"), str) and re.fullmatch(r"#[0-9A-Fa-f]{6}", row["accent"]) else "",
                 "approvalMode": row.get("approvalMode") if row.get("approvalMode") in {"manual", "accept_edits", "yolo"} else "manual",
-            })
+            }
+            length = len(json.dumps(projected, ensure_ascii=False).encode("utf8"))
+            if size + length > 32000: break
+            rows.append(projected); size += length
         return {"event": "chats", "chats": rows}
     if kind == "approval":
         approval = event.get("approval")
