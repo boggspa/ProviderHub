@@ -155,17 +155,17 @@ class ProcessRegistryTests(unittest.TestCase):
         other = Conversation("chat-b")
         self.assertEqual(scope(member), ("chat-a", {"owner": "Sol", "route": "ollama/a", "account": "", "memberID": "m1"}))
         self.assertEqual(scope(helper), ("chat-a", {"owner": "Helper · Opus", "route": "ollama/a", "account": "", "memberID": None}))
-        with mock.patch.object(chat_processes, "FIRST_LOOK", 0.05), mock.patch.object(chat_processes, "MAX_RUNNING", 5):
-            for owner in (parent, member, helper, member):
+        with mock.patch.object(chat_processes, "FIRST_LOOK", 0.01), mock.patch.object(chat_processes, "MAX_RUNNING", 9):
+            for owner in (parent, member, helper, member, parent, member, helper, member):
                 self.start("sleep 30", owner)
             rows = self.rows()
-            self.assertEqual(sorted(rows), ["p1", "p2", "p3", "p4"])
+            self.assertEqual(sorted(rows), [f"p{i}" for i in range(1, 9)])
             self.assertEqual([rows[key]["owner"] for key in ("p1", "p2", "p3")], ["Model A", "Sol", "Helper · Opus"])
-            with self.assertRaisesRegex(ValueError, "already has 4"):
+            with self.assertRaisesRegex(ValueError, "already has 8"):
                 self.start("sleep 30")
             self.start("sleep 30", other)
             self.assertEqual(list(self.rows("chat-b")), ["p1"])
-            with self.assertRaisesRegex(ValueError, "5 background processes are already running"):
+            with self.assertRaisesRegex(ValueError, "9 background processes are already running"):
                 self.start("sleep 30", other)
         with self.assertRaisesRegex(ValueError, "No background process 'p2'"):
             self.registry.stop(other, "p2", other.cancel)

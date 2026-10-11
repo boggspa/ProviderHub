@@ -5,7 +5,8 @@ cleanup queue retains prompt, schema, image and diagnostics files until the chil
 exits. Cancellation is checked while waiting for stdio traffic and admission.
 Each active request owns its CLI process; requests using the same provider/model
 do not share an active reader or a native thread. The gateway's existing global
-eight-request admission limit still applies.
+sixteen-request admission limit applies. Provider backoff and adaptive admission
+still respond to upstream rate limits.
 
 ## Provider behavior
 
