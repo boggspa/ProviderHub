@@ -202,20 +202,20 @@ in the settings file. Quit Codex, save, then launch again: the catalogue is
 written at launch.
 
 Claude and Codex can run on the same gateway. While one desktop harness is
-live, you can change the other's model selection and save; launching briefly
-restarts the gateway so both share the new snapshot, and the running app
-reconnects automatically. Shared provider settings (keys, regions, port) still
-require quitting both desktop apps.
+live, you can change the other's model selection and save; when the new
+selection needs a fresh snapshot, launching asks before briefly restarting the
+gateway so both share it, and the running app reconnects automatically. The
+port and provider connections (keys, regions, endpoints) still require
+quitting both desktop apps.
 
 Launching another desktop app while a run is active elsewhere does not need
 the active run to finish first. When the live gateway already carries the
-selection the new launch needs, the launch opens the app directly — no save,
-no gateway restart, no chat block. A Chat turn or in-flight requests block
-the restart with a named reason ("Chat is working", "Codex / ChatGPT has 2
-requests in flight") rather than a generic refusal; the shared gateway
-auto-stop on the Config pane honours ChatModel's active-turn signal so a
-Chat turn in flight keeps the gateway alive while you close or switch the
-other desktop app.
+selection the new launch needs, the launch opens the app directly, with no
+gateway restart. When a restart is needed, a Chat turn or in-flight requests
+refuse it with a named reason ("Chat is working", "The gateway has 2 requests
+in flight", counting every app on the gateway), and your unsaved edits stay
+pending. The gateway's auto-stop re-reads its in-flight count and keeps it
+running while Chat is open or working.
 
 This integration applies to the Codex coding workspace. It does not reroute
 ordinary ChatGPT cloud chats, voice, or every other product feature. File

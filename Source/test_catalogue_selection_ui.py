@@ -96,26 +96,14 @@ FileHandle.standardOutput.write(try JSONEncoder().encode(entries))
 @unittest.skipUnless(shutil.which("xcrun"), "Swift save classification requires the macOS toolchain")
 class SettingsChangeClassificationTests(unittest.TestCase):
     def test_combined_preferences_keep_codex_session_restrictions(self):
-        # Execute the production property with its actual RouteSettings value
-        # type. This catches a benign preference masking a Codex mutation.
-        # ``ChangeKind`` lives in ``Source/LaunchPlan.swift`` as a top-level
-        # enum (so the Swift launch-plan resolver can take it as a parameter
-        # without coupling to the ``BridgeModel`` declaration). The
-        # ``changeKind`` computed property still lives in ``MistralBridge.swift``
-        # as a thin BridgeModel wrapper. Read both files so the harness
-        # compiles against the real types.
+        # Execute the production classifier (LaunchPlan.swift) with its actual
+        # RouteSettings value type. This catches a benign preference masking a
+        # Codex mutation, and a connection change hiding behind a selection.
         bridge_source = Path(__file__).with_name("MistralBridge.swift").read_text()
-        launch_source = Path(__file__).with_name("LaunchPlan.swift").read_text()
-        # Extract the closing-brace position of the enum so the slice ends
-        # cleanly at the brace; including the leading slash of the next
-        # ``//`` doc comment would corrupt the Swift token stream.
-        enum_start = launch_source.index("public enum ChangeKind")
-        enum_close = launch_source.index("}", enum_start)
-        classifier = launch_source[enum_start:launch_source.index("\n", enum_close) + 1]
-        change_kind_property = bridge_source[bridge_source.index("var changeKind: ChangeKind"):bridge_source.index("var routeOptions:")]
         slot_source = bridge_source[bridge_source.index("let slots:"):bridge_source.index("/// Family tier")]
         harness_source = "import Foundation\n" + slot_source + "\nstruct Probe {\n"
-        harness_source += "var settings = RouteSettings()\nvar savedSettings = RouteSettings()\n" + classifier + change_kind_property + "}\n"
+        harness_source += "var settings = RouteSettings()\nvar savedSettings = RouteSettings()\n"
+        harness_source += "var changeKind: ChangeKind { classifyChange(settings, from: savedSettings) }\n}\n"
         harness_source += '''
 var result: [String] = []
 var unchanged = Probe()
@@ -135,6 +123,16 @@ routing.settings.mappings["claude-opus-5"] = "kimi/k3"
 result.append(String(describing: routing.changeKind))
 routing.settings.codex_goal_budget = true
 result.append(String(describing: routing.changeKind))
+var port = Probe()
+port.settings.port += 1
+result.append(String(describing: port.changeKind))
+var connection = Probe()
+connection.savedSettings.providers["mistral"] = ProviderConnection(region: "eu", base_url: "https://a.example", credential_mode: "keychain")
+connection.settings = connection.savedSettings
+connection.settings.providers["mistral"]?.cli_account = "work"
+result.append(String(describing: connection.changeKind))
+connection.settings.providers["mistral"]?.base_url = "https://b.example"
+result.append(String(describing: connection.changeKind))
 FileHandle.standardOutput.write(try JSONEncoder().encode(result))
 '''
         with tempfile.TemporaryDirectory(prefix="hub-settings-classification-") as tmp:
@@ -145,11 +143,13 @@ FileHandle.standardOutput.write(try JSONEncoder().encode(result))
             subprocess.run([
                 "xcrun", "swiftc", "-swift-version", "5", "-module-cache-path", str(root / "ModuleCache"),
                 str(Path(__file__).with_name("CatalogueSelection.swift")),
-                str(Path(__file__).with_name("HubModels.swift")), str(harness), "-o", str(executable),
+                str(Path(__file__).with_name("HubModels.swift")), str(Path(__file__).with_name("LaunchPlan.swift")),
+                str(harness), "-o", str(executable),
             ], check=True, capture_output=True, text=True, timeout=120)
             result = subprocess.run([str(executable)], check=True, capture_output=True, text=True, timeout=10)
         self.assertEqual(json.loads(result.stdout), [
             "unchanged", "prefs", "codexOnly", "codexOnly", "codexOnly", "claudeRouting", "mixed",
+            "shared", "prefs", "shared",
         ])
 
 
