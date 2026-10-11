@@ -23,11 +23,25 @@ enum ChatPairingCode {
         filter.setValue(Data(payload.utf8), forKey: "inputMessage")
         filter.setValue("M", forKey: "inputCorrectionLevel")
         guard let code = filter.outputImage else { return nil }
-        let border: CGFloat = 4
-        let extent = CGRect(x: 0, y: 0, width: code.extent.width + border * 2, height: code.extent.height + border * 2)
-        let white = CIImage(color: CIColor(red: 1, green: 1, blue: 1)).cropped(to: extent)
-        let framed = code.transformed(by: CGAffineTransform(translationX: border, y: border)).composited(over: white)
-        let scaled = framed.transformed(by: CGAffineTransform(scaleX: 6, y: 6))
-        return CIContext().createCGImage(scaled, from: scaled.extent)
+        // Materialize the native one-pixel modules in software before scaling.
+        // This avoids GPU/lazy CI compositing and unspecified output pixel formats
+        // varying between headless macOS runners and the desktop renderer.
+        let context = CIContext(options: [.useSoftwareRenderer: true])
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        guard let modules = context.createCGImage(code, from: code.extent,
+                                                 format: .RGBA8, colorSpace: colorSpace) else { return nil }
+        let scale = 6, border = 4
+        let width = (modules.width + border * 2) * scale
+        let height = (modules.height + border * 2) * scale
+        guard let bitmap = CGContext(data: nil, width: width, height: height,
+            bitsPerComponent: 8, bytesPerRow: width * 4, space: colorSpace,
+            bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue) else { return nil }
+        bitmap.setFillColor(CGColor(gray: 1, alpha: 1))
+        bitmap.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        bitmap.interpolationQuality = .none
+        bitmap.setShouldAntialias(false)
+        bitmap.draw(modules, in: CGRect(x: border * scale, y: border * scale,
+                                       width: modules.width * scale, height: modules.height * scale))
+        return bitmap.makeImage()
     }
 }
