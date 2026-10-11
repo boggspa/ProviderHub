@@ -861,6 +861,79 @@ class DiscoverProviderBranchTest(unittest.TestCase):
                          connection_signature("claude", settings["providers"]["claude"]))
         self.assertEqual(cached["models"][0]["id"], "sonnet")
 
+    def test_the_second_chat_source_is_discovered_beside_the_active_one(self):
+        from bridge_core import attach_model_specs, cached_catalogue, keychain_read
+        from hub_config import chat_source_settings
+        settings = default_settings()
+        settings["providers"]["claude"].update(credential_mode="cli", chat_both_sources=True)
+        seen = {}
+
+        def fake_cli(provider_id, **kwargs):
+            seen["cli"] = kwargs
+            return {"provider_id": provider_id, "models": [
+                {"id": "sonnet", "display_name": "Sonnet", "aliases": ["sonnet"]}], "source": "cli", "warnings": []}
+
+        def fake_api(provider_id, connection, key, **kwargs):
+            seen["api"] = (connection["credential_mode"], key)
+            return {"provider_id": provider_id, "models": [
+                {"id": "claude-opus-4-1", "display_name": "Opus", "aliases": ["claude-opus-4-1"], "context": 200000}],
+                "source": "provider_api", "warnings": []}
+
+        with patch("bridge_core.discover_via_cli", side_effect=fake_cli), \
+             patch("bridge_core.discover", side_effect=fake_api), \
+             patch("bridge_core.keychain_read", return_value="sk-ant-test"):
+            self.assertEqual(discover_provider(settings, "claude", root=self.root), "Claude CLI login")
+        self.assertEqual(seen["api"], ("keychain", "sk-ant-test"))
+        keyed = chat_source_settings(settings, "claude", "keychain")["providers"]["claude"]
+        cached = json.loads((self.root / "catalogues" / "claude.keychain.json").read_text())
+        self.assertEqual(cached["connection_signature"], connection_signature("claude", keyed))
+        self.assertEqual(cached["models"][0]["id"], "claude-opus-4-1")
+        # The main file is the CLI's, untouched by the second discovery.
+        main = json.loads((self.root / "catalogues" / "claude.json").read_text())
+        self.assertEqual([model["id"] for model in main["models"]], ["sonnet"])
+        inventory = cached_catalogue(settings, self.root)
+        # The CLI projection seeds every known tier beside the discovered row;
+        # the key's catalogue stays its own and never joins the launcher list.
+        self.assertIn("claude/claude-sonnet-5", [model["id"] for model in inventory["models"]])
+        self.assertNotIn("claude/claude-opus-4-1", [model["id"] for model in inventory["models"]])
+        self.assertEqual([model["id"] for model in inventory["chat_sources"]["claude"]["keychain"]], ["claude/claude-opus-4-1"])
+        self.assertEqual(inventory["providers"]["claude"]["chat_sources"]["keychain"]["model_count"], 1)
+        attached, _ = attach_model_specs(settings, self.root)
+        self.assertIn("claude/claude-opus-4-1", attached["_chat_source_specs"]["claude"]["keychain"])
+        self.assertNotIn("claude/claude-opus-4-1", attached["_model_specs"])
+
+        # No key saved: the second source records why and the active one still refreshes.
+        with patch("bridge_core.discover_via_cli", side_effect=fake_cli), \
+             patch("bridge_core.discover", side_effect=AssertionError("no key, so no HTTP discovery")), \
+             patch("bridge_core.keychain_read", return_value=None):
+            self.assertEqual(discover_provider(settings, "claude", root=self.root), "Claude CLI login")
+        cached = json.loads((self.root / "catalogues" / "claude.keychain.json").read_text())
+        self.assertEqual(cached["models"], [])
+        self.assertIn("API key models", cached["warnings"][0])
+        inventory = cached_catalogue(settings, self.root)
+        self.assertEqual(inventory["chat_sources"]["claude"]["keychain"], [])
+        self.assertIn("API key models", inventory["providers"]["claude"]["chat_sources"]["keychain"]["warnings"][0])
+
+        # The other way round: a keyed provider lists its CLI, under the CLI's own account.
+        settings["providers"]["claude"].update(credential_mode="keychain",
+                                               cli_accounts=[{"id": "work", "label": "Work", "config_dir": "/accounts/work"}],
+                                               cli_account="work")
+        with patch("bridge_core.discover_via_cli", side_effect=fake_cli), \
+             patch("bridge_core.discover", side_effect=fake_api), \
+             patch("bridge_core.keychain_read", return_value="sk-ant-test"):
+            self.assertEqual(discover_provider(settings, "claude", root=self.root), "macOS Keychain")
+        self.assertEqual(seen["cli"], {"config_dir": "/accounts/work"})
+        self.assertEqual(json.loads((self.root / "catalogues" / "claude.json").read_text())["models"][0]["id"], "claude-opus-4-1")
+        self.assertEqual(json.loads((self.root / "catalogues" / "claude.cli.json").read_text())["source"], "cli")
+        # A stale second-source file is not served after the provider's connection changes.
+        settings["providers"]["claude"]["credential_revision"] += 1
+        inventory = cached_catalogue(settings, self.root)
+        self.assertNotIn("claude", inventory["chat_sources"])
+        self.assertTrue(inventory["providers"]["claude"]["chat_sources"]["cli"]["needs_refresh"])
+        # Payloads for the UI carry the summary, not the second catalogue itself.
+        from bridge_core import CATALOGUE_DETAIL_KEYS
+        self.assertIn("chat_sources", CATALOGUE_DETAIL_KEYS)
+
 
 class GatewayCliTurnTest(unittest.TestCase):
     """End-to-end through a real in-process gateway against a fake adapter."""

@@ -23,7 +23,8 @@ from model_names import friendly_model_name, label_catalog
 from catalogue import build_catalogue, read_observations, route_specs
 from cli_routes import cli_credential_mode, discover_via_cli
 from claude_accent import profile_accents
-from hub_config import (CLAUDE_TIER_MODELS, SLOTS, claude_picker_rows, claude_routes, cli_account_dir, connection_signature, key_account_label, keychain_account,
+from hub_config import (CHAT_SOURCE_LABELS, CLAUDE_TIER_MODELS, SLOTS, chat_extra_source, chat_source_settings,
+                        claude_picker_rows, claude_routes, cli_account_dir, connection_signature, key_account_label, keychain_account,
                         defaults as hub_defaults, normalize as normalize_hub_settings,
                         project_catalogue, provider_display_name, provider_presentations,
                         qualify, split_route)
@@ -301,6 +302,16 @@ def catalog(key: str) -> dict:
     return data
 
 
+#: Keys of cached_catalogue's result that carry whole model lists rather than
+#: a summary; the UI payloads leave them out.
+CATALOGUE_DETAIL_KEYS = frozenset({"models", "raw", "chat_sources"})
+
+
+def chat_source_catalogue_path(root, provider_id: str, source: str):
+    """Where the second Chat source's inventory lives, beside the provider's own."""
+    return root / "catalogues" / f"{provider_id}.{source}.json"
+
+
 def cached_catalogue(settings, root=None):
     root = root or state_root()
     observations = read_observations(root)
@@ -340,14 +351,38 @@ def cached_catalogue(settings, root=None):
         models.extend(projected)
         summaries[provider_id] = {"model_count": len(projected), "source": inventory.get("source", "provider"),
                                   "fetched_at": inventory.get("fetched_at"), "warnings": inventory.get("warnings", [])}
+    # The second source Chat lists stays out of `models`: the desktop launchers
+    # and the Providers pane follow the active source, and a route id is the
+    # same on both, so merging would hand a launcher a route it cannot serve.
+    chat_sources = {}
+    for provider_id in PROVIDERS:
+        source = chat_extra_source(settings["providers"][provider_id], provider_id)
+        if source is None:
+            continue
+        alternate = chat_source_settings(settings, provider_id, source)
+        inventory = read_json(chat_source_catalogue_path(root, provider_id, source))
+        entry = summaries[provider_id].setdefault("chat_sources", {})
+        if not inventory or inventory.get("connection_signature") != connection_signature(
+                provider_id, alternate["providers"][provider_id]):
+            entry[source] = {"needs_refresh": True, "model_count": 0,
+                             "warnings": [f"Refresh this provider's catalogue to list its {CHAT_SOURCE_LABELS[source]} models in Chat."]}
+            continue
+        projected = project_catalogue(provider_id, inventory, alternate, observations)
+        chat_sources.setdefault(provider_id, {})[source] = projected
+        entry[source] = {"model_count": len(projected), "source": inventory.get("source", "provider"),
+                         "fetched_at": inventory.get("fetched_at"), "warnings": inventory.get("warnings", [])}
     return {"schema_version": 3, "models": models, "providers": summaries,
-            "model_count": len(models), "needs_refresh": not bool(models)}
+            "model_count": len(models), "needs_refresh": not bool(models), "chat_sources": chat_sources}
 
 
 def attach_model_specs(settings, root=None):
     inventory = cached_catalogue(settings, root)
-    return {**settings, "_model_specs": route_specs(inventory),
-            "_display_names": {identifier: entry["display_name"] for identifier, entry in route_specs(inventory).items()}}, inventory
+    specs = route_specs(inventory)
+    chat_specs = {provider_id: {source: route_specs({"models": projected}) for source, projected in sources.items()}
+                  for provider_id, sources in inventory.get("chat_sources", {}).items()}
+    return {**settings, "_model_specs": specs,
+            "_display_names": {identifier: entry["display_name"] for identifier, entry in specs.items()},
+            "_chat_source_specs": chat_specs}, inventory
 
 
 def model_labels(settings: dict, entries=(), vibe=None):
@@ -641,9 +676,38 @@ def inspect_state(root: Path) -> dict:
     result["profile_id"] = PROFILE_ID
     cached = cached_catalogue(settings, root)
     result["catalog"] = cached.get("models", [])
-    result["catalog_summary"] = {k: v for k, v in cached.items() if k not in {"models", "raw"}}
+    result["catalog_summary"] = {k: v for k, v in cached.items() if k not in CATALOGUE_DETAIL_KEYS}
     result["friendly_names"] = model_labels(settings, result["catalog"], result.get("vibe", {}))
     return result
+
+
+def discover_chat_source(settings, provider_id, source, root=None):
+    """Discover the second source Chat lists for a provider.
+
+    Runs the same discovery the provider would run if ``source`` were its
+    active credential mode, and caches it beside the provider's own file under
+    that mode's own signature. A failure here (no key saved, a signed-out CLI)
+    is recorded as the inventory's warning rather than raised: it must never
+    fail the refresh of the active source the desktop launchers depend on.
+    """
+    root = root or state_root()
+    alternate = chat_source_settings(settings, provider_id, source)
+    connection = alternate["providers"][provider_id]
+    key = ""
+    try:
+        key, _ = credentials(alternate, provider_id)
+        if source == "cli":
+            inventory = discover_via_cli(provider_id, config_dir=cli_account_dir(alternate, provider_id))
+        else:
+            inventory = discover(provider_id, connection, key)
+    except Exception as exc:  # noqa: BLE001 - recorded, never raised past the active source
+        detail = str(exc).replace(key, "[redacted]") if key else str(exc)
+        inventory = {"provider_id": provider_id, "models": [], "source": source,
+                     "warnings": [f"Chat cannot list this provider's {CHAT_SOURCE_LABELS[source]} models: {detail}"]}
+    inventory["connection_signature"] = connection_signature(provider_id, connection)
+    inventory["fetched_at"] = time_now_iso()
+    atomic_json(chat_source_catalogue_path(root, provider_id, source), inventory)
+    return inventory
 
 
 def discover_provider(settings, provider_id, root=None):
@@ -668,6 +732,9 @@ def discover_provider(settings, provider_id, root=None):
     inventory["connection_signature"] = connection_signature(provider_id, settings["providers"][provider_id])
     inventory["fetched_at"] = time_now_iso()
     atomic_json(root / "catalogues" / (provider_id + ".json"), inventory)
+    extra = chat_extra_source(settings["providers"][provider_id], provider_id)
+    if extra is not None:
+        discover_chat_source(settings, provider_id, extra, root)
     return source
 
 
