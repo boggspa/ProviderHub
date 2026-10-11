@@ -746,6 +746,82 @@ import Combine
             ["id":"p9", "command":"sleep 30", "status":"exited", "code":-9, "started":0, "ended":4]))
         check(signalled.failed && signalled.statusText() == "Failed (signal 9) · 4s", "a signal death read as an exit code")
         try processEvent(["event":"processes", "chat":"A", "processes":[runningRow]])
+        procs.primeChangesActivity()
+        let beforeLive = processCommands.count
+        procs.noteCompletedFileTools(now: 50)
+        check(processCommands.count == beforeLive, "unchanged transcript refreshed changes")
+        func toolEntry(_ id: String, _ name: String, _ detail: String, _ files: [String], _ member: String? = nil, _ memberName: String? = nil) -> ChatEntry {
+            ChatEntry(id: id, kind: "tool", text: "", route: "ollama/test", tool: name, detail: detail, isError: false, changedFiles: files, memberID: member, memberName: memberName)
+        }
+        procs.entries = [toolEntry("running", "run_shell", "Running\u{2026}", [])]
+        procs.noteCompletedFileTools(now: 51)
+        check(processCommands.count == beforeLive, "in-flight shell refreshed changes")
+        procs.entries = [toolEntry("running", "run_shell", "Finished", [])]
+        procs.noteCompletedFileTools(now: 52)
+        check(processCommands.count == beforeLive + 1 && processCommands.last?["command"] as? String == "inspect_git" && processCommands.last?["id"] as? String == "A", "completed shell did not refresh changes")
+        let firstLive = processCommands.last?["request"] as! String
+        try processEvent(["event":"git_changes", "chat":"A", "workspace":"/tmp", "request":firstLive, "changes":["files":[], "truncated":false]])
+        check(procs.gitChanges?.commits.isEmpty == true && !procs.gitChangesLoading, "legacy changes payload did not decode")
+        procs.entries.append(toolEntry("patch", "apply_patch", "Applied", ["A.swift"], "m-old", "Old"))
+        procs.noteCompletedFileTools(now: 53)
+        procs.flushScheduledChanges(now: 54)
+        check(processCommands.count == beforeLive + 1, "throttled refresh flooded inspect_git")
+        procs.flushScheduledChanges(now: 55)
+        check(processCommands.count == beforeLive + 2 && processCommands.last?["command"] as? String == "inspect_git", "coalesced refresh did not run after the interval")
+        let secondLive = processCommands.last?["request"] as! String
+        try processEvent(["event":"git_changes", "chat":"A", "workspace":"/tmp", "request":secondLive, "changes":["files":[], "truncated":false]])
+        procs.entries.append(toolEntry("read", "read_file", "Done", ["B.swift"], "m-old", "Old"))
+        procs.noteCompletedFileTools(now: 58)
+        check(processCommands.count == beforeLive + 3, "a finished edit outside patch and shell did not refresh")
+        let thirdLive = processCommands.last?["request"] as! String
+        try processEvent(["event":"git_changes", "chat":"A", "workspace":"/tmp", "request":thirdLive, "changes":["files":[], "truncated":false]])
+        procs.entries.append(toolEntry("later", "apply_patch", "Applied", ["A.swift"], "m-new", "New"))
+        procs.noteCompletedFileTools(now: 59)
+        check(processCommands.count == beforeLive + 3 && procs.changesActivityDirty, "an edit inside the interval was sent immediately")
+        check(procs.fileAuthor(path: "A.swift")?.memberID == "m-new" && procs.fileAuthor(path: "A.swift")?.name == "New", "latest member did not win the path")
+        check(procs.fileAuthor(path: "B.swift")?.name == "Old", "an earlier path lost its author")
+        check(procs.fileAuthor(path: "missing.swift") == nil, "an untouched path was attributed")
+        let beforeIdle = processCommands.count
+        procs.flushScheduledChanges(now: 60.5)
+        check(processCommands.count == beforeIdle + 1 && processCommands.last?["command"] as? String == "inspect_git", "a throttled edit never refreshed")
+        let idleLive = processCommands.last?["request"] as! String
+        try processEvent(["event":"git_changes", "chat":"A", "workspace":"/tmp", "request":idleLive, "changes":["files":[], "truncated":false]])
+        let beforeTrail = processCommands.count
+        try processEvent(["event":"state", "chat":"A", "busy":true])
+        procs.inspectorVisible = true; procs.inspectorTab = .changes
+        check(procs.pollChangesActivity(chat: "A", workspace: "/tmp", now: 61), "idle sample stopped a live pane's task")
+        check(processCommands.count == beforeTrail, "idle poll made a Git request")
+        // The last completion arrives after the idle sample, with no later event to re-arm a task.
+        procs.entries.append(toolEntry("trail", "apply_patch", "Applied", ["C.swift"], "m-trail", "Trail"))
+        check(procs.pollChangesActivity(chat: "A", workspace: "/tmp", now: 63), "live polling stopped after trailing completion")
+        check(processCommands.count == beforeTrail + 1 && processCommands.last?["command"] as? String == "inspect_git" && processCommands.last?["id"] as? String == "A", "trailing refresh waited for another tool or the end of the turn")
+        let trailRequest = processCommands.last?["request"] as! String
+        try processEvent(["event":"git_changes", "chat":"A", "workspace":"/tmp", "request":trailRequest, "changes":["files":[], "truncated":false]])
+        check(procs.fileAuthor(path: "C.swift")?.memberID == "m-trail", "the trailing edit lost its author")
+        let beforeDue = processCommands.count
+        procs.entries.append(toolEntry("due", "run_shell", "Finished", []))
+        procs.inspectorVisible = false
+        check(!procs.pollChangesActivity(chat: "A", workspace: "/tmp", now: 66) && processCommands.count == beforeDue, "hidden pane kept polling")
+        procs.inspectorVisible = true; procs.inspectorTab = .agents
+        check(!procs.pollChangesActivity(chat: "A", workspace: "/tmp", now: 66) && processCommands.count == beforeDue, "inactive tab kept polling")
+        procs.inspectorTab = .changes
+        let clockA = procs.changesActivity
+        procs.selectedID = "B"
+        check(procs.changesActivity !== clockA, "two chats shared a refresh clock")
+        check(!procs.pollChangesActivity(chat: "A", workspace: "/tmp", now: 66) && processCommands.count == beforeDue, "old task polled a different chat in the same workspace")
+        procs.selectedID = "A"
+        check(procs.changesActivity === clockA, "chat selection lost its refresh clock")
+        check(procs.pollChangesActivity(chat: "A", workspace: "/tmp", now: 66) && processCommands.count == beforeDue + 1 && processCommands.last?["id"] as? String == "A", "completed edit failed to refresh after showing the pane")
+        let dueRequest = processCommands.last?["request"] as! String
+        try processEvent(["event":"git_changes", "chat":"A", "workspace":"/tmp", "request":dueRequest, "changes":["files":[], "truncated":false]])
+        try processEvent(["event":"state", "chat":"A", "busy":false])
+        check(!procs.pollChangesActivity(chat: "A", workspace: "/tmp", now: 70), "idle turn kept polling")
+        procs.refreshChanges()
+        let commitRequest = processCommands.last?["request"] as! String
+        let commitFile: [String: Any] = ["path":"A.swift", "status":"M", "added":3, "deleted":1, "binary":false, "diff":"+now"]
+        let commitRow: [String: Any] = ["hash":String(repeating: "ab", count: 20), "subject":"Keep the edit", "author":"Ada", "time":"2026-10-11T00:04:00Z", "files":[commitFile], "truncated":false]
+        try processEvent(["event":"git_changes", "chat":"A", "workspace":"/tmp", "request":commitRequest, "changes":["files":[commitFile], "truncated":false, "commits":[commitRow]]])
+        check(procs.gitChanges?.commits.count == 1 && procs.gitChanges?.commits.first?.subject == "Keep the edit" && procs.gitChanges?.commits.first?.files.first?.added == 3 && procs.gitChanges?.files.first?.added == 3, "commit payload did not decode")
         procs.disconnected("Transport gone")
         check(procs.processes.isEmpty && procs.processesNotice.contains("may still be running"), "disconnect kept rows or hid possible orphans")
         print("ChatModel state transitions passed")

@@ -19,7 +19,52 @@ struct ChatChange: Decodable, Identifiable {
     var diff: String
     var id: String { path }
 }
-struct ChatChanges: Decodable { var files: [ChatChange]; var truncated: Bool }
+struct ChatCommitFile: Decodable, Identifiable {
+    var path: String
+    var oldPath: String?
+    var status: String
+    var added: Int
+    var deleted: Int
+    var binary: Bool
+    var diff: String
+    var id: String { path }
+}
+struct ChatCommit: Decodable, Identifiable {
+    var hash: String
+    var subject: String
+    var author: String
+    var time: String
+    var files: [ChatCommitFile]
+    var truncated: Bool
+    var id: String { hash }
+}
+struct ChatChanges: Decodable {
+    var files: [ChatChange]
+    var truncated: Bool
+    var commits: [ChatCommit]
+    private enum CodingKeys: String, CodingKey { case files, truncated, commits }
+    init(from decoder: Decoder) throws {
+        let row = try decoder.container(keyedBy: CodingKeys.self)
+        files = try row.decode([ChatChange].self, forKey: .files)
+        truncated = try row.decode(Bool.self, forKey: .truncated)
+        commits = try row.decodeIfPresent([ChatCommit].self, forKey: .commits) ?? []
+    }
+}
+struct ChatFileAuthor: Equatable {
+    var memberID: String
+    var name: String
+    var route: String
+}
+final class ChangesLiveClock {
+    static let interval: TimeInterval = 2.5
+    var dirty = false
+    var notBefore: TimeInterval = 0
+    var signature = ""
+    var seenTools = false
+    func reset() {
+        dirty = false; notBefore = 0; signature = ""; seenTools = false
+    }
+}
 struct ChatBranch: Decodable, Identifiable {
     var name: String; var current: Bool; var worktree: String?
     var nameBytes: String?
@@ -237,6 +282,89 @@ struct ChatTeamSnapshot: Decodable {
         gitChangesLoading = true; inspectorNotice = ""
         if !inspectorCommand(["command": "inspect_git", "id": selectedID, "request": request]) { gitChangesLoading = false; changesRequest = nil }
     }
+    func refreshChanges(now: TimeInterval) {
+        refreshChanges()
+        stampChangesRefresh(now)
+    }
+    /// Completed patch and shell rows in the selected transcript. Reads and in-flight calls stay out.
+    var fileToolFingerprint: String {
+        entries.compactMap { entry in
+            guard entry.kind == "tool", entry.detail != "Running\u{2026}" else { return nil }
+            let edited = !entry.changedFiles.isEmpty
+            let mutation = entry.tool == "apply_patch" || entry.tool == "run_shell"
+            guard edited || mutation else { return nil }
+            return entry.id + "\t" + (entry.tool ?? "") + "\t" + entry.changedFiles.joined(separator: "\t")
+        }.joined(separator: "\n")
+    }
+    func primeChangesActivity() {
+        let clock = changesActivity
+        clock.signature = fileToolFingerprint
+        clock.seenTools = true
+    }
+    func noteCompletedFileTools(now: TimeInterval = ProcessInfo.processInfo.systemUptime) {
+        let clock = changesActivity
+        let signature = fileToolFingerprint
+        let changed = clock.seenTools && signature != clock.signature
+        clock.signature = signature
+        clock.seenTools = true
+        if changed { scheduleChangesRefresh(now: now) }
+    }
+    /// Coalesce file-editing tool completions. Manual refresh stays immediate.
+    func scheduleChangesRefresh(now: TimeInterval = ProcessInfo.processInfo.systemUptime) {
+        guard connected, stateChatID != nil else { return }
+        let clock = changesActivity
+        if gitChangesLoading {
+            // One follow-up when this refresh is already due; hold the rest for the pane's flush.
+            if now >= clock.notBefore { changesRefreshPending = true; clock.dirty = false }
+            else { clock.dirty = true }
+            return
+        }
+        if now < clock.notBefore {
+            clock.dirty = true
+            return
+        }
+        clock.dirty = false
+        refreshChanges(now: now)
+    }
+    func flushScheduledChanges(now: TimeInterval = ProcessInfo.processInfo.systemUptime) {
+        guard connected else { changesActivity.dirty = false; return }
+        guard changesActivity.dirty else { return }
+        scheduleChangesRefresh(now: now)
+    }
+    /// One tick of the visible pane's lifecycle task. It remains alive for the
+    /// run even when a sample finds no edits, so the next completion is seen.
+    @discardableResult
+    func pollChangesActivity(chat: String, workspace: String, now: TimeInterval = ProcessInfo.processInfo.systemUptime) -> Bool {
+        guard connected, inspectorVisible, inspectorTab == .changes, busy,
+              selectedID == chat, stateChatID == chat, selected?.workspace == workspace else { return false }
+        noteCompletedFileTools(now: now)
+        flushScheduledChanges(now: now)
+        return true
+    }
+    var changesActivityDirty: Bool { changesActivity.dirty }
+    private func stampChangesRefresh(_ now: TimeInterval) {
+        let clock = changesActivity
+        clock.notBefore = now + ChangesLiveClock.interval
+        clock.dirty = false
+    }
+    func fileAuthor(path: String) -> ChatFileAuthor? {
+        fileAuthors()[path]
+    }
+    func presentation(for author: ChatFileAuthor) -> ProviderPresentation? {
+        if let member = team?.members.first(where: { $0.id == author.memberID }) {
+            return models.first { $0.route == member.route && $0.account == member.account }?.presentation
+        }
+        return models.first { $0.route == author.route }?.presentation
+    }
+    private func fileAuthors() -> [String: ChatFileAuthor] {
+        var authors: [String: ChatFileAuthor] = [:]
+        for entry in entries where entry.kind == "tool" && entry.detail != "Running\u{2026}" {
+            guard let memberID = entry.memberID, !memberID.isEmpty else { continue }
+            let author = ChatFileAuthor(memberID: memberID, name: entry.memberName ?? "", route: entry.route)
+            for path in entry.changedFiles where !path.isEmpty { authors[path] = author }
+        }
+        return authors
+    }
     var runningProcessCount: Int { processes.filter(\.running).count }
     /// The pane's poll leaves a notice in place; the refresh button clears it.
     func refreshProcesses(userInitiated: Bool = false) {
@@ -309,6 +437,7 @@ struct ChatTeamSnapshot: Decodable {
     }
     func resetInspector(clearSessions: Bool = false) {
         if clearSessions, let stateChatID { sideRequests[stateChatID] = nil }
+        changesActivity.reset()
         gitChanges = nil; gitChangesLoading = false; branches = nil; branchesLoading = false; branchBusy = false
         changesRequest = nil; changesRefreshPending = false; branchesRequest = nil; branchesRefreshPending = false; branchRequest = nil
         inspectorNotice = ""; branchNotice = ""; agents = []; inspectedAgentID = nil
@@ -356,7 +485,7 @@ struct ChatTeamSnapshot: Decodable {
         case "git_changes":
             if let workspace = event["workspace"] as? String, workspace != selected?.workspace { return }
             guard event["request"] as? String == changesRequest else { return }
-            if changesRefreshPending { gitChangesLoading = false; refreshChanges(); return }
+            if changesRefreshPending { gitChangesLoading = false; refreshChanges(now: ProcessInfo.processInfo.systemUptime); return }
             gitChanges = decoded(event["changes"], as: ChatChanges.self); gitChangesLoading = false
             changesRequest = nil
             inspectorNotice = event["notice"] as? String ?? ""

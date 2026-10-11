@@ -107,6 +107,7 @@ private struct ChatSessionState {
     var gitChangesLoading = false
     var changesRequest: String?
     var changesRefreshPending = false
+    let changesActivity = ChangesLiveClock()
     var branches: ChatBranchesSnapshot?
     var branchesLoading = false
     var branchesRequest: String?
@@ -185,6 +186,7 @@ final class ChatModel: ObservableObject {
     var gitChanges: ChatChanges? { get { value(\.gitChanges) } set { update(\.gitChanges, newValue) } }
     var gitChangesLoading: Bool { get { value(\.gitChangesLoading) } set { update(\.gitChangesLoading, newValue) } }
     var changesRequest: String? { get { value(\.changesRequest) } set { update(\.changesRequest, newValue) } }
+    var changesActivity: ChangesLiveClock { value(\.changesActivity) }
     var changesRefreshPending: Bool { get { value(\.changesRefreshPending) } set { update(\.changesRefreshPending, newValue) } }
     var branches: ChatBranchesSnapshot? { get { value(\.branches) } set { update(\.branches, newValue) } }
     var branchesLoading: Bool { get { value(\.branchesLoading) } set { update(\.branchesLoading, newValue) } }

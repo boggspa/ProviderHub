@@ -107,8 +107,14 @@ available only between turns, including Side Chats using that workspace.
 The right-hand **inspector** has four views, each using the whole pane:
 
 - **File Changes** lists file diff counts and expandable patches with three
-  context lines. It includes untracked files and reports binary or truncated
-  changes. Reads use the local checkout and never fetch a remote.
+  context lines, then the commits made since this turn started. It includes
+  untracked files and reports binary or truncated changes. While a turn is
+  running it refreshes after a completed patch, shell or other file edit,
+  about every few seconds, and again when the turn finishes. A file edit that
+  arrives as that refresh decides the list is idle still schedules a trailing
+  refresh, without waiting for another edit or the end of the turn. A team member
+  who last edited a path is marked on that row. Reads use the local checkout
+  and never fetch a remote.
 - **Team** configures up to four persistent members, including the current
   chat model. Each contributes once by default and may explicitly continue with
   a next step. Members think and read in parallel through one attributed
