@@ -29,6 +29,65 @@ skips; 14 companion tests; iOS simulator typecheck; and repository/runtime gates
 The release was signed, notarized, stapled and published. Do not change its tag
 or rebuild its assets as part of this work.
 
+## Progress — cloud continuation (2026-10-11)
+
+Continued on `claude/friendly-ride-5pvv3u`, which starts from this handoff
+commit. PR 1's Python side is implemented there; the contract is
+[chat-host.md](chat-host.md).
+
+- `Source/chat_host.py`: the persistent Host. `ChatHost` and the serial command
+  owner (now `chat_runtime.CommandOwner`, shared with the unchanged stdio
+  worker) behind a private Unix socket, with a per-state-root `flock`, a
+  per-start credential, kernel peer-UID checks and a versioned handshake.
+  Detach and explicit shutdown are separate paths. Each client has a bounded
+  queue, and one desktop window is attached at a time (a newer one supersedes
+  it). A version-tolerant control role can read status or retire the Host.
+  Browser actions follow the surface policy below.
+- `Source/gateway_service.py` and `gateway.py serve --detach` with an
+  authenticated `POST /_bridge/shutdown`. The gateway is **not** a child of
+  the Host. See the direction change below.
+- `Source/test_chat_host.py` and `Source/test_gateway_service.py`: real
+  processes, scripted provider, bounded waits.
+
+Not yet done: no Swift changes, so the shipped app still uses the stdio worker
+and `--parent-pipe`. There is no snapshot cursor or command receipt (PR 2).
+macOS AppKit/Swift checks were not run in the cloud environment.
+
+### Direction change: hub and Chat harness lifetimes are separate
+
+The user asked that a frozen Chat harness should not stop them operating the
+hub, and ideally that restarting the harness should not disrupt other
+hub-launched work. This replaced "the Host owns the gateway and its parent
+pipe": a gateway that is the Host's child would make every Chat Host restart
+also restart the gateway under the hub's desktop sessions. Now:
+
+| Owner | Lifetime authority |
+| --- | --- |
+| Gateway | Detached service per state root. Started by whoever needs it (`gateway_service.ensure`), stopped only by an explicit authenticated request, by the hub. |
+| Chat Host | Its own lock. Stopped only by an explicit `shutdown`. Restarting it leaves the gateway alone. |
+| Chat window | Attaches to and detaches from the Host. Can be relaunched without touching either. |
+| Hub UI | Controls the gateway and desktop launches. Today it shares a process and main thread with the Chat window, so a SwiftUI freeze in Chat still freezes the hub UI, though no longer the work. |
+
+### Revised sequence
+
+1. **Lifetime and connection** (this branch): done on the Python side as
+   above. It still needs the macOS CI run.
+2. **Authoritative reconnect and receipts**: unchanged from below.
+3. **Swift attach**: `ChatModel` connects to the Host over the socket
+   (connect-or-launch as in `chat_host.ensure`). App quit sends `detach`, not
+   `shutdown`. `BridgeModel.startGateway`/`stopGateway` become
+   `gateway_service ensure`/`stop`. At launch the app attaches to an
+   already-running gateway (check its build in `/_bridge/health`) instead of
+   failing on the held lock. Updates use the control role:
+   `shutdown {"ifIdle": true}` or defer. The quit gate stops treating Chat
+   runs as a reason to block quitting.
+4. **Harness isolation**: run the Chat window as its own process (a second
+   executable in the bundle) that attaches to the Host. The hub UI stays
+   responsive when Chat's main thread is stuck. The hub can offer
+   "Restart Chat window", and the newest window supersedes a frozen one.
+   Desktop sessions, the gateway and Chat runs are untouched.
+5. **Recovery and lifecycle qualification**: the former PR 3 below.
+
 ## Objective and limits
 
 Make existing runs survive a disconnected, reloaded or crashed **UI**. Keep

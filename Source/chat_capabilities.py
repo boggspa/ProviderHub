@@ -19,6 +19,11 @@ from chat_plugins import PluginRegistry, peekaboo_config
 from chat_plugin_mcp import MCPError
 
 
+SURFACE_UNAVAILABLE = "The Chat window that runs browser actions is not connected. This action was not executed."
+SURFACE_LOST = ("The Chat window disconnected after this browser action was sent. Its outcome is unknown; "
+                "inspect the page before running it again.")
+
+
 class NativeActions:
     def __init__(self, emit, *, timeout=90):
         self.emit, self.timeout = emit, timeout
@@ -27,6 +32,9 @@ class NativeActions:
         self._closed = False
         self._enabled = True
         self._generation = 0
+        # The persistent Host names the attached window that may execute an
+        # action; None (the stdio worker) means its parent UI is that window.
+        self.surface = None
 
     def set_enabled(self, enabled):
         with self._lock:
@@ -40,12 +48,15 @@ class NativeActions:
 
     def call(self, chat, tool, arguments, cancel, request_id=None, *, generation=None):
         identifier = request_id or uuid.uuid4().hex
-        pending = {"chat": chat, "event": threading.Event(), "result": None}
+        pending = {"chat": chat, "event": threading.Event(), "result": None, "surface": None, "lost": False}
         with self._lock:
             if (self._closed or not self._enabled or
                     generation is not None and generation != self._generation or
                     cancel is not None and cancel.is_set()):
                 raise InterruptedError("Native action cancelled before dispatch")
+            if self.surface is not None:
+                pending["surface"] = self.surface()
+                if pending["surface"] is None: raise ValueError(SURFACE_UNAVAILABLE)
             self._pending[identifier] = pending
             # Revocation shares this lock: registration and emission are a
             # single admission, so disable cannot slip between them.
@@ -63,6 +74,9 @@ class NativeActions:
                     raise InterruptedError("Native action stopped; inspect the recorded surface before retrying")
                 if time.monotonic() >= deadline:
                     raise ValueError("Native action timed out; its outcome may be unknown")
+            if pending["lost"]:
+                # Never replayed against a replacement window or client.
+                raise ValueError(SURFACE_LOST)
             if pending["result"] is None:
                 raise InterruptedError("Native action cancelled")
             completed = True
@@ -83,9 +97,19 @@ class NativeActions:
             if pending is None: return
             if command.get("chat") != pending["chat"]:
                 raise ValueError("Native result belongs to another chat")
+            if pending["surface"] is not None and command.get("_attachment") != pending["surface"]:
+                raise ValueError("Native result belongs to another Chat window")
             if pending["event"].is_set(): return
             pending["result"] = copy.deepcopy(result)
             pending["event"].set()
+
+    def surface_lost(self, surface):
+        """Settle actions sent to a window that went away as unknown outcomes."""
+        with self._lock:
+            for pending in self._pending.values():
+                if pending["surface"] == surface and not pending["event"].is_set():
+                    pending["lost"] = True
+                    pending["event"].set()
 
     def cancel_all(self, *, close=False):
         with self._lock:

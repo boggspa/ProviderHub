@@ -741,6 +741,32 @@ class Handler(BaseHTTPRequestHandler):
             return
         self.json_response(200, session.to_dict())
 
+    def _handle_shutdown(self):
+        """An explicit, authenticated stop. No client process owns this lifetime.
+
+The hub, the Chat Host and their windows each leave the gateway running when
+they exit or restart, so none of them can interrupt another's requests.
+"""
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+            request = json.loads(self.rfile.read(length) or b"{}") if 0 <= length <= 4096 else None
+        except ValueError:
+            request = None
+        if not isinstance(request, dict) or type(request.get("ifIdle", False)) is not bool:
+            self.error(400, "Send {\"ifIdle\": true|false}.")
+            return
+        stop = getattr(self.server, "stop_service", None)
+        if stop is None:
+            self.error(409, "This gateway is not serving as a stoppable service.")
+            return
+        with self.runtime.lock:
+            active = self.runtime.active
+        if request.get("ifIdle") and active:
+            self.error(409, "The gateway still has active requests.")
+            return
+        self.json_response(202, {"stopping": True, "pid": os.getpid(), "active": active})
+        stop()
+
     def allowed(self, *, health=False):
         host = self.headers.get("Host", "").split(":")[0]
         if host not in {"127.0.0.1", "localhost"}:
@@ -786,6 +812,8 @@ class Handler(BaseHTTPRequestHandler):
         if not self.allowed():
             return
         path = urllib.parse.urlsplit(self.path).path
+        if path == "/_bridge/shutdown":
+            return self._handle_shutdown()
         if path == "/v1/responses/compact":
             from responses_compact import handle_compact
             return handle_compact(self)
@@ -1405,7 +1433,11 @@ class Server(ThreadingHTTPServer):
         pass
 
 
-def serve(root, parent_pipe=False):
+def serve(root, parent_pipe=False, detach=False):
+    if detach:
+        # A service, not a child: it outlives whichever process started it.
+        try: os.setsid()
+        except OSError: pass
     private_directory(root)
     lock = open(root / "gateway.lock", "a")
     try:
@@ -1422,14 +1454,21 @@ def serve(root, parent_pipe=False):
         runtime.stopping.set()
         threading.Thread(target=server.shutdown, daemon=True).start()
 
+    server.stop_service = stop
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
+    if detach:
+        signal.signal(signal.SIGHUP, signal.SIG_IGN)
     if parent_pipe:
         def parent_watch():
             sys.stdin.buffer.read()
             stop()
         threading.Thread(target=parent_watch, daemon=True).start()
     print(json.dumps({"ready": True, "port": server.server_address[1], "credential_source": runtime.source}), flush=True)
+    if detach:
+        # Readiness is the only output a launcher reads; it may close the pipe.
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, 1); os.dup2(devnull, 2); os.close(devnull)
     server.serve_forever(poll_interval=.2)
     runtime.stopping.set()
     with runtime.lock:
@@ -1464,12 +1503,13 @@ def main():
     parser.add_argument("command", choices=["inspect", "validate", "save", "discover", "refresh-all", "prepare-launch", "activate", "restore", "serve", "codex-status", "codex-projects", "codex-prepare", "codex-activate", "codex-restore", "codex-accent", "cli-accounts", "key-accounts"])
     parser.add_argument("--provider", choices=list(PROVIDERS), default="mistral")
     parser.add_argument("--parent-pipe", action="store_true")
+    parser.add_argument("--detach", action="store_true", help="serve: run as a detached service, stopped only on request")
     parser.add_argument("--app", help="App bundle to launch for codex-accent")
     args = parser.parse_args()
     root = state_root()
     bootstrap_metadata(root)
     if args.command == "serve":
-        serve(root, args.parent_pipe)
+        serve(root, args.parent_pipe, args.detach)
         return
     if args.command == "codex-accent":
         # Long-lived: launches the desktop app with a DevTools pipe, tints
