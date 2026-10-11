@@ -41,6 +41,33 @@ User attachment validation stays strict. Generated image history uses the
 same honest fallback and can be compacted without feeding base64 to the
 summarizer. Switching to a text-only route retains an image outcome note.
 
+## Inline visualizations from non-GPT models (10 October 2026)
+
+A Claude Fable thread ended with its `visualize{"path":…}` line printed as
+text instead of the inline chart. The installed skill and desktop parser
+both require U+E200 before `visualize`, U+E202 before the JSON and U+E201
+after it. The recorded reply lacked those delimiters. A previous `codex/`
+reply preserved them, so this was not a universal visualization failure.
+The available evidence does not establish why the model omitted them.
+
+Provider Hub now wraps a bare reference line in those sentinels on both
+output paths: the Messages adapter behind translated and CLI routes, and the
+native Responses relay. Deltas are rewritten line by line, holding back only
+a line that could still become a reference, so the reference does not flash
+as raw text while streaming, and every completed shape (`output_text.done`,
+`content_part.done`, `output_item.done`, the terminal response) carries the
+same wrapped text. Lines already wrapped, lines inside fenced code and
+objects without a non-empty `path` string are left alone. This fallback
+handles the observed malformed reference without assuming which provider
+will produce it. The model still writes the fragment itself into the
+thread's visualization directory; the hub changes no paths and adds nothing
+to the request.
+
+Regression coverage uses synthetic replies and local HTTP fixtures, including
+split keywords, non-empty opening blocks, fenced examples, interleaved text
+parts and completion without a trailing newline. An installed Desktop render
+with this patch is still a manual qualification step.
+
 ## Qualification
 
 ### Build 59 native-command regression

@@ -444,6 +444,75 @@ class CustomApplyPatchBridgeTests(unittest.TestCase):
         self.assertEqual(done["input"], "x")
 
 
+class VisualizeReferenceBridgeTests(unittest.TestCase):
+    """The desktop renders a visualize reference only in its sentinel form."""
+
+    BODY = '{"path":"/tmp/viz/busiest-days.html"}'
+
+    def setUp(self):
+        from responses_visualize import CLOSE, OPEN, SEPARATOR
+        self.wrapped = OPEN + "visualize" + SEPARATOR + self.BODY + CLOSE
+
+    def test_streamed_deltas_and_the_completed_item_share_the_wrapped_text(self):
+        adapter = MessagesResponsesAdapter("claude/fable", None, "scope")
+        adapter.feed({"type": "message_start", "message": {"usage": {"input_tokens": 1}}})
+        adapter.feed({"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}})
+        chunks = ["Here it is.\n\nvisu", "alize" + self.BODY[:9], self.BODY[9:] + "\n\n**Patterns**",
+                  " worth noticing.\nvisualize" + self.BODY]
+        deltas = []
+        for chunk in chunks:
+            for event in adapter.feed({"type": "content_block_delta", "index": 0,
+                                       "delta": {"type": "text_delta", "text": chunk}}):
+                self.assertEqual(event["type"], "response.output_text.delta")
+                deltas.append(event["delta"])
+        # Prose streams as it arrives; only the reference line waits for its newline.
+        self.assertEqual(deltas, ["Here it is.\n\n", self.wrapped + "\n\n**Patterns**", " worth noticing.\n"])
+        stopped = adapter.feed({"type": "content_block_stop", "index": 0})
+        self.assertEqual([event["type"] for event in stopped],
+                         ["response.output_text.delta", "response.output_text.done",
+                          "response.content_part.done", "response.output_item.done"])
+        expected = "Here it is.\n\n" + self.wrapped + "\n\n**Patterns** worth noticing.\n" + self.wrapped
+        self.assertEqual("".join(deltas) + stopped[0]["delta"], expected)
+        self.assertEqual(stopped[1]["text"], expected)
+        self.assertEqual(stopped[2]["part"]["text"], expected)
+        self.assertEqual(stopped[3]["item"]["content"][0]["text"], expected)
+        adapter.feed({"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 9}})
+        completed = adapter.feed({"type": "message_stop"})[0]
+        self.assertEqual(completed["type"], "response.completed")
+        self.assertEqual(completed["response"]["output"][0]["content"][0]["text"], expected)
+
+    def test_buffered_replies_are_wrapped_and_sentinel_text_is_left_alone(self):
+        adapter = MessagesResponsesAdapter("kimi/kimi-for-coding", None, "scope")
+        response = adapter.from_message({"type": "message", "stop_reason": "end_turn", "usage": {},
+                                         "content": [{"type": "text", "text": "Chart:\nvisualize" + self.BODY + "\n"}]})
+        self.assertEqual(response["output"][0]["content"][0]["text"], "Chart:\n" + self.wrapped + "\n")
+        # Codex routes already carry the sentinels; nothing is double-wrapped.
+        adapter = MessagesResponsesAdapter("codex/gpt-6.1-sol", None, "scope")
+        response = adapter.from_message({"type": "message", "stop_reason": "end_turn", "usage": {},
+                                         "content": [{"type": "text", "text": self.wrapped + "\n"}]})
+        self.assertEqual(response["output"][0]["content"][0]["text"], self.wrapped + "\n")
+
+    def test_nonempty_opening_text_and_fences_survive_every_split(self):
+        from responses_visualize import wrap_text
+        for raw in ("Intro\nvisualize" + self.BODY,
+                    "```text\nvisualize" + self.BODY + "\n```\nvisualize" + self.BODY):
+            expected = wrap_text(raw)
+            for cut in range(len(raw) + 1):
+                with self.subTest(cut=cut, raw=raw):
+                    adapter = MessagesResponsesAdapter("claude/fable", None, "scope")
+                    opened = adapter.feed({"type": "content_block_start", "index": 0,
+                                           "content_block": {"type": "text", "text": raw[:cut]}})
+                    stream = opened[0]["item"]["content"][0]["text"]
+                    events = adapter.feed({"type": "content_block_delta", "index": 0,
+                                           "delta": {"type": "text_delta", "text": raw[cut:]}})
+                    events += adapter.feed({"type": "content_block_stop", "index": 0})
+                    stream += "".join(e["delta"] for e in events if e["type"] == "response.output_text.delta")
+                    self.assertEqual(stream, expected)
+                    self.assertEqual(events[-1]["item"]["content"][0]["text"], expected)
+                    all_events = opened + events
+                    self.assertEqual([e["sequence_number"] for e in all_events], list(range(len(all_events))))
+
+
 class PublishedReasoningSummaryTests(unittest.TestCase):
     """Only an opted-in, source-filtered summary lane becomes visible."""
 
