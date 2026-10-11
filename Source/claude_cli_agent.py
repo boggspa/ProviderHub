@@ -148,6 +148,10 @@ _MCP_ENV = {"MCP_CONNECTION_NONBLOCKING": "false", "MCP_TIMEOUT": "20000",
             "ENABLE_TOOL_SEARCH": "false"}
 #: The route passes typed history so a host call can continue a live session.
 LIVE_HOST_CALLS = True
+#: Narration streams as the model writes it. Host calls arrive as native MCP
+#: calls, so the protocol correction that holding text guards against is rare
+#: here, while holding withheld every step's text until its call or its end.
+LIVE_NARRATION = True
 #: How long a CLI may wait for the host's result before it is retired and the
 #: next step replays the conversation into a fresh process instead.
 LIVE_PENDING_TTL = 900

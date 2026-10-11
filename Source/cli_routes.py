@@ -628,6 +628,13 @@ def _tool_turn(adapter, request, *, timeout):
     # bash on 26-27 Sep 2026). Host calls are released only at message_stop,
     # so the stopped attempt executed nothing the host can see.
     approval_redirects = 0 if native else 1
+    # Narration is held until a step's handoff or reply is validated, so an
+    # invisible retry cannot print the same promises twice. A route whose
+    # calls arrive as native tool calls rarely retries, and holding cost it
+    # every word of every step, so it streams narration as it is written; a
+    # retry is then told what was shown and holds its own text.
+    live_narration = native or bool(getattr(adapter, "LIVE_NARRATION", False))
+    shown = False
     current = request
     while True:
         parser = cli_structured_reply.parse_stream if request.get("host_tool_schema") else _parse_tool_stream
@@ -639,6 +646,8 @@ def _tool_turn(adapter, request, *, timeout):
         restart = None
         searches = set()
         paragraph = False
+        narrated = False
+        hold = not live_narration or current is not request
         pending_text = []
         pending_bytes = 0
         try:
@@ -659,14 +668,19 @@ def _tool_turn(adapter, request, *, timeout):
                         # cutting here leaves nothing half-executed.
                         restart = "search"
                         break
-                    # The buffer below would run the narration on either side
-                    # of a search together into one sentence.
-                    paragraph = paragraph or bool(pending_text)
+                    # Narration on either side of a search would otherwise
+                    # run together into one sentence.
+                    paragraph = paragraph or narrated
                 if kind == "text_delta" and not native:
                     text = event.get("text") or ""
                     if paragraph and text and not text[:1].isspace():
                         event = {**event, "text": "\n\n" + text}
                     paragraph = False
+                    narrated = narrated or bool(text)
+                    if not hold:
+                        shown = shown or bool(text)
+                        yield event
+                        continue
                     # An invalid attempt has not done any host work. Keep its
                     # narration private until the handoff/reply is validated,
                     # so retrying cannot print the same promises twice.
@@ -683,6 +697,7 @@ def _tool_turn(adapter, request, *, timeout):
                 if kind in {"tool_call", "message_stop"}:
                     yield from pending_text
                     pending_text.clear()
+                    narrated = False
                 yield event
         finally:
             events.close()
@@ -719,6 +734,9 @@ def _tool_turn(adapter, request, *, timeout):
                     "already in this conversation is real and complete. Continue from those results "
                     "and issue only the host tool call that comes next - or the final answer if no call "
                     "remains - " + convention + "Never simulate a result.")
+        if shown:
+            note += (" The text you wrote before that point has already been shown to the user; "
+                     "do not repeat it.")
         current = {**current, "messages": [*current.get("messages", []), {"role": "user", "content": note}]}
 
 
