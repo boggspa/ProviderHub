@@ -492,12 +492,8 @@ private struct ChatInvitation: View {
 
 // MARK: - Transcript
 
-private struct ContentBottomKey: PreferenceKey {
-    static var defaultValue: CGFloat = 0
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
-}
-
-private struct ChatTranscript: View {
+@MainActor
+struct ChatTranscript: View {
     @ObservedObject var model: ChatModel
     @State private var expanded: Set<String> = []
     /// Explicit open/closed choices per fold; a fold without one follows the
@@ -505,35 +501,32 @@ private struct ChatTranscript: View {
     @State private var foldChoice: [String: Bool] = [:]
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.chatTextStyle) private var textStyle
-    /// True while the end of the transcript is within reach of the viewport;
-    /// new text follows only then, so reading earlier turns is never yanked.
-    @State private var nearBottom = true
-    @State private var viewportHeight: CGFloat = 0
+    @StateObject private var follow = ChatTranscriptFollow()
     @State private var visibleSegmentLimit = 100
     private let bottomID = "chat-transcript-bottom"
 
     var body: some View {
-        GeometryReader { outer in
-            ScrollViewReader { proxy in
-                ScrollView {
-                    content
-                        .background(GeometryReader { inner in
-                            Color.clear.preference(key: ContentBottomKey.self, value: inner.frame(in: .named("transcript")).maxY)
-                        })
+        ScrollViewReader { proxy in
+            ScrollView {
+                content.background(ChatTranscriptScrollObserver(follow: follow))
+            }
+            .onChange(of: model.transcriptVersion) { _, _ in scrollToEnd(proxy) }
+            .onChange(of: model.selectedID) { _, _ in
+                visibleSegmentLimit = 100; follow.resume()
+                scrollToEnd(proxy)
+            }
+            .onAppear { scrollToEnd(proxy) }
+            .onDisappear { follow.cancel() }
+            .overlay(alignment: .bottomTrailing) {
+                if !follow.followsLatest {
+                    Button {
+                        follow.resume(); scrollToEnd(proxy)
+                    } label: {
+                        Label("Latest", systemImage: "arrow.down").font(.system(size: 11.5, weight: .medium))
+                            .padding(.horizontal, 11).padding(.vertical, 7)
+                            .background(.regularMaterial, in: Capsule())
+                    }.buttonStyle(.plain).padding(12).accessibilityLabel("Go to latest activity")
                 }
-                .coordinateSpace(name: "transcript")
-                .onPreferenceChange(ContentBottomKey.self) { maxY in nearBottom = maxY - outer.size.height < 120 }
-                .onChange(of: model.entries.count) { _, _ in
-                    if model.entries.last?.kind == "user" || nearBottom { scrollToEnd(proxy) }
-                }
-                .onChange(of: model.transcriptVersion) { _, _ in
-                    if nearBottom { scrollToEnd(proxy) }
-                }
-                .onChange(of: model.selectedID) { _, _ in
-                    visibleSegmentLimit = 100; nearBottom = true
-                    scrollToEnd(proxy)
-                }
-                .onAppear { scrollToEnd(proxy) }
             }
         }
     }
@@ -565,7 +558,7 @@ private struct ChatTranscript: View {
             if model.entries.isEmpty { ChatInvitation(model: model) }
             if segments.count > visibleSegmentLimit {
                 Button("Load earlier messages") {
-                    nearBottom = false
+                    follow.pause()
                     visibleSegmentLimit += 100
                 }
                 .frame(maxWidth: .infinity).padding(.bottom, 16)
@@ -605,7 +598,7 @@ private struct ChatTranscript: View {
     }
 
     private func scrollToEnd(_ proxy: ScrollViewProxy) {
-        proxy.scrollTo(bottomID, anchor: .bottom)
+        follow.request { proxy.scrollTo(bottomID, anchor: .bottom) }
     }
 
     @ViewBuilder private func row(_ entry: ChatEntry, after speaker: ChatEntry? = nil, liveEntryIDs: Set<String>) -> some View {
