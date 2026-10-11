@@ -501,6 +501,12 @@ main actor. Each worker gets a new reader; queued events from an older process
 are ignored after reconnecting. Streaming offsets and inspector request IDs
 therefore retain their original ordering.
 
+A transcript travels as one line, which the pipe delivers in 16 KB reads.
+Framing searches each byte once; rescanning the buffer on every read made a
+35 MB transcript take minutes to connect. The worker sends a transcript once
+before `ready`, and once per chat in a subscription: the `snapshot`, followed
+by that chat's helper, Side Chat and Team state.
+
 The transcript initially renders the last 100 layout segments. “Load earlier
 messages” reveals 100 more at a time, preserving the full transcript and its
 speaker/fold grouping while bounding layout during a chat switch. Workspace

@@ -62,6 +62,26 @@ class ConcurrentChatTests(unittest.TestCase):
             self.host.handle({"command": "subscribe", "client": "desktop", "chats": ["missing-chat"]})
         self.assertEqual(self.host.subscriptions["desktop"], {second})
 
+    def test_startup_and_subscriptions_send_each_transcript_once(self):
+        # A long transcript is one wire line that the window decodes in full,
+        # so connecting and subscribing must not repeat it.
+        older, team = self.create("older"), self.create("team")
+        self.host.handle({"command": "configure_team", "chat": team, "request": "roster", "enabled": True,
+                          "members": [{"name": "Member", "choice": self.host.models[0]["id"], "effort": "", "responsibility": "Inspect"}]})
+        def transcripts(events):
+            return sorted((event["event"], event["chat"]) for event in events if "entries" in event)
+        events, client = [], FakeTransport([])
+        client.root = self.root
+        restarted = ChatHost(self.store, client, events.append, child_factory=lambda: client)
+        restarted.initialize(); self.addCleanup(restarted.shutdown)
+        ready = [event["event"] for event in events].index("ready")
+        self.assertEqual(transcripts(events[:ready]), [("selected", team)])
+        self.assertIn("team", [event["event"] for event in events[:ready]])
+        events.clear()
+        restarted.handle({"command": "subscribe", "client": "desktop", "chats": [older, team]})
+        self.assertEqual(transcripts(events), sorted([("snapshot", older), ("snapshot", team)]))
+        self.assertTrue(any(event["event"] == "team" and event["chat"] == team for event in events))
+
     def test_attached_folder_real_session_tools_and_detach(self):
         from test_chat_agents import call
         identifier = self.create()

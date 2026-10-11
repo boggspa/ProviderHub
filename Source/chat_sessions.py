@@ -380,13 +380,14 @@ class ChatHost:
         self._initializing = True
         try:
             service = self.new_session()
+            # Publishes the selected transcript; repeating it here cost the
+            # window another full decode before ready.
             service.initialize()
             self.models = service.models
             if service.chat:
                 self.sessions[service.chat["id"]] = service
                 self.view_id = service.chat["id"]
             self.publish_summaries()
-            service.publish()
         finally:
             self._initializing = False
         with self._output: self.emit({"event": "ready"})
@@ -525,8 +526,9 @@ the same publication `initialize` and `select` perform, ending with `ready`.
                         self.emit({"event": "snapshot", "chat": identifier, "id": identifier,
                                    "entries": copy.deepcopy(service.chat["entries"]), "usage": service.chat.get("usage"),
                                    **self.state(service)})
-                    # Inspector snapshots also retain their owning chat.
-                    service.publish()
+                    # The snapshot is this chat's only transcript copy; its
+                    # helper, Side Chat and Team state follow for the inspector.
+                    service.publish_inspector()
             self.prune()
             return
         self.prune(keep=command.get("chat") or command.get("id"))
