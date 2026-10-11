@@ -69,12 +69,13 @@ struct ChatSettingsMenu: View {
 struct ChatGitIndicator: View {
     @ObservedObject var model: ChatModel
     var body: some View {
-        Group {
+        HStack(spacing: 0) {
             if let git = model.gitStatus {
                 values(git)
             }
         }
-        .task(id: model.selected?.workspace) {
+        .task(id: "\(model.selectedID ?? "")|\(model.selected?.workspace ?? "")|\(model.connected)") {
+            guard model.connected, model.selectedID != nil else { return }
             model.refreshGitStatus()
             while !Task.isCancelled {
                 do { try await Task.sleep(nanoseconds: 4_000_000_000) } catch { return }

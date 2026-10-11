@@ -35,6 +35,7 @@ import chat_execution
 import chat_processes
 import chat_team
 from chat_git import git_status
+from chat_git_overview import handle as handle_git_overview
 from chat_workspaces import ChatWorkspaces, available_workspace
 from protocol import compact_conversation, estimated_tokens
 
@@ -701,6 +702,7 @@ class ChatService:
         if self.role == "parent":
             if chat_team.handle(self, command): return
             if chat_blackboard.handle(self, command): return
+            if handle_git_overview(self, command): return
             from chat_agents import handle_auxiliary
             if handle_auxiliary(self, command):
                 return

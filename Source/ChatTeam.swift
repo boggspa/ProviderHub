@@ -29,6 +29,21 @@ struct ChatTeamControls: View {
                             Text(member.statusLabel)
                                 .font(.system(size: 10.5)).foregroundStyle(member.status == "error" ? HubTheme.Semantic.contextCritical : HubTheme.Semantic.secondaryInk)
                                 .help(member.pendingChange == nil ? "" : "Applies after this member's current step; a running tool finishes and records its result first.")
+                            if member.status == "working" {
+                                Button { model.controlTeamMember(member.id, start: false) } label: {
+                                    Image(systemName: "stop.circle").font(.system(size: 13))
+                                }.buttonStyle(.plain).foregroundStyle(.secondary)
+                                    .disabled(!model.canControlTeamMember || member.memberStoppedByUser == true)
+                                    .help("Stop this member's current run")
+                                    .accessibilityLabel("Stop \(member.name)")
+                            } else if ["done", "ready", "stopped", "interrupted", "error", "limit_reached"].contains(member.status) {
+                                Button { model.controlTeamMember(member.id, start: true) } label: {
+                                    Image(systemName: "play.circle").font(.system(size: 13))
+                                }.buttonStyle(.plain).foregroundStyle(.secondary)
+                                    .disabled(!model.canControlTeamMember || team.needsInput || member.pendingChange != nil)
+                                    .help("Start another contribution with the current Team context")
+                                    .accessibilityLabel("Start \(member.name)")
+                            }
                         }
                         Text(member.label + (member.account.isEmpty ? "" : " · " + member.account))
                             .font(.system(size: 10.5)).foregroundStyle(.secondary).lineLimit(2)
