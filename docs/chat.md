@@ -31,9 +31,10 @@ lists every model its catalogue holds, and the picker's search narrows it. The
 second source's accounts are the ones saved for it (extra API keys or CLI
 folders), managed by switching the credential source temporarily. Claude
 Desktop and Codex keep using the active source only; a chat on the second
-source names it in `_provider_hub_account`, and the gateway serves it from a
-separate catalogue snapshot, so reconnect after refreshing to see new models. Changing workspace opens a new
-chat, leaving the original transcript in the rail.
+source names it in `_provider_hub_account`, and the gateway reads that source's
+cached catalogue whenever the picker refreshes or a request plans on it, so a
+refreshed catalogue reaches Chat without restarting the gateway. Changing
+workspace opens a new chat, leaving the original transcript in the rail.
 
 The sidebar lists **Projects** first, then **Recents**, then **Workspaces**. A
 workspace with attached folders is promoted into Projects; the extra folders

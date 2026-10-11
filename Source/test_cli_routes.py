@@ -862,7 +862,7 @@ class DiscoverProviderBranchTest(unittest.TestCase):
         self.assertEqual(cached["models"][0]["id"], "sonnet")
 
     def test_the_second_chat_source_is_discovered_beside_the_active_one(self):
-        from bridge_core import attach_model_specs, cached_catalogue, keychain_read
+        from bridge_core import attach_model_specs, cached_catalogue, chat_source_specs, keychain_read
         from hub_config import chat_source_settings
         settings = default_settings()
         settings["providers"]["claude"].update(credential_mode="cli", chat_both_sources=True)
@@ -901,6 +901,8 @@ class DiscoverProviderBranchTest(unittest.TestCase):
         attached, _ = attach_model_specs(settings, self.root)
         self.assertIn("claude/claude-opus-4-1", attached["_chat_source_specs"]["claude"]["keychain"])
         self.assertNotIn("claude/claude-opus-4-1", attached["_model_specs"])
+        # The gateway reads the same specs fresh from the file, without a snapshot.
+        self.assertEqual(chat_source_specs(settings, self.root), attached["_chat_source_specs"])
 
         # No key saved: the second source records why and the active one still refreshes.
         with patch("bridge_core.discover_via_cli", side_effect=fake_cli), \

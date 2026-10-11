@@ -24,14 +24,14 @@ import urllib.parse
 import urllib.request
 
 import cli_routes
-from bridge_core import (BridgeError, CATALOGUE_DETAIL_KEYS, ClaudeProfile, MAX_REQUEST_BODY, atomic_json, attach_model_specs, bootstrap_metadata, cached_catalogue, credentials, discover_provider, gateway_token,
+from bridge_core import (BridgeError, CATALOGUE_DETAIL_KEYS, ClaudeProfile, MAX_REQUEST_BODY, atomic_json, attach_model_specs, bootstrap_metadata, cached_catalogue, chat_source_specs, credentials, discover_provider, gateway_token,
                          inspect_state, key_account_states, load_settings, model_labels, private_directory, private_token, read_json, ssl_context, state_root, validate_settings)
 from catalogue_lifecycle import (CataloguePreparationError, catalogue_fingerprint,
                                  prepare_launch, refresh_all, require_prepared,
                                  runtime_fingerprint_error,
                                  validate_prepared_launch)
 from catalogue import build_catalogue, read_observations
-from hub_config import claude_routes, cli_account_dir, connection_signature, provider_presentations, qualify, split_route
+from hub_config import CHAT_SOURCE_LABELS, chat_extra_source, claude_routes, cli_account_dir, connection_signature, provider_presentations, qualify, split_route
 from launch_selection import apply_plan, effective_launch_settings, require_launchable, servable_shortfall, usable_providers, write_plan
 from ollama_lifecycle import http_transport, lease_seconds, release as release_resident_model
 from providers import PROVIDERS, prepare_request, ProviderError
@@ -194,23 +194,31 @@ class Runtime:
                 self.credential_cache[provider_id] = cached
         return cached[0]
 
-    def chat_route(self, requested, connection):
+    def chat_route(self, requested, connection, settings):
         """Resolve a Chat request's route and spec on the credential source its account names.
 
         The active source serves the startup snapshot like every other
-        request. A second source (hub_config.chat_sources) has its own
-        snapshot, keyed the same way, because a route id reads the same on
-        both while the models behind it need not.
+        request. The second source (hub_config.chat_sources) is Chat-only, so
+        its specs are read fresh from its cached catalogue (``settings`` is
+        the saved state naming it): a refresh reaches the next request without
+        a restart. It is keyed the same way, because a route id reads the same
+        on both while the models behind it need not.
         """
         provider_id = split_route(requested)[0]
         if connection["credential_mode"] == self.settings["providers"][provider_id]["credential_mode"]:
             route = self.resolve_route(requested)
             return route, self.settings["_model_specs"][route]
-        specs = (self.settings.get("_chat_source_specs") or {}).get(provider_id, {}).get(connection["credential_mode"]) or {}
+        source = chat_extra_source(settings["providers"][provider_id], provider_id)
+        if connection["credential_mode"] != source:
+            # Only an active source changed since start reaches here: the
+            # snapshot was built for the earlier one and cannot serve the new.
+            raise BridgeError("The gateway started on this provider's earlier credential source. "
+                              "Restart the gateway to chat on the one now chosen.")
+        specs = chat_source_specs(settings, self.root).get(provider_id, {}).get(source) or {}
         spec = specs.get(qualify(*split_route(requested)))
         if spec is None:
-            raise BridgeError("This route is not in the running gateway's catalogue for that credential source. "
-                              "Refresh the provider's models, then reconnect.")
+            raise BridgeError(f"This model is not in the {CHAT_SOURCE_LABELS[source]} catalogue Chat lists for this "
+                              "provider. Refresh the provider's models, or choose another model.")
         return spec.get("id") or requested, spec
 
     def plan(self, payload):
@@ -220,12 +228,13 @@ class Runtime:
         if is_chat:
             try:
                 provider_id = split_route(payload.get("model"))[0]
+                saved = load_settings(self.root)
                 selected_settings, connection, chat_directory, chat_scope = chat_connection(
-                    load_settings(self.root), provider_id, payload.get("_provider_hub_account", ""),
+                    saved, provider_id, payload.get("_provider_hub_account", ""),
                     payload.get("_provider_hub_connection"))
             except ValueError as exc:
                 raise BridgeError(str(exc)) from exc
-            route, spec = self.chat_route(payload.get("model"), connection)
+            route, spec = self.chat_route(payload.get("model"), connection, saved)
         else:
             route = self.resolve_route(payload.get("model"))
             spec = self.settings["_model_specs"][route]
@@ -821,10 +830,13 @@ they exit or restart, so none of them can interrupt another's requests.
         elif path == "/_bridge/codex/models":
             self.json_response(200, {"models": codex_choices(self.runtime.settings, self.runtime.catalogue)})
         elif path == "/_bridge/chat/models":
-            # Route metadata stays on the serving snapshot; accounts and display
-            # overrides are read live without changing a desktop's selection.
-            settings = {**load_settings(self.runtime.root), "_model_specs": self.runtime.settings["_model_specs"],
-                        "_chat_source_specs": self.runtime.settings.get("_chat_source_specs") or {}}
+            # The active source's route metadata stays on the serving snapshot.
+            # Accounts and display overrides are read live without changing a
+            # desktop's selection, and so is the second source Chat lists: no
+            # desktop depends on it, so a refresh reaches the picker's next ask.
+            live = load_settings(self.runtime.root)
+            settings = {**live, "_model_specs": self.runtime.settings["_model_specs"],
+                        "_chat_source_specs": chat_source_specs(live, self.runtime.root)}
             self.json_response(200, {"models": chat_choices(settings)})
         elif path == "/v1/agents/sessions":
             return self._handle_list_agent_sessions()

@@ -107,7 +107,8 @@ class ChatCatalogueTests(unittest.TestCase):
                 "vibe_home": str(root / "vibe"), "configured_models": []}
         with patch("bridge_core.vibe_settings", return_value=vibe):
             settings = default_settings()
-        settings["providers"]["claude"].update(credential_mode="cli", chat_both_sources=True)
+        # The switch is off when the gateway starts: its snapshot is the CLI's alone.
+        settings["providers"]["claude"].update(credential_mode="cli")
         settings["mappings"] = {slot[0]: "claude/claude-sonnet-5" for slot in SLOTS}
         # Curate the launcher lists to one route: the CLI projection seeds every
         # known Claude tier, and an uncurated Codex list would show them all.
@@ -121,24 +122,32 @@ class ChatCatalogueTests(unittest.TestCase):
         atomic_json(root / "catalogues" / "claude.json", {
             "provider_id": "claude", "source": "cli", "models": [model("claude-sonnet-5", "cli", 200000)],
             "connection_signature": connection_signature("claude", settings["providers"]["claude"])})
-        keyed = chat_source_settings(settings, "claude", "keychain")["providers"]["claude"]
-        atomic_json(root / "catalogues" / "claude.keychain.json", {
-            "provider_id": "claude", "source": "provider_api",
-            "models": [model("claude-sonnet-5", "provider_api", 1000000), model("claude-opus-4-1", "provider_api", 200000)],
-            "connection_signature": connection_signature("claude", keyed)})
         with patch("bridge_core.vibe_settings", return_value=vibe):
             runtime = Runtime(root)
-        self.assertEqual(sorted(runtime.settings["_chat_source_specs"]["claude"]["keychain"]),
-                         ["claude/claude-opus-4-1", "claude/claude-sonnet-5"])
+        self.assertEqual(runtime.settings["_chat_source_specs"], {})
         server = Server(runtime, 0)
         import threading
         threading.Thread(target=server.serve_forever, kwargs={"poll_interval": .05}, daemon=True).start()
         self.addCleanup(server.server_close); self.addCleanup(server.shutdown)
-        connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=5)
-        connection.request("GET", "/_bridge/chat/models", headers={"Authorization": "Bearer " + runtime.token})
-        rows = json.loads(connection.getresponse().read())["models"]
-        connection.close()
-        self.assertEqual(sorted((row["account"], row["route"], row["context"]) for row in rows), [
+        def listed():
+            connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=5)
+            connection.request("GET", "/_bridge/chat/models", headers={"Authorization": "Bearer " + runtime.token})
+            rows = json.loads(connection.getresponse().read())["models"]
+            connection.close()
+            return sorted((row["account"], row["route"], row["context"]) for row in rows)
+        self.assertEqual(listed(), [("", "claude/claude-sonnet-5", 200000)])
+        # Turning the switch on and refreshing while the gateway runs reaches
+        # the picker's next refresh: no desktop depends on the second source,
+        # so it is read from its cached file rather than the startup snapshot.
+        settings["providers"]["claude"]["chat_both_sources"] = True
+        atomic_json(root / "settings.json", settings)
+        keyed = chat_source_settings(settings, "claude", "keychain")["providers"]["claude"]
+        def refreshed(*models):
+            atomic_json(root / "catalogues" / "claude.keychain.json", {
+                "provider_id": "claude", "source": "provider_api", "models": list(models),
+                "connection_signature": connection_signature("claude", keyed)})
+        refreshed(model("claude-sonnet-5", "provider_api", 1000000), model("claude-opus-4-1", "provider_api", 200000))
+        self.assertEqual(listed(), [
             ("", "claude/claude-sonnet-5", 200000),
             ("keychain:", "claude/claude-opus-4-1", 200000), ("keychain:", "claude/claude-sonnet-5", 1000000)])
         base = {"max_tokens": 64, "messages": [{"role": "user", "content": "hello"}], "_provider_hub_surface": "chat"}
@@ -158,7 +167,19 @@ class ChatCatalogueTests(unittest.TestCase):
             # A model only the key offers is not reachable through the CLI rows.
             with self.assertRaisesRegex(Exception, "not in the current provider catalogue"):
                 runtime.plan({**base, "model": "claude/claude-opus-4-1", "_provider_hub_account": ""})
+            # A later refresh that drops a model reaches the next request too.
+            refreshed(model("claude-sonnet-5", "provider_api", 1000000))
+            self.assertEqual([row for row in listed() if row[1].endswith("opus-4-1")], [])
+            with self.assertRaisesRegex(Exception, "not in the API key catalogue"):
+                runtime.plan({**base, "model": "claude/claude-opus-4-1", "_provider_hub_account": "keychain:"})
+            # Changing the active source while the gateway runs still needs a
+            # restart: the snapshot was built for the CLI, and Chat says so.
+            settings["providers"]["claude"]["credential_mode"] = "keychain"
+            atomic_json(root / "settings.json", settings)
+            with self.assertRaisesRegex(Exception, "earlier credential source"):
+                runtime.plan({**base, "model": "claude/claude-sonnet-5", "_provider_hub_account": ""})
             # And the key source is only reachable while the switch is on.
+            settings["providers"]["claude"]["credential_mode"] = "cli"
             settings["providers"]["claude"].pop("chat_both_sources")
             atomic_json(root / "settings.json", settings)
             with self.assertRaisesRegex(Exception, "no longer offered"):

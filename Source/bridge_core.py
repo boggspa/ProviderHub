@@ -314,10 +314,7 @@ def chat_source_catalogue_path(root, provider_id: str, source: str):
 
 def cached_catalogue(settings, root=None):
     root = root or state_root()
-    observations = read_observations(root)
-    # Old events were bare Mistral IDs. Keep them historical, without assigning
-    # them to a different provider that happens to use the same model string.
-    observations = {qualify(*split_route(identifier)): value for identifier, value in observations.items()}
+    observations = _observations(root)
     models, summaries = [], {}
     for provider_id in PROVIDERS:
         path = root / "catalogues" / (provider_id + ".json")
@@ -354,25 +351,60 @@ def cached_catalogue(settings, root=None):
     # The second source Chat lists stays out of `models`: the desktop launchers
     # and the Providers pane follow the active source, and a route id is the
     # same on both, so merging would hand a launcher a route it cannot serve.
-    chat_sources = {}
+    chat_sources, source_summaries = chat_source_inventories(settings, root, observations)
+    for provider_id, entry in source_summaries.items():
+        summaries[provider_id]["chat_sources"] = entry
+    return {"schema_version": 3, "models": models, "providers": summaries,
+            "model_count": len(models), "needs_refresh": not bool(models), "chat_sources": chat_sources}
+
+
+def _observations(root):
+    observations = read_observations(root)
+    # Old events were bare Mistral IDs. Keep them historical, without assigning
+    # them to a different provider that happens to use the same model string.
+    return {qualify(*split_route(identifier)): value for identifier, value in observations.items()}
+
+
+def chat_source_inventories(settings, root, observations=None):
+    """Project the second source Chat lists for each provider from its cached file.
+
+    Returns the models, ``{provider: {source: [projected]}}``, and the summary
+    the Providers pane shows, ``{provider: {source: {...}}}``; a missing or
+    re-signed file is summarised as needing a refresh.
+    """
+    if observations is None:
+        observations = _observations(root)
+    projected, summaries = {}, {}
     for provider_id in PROVIDERS:
         source = chat_extra_source(settings["providers"][provider_id], provider_id)
         if source is None:
             continue
         alternate = chat_source_settings(settings, provider_id, source)
         inventory = read_json(chat_source_catalogue_path(root, provider_id, source))
-        entry = summaries[provider_id].setdefault("chat_sources", {})
+        entry = summaries.setdefault(provider_id, {})
         if not inventory or inventory.get("connection_signature") != connection_signature(
                 provider_id, alternate["providers"][provider_id]):
             entry[source] = {"needs_refresh": True, "model_count": 0,
                              "warnings": [f"Refresh this provider's catalogue to list its {CHAT_SOURCE_LABELS[source]} models in Chat."]}
             continue
-        projected = project_catalogue(provider_id, inventory, alternate, observations)
-        chat_sources.setdefault(provider_id, {})[source] = projected
-        entry[source] = {"model_count": len(projected), "source": inventory.get("source", "provider"),
+        models = project_catalogue(provider_id, inventory, alternate, observations)
+        projected.setdefault(provider_id, {})[source] = models
+        entry[source] = {"model_count": len(models), "source": inventory.get("source", "provider"),
                          "fetched_at": inventory.get("fetched_at"), "warnings": inventory.get("warnings", [])}
-    return {"schema_version": 3, "models": models, "providers": summaries,
-            "model_count": len(models), "needs_refresh": not bool(models), "chat_sources": chat_sources}
+    return projected, summaries
+
+
+def chat_source_specs(settings, root=None):
+    """Route specs for the second source Chat lists, read fresh from its cached file.
+
+    Chat-only metadata: no desktop profile is written from it, so the gateway
+    does not freeze it at start the way it freezes ``_model_specs``. A
+    catalogue refreshed after the switch is turned on reaches the picker's
+    next refresh and the next request without a gateway restart.
+    """
+    projected, _ = chat_source_inventories(settings, root or state_root())
+    return {provider_id: {source: route_specs({"models": models}) for source, models in sources.items()}
+            for provider_id, sources in projected.items()}
 
 
 def attach_model_specs(settings, root=None):
