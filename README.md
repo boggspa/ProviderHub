@@ -1,6 +1,6 @@
 # Provider Hub
 
-**Version 0.5.6 (build 66).** Licensed Apache-2.0 — see [LICENSE](LICENSE),
+**Version 0.5.6 (build 67).** Licensed Apache-2.0 — see [LICENSE](LICENSE),
 with attributions in [NOTICE](NOTICE).
 
 A native macOS menu bar app that connects Claude Desktop and the Codex coding workspace to eleven model API connections: Mistral, Kimi Code, MiMo Token Plan, Ollama, DeepSeek, Cerebras, Muse, Grok, Qwen Token Plan, OpenRouter, and the Gemini API. Claude uses the local Messages endpoint. Codex uses Responses: Grok, Ollama, and OpenRouter retain native Responses transports, while the other eight use the local Messages bridge and their provider adapters.
@@ -52,13 +52,15 @@ Provider implementation is split between [registry and connections](Source/provi
 
 Build from the repository root with `bash Source/build.sh` to create `Provider Hub.app` beside the checkout. `Source/build.sh` is the source of truth for both the version and the build stamp. Building from source applies an ad-hoc development signature, which is enough to run locally; distribution builds are signed with an Apple Developer ID and notarized on the maintainer's machine, and those credentials are never committed. See [`CONTRIBUTING.md`](CONTRIBUTING.md) for setup and tests, and [`SECURITY.md`](SECURITY.md) for the signing and threat model. A shorter end-user guide is in `QUICK-START.md`.
 
-Build 66 keeps lean Chat Team work running across checkpoints: new Teams keep
-their tools, members resume independently, and a member can wait on a process
-or a peer without polling. Build 66 raises the Team cap to five members and the
-worker-wide model-request gate to twelve, so a five-member Team leaves the
-per-turn four-helper budget and open Side Chats with room to breathe. Optional time and reported-token limits sit in the
-Team's Run settings. Type `@Name` to address members; a tag that reaches a
-member is drawn in that member's provider accent, and only tagged members run.
+Build 67 adds a Team Blackboard with attachment previews and reference inspection,
+Projects with attached folders, Recents, resizable panes and updated Claude/Codex
+marks. Chat switching decodes transcripts in the background; timestamped member
+sections keep interleaved tools together, and Changes stays current during runs.
+Teams support five members and safe model replacements while peers keep working.
+The worker-wide model-request gate allows twelve requests. Adjacent desktop
+launches reuse a matching gateway without interrupting active work.
+Build 66 introduced continuous Team work across checkpoints and `@Name` routing.
+Optional time and reported-token limits remain in the Team's Run settings.
 See [Team in Chat](docs/chat-team.md). Build 65 brought four-member Teams, a
 turn close-out table and block Markdown in replies, and warns when a Desktop
 project uses the whole disk as its folder; see
