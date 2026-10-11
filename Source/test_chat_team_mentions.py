@@ -116,16 +116,23 @@ class PeerMentionTests(unittest.TestCase):
         self.assertEqual(parent.chat['team']['queue'], [])
 
     def test_real_running_peer_receives_at_next_round_and_receipt_persists(self):
+        import threading
         import time
         harness = harness_module.TeamTests(methodName='runTest')
         harness.setUp(); self.addCleanup(harness.doCleanups)
+        receiver_started = threading.Event()
+        def sender(payload, cancel, delta):
+            if not receiver_started.wait(2):
+                raise AssertionError('Receiver did not start its first request')
+            return response('@Member 2 ' + 'public finding ' * 500)
         def receiver(payload, cancel, delta):
+            receiver_started.set()
             deadline = time.monotonic() + 2
             while parent.chat['team']['members'][0]['status'] != 'done':
                 if time.monotonic() > deadline: raise AssertionError('Sender did not finish')
                 time.sleep(.005)
             return call('team_status', {'state': 'done'})
-        parent = harness.service([[response('@Member 2 ' + 'public finding ' * 500)],
+        parent = harness.service([[sender],
                                   [receiver, response('Read the reference')]])
         members = harness.configure(parent)
         harness.send(parent); harness.finish(parent)
