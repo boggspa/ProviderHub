@@ -1,6 +1,6 @@
 # Team in Chat
 
-Team lets up to five model/account choices contribute to one Chat transcript.
+Team lets up to six model/account choices contribute to one Chat transcript.
 Open **Team** in the inspector, choose **Set up**, and pick names, models,
 reasoning efforts and optional responsibilities. The first member takes the
 place of the chat's current model. There is no separate coordinator model or
@@ -392,7 +392,7 @@ working. Every member retains its own `status`, `contributionID`, `usage` and
 latest row in its live contribution, even when another member appends a row.
 
 `test_chat_team.py` exercises real ChatService scheduling against scripted
-providers: all five members, long continuation, fairness, private reasoning and
+providers: all six members, long continuation, fairness, private reasoning and
 account isolation, shared recall, serialized approvals/edits, Stop/steer,
 failures, context checkpoints and crash recovery. `test_chat_model.py` runs the
 actual Swift model to check correlated configuration, cross-chat isolation,

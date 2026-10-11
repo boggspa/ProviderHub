@@ -56,7 +56,7 @@ Build 67 adds a Team Blackboard with attachment previews and reference inspectio
 Projects with attached folders, Recents, resizable panes and updated Claude/Codex
 marks. Chat switching decodes transcripts in the background; timestamped member
 sections keep interleaved tools together, and Changes stays current during runs.
-Teams support five members and safe model replacements while peers keep working.
+Teams support six members and safe model replacements while peers keep working.
 The worker-wide model-request gate allows twelve requests. Adjacent desktop
 launches reuse a matching gateway without interrupting active work.
 Build 66 introduced continuous Team work across checkpoints and `@Name` routing.
