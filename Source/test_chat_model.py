@@ -53,6 +53,11 @@ import Combine
             model.consume(try JSONSerialization.data(withJSONObject: event) + Data([10]))
         }
         func check(_ yes: Bool, _ text: String) { if !yes { fatalError(text) } }
+        var railCommands: [[String: Any]] = []
+        let railModel = ChatModel(sendCommand: { railCommands.append($0); return true }, preferences: preferences)
+        railModel.select("qa")
+        check(railCommands.last?["id"] as? String == "qa" && railCommands.last?["chat"] as? String == "qa",
+              "rail selection must retain the chat identity independently of section-specific view IDs")
         check(!model.hasActiveWork && !model.hasUnsentDrafts, "Idle Chat blocked an update")
         model.sideChat = ChatSide(id: "side", route: "test", account: "", label: "Side", effort: "", status: "working", busy: true, entries: [])
         check(model.hasActiveWork, "Update ignored active Side Chat")
