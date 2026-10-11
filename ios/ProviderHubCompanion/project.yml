@@ -19,4 +19,5 @@ targets:
         SWIFT_VERSION: "5.0"
         GENERATE_INFOPLIST_FILE: YES
         INFOPLIST_KEY_NSLocalNetworkUsageDescription: Connect to your paired Mac on your private network.
+        INFOPLIST_KEY_NSCameraUsageDescription: Scan the pairing QR code shown by Provider Hub on your Mac.
         INFOPLIST_KEY_UILaunchScreen_Generation: YES

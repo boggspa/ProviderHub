@@ -8,6 +8,37 @@ public struct RemoteBootstrap: Codable {
     public var port: UInt16
     public var sessionId: String
     public var macIdentityPubKey: String
+
+    public static func decodePairingText(_ text: String) throws -> RemoteBootstrap {
+        let value = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty, value.utf8.count <= 4096,
+              let bootstrap = try? JSONDecoder().decode(Self.self, from: Data(value.utf8)),
+              bootstrap.port > 0,
+              (1...128).contains(bootstrap.sessionId.utf8.count),
+              bootstrap.sessionId.utf8.allSatisfy({ (48...57).contains($0) || (65...90).contains($0) || (97...122).contains($0) || [45, 46, 95].contains($0) }),
+              Data(base64Encoded: bootstrap.macIdentityPubKey)?.count == 32 else { throw RemotePairingError.invalidCode }
+        // Match the Mac's explicit private-interface policy. A scanned URL is
+        // never opened; the payload is data for the authenticated TCP channel.
+        if let address = IPv4Address(bootstrap.host) {
+            let bytes = Array(address.rawValue)
+            guard bytes[0] == 10 || bytes[0] == 127 ||
+                    bytes[0] == 172 && (16...31).contains(bytes[1]) ||
+                    bytes[0] == 192 && bytes[1] == 168 ||
+                    bytes[0] == 100 && (64...127).contains(bytes[1]) else { throw RemotePairingError.privateNetworkRequired }
+        } else if bootstrap.host != "::1" { throw RemotePairingError.privateNetworkRequired }
+        return bootstrap
+    }
+}
+
+public enum RemotePairingError: LocalizedError {
+    case invalidCode
+    case privateNetworkRequired
+    public var errorDescription: String? {
+        switch self {
+        case .invalidCode: return "Use the pairing code shown in Provider Hub’s Devices settings on your Mac."
+        case .privateNetworkRequired: return "Pairing requires your Mac’s LAN or Tailscale address."
+        }
+    }
 }
 
 /// TaskWraith v1 client handshake and frame codec, independently testable.
@@ -117,11 +148,9 @@ public final class RemoteConnection: CompanionLink {
     public func connect(text: String) {
         queue.async {
             do {
-                let bootstrap = try JSONDecoder().decode(RemoteBootstrap.self, from: Data(text.utf8))
-                guard bootstrap.port > 0, Data(base64Encoded: bootstrap.macIdentityPubKey)?.count == 32,
-                      !bootstrap.host.isEmpty else { throw RemoteProtocolError.rejected }
+                let bootstrap = try RemoteBootstrap.decodePairingText(text)
                 self.open(bootstrap, identity: try self.identity())
-            } catch { self.onStatus?("Connection failed: \(error)", nil) }
+            } catch { self.onStatus?("Connection failed: \(error.localizedDescription)", nil) }
         }
     }
     private func open(_ bootstrap: RemoteBootstrap, identity: Curve25519.Signing.PrivateKey) {

@@ -11,8 +11,11 @@ after a successful acknowledgement.
 1. In Provider Hub's remote settings, explicitly start the listener on the
    Mac's private interface IP and port. It is off by default. Wildcard and
    public interface binds are rejected.
-2. Copy the Mac's JSON pairing text into the companion and tap Connect.
-   Transfer this text through a channel you trust: it pins the Mac public key.
+2. Choose **Scan QR code** in the companion and scan the code in the Mac's
+   Devices settings. Camera permission is requested only when opening the scanner.
+   If the camera is unavailable or permission is off, copy the Mac's JSON pairing
+   text into the companion and tap Connect. Only scan a code from your own Mac;
+   the payload pins that Mac's public identity.
 3. Compare the six-digit code shown on phone and Mac. Approve that identity
    on the Mac only when both codes match. An unknown device receives no chat
    events or command access before approval.
@@ -36,6 +39,10 @@ xcodegen generate --spec ios/ProviderHubCompanion/project.yml
 Open the generated project, select a signing team, and run on your iPhone.
 The target includes a local-network usage description. SwiftPM builds the
 core and provides a macOS executable harness; it does not install an iOS app.
+The camera usage description is also generated from `project.yml`. Keep
+simulator ad-hoc signing enabled (`CODE_SIGN_IDENTITY=-`,
+`CODE_SIGNING_ALLOWED=YES`) when running the companion: its device identity
+uses Keychain and an unsigned simulator app cannot create that identity.
 
 ```sh
 swift test --package-path Packages/ProviderHubRemote --scratch-path .local-only/remote-swift-build
@@ -50,7 +57,10 @@ golden vectors. Test peers auto-confirm only inside test fixtures.
 ## Scope
 
 This first version permits one active phone. No cloud relay, push notifications,
-background execution, Bonjour discovery, or camera QR scanner is included.
+background execution or Bonjour discovery is included. QR generation/decoding
+is verified with Core Image and Vision; live physical-camera scanning still
+requires an on-device check. The camera stops when the scanner closes or the
+companion goes into the background. Camera frames stay on the phone.
 Reconnect refreshes state; unacknowledged messages remain drafts and are not
 automatically resent. Request deduplication is bounded to the last 64 request
 IDs per device during the Mac process lifetime, including socket reconnects;
@@ -58,7 +68,9 @@ it does not guarantee exactly-once execution across a Mac process restart.
 Transcript projection sends the latest 30 entries and capped live text.
 Transport flushes have a two-second upper bound before disconnecting a slow
 peer. iPhone installation/signing and an on-device network trial require a
-user's signing team and device.
+user's signing team and device. A signed Simulator app has completed actual
+pairing, transcript subscription and a text-message round trip against the
+production ChatHost using fixture data and a fake model transport.
 
 ## Protocol provenance
 

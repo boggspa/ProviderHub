@@ -101,10 +101,11 @@ does not restart and replay the action automatically.
 
 Open **Settings → Devices**, enter the Mac's explicit LAN or Tailscale IP,
 and choose Enable. Listening is off by default and never restored automatically
-at app launch. Copy the pairing text into the iOS companion, compare the code
-on both devices and confirm on the Mac. Turn off remote access or remove the
+at app launch. Scan the QR code with the iOS companion (or copy pairing text),
+compare the code on both devices and confirm on the Mac. Turn off remote access or remove the
 device to revoke its connection. The first version supports one phone at a
-time on the private network, with text pairing instead of a QR scanner.
+time on the private network. The scanner asks for camera access only when
+opened; pasted pairing text remains available when camera access is unavailable.
 
 The transport and Swift companion live in `Source/chat_remote.py`,
 `Packages/ProviderHubRemote/` and `ios/ProviderHubCompanion/`. The phone can list
@@ -124,8 +125,10 @@ execution after a process restart. Full history, media preview, push, background
 phone connections and a cloud relay remain separate follow-ups.
 
 See [the companion guide](../ios/ProviderHubCompanion/README.md) for iOS build
-and pairing details. Simulator compilation and real Swift/Python encrypted
-TCP tests pass; an on-device signing and network trial remains unverified.
+and pairing details. A signed Simulator app completed pairing, transcript
+subscription and a message round trip with fixture data against production
+ChatHost. Real Swift/Python encrypted TCP tests and a QR render/decode round
+trip pass. Physical-camera scanning and an on-device network trial remain unverified.
 
 ## Verification
 

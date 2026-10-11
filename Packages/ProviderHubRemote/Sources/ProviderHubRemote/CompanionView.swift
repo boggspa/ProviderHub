@@ -33,29 +33,43 @@ public final class CompanionModel: ObservableObject {
             }
         }
         connection.onMessage = { [weak self] message in
-            DispatchQueue.main.async {
-                guard let self else { return }
-                do {
-                    try self.store.receive(message)
-                    if message["method"] as? String == "session.ack",
-                       let params = message["params"] as? [String: Any],
-                       let id = params["requestId"] as? String,
-                       let (chat, text) = self.pendingDrafts.removeValue(forKey: id),
-                       params["ok"] as? Bool == true {
-                        if self.drafts[chat] == text { self.drafts[chat] = "" }
-                        if self.selectedChatID == chat && self.draft == text { self.draft = "" }
-                    }
-                    if self.selectedChatID == nil { self.selectedChatID = self.store.selectedID ?? self.store.chats.first?.id }
-                    if self.store.needsSnapshot { self.connection.snapshot() }
-                } catch { self.status = "Invalid server event" }
-            }
+            DispatchQueue.main.async { self?.receiveRemote(message) }
         }
         pairingText = UserDefaults.standard.string(forKey: "remote-bootstrap") ?? ""
     }
 
+    func receiveRemote(_ message: [String: Any]) {
+        do {
+            try store.receive(message)
+            if message["method"] as? String == "session.ack",
+               let params = message["params"] as? [String: Any],
+               let id = params["requestId"] as? String,
+               let (chat, text) = pendingDrafts.removeValue(forKey: id),
+               params["ok"] as? Bool == true {
+                if drafts[chat] == text { drafts[chat] = "" }
+                if selectedChatID == chat && draft == text { draft = "" }
+            }
+            if message["method"] as? String == "session.snapshot" {
+                let saved = selectedChatID.flatMap { id in store.chats.contains(where: { $0.id == id }) ? id : nil }
+                let next = saved ?? store.selectedID ?? store.chats.first?.id
+                selectedChatID = next
+                if let next, store.selectedID != next { select(next) }
+            }
+            if store.needsSnapshot { connection.snapshot() }
+        } catch { status = "Invalid server event" }
+    }
+
     public func connect() {
+        do { _ = try RemoteBootstrap.decodePairingText(pairingText) }
+        catch { status = error.localizedDescription; return }
         UserDefaults.standard.set(pairingText, forKey: "remote-bootstrap")
         connection.connect(text: pairingText)
+    }
+    public func connect(scannedCode: String) {
+        do { _ = try RemoteBootstrap.decodePairingText(scannedCode) }
+        catch { status = error.localizedDescription; return }
+        pairingText = scannedCode
+        connect()
     }
     public func disconnect() { connection.disconnect() }
     public func select(_ id: String) {
@@ -90,6 +104,7 @@ public final class CompanionModel: ObservableObject {
 
 public struct CompanionView: View {
     @ObservedObject var model: CompanionModel
+    @State private var scanning = false
 
     public init(model: CompanionModel) { self.model = model }
 
@@ -102,6 +117,10 @@ public struct CompanionView: View {
             HStack {
                 Button("Connect", action: model.connect)
                 Button("Disconnect", action: model.disconnect)
+                #if os(iOS)
+                Spacer()
+                Button { scanning = true } label: { Label("Scan QR code", systemImage: "qrcode.viewfinder") }
+                #endif
             }
             Text("Provider keys stay on the Mac. This phone only sends, stops, and answers the approval already pending there.")
                 .font(.footnote)
@@ -112,19 +131,11 @@ public struct CompanionView: View {
             if model.store.chats.isEmpty {
                 Text("No chats yet").foregroundStyle(.secondary)
             } else {
-                ForEach(model.store.chats) { chat in
-                    Button(action: { model.select(chat.id) }) {
-                        HStack {
-                            VStack(alignment: .leading) {
-                                Text(chat.title)
-                                Text(chat.busy ? "Running" : chat.status).font(.caption).foregroundStyle(.secondary)
-                            }
-                            Spacer()
-                            if chat.id == model.selectedChatID { Image(systemName: "checkmark") }
-                        }
+                Picker("Chat", selection: Binding(get: { model.selectedChatID }, set: { if let id = $0 { model.select(id) } })) {
+                    ForEach(model.store.chats) { chat in
+                        Text(chat.title + (chat.busy ? " · Running" : "")).tag(Optional(chat.id))
                     }
-                    .buttonStyle(.plain)
-                }
+                }.pickerStyle(.menu)
             }
             ScrollView { Text(model.store.transcript).frame(maxWidth: .infinity, alignment: .leading).textSelection(.enabled) }
             ForEach(Array(model.store.notices.suffix(3).enumerated()), id: \.offset) { _, notice in
@@ -155,5 +166,13 @@ public struct CompanionView: View {
         }
         .padding()
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        #if os(iOS)
+        .sheet(isPresented: $scanning) {
+            PairingScannerView { text in
+                scanning = false
+                model.connect(scannedCode: text)
+            }
+        }
+        #endif
     }
 }

@@ -1,6 +1,7 @@
 import AppKit
 import SwiftUI
 
+@MainActor
 struct ChatDevicesSettings: View {
     @ObservedObject var model: ChatModel
     @Environment(\.dismiss) private var dismiss
@@ -8,6 +9,10 @@ struct ChatDevicesSettings: View {
     private var listening: Bool { model.remoteStatus["listening"] as? Bool ?? false }
     private var pending: [String: Any]? { model.remoteStatus["pendingPairing"] as? [String: Any] }
     private var devices: [[String: Any]] { model.remoteStatus["devices"] as? [[String: Any]] ?? [] }
+    @State private var pairingImage: CGImage?
+    private var pairingText: String? {
+        (model.remoteStatus["bootstrap"] as? [String: Any]).flatMap { ChatPairingCode.payload($0) }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -29,9 +34,20 @@ struct ChatDevicesSettings: View {
                 }
                 if listening {
                     Section("Pair a device") {
-                        Text("Copy the pairing text into the iOS companion, then compare the code shown on both devices.")
-                            .font(.caption).foregroundStyle(.secondary)
-                        Button("Copy pairing text") { copyBootstrap() }
+                        HStack(alignment: .center, spacing: 16) {
+                            if let pairingImage {
+                                Image(decorative: pairingImage, scale: 1).resizable().interpolation(.none)
+                                    .frame(width: 168, height: 168)
+                                    .accessibilityLabel("Pairing QR code")
+                            }
+                            VStack(alignment: .leading, spacing: 10) {
+                                Text("Choose Scan QR code in the iOS companion, then compare the code shown on both devices.")
+                                    .font(.caption).foregroundStyle(.secondary)
+                                Button("Copy pairing text") { copyBootstrap() }
+                                Text("Both devices must be able to reach this Mac’s private network address.")
+                                    .font(.caption).foregroundStyle(.secondary)
+                            }
+                        }
                         if let pending, let identity = pending["identity"] as? String, let code = pending["confirmCode"] as? String {
                             Text(code).font(.system(.title2, design: .monospaced))
                             HStack {
@@ -59,7 +75,8 @@ struct ChatDevicesSettings: View {
             if let error = model.remoteStatus["error"] as? String, !error.isEmpty {
                 Text(error).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
             }
-        }.padding(20).frame(width: 480, height: 530)
+        }.padding(20).frame(width: 520, height: 620)
+            .task(id: pairingText) { pairingImage = pairingText.flatMap { ChatPairingCode.image(for: $0) } }
             .task {
                 while !Task.isCancelled {
                     model.refreshDevices()
@@ -68,9 +85,7 @@ struct ChatDevicesSettings: View {
             }
     }
     private func copyBootstrap() {
-        guard let bootstrap = model.remoteStatus["bootstrap"] as? [String: Any],
-              let data = try? JSONSerialization.data(withJSONObject: bootstrap, options: [.sortedKeys]),
-              let text = String(data: data, encoding: .utf8) else { return }
+        guard let text = pairingText else { return }
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(text, forType: .string)
     }

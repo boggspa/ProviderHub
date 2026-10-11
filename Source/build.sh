@@ -21,6 +21,7 @@ SWIFT_SOURCES=(
   "$SOURCE_DIR/ChatWorkspaceLayout.swift" "$SOURCE_DIR/ChatSplitWorkspace.swift" "$SOURCE_DIR/ChatWorkspaceUI.swift"
   "$SOURCE_DIR/ChatCapabilities.swift" "$SOURCE_DIR/ChatBrowser.swift"
   "$SOURCE_DIR/ChatDevices.swift"
+  "$SOURCE_DIR/ChatPairingCode.swift"
 )
 xcrun swiftc -swift-version 5 -parse-as-library -O -target arm64-apple-macosx14.0 \
   -module-cache-path "$BUILD_DIR/ModuleCache" \
