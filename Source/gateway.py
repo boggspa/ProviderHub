@@ -96,6 +96,7 @@ def build_identity(resources=None):
 
 
 BUILD_IDENTITY = build_identity()
+MAX_PROVIDER_REQUESTS = 16
 
 
 class Runtime:
@@ -121,8 +122,8 @@ class Runtime:
         self.request_planner = request_planner
         self.credential_cache = {}
         self.lock = threading.Lock()
-        self.semaphore = threading.BoundedSemaphore(8)
-        self.admission = ProviderAdmission(self.semaphore)
+        self.semaphore = threading.BoundedSemaphore(MAX_PROVIDER_REQUESTS)
+        self.admission = ProviderAdmission(self.semaphore, capacity=MAX_PROVIDER_REQUESTS)
         self.throttle = ProviderThrottle()
         self.calibration = TokenCalibration()
         # Mistral reports a model-dependent image count only when rejecting a

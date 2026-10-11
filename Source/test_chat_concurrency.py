@@ -267,7 +267,8 @@ class ConcurrentChatTests(unittest.TestCase):
         self.wait(lambda: not second.busy)
         self.assertFalse((self.root / "b/result.txt").exists())
 
-    def test_fifth_turn_and_duplicate_send_are_rejected_before_recording(self):
+    def test_configured_chat_limit_and_duplicate_send_are_rejected_before_recording(self):
+        self.host.max_active = 4
         running = []
         for index in range(4):
             identifier = self.create(str(index))
@@ -285,6 +286,40 @@ class ConcurrentChatTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "already running"):
             self.host.handle({"command": "send", "chat": running[0].chat["id"], "text": "Second input"})
         self.assertEqual(len(running[0].chat["entries"]), count)
+
+    def test_sixteen_active_chats_and_seventeenth_waits_for_capacity(self):
+        release = threading.Event()
+        entered, services = [], []
+        def held(signal):
+            def request(payload, cancel, delta):
+                signal.set()
+                while not release.wait(.01):
+                    if cancel.is_set(): raise InterruptedError("Stopped")
+                return response()
+            return request
+        try:
+            for index in range(16):
+                signal = threading.Event()
+                identifier = self.create(f"parallel-{index}")
+                services.append(self.send(identifier, [held(signal)]))
+                entered.append(signal)
+            self.assertTrue(all(signal.wait(3) for signal in entered))
+            self.assertEqual(sum(service.busy for service in self.host.sessions.values()), 16)
+            queued = self.create("seventeenth")
+            with self.assertRaisesRegex(ValueError, "16 chats"):
+                self.send(queued, [response()], text="Keep this draft")
+            self.assertEqual(self.store.load(queued)["entries"], [])
+            self.host.handle({"command": "stop", "chat": services[0].chat["id"]})
+            self.wait(lambda: not services[0].busy)
+            extra = self.send(queued, [response()], text="Now there is capacity")
+            self.wait(lambda: not extra.busy)
+            self.assertEqual([row["text"] for row in extra.chat["entries"] if row["kind"] == "user"], ["Now there is capacity"])
+        finally:
+            release.set()
+            self.host.stop_all()
+            for service in services:
+                service.thread.join(3)
+                self.assertFalse(service.thread.is_alive())
 
     def test_submission_identity_survives_reload_and_never_enters_provider_context(self):
         identifier = self.create()

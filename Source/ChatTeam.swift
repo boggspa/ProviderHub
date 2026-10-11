@@ -140,7 +140,7 @@ private struct ChatTeamEditor: View {
     @State private var minutes = ""
     @State private var tokens = ""
     @State private var contextTokens = "200000"
-    @State private var processSlots = 5
+    @State private var processSlots = 8
     private var execution: ChatTeamExecution? {
         let minuteText = minutes.trimmingCharacters(in: .whitespacesAndNewlines)
         let tokenText = tokens.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -263,7 +263,7 @@ private struct ChatTeamEditor: View {
                     }
                 }.help("Uses the smaller of this ceiling and the model’s window; space is reserved for output and notes.")
                 Stepper("Background processes: \(processSlots)", value: $processSlots, in: 1...8)
-                    .help("Shared across this Team. Extra launches reserve capacity for active peers; eight processes maximum across Chat.")
+                    .help("Shared across this Team. Extra launches reserve capacity for active peers; 64 processes maximum across all chats.")
                 Text("A new message or Resume starts a fresh run allowance; updates to active work keep it. Limits are checked between requests and actions, so work already running can go over. A token limit pauses if usage is unavailable. Spending limits are unavailable because providers do not report reliable charges.")
                     .font(.system(size: 10.5)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 if execution == nil {

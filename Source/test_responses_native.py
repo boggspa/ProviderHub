@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 import test_gateway_hub as fixtures
 from test_gateway_hub import MockProvider
+from gateway import MAX_PROVIDER_REQUESTS
 
 
 class CustomApplyPatchUnitTests(unittest.TestCase):
@@ -903,42 +904,42 @@ class NativeResponsesTests(unittest.TestCase):
         log = (self.root / "activity.jsonl").read_text()
         self.assertEqual(log.count('"event": "throttled"'), 4)
 
-    def test_ninth_request_queues_for_a_slot(self):
+    def test_seventeenth_request_queues_for_a_slot(self):
         self.start("ollama")
-        for _ in range(8):
-            self.assertTrue(self.runtime.semaphore.acquire(blocking=False))
+        for _ in range(MAX_PROVIDER_REQUESTS):
+            self.assertTrue(self.runtime.admission.acquire("ollama", timeout=.2))
         outcome = {}
 
-        def ninth():
+        def seventeenth():
             try:
                 outcome["result"] = self.raw_request(self.body(), timeout=10)
             except Exception as exc:
                 outcome["error"] = exc
 
         with patch("responses_native.SLOT_WAIT_TIMEOUT", 5):
-            thread = threading.Thread(target=ninth)
+            thread = threading.Thread(target=seventeenth)
             thread.start()
             time.sleep(0.5)
             # Still queued: the old fail-fast 429 would have answered by now.
             self.assertNotIn("result", outcome)
             self.assertNotIn("error", outcome)
-            self.runtime.semaphore.release()
+            self.runtime.admission.release("ollama")
             thread.join(timeout=10)
-            for _ in range(7):
-                self.runtime.semaphore.release()
+            for _ in range(MAX_PROVIDER_REQUESTS - 1):
+                self.runtime.admission.release("ollama")
         self.assertNotIn("error", outcome)
         status, raw, _ = outcome["result"]
         self.assertEqual(status, 200, raw)
 
     def test_slot_wait_expiry_returns_retry_after(self):
         self.start("ollama")
-        for _ in range(8):
+        for _ in range(MAX_PROVIDER_REQUESTS):
             self.assertTrue(self.runtime.semaphore.acquire(blocking=False))
         try:
             with patch("responses_native.SLOT_WAIT_TIMEOUT", 0.2):
                 status, raw, headers = self.raw_request(self.body())
         finally:
-            for _ in range(8):
+            for _ in range(MAX_PROVIDER_REQUESTS):
                 self.runtime.semaphore.release()
         self.assertEqual(status, 429)
         self.assertEqual(json.loads(raw)["error"]["type"], "rate_limit_error")

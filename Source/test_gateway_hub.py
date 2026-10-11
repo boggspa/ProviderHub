@@ -19,7 +19,7 @@ from unittest.mock import patch
 
 from bridge_core import SLOTS, atomic_json, default_settings
 from cerebras_replay import validate_messages
-from gateway import Runtime, Server
+from gateway import MAX_PROVIDER_REQUESTS, Runtime, Server
 from hub_config import connection_signature
 from protocol import estimated_tokens, with_identity_note
 from rate_limit import ProviderAdmission
@@ -812,34 +812,34 @@ class GatewayHubHTTPTests(unittest.TestCase):
         lowered = {key.lower(): value for key, value in response_headers.items()}
         self.assertEqual(lowered.get("retry-after"), "3600")
 
-    def test_ninth_request_queues_for_a_slot(self):
+    def test_seventeenth_request_queues_for_a_slot(self):
         self.start_gateway("deepseek", "deepseek-flash", {"reasoning_history": "native"})
         payload = {
             "model": "claude-fable-5",
             "max_tokens": 64,
             "messages": [{"role": "user", "content": "hello"}],
         }
-        for _ in range(8):
-            self.assertTrue(self.runtime.semaphore.acquire(blocking=False))
+        for _ in range(MAX_PROVIDER_REQUESTS):
+            self.assertTrue(self.runtime.admission.acquire("deepseek", timeout=.2))
         outcome = {}
 
-        def ninth():
+        def seventeenth():
             try:
                 outcome["result"] = self.request(payload, timeout=10)
             except Exception as exc:
                 outcome["error"] = exc
 
         with patch("gateway.SLOT_WAIT_TIMEOUT", 5):
-            thread = threading.Thread(target=ninth)
+            thread = threading.Thread(target=seventeenth)
             thread.start()
             time.sleep(0.5)
             # Still queued: the old fail-fast 429 would have answered by now.
             self.assertNotIn("result", outcome)
             self.assertNotIn("error", outcome)
-            self.runtime.semaphore.release()
+            self.runtime.admission.release("deepseek")
             thread.join(timeout=10)
-            for _ in range(7):
-                self.runtime.semaphore.release()
+            for _ in range(MAX_PROVIDER_REQUESTS - 1):
+                self.runtime.admission.release("deepseek")
         self.assertNotIn("error", outcome)
         status, raw, _ = outcome["result"]
         self.assertEqual(status, 200, raw)
@@ -851,13 +851,13 @@ class GatewayHubHTTPTests(unittest.TestCase):
             "max_tokens": 64,
             "messages": [{"role": "user", "content": "hello"}],
         }
-        for _ in range(8):
+        for _ in range(MAX_PROVIDER_REQUESTS):
             self.assertTrue(self.runtime.semaphore.acquire(blocking=False))
         try:
             with patch("gateway.SLOT_WAIT_TIMEOUT", 0.2):
                 status, raw, response_headers = self.request(payload)
         finally:
-            for _ in range(8):
+            for _ in range(MAX_PROVIDER_REQUESTS):
                 self.runtime.semaphore.release()
         self.assertEqual(status, 429)
         result = json.loads(raw)

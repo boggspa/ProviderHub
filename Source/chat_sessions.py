@@ -18,11 +18,10 @@ from chat_team import live_editable as live_team_edit
 from chat_tools import ChatToolRunner
 from chat_workspaces import ChatWorkspaces
 
-MAX_ACTIVE_CHATS = 4
-MAX_ACTIVE_REQUESTS = 12
-# Five Team members leave seven slots for the per-turn helper budget (still
-# capped at four), open Side Chats, and the host's own actions; eight leaves
-# a five-member Team plus one helper without room for anyone else.
+MAX_ACTIVE_CHATS = 16
+MAX_ACTIVE_REQUESTS = 16
+# Model requests share the gateway's 16-slot admission budget. Waiting for
+# user input or local work does not occupy a provider-request slot.
 HEADER_KEYS = ("id", "title", "updated", "route", "account", "workspace", "effort", "approvalMode", "scope", "status")
 
 

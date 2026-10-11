@@ -215,7 +215,7 @@ struct ChatTeamPendingChange: Decodable {
 struct ChatTeamExecution: Decodable {
     var mode: String = "task"
     var contextTokens: Int = 200_000
-    var processes: Int = 5
+    var processes: Int = 8
     var minutes: Int?
     var tokens: Int?
     var isValid: Bool {
