@@ -203,6 +203,74 @@ def strip_goal_budget(tools):
     return changed
 
 
+SEAL_KEYWORD = "encrypted"
+# Schema keywords whose values are schemas, maps of named schemas, or lists of
+# schemas. Everything else at a schema level is a keyword; the names inside a
+# map are property names, never keywords.
+_SCHEMA_ONE = ("items", "additionalItems", "additionalProperties", "unevaluatedItems",
+               "unevaluatedProperties", "contains", "propertyNames", "not", "if", "then", "else")
+_SCHEMA_MAPS = ("properties", "patternProperties", "dependentSchemas", "dependencies", "$defs", "definitions")
+_SCHEMA_LISTS = ("allOf", "anyOf", "oneOf", "prefixItems")
+
+
+def drop_schema_keyword(schema, keyword=SEAL_KEYWORD, _depth=0):
+    """Remove `keyword` wherever it is a keyword of `schema`; returns how many.
+
+    Only keyword positions are touched: a property *named* like the keyword,
+    and every `required` list, are left exactly as they were.
+    """
+    if not isinstance(schema, dict) or _depth > 64:
+        return 0
+    removed = 0
+    if keyword in schema:
+        del schema[keyword]
+        removed += 1
+    for key in _SCHEMA_ONE:
+        child = schema.get(key)
+        for item in child if isinstance(child, list) else (child,):
+            removed += drop_schema_keyword(item, keyword, _depth + 1)
+    for key in _SCHEMA_MAPS:
+        children = schema.get(key)
+        if isinstance(children, dict):
+            for child in children.values():
+                removed += drop_schema_keyword(child, keyword, _depth + 1)
+    for key in _SCHEMA_LISTS:
+        children = schema.get(key)
+        if isinstance(children, list):
+            for child in children:
+                removed += drop_schema_keyword(child, keyword, _depth + 1)
+    return removed
+
+
+def strip_sealed_keyword(tools):
+    """Stop asking OpenAI to seal the desktop's delegated messages.
+
+    The desktop marks the `message` argument of spawn_agent, followup_task
+    and send_message with a non-standard `"encrypted": true`. It encrypts
+    nothing itself: it copies whatever the parent wrote into the child's
+    incoming message. OpenAI honours the keyword and returns that argument as
+    a sealed token only its own servers can open, and no Provider Hub route
+    hands the token back to OpenAI in a form it would open. Every child, on
+    every model, then receives ciphertext as its task.
+
+    Removing only the keyword asks for what the desktop already handles:
+    plaintext, which every non-GPT parent sends today. The tools, their
+    properties and required fields are untouched. Returns how many keywords
+    were removed.
+    """
+    if not isinstance(tools, list):
+        return 0
+    removed = 0
+    for tool in tools:
+        if not isinstance(tool, dict):
+            continue
+        if tool.get("type") == "namespace":
+            removed += strip_sealed_keyword(tool.get("tools"))
+        else:
+            removed += drop_schema_keyword(tool.get("parameters"))
+    return removed
+
+
 def split_hosted_search(tools):
     """Lift a hosted web-search request out of the tools array.
 

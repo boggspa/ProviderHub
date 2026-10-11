@@ -1,4 +1,4 @@
-# Provider Hub 0.5.6 (build 68)
+# Provider Hub 0.5.7 (build 69)
 
 Use your model accounts inside Claude Desktop, the Codex coding workspace, or Provider Hub's lightweight **Chat with Model…** window. See [Chat in Provider Hub](docs/chat.md) for its tools, attachments, approvals and model switching.
 
@@ -30,6 +30,11 @@ settings, or conversations from its developer.
   The slot chosen in **Account** is the one a pasted key lands in and the one
   the gateway uses; Save applies a switch. Subscriptions, Devin and Muse keep a
   single login.
+- **Both a subscription and a key** (Claude, Codex, Muse, Grok): the credential
+  source chosen in the card is what Claude Desktop and Codex use. Chat can list
+  the other one as well: turn on **Also list this provider's … models in Chat**
+  under the source picker and refresh the catalogue. Each Chat row then says
+  which source it runs on. See [Chat](docs/chat.md).
 - **Ollama:** run your existing Ollama app or daemon. It manages its own models,
   downloads, and cloud sign-in.
 
@@ -237,7 +242,7 @@ tests; not every advertised model has been live-tested.
 
 Live Messages and streaming Responses read/edit/read cycles also passed on the
 0.5.0 build for OpenRouter North Mini Code Free and Gemini 3.8 Flash; they have
-not been re-run against 0.5.6. Qwen Token Plan
+not been re-run against 0.5.7. Qwen Token Plan
 returned its exhausted weekly quota response, so its live tool cycle remains
 for verification after quota returns.
 

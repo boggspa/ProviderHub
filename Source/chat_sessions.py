@@ -392,6 +392,33 @@ class ChatHost:
         with self._output: self.emit({"event": "ready"})
         self.capabilities.publish()
 
+    def welcome(self):
+        """Republish current state for a newly attached client; nothing changes.
+
+The persistent Host calls this on the serial owner after a UI attaches. It is
+the same publication `initialize` and `select` perform, ending with `ready`.
+"""
+        self.publish_workspaces()
+        with self._output: self._last_summaries = None
+        self.publish_summaries()
+        service = self.sessions.get(self.view_id)
+        if service is None and self.view_id in self.headers:
+            try: service = self.session(self.view_id)
+            except (OSError, ValueError, KeyError, TypeError): service = None
+        if service is not None:
+            with service._mutex: service.publish()
+        else:
+            with self._output: self.emit({"event": "selected", "id": None, "entries": [], "usage": None})
+        self.capabilities.publish()
+        self.publish_remote()
+        with self._output: self.emit({"event": "ready"})
+
+    def detach_client(self, client):
+        """A disconnected client stops watching. Its chats keep running."""
+        if client in self.subscriptions:
+            self.subscriptions = {key: value for key, value in self.subscriptions.items() if key != client}
+        self.prune()
+
     def session(self, identifier):
         if identifier not in self.sessions:
             self.sessions[identifier] = self.new_session(self.store.load(identifier))

@@ -28,6 +28,11 @@ struct ProviderConnection: Codable, Equatable {
     /// the active one and nil is the pre-accounts item. Omitted until used.
     var key_accounts: [KeyAccount]?
     var key_account: String?
+    /// Chat lists this provider's other credential source beside the active
+    /// one (the Keychain key while the CLI is active, the CLI otherwise).
+    /// Claude Desktop and Codex keep following `credential_mode`. Omitted
+    /// until turned on; the worker drops an explicit false.
+    var chat_both_sources: Bool?
 }
 struct KeyAccount: Codable, Equatable, Identifiable {
     var id: String

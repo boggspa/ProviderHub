@@ -33,6 +33,8 @@ class ResponsesToolTests(unittest.TestCase):
         # send_message) mark their message argument "encrypted": true, which
         # no JSON Schema draft defines. Flattening carries schemas verbatim:
         # a tool is never validated away for a keyword a provider may reject.
+        # (Ingress removes that particular keyword beforehand, in
+        # strip_sealed_keyword, because OpenAI honours it as a seal.)
         schema = {"type": "object", "properties": {"message": {"type": "string", "encrypted": True}},
                   "required": ["message"]}
         source = [{"type": "namespace", "name": "collaboration", "description": "Multi-agent tools",
@@ -45,6 +47,34 @@ class ResponsesToolTests(unittest.TestCase):
         for tool in flat[:4]:
             self.assertEqual(tool["parameters"], schema)
             self.assertEqual(mapping[tool["name"]], {"namespace": "collaboration", "name": tool["name"]})
+
+    def test_only_the_seal_keyword_is_removed_and_property_names_survive(self):
+        from responses_tools import strip_sealed_keyword
+        schema = {"type": "object", "encrypted": True,
+                  "properties": {"message": {"type": "string", "encrypted": True},
+                                 # A property named like the keyword, with data
+                                 # that mentions it, is not the keyword.
+                                 "encrypted": {"type": "boolean", "default": {"encrypted": True}},
+                                 "files": {"type": "array", "items": {"type": "string", "encrypted": True}},
+                                 "choice": {"anyOf": [{"type": "string", "encrypted": True}, {"type": "null"}]}},
+                  "$defs": {"note": {"type": "string", "encrypted": True}},
+                  "required": ["message", "encrypted"]}
+        tools = [{"type": "namespace", "name": "collaboration",
+                  "tools": [{"type": "function", "name": "spawn_agent", "parameters": schema}]},
+                 {"type": "function", "name": "send_message", "parameters": {
+                     "type": "object", "properties": {"message": {"type": "string", "encrypted": True}}}},
+                 {"type": "custom", "name": "apply_patch"}, None, "tool"]
+        self.assertEqual(strip_sealed_keyword(tools), 6)
+        self.assertEqual(schema, {"type": "object",
+                                  "properties": {"message": {"type": "string"},
+                                                 "encrypted": {"type": "boolean", "default": {"encrypted": True}},
+                                                 "files": {"type": "array", "items": {"type": "string"}},
+                                                 "choice": {"anyOf": [{"type": "string"}, {"type": "null"}]}},
+                                  "$defs": {"note": {"type": "string"}},
+                                  "required": ["message", "encrypted"]})
+        self.assertEqual(tools[1]["parameters"]["properties"]["message"], {"type": "string"})
+        self.assertEqual(strip_sealed_keyword(tools), 0)
+        self.assertEqual(strip_sealed_keyword(None), 0)
 
     def test_invalid_namespaces_and_non_function_children_fail_explicitly(self):
         for tool in ({"type": "namespace", "tools": [{"type": "function", "name": "read"}]},

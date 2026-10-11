@@ -6,6 +6,7 @@ orchestration service, or additional third-party runtime is involved.
 """
 from __future__ import annotations
 
+from concurrent.futures import Future
 import copy
 from datetime import datetime, timezone
 import errno
@@ -1283,46 +1284,78 @@ class ChatService:
         else: self.turn_heads[key] = revision
 
 
-def main():
-    from chat_sessions import ChatHost
-    from concurrent.futures import Future
-    mutex = threading.Lock()
-    def emit(event):
-        with mutex:
-            print(json.dumps(event, ensure_ascii=False), flush=True)
-    service = None
-    commands = queue.Queue(maxsize=256)
-    closing = threading.Event()
-    def dispatch(callback):
+MAX_COMMAND = 2_000_000
+MAX_NATIVE_RESULT = 12_000_000
+
+
+def parse_command(line):
+    if len(line) > MAX_NATIVE_RESULT: raise ValueError("Chat command is too large.")
+    command = json.loads(line)
+    if not isinstance(command, dict): raise ValueError("Chat command must be an object.")
+    if len(line) > MAX_COMMAND and command.get("command") != "native_result":
+        raise ValueError("Chat command is too large.")
+    return command
+
+
+class CommandOwner:
+    """The one serial owner of Chat commands, whichever transport carries them.
+
+Command lines, network callbacks and event callbacks share one bounded FIFO, so
+none of them runs concurrently with a command. Producers wait on the queue
+itself; nothing here holds a chat or output lock while it waits.
+"""
+    def __init__(self, maxsize=256):
+        self.commands = queue.Queue(maxsize=maxsize)
+        self.closing = threading.Event()
+
+    def dispatch(self, callback):
         """Network callbacks wait for the same serial command owner as stdin."""
         future = Future()
-        if closing.is_set(): raise ValueError("Chat is closing")
-        try: commands.put(("callback", (callback, future)), timeout=5)
+        if self.closing.is_set(): raise ValueError("Chat is closing")
+        try: self.commands.put(("callback", (callback, future)), timeout=5)
         except queue.Full: raise ValueError("Chat command queue is busy") from None
         try: return future.result(timeout=30)
         except TimeoutError:
             future.cancel()
             raise ValueError("Remote command timed out; inspect its receipt before retrying") from None
-    def dispatch_event(callback):
-        if closing.is_set(): return False
+
+    def dispatch_event(self, callback):
+        if self.closing.is_set(): return False
         try:
-            commands.put_nowait(("event_callback", callback))
+            self.commands.put_nowait(("event_callback", callback))
             return True
         except queue.Full:
             return False
-    def read_commands():
-        try:
-            for line in sys.stdin:
-                if closing.is_set(): break
-                commands.put(("line", line))
-        finally: commands.put(("eof", None))
-    try:
-        root = state_root()
-        service = ChatHost(ChatStore(root), GatewayClient(root), emit, dispatch=dispatch, dispatch_event=dispatch_event)
-        service.initialize()
-        threading.Thread(target=read_commands, daemon=True, name="chat-stdin").start()
-        while not service.closing:
-            kind, item = commands.get()
+
+    def submit(self, line, origin=None):
+        """Block the producing transport, never the owner, while the queue is full."""
+        while not self.closing.is_set():
+            try:
+                self.commands.put(("line", (line, origin)), timeout=.5)
+                return True
+            except queue.Full:
+                continue
+        return False
+
+    def finish(self):
+        self.commands.put(("eof", None))
+
+    def stop(self):
+        """End the loop without blocking the caller, even when the queue is full."""
+        self.closing.set()
+        try: self.commands.put_nowait(("eof", None))
+        except queue.Full: pass
+
+    def run(self, service, intercept=None, refuse=None):
+        """Serve until end of input, an explicit stop, or Chat shutdown.
+
+`intercept(command, origin)` lets a transport answer its own commands (for
+example a socket detach) on this same owner; it returns True when handled.
+`refuse(command, error, origin)` likewise answers a failure to its origin
+instead of the chat's own rejection path.
+"""
+        while not service.closing and not self.closing.is_set():
+            kind, item = self.commands.get()
             if kind == "eof": break
             if kind == "event_callback":
                 item()
@@ -1333,22 +1366,42 @@ def main():
                     try: future.set_result(callback())
                     except Exception as exc: future.set_exception(exc)
                 continue
-            line = item
+            line, origin = item
             command = None
             try:
-                if len(line) > 12_000_000: raise ValueError("Chat command is too large.")
-                command = json.loads(line)
-                if not isinstance(command, dict): raise ValueError("Chat command must be an object.")
-                if len(line) > 2_000_000 and command.get("command") != "native_result":
-                    raise ValueError("Chat command is too large.")
+                command = parse_command(line)
+                if intercept is not None and intercept(command, origin): continue
                 service.handle(command)
                 if service.closing: break
             except Exception as exc:
-                service.reject(command, exc)
+                if refuse is None or not refuse(command, exc, origin):
+                    service.reject(command, exc)
+
+
+def main():
+    from chat_sessions import ChatHost
+    mutex = threading.Lock()
+    def emit(event):
+        with mutex:
+            print(json.dumps(event, ensure_ascii=False), flush=True)
+    service = None
+    owner = CommandOwner()
+    def read_commands():
+        try:
+            for line in sys.stdin:
+                if owner.closing.is_set(): break
+                owner.submit(line)
+        finally: owner.finish()
+    try:
+        root = state_root()
+        service = ChatHost(ChatStore(root), GatewayClient(root), emit, dispatch=owner.dispatch, dispatch_event=owner.dispatch_event)
+        service.initialize()
+        threading.Thread(target=read_commands, daemon=True, name="chat-stdin").start()
+        owner.run(service)
     except Exception as exc:
         emit({"event": "error", "message": str(exc)})
     finally:
-        closing.set()
+        owner.closing.set()
         if service:
             service.shutdown()
 

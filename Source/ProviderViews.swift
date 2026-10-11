@@ -15,6 +15,9 @@ let keyAccountProviders: Set<String> = ["mistral", "kimi", "mimo", "deepseek", "
 /// CLI providers that can hold several logins side by side, one config folder
 /// each. Mirrors `hub_config.CLI_ACCOUNT_PROVIDERS`.
 fileprivate let cliAccountProviders: Set<String> = ["codex", "claude"]
+/// Providers with both an API-key source and an installed-CLI source, which
+/// Chat can list side by side. Mirrors `hub_config.CHAT_SOURCE_PROVIDERS`.
+fileprivate let chatSourceProviders: Set<String> = ["codex", "claude", "muse", "grok"]
 
 struct ProviderPage: View {
     @ObservedObject var model: BridgeModel
@@ -97,6 +100,17 @@ struct ProviderPage: View {
                             if modes.contains("environment") { Text("Environment").tag("environment") }
                             if modes.contains("cli") { Text("Installed CLI").tag("cli") }
                         }.pickerStyle(.segmented)
+                        if chatSourceProviders.contains(provider.id) {
+                            Toggle(isOn: Binding(
+                                get: { model.settings.providers[provider.id]?.chat_both_sources ?? false },
+                                set: { model.settings.providers[provider.id]?.chat_both_sources = $0 ? true : nil })) {
+                                Text(connection.credential_mode == "cli"
+                                     ? "Also list this provider’s API key models in Chat"
+                                     : "Also list this provider’s installed CLI models in Chat")
+                            }.toggleStyle(.checkbox)
+                            Text("Chat shows both sources side by side, each row labelled with its source; Claude Desktop and Codex keep using the source chosen above. Refresh the catalogue after turning this on.")
+                                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                        }
                         if connection.credential_mode == "keychain" {
                             if keyAccountProviders.contains(provider.id) { KeyAccountsSection(model: model, provider: provider.id) }
                             HStack {

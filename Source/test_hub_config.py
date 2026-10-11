@@ -6,9 +6,15 @@ import unittest
 from branding import BrandingError
 from effort_map import MISTRAL_NARROW_EFFORTS, MISTRAL_REASONING_EFFORTS
 from hub_config import (
+    CHAT_SOURCE_PROVIDERS,
     CLAUDE_LADDER_PREFIX,
     CLAUDE_TIERS,
     CLI_AUTH_PROVIDERS,
+    chat_extra_source,
+    chat_source_settings,
+    chat_sources,
+    credential_modes,
+    split_chat_account,
     _FOREIGN_FAMILY,
     _row_slug_digest,
     claude_catalogue_rows,
@@ -362,6 +368,46 @@ class SettingsMigrationTests(unittest.TestCase):
                     {"providers": {provider_id: {"credential_mode": "cli"}}},
                     SLOTS, "mistral-test")
                 self.assertEqual(chosen["providers"][provider_id]["credential_mode"], "cli")
+
+    def test_chat_may_list_a_second_credential_source_only_where_two_exist(self):
+        self.assertEqual(CHAT_SOURCE_PROVIDERS, frozenset(
+            provider for provider in CLI_AUTH_PROVIDERS if "keychain" in credential_modes(provider)))
+        for provider_id in sorted(CHAT_SOURCE_PROVIDERS):
+            with self.subTest(provider=provider_id):
+                chosen = normalize({"providers": {provider_id: {"credential_mode": "cli", "chat_both_sources": True}}},
+                                   SLOTS, "mistral-test")
+                connection = chosen["providers"][provider_id]
+                self.assertIs(connection["chat_both_sources"], True)
+                self.assertEqual(chat_sources(connection, provider_id), ["cli", "keychain"])
+                keyed = normalize({"providers": {provider_id: {"chat_both_sources": True}}}, SLOTS, "mistral-test")
+                self.assertEqual(chat_sources(keyed["providers"][provider_id], provider_id), ["keychain", "cli"])
+                # Off is the absent default, so untouched settings keep their shape.
+                off = normalize({"providers": {provider_id: {"chat_both_sources": False}}}, SLOTS, "mistral-test")
+                self.assertNotIn("chat_both_sources", off["providers"][provider_id])
+                self.assertIsNone(chat_extra_source(off["providers"][provider_id], provider_id))
+                self.assertEqual(chat_sources(off["providers"][provider_id], provider_id), ["keychain"])
+        for provider_id in ("antigravity", "mistral", "ollama", "kimi"):
+            with self.subTest(provider=provider_id), self.assertRaises(ValueError):
+                normalize({"providers": {provider_id: {"chat_both_sources": True}}}, SLOTS, "mistral-test")
+        with self.assertRaises(ValueError):
+            normalize({"providers": {"claude": {"chat_both_sources": "yes"}}}, SLOTS, "mistral-test")
+
+    def test_chat_account_ids_name_their_source_only_when_not_the_active_one(self):
+        self.assertEqual(split_chat_account(""), (None, ""))
+        self.assertEqual(split_chat_account("work"), (None, "work"))
+        self.assertEqual(split_chat_account("keychain:"), ("keychain", ""))
+        self.assertEqual(split_chat_account("cli:work"), ("cli", "work"))
+        with self.assertRaises(ValueError):
+            split_chat_account({"id": "work"})
+        settings = normalize({"providers": {"claude": {"credential_mode": "cli", "chat_both_sources": True,
+                                                       "cli_accounts": [{"id": "work", "label": "Work", "config_dir": "/accounts/work"}],
+                                                       "cli_account": "work"}}}, SLOTS, "mistral-test")
+        alternate = chat_source_settings(settings, "claude", "keychain")
+        self.assertEqual(alternate["providers"]["claude"]["credential_mode"], "keychain")
+        self.assertEqual(alternate["providers"]["claude"]["cli_account"], "work")
+        self.assertEqual(settings["providers"]["claude"]["credential_mode"], "cli")
+        self.assertNotEqual(connection_signature("claude", settings["providers"]["claude"]),
+                            connection_signature("claude", alternate["providers"]["claude"]))
 
     def test_cli_credential_source_is_refused_where_no_cli_lane_exists(self):
         for provider_id in ("mistral", "kimi", "mimo", "ollama", "deepseek", "cerebras"):

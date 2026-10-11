@@ -17,8 +17,24 @@ provider history, including returned opaque reasoning, stays intact in a private
 archive in the JSONL log. The new provider receives portable text/image context,
 never another provider's reasoning signatures, encrypted blocks or pending calls.
 Switching back follows the same rule rather than reviving a stale trace. Changed
-connections also start a fresh provider context. Changing workspace opens a new
-chat, leaving the original transcript in the rail.
+connections also start a fresh provider context.
+
+A provider that offers both an API key and an installed CLI (Claude, Codex,
+Muse, Grok) can list both in Chat at once. Turn on **Also list this provider's
+… models in Chat** under its credential source in Providers and refresh its
+catalogue. Rows on the active source keep their account ids; rows on the
+second source carry `<source>:<account>` (for example `keychain:` for the
+default key slot, `cli:work` for a named CLI login), and every row of such a
+provider is labelled with its source. The active source still lists the
+launcher-enabled routes; the second source has no tick list of its own, so it
+lists every model its catalogue holds, and the picker's search narrows it. The
+second source's accounts are the ones saved for it (extra API keys or CLI
+folders), managed by switching the credential source temporarily. Claude
+Desktop and Codex keep using the active source only; a chat on the second
+source names it in `_provider_hub_account`, and the gateway reads that source's
+cached catalogue whenever the picker refreshes or a request plans on it, so a
+refreshed catalogue reaches Chat without restarting the gateway. Changing
+workspace opens a new chat, leaving the original transcript in the rail.
 
 The sidebar lists **Projects** first, then **Recents**, then **Workspaces**. A
 workspace with attached folders is promoted into Projects; the extra folders

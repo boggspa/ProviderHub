@@ -2,6 +2,11 @@
 
 Presentation comes from the shared TaskWraith-compatible branding contract.
 Selections never change the provider settings used by either desktop client.
+
+A provider may offer two credential sources at once (hub_config.chat_sources):
+the active one, whose rows carry bare account ids as they always have, and a
+second one, whose rows carry ``<source>:<id>`` so a saved chat keeps naming
+the login it ran on.
 """
 from __future__ import annotations
 
@@ -10,7 +15,8 @@ import json
 
 from branding import resolve_presentation
 from codex_catalogue import choices as codex_choices
-from hub_config import claude_routes, cli_account_dir, connection_signature
+from hub_config import (CHAT_SOURCE_LABELS, chat_extra_source, chat_sources, claude_routes, cli_account_dir,
+                        connection_signature, split_chat_account)
 from model_names import friendly_model_name
 
 
@@ -19,12 +25,16 @@ def native_search_available(spec, connection, provider):
 
 
 def chat_connection(settings, provider, account="", expected_scope=None):
-    if not isinstance(account, str):
-        raise ValueError("Choose a configured account.")
+    source, account = split_chat_account(account)
     connections = settings.get("providers") or {}
     if provider not in connections:
         raise ValueError("This provider is no longer configured.")
     connection = dict(connections[provider])
+    if source is not None:
+        if source not in chat_sources(connection, provider):
+            raise ValueError("This account's credential source is no longer offered in Chat. "
+                             "Choose a model/account for a new chat.")
+        connection["credential_mode"] = source
     mode = connection.get("credential_mode")
     field = "cli_account" if mode == "cli" else "key_account"
     rows = connection.get("cli_accounts" if mode == "cli" else "key_accounts") or []
@@ -42,12 +52,28 @@ def chat_connection(settings, provider, account="", expected_scope=None):
 
 
 def chat_choices(settings):
-    rows, seen = [], set()
+    """One row per route and account, on every credential source Chat offers.
+
+    The active source lists the launcher-enabled routes, as the picker always
+    has. A second source has no tick list of its own, so it lists every model
+    its catalogue holds; the picker's search narrows it.
+    """
     specs = settings.get("_model_specs") or {}
     inventory = {"models": list({spec["id"]: spec for spec in specs.values()}.values())}
     selected = list(dict.fromkeys([*claude_routes(settings).values(),
                                   *(row["id"] for row in codex_choices(settings, inventory))]))
-    for alias in selected:
+    rows = _rows(settings, specs, selected)
+    for provider, sources in (settings.get("_chat_source_specs") or {}).items():
+        connection = (settings.get("providers") or {}).get(provider) or {}
+        extra = chat_extra_source(connection, provider)
+        if extra and extra in sources:
+            rows.extend(_rows(settings, sources[extra], list(sources[extra]), source=extra, only=provider))
+    return rows
+
+
+def _rows(settings, specs, candidates, *, source=None, only=None):
+    rows, seen = [], set()
+    for alias in candidates:
         spec = specs.get(alias)
         if not spec:
             continue
@@ -56,9 +82,14 @@ def chat_choices(settings):
             continue
         seen.add(route)
         provider = spec.get("provider_id") or route.split("/", 1)[0]
+        if only is not None and provider != only:
+            continue
         connection = (settings.get("providers") or {}).get(provider)
         if not connection or connection.get("protocol") == "agent_session":
             continue
+        labelled = len(chat_sources(connection, provider)) > 1
+        if source is not None:
+            connection = {**connection, "credential_mode": source}
         mode = connection.get("credential_mode")
         field = "cli_account" if mode == "cli" else "key_account"
         accounts = [{"id": "", "label": "Default"}]
@@ -76,10 +107,12 @@ def chat_choices(settings):
         if spec.get("reasoning") is False:
             efforts = []
         for account in accounts:
-            _, _, _, scope = chat_connection(settings, provider, account["id"])
-            rows.append({"id": route + "|" + account["id"], "route": route, "label": label,
-                         "provider": presentation["displayProvider"], "account": account["id"],
-                         "accountLabel": account["label"], "scope": scope,
+            identifier = account["id"] if source is None else source + ":" + account["id"]
+            _, _, _, scope = chat_connection(settings, provider, identifier)
+            account_label = account["label"] + (" · " + CHAT_SOURCE_LABELS.get(mode, mode) if labelled else "")
+            rows.append({"id": route + "|" + identifier, "route": route, "label": label,
+                         "provider": presentation["displayProvider"], "account": identifier,
+                         "accountLabel": account_label, "source": mode, "scope": scope,
                          "efforts": efforts, "context": spec.get("runtime_context") or spec.get("context"),
                          "max_output": spec.get("max_output"), "supportsTools": spec.get("tools") is not False,
                          "supportsWebSearch": native_search_available(spec, connection, provider),
