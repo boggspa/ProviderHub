@@ -7,6 +7,7 @@ import stat
 import shutil
 import subprocess
 import sys
+import threading
 import tempfile
 import time
 import unittest
@@ -496,6 +497,40 @@ class BlackboardTeamTests(unittest.TestCase):
         self.assertEqual(base64.b64decode(image["source"]["data"]), PNG)
         tool = next(item for item in parent.chat["entries"] if item.get("tool") == "blackboard_read")
         self.assertFalse(tool["isError"])
+
+    def test_slow_pdf_inspection_releases_parent_mutex(self):
+        parent = self.team([[response("Unused")]])
+        member = parent.chat["team"]["members"][0]
+        source = self.root / "slow.pdf"; source.write_bytes(b"%PDF-test")
+        row = blackboard.attach(parent.chat, self.store.root, paths=[str(source)], now=NOW)[0]
+        service = type("MemberService", (), {"role": "team", "team_parent": parent,
+                       "team_member": member, "choice": lambda self: {"vision": True}})()
+        entered, release, acquired = threading.Event(), threading.Event(), threading.Event()
+        results, errors = [], []
+        def slow_pdf(*args, **kwargs):
+            entered.set()
+            if not release.wait(3): raise AssertionError("PDF release was not signalled")
+            return subprocess.CompletedProcess([], 0, b"Extracted reference", b"")
+        def read():
+            try: results.append(blackboard.execute(service, "blackboard_read", {"attachment_id": row["id"]}))
+            except BaseException as exc: errors.append(exc)
+        def peer():
+            with parent._mutex: acquired.set()
+        with patch.object(blackboard.subprocess, "run", side_effect=slow_pdf):
+            reader = threading.Thread(target=read); reader.start()
+            peer_thread = None
+            try:
+                self.assertTrue(entered.wait(3), "PDF helper did not start")
+                peer_thread = threading.Thread(target=peer); peer_thread.start()
+                self.assertTrue(acquired.wait(1), "slow attachment read held the Team mutex")
+                self.assertFalse(release.is_set())
+                with self.assertRaisesRegex(ValueError, "No attachment"):
+                    blackboard.execute(service, "blackboard_read", {"attachment_id": "foreign"})
+            finally:
+                release.set(); reader.join(3)
+                if peer_thread: peer_thread.join(3)
+        self.assertFalse(errors, errors)
+        self.assertIn("Extracted reference", results[0]["content"][0]["text"])
 
     def test_member_removal_save_failure_restores_metadata_and_retains_file(self):
         parent = self.team([[response("Unused")]])

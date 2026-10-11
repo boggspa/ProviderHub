@@ -369,17 +369,27 @@ def attachments(chat, saved=None):
     return rows
 
 
-def inspect_attachment(chat, store_root, identifier, *, vision=True):
-    """Read only an ID in this chat, with no model-supplied filesystem path."""
+def _owned_attachment(chat, identifier):
+    """Capture one owned row while the caller holds its chat lock."""
     if not isinstance(identifier, str) or not identifier:
         raise ValueError("Choose an attachment ID from this chat's Blackboard.")
     item = next((row for row in attachments(chat) if row["id"] == identifier), None)
     if item is None: raise ValueError("No attachment with that ID in this chat.")
+    return dict(item)
+
+
+def inspect_attachment(chat, store_root, identifier, *, vision=True):
+    """Read only an ID in this chat, with no model-supplied filesystem path."""
+    return _inspect_owned_attachment(chat["id"], store_root, _owned_attachment(chat, identifier), vision=vision)
+
+
+def _inspect_owned_attachment(chat_id, store_root, item, *, vision=True):
+    """Bounded I/O on a captured owned row; never needs the Team mutex."""
     metadata = json.dumps(_listed(item, ("size",)), ensure_ascii=False)
     if item.get("url"):
         return [{"type": "text", "text": metadata + "\nLink stored; its contents have not been fetched."}]
     path = Path(item["path"])
-    chat_folder = Path(store_root) / chat["id"]
+    chat_folder = Path(store_root) / chat_id
     folder = chat_folder / ("blackboard" if item["source"] == "board" else "attachments")
     # Saved metadata is not permission to read elsewhere. Reject aliases and
     # symlinks, including changed storage directories, before opening a leaf.
@@ -491,21 +501,25 @@ def describe(name, args):
 
 
 def execute(service, name, args):
-    """Run a member's tool against the parent chat, under the parent's lock."""
+    """Mutate under the parent lock; inspect captured attachments outside it."""
     from chat_runtime import now
     description = describe(name, args)
     if service.role != "team":
         raise ValueError("Blackboard tools are available only to Team members.")
     parent, member = service.team_parent, service.team_member
+    if name == "blackboard_read" and args.get("attachment_id") is not None:
+        if args.get("key") is not None or args.get("category") is not None:
+            raise ValueError("Inspect an attachment ID or filter posts, not both.")
+        with parent._mutex:
+            chat_id = parent.chat["id"]
+            owned = _owned_attachment(parent.chat, args["attachment_id"])
+            store_root = parent.store.root
+            vision = service.choice().get("vision") is not False
+        content = _inspect_owned_attachment(chat_id, store_root, owned, vision=vision)
+        return {"content": content, "is_error": False, "summary": "Read Blackboard attachment", "changed_files": []}
     with parent._mutex:
         chat = parent.chat
         if name == "blackboard_read":
-            if args.get("attachment_id") is not None:
-                if args.get("key") is not None or args.get("category") is not None:
-                    raise ValueError("Inspect an attachment ID or filter posts, not both.")
-                content = inspect_attachment(chat, parent.store.root, args["attachment_id"],
-                                             vision=service.choice().get("vision") is not False)
-                return {"content": content, "is_error": False, "summary": "Read Blackboard attachment", "changed_files": []}
             saved = board(chat)
             key, category = args.get("key"), args.get("category")
             if category is not None: _category(category)

@@ -212,6 +212,18 @@ each, 256 MiB in total) and http/https links. Added files are copied into the
 chat's private `blackboard` folder and deleted when removed from the board;
 message originals are never touched.
 
+Members inspect a listed board or message attachment with
+`blackboard_read(attachment_id)`. IDs must belong to the current chat; arbitrary
+paths, foreign IDs and symlinks are refused. Text reads are limited to 8 MiB
+and return up to 200,000 UTF-8 bytes, with an explicit truncation notice.
+PDFs use local PDFKit text extraction: at most the first 100 pages and 200,000
+UTF-8 bytes, with a 15-second timeout and no OCR. PNG/JPEG/GIF/WebP images
+reach image-capable members as original image content. Audio/video return
+metadata and a preview-only notice; links are not fetched. Ownership metadata
+is captured under the Team lock, then file reads and PDF extraction run outside
+it so peers and controls remain responsive. Removal during a read may cause
+the read to fail, or an already-open file may finish reading safely.
+
 Members add files and links with a separate `blackboard_attach` tool, which
 takes `paths` (relative to the chat's workspace) and/or `links` (`url`, optional
 `title`). It has the same rights gate as the other Blackboard tools: only Team
@@ -227,12 +239,13 @@ member's provider mark and name. A member removes only its own items, with
 `blackboard_remove` and an `attachment_id`; it cannot remove yours or a peer's.
 You can remove any added item. Each call is an expandable tool row, and the
 member digest lists attachment names, authors and IDs (never private paths) so
-peers know they exist.
+peers can discover them and request their contents by ID.
 
 Added items share one cap of 24 whoever adds them, and 256 MiB of file bytes
 in total. Attachment bytes do **not** count toward the 24,000-byte board total:
 that total bounds post text, which is what is projected into model context;
-attachments reach a model only as names in the digest.
+the digest lists attachment metadata; contents reach a member on demand through
+`blackboard_read(attachment_id)` within the inspection bounds above.
 
 Thumbnails are rendered off the main thread and cached as small PNGs (at most
 360 pixels on a side) in that folder, then in memory: images use ImageIO,
