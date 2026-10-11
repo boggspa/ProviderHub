@@ -233,7 +233,7 @@ struct ChatTeamRunUsage: Decodable {
 }
 struct ChatTeamSnapshot: Decodable {
     /// The runtime's MAX_MEMBERS (chat_team.py), including the chat's own model.
-    static let maxMembers = 5
+    static let maxMembers = 6
     var enabled: Bool; var status: String; var activeMemberID: String?; var members: [ChatTeamMember]
     var activeMemberIDs: [String]?
     var execution: ChatTeamExecution?; var runUsage: ChatTeamRunUsage?; var limitReason: String?
@@ -267,7 +267,7 @@ struct ChatTeamSnapshot: Decodable {
         guard (1...ChatTeamSnapshot.maxMembers).contains(members.count), members.allSatisfy({ member in
             guard let choice = member["choice"] as? String, let name = member["name"] as? String else { return false }
             return !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && models.contains { $0.id == choice && $0.supportsTools }
-        }) else { teamNotice = "Choose one to five named members with enabled models."; return }
+        }) else { teamNotice = "Choose one to \(ChatTeamSnapshot.maxMembers) named members with enabled models."; return }
         let names = members.compactMap { ($0["name"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
             .folding(options: .caseInsensitive, locale: nil) }
         guard Set(names).count == names.count else { teamNotice = "Give each member a different name, so an @name tag reaches one member."; return }
