@@ -33,6 +33,7 @@ public enum ChatPaneDropGeometry {
     }
 }
 
+@MainActor
 public struct ChatSplitWorkspace<Leaf: View>: NSViewControllerRepresentable {
     @Binding var layout: ChatWorkspaceLayout
     @Binding var focusedPaneID: UUID?
@@ -205,7 +206,7 @@ private final class ChatDropSurface: NSView {
         let provider = NSItemProvider(item:data as NSData,typeIdentifier:UTType.chatPaneChatID.identifier)
         provider.loadDataRepresentation(forTypeIdentifier:UTType.chatPaneChatID.identifier) { [weak self] payload,_ in
             guard let payload, payload.count <= 4096, let chat = String(data:payload,encoding:.utf8), !chat.isEmpty else { return }
-            Task { @MainActor in
+            Task { @MainActor [weak self] in
                 guard let self, self.window != nil, ChatPaneDropGeometry.allowed(zone,size:self.bounds.size) else { return }
                 self.drop(zone,chat)
             }

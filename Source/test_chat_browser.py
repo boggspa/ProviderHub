@@ -18,7 +18,11 @@ import Combine
   NSApplication.shared.setActivationPolicy(.prohibited)
   let store = ChatBrowserStore(storageRoot:URL(fileURLWithPath:CommandLine.arguments[2]))
   let url = CommandLine.arguments[1]
-  func check(_ ok:Bool,_ name:String) { print((ok ? "PASS " : "FAIL ")+name); if !ok { exit(1) } }
+  func check(_ ok:Bool,_ name:String) {
+   let message = (ok ? "PASS " : "FAIL ")+name+"\n"
+   FileHandle.standardError.write(Data(message.utf8))
+   if !ok { exit(1) }
+  }
   func call(_ id:String,_ tool:String,_ args:[String:Any]=[:]) async -> [String:Any] {
    await store.perform(chatID:"fixture",requestID:id,tool:tool,arguments:args)
   }
@@ -31,17 +35,30 @@ import Combine
   check(opened["is_error"] as? Bool == false,"open loopback")
   var forwarded = 0
   let subscription = store.objectWillChange.sink { forwarded += 1 }
-  let web = store.webView(forChatID:"fixture")!
-  let isolated = try? await web.evaluateJavaScript("typeof window.__cbRefs")
+  guard let web = store.webView(forChatID:"fixture") else { check(false,"opened page exists"); return }
+  // The macOS 14 async overlay returns nonoptional Any and traps on JavaScript
+  // undefined. The callback API preserves nil, just like the production driver.
+  func evaluatePage(_ script:String) async throws -> Any? {
+   try await withCheckedThrowingContinuation { continuation in
+    web.evaluateJavaScript(script) { value,error in
+     if let error { continuation.resume(throwing:error) }
+     else { continuation.resume(returning:value) }
+    }
+   }
+  }
+  let isolated = try? await evaluatePage("typeof window.__cbRefs")
   check(isolated as? String == "undefined","isolated world")
   let observed = await call("observe","browser_observe",["depth":8,"max_bytes":200000])
   if observed["is_error"] as? Bool == true { print(observed) }
   check(observed["is_error"] as? Bool == false,"observe")
-  let snapshot = store.sessions["fixture"]!.page.snapshotID!
-  _ = try? await web.evaluateJavaScript("document.getElementById('evil').setAttribute('data-cb-ref','r1')")
+  guard let snapshot = store.sessions["fixture"]?.page.snapshotID else { check(false,"observation includes snapshot identity"); return }
+  do {
+   let mutation = try await evaluatePage("document.getElementById('evil').setAttribute('data-cb-ref','r1')")
+   check(mutation == nil,"undefined JavaScript result remains optional")
+  } catch { check(false,"fixture mutation failed: \(error)") }
   let acted = await call("act","browser_act",["snapshot_id":snapshot,"actions":[["kind":"click","ref":"r1"]]])
   check(acted["is_error"] as? Bool == false,"act")
-  let clicked = try? await web.evaluateJavaScript("document.body.dataset.clicked")
+  let clicked = try? await evaluatePage("document.body.dataset.clicked")
   check(clicked as? String == "good","ref forgery rejected")
   let first = Task { @MainActor in await call("slow","browser_navigate",["url":url+"slow"]) }
   try? await Task.sleep(nanoseconds:150_000_000)
@@ -51,7 +68,7 @@ import Combine
   let one = await first.value; let two = await second.value
   check(one["is_error"] as? Bool == false,"active unaffected by queued cancel")
   check(two["is_error"] as? Bool == true,"queued cancelled")
-  check(store.sessions["fixture"]!.page.url.hasSuffix("slow"),"per chat serial")
+  check(store.sessions["fixture"]?.page.url.hasSuffix("slow") == true,"per chat serial")
   let newer = Task { @MainActor in await call("new","browser_navigate",["url":url+"slow2"]) }
   try? await Task.sleep(nanoseconds:150_000_000)
   store.cancel(chatID:"fixture",requestID:"slow")
@@ -72,7 +89,7 @@ import Combine
   let serialB = Task { @MainActor in await call("serialB","browser_navigate",["url":url+"final"]) }
   let resultA = await serialA.value; let resultB = await serialB.value
   check(resultA["is_error"] as? Bool == false && resultB["is_error"] as? Bool == false,"different request IDs serialized successfully")
-  check(store.sessions["fixture"]!.page.url.hasSuffix("final"),"queued navigation finishes last")
+  check(store.sessions["fixture"]?.page.url.hasSuffix("final") == true,"queued navigation finishes last")
   subscription.cancel()
   store.close(chatID:"fixture")
   print("WEBKIT_INTEGRATION_OK"); exit(0)
