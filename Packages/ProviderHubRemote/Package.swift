@@ -1,4 +1,4 @@
-// swift-tools-version: 6.0
+// swift-tools-version: 5.9
 import PackageDescription
 
 let package = Package(
@@ -14,5 +14,5 @@ let package = Package(
         .target(name: "ProviderHubRemote"),
         .testTarget(name: "ProviderHubRemoteTests", dependencies: ["ProviderHubRemote"]),
     ],
-    swiftLanguageModes: [.v5]
+    swiftLanguageVersions: [.v5]
 )
