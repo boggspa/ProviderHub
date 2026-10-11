@@ -380,6 +380,58 @@ class ChatRuntimeTests(unittest.TestCase):
         nxt = self._inspector_event("next-turn")
         self.assertEqual(nxt["changes"]["commits"], [])
 
+    def test_chat_host_and_team_keep_turn_commits(self):
+        """Sessions and Team turns record HEAD even though Team skips the solo loop."""
+        from chat_sessions import ChatHost
+        repo = self.root / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-b", "main", str(repo)], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(repo), "config", "user.email", "test@example.invalid"], check=True)
+        subprocess.run(["git", "-C", str(repo), "config", "user.name", "Test"], check=True)
+        (repo / "base.txt").write_text("base\n")
+        subprocess.run(["git", "-C", str(repo), "add", "--", "base.txt"], check=True)
+        subprocess.run(["git", "-C", str(repo), "commit", "-m", "base"], check=True, capture_output=True)
+        children = []
+        def client():
+            return FakeTransport(children.pop(0) if children else [])
+        host = ChatHost(self.store, FakeTransport([]), self.events.append, child_factory=client)
+        self.addCleanup(host.shutdown)
+        host.models = FakeTransport([]).catalogue()
+        host.handle({"command": "create", "choice": host.models[0]["id"], "workspace": str(repo)})
+        solo = host.view_id
+        service = host.session(solo)
+        service.transport.client.responses = [response("Solo done")]
+        host.handle({"command": "send", "chat": solo, "id": solo, "text": "Solo"})
+        service.thread.join(3)
+        self.assertFalse(service.busy)
+        key = str(repo.resolve())
+        baseline = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], check=True, capture_output=True).stdout.decode().strip()
+        self.assertEqual(service.turn_heads.get(key), baseline)
+        (repo / "during.txt").write_text("during\n")
+        subprocess.run(["git", "-C", str(repo), "add", "--", "during.txt"], check=True)
+        subprocess.run(["git", "-C", str(repo), "commit", "-m", "during the hosted turn"], check=True, capture_output=True)
+        host.handle({"command": "inspect_git", "chat": solo, "id": solo, "request": "hosted-commits"})
+        hosted = self._inspector_event("hosted-commits")
+        self.assertEqual([row["subject"] for row in hosted["changes"]["commits"]], ["during the hosted turn"])
+        children.append([response("Member done")])
+        host.handle({"command": "create", "choice": host.models[0]["id"], "workspace": str(repo)})
+        team_id = host.view_id
+        team = host.session(team_id)
+        host.handle({"command": "configure_team", "chat": team_id, "id": team_id, "request": "roster", "enabled": True,
+                     "members": [{"name": "Member", "choice": host.models[0]["id"], "effort": "", "responsibility": "Inspect"}]})
+        moved = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], check=True, capture_output=True).stdout.decode().strip()
+        host.handle({"command": "send", "chat": team_id, "id": team_id, "text": "Team"})
+        team.thread.join(4)
+        self.assertFalse(team.busy, self.events[-3:])
+        self.assertEqual(team.turn_heads.get(key), moved)
+        self.assertTrue(any(item.get("memberID") for item in team.chat["entries"]))
+        (repo / "team.txt").write_text("team\n")
+        subprocess.run(["git", "-C", str(repo), "add", "--", "team.txt"], check=True)
+        subprocess.run(["git", "-C", str(repo), "commit", "-m", "during the team turn"], check=True, capture_output=True)
+        host.handle({"command": "inspect_git", "chat": team_id, "id": team_id, "request": "team-commits"})
+        team_event = self._inspector_event("team-commits")
+        self.assertEqual([row["subject"] for row in team_event["changes"]["commits"]], ["during the team turn"])
+
     def _inspector_event(self, request):
         deadline = time.monotonic() + 3
         while time.monotonic() < deadline:
