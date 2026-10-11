@@ -469,8 +469,9 @@ attachment's welcome snapshot are the record, not a replay of these events.
         command.pop("_attachment", None)
         if origin is None: return False
         action = command.get("command")
-        if origin.closed and action in {"subscribe", "detach", "host_status", "gateway_status"}:
-            # Accepted input still runs; a departed client's view requests do not.
+        if origin.closed and action in {"select", "subscribe", "detach", "host_status", "gateway_status"}:
+            # Accepted input still runs; a departed client's view requests do
+            # not, so it cannot steer the window that replaced it.
             return True
         if origin.role == "control" and action not in CONTROL_COMMANDS:
             raise HostError("A control connection may only read status, detach or shut the Host down.")

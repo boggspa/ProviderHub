@@ -760,7 +760,10 @@ they exit or restart, so none of them can interrupt another's requests.
             self.error(409, "This gateway is not serving as a stoppable service.")
             return
         with self.runtime.lock:
+            # Checked and closed together: a request admitted after this point
+            # is refused before any upstream call instead of being torn down.
             active = self.runtime.active
+            if not (request.get("ifIdle") and active): self.runtime.stopping.set()
         if request.get("ifIdle") and active:
             self.error(409, "The gateway still has active requests.")
             return
@@ -931,7 +934,13 @@ they exit or restart, so none of them can interrupt another's requests.
                 slot_held = True
                 if not active_counted:
                     with self.runtime.lock:
-                        self.runtime.active += 1
+                        # An idle stop closes admission under this same lock.
+                        stopping = self.runtime.stopping.is_set()
+                        if not stopping: self.runtime.active += 1
+                    if stopping:
+                        self.error(503, "The gateway is stopping. Retry once it is running again.",
+                                   headers={"Retry-After": "1", "X-Provider-Hub-Origin": "gateway"})
+                        return False
                     active_counted = True
                 return True
 

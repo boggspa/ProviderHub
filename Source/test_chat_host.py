@@ -503,6 +503,17 @@ class NativeSurfaceTests(unittest.TestCase):
         self.assertEqual([event["event"] for event in events], ["native_action", "native_cancel"])
 
 
+class DepartedWindowTests(unittest.TestCase):
+    def test_a_departed_window_cannot_steer_its_replacement_but_its_input_still_runs(self):
+        host = chat_host.PersistentHost(tempfile.gettempdir())
+        class Departed:
+            id, role, closed = "departed-window", "desktop", True
+        for action in ("select", "subscribe", "detach", "host_status", "gateway_status"):
+            self.assertTrue(host.intercept({"command": action, "id": "chat"}, Departed()), action)
+        for action in ("send", "approve", "answer_question", "stop"):
+            self.assertFalse(host.intercept({"command": action, "id": "chat"}, Departed()), action)
+
+
 class AttachmentBoundTests(unittest.TestCase):
     def test_queue_bound_detaches_without_blocking_the_sender(self):
         near, far = socket.socketpair()

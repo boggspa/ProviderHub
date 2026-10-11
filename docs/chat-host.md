@@ -134,7 +134,9 @@ are answered to the asking attachment as
 There is deliberately no gateway stop through the Chat Host. Stopping or
 restarting the gateway is the hub's decision (`gateway_service.stop`).
 
-Every other command goes to `ChatHost.handle` unchanged. The transport rewrites
+Every other command goes to `ChatHost.handle` unchanged. Input a window
+sent before it departed (a send, an approval, an answer) still runs; its view
+requests (`select`, `subscribe`) do not, so it cannot steer its replacement. The transport rewrites
 `subscribe.client` to the attachment ID and stamps `native_result` with the
 attachment that sent it; clients cannot choose either.
 
@@ -182,7 +184,10 @@ window, is unchanged.
   one gateway; `started` says whether this call started it.
 - `stop` sends the authenticated `POST /_bridge/shutdown`
   (`{"ifIdle": bool}`; `409` while requests are active and `ifIdle` is set) and
-  waits until the gateway's lock is released.
+  waits until the gateway's lock is released. An accepted stop closes
+  admission in the same critical section as the idle check: a request that
+  arrives afterwards gets `503` before any upstream call, instead of being cut
+  off mid-flight.
 - `gateway.py serve --parent-pipe`, the app's current mode, keeps its parent
   pipe and also accepts the authenticated stop.
 - The stop is authorised by the gateway token, the same credential desktop

@@ -90,9 +90,12 @@ class GatewayServiceTests(unittest.TestCase):
         status, body = post({"ifIdle": True})
         self.assertEqual(status, 409)
         self.assertIn("active requests", body["error"]["message"])
-        self.assertFalse(stopped.is_set())
-        status, body = post({"ifIdle": False})
-        self.assertEqual((status, body["active"]), (202, 1))
+        self.assertFalse(stopped.is_set() or runtime.stopping.is_set())
+        with runtime.lock: runtime.active = 0
+        status, body = post({"ifIdle": True})
+        self.assertEqual((status, body["active"]), (202, 0))
+        # Admission closed in the same critical section as the idle check.
+        self.assertTrue(runtime.stopping.is_set())
         self.assertTrue(stopped.wait(5))
 
 
