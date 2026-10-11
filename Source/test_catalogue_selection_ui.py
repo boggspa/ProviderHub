@@ -98,11 +98,24 @@ class SettingsChangeClassificationTests(unittest.TestCase):
     def test_combined_preferences_keep_codex_session_restrictions(self):
         # Execute the production property with its actual RouteSettings value
         # type. This catches a benign preference masking a Codex mutation.
-        source = Path(__file__).with_name("MistralBridge.swift").read_text()
-        classifier = source[source.index("    enum ChangeKind {"):source.index("    var routeOptions:")]
-        slot_source = source[source.index("let slots:"):source.index("/// Family tier")]
+        # ``ChangeKind`` lives in ``Source/LaunchPlan.swift`` as a top-level
+        # enum (so the Swift launch-plan resolver can take it as a parameter
+        # without coupling to the ``BridgeModel`` declaration). The
+        # ``changeKind`` computed property still lives in ``MistralBridge.swift``
+        # as a thin BridgeModel wrapper. Read both files so the harness
+        # compiles against the real types.
+        bridge_source = Path(__file__).with_name("MistralBridge.swift").read_text()
+        launch_source = Path(__file__).with_name("LaunchPlan.swift").read_text()
+        # Extract the closing-brace position of the enum so the slice ends
+        # cleanly at the brace; including the leading slash of the next
+        # ``//`` doc comment would corrupt the Swift token stream.
+        enum_start = launch_source.index("public enum ChangeKind")
+        enum_close = launch_source.index("}", enum_start)
+        classifier = launch_source[enum_start:launch_source.index("\n", enum_close) + 1]
+        change_kind_property = bridge_source[bridge_source.index("var changeKind: ChangeKind"):bridge_source.index("var routeOptions:")]
+        slot_source = bridge_source[bridge_source.index("let slots:"):bridge_source.index("/// Family tier")]
         harness_source = "import Foundation\n" + slot_source + "\nstruct Probe {\n"
-        harness_source += "var settings = RouteSettings()\nvar savedSettings = RouteSettings()\n" + classifier + "}\n"
+        harness_source += "var settings = RouteSettings()\nvar savedSettings = RouteSettings()\n" + classifier + change_kind_property + "}\n"
         harness_source += '''
 var result: [String] = []
 var unchanged = Probe()
