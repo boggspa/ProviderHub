@@ -14,6 +14,109 @@ from test_chat_runtime import FakeTransport, response
 
 
 class ConcurrentChatTests(unittest.TestCase):
+    def test_attached_folder_real_session_tools_and_detach(self):
+        from test_chat_agents import call
+        identifier = self.create()
+        secondary = self.root / "secondary"; secondary.mkdir()
+        file = secondary / "note.txt"; file.write_text("secondary content")
+        self.host.handle({"command": "attach_workspace", "chat": identifier, "folder": str(secondary)})
+        self.host.handle({"command": "select", "id": identifier})
+        service = self.send(identifier, [call("read_file", {"path": str(file)}), response("Read")])
+        self.wait(lambda: not service.busy)
+        self.assertIn(str(secondary), service.transport.client.requests[0]["system"])
+        tools = [item for item in service.chat["entries"] if item["kind"] == "tool"]
+        self.assertFalse(tools[-1]["isError"])
+        runner = service.runner_type(service.chat["workspace"], cancel_event=service.cancel,
+                                     roots=[str(secondary)])
+        patch_text = "*** Begin Patch\n*** Update File: " + str(file) + "\n@@\n-secondary content\n+edited\n*** End Patch"
+        self.assertFalse(runner.execute("apply_patch", {"patch": patch_text})["is_error"])
+        self.assertEqual(file.read_text(), "edited")
+        self.host.handle({"command": "detach_workspace", "chat": identifier, "folder": str(secondary)})
+        self.assertTrue(runner.execute("read_file", {"path": str(file)})["is_error"])
+        self.assertTrue(runner.execute("apply_patch", {"patch": patch_text})["is_error"])
+
+        self.host.handle({"command": "attach_workspace", "chat": identifier, "folder": str(secondary)})
+        patch_text = patch_text.replace("-secondary content", "-edited").replace("+edited", "+approved")
+        service = self.send(identifier, [response("", patch_text), response("Finished")])
+        self.wait(lambda: service.approval is not None)
+        self.assertEqual(file.read_text(), "edited")
+        self.host.handle({"command": "detach_workspace", "chat": identifier, "folder": str(secondary)})
+        self.host.handle({"command": "approve", "chat": identifier, "id": service.approval["id"], "allow": True})
+        self.wait(lambda: not service.busy)
+        self.assertEqual(file.read_text(), "edited")
+        tools = [item for item in service.chat["entries"] if item["kind"] == "tool"]
+        self.assertTrue(tools[-1]["isError"])
+
+        self.host.handle({"command": "attach_workspace", "chat": identifier, "folder": str(secondary)})
+        service = self.send(identifier, [response("", patch_text), response("Edited")])
+        self.wait(lambda: service.approval is not None)
+        self.host.handle({"command": "approve", "chat": identifier, "id": service.approval["id"], "allow": True})
+        self.wait(lambda: not service.busy)
+        self.assertEqual(file.read_text(), "approved")
+
+    def test_side_and_helper_runners_share_live_attached_roots(self):
+        from chat_agents import make_child
+        identifier = self.create()
+        parent = self.host.session(identifier)
+        secondary = self.root / "secondary"; secondary.mkdir()
+        file = secondary / "note.txt"; file.write_text("shared")
+        self.host.workspaces.attach(parent.chat["workspace"], str(secondary))
+        self.host.handle({"command": "open_side", "chat": identifier, "request": "side", "choice": self.host.models[0]["id"]})
+        children = [self.host.sides[identifier], make_child(parent, self.host.models[0], "", "delegate", self.events.append)]
+        runners = [child.runner_type(child.chat["workspace"], cancel_event=child.cancel, roots=[str(secondary)]) for child in children]
+        for runner in runners: self.assertFalse(runner.execute("read_file", {"path": str(file)})["is_error"])
+        self.host.workspaces.detach(parent.chat["workspace"], str(secondary))
+        for runner in runners: self.assertTrue(runner.execute("read_file", {"path": str(file)})["is_error"])
+
+    def test_secondary_checkout_blocks_branch_and_serializes_writers(self):
+        first_id = self.create("primary")
+        second_id = self.create("secondary")
+        first = self.host.session(first_id); second = self.host.session(second_id)
+        self.host.workspaces.attach(first.chat["workspace"], second.chat["workspace"])
+        first._steering = True
+        self.assertTrue(self.host.workspace_busy(second.chat["workspace"], excluding=second_id))
+        first._steering = False
+        first._branch_working = True
+        self.assertTrue(self.host.workspace_busy(second.chat["workspace"], branch_only=True))
+        first._branch_working = False
+        a = self.host.runner(first.chat["workspace"], cancel_event=threading.Event())
+        b = self.host.runner(second.chat["workspace"], cancel_event=threading.Event())
+        entered, release, other = threading.Event(), threading.Event(), threading.Event()
+        self.addCleanup(release.set)
+        def hold(*args):
+            entered.set(); release.wait(3)
+            return {"is_error": False}
+        with patch.object(a.runner, "execute", side_effect=hold), patch.object(b.runner, "execute", side_effect=lambda *args: other.set()):
+            t1 = threading.Thread(target=a.execute, args=("run_shell", {})); t1.start()
+            self.assertTrue(entered.wait(2))
+            t2 = threading.Thread(target=b.execute, args=("apply_patch", {})); t2.start()
+            self.assertFalse(other.wait(.05))
+            self.host.workspaces.detach(first.chat["workspace"], second.chat["workspace"])
+            self.assertTrue(self.host.workspace_busy(second.chat["workspace"], excluding=second_id))
+            release.set(); t1.join(2); t2.join(2)
+            self.assertTrue(other.is_set())
+
+    def test_nested_attached_roots_share_checkout_gates_without_git(self):
+        primary_id = self.create("primary")
+        nested_id = self.create("secondary/nested")
+        primary = self.host.session(primary_id)
+        self.host.workspaces.attach(primary.chat["workspace"], str(self.root / "secondary"))
+        keys = self.host.workspace_keys(primary.chat["workspace"])
+        self.assertTrue(keys & self.host.workspace_keys(str(self.root / "secondary/nested")))
+
+    def test_project_catalogue_refresh_and_commands_without_selected_chat(self):
+        primary = self.root / "primary"; primary.mkdir()
+        secondary = self.root / "secondary"; secondary.mkdir()
+        self.host.workspaces.remember(str(primary))
+        self.host.handle({"command": "attach_workspace", "workspace": str(primary), "folder": str(secondary)})
+        self.assertEqual(self.events[-1]["projects"][str(primary)], [str(secondary)])
+        self.host.handle({"command": "refresh"})
+        catalogues = [event for event in self.events if event["event"] == "catalogue"]
+        self.assertEqual(catalogues[-1]["projects"][str(primary)], [str(secondary)])
+        self.host.handle({"command": "detach_workspace", "workspace": str(primary), "folder": str(secondary)})
+        self.assertEqual(self.events[-1]["projects"], {})
+
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)

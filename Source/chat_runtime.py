@@ -495,7 +495,8 @@ class ChatService:
         self.publish_workspaces()
 
     def publish_workspaces(self):
-        self.emit({"event": "catalogue", "models": self.models, "folders": self.workspaces.folders[:]})
+        self.emit({"event": "catalogue", "models": self.models, "folders": self.workspaces.folders[:],
+                   "projects": {primary: attached[:] for primary, attached in self.workspaces.projects.items()}})
 
     def current_workspace(self):
         if self.chat:
@@ -779,6 +780,12 @@ class ChatService:
                 self.save(); self.publish()
             else:
                 self.create(choice["id"], folder, effort)
+        elif action == "attach_workspace":
+            self.workspaces.attach(command.get("workspace") or self.current_workspace(), command["folder"])
+            self.publish_workspaces()
+        elif action == "detach_workspace":
+            self.workspaces.detach(command.get("workspace") or self.current_workspace(), command["folder"])
+            self.publish_workspaces()
         elif action in {"send", "retry"}:
             if not self.chat or command.get("id") != self.chat["id"]:
                 raise ValueError("Select a chat before sending.")
@@ -858,10 +865,16 @@ class ChatService:
         permission = {"manual": "Manual: patches and shell commands need the user's Allow once.",
                       "accept_edits": "Accept Edits: patches inside the selected Git repository are preauthorized; shell commands and other mutations need Allow once.",
                       "yolo": "YOLO: the user preauthorized the available tools without approval prompts."}[chat.get("approvalMode", "manual")]
+        attached = self.workspaces.secondaries(chat["workspace"])
         payload = {"model": chat["route"], "messages": chat["messages"], "system": SYSTEM + "\nWorkspace: " + chat["workspace"] + "\nApproval mode: " + permission,
                    "tools": tools, "max_tokens": output,
                    "_provider_hub_surface": "chat", "_provider_hub_account": chat["account"],
                    "_provider_hub_connection": chat["scope"]}
+        if attached:
+            payload["system"] += ("\nAttached folders: " + ", ".join(attached) +
+                                  ". They share this chat's file tools and approvals. Absolute paths may target "
+                                  "them; relative paths stay in the workspace, and shell commands run with the "
+                                  "workspace as their working directory.")
         search_enabled = self.preferences["webSearch"] and choice.get("supportsWebSearch") is True
         if search_enabled:
             # Hosted search is executed by the provider, never by ChatToolRunner.
@@ -967,7 +980,12 @@ class ChatService:
         self._delegations = min(4, max(0, used)) if type(used) is int else 4
         try:
             choice = self.choice()
-            runner = self.runner_type(chat["workspace"], cancel_event=self.cancel)
+            # Attached folders widen the file tools to the project's secondary
+            # roots under the same approvals; the argument stays optional so
+            # injected test runners keep their two-parameter signature until
+            # a project actually has attached folders.
+            roots = self.workspaces.secondaries(chat["workspace"])
+            runner = self.runner_type(chat["workspace"], cancel_event=self.cancel, **({"roots": roots} if roots else {}))
             closing_rounds = chat_team.CLOSING_ROUNDS if self.role in {"parent", "team"} else 0
             import itertools
             for round_index in itertools.count():

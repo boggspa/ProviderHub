@@ -53,6 +53,11 @@ import Combine
             model.consume(try JSONSerialization.data(withJSONObject: event) + Data([10]))
         }
         func check(_ yes: Bool, _ text: String) { if !yes { fatalError(text) } }
+        var railCommands: [[String: Any]] = []
+        let railModel = ChatModel(sendCommand: { railCommands.append($0); return true }, preferences: preferences)
+        railModel.select("qa")
+        check(railCommands.last?["id"] as? String == "qa" && railCommands.last?["chat"] as? String == "qa",
+              "rail selection must retain the chat identity independently of section-specific view IDs")
         check(!model.hasActiveWork && !model.hasUnsentDrafts, "Idle Chat blocked an update")
         model.sideChat = ChatSide(id: "side", route: "test", account: "", label: "Side", effort: "", status: "working", busy: true, entries: [])
         check(model.hasActiveWork, "Update ignored active Side Chat")
@@ -78,6 +83,38 @@ import Combine
         try send(["event":"catalogue", "models":[route], "folders":["/tmp"]])
         try send(["event":"chats", "chats":[summary("A"),summary("B")]])
         try send(["event":"ready"])
+        // The rail promotes attached workspaces into Projects, keeps plain
+        // folders under Workspaces, and lists the newest chats in Recents.
+        check(model.workspaceProjects.isEmpty, "catalogue without projects must leave projects empty")
+        try send(["event":"catalogue", "models":[route], "folders":["/tmp", "/var/tmp/proj"], "projects":["/var/tmp/proj": ["/tmp/shared"]]])
+        check(model.workspaceProjects["/var/tmp/proj"] == ["/tmp/shared"], "catalogue projects payload not decoded")
+        let projID = ChatWorkspaceGroup.identity("/var/tmp/proj")
+        let sharedID = ChatWorkspaceGroup.identity("/tmp/shared")
+        let plainID = ChatWorkspaceGroup.identity("/tmp")
+        func railChat(_ id: String, _ updated: String, workspace: String) -> ChatSummary {
+            ChatSummary(id: id, title: id, updated: updated, route: "ollama/test", account: "", workspace: workspace, effort: "", approvalMode: nil, scope: nil)
+        }
+        let railChats = [
+            railChat("r1", "2026-10-09T12:00:00Z", workspace: "/var/tmp/proj"),
+            railChat("r2", "2026-10-10T09:00:00Z", workspace: "/tmp"),
+            railChat("r3", "2026-10-10T10:00:00Z", workspace: "/var/tmp/proj"),
+            railChat("r4", "2026-10-08T08:00:00Z", workspace: "/tmp/other"),
+        ]
+        let sections = ChatWorkspaceGroup.rail(chats: railChats, folders: ["/tmp", "/var/tmp/proj"], projects: model.workspaceProjects)
+        check(sections.projects.map(\.id) == [projID] && sections.projects[0].secondaries == [sharedID],
+              "project promotion or its secondaries lost")
+        check(sections.workspaces.map(\.id).contains(plainID), "plain workspace missing from the Workspaces list")
+        check(sections.recents.map(\.id) == ["r3", "r2", "r1", "r4"], "recents not newest-first across workspaces")
+        let demoted = ChatWorkspaceGroup.rail(chats: railChats, folders: ["/tmp", "/var/tmp/proj"], projects: [:])
+        check(demoted.projects.isEmpty && demoted.workspaces.map(\.id).contains(projID),
+              "disconnecting every folder must demote the project")
+        let many = (0..<14).map { n in
+            railChat("c\(n)", String(format: "2026-10-%02dT%02d:00:00Z", n + 1, n), workspace: "/tmp")
+        }
+        let capped = ChatWorkspaceGroup.rail(chats: many, folders: [])
+        check(capped.recents.count == 10 && capped.recents.first?.id == "c13" && capped.recents.last?.id == "c4",
+              "recents not capped at the ten newest chats")
+        try send(["event":"catalogue", "models":[route], "folders":["/tmp"]])
         check(model.webSearchEnabled && commands.last?["webSearch"] as? Bool == true, "search must default on and sync at connection")
         model.setWebSearchEnabled(false)
         check(!model.webSearchEnabled && commands.last?["webSearch"] as? Bool == false, "search toggle was not sent")
@@ -748,6 +785,9 @@ import Combine
         try processEvent(["event":"processes", "chat":"A", "processes":[runningRow]])
         procs.disconnected("Transport gone")
         check(procs.processes.isEmpty && procs.processesNotice.contains("may still be running"), "disconnect kept rows or hid possible orphans")
+        model.detachFolder(from: "/tmp", "/var/tmp/shared")
+        check(commands.last?["command"] as? String == "detach_workspace" && commands.last?["workspace"] as? String == "/tmp" &&
+              commands.last?["folder"] as? String == "/var/tmp/shared", "disconnect command malformed")
         print("ChatModel state transitions passed")
     }
 }
