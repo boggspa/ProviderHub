@@ -185,7 +185,7 @@ struct ChatBlackboardPostCard: View {
             }
         }
         .padding(8).frame(maxWidth: .infinity, alignment: .leading)
-        .background(Semantic.raisedSurface, in: RoundedRectangle(cornerRadius: 7))
+        .hubCard(cornerRadius: 7)
         .contentShape(Rectangle())
         .onTapGesture { if verbose { withAnimation(.easeOut(duration: 0.12)) { expanded.toggle() } } }
         .contextMenu {
@@ -346,7 +346,7 @@ private struct ChatBlackboardTile: View {
     }
     @ViewBuilder private var preview: some View {
         ZStack {
-            RoundedRectangle(cornerRadius: HubTheme.Radius.row).fill(Semantic.raisedSurface)
+            RoundedRectangle(cornerRadius: HubTheme.Radius.row).fill(Semantic.cardFill)
             if let image {
                 if file.kind == "audio" {
                     Image(nsImage: image).renderingMode(.template).resizable().foregroundStyle(Semantic.secondaryInk).padding(.horizontal, 6)
@@ -363,7 +363,7 @@ private struct ChatBlackboardTile: View {
         }
         .frame(width: width, height: height)
         .clipShape(RoundedRectangle(cornerRadius: HubTheme.Radius.row))
-        .overlay(RoundedRectangle(cornerRadius: HubTheme.Radius.row).stroke(Semantic.hairline, lineWidth: 1))
+        .overlay(RoundedRectangle(cornerRadius: HubTheme.Radius.row).strokeBorder(Semantic.cardRim, lineWidth: 0.5))
     }
     private func open() {
         if let link = file.url, let url = URL(string: link), ["http", "https"].contains(url.scheme?.lowercased() ?? "") {

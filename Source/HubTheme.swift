@@ -81,6 +81,12 @@ enum HubTheme {
         /// A card, row or panel lifted off the surface.
         static let raisedSurface = dynamic(light: NSColor.black.withAlphaComponent(0.045),
                                            dark: NSColor.white.withAlphaComponent(0.045))
+        /// Container tint, kept separate from hover and control surfaces.
+        /// Translucency retains the window's Glass/Solid character.
+        static let cardFill = dynamic(light: NSColor.black.withAlphaComponent(0.065),
+                                      dark: NSColor.black.withAlphaComponent(0.12))
+        /// A restrained brand fallback for containers without a provider.
+        static let cardRim = accentOnSurface.opacity(0.20)
         /// A selected navigation row or an active control background.
         static let selection = dynamic(light: NSColor.black.withAlphaComponent(0.09),
                                        dark: NSColor.white.withAlphaComponent(0.09))

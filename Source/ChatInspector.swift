@@ -304,7 +304,7 @@ private struct ChatSidePane: View {
                         Button { model.stopSide() } label: { Image(systemName: "stop.fill").frame(width: 24, height: 24) }
                             .buttonStyle(.plain).accessibilityLabel("Stop Side Chat")
                     } else { sideSendButton("arrow.up", label: "Send to Side Chat") }
-                }.padding(8).background(HubTheme.Semantic.raisedSurface, in: RoundedRectangle(cornerRadius: 10)).padding(.horizontal, 12)
+                }.padding(8).hubCard(cornerRadius: 10, accent: model.activeAccent).padding(.horizontal, 12)
                 Text(model.sideNotice.isEmpty ? "Temporary · Read only" : model.sideNotice)
                     .font(.system(size: 10.5)).foregroundStyle(.secondary).lineLimit(3).padding(12)
             } else {

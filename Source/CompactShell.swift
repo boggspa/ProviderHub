@@ -365,10 +365,8 @@ struct CompactShell: View {
             Button { model.notice = "" } label: { Image(systemName: "xmark").font(.system(size: 9, weight: .semibold)) }.buttonStyle(.plain).foregroundStyle(.secondary)
         }
         .padding(.horizontal, 10).padding(.vertical, 8)
-        .background(RoundedRectangle(cornerRadius: 9).fill(tone.opacity(0.12)))
+        .hubCard(cornerRadius: 9, accent: tone)
         .background(RoundedRectangle(cornerRadius: 9).fill(Semantic.surface))
-        .overlay(RoundedRectangle(cornerRadius: 9).stroke(tone.opacity(0.65), lineWidth: 1))
-        .shadow(color: tone.opacity(0.3), radius: 10, y: 2)
         .shadow(color: .black.opacity(0.22), radius: 8, y: 4)
         .padding(.horizontal, 10).padding(.top, 6)
         .onHover { noticeHovered = $0 }
@@ -423,7 +421,7 @@ struct CompactShell: View {
 
     private func auditTile(_ value: String, _ label: String) -> some View {
         VStack(alignment: .leading, spacing: 2) { Text(value).font(.system(size: 16, weight: .semibold, design: .rounded)); Text(label).font(.system(size: 10)).foregroundStyle(.secondary) }
-            .padding(8).frame(maxWidth: .infinity, alignment: .leading).background(Semantic.raisedSurface, in: RoundedRectangle(cornerRadius: 8))
+            .padding(8).frame(maxWidth: .infinity, alignment: .leading).hubCard(cornerRadius: 8)
     }
 }
 
@@ -470,8 +468,8 @@ private struct ModeCard: View {
                 HStack { Text(title).font(.system(size: 11.5, weight: .semibold)); Spacer(); if selected { Image(systemName: "checkmark").font(.system(size: 9, weight: .bold)).foregroundStyle(accent) } }
                 Text(code).font(.system(size: 9.5, design: .monospaced)).foregroundStyle(.tertiary)
             }.padding(8).frame(maxWidth: .infinity, alignment: .leading)
-            .background(RoundedRectangle(cornerRadius: 9).fill(selected ? accent.opacity(0.14) : Semantic.raisedSurface))
-            .overlay(RoundedRectangle(cornerRadius: 9).stroke(selected ? accent.opacity(0.55) : Semantic.hairline, lineWidth: 1))
+            .background(RoundedRectangle(cornerRadius: 9).fill(selected ? accent.opacity(0.10) : .clear))
+            .hubCard(cornerRadius: 9, accent: accent)
         }.buttonStyle(.plain)
     }
 }
@@ -818,7 +816,7 @@ private struct ClaudeShellPane: View {
                         } else {
                             Text("none · nearest tier stands in").foregroundStyle(.tertiary); Spacer()
                         }
-                    }.padding(.horizontal, 8).padding(.vertical, 4).background(Semantic.raisedSurface, in: RoundedRectangle(cornerRadius: 6))
+                    }.padding(.horizontal, 8).padding(.vertical, 4).hubCard(cornerRadius: 6, accent: Chroma.claude)
                 }
             }
         }

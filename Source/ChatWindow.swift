@@ -109,7 +109,7 @@ struct ChatWindow: View {
                 Text(model.busy || model.branchBusy ? "Drop files to attach" : "Drop files to attach, or a folder to change workspace")
                     .font(HubTheme.Typography.rowTitle).foregroundStyle(Semantic.ink)
                     .padding(.horizontal, 12).padding(.vertical, 8)
-                    .background(RoundedRectangle(cornerRadius: HubTheme.Radius.row).fill(Semantic.raisedSurface))
+                    .hubCard(cornerRadius: HubTheme.Radius.row, accent: model.activeAccent)
             }
             .allowsHitTesting(false)
     }
@@ -795,9 +795,7 @@ private struct ChatComposer: View {
                 }
             }
             .padding(.leading, 14).padding(.trailing, 7).padding(.vertical, 7)
-            .background(RoundedRectangle(cornerRadius: HubTheme.Radius.panel).fill(Semantic.raisedSurface))
-            .overlay(RoundedRectangle(cornerRadius: HubTheme.Radius.panel)
-                .stroke(yolo ? Semantic.approvalYolo.opacity(0.4) : Semantic.hairline, lineWidth: 1))
+            .hubCard(cornerRadius: HubTheme.Radius.panel, accent: yolo ? Semantic.approvalYolo : model.activeAccent)
             .overlay(alignment: .topLeading) {
                 ChatMentionList(menu: mentionMenu, model: model).padding(.leading, 6).alignmentGuide(.top) { $0[.bottom] + 6 }
             }
@@ -938,9 +936,9 @@ private struct ChatMentionList: View {
             // Opaque, a step above the window, so the transcript never shows through.
             .background {
                 RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Semantic.surface)
-                    .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Semantic.raisedSurface))
+                    .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Semantic.cardFill))
             }
-            .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(Semantic.hairline, lineWidth: 1))
+            .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(model.activeAccent.opacity(0.22), lineWidth: 0.5))
             .shadow(color: .black.opacity(0.18), radius: 14, y: 4)
             .accessibilityElement(children: .contain)
             .accessibilityLabel("Team members to address")
