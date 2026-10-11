@@ -30,6 +30,11 @@ settings, or conversations from its developer.
   The slot chosen in **Account** is the one a pasted key lands in and the one
   the gateway uses; Save applies a switch. Subscriptions, Devin and Muse keep a
   single login.
+- **Both a subscription and a key** (Claude, Codex, Muse, Grok): the credential
+  source chosen in the card is what Claude Desktop and Codex use. Chat can list
+  the other one as well: turn on **Also list this provider's … models in Chat**
+  under the source picker and refresh the catalogue. Each Chat row then says
+  which source it runs on. See [Chat](docs/chat.md).
 - **Ollama:** run your existing Ollama app or daemon. It manages its own models,
   downloads, and cloud sign-in.
 

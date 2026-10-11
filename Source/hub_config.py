@@ -176,6 +176,53 @@ def cli_account_dir(settings: dict, provider_id: str) -> str | None:
     return None
 
 
+#: Providers with both an API-key source and an installed-CLI source. Chat
+#: can list the two side by side (``chat_both_sources``); the desktop
+#: launchers keep following the one active ``credential_mode``. AntiGravity
+#: has only its CLI, so there is no second source to list.
+CHAT_SOURCE_PROVIDERS = frozenset({"codex", "claude", "muse", "grok"})
+CHAT_SOURCE_LABELS = {"cli": "Installed CLI", "keychain": "API key",
+                      "environment": "API key (environment)", "vibe": "Vibe key"}
+
+
+def chat_extra_source(connection: dict, provider_id: str) -> str | None:
+    """The second credential source Chat lists for this provider, or None.
+
+    With the installed CLI active it is the Keychain key, the slot "Save key"
+    writes; with any API-key source active it is the installed CLI. Nothing
+    is listed until the provider's ``chat_both_sources`` is on: the
+    per-provider choice stays the gate, as it is for the CLI source itself.
+    """
+    if provider_id not in CHAT_SOURCE_PROVIDERS or connection.get("chat_both_sources") is not True:
+        return None
+    return "keychain" if connection.get("credential_mode") == "cli" else "cli"
+
+
+def chat_sources(connection: dict, provider_id: str) -> list[str]:
+    """The credential sources Chat may run this provider on, active first."""
+    extra = chat_extra_source(connection, provider_id)
+    return [connection.get("credential_mode")] + ([extra] if extra else [])
+
+
+def split_chat_account(account) -> tuple[str | None, str]:
+    """Parse a Chat account id: ``<id>`` on the active source, ``<source>:<id>`` on another.
+
+    Account ids never contain a colon, so the first one is the separator. A
+    bare id is the pre-sources form and keeps meaning the active source.
+    """
+    if not isinstance(account, str):
+        raise ValueError("Choose a configured account.")
+    source, separator, identifier = account.partition(":")
+    return (source, identifier) if separator else (None, account)
+
+
+def chat_source_settings(settings: dict, provider_id: str, source: str) -> dict:
+    """A settings copy in which this provider runs on ``source``; nothing else moves."""
+    providers = settings["providers"]
+    connection = {**providers[provider_id], "credential_mode": source}
+    return {**settings, "providers": {**providers, provider_id: connection}}
+
+
 def _default_credential_mode(provider_id: str) -> str:
     if provider_id == "antigravity":
         # CLI-only provider: its installed `agy` binary is the whole transport.
@@ -679,6 +726,16 @@ def normalize(value: dict, slots, vibe_model: str, port: int = 11436) -> dict:
             connection["key_accounts"] = key_accounts
         if key_active is not None:
             connection["key_account"] = key_active
+        # Chat may list the provider's other credential source beside the
+        # active one. Present only while on, like the account fields.
+        both = requested.get("chat_both_sources")
+        if both is not None:
+            if type(both) is not bool:
+                raise ValueError("chat_both_sources must be true or false.")
+            if provider_id not in CHAT_SOURCE_PROVIDERS:
+                raise ValueError(f"{PROVIDERS[provider_id]['name']} has only one credential source for Chat to list.")
+            if both:
+                connection["chat_both_sources"] = True
         result["providers"][provider_id] = connection
     result["branding_overrides"] = validate_overrides(value.get("branding_overrides", {}))
     if value.get("codex_model") is not None:

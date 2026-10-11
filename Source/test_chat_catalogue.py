@@ -20,6 +20,171 @@ class ChatCatalogueTests(unittest.TestCase):
         self.assertEqual(rows[0]["efforts"], ["low", "high"])
         self.assertEqual(rows[0]["context"], 200000)
 
+    def test_a_second_credential_source_lists_beside_the_active_one(self):
+        # Claude runs on the installed CLI; the Keychain key is listed too.
+        self.settings["providers"]["claude"]["chat_both_sources"] = True
+        api = {"id": "claude/claude-fable-5-1", "provider_id": "claude", "model_id": "claude-fable-5-1",
+               "tools": True, "context": 1000000, "effort_modes": ["low"], "source": "provider_api"}
+        legacy = {**api, "id": "claude/claude-opus-4-6", "model_id": "claude-opus-4-6"}
+        self.settings["_chat_source_specs"] = {"claude": {"keychain": {api["id"]: api, legacy["id"]: legacy}}}
+        rows = chat_choices(self.settings)
+        self.assertEqual([(row["account"], row["source"], row["route"]) for row in rows], [
+            ("work", "cli", "claude/claude-fable-5-1"), ("", "cli", "claude/claude-fable-5-1"),
+            # The second source has no tick list: it lists its whole catalogue.
+            ("keychain:", "keychain", "claude/claude-fable-5-1"), ("keychain:", "keychain", "claude/claude-opus-4-6")])
+        self.assertEqual([row["accountLabel"] for row in rows],
+                         ["Work · Installed CLI", "Default · Installed CLI", "Default · API key", "Default · API key"])
+        self.assertEqual(rows[0]["id"], "claude/claude-fable-5-1|work")
+        self.assertEqual(rows[2]["id"], "claude/claude-fable-5-1|keychain:")
+        # Each source carries its own catalogue's metadata and its own scope;
+        # a scope names a connection, so the key's two routes share one.
+        self.assertEqual((rows[1]["context"], rows[2]["context"]), (200000, 1000000))
+        self.assertEqual(len({rows[0]["scope"], rows[1]["scope"], rows[2]["scope"]}), 3)
+        self.assertEqual(rows[2]["scope"], rows[3]["scope"])
+        self.assertEqual(rows[2]["connectionPresentation"], rows[1]["connectionPresentation"])
+        # Hosted search is a CLI capability; the same model on the key is not offered it.
+        self.settings["_model_specs"]["claude/claude-fable-5-1"]["web_search"] = True
+        api["web_search"] = True
+        rows = chat_choices(self.settings)
+        self.assertEqual([row["supportsWebSearch"] for row in rows], [True, True, False, False])
+        # Without the switch the second catalogue is ignored and labels stay bare.
+        del self.settings["providers"]["claude"]["chat_both_sources"]
+        rows = chat_choices(self.settings)
+        self.assertEqual([row["account"] for row in rows], ["work", ""])
+        self.assertEqual(rows[1]["accountLabel"], "Default")
+
+    def test_a_second_source_account_selects_that_source_without_touching_the_active_one(self):
+        before = copy.deepcopy(self.settings)
+        with self.assertRaisesRegex(ValueError, "no longer offered"):
+            chat_connection(self.settings, "claude", "keychain:")
+        self.settings["providers"]["claude"]["chat_both_sources"] = True
+        selected, connection, directory, scope = chat_connection(self.settings, "claude", "keychain:")
+        self.assertEqual(connection["credential_mode"], "keychain")
+        self.assertIsNone(connection["key_account"])
+        self.assertIsNone(directory)
+        self.assertEqual(selected["providers"]["claude"]["credential_mode"], "keychain")
+        self.assertEqual(self.settings["providers"]["claude"]["credential_mode"], "cli")
+        _, _, work_directory, work_scope = chat_connection(self.settings, "claude", "work")
+        self.assertEqual(work_directory, "/accounts/work")
+        self.assertNotEqual(scope, work_scope)
+        # Naming the active source explicitly is the same connection as the bare id.
+        _, _, _, explicit_scope = chat_connection(self.settings, "claude", "cli:work")
+        self.assertEqual(explicit_scope, work_scope)
+        with self.assertRaisesRegex(ValueError, "no longer configured"):
+            chat_connection(self.settings, "claude", "keychain:work")
+        with self.assertRaisesRegex(ValueError, "no longer offered"):
+            chat_connection(self.settings, "claude", "environment:")
+        # A saved chat on the second source is refused once the switch is off.
+        self.settings["providers"]["claude"].pop("chat_both_sources")
+        with self.assertRaisesRegex(ValueError, "no longer offered"):
+            chat_connection(self.settings, "claude", "keychain:", scope)
+        self.settings["providers"]["claude"]["chat_both_sources"] = True
+        self.settings["providers"]["claude"]["credential_revision"] += 1
+        with self.assertRaisesRegex(ValueError, "connection changed"):
+            chat_connection(self.settings, "claude", "keychain:", scope)
+        self.settings["providers"]["claude"]["credential_revision"] -= 1
+        del self.settings["providers"]["claude"]["chat_both_sources"]
+        self.assertEqual(self.settings, before)
+
+    def test_gateway_serves_a_chat_on_the_second_source_from_its_own_catalogue(self):
+        import http.client
+        import json
+        import tempfile
+        from pathlib import Path
+        import cli_routes
+        from bridge_core import atomic_json, connection_signature, default_settings
+        from gateway import Runtime, Server
+        from hub_config import chat_source_settings
+        from test_cli_routes import _fake_adapter
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        saved = dict(cli_routes._cache)
+        cli_routes._cache.clear()
+        self.addCleanup(lambda: (cli_routes._cache.clear(), cli_routes._cache.update(saved)))
+        cli_routes._cache["claude"] = _fake_adapter()
+        vibe = {"active_model": "unused", "active_display_name": "Unused", "key_name": "MISTRAL_API_KEY",
+                "vibe_home": str(root / "vibe"), "configured_models": []}
+        with patch("bridge_core.vibe_settings", return_value=vibe):
+            settings = default_settings()
+        # The switch is off when the gateway starts: its snapshot is the CLI's alone.
+        settings["providers"]["claude"].update(credential_mode="cli")
+        settings["mappings"] = {slot[0]: "claude/claude-sonnet-5" for slot in SLOTS}
+        # Curate the launcher lists to one route: the CLI projection seeds every
+        # known Claude tier, and an uncurated Codex list would show them all.
+        settings["codex_catalogue"] = ["claude/claude-sonnet-5"]
+        atomic_json(root / "settings.json", settings)
+        def model(identifier, source, context):
+            return {"id": identifier, "canonical_id": identifier, "display_name": identifier, "context": context,
+                    "aliases": [identifier], "tools": True, "vision": True, "reasoning": True,
+                    "effort_modes": ["low", "high"], "fast_mode": False, "inference_status": "advertised",
+                    "source": source, "evidence": "test"}
+        atomic_json(root / "catalogues" / "claude.json", {
+            "provider_id": "claude", "source": "cli", "models": [model("claude-sonnet-5", "cli", 200000)],
+            "connection_signature": connection_signature("claude", settings["providers"]["claude"])})
+        with patch("bridge_core.vibe_settings", return_value=vibe):
+            runtime = Runtime(root)
+        self.assertEqual(runtime.settings["_chat_source_specs"], {})
+        server = Server(runtime, 0)
+        import threading
+        threading.Thread(target=server.serve_forever, kwargs={"poll_interval": .05}, daemon=True).start()
+        self.addCleanup(server.server_close); self.addCleanup(server.shutdown)
+        def listed():
+            connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=5)
+            connection.request("GET", "/_bridge/chat/models", headers={"Authorization": "Bearer " + runtime.token})
+            rows = json.loads(connection.getresponse().read())["models"]
+            connection.close()
+            return sorted((row["account"], row["route"], row["context"]) for row in rows)
+        self.assertEqual(listed(), [("", "claude/claude-sonnet-5", 200000)])
+        # Turning the switch on and refreshing while the gateway runs reaches
+        # the picker's next refresh: no desktop depends on the second source,
+        # so it is read from its cached file rather than the startup snapshot.
+        settings["providers"]["claude"]["chat_both_sources"] = True
+        atomic_json(root / "settings.json", settings)
+        keyed = chat_source_settings(settings, "claude", "keychain")["providers"]["claude"]
+        def refreshed(*models):
+            atomic_json(root / "catalogues" / "claude.keychain.json", {
+                "provider_id": "claude", "source": "provider_api", "models": list(models),
+                "connection_signature": connection_signature("claude", keyed)})
+        refreshed(model("claude-sonnet-5", "provider_api", 1000000), model("claude-opus-4-1", "provider_api", 200000))
+        self.assertEqual(listed(), [
+            ("", "claude/claude-sonnet-5", 200000),
+            ("keychain:", "claude/claude-opus-4-1", 200000), ("keychain:", "claude/claude-sonnet-5", 1000000)])
+        base = {"max_tokens": 64, "messages": [{"role": "user", "content": "hello"}], "_provider_hub_surface": "chat"}
+        with patch("bridge_core.keychain_read", return_value="sk-ant-test"):
+            # The active source plans the CLI turn, exactly as before.
+            plan = runtime.plan({**base, "model": "claude/claude-sonnet-5", "_provider_hub_account": ""})
+            self.assertTrue(plan["cli"])
+            self.assertEqual(plan["model_spec"]["context"], 200000)
+            # The key's rows run as API requests, with that source's own metadata.
+            plan = runtime.plan({**base, "model": "claude/claude-sonnet-5", "_provider_hub_account": "keychain:"})
+            self.assertFalse(plan.get("cli"))
+            self.assertIn("api.anthropic.com", plan["url"])
+            self.assertEqual(plan["headers"]["x-api-key"], "sk-ant-test")
+            self.assertEqual(plan["model_spec"]["context"], 1000000)
+            plan = runtime.plan({**base, "model": "claude/claude-opus-4-1", "_provider_hub_account": "keychain:"})
+            self.assertEqual(plan["upstream_model"], "claude-opus-4-1")
+            # A model only the key offers is not reachable through the CLI rows.
+            with self.assertRaisesRegex(Exception, "not in the current provider catalogue"):
+                runtime.plan({**base, "model": "claude/claude-opus-4-1", "_provider_hub_account": ""})
+            # A later refresh that drops a model reaches the next request too.
+            refreshed(model("claude-sonnet-5", "provider_api", 1000000))
+            self.assertEqual([row for row in listed() if row[1].endswith("opus-4-1")], [])
+            with self.assertRaisesRegex(Exception, "not in the API key catalogue"):
+                runtime.plan({**base, "model": "claude/claude-opus-4-1", "_provider_hub_account": "keychain:"})
+            # Changing the active source while the gateway runs still needs a
+            # restart: the snapshot was built for the CLI, and Chat says so.
+            settings["providers"]["claude"]["credential_mode"] = "keychain"
+            atomic_json(root / "settings.json", settings)
+            with self.assertRaisesRegex(Exception, "earlier credential source"):
+                runtime.plan({**base, "model": "claude/claude-sonnet-5", "_provider_hub_account": ""})
+            # And the key source is only reachable while the switch is on.
+            settings["providers"]["claude"]["credential_mode"] = "cli"
+            settings["providers"]["claude"].pop("chat_both_sources")
+            atomic_json(root / "settings.json", settings)
+            with self.assertRaisesRegex(Exception, "no longer offered"):
+                runtime.plan({**base, "model": "claude/claude-sonnet-5", "_provider_hub_account": "keychain:"})
+
     def test_shared_branding_and_overrides_are_display_only(self):
         self.settings["branding_overrides"] = {"claude": {"accent": "#123456", "displayProvider": "Studio", "shortCode": "ST"}}
         rows = chat_choices(self.settings)
