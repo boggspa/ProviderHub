@@ -309,6 +309,92 @@ import Combine
 }
 '''
 
+BUBBLE_CASES = r'''
+import AppKit
+import SwiftUI
+
+@main struct Cases {
+    @MainActor static func main() {
+        _ = NSApplication.shared
+        func check(_ condition: Bool, _ message: String) { if !condition { fatalError(message) } }
+        func textViews(_ view: NSView) -> [ChatSelectableText.TextView] {
+            if let text = view as? ChatSelectableText.TextView { return [text] }
+            return view.subviews.flatMap(textViews)
+        }
+        func checkHeight(_ drawn: ChatSelectableText.TextView, _ context: String) {
+            let container = drawn.textContainer!, layout = drawn.layoutManager!
+            layout.ensureLayout(for: container)
+            let used = layout.usedRect(for: container)
+            check(ceil(used.maxY) <= drawn.bounds.height,
+                  "Text escaped its bubble: \(context), frame=\(drawn.frame), used=\(used)")
+            check(layout.glyphRange(for: container).length == layout.numberOfGlyphs,
+                  "Text disappeared from its bubble: \(context)")
+        }
+
+        let message = "@Muse how are you getting on?"
+        let marked = ChatMentions.marked(message, mentions: [
+            ChatMention(id: "m", name: "Muse", route: "muse", start: 0, length: 5)
+        ], accent: { _ in .blue })
+        let tail = "Check with @Muse"
+        let trailingTag = ChatMentions.marked(tail, mentions: [
+            ChatMention(id: "m", name: "Muse", route: "muse", start: 11, length: 5)
+        ], accent: { _ in .blue })
+        let texts = [marked, trailingTag, AttributedString(message), AttributedString("Hi"),
+                     AttributedString(String(repeating: "word ", count: 20)),
+                     AttributedString("First line\nSecond line\n"),
+                     AttributedString("東京 🦉 e\u{301} and 👩🏽‍💻"),
+                     AttributedString(String(repeating: "x", count: 80))]
+        // Compare the actual TextKit layout at the returned width with the
+        // allocated height, including fractional widths and reading zoom.
+        let widths: [CGFloat] = [40, 60.5, 90, 137.25, 175, 199, 200, 218, 237.5, 300, 400, 600]
+        for zoom in ChatZoom.steps {
+            let fonts = [NSFont.systemFont(ofSize: 13 * zoom),
+                         .monospacedSystemFont(ofSize: 13 * zoom, weight: .regular),
+                         NSFont(name: "Times-Roman", size: 13 * zoom)!]
+            for font in fonts {
+                let sizing = ChatSelectableText.Coordinator()
+                let drawn = ChatSelectableText.makeTextView()
+                for text in texts {
+                    drawn.textStorage?.setAttributedString(sizing.attributed(for:
+                        ChatSelectableText(text: text, font: font, color: .labelColor)))
+                    for width in widths + widths.reversed() {
+                        let size = sizing.size(width: width)
+                        check(size.width <= width && size.width > 0 && size.height > 0,
+                              "Bubble size escaped proposal: \(size), width=\(width)")
+                        drawn.frame = NSRect(origin: .zero, size: size)
+                        checkHeight(drawn, "\(String(text.characters).debugDescription), font=\(font.fontName), zoom=\(zoom), proposal=\(width)")
+                    }
+                }
+            }
+        }
+
+        // SwiftUI must also allocate enough height after its padded, trailing
+        // bubble shrinks the representable and after the column is resized.
+        for zoom in [1.0, 1.5, 3] {
+            let bubble = VStack(alignment: .trailing, spacing: 4) {
+                VStack(alignment: .leading, spacing: 6 * zoom) {
+                    ChatSelectableText(text: marked, font: .systemFont(ofSize: 13 * zoom), color: .labelColor)
+                }
+                .padding(.horizontal, 13 * zoom).padding(.vertical, 8 * zoom)
+                .background(RoundedRectangle(cornerRadius: 15 * zoom).fill(Color.gray))
+            }
+            .frame(maxWidth: .infinity, alignment: .trailing)
+            .padding(.leading, 56)
+            let hosting = NSHostingView(rootView: bubble)
+            for width in [400.0, 220, 600.5, 300, 900, 260, 400] {
+                hosting.frame = NSRect(x: 0, y: 0, width: width, height: 1000)
+                hosting.layoutSubtreeIfNeeded()
+                let drawn = textViews(hosting)
+                check(drawn.count == 1, "Hosted bubble lost its native text view")
+                checkHeight(drawn[0], "hosted width=\(width), zoom=\(zoom)")
+                check(drawn[0].string == message, "Bubble changed the message")
+            }
+        }
+        print("Selectable bubble sizing and native hosting checks passed")
+    }
+}
+'''
+
 LAYOUT_CASES = r'''
 import SwiftUI
 
@@ -557,6 +643,10 @@ class ChatTranscriptTests(unittest.TestCase):
     def test_parser_streaming_copy_budgets_and_column_layout(self):
         self.run_native(["ChatFonts.swift", "ChatMentions.swift", "ChatSelectableText.swift", "ChatTranscriptText.swift"], CASES,
                         "Transcript parser, streaming, copy and layout checks passed", stubs=STUBS)
+
+    def test_selectable_bubble_height_matches_rendered_width(self):
+        self.run_native(["ChatFonts.swift", "ChatMentions.swift", "ChatSelectableText.swift", "ChatTranscriptText.swift"], BUBBLE_CASES,
+                        "Selectable bubble sizing and native hosting checks passed", stubs=STUBS)
 
     def test_outline_tool_phrasing_sources_notices_and_glyphs(self):
         self.run_native(["ChatTranscriptLayout.swift", "ChatToolGlyph.swift"], LAYOUT_CASES,
