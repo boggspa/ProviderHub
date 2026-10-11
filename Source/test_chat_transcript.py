@@ -201,6 +201,14 @@ import Combine
         check(menu.items.contains { $0.action == #selector(NSText.copy(_:)) }, "System Copy missing: \(menu.items.map(\.title))")
         textView.copyMessage(nil)
         check(board.string(forType: .string) == "Whole message", "Copy Message copied the wrong text")
+        var pinned = 0
+        textView.blackboardPin = { pinned += 1 }
+        _ = textView.menu(for: click)
+        check(textView.menu(for: click)!.items.filter { $0.title == "Pin to Blackboard" }.count == 1, "Pin missing or repeated")
+        textView.pinToBlackboard(nil)
+        check(pinned == 1, "Pin did not call the owning entry action")
+        textView.blackboardPin = nil
+        check(!textView.menu(for: click)!.items.contains { $0.title == "Pin to Blackboard" }, "Pin shown outside a Team entry")
         textView.message = nil
         check(!textView.menu(for: click)!.items.contains { $0.title == "Copy Message" }, "Copy Message shown without a message")
 
@@ -399,6 +407,12 @@ struct Item: ChatTranscriptItem {
         check(ChatToolDisplay.describe(tool: "mystery", summary: "Did a thing\nmore").subject == "Did a thing", "Unknown summary dropped")
         check(ChatToolDisplay.activity(["run_shell", "run_shell", "apply_patch", "read_file", nil, "search_history", "read_history"])
               == "2 commands, 1 edit, 1 read, 1 step, 2 recalls", "Fold activity")
+        check(ChatToolDisplay.describe(tool: "blackboard_post", summary: "Pinned schema (risk)")
+              == ChatToolDisplay(verb: "Pinned to the Blackboard", subject: "schema (risk)", code: true), "Blackboard post phrasing")
+        check(ChatToolDisplay.describe(tool: "blackboard_remove", summary: "Removed schema", live: true).verb == "Removing a Blackboard post", "Live Blackboard removal")
+        check(ChatToolDisplay.activity(["blackboard_post", "blackboard_post", "blackboard_read"]) == "2 pins, 1 board read", "Blackboard fold activity")
+        check(ChatToolDisplay.describe(tool: "blackboard_attach", summary: "Added notes.txt, example.com/spec")
+              == ChatToolDisplay(verb: "Added to the Blackboard", subject: "notes.txt, example.com/spec"), "Blackboard attach phrasing")
 
         // Source links collapse only when the line is exactly the runtime's list.
         let cited = ChatReplySources.split("Body\n\nSources: [A \\[x\\]](<https://www.a.com/p>), [B](<https://b.org/q?x=1>)")
@@ -454,7 +468,7 @@ struct Item: ChatTranscriptItem {
         // Every glyph a row can ask for exists, and the path parser reads the
         // catalogue's curve syntax, including relative curves.
         for name in ["run_shell", "apply_patch", "read_file", "search_files", "web_search", "search_history", "record_decision",
-                     "delegate", "team_status", nil] {
+                     "delegate", "team_status", "blackboard_post", "blackboard_read", nil] {
             check(ChatToolGlyph.has(ChatToolDisplay.glyph(name)), "Missing glyph for \(name ?? "nil")")
         }
         check(ChatToolGlyph.has("handoff"), "Missing handoff glyph")

@@ -208,6 +208,8 @@ final class ChatModel: ObservableObject {
     var processesNotice: String { get { value(\.processesNotice) } set { update(\.processesNotice, newValue) } }
     private var pendingSend: (chat: String, request: String, text: String, attachments: [ChatAttachment])? { get { value(\.pendingSend) } set { update(\.pendingSend, newValue) } }
     var sideRequests: [String: String] = [:]
+    /// Per-chat Team Blackboard (ChatBlackboardModel.swift).
+    let blackboard = ChatBlackboardModel()
     var onActivity: ((Bool) -> Void)?
     var onSurfaceChange: (() -> Void)?
     private weak var bridge: BridgeModel?

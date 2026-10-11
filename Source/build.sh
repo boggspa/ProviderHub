@@ -14,7 +14,7 @@ SWIFT_SOURCES=(
   "$SOURCE_DIR/HubLayout.swift" "$SOURCE_DIR/ProviderViews.swift"
   "$SOURCE_DIR/DevinAgentsView.swift" "$SOURCE_DIR/CodexHarness.swift"
   "$SOURCE_DIR/HubTheme.swift" "$SOURCE_DIR/HubGlass.swift" "$SOURCE_DIR/HubUpdater.swift" "$SOURCE_DIR/QuickComposerPanel.swift" "$SOURCE_DIR/CompactShell.swift"
-  "$SOURCE_DIR/ChatModel.swift" "$SOURCE_DIR/ChatMentions.swift" "$SOURCE_DIR/ChatInspectorModel.swift" "$SOURCE_DIR/ChatInspector.swift" "$SOURCE_DIR/ChatTeam.swift" "$SOURCE_DIR/ChatBranches.swift" "$SOURCE_DIR/ChatFonts.swift" "$SOURCE_DIR/ChatSettings.swift" "$SOURCE_DIR/ChatTurnTime.swift" "$SOURCE_DIR/ChatStateAccents.swift" "$SOURCE_DIR/ChatWorkspaces.swift" "$SOURCE_DIR/ChatModelPicker.swift" "$SOURCE_DIR/ChatAttachments.swift" "$SOURCE_DIR/ChatToolGlyph.swift" "$SOURCE_DIR/ChatSelectableText.swift" "$SOURCE_DIR/ChatTranscriptText.swift" "$SOURCE_DIR/ChatTranscriptLayout.swift" "$SOURCE_DIR/ChatTranscriptRows.swift" "$SOURCE_DIR/ChatComposerText.swift" "$SOURCE_DIR/ChatWindow.swift"
+  "$SOURCE_DIR/ChatModel.swift" "$SOURCE_DIR/ChatMentions.swift" "$SOURCE_DIR/ChatInspectorModel.swift" "$SOURCE_DIR/ChatInspector.swift" "$SOURCE_DIR/ChatTeam.swift" "$SOURCE_DIR/ChatBlackboardModel.swift" "$SOURCE_DIR/ChatBlackboard.swift" "$SOURCE_DIR/ChatBlackboardThumbnails.swift" "$SOURCE_DIR/ChatBlackboardWindow.swift" "$SOURCE_DIR/ChatBranches.swift" "$SOURCE_DIR/ChatFonts.swift" "$SOURCE_DIR/ChatSettings.swift" "$SOURCE_DIR/ChatTurnTime.swift" "$SOURCE_DIR/ChatStateAccents.swift" "$SOURCE_DIR/ChatWorkspaces.swift" "$SOURCE_DIR/ChatModelPicker.swift" "$SOURCE_DIR/ChatAttachments.swift" "$SOURCE_DIR/ChatToolGlyph.swift" "$SOURCE_DIR/ChatSelectableText.swift" "$SOURCE_DIR/ChatTranscriptText.swift" "$SOURCE_DIR/ChatTranscriptLayout.swift" "$SOURCE_DIR/ChatTranscriptRows.swift" "$SOURCE_DIR/ChatComposerText.swift" "$SOURCE_DIR/ChatWindow.swift"
   "$SOURCE_DIR/MistralBridge.swift"
 )
 xcrun swiftc -swift-version 5 -parse-as-library -O -target arm64-apple-macosx14.0 \
@@ -22,10 +22,16 @@ xcrun swiftc -swift-version 5 -parse-as-library -O -target arm64-apple-macosx14.
   -framework AppKit -framework SwiftUI -framework Security -framework PDFKit \
   "${SWIFT_SOURCES[@]}" \
   -o "$APP_DIR/Contents/MacOS/MistralBridge"
-for module in chat_git chat_memory chat_history chat_team chat_execution chat_attachments chat_catalogue chat_runtime chat_sessions chat_agents chat_inspector chat_processes chat_workspaces chat_tools bridge_core protocol gateway model_names fast_models catalogue hub_config providers provider_registry provider_discovery provider_requests devin_agent qwen_provider minimax_provider openrouter_provider gemini_provider branding cerebras_replay catalogue_lifecycle launch_selection responses_native responses_tools responses_bridge responses_compact codex_catalogue codex_profile codex_projects codex_token codex_runtime codex_accent codex_quick_composer codex_recent_threads codex_desktop_actions codex_quick_bridge codex_quick_window codex_quick_host claude_accent effort_map chat_tool_order rate_limit spawn_depth subagent_catalogue ollama_lifecycle cli_session cli_lifecycle codex_session_pool cli_routes cli_auth_probe cli_tool_call cli_host_mcp cli_host_bridge cli_live_session host_tools_mcp cli_structured_reply cli_images cli_image_history claude_cli_agent codex_cli_agent agy_cli_agent agy_context muse_cli_agent grok_cli_agent claude_context; do
+for module in chat_git chat_memory chat_blackboard chat_history chat_team chat_execution chat_attachments chat_catalogue chat_runtime chat_sessions chat_agents chat_inspector chat_processes chat_workspaces chat_tools bridge_core protocol gateway model_names fast_models catalogue hub_config providers provider_registry provider_discovery provider_requests devin_agent qwen_provider minimax_provider openrouter_provider gemini_provider branding cerebras_replay catalogue_lifecycle launch_selection responses_native responses_tools responses_bridge responses_compact codex_catalogue codex_profile codex_projects codex_token codex_runtime codex_accent codex_quick_composer codex_recent_threads codex_desktop_actions codex_quick_bridge codex_quick_window codex_quick_host claude_accent effort_map chat_tool_order rate_limit spawn_depth subagent_catalogue ollama_lifecycle cli_session cli_lifecycle codex_session_pool cli_routes cli_auth_probe cli_tool_call cli_host_mcp cli_host_bridge cli_live_session host_tools_mcp cli_structured_reply cli_images cli_image_history claude_cli_agent codex_cli_agent agy_cli_agent agy_context muse_cli_agent grok_cli_agent claude_context; do
   cp "$SOURCE_DIR/$module.py" "$APP_DIR/Contents/Resources/worker/"
 done
 cp "$SOURCE_DIR/provider_branding.json" "$APP_DIR/Contents/Resources/worker/"
+xcrun swiftc -swift-version 5 -O -target arm64-apple-macosx14.0 \
+  -module-cache-path "$BUILD_DIR/ModuleCache" -framework PDFKit \
+  "$SOURCE_DIR/ChatBlackboardPDF.swift" -o "$APP_DIR/Contents/MacOS/blackboard-pdf"
+if [ "${MISTRAL_BRIDGE_SKIP_CODESIGN:-0}" != "1" ]; then
+  /usr/bin/codesign --force --sign - "$APP_DIR/Contents/MacOS/blackboard-pdf"
+fi
 cp "$SOURCE_DIR/hub_updater.py" "$SOURCE_DIR/update_install.sh" "$APP_DIR/Contents/Resources/worker/"
 cp -R "$SOURCE_DIR/provider-logos" "$APP_DIR/Contents/Resources/worker/"
 cp -R "$SOURCE_DIR/fonts" "$APP_DIR/Contents/Resources/worker/"
@@ -92,7 +98,7 @@ cat > "$APP_DIR/Contents/Info.plist" <<'PLIST'
 PLIST
 if [ -f "$SOURCE_DIR/AppIcon.icns" ]; then cp "$SOURCE_DIR/AppIcon.icns" "$APP_DIR/Contents/Resources/"; fi
 python3 "$SOURCE_DIR/build_provenance.py" write --source-dir "$SOURCE_DIR" \
-  --app-dir "$APP_DIR" --swift-sources "${SWIFT_SOURCES[@]}"
+  --app-dir "$APP_DIR" --swift-sources "${SWIFT_SOURCES[@]}" "$SOURCE_DIR/ChatBlackboardPDF.swift"
 if [ "${MISTRAL_BRIDGE_SKIP_CODESIGN:-0}" = "1" ]; then
   rm -rf "$APP_DIR/Contents/_CodeSignature"
 else

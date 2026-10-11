@@ -748,6 +748,75 @@ import Combine
         try processEvent(["event":"processes", "chat":"A", "processes":[runningRow]])
         procs.disconnected("Transport gone")
         check(procs.processes.isEmpty && procs.processesNotice.contains("may still be running"), "disconnect kept rows or hid possible orphans")
+
+        // The Team Blackboard is per-chat inspector state: snapshots, correlated commands, no active work.
+        var boardCommands: [[String: Any]] = []
+        let boards = ChatModel(sendCommand: { boardCommands.append($0); return true }, uptime: { clock }, preferences: preferences)
+        func boardEvent(_ payload: [String: Any]) throws {
+            boards.consume(try JSONSerialization.data(withJSONObject: payload) + Data([10]))
+        }
+        try boardEvent(["event":"catalogue", "models":[route], "folders":["/tmp"]])
+        try boardEvent(["event":"chats", "chats":[summary("A"), summary("B")]])
+        try boardEvent(["event":"ready"])
+        boards.select("A")
+        try boardEvent(["event":"selected", "id":"A", "chat":"A", "entries":[], "busy":false, "interrupting":false, "status":"Ready", "usage":0])
+        boards.refreshBlackboard()
+        check(boardCommands.last?["command"] as? String == "blackboard" && boardCommands.last?["chat"] as? String == "A", "refresh lacks blackboard command or owner")
+        func post(_ id: String, _ key: String, author: String = "m1", category: String = "note", updated: String) -> [String: Any] {
+            ["id":id, "author":author, "authorName":author == "user" ? "You" : "Sol", "route":"ollama/test", "key":key,
+             "body":"Body " + key, "category":category, "created":updated, "updated":updated]
+        }
+        let limits: [String: Any] = ["posts":48, "bodyBytes":1500, "boardBytes":24000, "usedBytes":300, "attachments":24, "attachmentBytes":67108864]
+        var rows = (0..<10).map { post("p\($0)", "k\($0)", updated: "2026-10-10T12:0\($0):00+00:00") }
+        rows[3]["category"] = "risk"; rows.append(["id":"broken", "author":7])
+        let files: [[String: Any]] = [["id":"f1", "name":"clip.mov", "kind":"video", "path":"/tmp/clip.mov", "size":64, "source":"board",
+                                       "author":"m1", "authorName":"Sol", "route":"ollama/test"],
+                                      ["id":"f2", "name":"shot.png", "kind":"image", "path":"/tmp/shot.png", "size":3, "source":"message", "entryID":"u1"],
+                                      ["id":"bad"], ["id":"f3", "name":"spec", "kind":"url", "url":"https://example.com", "author":"user", "authorName":"You"]]
+        let board: [String: Any] = ["posts":rows, "attachments":files, "omittedAttachments":0, "thumbnails":"/tmp/A/blackboard/thumbnails", "limits":limits]
+        try boardEvent(["event":"blackboard", "chat":"A", "blackboard":board])
+        let snapshotA = boards.blackboard.state("A").snapshot
+        check(snapshotA?.posts.count == 10 && snapshotA?.attachments.map(\.id) == ["f1", "f2", "f3"], "one malformed row hid the board")
+        check(snapshotA?.attachments.map(\.byUser) == [false, true, true] && snapshotA?.attachments[0].authorName == "Sol"
+              && snapshotA?.attachments[0].route == "ollama/test", "attachment attribution lost")
+        check(snapshotA?.latest.map(\.key) == ["k9", "k8", "k7", "k6", "k5", "k4", "k3", "k2"], "inspector must show the newest eight posts")
+        check(snapshotA?.groups.map(\.category) == ["risk", "note"] && snapshotA?.attachments[0].removable == true
+              && snapshotA?.attachments[1].removable == false, "categories or attachment sources wrong")
+        check(!boards.hasActiveWork, "the board counted as active work")
+        try boardEvent(["event":"blackboard", "chat":"B", "blackboard":["posts":[post("b1", "only-b", updated: "x")], "limits":limits]])
+        check(boards.blackboard.state("A").snapshot?.posts.count == 10 && boards.blackboard.state("B").snapshot?.posts.map(\.key) == ["only-b"],
+              "a background chat's board replaced the selected one")
+        let request = boards.postToBlackboard(key: "", body: "Deploy after review, not before", category: "decision")
+        let postCommand = boardCommands.last
+        check(postCommand?["command"] as? String == "blackboard_post" && postCommand?["key"] as? String == "deploy-after-review-not"
+              && postCommand?["category"] as? String == "decision" && postCommand?["request"] as? String == request && postCommand?["chat"] as? String == "A",
+              "user post command malformed")
+        check(boards.blackboard.state("A").request == request && !boards.hasActiveWork, "pending post not tracked or blocked quit")
+        check(ChatBlackboardSnapshot.key("Release / Notes!", body: "") == "release-notes" && ChatBlackboardSnapshot.key("", body: "") == "note"
+              && ChatBlackboardSnapshot.key("-- API", body: "") == "api", "key derivation wrong")
+        try boardEvent(["event":"blackboard", "chat":"A", "request":"stale", "notice":"Old failure"])
+        check(boards.blackboard.state("A").request == request && boards.blackboard.state("A").notice.isEmpty, "a stale reply settled the pending post")
+        var acceptedBoard = board; acceptedBoard["posts"] = Array(rows.dropLast()) + [post("p10", "deploy-after-review-not", author: "user", updated: "2026-10-10T13:00:00+00:00")]
+        try boardEvent(["event":"blackboard", "chat":"A", "request":request ?? "", "blackboard":acceptedBoard])
+        let settled = boards.blackboard.state("A")
+        check(settled.request == nil && settled.settled == request && settled.settledOK && settled.snapshot?.latest.first?.byUser == true, "accepted post not settled")
+        let full = boards.postToBlackboard(key: "more", body: "Another", category: "note")
+        try boardEvent(["event":"blackboard", "chat":"A", "request":full ?? "", "blackboard":acceptedBoard, "notice":"The Blackboard is full."])
+        check(!boards.blackboard.state("A").settledOK && boards.blackboard.state("A").notice == "The Blackboard is full."
+              && boards.blackboard.state("A").snapshot?.posts.count == 11, "a refused post lost its notice or the board")
+        boards.removeBlackboardPost(post: "p3")
+        check(boardCommands.last?["command"] as? String == "blackboard_remove" && boardCommands.last?["post"] as? String == "p3", "remove command malformed")
+        boards.detachFromBlackboard(attachment: "f1")
+        check(boardCommands.last?["command"] as? String == "blackboard_detach" && boardCommands.last?["attachment"] as? String == "f1", "detach command malformed")
+        boards.linkToBlackboard(url: " https://example.com/spec ")
+        check(boardCommands.last?["command"] as? String == "blackboard_attach" && boardCommands.last?["url"] as? String == "https://example.com/spec", "link command malformed")
+        try boardEvent(["event":"blackboard", "chat":"A", "blackboard":NSNull(), "notice":"Invalid saved Blackboard."])
+        check(boards.blackboard.state("A").snapshot == nil && boards.blackboard.state("A").notice == "Invalid saved Blackboard.", "invalid board kept a stale snapshot")
+        let sentBefore = boardCommands.count
+        boards.disconnected("Transport gone")
+        check(boards.blackboard.state("A") == ChatBlackboardState(), "disconnect kept board state")
+        check(boards.postToBlackboard(key: "x", body: "offline", category: "note") == nil && boardCommands.count == sentBefore
+              && boards.blackboard.state("A").notice == "Chat is disconnected.", "offline post was sent or silent")
         print("ChatModel state transitions passed")
     }
 }
@@ -759,7 +828,7 @@ import Combine
             binary = root / "chat-model-tests"
             compiled = subprocess.run(["xcrun", "swiftc", "-swift-version", "5", "-parse-as-library",
                 "-module-cache-path", str(root / "cache"), str(root / "Stubs.swift"),
-                str(Path(__file__).with_name("ChatModel.swift")), str(Path(__file__).with_name("ChatMentions.swift")), str(Path(__file__).with_name("ChatInspectorModel.swift")), str(Path(__file__).with_name("ChatWorkspaces.swift")), str(root / "Cases.swift"),
+                str(Path(__file__).with_name("ChatModel.swift")), str(Path(__file__).with_name("ChatMentions.swift")), str(Path(__file__).with_name("ChatInspectorModel.swift")), str(Path(__file__).with_name("ChatWorkspaces.swift")), str(Path(__file__).with_name("ChatBlackboardModel.swift")), str(root / "Cases.swift"),
                 "-framework", "AppKit", "-framework", "SwiftUI", "-framework", "PDFKit", "-o", str(binary)], capture_output=True, text=True, timeout=90)
             self.assertEqual(compiled.returncode, 0, compiled.stderr)
             ran = subprocess.run([str(binary)], capture_output=True, text=True, timeout=15)

@@ -173,6 +173,103 @@ changes underneath a saved roster, Team asks for reconfiguration before running.
 Turning Team off retains the visible transcript and resumes solo mode from its
 attributed public record. Normal model switching is available again in solo mode.
 
+## Blackboard
+
+Under the member list, the Team tab shows the chat's **Blackboard**: a small
+shared board of pinned posts and reference files, modelled on TaskWraith's
+blackboard but kept lean. The tab shows the eight most recently updated posts
+(click a long post to expand it), a compact attachments strip and a field for
+your own posts. The expand button opens a separate Blackboard window for that
+chat, using the same views, with every post grouped by category and the full
+attachments grid. The window follows its own chat, not the main selection.
+
+A post has an author (a member, or you), a short key, a body, a category
+(decision, fact, risk, do-not-repeat or note), its time and optionally a quoted
+transcript entry, so a message or tool result can be pinned with a bounded
+excerpt. Author chips use the member's provider accent. Members post with
+`blackboard_post`, which replaces the same member's post with the same key,
+remove posts with `blackboard_remove` and read full posts with
+`blackboard_read`; each call is an expandable tool row in the transcript. A
+member cannot remove your posts. You can remove any post from its context
+menu. Posts are reference material, not verified facts, instructions or
+permission; members are told to re-read files before relying on them.
+
+The board holds at most 48 posts, 1,500 UTF-8 bytes per body and 24,000 bytes
+of serialized posts. A full board refuses new posts until one is replaced or
+removed; it never silently evicts. Before every member request a digest is
+projected ahead of the conversation, like the decision notebook: newest posts
+first, bodies shortened to 400 bytes, at most 5,000 bytes of posts plus the
+names of up to twelve attachments. It reserves space before context trimming,
+is never saved into a member's history, and is replaced by a short notice when
+it would exceed an eighth of the member's context. Helpers, Side Chats and a
+solo chat's model are not offered the tools and cannot change the board; you
+can still post in a solo chat, ready for when a Team is enabled.
+
+Attachments sit in their own section. Every file you attach to a message is
+listed automatically from its existing private copy. You can also add files of
+any type (drop them on the board or use the paperclip; up to 24 items, 64 MiB
+each, 256 MiB in total) and http/https links. Added files are copied into the
+chat's private `blackboard` folder and deleted when removed from the board;
+message originals are never touched.
+
+Members inspect a listed board or message attachment with
+`blackboard_read(attachment_id)`. IDs must belong to the current chat; arbitrary
+paths, foreign IDs and symlinks are refused. Text reads are limited to 8 MiB
+and return up to 200,000 UTF-8 bytes, with an explicit truncation notice.
+PDFs use local PDFKit text extraction: at most the first 100 pages and 200,000
+UTF-8 bytes, with a 15-second timeout and no OCR. PNG/JPEG/GIF/WebP images
+reach image-capable members as original image content. Audio/video return
+metadata and a preview-only notice; links are not fetched. Ownership metadata
+is captured under the Team lock, then file reads and PDF extraction run outside
+it so peers and controls remain responsive. Removal during a read may cause
+the read to fail, or an already-open file may finish reading safely.
+
+Members add files and links with a separate `blackboard_attach` tool, which
+takes `paths` (relative to the chat's workspace) and/or `links` (`url`, optional
+`title`). It has the same rights gate as the other Blackboard tools: only Team
+members are offered it. A path must name a readable regular file inside the
+workspace, under the file tools' own rules: no `..`, no absolute path
+elsewhere, no symbolic link anywhere on the path, and no directories. Each file
+is held to the chat attachment cap of 8 MiB and is copied at that moment into
+the same private folder and thumbnail path as yours: a snapshot, not a live
+link. Links must be http or https without credentials and are stored, never
+fetched. One call adds at most four items and is all or nothing: one refused
+item adds none. Every added item records its author, and its chip shows that
+member's provider mark and name. A member removes only its own items, with
+`blackboard_remove` and an `attachment_id`; it cannot remove yours or a peer's.
+You can remove any added item. Each call is an expandable tool row, and the
+member digest lists attachment names, authors and IDs (never private paths) so
+peers can discover them and request their contents by ID.
+
+Added items share one cap of 24 whoever adds them, and 256 MiB of file bytes
+in total. Attachment bytes do **not** count toward the 24,000-byte board total:
+that total bounds post text, which is what is projected into model context;
+the digest lists attachment metadata; contents reach a member on demand through
+`blackboard_read(attachment_id)` within the inspection bounds above.
+
+Thumbnails are rendered off the main thread and cached as small PNGs (at most
+360 pixels on a side) in that folder, then in memory: images use ImageIO,
+video a filmstrip of five frames, audio a 200-bar peak waveform read with
+AVAssetReader, and PDFs their first page. ImageIO decodes a truncated PNG, GIF
+or JPEG without error, so their end markers are checked first. A file that
+cannot be read, truncated or corrupt, keeps its glyph chip and nothing is
+cached for it. Other files and links show a glyph, name and size.
+
+The board is saved with the chat in the same atomic snapshot as the notebook
+and is carried in each Team checkpoint, so a member's post survives a crash
+mid-run. Your own changes are saved at once when idle and appended to the Team
+checkpoint log during a run; during a solo turn, that turn's next save records
+them. A failed save restores the previous board and
+removes any copied files. `test_chat_blackboard.py` covers the store, caps,
+commands, member tools and attachments (workspace escapes, caps, schemes and
+removal rights), projection and recovery; `test_chat_model.py` drives the
+Swift model through `blackboard` snapshots and correlated commands.
+`test_chat_blackboard_media.py` makes real media at test time (WAV tone and
+silence, a PNG, a one-page PDF and a five-frame H.264 clip) and runs the
+thumbnail code on them. It checks the bounds, frame count and size, waveform
+amplitude, PDF ink, graceful failure on truncated and corrupt files, cache
+hits in memory and on disk, and that no render ran on the main thread.
+
 ## Permissions and interruptions
 
 All members have workspace tools, background process tools, recall/notebook tools and
