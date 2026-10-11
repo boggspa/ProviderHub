@@ -6,8 +6,8 @@ The following PNGs are copied verbatim from Limit Counter's
 
 | Hub asset | Limit Counter source | Used by |
 | --- | --- | --- |
-| `provider-logo-codex.png` | `ProviderCodexLogo.imageset/logo.png` | Codex |
-| `provider-logo-claude.png` | `ProviderClaudeLogo.imageset/logo.png` | Claude |
+| `provider-logo-codex.png` | `ProviderCodexLogo.imageset/logo.png` | Retained legacy Codex asset |
+| `provider-logo-claude.png` | `ProviderClaudeLogo.imageset/logo.png` | Retained legacy Claude asset |
 | `provider-logo-antigravity.png` | `ProviderAntigravityLogo.imageset/logo.png` | AntiGravity |
 | `provider-logo-qwen.png` | `ProviderQwenLogo.imageset/logo.png` | Qwen Token Plan |
 | `provider-logo-openrouter.png` | `ProviderOpenRouterLogo.imageset/logo.png` | OpenRouter |
@@ -34,3 +34,16 @@ the hub's dark surface. Both settings are supported in user logo overrides;
 omitting them preserves the original image rendering.
 
 Runtime provider IDs and account routing stay independent of these display assets.
+
+The active Claude and Codex artwork was supplied by the user and copied
+verbatim, without redrawing or recoloring the PNGs:
+
+| Hub asset | Supplied filename | SHA-256 |
+| --- | --- | --- |
+| `provider-logo-claude-spark.png` | `claude.png` | `9ad0db2010a8ef85741c92ae0dd8945126f5cd738bfb84d077a614f1967bbce7` |
+| `provider-logo-codex-cloud.png` | `openai-codex-logo-1024x1024.png` | `dd046d767b00c1b49d119bcbd03404014c9e2067f138ddd06efb9d57a21dddba` |
+
+Claude preserves its transparent orange spark. Codex uses `template: true`
+with optional `tint: "accent"`, rendering its neutral source in the provider's
+current accent (including user overrides). Templates without `tint` keep the
+primary foreground behavior. User logo overrides support the same option.

@@ -130,8 +130,14 @@ The right-hand **inspector** has four views, each using the whole pane:
   for the pid, folder and recent output, or stop it. The tab's badge counts
   running processes. See background shells under Files and commands.
 
-The inspector collapses the left workspace rail on narrower windows to keep the
-conversation usable. The main turn clock and context count describe the parent;
+Drag the hairline at either side of the conversation to resize the workspace
+rail (150–360 points, default 190) or inspector (260–600 points, responsive
+default up to 360). Width preferences persist across sessions. Double-click a
+divider to reset it; accessibility adjustment and a Reset width action are also
+available. Resizing the window clamps displayed widths to leave at least 420
+points for the conversation. The inspector collapses the left workspace rail
+on narrower windows; growing the window restores the preferred widths.
+The main turn clock and context count describe the parent;
 Side Chat runs independently.
 
 The small gear at the bottom-left of the sidebar offers Allow web search, Theme, Glass/Solid,

@@ -1,5 +1,6 @@
 """Offline tests for TaskWraith-compatible provider presentation data."""
 import copy
+import hashlib
 import unittest
 from pathlib import Path
 
@@ -267,6 +268,7 @@ class BrandingTests(unittest.TestCase):
             "light": "provider-logos/wordmark.png",
             "leadingMarkAspectRatio": 1.5,
             "template": True,
+            "tint": "accent",
         }
         overrides = {"muse": {"logo": logo}}
         before = copy.deepcopy(overrides)
@@ -280,12 +282,27 @@ class BrandingTests(unittest.TestCase):
 
         # Replacing a default cropped/template logo with plain artwork must
         # not retain the old asset's display settings.
-        for provider in ("muse", "qwen-token-plan", "devin"):
+        for provider in ("muse", "qwen-token-plan", "devin", "codex"):
             with self.subTest(provider=provider):
                 plain = resolve_presentation(
                     provider, overrides={provider: {"logo": {"light": "custom.png"}}},
                     catalogue=self.catalogue)
                 self.assertEqual(plain["logo"], {"light": "custom.png", "dark": "custom.png"})
+
+    def test_supplied_logos_and_codex_accent_override(self):
+        expected = {
+            "claude": ("provider-logo-claude-spark.png", "9ad0db2010a8ef85741c92ae0dd8945126f5cd738bfb84d077a614f1967bbce7"),
+            "codex": ("provider-logo-codex-cloud.png", "dd046d767b00c1b49d119bcbd03404014c9e2067f138ddd06efb9d57a21dddba"),
+        }
+        for provider, (filename, digest) in expected.items():
+            presentation = resolve_presentation(provider, catalogue=self.catalogue)
+            self.assertEqual(presentation["logo"]["light"], "provider-logos/" + filename)
+            self.assertEqual(hashlib.sha256((Path(__file__).parent / "provider-logos" / filename).read_bytes()).hexdigest(), digest)
+        codex = resolve_presentation("codex", overrides={"codex": {"accent": "#123456"}}, catalogue=self.catalogue)
+        self.assertEqual(codex["accent"], "#123456")
+        self.assertEqual(codex["logo"]["tint"], "accent")
+        self.assertTrue(codex["logo"]["template"])
+        self.assertNotIn("tint", resolve_presentation("devin", catalogue=self.catalogue)["logo"])
 
     def test_trailing_mark_crop_rides_along_like_the_leading_one(self):
         """MiMo's ring sits at the end of its wordmark, so the crop setting
@@ -308,6 +325,7 @@ class BrandingTests(unittest.TestCase):
             for key in ("leadingMarkAspectRatio", "trailingMarkAspectRatio")
             for value in (True, "1.5", 0, -1, 0.49, 2.01, float("nan"), float("inf"))
         ] + [{"template": value} for value in (0, 1, "true", None)] + [
+            {"tint": value} for value in (0, 1, True, "red", "primary", None)] + [
             {"leadingMarkAspectRatio": 1.0, "trailingMarkAspectRatio": 1.0},
         ]
         for options in invalid:
