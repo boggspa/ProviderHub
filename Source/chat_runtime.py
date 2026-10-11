@@ -704,6 +704,9 @@ class ChatService:
             raise ValueError("Chat is closing.")
         if action == "answer_question":
             return chat_questions.registry(self).answer(command)
+        if action in {"configure", "select", "create"} and self.chat and any(
+                item.get("question", {}).get("status") == "pending" for item in self.chat["entries"]):
+            raise ValueError("Answer, dismiss or stop this chat's pending questions before changing its configuration.")
         if action == "preferences":
             if type(command.get("webSearch")) is not bool:
                 raise ValueError("Web search must be enabled or disabled.")

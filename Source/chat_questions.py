@@ -210,7 +210,7 @@ class Registry:
     def cancel(self, service):
         with self.root._mutex:
             for row in self.requests.values():
-                if row["entry"]["question"]["status"] == "pending" and (service is self.root or row["source"] is service):
+                if row["entry"]["question"]["status"] == "pending" and (service is self.root or row["requester"] == requester(service)):
                     self._settle(row, "cancelled", {})
 
 

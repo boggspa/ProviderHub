@@ -161,5 +161,18 @@ class QuestionTests(unittest.TestCase):
         self.assertEqual(members[1]["status"], "working")
         parent._working = False
 
+    def test_pending_questions_keep_identity_across_configuration_and_member_recreation(self):
+        questions.execute(self.service, "request_user_input_async", ARGS)
+        with self.assertRaisesRegex(ValueError, "pending questions"):
+            self.service.handle({"command":"configure", "choice":self.service.models[1]["id"]})
+        original = make_child(self.service, self.service.choice(), "", "team", lambda _: None)
+        original.team_member = {"id":"stable-slot", "name":"Sol"}
+        replacement = make_child(self.service, self.service.choice(), "", "team", lambda _: None)
+        replacement.team_member = original.team_member
+        questions.execute(original, "request_user_input_async", ARGS)
+        replacement.handle({"command":"stop"})
+        records = [item["question"] for item in self.service.chat["entries"] if item.get("question")]
+        self.assertEqual([q["status"] for q in records], ["pending", "cancelled"])
+
 
 if __name__ == "__main__": unittest.main()
