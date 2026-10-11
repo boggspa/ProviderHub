@@ -1,4 +1,4 @@
-# Provider Hub 0.5.6 (build 68)
+# Provider Hub 0.5.7 (build 69)
 
 Use your model accounts inside Claude Desktop, the Codex coding workspace, or Provider Hub's lightweight **Chat with Model…** window. See [Chat in Provider Hub](docs/chat.md) for its tools, attachments, approvals and model switching.
 
@@ -242,7 +242,7 @@ tests; not every advertised model has been live-tested.
 
 Live Messages and streaming Responses read/edit/read cycles also passed on the
 0.5.0 build for OpenRouter North Mini Code Free and Gemini 3.8 Flash; they have
-not been re-run against 0.5.6. Qwen Token Plan
+not been re-run against 0.5.7. Qwen Token Plan
 returned its exhausted weekly quota response, so its live tool cycle remains
 for verification after quota returns.
 
