@@ -91,7 +91,8 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(request["output_config"], {"effort": "high"})
         self.assertNotIn("Parent task", json.dumps(request["messages"]))
         self.assertEqual({t["name"] for t in request["tools"]},
-                         {"read_file", "search_files", "apply_patch", "run_shell", "read_process", "stop_process"})
+                         {"read_file", "search_files", "apply_patch", "run_shell", "read_process", "stop_process",
+                          "request_user_input", "request_user_input_async", "wait_for_user_input"})
         self.assertEqual(child["workspace"], parent.chat["workspace"])
         self.assertEqual(child["approvalMode"], "manual")
         stored = self.store.load(parent.chat["id"])
@@ -188,7 +189,8 @@ class AgentTests(unittest.TestCase):
         side = self.open_side(parent)
         parent.handle({"command": "side_send", "id": parent.chat["id"], "side": side.chat["id"], "text": "Discuss"})
         self.finish(side)
-        self.assertEqual({t["name"] for t in self.children[0].requests[0]["tools"]}, {"read_file", "search_files"})
+        self.assertEqual({t["name"] for t in self.children[0].requests[0]["tools"]},
+                         {"read_file", "search_files", "request_user_input", "request_user_input_async", "wait_for_user_input"})
         self.assertNotIn("parent-signed", json.dumps(self.children[0].requests))
         self.assertTrue(self.children[0].requests[1]["messages"][-1]["content"][0]["is_error"])
         self.assertFalse((self.root / "forbidden").exists())

@@ -405,7 +405,8 @@ class ChatHost:
         for identifier, service in list(self.sessions.items()):
             if (identifier not in {self.view_id, keep} | self.watched_chats() and not self.active(service) and identifier not in self.sides
                     and not service._git_working and not (service.thread and service.thread.is_alive())
-                    and not (service.restart_thread and service.restart_thread.is_alive())):
+                    and not (service.restart_thread and service.restart_thread.is_alive())
+                    and not any(item.get("question", {}).get("status") == "pending" for item in service.chat["entries"])):
                 self.sessions.pop(identifier, None)
 
     def workspace_busy(self, workspace, *, excluding=None, branch_only=False):
@@ -582,7 +583,7 @@ class ChatHost:
         service = self.session(identifier)
         if action in {"send", "retry"} and service.busy:
             raise ValueError("This chat is already running. Use an update to interrupt it.")
-        if action in {"send", "retry", "steer", "team_resume", "team_member_start"} and not service.busy:
+        if action in {"send", "retry", "steer", "team_resume", "team_member_start", "answer_question"} and not service.busy:
             if sum(current.busy for current in list(self.sessions.values())) >= self.max_active:
                 raise ValueError(f"{self.max_active} chats are already running. Send this draft after a chat finishes.")
         if action in {"send", "retry", "steer", "team_resume", "team_member_start", "side_send", "open_side"}:

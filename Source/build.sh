@@ -22,6 +22,7 @@ SWIFT_SOURCES=(
   "$SOURCE_DIR/ChatCapabilities.swift" "$SOURCE_DIR/ChatBrowser.swift"
   "$SOURCE_DIR/ChatDevices.swift"
   "$SOURCE_DIR/ChatPairingCode.swift"
+  "$SOURCE_DIR/ChatQuestions.swift"
 )
 xcrun swiftc -swift-version 5 -parse-as-library -O -target arm64-apple-macosx14.0 \
   -module-cache-path "$BUILD_DIR/ModuleCache" \
@@ -34,6 +35,7 @@ done
 # Optional capabilities use the same worker; their external executables are
 # configured separately and are never downloaded during build or launch.
 cp "$SOURCE_DIR/plugin-dependencies.lock.json" "$APP_DIR/Contents/Resources/worker/"
+cp "$SOURCE_DIR/chat_questions.py" "$APP_DIR/Contents/Resources/worker/"
 # The launch-decision policy is now canonical in Swift
 # (Source/LaunchPlan.swift). There is no Python policy to ship.
 cp "$SOURCE_DIR/provider_branding.json" "$APP_DIR/Contents/Resources/worker/"

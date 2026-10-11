@@ -26,6 +26,15 @@ from chat_remote import project_event
 
 
 class PresentationProjectionTests(unittest.TestCase):
+    def test_question_projection_excludes_private_metadata_and_keeps_identity(self):
+        from chat_questions import validate
+        question = {"id":"ab"*16, "status":"pending", "mode":"wait", "asker":"Helper", "answers":{},
+                    "questions":validate("request_user_input", {"questions":[{"id":"choice", "question":"Which one?"}]}),
+                    "private":"do not send"}
+        projected = project_event({"event":"entry", "chat":"cd"*16, "entry":{"id":"ef"*16,"kind":"question","question":question}})
+        self.assertEqual(projected["entry"]["question"]["id"], question["id"])
+        self.assertNotIn("private", projected["entry"]["question"])
+
     def test_long_stream_and_midstream_subscription_keep_bounded_offsets(self):
         bridge = MacBridge(lambda _: None, "projection")
         bridge.publish({"event":"snapshot", "chat":"ab"*16, "entries":[{
@@ -219,6 +228,15 @@ class GoldenVectorTests(unittest.TestCase):
 
 
 class BridgeTests(unittest.TestCase):
+    def test_paired_question_reply_is_exact_and_deduplicated(self):
+        host, mac, phone = pair()
+        params = {"chat":CHAT, "questionId":"ab"*16, "answers":{"choice":["Blue"]}, "requestId":"question-answer"}
+        phone._send("chat.answer_question", params); exchange(mac, phone)
+        phone._send("chat.answer_question", params); exchange(mac, phone)
+        self.assertEqual(len(host.commands), 1)
+        self.assertEqual(host.commands[0], {"command":"answer_question", "chat":CHAT, "question_id":"ab"*16,
+                                             "answers":{"choice":["Blue"]}, "dismiss":False})
+        self.assertTrue(phone.acks["question-answer"]["ok"])
     def test_unicode_and_escaped_display_snapshots_fit_the_encrypted_frame(self):
         for character in ("😀", "\u0000"):
             with self.subTest(character=repr(character)):

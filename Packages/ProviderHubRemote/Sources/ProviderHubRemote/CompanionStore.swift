@@ -29,14 +29,19 @@ public struct RemoteEntry: Equatable, Identifiable {
     public var memberName: String
     public var isError: Bool
     public var isLive: Bool = false
+    public var question: RemoteQuestion? = nil
 
     static func decode(_ row: [String: Any], fallback: String) -> RemoteEntry {
         let identifier = row["id"] as? String
-        return RemoteEntry(id: identifier == nil || identifier == "legacy" || identifier == "" ? fallback : identifier!, role: row["role"] as? String ?? "note",
+        var decoded = RemoteEntry(id: identifier == nil || identifier == "legacy" || identifier == "" ? fallback : identifier!, role: row["role"] as? String ?? "note",
                     text: row["text"] as? String ?? "", summary: row["summary"] as? String ?? "",
                     detail: row["detail"] as? String ?? "", tool: row["tool"] as? String ?? "",
                     memberName: row["memberName"] as? String ?? "", isError: row["isError"] as? Bool ?? false,
                     isLive: row["isLive"] as? Bool ?? false)
+        if let question = row["question"], let data = try? JSONSerialization.data(withJSONObject: question) {
+            decoded.question = try? JSONDecoder().decode(RemoteQuestion.self, from: data)
+        }
+        return decoded
     }
 }
 
@@ -206,6 +211,9 @@ public struct RemoteCommand: Codable, Equatable {
     public var text: String?
     public var approvalId: String?
     public var allow: Bool?
+    public var questionId: String?
+    public var answers: [String: [String]]?
+    public var dismiss: Bool?
 
     public init(method: String, requestId: String, chat: String? = nil, text: String? = nil, approvalId: String? = nil, allow: Bool? = nil) {
         self.v = 1

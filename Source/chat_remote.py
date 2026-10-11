@@ -439,7 +439,7 @@ class Session:
 
 def project_entry(entry, fallback="legacy"):
     """Visible transcript data only; omit provider reasoning and private metadata."""
-    return {"id": str(entry.get("id") or fallback)[:128],
+    row = {"id": str(entry.get("id") or fallback)[:128],
             "role": str(entry.get("role") or entry.get("kind") or "note")[:40],
             "text": str(entry.get("text") or "")[:DISPLAY_TEXT_LIMIT],
             "summary": str(entry.get("summary") or "")[:500],
@@ -448,6 +448,18 @@ def project_entry(entry, fallback="legacy"):
             "memberName": str(entry.get("memberName") or "")[:100],
             "isError": entry.get("isError") is True,
             "isLive": (entry.get("role") or entry.get("kind")) == "assistant" and entry.get("recorded") is False}
+    question = entry.get("question")
+    if row["role"] == "question" and isinstance(question, dict):
+        from chat_questions import validate
+        try:
+            projected = {"id": question["id"], "status": question["status"], "mode": question["mode"],
+                         "asker": str(question.get("asker", "Assistant"))[:120],
+                         "questions": validate("request_user_input", {"questions":question["questions"]}),
+                         "answers": question.get("answers", {})}
+            if len(json.dumps(projected, ensure_ascii=False).encode("utf8")) <= 40000:
+                row.update(question=projected, text="")
+        except (ValueError, KeyError, TypeError): pass
+    return row
 
 
 def bound_entries(entries):
@@ -672,7 +684,7 @@ class MacBridge:
             else:
                 self._emit("session.snapshot", self._snapshot())
             return
-        if method not in {"chat.send", "chat.stop", "chat.approve", "chat.select"}:
+        if method not in {"chat.send", "chat.stop", "chat.approve", "chat.select", "chat.answer_question"}:
             self._ack(params.get("requestId"), False, "unsupported command")
             return
         request_id = params.get("requestId")
@@ -714,6 +726,11 @@ class MacBridge:
             self._execute({"command": "send", "chat": chat, "id": chat, "text": text, "request": request_id})
         elif method == "chat.stop":
             self._execute({"command": "stop", "chat": chat, "id": chat})
+        elif method == "chat.answer_question":
+            identifier = params.get("questionId")
+            if not isinstance(identifier, str) or not TOKEN.fullmatch(identifier): raise RemoteError("question id required")
+            self._execute({"command": "answer_question", "chat": chat, "question_id": identifier,
+                           "answers": params.get("answers"), "dismiss": params.get("dismiss") is True})
         elif method == "chat.select":
             self.selected_chat = chat
             self._execute({"command": "subscribe", "client": "remote", "chats": [chat]})
