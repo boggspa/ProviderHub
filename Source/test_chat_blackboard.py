@@ -1,8 +1,12 @@
 """Team Blackboard: bounded store, user commands, member tools and projection."""
 import json
+import base64
 import os
 from pathlib import Path
 import stat
+import shutil
+import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -189,6 +193,109 @@ class BlackboardStoreTests(unittest.TestCase):
         self.assertIn("invalid", blackboard.digest_message(self.chat)["content"][0]["text"])
 
 
+class BlackboardInspectionTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.helper_tmp = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(cls.helper_tmp.cleanup)
+        cls.helper = Path(cls.helper_tmp.name) / "blackboard-pdf"
+        if sys.platform == "darwin" and shutil.which("xcrun"):
+            subprocess.run(["xcrun", "swiftc", "-framework", "PDFKit", str(Path(__file__).with_name("ChatBlackboardPDF.swift")),
+                            "-o", str(cls.helper)], check=True, capture_output=True, timeout=60)
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(); self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.chat = {"id": "a" * 32, "entries": []}
+
+    def added(self, name, data):
+        source = self.root / name; source.write_bytes(data)
+        return blackboard.attach(self.chat, self.root, paths=[str(source)], now=NOW)[0]
+
+    def read(self, identifier, **options):
+        with patch.object(blackboard, "PDF_HELPER", self.helper):
+            return blackboard.inspect_attachment(self.chat, self.root, identifier, **options)
+
+    def test_owned_text_and_transcript_attachment_read_after_original_removed(self):
+        row = self.added("notes.txt", "Exact source Ω\n".encode())
+        (self.root / "notes.txt").unlink()
+        self.assertIn("Exact source Ω\n", self.read(row["id"])[0]["text"])
+        from chat_attachments import prepare_attachments
+        source = self.root / "message.txt"; source.write_text("Transcript source")
+        visual, _ = prepare_attachments([{"path": str(source)}], self.root / self.chat["id"])
+        self.chat["entries"] = [{"id": "message", "kind": "user", "attachments": visual}]
+        self.assertIn("Transcript source", self.read(visual[0]["id"])[0]["text"])
+        self.assertIn(visual[0]["id"], blackboard.digest(self.chat)["content"][0]["text"])
+        self.assertNotIn(visual[0]["path"], blackboard.digest(self.chat)["content"][0]["text"])
+
+    def test_foreign_missing_and_metadata_path_escape_are_refused(self):
+        other = {"id": "b" * 32, "entries": []}
+        source = self.root / "foreign.txt"; source.write_text("Secret")
+        foreign = blackboard.attach(other, self.root, paths=[str(source)], now=NOW)[0]
+        with self.assertRaisesRegex(ValueError, "No attachment"): self.read(foreign["id"])
+        with self.assertRaisesRegex(ValueError, "No attachment"): self.read(str(source))
+        row = self.added("owned.txt", b"owned")
+        Path(row["path"]).unlink()
+        with self.assertRaises(FileNotFoundError): self.read(row["id"])
+        self.chat["blackboard"]["attachments"][0]["path"] = str(source)
+        with self.assertRaisesRegex(ValueError, "outside"): self.read(row["id"])
+        blackboard.detach(self.chat, self.root, row["id"])
+        with self.assertRaisesRegex(ValueError, "No attachment"): self.read(row["id"])
+
+    def test_symlink_and_file_and_text_bounds(self):
+        row = self.added("large.txt", b"x")
+        path = Path(row["path"])
+        with path.open("wb") as stream: stream.truncate(blackboard.MAX_READ_BYTES + 1)
+        with self.assertRaisesRegex(ValueError, "8 MiB"): self.read(row["id"])
+        path.write_text("Ω" * 110_000)
+        text = self.read(row["id"])[0]["text"]
+        self.assertIn("Text truncated", text)
+        self.assertEqual(text.rsplit("\n\n", 1)[1], "Ω" * 100_000)
+        path.unlink(); path.symlink_to(self.root / "large.txt")
+        with self.assertRaises(OSError): self.read(row["id"])
+
+    def test_real_image_bytes_and_vision_gate(self):
+        from test_chat_attachments import PNG
+        row = self.added("pixel.png", PNG)
+        blocks = self.read(row["id"])
+        self.assertIn("width 1, height 1", blocks[0]["text"])
+        self.assertEqual(blocks[1]["type"], "image")
+        self.assertEqual(base64.b64decode(blocks[1]["source"]["data"]), PNG)
+        with self.assertRaisesRegex(ValueError, "does not accept images"): self.read(row["id"], vision=False)
+
+    def test_real_pdf_text_extraction_and_invalid_pdf(self):
+        if not self.helper.exists(): self.skipTest("PDFKit helper requires macOS")
+        # A complete real PDF with xref and an embedded Helvetica text stream.
+        stream = b"BT /F1 12 Tf 20 100 Td (Blackboard PDF reference) Tj ET"
+        objects = [b"<< /Type /Catalog /Pages 2 0 R >>", b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+                   b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>",
+                   b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+                   b"<< /Length " + str(len(stream)).encode() + b" >>\nstream\n" + stream + b"\nendstream"]
+        pdf = b"%PDF-1.4\n"; offsets = [0]
+        for index, obj in enumerate(objects, 1):
+            offsets.append(len(pdf)); pdf += f"{index} 0 obj\n".encode() + obj + b"\nendobj\n"
+        start = len(pdf)
+        pdf += b"xref\n0 6\n0000000000 65535 f \n"
+        pdf += b"".join(f"{offset:010} 00000 n \n".encode() for offset in offsets[1:])
+        pdf += f"trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n{start}\n%%EOF\n".encode()
+        row = self.added("reference.pdf", pdf)
+        self.assertIn("Blackboard PDF reference", self.read(row["id"])[0]["text"])
+        with patch.object(blackboard.subprocess, "run", side_effect=subprocess.TimeoutExpired("pdf", 15)):
+            with self.assertRaisesRegex(ValueError, "extraction failed"): self.read(row["id"])
+        self.assertEqual(Path(row["path"]).read_bytes(), pdf)
+        # Even an unexpectedly oversized helper reply cannot escape the bound.
+        with patch.object(blackboard.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, b"x" * 200_010, b"")):
+            self.assertEqual(len(self.read(row["id"])[0]["text"].rsplit("\n\n", 1)[1]), 200_000)
+        bad = self.added("invalid.pdf", b"%PDF-broken")
+        with self.assertRaisesRegex(ValueError, "extraction failed"): self.read(bad["id"])
+
+    def test_audio_video_and_links_report_preview_only(self):
+        row = self.added("clip.wav", b"audio fixture")
+        self.assertIn("preview-only", self.read(row["id"])[0]["text"])
+        link = blackboard.attach(self.chat, self.root, url="https://example.com", now=NOW)[0]
+        self.assertIn("not been fetched", self.read(link["id"])[0]["text"])
+
+
 class BlackboardCommandTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(); self.addCleanup(self.tmp.cleanup)
@@ -373,6 +480,22 @@ class BlackboardTeamTests(unittest.TestCase):
             blackboard.execute(service, "blackboard_remove", {"attachment_id": rows[0]["id"]})
         self.assertFalse(Path(rows[0]["path"]).exists())
         self.assertEqual(Path(retained["path"]).read_text(), "keep these results")
+
+    def test_attachment_inspection_reaches_member_tool_result_content(self):
+        from test_chat_attachments import PNG
+        source = self.root / "pixel.png"; source.write_bytes(PNG)
+        def inspect(payload, cancel, delta):
+            return call("blackboard_read", {"attachment_id": row["id"]})
+        parent = self.team([[inspect, response("Inspected")]])
+        row = blackboard.attach(parent.chat, self.store.root, paths=[str(source)], now=NOW)[0]
+        parent.save()
+        self.run_team(parent)
+        results = [block for message in self.transports[0].requests[1]["messages"] for block in message.get("content", [])
+                   if block.get("type") == "tool_result"]
+        image = next(block for result in results for block in result["content"] if block.get("type") == "image")
+        self.assertEqual(base64.b64decode(image["source"]["data"]), PNG)
+        tool = next(item for item in parent.chat["entries"] if item.get("tool") == "blackboard_read")
+        self.assertFalse(tool["isError"])
 
     def test_member_removal_save_failure_restores_metadata_and_retains_file(self):
         parent = self.team([[response("Unused")]])

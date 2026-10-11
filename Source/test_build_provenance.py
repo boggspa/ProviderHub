@@ -146,6 +146,18 @@ class BuildProvenanceTests(unittest.TestCase):
         self.assertNotIn(str(self.root), json.dumps(manifest))
         self.assertEqual(verify_manifest(self.app, revision=self.revision, require_clean=True), manifest)
 
+    def test_native_pdf_helper_hash_is_recorded_and_verified(self):
+        helper = self.app / "Contents/MacOS/blackboard-pdf"
+        helper.parent.mkdir(parents=True, exist_ok=True)
+        helper.write_bytes(b"native helper fixture")
+        manifest = self.build()
+        self.assertEqual(manifest["native_helpers"]["blackboard-pdf"], hashlib.sha256(helper.read_bytes()).hexdigest())
+        self.assertEqual(verify_manifest(self.app), manifest)
+        helper.write_bytes(b"changed")
+        with self.assertRaisesRegex(ValueError, "Native PDF helper"): verify_manifest(self.app)
+        helper.unlink()
+        with self.assertRaisesRegex(ValueError, "Native PDF helper"): verify_manifest(self.app)
+
     def test_only_packaged_build_inputs_affect_dirty_status(self):
         (self.source / "test_unrelated.py").write_text("# changed unrelated test\n")
         (self.repository / "notes.md").write_text("Unrelated local notes\n")
