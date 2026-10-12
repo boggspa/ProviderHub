@@ -21,6 +21,25 @@ struct ActivityEntry: Identifiable {
     var event: String
     var model: String
     var status: Int?
+    var usage: HubTokenUsage? = nil
+    var credentialMode: String? = nil
+    var surface: String? = nil
+    var sourceSummary: String {
+        let source: String
+        switch credentialMode {
+        case "keychain", "environment", "vibe": source = "API key"
+        case "cli": source = "Installed CLI"
+        default: source = "Source not recorded"
+        }
+        let client: String
+        switch surface {
+        case "chat": client = "Chat"
+        case "responses": client = "Codex / ChatGPT"
+        case "messages": client = "Messages / Claude Desktop"
+        default: client = ""
+        }
+        return [source, client].filter { !$0.isEmpty }.joined(separator: " · ")
+    }
 }
 
 enum Page: String, CaseIterable, Identifiable {
@@ -934,7 +953,9 @@ final class BridgeModel: ObservableObject {
         activityFileStamp = (size, mtime)
         let entries = text.split(separator: "\n").suffix(30).reversed().compactMap { line -> ActivityEntry? in
             guard let raw = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any] else { return nil }
-            return ActivityEntry(time: raw["time"] as? String ?? "", event: raw["event"] as? String ?? "", model: raw["model"] as? String ?? "", status: raw["status"] as? Int)
+            return ActivityEntry(time: raw["time"] as? String ?? "", event: raw["event"] as? String ?? "", model: raw["model"] as? String ?? "", status: raw["status"] as? Int,
+                                 usage: (raw["usage"] as? [String: Any]).map(HubTokenUsage.init),
+                                 credentialMode: raw["credential_mode"] as? String, surface: raw["surface"] as? String)
         }
         // Avoid replacing row identities on every timer tick.
         if entries.count != activity.count || entries.first?.time != activity.first?.time || entries.first?.event != activity.first?.event { activity = entries }
@@ -1364,7 +1385,14 @@ struct BridgeWindow: View {
                     ForEach(model.activity) { entry in
                         HStack(spacing: 10) {
                             Image(systemName: entry.event == "completed" ? "checkmark.circle.fill" : entry.event == "cancelled" ? "stop.circle" : entry.event == "compacted" ? "arrow.down.circle" : "exclamationmark.circle").foregroundStyle(entry.event == "completed" ? Color.green : entry.event == "compacted" ? Color.blue : .orange)
-                            VStack(alignment: .leading, spacing: 4) { Text(model.modelLabel(entry.model)).font(.system(size: 12, weight: .medium)).help(entry.model); Text(entry.event.capitalized + (entry.status.map { " · HTTP \($0)" } ?? "")).font(.caption).foregroundStyle(.secondary) }
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(model.modelLabel(entry.model)).font(.system(size: 12, weight: .medium)).help(entry.model)
+                                Text(entry.event.capitalized + (entry.status.map { " · HTTP \($0)" } ?? "")).font(.caption).foregroundStyle(.secondary)
+                                if let usage = entry.usage {
+                                    Text(entry.sourceSummary).font(.caption).foregroundStyle(.secondary)
+                                    Text(usage.summary).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                                }
+                            }
                             Spacer(); Text(String(entry.time.dropFirst(11).prefix(8))).font(.system(size: 10, design: .monospaced)).foregroundStyle(.tertiary)
                         }
                     }
