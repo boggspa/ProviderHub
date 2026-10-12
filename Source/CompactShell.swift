@@ -408,12 +408,18 @@ struct CompactShell: View {
             ScrollView {
                 VStack(spacing: 2) {
                     ForEach(model.activity) { entry in
-                        HStack(spacing: 8) {
-                            Text(String(entry.time.dropFirst(11).prefix(8))).font(.system(size: 10, design: .monospaced)).foregroundStyle(.tertiary)
-                            Text(entry.event).frame(width: 90, alignment: .leading)
-                            Text(model.modelLabel(entry.model)).lineLimit(1).frame(maxWidth: .infinity, alignment: .leading)
-                            Text(entry.status.map(String.init) ?? "").font(.system(size: 10, design: .monospaced)).foregroundStyle(entry.event == "completed" ? Chroma.ok : Chroma.warn)
-                        }.font(.system(size: 11)).padding(.vertical, 2)
+                        VStack(alignment: .leading, spacing: 3) {
+                            HStack(spacing: 8) {
+                                Text(String(entry.time.dropFirst(11).prefix(8))).font(.system(size: 10, design: .monospaced)).foregroundStyle(.tertiary)
+                                Text(entry.event).frame(width: 90, alignment: .leading)
+                                Text(model.modelLabel(entry.model)).lineLimit(1).frame(maxWidth: .infinity, alignment: .leading)
+                                Text(entry.status.map(String.init) ?? "").font(.system(size: 10, design: .monospaced)).foregroundStyle(entry.event == "completed" ? Chroma.ok : Chroma.warn)
+                            }
+                            if let usage = entry.usage {
+                                Text(entry.sourceSummary).foregroundStyle(.secondary)
+                                Text(usage.summary).font(.system(size: 10)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                            }
+                        }.font(.system(size: 11)).padding(.vertical, 3)
                     }
                     if model.activity.isEmpty { Text("No requests yet").foregroundStyle(.secondary).padding() }
                 }

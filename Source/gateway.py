@@ -436,6 +436,8 @@ class Runtime:
         plan.update(route=route, provider_id=provider_id, provider_name=PROVIDERS[provider_id]["name"],
                     private_key=key, upstream_model=upstream_model, replay_scope=scope, replay_required=replay_required,
                     model_spec=spec, estimate_raw=raw_estimate_fn(payload))
+        plan["credential_mode"] = connection.get("credential_mode")
+        plan["surface"] = ("chat" if is_chat else "responses" if payload.get("_provider_hub_surface") == "responses" else "messages")
         if calibration_factor < 1.0:
             plan.setdefault("compatibility", {})["estimate_calibration"] = round(calibration_factor, 3)
         if reminders_rewritten:
@@ -499,7 +501,8 @@ class Runtime:
                     "codex_catalogue_digest": self.codex_catalogue_digest,
                     "providers": {key: dict(value) for key, value in self.provider_counts.items()}}
 
-    def record(self, kind, model="", code=None, usage=None, model_unavailable=False, service_tier=None):
+    def record(self, kind, model="", code=None, usage=None, model_unavailable=False, service_tier=None,
+               credential_mode=None, surface=None):
         # Deliberately excludes prompts, tool arguments, response text, headers,
         # credentials, and raw upstream error bodies.
         event = {"time": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "event": kind}
@@ -510,6 +513,10 @@ class Runtime:
             event["status"] = code
         if usage:
             event["usage"] = usage
+        if isinstance(credential_mode, str) and credential_mode in {"keychain", "environment", "vibe", "cli", "none"}:
+            event["credential_mode"] = credential_mode
+        if isinstance(surface, str) and surface in {"chat", "responses", "messages"}:
+            event["surface"] = surface
         if service_tier in {"default", "priority"}:
             event["service_tier"] = service_tier
         if model_unavailable:
@@ -1067,7 +1074,8 @@ they exit or restart, so none of them can interrupt another's requests.
                 # shared finally still runs (worker count, semaphore, lease).
                 if self._serve_cli_turn(plan, payload, disconnected, closed, write_lock, usage):
                     self.runtime.calibration.observe(plan["route"], plan.get("estimate_raw"), reported_input_tokens(usage))
-                    self.runtime.record("completed", plan["route"], 200, usage)
+                    self.runtime.record("completed", plan["route"], 200, usage,
+                                        credential_mode=plan.get("credential_mode"), surface=plan.get("surface"))
                 return
             encoded = json.dumps(upstream, ensure_ascii=False).encode()
             headers = {**plan["headers"], "Accept": "text/event-stream" if upstream.get("stream") else "application/json"}
@@ -1302,7 +1310,8 @@ they exit or restart, so none of them can interrupt another's requests.
                     self.wfile.flush()
                 self.close_connection = True
             self.runtime.calibration.observe(plan["route"], plan.get("estimate_raw"), reported_input_tokens(usage))
-            self.runtime.record("completed", plan["route"], 200, usage, service_tier=service_tier)
+            self.runtime.record("completed", plan["route"], 200, usage, service_tier=service_tier,
+                                credential_mode=plan.get("credential_mode"), surface=plan.get("surface"))
         except (BrokenPipeError, ConnectionResetError):
             self.runtime.record("cancelled", plan["route"])
         except Exception as exc:
