@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import fcntl
 import hashlib
 import hmac
@@ -99,6 +100,26 @@ BUILD_IDENTITY = build_identity()
 MAX_PROVIDER_REQUESTS = 16
 
 
+def save_key_metadata(root: Path, provider_id: str, value: dict) -> dict:
+    """Persist only the credential slot, never a pane's pending routing edits."""
+    if provider_id not in PROVIDERS or not PROVIDERS[provider_id].get("credential_account"):
+        raise BridgeError("This provider does not have an API-key slot.")
+    if not isinstance(value, dict) or set(value) - {"key_account", "key_accounts"}:
+        raise BridgeError("Save key accepts only API-key account metadata.")
+    settings = load_settings(root)
+    connection = settings["providers"][provider_id]
+    connection["credential_mode"] = "keychain"
+    connection["credential_revision"] += 1
+    for field in ("key_account", "key_accounts"):
+        if field in value:
+            connection.pop(field, None)
+            if value[field] is not None: connection[field] = value[field]
+    settings = validate_settings(settings)
+    private_directory(root)
+    atomic_json(root / "settings.json", settings)
+    return settings
+
+
 class Runtime:
     def __init__(self, root: Path, upstream_url=None, key=None, request_planner=None):
         self.root = root
@@ -186,13 +207,45 @@ class Runtime:
     def provider_key(self, provider_id):
         if self.key is not None:
             return self.key
+        live = self.credential_settings()
+        signature = connection_signature(provider_id, live["providers"][provider_id])
         with self.lock:
             cached = self.credential_cache.get(provider_id)
-        if cached is None:
-            cached = credentials(self.settings, provider_id)
+        if cached is None or cached[0] != signature:
+            resolved = credentials(live, provider_id)
             with self.lock:
-                self.credential_cache[provider_id] = cached
-        return cached[0]
+                self.credential_cache[provider_id] = (signature, resolved)
+            return resolved[0]
+        return cached[1][0]
+
+    def credential_settings(self):
+        """Reload key revisions/accounts between calls; keep running routes stable.
+
+        A provider request already owns its headers/key. Saving a replacement
+        never closes that socket or changes the model/source it is executing.
+        """
+        try:
+            stat = (self.root / "settings.json").stat()
+            stamp = (stat.st_ino, stat.st_mtime_ns, stat.st_size)
+        except OSError:
+            stamp = None
+        with self.lock:
+            cached = getattr(self, "_credential_settings", None)
+            if cached is not None and cached[0] == stamp: return cached[1]
+        live = copy.deepcopy(self.settings)
+        saved = load_settings(self.root) if stamp is not None else self.settings
+        for provider_id, connection in live["providers"].items():
+            current = saved["providers"][provider_id]
+            # A saved key may replace an environment/Vibe API credential too.
+            # An installed-CLI route keeps its process, login and protocol.
+            if connection["credential_mode"] != "cli" and current["credential_mode"] == "keychain":
+                connection["credential_mode"] = "keychain"
+            for field in ("credential_revision", "key_account", "key_accounts"):
+                connection.pop(field, None)
+                if field in current: connection[field] = copy.deepcopy(current[field])
+        with self.lock:
+            self._credential_settings = (stamp, live)
+        return live
 
     def chat_route(self, requested, connection, settings):
         """Resolve a Chat request's route and spec on the credential source its account names.
@@ -205,7 +258,9 @@ class Runtime:
         on both while the models behind it need not.
         """
         provider_id = split_route(requested)[0]
-        if connection["credential_mode"] == self.settings["providers"][provider_id]["credential_mode"]:
+        startup_mode = self.settings["providers"][provider_id]["credential_mode"]
+        if (connection["credential_mode"] == startup_mode
+                or connection["credential_mode"] != "cli" and startup_mode != "cli"):
             route = self.resolve_route(requested)
             return route, self.settings["_model_specs"][route]
         source = chat_extra_source(settings["providers"][provider_id], provider_id)
@@ -238,10 +293,10 @@ class Runtime:
         else:
             route = self.resolve_route(payload.get("model"))
             spec = self.settings["_model_specs"][route]
-            selected_settings = self.settings
+            selected_settings = self.credential_settings()
         provider_id, upstream_model = split_route(route)
         if not is_chat:
-            connection = self.settings["providers"][provider_id]
+            connection = selected_settings["providers"][provider_id]
         if is_chat:
             if not native_search_available(spec, connection, provider_id):
                 # Recheck the live route: Chat's model list may predate a refresh.
@@ -627,11 +682,7 @@ class Handler(BaseHTTPRequestHandler):
     # routes sit beside the LLM routes instead of flowing through plan().
     # ------------------------------------------------------------------
     def _devin_key(self):
-        # A test-harness key override wins, exactly like Runtime.provider_key().
-        if self.runtime.key is not None:
-            return self.runtime.key
-        key, _source = credentials(self.runtime.settings, "devin")
-        return key
+        return self.runtime.provider_key("devin")
 
     def _devin_org_id(self):
         connection = self.runtime.settings.get("providers", {}).get("devin", {})
@@ -1546,7 +1597,7 @@ def catalogue_command_result(settings, root, lifecycle):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=["inspect", "validate", "save", "discover", "refresh-all", "prepare-launch", "activate", "restore", "serve", "codex-status", "codex-projects", "codex-prepare", "codex-activate", "codex-restore", "codex-accent", "cli-accounts", "key-accounts"])
+    parser.add_argument("command", choices=["inspect", "validate", "save", "save-key-metadata", "discover", "refresh-all", "prepare-launch", "activate", "restore", "serve", "codex-status", "codex-projects", "codex-prepare", "codex-activate", "codex-restore", "codex-accent", "cli-accounts", "key-accounts"])
     parser.add_argument("--provider", choices=list(PROVIDERS), default="mistral")
     parser.add_argument("--parent-pipe", action="store_true")
     parser.add_argument("--detach", action="store_true", help="serve: run as a detached service, stopped only on request")
@@ -1624,6 +1675,9 @@ def main():
         result = CodexProfile(root).activate(settings, inventory)
     elif args.command == "codex-restore":
         result = CodexProfile(root).restore()
+    elif args.command == "save-key-metadata":
+        settings = save_key_metadata(root, args.provider, json.load(sys.stdin))
+        result = {"saved": True, "settings": settings}
     elif args.command in {"validate", "save"}:
         settings = validate_settings(json.load(sys.stdin))
         if args.command == "save":

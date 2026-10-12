@@ -30,6 +30,7 @@ from provider_registry import (
     _provider,
     _published_ollama_context,
     documented_context,
+    claude_effort_modes,
     validate_connection,
 )
 from devin_agent import catalogue as devin_catalogue
@@ -701,7 +702,21 @@ def _models_from_api(provider_id: str, raw: dict, evidence: str, *, enriched=Non
             if card.get("type") not in (None, "model"):
                 continue
             context, context_evidence = documented_context(provider_id, identifier)
-            reported_context = _first_positive(card.get("context_window"), card.get("max_context_length"))
+            reported_context = _first_positive(card.get("max_input_tokens"), card.get("context_window"), card.get("max_context_length"))
+            caps = card.get("capabilities") if isinstance(card.get("capabilities"), dict) else {}
+            def support(value):
+                if isinstance(value, dict): value = value.get("supported")
+                return value if type(value) is bool else None
+            effort = caps.get("effort")
+            efforts = claude_effort_modes(identifier)
+            if isinstance(effort, dict):
+                efforts = ([] if effort.get("supported") is False else
+                           [level for level in ("low", "medium", "high", "xhigh", "max")
+                            if support(effort.get(level)) is True])
+            reasoning = support(caps.get("thinking"))
+            # Effort works even with thinking disabled; it is still a control
+            # axis the gateway and Chat must expose rather than strip.
+            if efforts: reasoning = True
             models.append(_catalogue_entry(
                 identifier,
                 context=reported_context or context,
@@ -709,6 +724,9 @@ def _models_from_api(provider_id: str, raw: dict, evidence: str, *, enriched=Non
                               "verified_documentation" if context else "unknown"),
                 context_evidence=context_evidence,
                 display_name=card.get("display_name") if isinstance(card.get("display_name"), str) else identifier,
+                reasoning=reasoning, effort_modes=efforts,
+                vision=support(caps.get("image_input")), tools=True,
+                max_output=_first_positive(card.get("max_tokens")),
                 fast_mode=supports_fast_toggle(provider_id, identifier),
                 source="provider_api",
                 evidence=evidence,

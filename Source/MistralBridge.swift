@@ -1034,14 +1034,20 @@ final class BridgeModel: ObservableObject {
         busy = true; defer { busy = false }
         await waitForCatalogueRefresh()
         do {
-            updateClaudeRunning()
-            if running { try await checkIdleGateway() }
-            guard activeRequests == 0 && !anyOwnedHarnessRunning else { throw WorkerError(message: "Quit the desktop sessions using this gateway before changing its key.") }
-            var proposed = settings
+            // Validate the key slot against saved state, independently of any
+            // pending model, endpoint, port or desktop configuration edits.
+            let inspected = try await command("inspect")
+            guard let raw = inspected["settings"],
+                  let bytes = try? JSONSerialization.data(withJSONObject: raw),
+                  let persisted = try? JSONDecoder().decode(RouteSettings.self, from: bytes) else {
+                throw WorkerError(message: "Could not read saved settings before saving the key.")
+            }
+            var proposed = persisted
             proposed.providers[providerID]?.credential_mode = "keychain"
             proposed.providers[providerID]?.credential_revision += 1
+            proposed.providers[providerID]?.key_account = settings.providers[providerID]?.key_account
+            proposed.providers[providerID]?.key_accounts = settings.providers[providerID]?.key_accounts
             _ = try await command("validate", input: JSONEncoder().encode(proposed))
-            if gatewayProcess?.isRunning == true { await stopGateway() }
             // Invalidate account-scoped metadata before replacing the credential.
             // Even a subsequent settings-write failure cannot reuse the old account's list.
             let cache = root.appendingPathComponent("catalogues/" + providerID + ".json")
@@ -1059,8 +1065,28 @@ final class BridgeModel: ObservableObject {
                 status = SecItemAdd(entry as CFDictionary, nil)
             }
             guard status == errSecSuccess else { throw WorkerError(message: "Keychain could not save the key (\(status)).") }
-            secretDraft = ""; settings = proposed
-            try await save()
+            var metadata: [String: Any] = [:]
+            if let id = proposed.providers[providerID]?.key_account { metadata["key_account"] = id }
+            else { metadata["key_account"] = NSNull() }
+            if let accounts = proposed.providers[providerID]?.key_accounts {
+                metadata["key_accounts"] = accounts.map { ["id": $0.id, "label": $0.label] }
+            }
+            let result: [String: Any]
+            do {
+                result = try await command("save-key-metadata", provider: providerID, input: JSONSerialization.data(withJSONObject: metadata))
+            } catch {
+                throw WorkerError(message: "Keychain saved the key, but its settings could not be saved. Click Save key again to retry. " + error.localizedDescription)
+            }
+            guard let raw = result["settings"], let bytes = try? JSONSerialization.data(withJSONObject: raw),
+                  let saved = try? JSONDecoder().decode(RouteSettings.self, from: bytes),
+                  let connection = saved.providers[providerID] else {
+                throw WorkerError(message: "The key was saved, but settings could not be refreshed. Reconnect to reload them.")
+            }
+            secretDraft = ""; savedSettings = saved
+            settings.providers[providerID]?.credential_mode = connection.credential_mode
+            settings.providers[providerID]?.credential_revision = connection.credential_revision
+            settings.providers[providerID]?.key_account = connection.key_account
+            settings.providers[providerID]?.key_accounts = connection.key_accounts
             if let info = try? await command("inspect") { readCatalogue(info, modelsKey: "catalog") }
             if keyAccountStates[providerID] != nil { await checkKeyAccounts(providerID) }
             do {
@@ -1068,7 +1094,7 @@ final class BridgeModel: ObservableObject {
                 readCatalogue(catalogue, modelsKey: "models")
                 providerRefreshIssues.removeValue(forKey: providerID)
                 let count = availableModels.filter { $0.provider_id == providerID }.count
-                tell("Key saved. \(count) \(provider.name) models are ready to choose.")
+                tell("Key saved. \(count) \(provider.name) models are ready to choose. Active calls continue; existing API routes use the replacement on their next call. New desktop model selections apply on the next launch.")
             } catch {
                 providerRefreshIssues[providerID] = error.localizedDescription
                 tell("Key saved. Model discovery needs attention: " + error.localizedDescription, error: true)
