@@ -54,7 +54,8 @@ class ClaudeCompatibilityTests(unittest.TestCase):
                 original = prompt(thinking={"type": "adaptive"}, output_config={"effort": level})
                 body = prepare_request("claude", {}, "test-key", original, "claude-opus-5-5", {
                     "reasoning": True, "effort_modes": ["low", "medium", "high", "xhigh", "max"]})["body"]
-                self.assertEqual(body["thinking"], {"type": "adaptive"})
+                self.assertEqual(body["thinking"], {"type": "adaptive",
+                    "block_binding": {"prefix_mismatch_behavior": "drop_block"}})
                 self.assertEqual(body["output_config"]["effort"], level)
                 self.assertEqual(original["thinking"], {"type": "adaptive"})
         body = prepare_request("claude", {}, "test-key", prompt(output_config={"effort": "ultra"}),

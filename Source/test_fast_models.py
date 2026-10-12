@@ -76,7 +76,8 @@ class FastModelTests(unittest.TestCase):
         request = prepare_request("claude", None, "key", prompt(speed="fast"),
                                   "claude-opus-5-5", spec)
         self.assertEqual(request["body"]["speed"], "fast")
-        self.assertEqual(request["headers"]["anthropic-beta"], "fast-mode-2026-02-01")
+        self.assertEqual(set(request["headers"]["anthropic-beta"].split(",")),
+                         {"fast-mode-2026-02-01", "thinking-binding-controls-2026-08-01"})
         # The Codex app sends its Fast tier as "priority"; older rows sent "fast".
         for tier in ("fast", "priority"):
             via_codex = prepare_request("claude", None, "key", prompt(service_tier=tier),
@@ -86,7 +87,7 @@ class FastModelTests(unittest.TestCase):
         standard = prepare_request("claude", None, "key", prompt(speed="standard"),
                                    "claude-opus-5-5", spec)
         self.assertNotIn("speed", standard["body"])
-        self.assertNotIn("anthropic-beta", standard["headers"])
+        self.assertEqual(standard["headers"]["anthropic-beta"], "thinking-binding-controls-2026-08-01")
         for model in ("claude-opus-4-7", "claude-opus-4-6"):
             with self.subTest(model=model), self.assertRaises(ProviderError):
                 prepare_request("claude", None, "key", prompt(speed="fast"),
