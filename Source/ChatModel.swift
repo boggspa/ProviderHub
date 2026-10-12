@@ -820,11 +820,12 @@ struct ChatParsedEvent {
             return (try? decoder.decode(ChatEventField<T>.self, from: line))?.value
         }
         switch event["event"] as? String {
-        case "selected": fields["entries"] = field([ChatEntry].self, "entries") ?? []
+        case "selected", "snapshot": fields["entries"] = field([ChatEntry].self, "entries") ?? []
         case "entry": fields["entry"] = field(ChatEntry.self, "entry")
         case "catalogue": fields["models"] = field([ChatRoute].self, "models") ?? []
         case "chats": fields["chats"] = field([ChatSummary].self, "chats") ?? []
         case "team": fields["team"] = field(ChatTeamSnapshot.self, "team")
+        case "blackboard": fields["blackboard"] = field(ChatBlackboardSnapshot.self, "blackboard")
         default: break
         }
     }

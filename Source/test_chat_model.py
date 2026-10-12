@@ -983,6 +983,11 @@ import Combine
             }
         }
         check(model.entries.last!.text.hasSuffix("after snapshot"), "reader reordered snapshot and delta")
+        let paneSnapshot = try JSONSerialization.data(withJSONObject: ["event":"snapshot", "chat":"large", "entries":largeEntries])
+        let parsedPane = ChatParsedEvent(line: paneSnapshot)!
+        check((parsedPane.fields["entries"] as? [ChatEntry])?.count == 5000, "pane snapshot decoding fell back to the main actor")
+        let preparedBoard = ChatParsedEvent(line: Data(#"{"event":"blackboard","chat":"large","blackboard":{"posts":[],"attachments":[],"limits":{"posts":96,"bodyBytes":16384,"boardBytes":524288,"usedBytes":0,"attachments":24,"attachmentBytes":20971520}}}"#.utf8))!
+        check(preparedBoard.fields["blackboard"] is ChatBlackboardSnapshot, "Blackboard decoding fell back to the main actor")
 
         // The Team Blackboard is per-chat inspector state: snapshots, correlated commands, no active work.
         var boardCommands: [[String: Any]] = []
