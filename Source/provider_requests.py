@@ -28,6 +28,61 @@ from qwen_provider import QwenError, normalize_controls as qwen_controls
 from minimax_provider import MiniMaxError, normalize_controls as minimax_controls
 
 
+CLAUDE_THINKING_BINDING_BETA = "thinking-binding-controls-2026-08-01"
+# These exact models already use adaptive thinking when the field is omitted.
+# Making that default explicit lets Responses and Chat attach binding controls
+# without enabling thinking on a legacy model whose default is off.
+_CLAUDE_DEFAULT_ADAPTIVE = {
+    "claude-fable-5-1", "claude-mythos-5-1", "claude-fable-5", "claude-mythos-5",
+    "claude-mythos-preview", "claude-opus-5-5", "claude-sonnet-5-5",
+    "claude-haiku-5-5", "claude-opus-5", "claude-sonnet-5",
+}
+
+
+def _claude_thinking_binding(body: dict, model: str, headers: dict) -> dict:
+    """Let Anthropic discard prefix-bound replay that the gateway cannot verify.
+
+    Context compaction, changed tools and desktop system prompts can invalidate
+    opaque signatures. Keep blocks byte-for-byte and let the API validate them,
+    rather than editing signatures or retrying the same permanent 400.
+    """
+    thinking = body.get("thinking")
+    if thinking is None and model in _CLAUDE_DEFAULT_ADAPTIVE:
+        thinking = body["thinking"] = {"type": "adaptive"}
+    mode = thinking.get("type") if isinstance(thinking, dict) else None
+    if mode in {"adaptive", "enabled"}:
+        binding = thinking.setdefault("block_binding", {})
+        if not isinstance(binding, dict):
+            raise ProviderError("thinking.block_binding must be an object.")
+        # An explicit caller policy remains authoritative, including strict
+        # error behavior. Negotiate the beta for either valid policy.
+        policy = binding.setdefault("prefix_mismatch_behavior", "drop_block")
+        tokens = (headers.get("anthropic-beta", "") + "," + CLAUDE_THINKING_BINDING_BETA).split(",")
+        headers["anthropic-beta"] = ",".join(dict.fromkeys(token.strip() for token in tokens if token.strip()))
+        return {"thinking_prefix_mismatch_behavior": policy}
+
+    # disabled/between_tools cannot carry block_binding. A model with an
+    # omitted off-by-default configuration must stay off. Remove replay-only
+    # thinking in these cases, retaining text, tool calls and tool results.
+    removed = 0
+    messages = []
+    for message in body["messages"]:
+        content = message.get("content")
+        if message.get("role") == "assistant" and isinstance(content, list):
+            kept = [block for block in content if not isinstance(block, dict)
+                    or block.get("type") not in {"thinking", "redacted_thinking"}]
+            count = len(content) - len(kept)
+            removed += count
+            if count:
+                if not kept: continue
+                message["content"] = kept
+        messages.append(message)
+    if removed:
+        body["messages"] = messages
+        return {"thinking_replay_blocks_removed": removed}
+    return {}
+
+
 def _valid_model_id(value: str) -> str:
     if not isinstance(value, str) or not _MODEL_ID.fullmatch(value):
         raise ProviderError("Upstream model ID is invalid.")
@@ -1051,6 +1106,7 @@ def prepare_request(
             headers["anthropic-beta"] = CLAUDE_FAST_BETA
         _apply_native_model_limits(body, model_spec, provider_id, estimate_factor)
         if provider_id == "claude":
+            control_compatibility.update(_claude_thinking_binding(body, upstream_model, headers))
             adapted = _claude_tool_schemas(body)
             if adapted: control_compatibility["tool_schema_root_combinators"] = adapted
             _claude_prompt_cache(body)

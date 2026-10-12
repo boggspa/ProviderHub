@@ -390,7 +390,11 @@ class Runtime:
         if provider_id == "mistral":
             payload = apply_mistral_prefix(payload)
             validate_mistral_roles(payload)
-        rewritten = rewrite_context_reminders(payload, context, estimate)
+        # A native Claude signature is bound to its original system/messages.
+        # Rewriting old remaining-token reminders on each call invalidates
+        # that prefix even in an otherwise append-only tool loop. The native
+        # request still enforces real context/output limits below.
+        rewritten = payload if provider_id == "claude" else rewrite_context_reminders(payload, context, estimate)
         reminders_rewritten = rewritten is not payload
         payload = rewritten
         key = (self.key if self.key is not None else credentials(selected_settings, provider_id)[0]) if is_chat else self.provider_key(provider_id)
