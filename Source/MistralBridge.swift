@@ -1150,6 +1150,42 @@ final class BridgeModel: ObservableObject {
         keyAccountStates[provider]?.append(KeyAccountState(id: account.id, label: account.label, active: true, found: false))
     }
 
+    /// Apply key-account metadata without saving unrelated pending edits or
+    /// interrupting calls. The worker checks the primary slot already has a key.
+    func saveKeyAccounts(_ provider: String) async {
+        guard !busy, keyAccountProviders.contains(provider) else { return }
+        busy = true; defer { busy = false }
+        do {
+            var metadata: [String: Any] = [:]
+            if let id = settings.providers[provider]?.key_account { metadata["key_account"] = id }
+            else { metadata["key_account"] = NSNull() }
+            metadata["key_accounts"] = (settings.providers[provider]?.key_accounts ?? []).map { ["id": $0.id, "label": $0.label] }
+            let result = try await command("save-key-accounts", provider: provider,
+                                           input: JSONSerialization.data(withJSONObject: metadata))
+            guard let raw = result["settings"], let bytes = try? JSONSerialization.data(withJSONObject: raw),
+                  let persisted = try? JSONDecoder().decode(RouteSettings.self, from: bytes),
+                  let connection = persisted.providers[provider] else {
+                throw WorkerError(message: "Account settings were saved but could not be refreshed. Reconnect to reload them.")
+            }
+            savedSettings = persisted
+            settings.providers[provider]?.key_account = connection.key_account
+            settings.providers[provider]?.key_accounts = connection.key_accounts
+            await checkKeyAccounts(provider)
+            if connection.credential_mode == "keychain" {
+                do {
+                    let catalogue = try await command("discover", provider: provider)
+                    readCatalogue(catalogue, modelsKey: "models")
+                    providerRefreshIssues.removeValue(forKey: provider)
+                } catch {
+                    providerRefreshIssues[provider] = error.localizedDescription
+                    tell("Primary key saved. Refresh its catalogue when available: " + error.localizedDescription, error: true)
+                    return
+                }
+            }
+            tell("Primary key saved. Existing API calls continue; the next call uses this key. Chat keeps its independently selected account.")
+        } catch { tell(error.localizedDescription, error: true) }
+    }
+
     /// Forget an extra key slot and delete its Keychain item; the default
     /// slot cannot be removed.
     func removeKeyAccount(_ provider: String, id: String) {

@@ -112,11 +112,11 @@ def _cli_accounts(provider_id: str, value) -> list[dict]:
 #: and a personal account). Each extra key is its own Keychain item under the
 #: hub's service, named ``<credential_account>.<id>``; the default slot keeps
 #: the bare ``credential_account`` name, so settings written before this
-#: field existed keep reading the same item. Subscriptions (Claude, Codex,
-#: AntiGravity, Devin) and Muse's minted key are deliberately left out.
-KEY_ACCOUNT_PROVIDERS = frozenset({
-    "mistral", "kimi", "mimo", "deepseek", "cerebras", "gemini", "grok",
-    "qwen-token-plan", "minimax", "openrouter"})
+#: field existed keep reading the same item. API-capable providers can also
+#: offer CLI subscriptions; API slots are independent of those CLI logins.
+KEY_ACCOUNT_PROVIDERS = frozenset(
+    provider for provider, descriptor in PROVIDERS.items()
+    if descriptor.get("credential_account") is not None)
 MAX_KEY_ACCOUNTS = 8
 
 
