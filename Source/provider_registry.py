@@ -593,6 +593,24 @@ def documented_context(provider_id: str, identifier: str) -> tuple[int | None, s
 
 
 _MUSE_MODEL_METADATA = {
+    # Launched 2026-10-12. Membership still comes from this account's API
+    # list; Wonder Full is subscription-only in Muse Code, so it has no
+    # invented API row here. No API output ceiling was documented.
+    "muse-wonder-1.0": {
+        "display_name": "Muse Wonder 1.0",
+        "context": 1048576,
+        "tools": True,
+        "vision": True,
+        "reasoning": True,
+        "streaming": True,
+        "adaptive_thinking": True,
+        "effort_modes": list(_MUSE_EFFORT_RANKS),
+        "fast_mode": False,
+        "parallel_tool_calls": True,
+        "tool_choice_modes": ["auto"],
+        "reasoning_history": "native",
+        "metadata_evidence": "https://dev.meta.ai/docs/models#muse-wonder",
+    },
     "muse-spark-1.3": {
         "display_name": "Muse Spark 1.3",
         "context": 1048576,
