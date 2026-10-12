@@ -100,7 +100,7 @@ BUILD_IDENTITY = build_identity()
 MAX_PROVIDER_REQUESTS = 16
 
 
-def save_key_metadata(root: Path, provider_id: str, value: dict) -> dict:
+def save_key_metadata(root: Path, provider_id: str, value: dict, *, credential_saved=True) -> dict:
     """Persist only the credential slot, never a pane's pending routing edits."""
     if provider_id not in PROVIDERS or not PROVIDERS[provider_id].get("credential_account"):
         raise BridgeError("This provider does not have an API-key slot.")
@@ -108,13 +108,20 @@ def save_key_metadata(root: Path, provider_id: str, value: dict) -> dict:
         raise BridgeError("Save key accepts only API-key account metadata.")
     settings = load_settings(root)
     connection = settings["providers"][provider_id]
-    connection["credential_mode"] = "keychain"
-    connection["credential_revision"] += 1
+    if credential_saved:
+        connection["credential_mode"] = "keychain"
+        connection["credential_revision"] += 1
     for field in ("key_account", "key_accounts"):
         if field in value:
             connection.pop(field, None)
             if value[field] is not None: connection[field] = value[field]
     settings = validate_settings(settings)
+    if not credential_saved:
+        # Selecting an existing primary key must not overwrite its secret or
+        # turn a live subscription route into a different credential source.
+        if settings["providers"][provider_id]["credential_mode"] == "keychain":
+            if not any(row["active"] and row["found"] for row in key_account_states(settings, provider_id)):
+                raise BridgeError("Save a key in the selected account before making it primary.")
     private_directory(root)
     atomic_json(root / "settings.json", settings)
     return settings
@@ -1610,7 +1617,7 @@ def catalogue_command_result(settings, root, lifecycle):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=["inspect", "validate", "save", "save-key-metadata", "discover", "refresh-all", "prepare-launch", "activate", "restore", "serve", "codex-status", "codex-projects", "codex-prepare", "codex-activate", "codex-restore", "codex-accent", "cli-accounts", "key-accounts"])
+    parser.add_argument("command", choices=["inspect", "validate", "save", "save-key-metadata", "save-key-accounts", "discover", "refresh-all", "prepare-launch", "activate", "restore", "serve", "codex-status", "codex-projects", "codex-prepare", "codex-activate", "codex-restore", "codex-accent", "cli-accounts", "key-accounts"])
     parser.add_argument("--provider", choices=list(PROVIDERS), default="mistral")
     parser.add_argument("--parent-pipe", action="store_true")
     parser.add_argument("--detach", action="store_true", help="serve: run as a detached service, stopped only on request")
@@ -1688,8 +1695,9 @@ def main():
         result = CodexProfile(root).activate(settings, inventory)
     elif args.command == "codex-restore":
         result = CodexProfile(root).restore()
-    elif args.command == "save-key-metadata":
-        settings = save_key_metadata(root, args.provider, json.load(sys.stdin))
+    elif args.command in {"save-key-metadata", "save-key-accounts"}:
+        settings = save_key_metadata(root, args.provider, json.load(sys.stdin),
+                                     credential_saved=args.command == "save-key-metadata")
         result = {"saved": True, "settings": settings}
     elif args.command in {"validate", "save"}:
         settings = validate_settings(json.load(sys.stdin))

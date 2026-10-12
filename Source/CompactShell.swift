@@ -661,6 +661,7 @@ private struct SubscriptionPane: View {
             PaneHeader(presentation: provider.presentation, title: provider.presentation.displayProvider, subtitle: provider.id == "devin" ? "Agent sessions" : "Subscription · CLI route", accent: provider.presentation.color, state: (state.text, state.color))
             SectionLabel(text: provider.id == "devin" ? "Credential" : "Accounts")
             if provider.id == "devin" {
+                KeyAccountsSection(model: model, provider: provider.id).controlSize(.small)
                 HStack(spacing: 8) {
                     SecureField("Devin API key (cog_ / pat_ / apk_)", text: $model.secretDraft).textFieldStyle(.roundedBorder).controlSize(.small)
                     Button("Save key") { Task { await model.saveKey() } }.controlSize(.small).disabled(model.busy || model.secretDraft.isEmpty)
@@ -670,6 +671,7 @@ private struct SubscriptionPane: View {
                     Text("Installed CLI").tag("cli"); Text("Paste a key").tag("keychain")
                 }.pickerStyle(.segmented).labelsHidden().controlSize(.small).fixedSize()
                 if model.settings.providers[provider.id]?.credential_mode == "keychain" {
+                    if keyAccountProviders.contains(provider.id) { KeyAccountsSection(model: model, provider: provider.id).controlSize(.small) }
                     HStack(spacing: 8) {
                         SecureField("API key", text: $model.secretDraft).textFieldStyle(.roundedBorder).controlSize(.small)
                         Button("Save key") { Task { await model.saveKey() } }.controlSize(.small).disabled(model.busy || model.secretDraft.isEmpty)

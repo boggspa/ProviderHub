@@ -40,7 +40,7 @@ class SettingsTests(unittest.TestCase):
 
     def test_every_listed_provider_accepts_accounts(self):
         for provider in ("mistral", "kimi", "mimo", "deepseek", "cerebras", "gemini", "grok",
-                         "qwen-token-plan", "minimax", "openrouter"):
+                         "qwen-token-plan", "minimax", "openrouter", "claude", "codex", "muse", "devin"):
             with self.subTest(provider=provider):
                 value = settings(provider, [{"id": "work", "label": "Work"}], "work")
                 self.assertEqual(value["providers"][provider]["key_account"], "work")
@@ -54,9 +54,7 @@ class SettingsTests(unittest.TestCase):
             ("mistral", [{"id": "w", "label": "W"}], "other"),
             ("mistral", None, "w"),
             ("mistral", [{"id": str(i), "label": "A"} for i in range(9)], None),
-            ("muse", [{"id": "w", "label": "W"}], None),
-            ("claude", [{"id": "w", "label": "W"}], None),
-            ("devin", [{"id": "w", "label": "W"}], None),
+            ("ollama", [{"id": "w", "label": "W"}], None),
             ("antigravity", [{"id": "w", "label": "W"}], None),
         ]
         for provider, accounts, active in cases:
