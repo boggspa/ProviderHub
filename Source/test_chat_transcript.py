@@ -207,6 +207,17 @@ import Combine
         check(menu.items.contains { $0.action == #selector(NSText.copy(_:)) }, "System Copy missing: \(menu.items.map(\.title))")
         textView.copyMessage(nil)
         check(board.string(forType: .string) == "Whole message", "Copy Message copied the wrong text")
+
+        // File links resolve against the workspace; web links stay the system's.
+        check(ChatFileLink.resolve(URL(string: "https://example.com/x")!, workspace: "/tmp/ws") == nil, "web link resolved as a file")
+        check(ChatFileLink.resolve(URL(string: "mailto:a@b.c")!, workspace: "/tmp/ws") == nil, "mailto resolved as a file")
+        check(ChatFileLink.resolve(URL(string: "build/receipt.json")!, workspace: "/tmp/ws")?.path == "/tmp/ws/build/receipt.json",
+              "relative link not anchored to the workspace")
+        check(ChatFileLink.resolve("/Users/me/a b.txt", workspace: nil)?.path == "/Users/me/a b.txt", "absolute path lost")
+        check(ChatFileLink.resolve(URL(string: "file:///tmp/ws/x.md")!, workspace: nil)?.path == "/tmp/ws/x.md", "file URL lost")
+        check(ChatFileLink.resolve(URL(string: "receipt.json")!, workspace: nil)?.path
+              == (NSHomeDirectory() as NSString).appendingPathComponent("receipt.json"), "relative link without a workspace should use home")
+        check(ChatFileLink.resolve(URL(string: "receipt%20two.json")!, workspace: "/tmp/ws")?.path == "/tmp/ws/receipt two.json", "percent encoding kept")
         var pinned = 0
         textView.blackboardPin = { pinned += 1 }
         _ = textView.menu(for: click)
