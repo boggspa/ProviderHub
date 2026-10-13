@@ -421,6 +421,7 @@ struct Item: ChatTranscriptItem {
     var id: String; var kind: String; var text = ""; var route = "codex/sol"
     var time: Double? = nil
     var tool: String? = nil; var summary: String? = nil; var detail: String? = nil
+    var isError = false
     var memberID: String? = nil; var memberName: String? = nil
     var agentID: String? = nil; var agentIDs: [String]? = nil
     var changedFiles: [String] = []
@@ -438,6 +439,45 @@ struct Item: ChatTranscriptItem {
             Item(id: id, kind: "assistant", text: text, route: route, memberID: member.id, memberName: member.name)
         }
         typealias Segment = ChatTranscriptSegment<Item>
+
+        // Reaction tools only update the target message's chips. Filter them
+        // before section grouping, even if another peer reacts first.
+        let reaction = tool("reaction", "react_to_message", member: opus)
+        let withdrawn = tool("withdrawn", "react_to_message", member: opus)
+        let reactedTo = Item(id: "reacted-to", kind: "user", text: "Go")
+        check(Segment.outline([reactedTo, reaction, withdrawn]) { _ in false }.map(\.id) == ["reacted-to"],
+              "Reaction-only turn left a tool row or speaker header")
+        check(Segment.outline([reaction], open: true) { _ in true }.isEmpty,
+              "Live reaction tool appeared in the transcript")
+        check(Segment.outline([reaction, tool("work-sol"), tool("work-opus", member: opus)]) { _ in false }.map(\.id) ==
+              ["speaker-work-sol", "work-sol", "speaker-work-opus", "work-opus"], "Hidden reactor reordered peer sections")
+        check(Segment.outline([tool("before-reaction"), reaction, tool("after-reaction")]) { _ in false }.map(\.id) ==
+              ["speaker-before-reaction", "before-reaction", "after-reaction"], "Reaction padded the Worked fold count")
+        check(Segment.outline([reply("peer-reply", "Done", member: opus), reaction, reply("next-reply", "Thanks")]) { _ in false }.map(\.id) ==
+              ["speaker-peer-reply", "peer-reply", "speaker-next-reply", "next-reply"], "Peer reaction left duplicate presentation")
+        var failedReaction = reaction; failedReaction.id = "failed-reaction"; failedReaction.isError = true
+        check(Segment.outline([reactedTo, failedReaction]) { _ in false }.map(\.id) ==
+              ["reacted-to", "speaker-failed-reaction", "failed-reaction"], "Failed reaction lost its error row")
+        var soloReaction = reaction; soloReaction.memberID = nil; soloReaction.memberName = nil
+        check(Segment.outline([reactedTo, soloReaction]) { _ in false }.map(\.id) == ["reacted-to"],
+              "Legacy unassigned reaction tool appeared")
+        check(reaction.tool == "react_to_message", "Presentation mutated recorded history")
+
+        let clusters = ChatReactionCluster.group([
+            ("👍", "dave", "Dave"), ("❤️", "opus", "Opus"), ("👍", "sol", "Sol"), ("👍", "user", "You")
+        ])
+        check(clusters.map(\.emoji) == ["👍", "❤️"], "Emoji group arrival order changed")
+        check(clusters.map(\.label) == ["Dave + 2 more", "Opus"], "First reactor attribution or extra count lost")
+        check(clusters[0].caption == "Dave, Sol and You reacted 👍", "Hover omitted reactors")
+        check(clusters[0].mine && !clusters[1].mine, "User toggle ownership was inferred from the first reactor")
+        let afterWithdrawal = ChatReactionCluster.group([("👍", "sol", "Sol"), ("👍", "user", "You")])
+        check(afterWithdrawal[0].label == "Sol + 1 more", "Withdrawing the first reaction kept stale attribution")
+        let replaced = ChatReactionCluster.group([("😂", "dave", "Dave"), ("👍", "sol", "Sol")])
+        check(replaced.map(\.label) == ["Dave", "Sol"], "Replacing emoji kept stale group attribution")
+        check(ChatReactionCluster.group([]).isEmpty, "Empty message invented reactions")
+        check(ChatReactionCluster.group([("👍", "user", " ")])[0].label == "You", "Unnamed user attribution")
+        check(ChatReactionCluster.group([("👍", "peer", "")])[0].label == "Team member", "Unnamed member attribution")
+
         var opening = tool("timed-opening"); opening.time = 1791763020
         var later = tool("timed-later"); later.time = 1791763080
         let timedSection = Segment.outline([opening, later]) { _ in false }

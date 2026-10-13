@@ -287,17 +287,21 @@ withdraw. Without an ID it lands on your latest message. Members are told to
 react now and again when it fits, for acknowledgement, agreement, amusement,
 mild annoyance or fun, never on every message and never instead of working,
 answering or recording a decision. A member cannot react to its own reply,
-and reactions go on messages only, never on tool rows or notices. Each call
-is a small tool row ("Reacted 👍"), and reactions do not count as progress
+and reactions go on messages only, never on tool rows or notices. Successful
+calls appear only as reactions on their target messages; their tool records
+stay in saved history without adding transcript rows or speaker headers.
+Failed calls still show their error. Reactions do not count as progress
 evidence in Task mode.
 
 You react from a message's context menu (**React** offers the six tapbacks)
 or by clicking an existing reaction chip to add yours or withdraw it. One
 reaction per author per message: a new emoji replaces the old one, and a
 message holds at most sixteen. Reactions are drawn as small capsules grouped
-by emoji with a count, hanging off the bottom trailing corner of your bubble
-or sitting in a quiet row under a reply, which stays a section, never a
-bubble; hovering names who reacted. They are saved on the entry itself, so
+by emoji, naming the first reactor and any others ("Dave + 2 more 👍"), hanging
+off the bottom trailing corner of your bubble or sitting in a quiet row under
+a reply, which stays a section, never a bubble. Hovering names everyone who
+reacted; on narrow panes the chips stack so they stay within the message.
+They are saved on the entry itself, so
 they share the chat's atomic save and the Team checkpoint log, reach the
 window as an ordinary entry update and survive reopening. They are
 presentation only: nothing projects them into any model's context, and they

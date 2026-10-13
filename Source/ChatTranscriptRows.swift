@@ -52,60 +52,45 @@ struct ChatSpeakerHeader: View {
     }
 }
 
-/// Reactions under a message as small capsules grouped by emoji with a count,
-/// iMessage tapback style; hovering names who reacted. With `onReact`, clicking
-/// a capsule adds the user's own reaction with that emoji or withdraws it.
+/// Reactions attached to a message, grouped by emoji and naming the first
+/// reactor ("Dave + 2 more 👍"); hovering names everyone. With `onReact`,
+/// clicking a capsule adds the user's reaction with that emoji or withdraws it.
 struct ChatReactionsRow: View {
     var reactions: [ChatReaction]
     /// (emoji, the user already reacted with it) -> add or withdraw.
     var onReact: ((String, Bool) -> Void)? = nil
     @Environment(\.chatTextStyle) private var textStyle
 
-    struct Cluster: Identifiable {
-        var emoji: String
-        var names: [String]
-        var mine: Bool
-        var id: String { emoji }
-        var caption: String {
-            let who = names.count <= 2 ? names.joined(separator: " and ")
-                : names.dropLast().joined(separator: ", ") + " and " + names[names.count - 1]
-            return who + " reacted " + emoji
-        }
-    }
-
-    static func clusters(_ reactions: [ChatReaction]) -> [Cluster] {
-        var order: [String] = []
-        var names: [String: [String]] = [:]
-        var mine = Set<String>()
-        for reaction in reactions {
-            if names[reaction.emoji] == nil { order.append(reaction.emoji); names[reaction.emoji] = [] }
-            names[reaction.emoji]?.append(reaction.authorName)
-            if reaction.author == "user" { mine.insert(reaction.emoji) }
-        }
-        return order.map { Cluster(emoji: $0, names: names[$0] ?? [], mine: mine.contains($0)) }
+    private var clusters: [ChatReactionCluster] {
+        ChatReactionCluster.group(reactions.map { (emoji: $0.emoji, author: $0.author, name: $0.authorName) })
     }
 
     var body: some View {
-        HStack(spacing: textStyle.scaled(4)) {
-            ForEach(Self.clusters(reactions)) { cluster in
-                if let onReact {
-                    Button { onReact(cluster.emoji, cluster.mine) } label: { capsule(cluster) }
-                        .buttonStyle(.plain)
-                        .help(cluster.caption)
-                        .accessibilityLabel(cluster.caption)
-                } else {
-                    capsule(cluster).help(cluster.caption).accessibilityLabel(cluster.caption)
-                }
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: textStyle.scaled(4)) { chips }
+                .fixedSize(horizontal: true, vertical: false)
+            VStack(alignment: .leading, spacing: textStyle.scaled(4)) { chips }
+        }
+    }
+
+    @ViewBuilder private var chips: some View {
+        ForEach(clusters) { cluster in
+            if let onReact {
+                Button { onReact(cluster.emoji, cluster.mine) } label: { capsule(cluster) }
+                    .buttonStyle(.plain)
+                    .help(cluster.caption)
+                    .accessibilityLabel(cluster.caption)
+            } else {
+                capsule(cluster).help(cluster.caption).accessibilityLabel(cluster.caption)
             }
         }
     }
 
-    private func capsule(_ cluster: Cluster) -> some View {
-        HStack(spacing: textStyle.scaled(3)) {
+    private func capsule(_ cluster: ChatReactionCluster) -> some View {
+        HStack(spacing: textStyle.scaled(4)) {
+            Text(cluster.label).font(textStyle.system(10.5, weight: .semibold))
+                .foregroundStyle(Semantic.secondaryInk).lineLimit(1)
             Text(cluster.emoji).font(textStyle.system(12))
-            if cluster.names.count > 1 {
-                Text("\(cluster.names.count)").font(textStyle.system(10.5, weight: .semibold)).foregroundStyle(Semantic.secondaryInk)
-            }
         }
         .padding(.horizontal, textStyle.scaled(7)).padding(.vertical, textStyle.scaled(3))
         .background(Capsule().fill(Semantic.raisedSurface))
