@@ -170,6 +170,8 @@ final class ChatModel: ObservableObject {
     private var focusedViewChatID: String?
     @Published var models: [ChatRoute] = []
     @Published var connected = false
+    /// A transcript row the activity strip asked the window to show.
+    @Published var jumpRequest: ChatJumpRequest?
     @Published private(set) var webSearchEnabled: Bool
     @Published private(set) var browserUseEnabled = false
     @Published private(set) var pluginStatus: [[String: Any]] = []
