@@ -60,7 +60,10 @@ struct ChatActivity: Identifiable, Equatable {
     static func current(entries: [ChatEntry], team: ChatTeamSnapshot?, busy: Bool, liveEntryIDs: Set<String>,
                         transition: String? = nil, label: (String) -> String) -> [ChatActivity] {
         guard busy else { return [] }
-        let rows = speakers(entries: entries, team: team, liveEntryIDs: liveEntryIDs, label: label)
+        // Match the outline's presentation-only filter so every enabled jump
+        // still names a visible row, including while a reaction is running.
+        let rows = speakers(entries: entries.filter { !$0.isHiddenReaction }, team: team,
+                            liveEntryIDs: liveEntryIDs, label: label)
         guard let transition, !transition.isEmpty else { return rows }
         return rows.map { row in
             var row = row

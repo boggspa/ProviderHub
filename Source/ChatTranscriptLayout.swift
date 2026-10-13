@@ -28,6 +28,41 @@ extension ChatTranscriptItem {
     var isError: Bool { false }
     var time: Double? { nil }
     var changedFiles: [String] { [] }
+    var isHiddenReaction: Bool { kind == "tool" && tool == "react_to_message" && !isError }
+}
+
+/// The visible attribution for one emoji, in the message's recorded arrival
+/// order. Keep the first reactor on the chip and everyone in its help text.
+struct ChatReactionCluster: Identifiable {
+    var emoji: String
+    var names: [String]
+    var mine: Bool
+    var id: String { emoji }
+    var label: String {
+        let first = names.first ?? "Team member"
+        return names.count > 1 ? first + " + \(names.count - 1) more" : first
+    }
+    var caption: String {
+        let who = names.count <= 2 ? names.joined(separator: " and ")
+            : names.dropLast().joined(separator: ", ") + " and " + names[names.count - 1]
+        return who + " reacted " + emoji
+    }
+
+    static func group(_ reactions: [(emoji: String, author: String, name: String)]) -> [Self] {
+        var result: [Self] = []
+        for reaction in reactions {
+            let recordedName = reaction.name.trimmingCharacters(in: .whitespacesAndNewlines)
+            let name = recordedName.isEmpty ? (reaction.author == "user" ? "You" : "Team member") : recordedName
+            let mine = reaction.author == "user"
+            if let index = result.firstIndex(where: { $0.emoji == reaction.emoji }) {
+                result[index].names.append(name)
+                result[index].mine = result[index].mine || mine
+            } else {
+                result.append(Self(emoji: reaction.emoji, names: [name], mine: mine))
+            }
+        }
+        return result
+    }
 }
 
 /// Recorded wall-clock time only; legacy rows deliberately have no label.
@@ -137,7 +172,12 @@ struct ChatTranscriptSegment<Item: ChatTranscriptItem>: Identifiable {
 
     /// `open` says the last turn is still being worked, so its close-out waits.
     static func outline(_ items: [Item], open: Bool = false, isLive: (Item) -> Bool) -> [ChatTranscriptSegment] {
-        let grouped = sections(items, isLive: isLive)
+        // Hide successful reactions before grouping, so a reaction
+        // never creates a speaker header, reorders peers, or pads a tool fold.
+        // Their records remain available to the runtime and saved history;
+        // failed calls still explain why no reaction appeared on the message.
+        let visible = items.filter { !$0.isHiddenReaction }
+        let grouped = sections(visible, isLive: isLive)
         let arrival = Dictionary(items.enumerated().map { ($0.element.id, $0.offset) }, uniquingKeysWith: { first, _ in first })
         var result: [ChatTranscriptSegment] = []
         var speaker: String?
