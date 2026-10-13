@@ -1,4 +1,4 @@
-# Provider Hub 0.5.8 (build 72)
+# Provider Hub 0.5.9 (build 73)
 
 Use your model accounts inside Claude Desktop, the Codex coding workspace, or Provider Hub's lightweight **Chat with Model…** window. See [Chat in Provider Hub](docs/chat.md) for its tools, attachments, approvals and model switching.
 
@@ -234,7 +234,7 @@ provider-specific reasoning history.
 
 ## What has been checked
 
-Build 67's combined source passes 2,147 pytest tests and 1,788 subtests with CPython 3.13 and Node available, with no skips. Native fixture rendering and pointer checks cover the revised inspector, Blackboard and pane dividers. In earlier live checks, the
+Build 73's combined source passes 2,357 pytest tests and 1,928 subtests with CPython 3.13 and Node available, with no skips. Native fixture rendering and pointer checks cover the revised inspector, Blackboard and pane dividers. In earlier live checks, the
 installed Codex engine completed read/edit/read cycles using Ollama's
 DeepSeek V4 Flash cloud route and Cerebras GPT OSS 120B. Their reported context
 limits were preserved. Other provider translations have deterministic protocol
@@ -242,7 +242,7 @@ tests; not every advertised model has been live-tested.
 
 Live Messages and streaming Responses read/edit/read cycles also passed on the
 0.5.0 build for OpenRouter North Mini Code Free and Gemini 3.8 Flash; they have
-not been re-run against 0.5.8. Qwen Token Plan
+not been re-run against 0.5.9. Qwen Token Plan
 returned its exhausted weekly quota response, so its live tool cycle remains
 for verification after quota returns.
 
