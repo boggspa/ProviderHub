@@ -61,7 +61,7 @@ new read/search findings count as progress, as do edits. This bounded comparison
 does not judge the meaning of prose or detect every unproductive workflow.
 
 Parallel execution is the default for existing and new Teams, with the same
-five-member cap. Model requests, file/search reads and transcript recall can
+eight-member cap. Model requests, file/search reads and transcript recall can
 overlap. Patches and shell commands take a cancellable FIFO gate for the chosen
 workspace, including their approval wait. Workspace gates are shared with other
 Chat turns in the same worker using that folder. Reads may observe another
