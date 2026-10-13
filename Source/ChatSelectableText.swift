@@ -5,10 +5,25 @@ private struct ChatBlackboardPinKey: EnvironmentKey {
     static let defaultValue: (() -> Void)? = nil
 }
 
+private struct ChatReactKey: EnvironmentKey {
+    static let defaultValue: ((String) -> Void)? = nil
+}
+
+/// The six iMessage tapbacks, offered in a message's context menu. Members may
+/// use any single emoji; these are the user's quick picks. Declared here, next
+/// to the menu that offers them, so the text view compiles on its own in the
+/// transcript and composer test targets.
+let chatReactionTapbacks = ["❤️", "👍", "👎", "😂", "‼️", "❓"]
+
 extension EnvironmentValues {
     var chatBlackboardPin: (() -> Void)? {
         get { self[ChatBlackboardPinKey.self] }
         set { self[ChatBlackboardPinKey.self] = newValue }
+    }
+    /// The user's reaction on the entry this text belongs to, by emoji.
+    var chatReact: ((String) -> Void)? {
+        get { self[ChatReactKey.self] }
+        set { self[ChatReactKey.self] = newValue }
     }
 }
 
@@ -29,6 +44,7 @@ struct ChatSelectableText: NSViewRepresentable {
     /// The whole entry for **Copy Message**; nil leaves the item out.
     var message: String?
     @Environment(\.chatBlackboardPin) private var blackboardPin
+    @Environment(\.chatReact) private var react
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
@@ -57,6 +73,7 @@ struct ChatSelectableText: NSViewRepresentable {
         if view.textStorage?.isEqual(to: attributed) == false { view.textStorage?.setAttributedString(attributed) }
         view.message = message
         view.blackboardPin = blackboardPin
+        view.react = react
     }
 
     func sizeThatFits(_ proposal: ProposedViewSize, nsView: TextView, context: Context) -> CGSize? {
@@ -235,6 +252,7 @@ struct ChatSelectableText: NSViewRepresentable {
     final class TextView: NSTextView {
         var message: String?
         var blackboardPin: (() -> Void)?
+        var react: ((String) -> Void)?
         /// Injectable so tests never touch the user's clipboard.
         var pasteboard = NSPasteboard.general
 
@@ -247,6 +265,19 @@ struct ChatSelectableText: NSViewRepresentable {
             item.target = self
             let copy = menu.items.firstIndex { $0.action == #selector(NSText.copy(_:)) }
             menu.insertItem(item, at: copy.map { $0 + 1 } ?? 0)
+            if react != nil {
+                // The six tapbacks as a submenu, like iMessage's long press.
+                let submenu = NSMenu(title: "React")
+                for emoji in chatReactionTapbacks {
+                    let choice = NSMenuItem(title: emoji, action: #selector(reactWith(_:)), keyEquivalent: "")
+                    choice.target = self
+                    choice.representedObject = emoji
+                    submenu.addItem(choice)
+                }
+                let parent = NSMenuItem(title: "React", action: nil, keyEquivalent: "")
+                parent.submenu = submenu
+                menu.addItem(parent)
+            }
             if blackboardPin != nil {
                 let pin = NSMenuItem(title: "Pin to Blackboard", action: #selector(pinToBlackboard(_:)), keyEquivalent: "")
                 pin.target = self
@@ -256,6 +287,11 @@ struct ChatSelectableText: NSViewRepresentable {
         }
 
         @objc func pinToBlackboard(_ sender: Any?) { blackboardPin?() }
+
+        @objc func reactWith(_ sender: Any?) {
+            guard let emoji = (sender as? NSMenuItem)?.representedObject as? String else { return }
+            react?(emoji)
+        }
 
         @objc func copyMessage(_ sender: Any?) {
             guard let message else { return }

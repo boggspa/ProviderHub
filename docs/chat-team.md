@@ -270,6 +270,34 @@ thumbnail code on them. It checks the bounds, frame count and size, waveform
 amplitude, PDF ink, graceful failure on truncated and corrupt files, cache
 hits in memory and on disk, and that no render ran on the main thread.
 
+## Reactions
+
+Members and you can leave one emoji on a message, iMessage tapback style. A
+member calls `react_to_message` with an emoji (any single emoji; the tool
+names the six tapbacks ❤️ 👍 👎 😂 ‼️ ❓ as examples), optionally an
+`entry_id` for a peer's reply or an earlier user message, and `remove` to
+withdraw. Without an ID it lands on your latest message. Members are told to
+react now and again when it fits, for acknowledgement, agreement, amusement,
+mild annoyance or fun, never on every message and never instead of working,
+answering or recording a decision. A member cannot react to its own reply,
+and reactions go on messages only, never on tool rows or notices. Each call
+is a small tool row ("Reacted 👍"), and reactions do not count as progress
+evidence in Task mode.
+
+You react from a message's context menu (**React** offers the six tapbacks)
+or by clicking an existing reaction chip to add yours or withdraw it. One
+reaction per author per message: a new emoji replaces the old one, and a
+message holds at most sixteen. Reactions are drawn as small capsules grouped
+by emoji with a count, hanging off the bottom trailing corner of your bubble
+or sitting in a quiet row under a reply, which stays a section, never a
+bubble; hovering names who reacted. They are saved on the entry itself, so
+they share the chat's atomic save and the Team checkpoint log, reach the
+window as an ordinary entry update and survive reopening. They are
+presentation only: nothing projects them into any model's context, and they
+are never read as approval, status or instructions. `test_chat_reactions.py`
+covers emoji validation, the bounded store, the member tool and the user
+command.
+
 ## Permissions and interruptions
 
 All members have workspace tools, background process tools, recall/notebook tools and
