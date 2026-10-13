@@ -225,7 +225,7 @@ class ParallelTeamTests(unittest.TestCase):
             wire = json.dumps(payload)
             self.assertEqual(wire.count("Recorded peer answer"), 1)
             self.assertNotIn("Unfinished peer fragment", wire)
-            self.assertIn("Recorded Team output", wire)
+            self.assertIn("Peer preview", wire)
             return call("read_file", {"path": "third"})
         def no_repeat(payload, cancel, delta):
             self.assertEqual(json.dumps(payload).count("Recorded peer answer"), 1)
@@ -263,7 +263,7 @@ class ParallelTeamTests(unittest.TestCase):
         self.assertNotIn("Recorded later result", json.dumps(delta))
         self.assertEqual(chat_team.shared_context(restored, restored_reader, parent.choice(reader["choice"])), [])
 
-    def test_bounded_shared_delta_defers_overflow_then_delivers_it_once(self):
+    def test_bounded_shared_delta_keeps_latest_preview_without_backfilling_old_output(self):
         from chat_runtime import entry
         parent = self.service([[], []])
         writer, reader = self.configure(parent)
@@ -275,11 +275,11 @@ class ParallelTeamTests(unittest.TestCase):
             self.assertIn("Newer finding", json.dumps(first))
             self.assertNotIn("Earlier finding", json.dumps(first))
             second = chat_team.shared_context(parent.chat, reader, parent.choice(reader["choice"]))
-            self.assertIn("Earlier finding", json.dumps(second))
-            self.assertNotIn("Newer finding", json.dumps(second))
+            self.assertEqual(second, [])
+            self.assertIn(older, parent.chat["entries"])
             self.assertEqual(chat_team.shared_context(parent.chat, reader, parent.choice(reader["choice"])), [])
 
-    def test_shared_delta_shortens_peer_tool_output_and_bounds_the_backlog(self):
+    def test_shared_delta_sends_tool_summary_and_bounded_reply_previews(self):
         from chat_runtime import entry
         parent = self.service([[], []])
         writer, reader = self.configure(parent)
@@ -288,18 +288,20 @@ class ParallelTeamTests(unittest.TestCase):
         parent.chat["entries"] += [tool, reply]
         delta = json.dumps(chat_team.shared_context(parent.chat, reader, parent.choice(reader["choice"])))
         self.assertNotIn("TAIL", delta)
-        self.assertIn("T" * chat_team.MAX_SHARED_TOOL, delta)
-        self.assertIn("KEPT", delta)
+        self.assertNotIn("T" * chat_team.MAX_SHARED_TOOL, delta)
+        self.assertIn("ls", delta)
+        self.assertNotIn("KEPT", delta)
+        self.assertIn(reply["id"], delta)
         self.assertIn("shortened", delta)
         parent.chat["entries"] += [entry("assistant", f"Finding {i} " + "x" * 300, memberID=writer["id"], recorded=True)
                                    for i in range(60)]
-        with patch.object(chat_team, "MAX_SHARED_BYTES", 500), patch.object(chat_team, "MAX_SHARED_BACKLOG", 5):
+        with patch.object(chat_team, "MAX_SHARED_BYTES", 500):
             first = json.dumps(chat_team.shared_context(parent.chat, reader, parent.choice(reader["choice"])))
             self.assertIn("Finding 59 ", first)
-            self.assertIn("54 older peer records were omitted", first)
-            self.assertEqual(len(reader["sharedDeferred"]), 5)
+            self.assertIn("59 additional peer records", first)
+            self.assertEqual(reader["sharedDeferred"], [])
             delivered = [json.dumps(chat_team.shared_context(parent.chat, reader, parent.choice(reader["choice"]))) for _ in range(5)]
-            self.assertIn("Finding 58 ", delivered[0])
+            self.assertTrue(all(item == "[]" for item in delivered))
             self.assertEqual(chat_team.shared_context(parent.chat, reader, parent.choice(reader["choice"])), [])
 
     def test_parallel_notebook_writes_keep_both_source_linked_notes(self):

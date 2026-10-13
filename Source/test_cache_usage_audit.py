@@ -17,6 +17,23 @@ class CacheUsageHTTPTests(unittest.TestCase):
     start_gateway = fixtures.GatewayHubHTTPTests.start_gateway
     request = fixtures.GatewayHubHTTPTests.request
 
+    def test_cli_estimate_is_tagged_in_log_and_excluded_from_reported_totals(self):
+        from protocol import reported_input_tokens
+        self.start_gateway("claude", "claude-opus-5-5", {})
+        estimate = {"input_tokens": 425000, "output_tokens": 0, "provider_hub_usage_source": "estimate"}
+        self.runtime.record("completed", "claude/claude-opus-5-5", 200, estimate, credential_mode="cli", surface="chat")
+        row = json.loads((self.root / "activity.jsonl").read_text().splitlines()[-1])
+        self.assertEqual(row["usage"], estimate)
+        self.assertIsNone(reported_input_tokens(estimate))
+        status = self.runtime.status()
+        self.assertEqual(status["input_tokens"], 0)
+        self.assertEqual(status["estimated_input_tokens"], 425000)
+        self.assertEqual(status["providers"]["claude"]["total_input_tokens"], 0)
+        self.assertEqual(status["providers"]["claude"]["estimated_input_tokens"], 425000)
+        self.runtime.record("completed", "claude/claude-opus-5-5", 200,
+                            {"input_tokens": 12, "output_tokens": 9, "cache_read_input_tokens": 100})
+        self.assertEqual(self.runtime.status()["total_input_tokens"], 112)
+
     def test_messages_completion_records_credential_source_and_surface(self):
         self.start_gateway("claude", "claude-opus-5-5", {})
         body={"model":"claude-fable-5","max_tokens":256,"messages":[{"role":"user","content":"Question"}]}
@@ -66,6 +83,11 @@ import Foundation
   precondition(cached.summary.contains("80.0% of input") && cached.summary.contains("Thinking 80"))
   precondition(cached.summary.contains("5m write 198") && cached.summary.contains("1h write 0"))
   let unknown=HubTokenUsage(["input_tokens":1000,"output_tokens":100])
+  let estimate=HubTokenUsage(["input_tokens":425000,"output_tokens":0,"provider_hub_usage_source":"estimate"])
+  precondition(estimate.summary.contains("Estimated input") && estimate.output==nil && estimate.cacheReadPercent==nil)
+  precondition(estimate.summary.contains("Provider usage unavailable"))
+  let aggregate=HubTokenUsage(["input_tokens":12,"output_tokens":9,"estimated_input_tokens":425000])
+  precondition(aggregate.summary.contains("excluded from reported totals"))
   precondition(unknown.cacheRead==nil && unknown.cacheReadPercent==nil)
   precondition(unknown.summary.contains("Cache telemetry unavailable") && !unknown.summary.contains("Cache read 0"))
   let zero=HubTokenUsage(["input_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0])

@@ -1,9 +1,12 @@
 import Foundation
 import CoreFoundation
 
-/// Provider-reported usage only. Missing cache fields mean unavailable, not
-/// zero hits, and cache totals describe input reuse rather than money/quotas.
+/// Separate provider-reported usage from explicitly marked input estimates.
+/// Missing cache fields mean unavailable, not zero hits; cache totals describe
+/// input reuse rather than money/quotas.
 struct HubTokenUsage {
+    var estimated: Bool
+    var excludedEstimates: Int?
     var input: Int?
     var output: Int?
     var cacheRead: Int?
@@ -19,7 +22,9 @@ struct HubTokenUsage {
                   let integer = value as? Int, integer >= 0 else { return nil }
             return integer
         }
-        input = count(raw["input_tokens"]); output = count(raw["output_tokens"])
+        estimated = raw["provider_hub_usage_source"] as? String == "estimate"
+        excludedEstimates = count(raw["estimated_input_tokens"])
+        input = count(raw["input_tokens"]); output = estimated ? nil : count(raw["output_tokens"])
         cacheRead = count(raw["cache_read_input_tokens"])
         cacheWrite = count(raw["cache_creation_input_tokens"])
         thinking = count((raw["output_tokens_details"] as? [String: Any])?["thinking_tokens"])
@@ -39,6 +44,9 @@ struct HubTokenUsage {
         return Double(cacheRead) / Double(totalInput) * 100
     }
     var summary: String {
+        if estimated {
+            return "Estimated input \(input?.formatted() ?? "unknown") · Provider usage unavailable · Output and cache usage unknown"
+        }
         var fields: [String] = []
         if let cacheRead {
             var read = "Cache read \(cacheRead.formatted())"
@@ -52,6 +60,9 @@ struct HubTokenUsage {
         if let thinking { fields.append("Thinking \(thinking.formatted()) (included in output)") }
         if let write5m { fields.append("5m write \(write5m.formatted())") }
         if let write1h { fields.append("1h write \(write1h.formatted())") }
+        if let excludedEstimates, excludedEstimates > 0 {
+            fields.append("Estimated input \(excludedEstimates.formatted()) (excluded from reported totals)")
+        }
         return fields.joined(separator: " · ")
     }
 }

@@ -140,19 +140,26 @@ The inspector shows status, next step and individual context usage. It uses
 the existing native transcript, lazy stacks and text/table renderer.
 
 Each member has its own native provider history, reasoning state and exact
-model/account connection. Before every model round, the existing shared-context
-logic supplies newly recorded peer replies, tool results and contribution outcomes.
-Members coordinate through that attributed transcript and the shared notebook;
-there is no additional channel. In-flight text and pending tool results stay out
-of model context until their checkpoint. The per-member cursor and deferred
-source IDs are persisted together, so an earlier row finishing later is neither
-skipped nor repeated. Records that do not fit a shared delta wait for the next
-round, keeping only the newest 32 so a busy Team cannot build an unbounded
-backlog. New user messages are preserved, while peer excerpts are bounded to
-48,000 UTF-8 bytes per update, 4,000 characters per reply and 1,500 per tool
-result, since a member can re-read files itself. Source IDs lead back to
-`search_history` and `read_history` for omitted details. Peer output is
-labelled reference material, never new user authorization.
+model/account connection. Before each model round, the shared-context path
+supplies short peer previews with author, route and source ID. Routine delivery
+keeps the newest reply and tool/error notice per peer in that update, within a
+6,000-byte UTF-8 preview budget. Replies have at most 240 preview bytes; tool
+notices have at most 160 and use the tool summary rather than raw output.
+Failed tools include a short error preview. Older and overflow records stay in
+the saved transcript instead of filling later requests with a backlog.
+
+Members choose which details to retrieve through `read_history` (with the source
+ID), `search_history`, and the Blackboard tools. Full user messages and
+corrections are never shortened by the preview budget. Explicit peer mentions
+retain their existing bounded direct-delivery path and reference-only labels.
+The member's own tool results, approvals and dependency outcomes are unchanged.
+No model is asked to summarize the transcript in the background.
+
+In-flight text and pending tool results stay out of peer context until their
+checkpoint. The per-member cursor and unfinished source IDs are persisted
+together, so a row finishing later is delivered once. Complete records remain
+available for explicit recall, including anything omitted from a digest. Peer
+output is reference material, never user authorization.
 
 Members share the chat's source-linked decision notebook. `team_status` also
 accepts bounded `objective`, `findings` and `owned_paths`; these are stored with the next step
@@ -163,8 +170,17 @@ Private model context is trimmed using the smaller of the provider's reported
 window and the configured Team context ceiling (default 200,000 tokens);
 unknown windows use at most 128,000. The inspector shows that effective ceiling.
 Input budgeting reserves 15% plus output and saved notes. These are local budgeting
-estimates, not a promise that a provider accepts every payload. The full visible
-transcript and notebook remain on disk when context is trimmed.
+estimates, not a promise that a provider accepts every payload. When that high
+watermark is crossed, trimming targets 60% of the effective window minus output
+and notes, creating headroom for subsequent tool rounds. Complete tool cycles
+and the newest unit remain intact; an individually oversized newest unit can
+still exceed the target. The full visible transcript and notebook remain on disk.
+
+CLI requests lacking native usage telemetry mark their input count as an
+estimate. Activity details label it, reported gateway totals exclude it, and
+Team usage is marked incomplete rather than claiming a measured token cost.
+A configured Team token cap pauses when usage is unavailable; clearing that cap
+is a user decision. Estimated input is retained separately for diagnostics.
 
 Changing a member's model, account connection, effort, responsibility or
 workspace archives that member's prior private history and starts a fresh

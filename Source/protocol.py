@@ -1463,7 +1463,7 @@ class TokenCalibration:
 
 def reported_input_tokens(usage):
     """Total prompt tokens the provider billed, including cached prefixes."""
-    if not isinstance(usage, dict):
+    if not isinstance(usage, dict) or usage.get("provider_hub_usage_source") == "estimate":
         return None
     total = 0
     seen = False
