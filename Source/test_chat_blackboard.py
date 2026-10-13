@@ -181,6 +181,32 @@ class BlackboardStoreTests(unittest.TestCase):
         blackboard.detach(self.chat, store, users["id"])
         self.assertEqual([item["id"] for item in self.chat["blackboard"]["attachments"]], ["legacy"])
 
+    def test_capacity_is_reported_and_removal_errors_name_the_holder(self):
+        blackboard.post(self.chat, MEMBER, {"key": "api", "body": "Use v2"}, now=NOW)
+        with self.assertRaisesRegex(ValueError, r"key 'api' by author_id 'm2'. That key belongs to Sol \(author_id 'm1'\)"):
+            blackboard.remove(self.chat, key="api", author="m2", allow_user=False)
+        with self.assertRaisesRegex(ValueError, "No Blackboard post matches key 'nope'"):
+            blackboard.remove(self.chat, key="nope", author="m1")
+        posts = blackboard.board(self.chat)["posts"]
+        self.assertEqual(blackboard.capacity(posts), {"posts": 1, "max_posts": 48, "bytes": blackboard._size(posts), "max_bytes": 24_000})
+        text = blackboard.digest(self.chat)["content"][0]["text"]
+        self.assertIn("Capacity: 1/48 posts, ", text)
+        self.assertNotIn("nearly full", text)
+        with patch.object(blackboard, "MAX_POSTS", 4):
+            for index in range(2): blackboard.post(self.chat, MEMBER, {"key": f"k{index}", "body": "x"}, now=NOW)
+            self.assertIn("3/4 posts", blackboard.capacity_note(blackboard.board(self.chat)["posts"]))
+            self.assertIn("nearly full", blackboard.digest(self.chat)["content"][0]["text"])
+            blackboard.post(self.chat, MEMBER, {"key": "k2", "body": "x"}, now=NOW)
+            with self.assertRaisesRegex(ValueError, r"full \(4/4 posts, \d+/24,000 bytes; nearly full.*this post would add \d+ bytes"):
+                blackboard.post(self.chat, MEMBER, {"key": "k3", "body": "x"}, now=NOW)
+        for index in range(14):
+            self.chat["entries"].append({"id": f"e{index}", "kind": "user", "text": "see file",
+                                         "attachments": [{"id": f"f{index}", "name": f"shot{index}.png", "kind": "image", "path": "/private/x"}]})
+        text = blackboard.digest(self.chat)["content"][0]["text"]
+        self.assertIn("shot13.png", text)
+        self.assertNotIn("shot0.png", text)
+        self.assertIn("2 more attachments not listed here; nothing was removed", text)
+
     def test_digest_is_bounded_and_says_what_it_left_out(self):
         self.assertIsNone(blackboard.digest(self.chat))
         for index in range(40):

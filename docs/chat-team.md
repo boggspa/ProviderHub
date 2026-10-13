@@ -196,10 +196,17 @@ permission; members are told to re-read files before relying on them.
 
 The board holds at most 48 posts, 1,500 UTF-8 bytes per body and 24,000 bytes
 of serialized posts. A full board refuses new posts until one is replaced or
-removed; it never silently evicts. Before every member request a digest is
+removed; it never silently evicts. The byte total usually binds before the post
+count, which is why a board can be full at twenty-odd posts. The digest header,
+every `blackboard_post` and `blackboard_read` result and the full-board
+refusal report the capacity used (posts and bytes), with a warning once either
+reaches three quarters, and a refusal says how many bytes the post would have
+added. A `blackboard_remove` for a key another member holds names that
+member's `author_id`, which is what the call needs. Before every member request a digest is
 projected ahead of the conversation, like the decision notebook: newest posts
 first, bodies shortened to 400 bytes, at most 5,000 bytes of posts plus the
-names of up to twelve attachments. It reserves space before context trimming,
+names of the twelve newest attachments and a count of any more. Older
+attachments are listed, not removed; `blackboard_read` lists them all. It reserves space before context trimming,
 is never saved into a member's history, and is replaced by a short notice when
 it would exceed an eighth of the member's context. Helpers, Side Chats and a
 solo chat's model are not offered the tools and cannot change the board; you
