@@ -405,6 +405,26 @@ gpt-oss-120b-medium	GPT-OSS 120B (Medium)
             self.assertIn("default_effort", model)
             self.assertIn("provider_effort_modes", model)
 
+    def test_argon_is_discovered_and_routed_without_a_subscription_gate(self):
+        from agy_cli_agent import build_argv
+        from cli_routes import discover_via_cli
+
+        def capture(argv, **kwargs):
+            self.assertEqual(argv, ["/fake/agy", "models"])
+            return subprocess.CompletedProcess(argv, 0,
+                "Fetching available models...\ngemini-4-argon\tGemini 4 Argon\n", "")
+
+        with mock.patch("agy_cli_agent._resolve_binary", return_value="/fake/agy"), \
+                mock.patch("agy_cli_agent._default_capture", side_effect=capture):
+            inventory = discover_via_cli("antigravity")
+        row, = inventory["models"]
+        self.assertEqual(row["id"], "gemini-4-argon")
+        self.assertEqual(row["display_name"], "Gemini 4 Argon")
+        self.assertEqual(row["source"], "cli")
+        self.assertTrue(row["tools"])
+        argv = build_argv(row["id"])
+        self.assertEqual(argv[argv.index("--model") + 1], "gemini-4-argon")
+
     def test_catalogue_empty_output(self):
         """Test catalogue handles empty agy models output."""
         from agy_cli_agent import catalogue

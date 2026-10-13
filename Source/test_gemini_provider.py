@@ -30,6 +30,7 @@ REQUESTED = "claude-sonnet-4-6"
 
 def model_spec(base=MODEL, **changes):
     efforts = {
+        "gemini-4-argon": ["minimal", "low", "medium", "high"],
         "gemini-3.8-flash": ["low", "medium", "high"],
         "gemini-3.5-flash": ["minimal", "low", "medium", "high"],
         "gemini-2.5-pro": ["minimal", "low", "medium", "high"],
@@ -199,6 +200,32 @@ class ConnectionAndDiscoveryTests(unittest.TestCase):
         self.assertEqual(by_id["gemini-2.5-pro-001"]["canonical_id"], "gemini-2.5-pro")
         self.assertTrue(any("exact API-reported" in warning for warning in result["warnings"]))
 
+    def test_argon_discovery_preserves_live_limits_and_documented_reasoning(self):
+        for base in (None, "gemini-4", "gemini-4-argon"):
+            with self.subTest(base=base):
+                card = {
+                    "name": "models/gemini-4-argon",
+                    "displayName": "Gemini 4 Argon",
+                    "inputTokenLimit": 1_048_576,
+                    "outputTokenLimit": 65_536,
+                    "supportedGenerationMethods": ["generateContent"],
+                    "thinking": True,
+                }
+                if base is not None:
+                    card["baseModelId"] = base
+                result = discover({}, KEY, transport=lambda _plan: {"models": [card]})
+                row, = result["models"]
+                self.assertEqual(row["id"], "gemini-4-argon")
+                self.assertEqual(row["display_name"], "Gemini 4 Argon")
+                self.assertEqual(row["max_input"], card["inputTokenLimit"])
+                self.assertEqual(row["max_output"], card["outputTokenLimit"])
+                self.assertEqual(row["context_kind"], "provider_reported_unified_limit")
+                self.assertTrue(row["tools"] and row["vision"] and row["reasoning"])
+                self.assertEqual(row["effort_modes"], ["minimal", "low", "medium", "high"])
+                self.assertEqual(row["provider_effort_modes"], ["low", "medium", "high"])
+                self.assertEqual(row["default_effort"], "medium")
+        self.assertEqual(discover({}, KEY, transport=lambda _plan: {"models": []})["models"], [])
+
     def test_missing_thinking_field_keeps_effort_unknown(self):
         result = discover({}, KEY, transport=lambda _plan: {"models": [{
             "name": "models/gemini-3.5-flash",
@@ -306,6 +333,66 @@ class ConnectionAndDiscoveryTests(unittest.TestCase):
 
 
 class RequestAndReplayTests(unittest.TestCase):
+    def test_argon_request_efforts_and_unified_window(self):
+        spec = model_spec("gemini-4-argon")
+        for requested, expected in (("minimal", "minimal"), ("low", "low"),
+                                    ("medium", "medium"), ("high", "high"), ("ultra", "high")):
+            with self.subTest(effort=requested):
+                plan = prepare_request({}, KEY, request_payload(output_config={"effort": requested}),
+                                       "gemini-4-argon", spec, SCOPE, REPLAY_KEY)
+                self.assertEqual(plan["body"]["model"], "gemini-4-argon")
+                self.assertEqual(plan["body"]["reasoning_effort"], expected)
+        default = prepare_request({}, KEY, request_payload(), "gemini-4-argon", spec, SCOPE, REPLAY_KEY)
+        self.assertNotIn("reasoning_effort", default["body"])
+        payload = {"model": REQUESTED, "max_tokens": 190, "messages": [{"role": "user", "content": "hi"}]}
+        plan = prepare_request({}, KEY, payload, "gemini-4-argon",
+                               model_spec("gemini-4-argon", context=200, max_input=200, max_output=190),
+                               SCOPE, REPLAY_KEY)
+        self.assertGreater(plan["body"]["max_tokens"], 0)
+        self.assertLess(plan["body"]["max_tokens"], 190)
+
+    def test_argon_signed_tool_cycle_and_unsigned_response_rejection(self):
+        model = "gemini-4-argon"
+        spec = model_spec(model, context=1024, max_input=1024, max_output=900)
+        # A large encrypted signature must not consume the unified text window.
+        signature = "argon-signature" * 256
+        initial = prepare_request({}, KEY, request_payload(), model, spec, SCOPE, REPLAY_KEY)
+        name = initial["body"]["tools"][0]["function"]["name"]
+        for signed in (False, True):
+            with self.subTest(signed=signed):
+                call = {"id": "argon-call", "type": "function",
+                        "function": {"name": name, "arguments": '{"path":"README.md"}'}}
+                if signed:
+                    call["extra_content"] = {"google": {"thought_signature": signature}}
+                response = {"choices": [{"message": {"tool_calls": [call]}, "finish_reason": "tool_calls"}]}
+                stream = GeminiStreamAdapter(REQUESTED, initial["tool_name_map"], model, SCOPE,
+                                             REPLAY_KEY, model_spec=spec)
+                stream.start()
+                stream.feed({"choices": [{"delta": {"tool_calls": [{**call, "index": 0}]},
+                                           "finish_reason": "tool_calls"}]})
+                if not signed:
+                    with self.assertRaisesRegex(GeminiError, "required thought signature"):
+                        translate_response(response, REQUESTED, initial["tool_name_map"], model,
+                                           SCOPE, REPLAY_KEY, model_spec=spec)
+                    with self.assertRaisesRegex(GeminiError, "required thought signature"):
+                        stream.end()
+                    continue
+                reply = translate_response(response, REQUESTED, initial["tool_name_map"], model,
+                                           SCOPE, REPLAY_KEY, model_spec=spec)
+                streamed, stop, _usage = reconstruct(stream.end())
+                self.assertEqual(stop, "tool_use")
+                for content in (reply["content"], streamed):
+                    payload = request_payload(messages=[
+                        {"role": "user", "content": "Check a file."},
+                        {"role": "assistant", "content": content},
+                        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "argon-call",
+                                                      "content": "file contents"}]},
+                    ])
+                    replay = prepare_request({}, KEY, payload, model, spec, SCOPE, REPLAY_KEY)
+                    assistant = replay["body"]["messages"][1]
+                    self.assertEqual(assistant["tool_calls"][0]["extra_content"]["google"]["thought_signature"],
+                                     signature)
+
     def test_initial_request_uses_bearer_auth_tools_usage_and_per_model_effort(self):
         payload = request_payload(
             stream=True,
