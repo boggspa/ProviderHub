@@ -28,6 +28,61 @@ from qwen_provider import QwenError, normalize_controls as qwen_controls
 from minimax_provider import MiniMaxError, normalize_controls as minimax_controls
 
 
+CLAUDE_THINKING_BINDING_BETA = "thinking-binding-controls-2026-08-01"
+# These exact models already use adaptive thinking when the field is omitted.
+# Making that default explicit lets Responses and Chat attach binding controls
+# without enabling thinking on a legacy model whose default is off.
+_CLAUDE_DEFAULT_ADAPTIVE = {
+    "claude-fable-5-1", "claude-mythos-5-1", "claude-fable-5", "claude-mythos-5",
+    "claude-mythos-preview", "claude-opus-5-5", "claude-sonnet-5-5",
+    "claude-haiku-5-5", "claude-opus-5", "claude-sonnet-5",
+}
+
+
+def _claude_thinking_binding(body: dict, model: str, headers: dict) -> dict:
+    """Let Anthropic discard prefix-bound replay that the gateway cannot verify.
+
+    Context compaction, changed tools and desktop system prompts can invalidate
+    opaque signatures. Keep blocks byte-for-byte and let the API validate them,
+    rather than editing signatures or retrying the same permanent 400.
+    """
+    thinking = body.get("thinking")
+    if thinking is None and model in _CLAUDE_DEFAULT_ADAPTIVE:
+        thinking = body["thinking"] = {"type": "adaptive"}
+    mode = thinking.get("type") if isinstance(thinking, dict) else None
+    if mode in {"adaptive", "enabled"}:
+        binding = thinking.setdefault("block_binding", {})
+        if not isinstance(binding, dict):
+            raise ProviderError("thinking.block_binding must be an object.")
+        # An explicit caller policy remains authoritative, including strict
+        # error behavior. Negotiate the beta for either valid policy.
+        policy = binding.setdefault("prefix_mismatch_behavior", "drop_block")
+        tokens = (headers.get("anthropic-beta", "") + "," + CLAUDE_THINKING_BINDING_BETA).split(",")
+        headers["anthropic-beta"] = ",".join(dict.fromkeys(token.strip() for token in tokens if token.strip()))
+        return {"thinking_prefix_mismatch_behavior": policy}
+
+    # disabled/between_tools cannot carry block_binding. A model with an
+    # omitted off-by-default configuration must stay off. Remove replay-only
+    # thinking in these cases, retaining text, tool calls and tool results.
+    removed = 0
+    messages = []
+    for message in body["messages"]:
+        content = message.get("content")
+        if message.get("role") == "assistant" and isinstance(content, list):
+            kept = [block for block in content if not isinstance(block, dict)
+                    or block.get("type") not in {"thinking", "redacted_thinking"}]
+            count = len(content) - len(kept)
+            removed += count
+            if count:
+                if not kept: continue
+                message["content"] = kept
+        messages.append(message)
+    if removed:
+        body["messages"] = messages
+        return {"thinking_replay_blocks_removed": removed}
+    return {}
+
+
 def _valid_model_id(value: str) -> str:
     if not isinstance(value, str) or not _MODEL_ID.fullmatch(value):
         raise ProviderError("Upstream model ID is invalid.")
@@ -159,6 +214,22 @@ def _normalize_native_controls(
 
     requested = _output_effort(body)
     thinking_type = _thinking_type(body)
+    if provider_id == "claude":
+        # Anthropic supports adaptive thinking natively; converting it to
+        # enabled loses that mode and can require a missing budget_tokens.
+        supported = model_spec.get("effort_modes") or []
+        if requested == "none":
+            body.pop("thinking", None)
+            body["thinking"] = {"type": "disabled"}
+            _write_output_effort(body, None)
+        elif requested is not None and supported:
+            normalized = nearest_effort(requested, supported)
+            if normalized is None:
+                raise ProviderError(f"Claude does not support reasoning effort {requested!r}.")
+            _write_output_effort(body, normalized)
+            if normalized != requested:
+                compatibility["reasoning_effort"] = f"{requested}_normalized_to_{normalized}"
+        return compatibility
     if thinking_type == "adaptive" and provider_id != "muse":
         if model_spec.get("reasoning") is not True:
             raise ProviderError(
@@ -419,6 +490,51 @@ def _normalize_native_payload(
     compatibility = _normalize_native_controls(
         provider_id, result, upstream_model, model_spec)
     return result, normalized_count, compatibility
+
+
+def _claude_tool_schemas(body: dict) -> int:
+    """Keep root boolean constraints under double negation, without renaming inputs.
+
+    Anthropic rejects the three combinators at input_schema's root. Moving
+    them under `not: {not: ...}` is JSON Schema-equivalent, including oneOf's
+    exclusivity. Nested property schemas remain intact; local JSON pointers
+    into relocated constraints are adjusted to keep their targets.
+    """
+    changed = 0
+    for tool in body.get("tools") or []:
+        schema = tool.get("input_schema") if isinstance(tool, dict) else None
+        if not isinstance(schema, dict): continue
+        constraints = {key: schema.pop(key) for key in ("oneOf", "allOf", "anyOf") if key in schema}
+        if not constraints: continue
+        if "not" in schema:
+            constraints["not"] = schema.pop("not")
+        schema["not"] = {"not": constraints}
+        def relocate(node, root_scope=True):
+            if not isinstance(node, dict): return
+            if node is not schema and "$id" in node: root_scope = False
+            if root_scope:
+                for field in ("$ref", "$dynamicRef"):
+                    reference = node.get(field)
+                    if not isinstance(reference, str): continue
+                    for key in constraints:
+                        prefix = "#/" + key
+                        if reference == prefix or reference.startswith(prefix + "/"):
+                            node[field] = "#/not/not/" + reference[2:]
+                            break
+            for key in ("items", "additionalProperties", "not", "if", "then", "else", "contains"):
+                child = node.get(key)
+                for value in child if isinstance(child, list) else (child,): relocate(value, root_scope)
+            for key in ("properties", "patternProperties", "$defs", "definitions", "dependentSchemas"):
+                children = node.get(key)
+                if isinstance(children, dict):
+                    for value in children.values(): relocate(value, root_scope)
+            for key in ("oneOf", "anyOf", "allOf", "prefixItems"):
+                children = node.get(key)
+                if isinstance(children, list):
+                    for value in children: relocate(value, root_scope)
+        relocate(schema)
+        changed += 1
+    return changed
 
 
 def _contains_content_type(value, kinds: set[str]) -> bool:
@@ -990,6 +1106,9 @@ def prepare_request(
             headers["anthropic-beta"] = CLAUDE_FAST_BETA
         _apply_native_model_limits(body, model_spec, provider_id, estimate_factor)
         if provider_id == "claude":
+            control_compatibility.update(_claude_thinking_binding(body, upstream_model, headers))
+            adapted = _claude_tool_schemas(body)
+            if adapted: control_compatibility["tool_schema_root_combinators"] = adapted
             _claude_prompt_cache(body)
         if provider_id == "openrouter":
             try:

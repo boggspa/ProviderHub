@@ -21,6 +21,25 @@ struct ActivityEntry: Identifiable {
     var event: String
     var model: String
     var status: Int?
+    var usage: HubTokenUsage? = nil
+    var credentialMode: String? = nil
+    var surface: String? = nil
+    var sourceSummary: String {
+        let source: String
+        switch credentialMode {
+        case "keychain", "environment", "vibe": source = "API key"
+        case "cli": source = "Installed CLI"
+        default: source = "Source not recorded"
+        }
+        let client: String
+        switch surface {
+        case "chat": client = "Chat"
+        case "responses": client = "Codex / ChatGPT"
+        case "messages": client = "Messages / Claude Desktop"
+        default: client = ""
+        }
+        return [source, client].filter { !$0.isEmpty }.joined(separator: " · ")
+    }
 }
 
 enum Page: String, CaseIterable, Identifiable {
@@ -934,7 +953,9 @@ final class BridgeModel: ObservableObject {
         activityFileStamp = (size, mtime)
         let entries = text.split(separator: "\n").suffix(30).reversed().compactMap { line -> ActivityEntry? in
             guard let raw = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any] else { return nil }
-            return ActivityEntry(time: raw["time"] as? String ?? "", event: raw["event"] as? String ?? "", model: raw["model"] as? String ?? "", status: raw["status"] as? Int)
+            return ActivityEntry(time: raw["time"] as? String ?? "", event: raw["event"] as? String ?? "", model: raw["model"] as? String ?? "", status: raw["status"] as? Int,
+                                 usage: (raw["usage"] as? [String: Any]).map(HubTokenUsage.init),
+                                 credentialMode: raw["credential_mode"] as? String, surface: raw["surface"] as? String)
         }
         // Avoid replacing row identities on every timer tick.
         if entries.count != activity.count || entries.first?.time != activity.first?.time || entries.first?.event != activity.first?.event { activity = entries }
@@ -1034,14 +1055,20 @@ final class BridgeModel: ObservableObject {
         busy = true; defer { busy = false }
         await waitForCatalogueRefresh()
         do {
-            updateClaudeRunning()
-            if running { try await checkIdleGateway() }
-            guard activeRequests == 0 && !anyOwnedHarnessRunning else { throw WorkerError(message: "Quit the desktop sessions using this gateway before changing its key.") }
-            var proposed = settings
+            // Validate the key slot against saved state, independently of any
+            // pending model, endpoint, port or desktop configuration edits.
+            let inspected = try await command("inspect")
+            guard let raw = inspected["settings"],
+                  let bytes = try? JSONSerialization.data(withJSONObject: raw),
+                  let persisted = try? JSONDecoder().decode(RouteSettings.self, from: bytes) else {
+                throw WorkerError(message: "Could not read saved settings before saving the key.")
+            }
+            var proposed = persisted
             proposed.providers[providerID]?.credential_mode = "keychain"
             proposed.providers[providerID]?.credential_revision += 1
+            proposed.providers[providerID]?.key_account = settings.providers[providerID]?.key_account
+            proposed.providers[providerID]?.key_accounts = settings.providers[providerID]?.key_accounts
             _ = try await command("validate", input: JSONEncoder().encode(proposed))
-            if gatewayProcess?.isRunning == true { await stopGateway() }
             // Invalidate account-scoped metadata before replacing the credential.
             // Even a subsequent settings-write failure cannot reuse the old account's list.
             let cache = root.appendingPathComponent("catalogues/" + providerID + ".json")
@@ -1059,8 +1086,28 @@ final class BridgeModel: ObservableObject {
                 status = SecItemAdd(entry as CFDictionary, nil)
             }
             guard status == errSecSuccess else { throw WorkerError(message: "Keychain could not save the key (\(status)).") }
-            secretDraft = ""; settings = proposed
-            try await save()
+            var metadata: [String: Any] = [:]
+            if let id = proposed.providers[providerID]?.key_account { metadata["key_account"] = id }
+            else { metadata["key_account"] = NSNull() }
+            if let accounts = proposed.providers[providerID]?.key_accounts {
+                metadata["key_accounts"] = accounts.map { ["id": $0.id, "label": $0.label] }
+            }
+            let result: [String: Any]
+            do {
+                result = try await command("save-key-metadata", provider: providerID, input: JSONSerialization.data(withJSONObject: metadata))
+            } catch {
+                throw WorkerError(message: "Keychain saved the key, but its settings could not be saved. Click Save key again to retry. " + error.localizedDescription)
+            }
+            guard let raw = result["settings"], let bytes = try? JSONSerialization.data(withJSONObject: raw),
+                  let saved = try? JSONDecoder().decode(RouteSettings.self, from: bytes),
+                  let connection = saved.providers[providerID] else {
+                throw WorkerError(message: "The key was saved, but settings could not be refreshed. Reconnect to reload them.")
+            }
+            secretDraft = ""; savedSettings = saved
+            settings.providers[providerID]?.credential_mode = connection.credential_mode
+            settings.providers[providerID]?.credential_revision = connection.credential_revision
+            settings.providers[providerID]?.key_account = connection.key_account
+            settings.providers[providerID]?.key_accounts = connection.key_accounts
             if let info = try? await command("inspect") { readCatalogue(info, modelsKey: "catalog") }
             if keyAccountStates[providerID] != nil { await checkKeyAccounts(providerID) }
             do {
@@ -1068,7 +1115,7 @@ final class BridgeModel: ObservableObject {
                 readCatalogue(catalogue, modelsKey: "models")
                 providerRefreshIssues.removeValue(forKey: providerID)
                 let count = availableModels.filter { $0.provider_id == providerID }.count
-                tell("Key saved. \(count) \(provider.name) models are ready to choose.")
+                tell("Key saved. \(count) \(provider.name) models are ready to choose. Active calls continue; existing API routes use the replacement on their next call. New desktop model selections apply on the next launch.")
             } catch {
                 providerRefreshIssues[providerID] = error.localizedDescription
                 tell("Key saved. Model discovery needs attention: " + error.localizedDescription, error: true)
@@ -1122,6 +1169,42 @@ final class BridgeModel: ObservableObject {
         settings.providers[provider]?.key_accounts = accounts
         settings.providers[provider]?.key_account = account.id
         keyAccountStates[provider]?.append(KeyAccountState(id: account.id, label: account.label, active: true, found: false))
+    }
+
+    /// Apply key-account metadata without saving unrelated pending edits or
+    /// interrupting calls. The worker checks the primary slot already has a key.
+    func saveKeyAccounts(_ provider: String) async {
+        guard !busy, keyAccountProviders.contains(provider) else { return }
+        busy = true; defer { busy = false }
+        do {
+            var metadata: [String: Any] = [:]
+            if let id = settings.providers[provider]?.key_account { metadata["key_account"] = id }
+            else { metadata["key_account"] = NSNull() }
+            metadata["key_accounts"] = (settings.providers[provider]?.key_accounts ?? []).map { ["id": $0.id, "label": $0.label] }
+            let result = try await command("save-key-accounts", provider: provider,
+                                           input: JSONSerialization.data(withJSONObject: metadata))
+            guard let raw = result["settings"], let bytes = try? JSONSerialization.data(withJSONObject: raw),
+                  let persisted = try? JSONDecoder().decode(RouteSettings.self, from: bytes),
+                  let connection = persisted.providers[provider] else {
+                throw WorkerError(message: "Account settings were saved but could not be refreshed. Reconnect to reload them.")
+            }
+            savedSettings = persisted
+            settings.providers[provider]?.key_account = connection.key_account
+            settings.providers[provider]?.key_accounts = connection.key_accounts
+            await checkKeyAccounts(provider)
+            if connection.credential_mode == "keychain" {
+                do {
+                    let catalogue = try await command("discover", provider: provider)
+                    readCatalogue(catalogue, modelsKey: "models")
+                    providerRefreshIssues.removeValue(forKey: provider)
+                } catch {
+                    providerRefreshIssues[provider] = error.localizedDescription
+                    tell("Primary key saved. Refresh its catalogue when available: " + error.localizedDescription, error: true)
+                    return
+                }
+            }
+            tell("Primary key saved. Existing API calls continue; the next call uses this key. Chat keeps its independently selected account.")
+        } catch { tell(error.localizedDescription, error: true) }
     }
 
     /// Forget an extra key slot and delete its Keychain item; the default
@@ -1338,7 +1421,14 @@ struct BridgeWindow: View {
                     ForEach(model.activity) { entry in
                         HStack(spacing: 10) {
                             Image(systemName: entry.event == "completed" ? "checkmark.circle.fill" : entry.event == "cancelled" ? "stop.circle" : entry.event == "compacted" ? "arrow.down.circle" : "exclamationmark.circle").foregroundStyle(entry.event == "completed" ? Color.green : entry.event == "compacted" ? Color.blue : .orange)
-                            VStack(alignment: .leading, spacing: 4) { Text(model.modelLabel(entry.model)).font(.system(size: 12, weight: .medium)).help(entry.model); Text(entry.event.capitalized + (entry.status.map { " · HTTP \($0)" } ?? "")).font(.caption).foregroundStyle(.secondary) }
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(model.modelLabel(entry.model)).font(.system(size: 12, weight: .medium)).help(entry.model)
+                                Text(entry.event.capitalized + (entry.status.map { " · HTTP \($0)" } ?? "")).font(.caption).foregroundStyle(.secondary)
+                                if let usage = entry.usage {
+                                    Text(entry.sourceSummary).font(.caption).foregroundStyle(.secondary)
+                                    Text(usage.summary).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                                }
+                            }
                             Spacer(); Text(String(entry.time.dropFirst(11).prefix(8))).font(.system(size: 10, design: .monospaced)).foregroundStyle(.tertiary)
                         }
                     }

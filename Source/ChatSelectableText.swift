@@ -5,10 +5,84 @@ private struct ChatBlackboardPinKey: EnvironmentKey {
     static let defaultValue: (() -> Void)? = nil
 }
 
+private struct ChatReactKey: EnvironmentKey {
+    static let defaultValue: ((String) -> Void)? = nil
+}
+
+private struct ChatWorkspaceKey: EnvironmentKey {
+    static let defaultValue: String? = nil
+}
+
+/// Links a model writes to files and folders: a path relative to the
+/// workspace, an absolute path, a tilde path or a file URL. NSTextView hands
+/// every link to NSWorkspace.open, which cannot open a URL that has no scheme
+/// and answers with Finder's "The application can't be opened. -50". These
+/// are resolved against the workspace and opened as files instead; web links
+/// are left to the system.
+enum ChatFileLink {
+    /// The file URL a link stands for, or nil for a link the system should open.
+    static func resolve(_ link: Any, workspace: String?) -> URL? {
+        let text: String
+        let url: URL?
+        if let value = link as? URL { url = value; text = value.absoluteString }
+        else if let value = link as? String { text = value; url = URL(string: value) }
+        else { return nil }
+        if let scheme = url?.scheme?.lowercased() {
+            if scheme == "file", let url { return url.standardizedFileURL }
+            return nil
+        }
+        // The URL's path is already decoded and leaves a line fragment
+        // ("Foo.swift#L42") or query behind; raw text only when the link
+        // did not parse as a URL at all (a path with spaces, say).
+        var path = url.map(\.path).flatMap { $0.isEmpty ? nil : $0 } ?? (text.removingPercentEncoding ?? text)
+        if path.hasPrefix("~") { path = (path as NSString).expandingTildeInPath }
+        if !path.hasPrefix("/") {
+            let root = workspace?.isEmpty == false ? workspace! : NSHomeDirectory()
+            path = (root as NSString).appendingPathComponent(path)
+        }
+        return URL(fileURLWithPath: path).standardizedFileURL
+    }
+
+    /// Open a file link: a file in its default app, a folder in Finder, and a
+    /// path that no longer exists by revealing its nearest existing ancestor,
+    /// so the user still lands where the agent pointed. False means the link
+    /// is not a file link and the system should handle it.
+    @discardableResult
+    static func open(_ link: Any, workspace: String?) -> Bool {
+        guard let url = resolve(link, workspace: workspace) else { return false }
+        var isDirectory: ObjCBool = false
+        var existing = url
+        while !FileManager.default.fileExists(atPath: existing.path, isDirectory: &isDirectory) {
+            let parent = existing.deletingLastPathComponent()
+            if parent.path == existing.path { return true }
+            existing = parent
+        }
+        if existing == url, !isDirectory.boolValue, NSWorkspace.shared.open(url) { return true }
+        NSWorkspace.shared.activateFileViewerSelecting([existing])
+        return true
+    }
+}
+
+/// The six iMessage tapbacks, offered in a message's context menu. Members may
+/// use any single emoji; these are the user's quick picks. Declared here, next
+/// to the menu that offers them, so the text view compiles on its own in the
+/// transcript and composer test targets.
+let chatReactionTapbacks = ["❤️", "👍", "👎", "😂", "‼️", "❓"]
+
 extension EnvironmentValues {
     var chatBlackboardPin: (() -> Void)? {
         get { self[ChatBlackboardPinKey.self] }
         set { self[ChatBlackboardPinKey.self] = newValue }
+    }
+    /// The user's reaction on the entry this text belongs to, by emoji.
+    var chatReact: ((String) -> Void)? {
+        get { self[ChatReactKey.self] }
+        set { self[ChatReactKey.self] = newValue }
+    }
+    /// The workspace a transcript's file links are relative to.
+    var chatWorkspace: String? {
+        get { self[ChatWorkspaceKey.self] }
+        set { self[ChatWorkspaceKey.self] = newValue }
     }
 }
 
@@ -29,6 +103,8 @@ struct ChatSelectableText: NSViewRepresentable {
     /// The whole entry for **Copy Message**; nil leaves the item out.
     var message: String?
     @Environment(\.chatBlackboardPin) private var blackboardPin
+    @Environment(\.chatReact) private var react
+    @Environment(\.chatWorkspace) private var workspace
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
@@ -57,6 +133,8 @@ struct ChatSelectableText: NSViewRepresentable {
         if view.textStorage?.isEqual(to: attributed) == false { view.textStorage?.setAttributedString(attributed) }
         view.message = message
         view.blackboardPin = blackboardPin
+        view.react = react
+        view.workspace = workspace
     }
 
     func sizeThatFits(_ proposal: ProposedViewSize, nsView: TextView, context: Context) -> CGSize? {
@@ -235,8 +313,16 @@ struct ChatSelectableText: NSViewRepresentable {
     final class TextView: NSTextView {
         var message: String?
         var blackboardPin: (() -> Void)?
+        var react: ((String) -> Void)?
+        /// Where a relative file link points; nil falls back to the home folder.
+        var workspace: String?
         /// Injectable so tests never touch the user's clipboard.
         var pasteboard = NSPasteboard.general
+
+        override func clicked(onLink link: Any, at charIndex: Int) {
+            if ChatFileLink.open(link, workspace: workspace) { return }
+            super.clicked(onLink: link, at: charIndex)
+        }
 
         override func menu(for event: NSEvent) -> NSMenu? {
             // A copy: the system may hand back a shared default menu, and
@@ -247,6 +333,19 @@ struct ChatSelectableText: NSViewRepresentable {
             item.target = self
             let copy = menu.items.firstIndex { $0.action == #selector(NSText.copy(_:)) }
             menu.insertItem(item, at: copy.map { $0 + 1 } ?? 0)
+            if react != nil {
+                // The six tapbacks as a submenu, like iMessage's long press.
+                let submenu = NSMenu(title: "React")
+                for emoji in chatReactionTapbacks {
+                    let choice = NSMenuItem(title: emoji, action: #selector(reactWith(_:)), keyEquivalent: "")
+                    choice.target = self
+                    choice.representedObject = emoji
+                    submenu.addItem(choice)
+                }
+                let parent = NSMenuItem(title: "React", action: nil, keyEquivalent: "")
+                parent.submenu = submenu
+                menu.addItem(parent)
+            }
             if blackboardPin != nil {
                 let pin = NSMenuItem(title: "Pin to Blackboard", action: #selector(pinToBlackboard(_:)), keyEquivalent: "")
                 pin.target = self
@@ -256,6 +355,11 @@ struct ChatSelectableText: NSViewRepresentable {
         }
 
         @objc func pinToBlackboard(_ sender: Any?) { blackboardPin?() }
+
+        @objc func reactWith(_ sender: Any?) {
+            guard let emoji = (sender as? NSMenuItem)?.representedObject as? String else { return }
+            react?(emoji)
+        }
 
         @objc func copyMessage(_ sender: Any?) {
             guard let message else { return }

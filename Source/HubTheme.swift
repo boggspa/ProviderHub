@@ -120,9 +120,9 @@ enum HubTheme {
                                          dark: NSColor(red: 0.94, green: 0.66, blue: 0.25, alpha: 1))
         static let contextCritical = approvalYolo
         /// A veil over Glass so text holds on a busy wallpaper: black on
-        /// dark, white on light, at 40%. Solid is opaque and needs none.
-        static let glassScrim = dynamic(light: NSColor.white.withAlphaComponent(0.40),
-                                        dark: NSColor.black.withAlphaComponent(0.40))
+        /// dark, white on light, at 75%. Solid is opaque and needs none.
+        static let glassScrim = dynamic(light: NSColor.white.withAlphaComponent(0.75),
+                                        dark: NSColor.black.withAlphaComponent(0.75))
 
         static func dynamic(light: NSColor, dark: NSColor) -> Color {
             Color(nsColor: dynamicNS(light: light, dark: dark))

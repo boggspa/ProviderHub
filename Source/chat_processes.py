@@ -72,6 +72,19 @@ def scope(service):
                              "memberID": member["id"] if member else None}
 
 
+def _duration(seconds):
+    seconds = max(0, int(seconds))
+    if seconds < 60:
+        return f"{seconds}s"
+    if seconds < 3600:
+        return f"{seconds // 60}m {seconds % 60:02d}s"
+    return f"{seconds // 3600}h {seconds % 3600 // 60:02d}m"
+
+
+STOPPED_BY = {"agent": " by stop_process", "user": " by the user from the inspector",
+              "chat": " because its chat was deleted or Chat shut down"}
+
+
 def _complete_utf8(data):
     """Length of data without a trailing, unfinished UTF-8 sequence."""
     for back in range(1, min(4, len(data)) + 1):
@@ -300,10 +313,16 @@ class ProcessRegistry:
             data = bytes(process.tail[max(seen, first) - first:end - first])
             process.seen[reader] = max(seen, end)
             state = {"running": "is running", "stopping": "is stopping"}.get(process.status)
-            if state is None:
+            if state is not None:
+                # Progress a model can see on a quiet long run: wall-clock age and bytes so far.
+                state += f" ({_duration(time.time() - process.started)} so far, {process.total:,} bytes of output in total)"
+            else:
                 verb = "was stopped" if process.status == "stopped" else "exited"
                 signalled = process.code is not None and process.code < 0
                 state = f"{verb} (signal {-process.code})" if signalled else f"{verb} (exit code {process.code})"
+                if process.status == "stopped":
+                    state += STOPPED_BY.get(process.stopped_by, "")
+                state += f" after {_duration((process.ended or time.time()) - process.started)}"
             alive, failed = process.alive, process.status == "exited" and process.code != 0
             lines = [f"{prefix} {process.id} (pid {process.pid}) {state}.", f"Command: {process.command}"]
         text = data.decode("utf-8", errors="replace")

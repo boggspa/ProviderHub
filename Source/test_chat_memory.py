@@ -101,6 +101,28 @@ class ChatMemoryTests(unittest.TestCase):
         self.assertEqual(len(self.chat["decisions"]), 15)
         self.assertEqual(invoke(self.chat, "read_history", entry_id=self.source["id"])["text"], self.source["text"])
 
+    def test_errors_name_the_cause_and_results_report_capacity(self):
+        result = self.remember()
+        self.assertEqual(result["capacity"], {"notes": 1, "max_notes": memory.MAX_NOTES, "max_bytes": memory.MAX_MEMORY_BYTES,
+                                              "bytes": len(json.dumps(self.chat["decisions"], ensure_ascii=False).encode())})
+        other = entry("user", "Another visible message.")
+        self.chat["entries"].append(other)
+        failures = [
+            (dict(text="   "), "text must be nonempty text"),
+            (dict(text="é" * 500), "text is 1000 UTF-8 bytes; the limit is 800"),
+            (dict(source_ids=[self.source["id"], self.source["id"]]), "repeated: " + self.source["id"]),
+            (dict(source_ids=[other["id"], "toolu_nope"]), "not a visible entry in this chat: toolu_nope"),
+        ]
+        for overrides, expected in failures:
+            args = {"key": "cause", "text": "Fine.", "source_ids": [self.source["id"]], **overrides}
+            with self.subTest(overrides=overrides), self.assertRaisesRegex(ValueError, expected):
+                invoke(self.chat, "record_decision", **args)
+        for i in range(15): self.remember(key=f"note-{i}", text="Keep this.")
+        with self.assertRaisesRegex(ValueError, r"full \(16/16 notes, \d+/6000 bytes"):
+            self.remember(key="overflow")
+        forgotten = invoke(self.chat, "forget_decision", key="note-0")
+        self.assertEqual(forgotten["capacity"]["notes"], 15)
+
     def test_total_byte_limit_is_enforced_before_mutation(self):
         while True:
             before = copy.deepcopy(self.chat.get("decisions", []))

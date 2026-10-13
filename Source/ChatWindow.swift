@@ -49,8 +49,8 @@ struct ChatWindow: View {
                                          railVisible: panes.rail > 0, railAvailable: panes.railAvailable) { railPreferred.toggle() }
                     if model.inspectorVisible {
                         ChatPaneDivider(label: "Inspector width", width: panes.inspector, direction: -1,
-                            resize: { inspectorWidth = Double(ChatPaneSizing.clamp($0, 260,
-                                min(600, proxy.size.width - ChatPaneSizing.transcriptMinimum - ChatPaneSizing.divider))) },
+                            resize: { inspectorWidth = Double(ChatPaneSizing.clamp($0, ChatPaneSizing.inspectorMinimum,
+                                ChatPaneSizing.inspectorMaximum(proxy.size.width))) },
                             reset: { inspectorWidth = 0 })
                         ChatInspector(model: model, browserStore: browser,
                                       browserInPane: model.selectedID.flatMap { workspace.browserPane(for: $0) } != nil)
@@ -187,6 +187,7 @@ struct ChatPane: View {
             Rectangle().fill(Semantic.hairline).frame(height: HubTheme.Separator.width)
             if model.selectedID == nil { ChatWelcome(model: model) }
             else { ChatTranscript(model: model) }
+            if model.selectedID != nil { ChatActivityStrip(model: model) }
             if let approval = model.approval { ApprovalStrip(model: model, approval: approval) }
             ChatComposer(model: model)
         }
@@ -511,6 +512,9 @@ struct ChatTranscript: View {
                 content.background(ChatTranscriptScrollObserver(follow: follow))
             }
             .onChange(of: model.transcriptVersion) { _, _ in scrollToEnd(proxy) }
+            .onChange(of: model.jumpRequest) { _, request in
+                if let request { jump(to: request.id, proxy: proxy) }
+            }
             .onChange(of: model.selectedID) { _, _ in
                 visibleSegmentLimit = 100; follow.resume()
                 scrollToEnd(proxy)
@@ -581,10 +585,15 @@ struct ChatTranscript: View {
                 }
                 .padding(.top, gap(segment.spacing))
             }
-            Color.clear.frame(height: 1).id(bottomID)
+            // Headroom: the follow target is this spacer's bottom edge, so the
+            // newest row sits a little above the composer instead of against
+            // it. Growing the spacer moves nothing else: scrollToEnd still
+            // anchors the same id, and the observer still measures the
+            // document's end, so following engages and disengages as before.
+            Color.clear.frame(height: textStyle.scaled(36)).id(bottomID)
         }
         .frame(maxWidth: textStyle.scaled(760)).frame(maxWidth: .infinity)
-        .padding(.horizontal, 20).padding(.vertical, 16)
+        .padding(.horizontal, 20).padding(.top, 16).padding(.bottom, 4)
     }
 
     /// Wide between speakers, tight inside one speaker's block.
@@ -601,17 +610,52 @@ struct ChatTranscript: View {
         follow.request { proxy.scrollTo(bottomID, anchor: .bottom) }
     }
 
+    /// Show the segment holding an entry: its own row, or the fold it sits
+    /// in, which opens so the row is visible. The tail is paged out far
+    /// enough to include it first. The user asked for this position, so
+    /// following pauses as it does for a manual scroll; Latest resumes it.
+    private func jump(to entryID: String, proxy: ScrollViewProxy) {
+        let liveEntryIDs = model.streamingEntryIDs()
+        let segments = ChatTranscriptSegment<ChatEntry>.outline(model.entries, open: model.busy) { liveEntryIDs.contains($0.id) }
+        guard let index = segments.firstIndex(where: { segment in
+            switch segment.content {
+            case .entry(let entry): return entry.id == entryID
+            case .fold(let entries): return entries.contains { $0.id == entryID }
+            default: return false
+            }
+        }) else { return }
+        let target = segments[index].id
+        var inFold = false
+        follow.pause()
+        if case .fold = segments[index].content { foldChoice[target] = true; inFold = true }
+        if segments.count - index > visibleSegmentLimit { visibleSegmentLimit = segments.count - index + 20 }
+        func scroll(to id: String) {
+            if reduceMotion { proxy.scrollTo(id, anchor: .center) }
+            else { withAnimation(.easeInOut(duration: 0.2)) { proxy.scrollTo(id, anchor: .center) } }
+        }
+        // After the paging and fold state above have laid out: the segment
+        // first, then, once an opened fold has its rows, the row itself, so a
+        // tall fold never leaves the current row off screen.
+        DispatchQueue.main.async {
+            scroll(to: target)
+            if inFold { DispatchQueue.main.async { scroll(to: entryID) } }
+        }
+    }
+
     @ViewBuilder private func row(_ entry: ChatEntry, after speaker: ChatEntry? = nil, liveEntryIDs: Set<String>) -> some View {
         let last = entry.id == model.entries.last?.id
         let live = model.busy && entry.detail == "Running…"
         let canPin = model.team?.enabled == true && model.connected && ["user", "assistant", "tool"].contains(entry.kind)
             && !live && (!entry.text.isEmpty || entry.detail?.isEmpty == false)
+        let canReact = model.connected && ["user", "assistant"].contains(entry.kind) && !liveEntryIDs.contains(entry.id)
+            && (!entry.text.isEmpty || entry.attachments?.isEmpty == false)
+        let react: ((String, Bool) -> Void)? = canReact ? { emoji, mine in model.react(entry, emoji: emoji, remove: mine) } : nil
         Group {
         switch entry.kind {
         case "user":
-            UserRow(entry: entry, accent: { model.accent(for: $0) })
+            UserRow(entry: entry, accent: { model.accent(for: $0) }, onReact: react)
         case "assistant":
-            AssistantRow(entry: entry, accent: model.accent(for: entry.route), streaming: liveEntryIDs.contains(entry.id))
+            AssistantRow(entry: entry, accent: model.accent(for: entry.route), streaming: liveEntryIDs.contains(entry.id), onReact: react)
         case "question":
             if let question = entry.question {
                 ChatQuestionCard(question: question, accent: model.accent(for: entry.route), enabled: model.connected) { answers, dismiss in
@@ -641,7 +685,16 @@ struct ChatTranscript: View {
         }
         }
         .environment(\.chatBlackboardPin, canPin ? { pinEntry(entry) } : nil)
+        .environment(\.chatReact, canReact ? { emoji in model.react(entry, emoji: emoji) } : nil)
+        .environment(\.chatWorkspace, entry.workspace ?? model.selected?.workspace)
         .contextMenu {
+            if canReact {
+                Menu("React") {
+                    ForEach(chatReactionTapbacks, id: \.self) { emoji in
+                        Button(emoji) { model.react(entry, emoji: emoji) }
+                    }
+                }
+            }
             if canPin {
                 Button("Pin to Blackboard") { pinEntry(entry) }
             }
@@ -681,7 +734,9 @@ struct ChatTranscript: View {
             .accessibilityLabel((live ? "Working, " : "Worked, ") + ChatToolDisplay.activity(entries.map(\.tool)))
             .accessibilityValue(open ? "Expanded" : "Collapsed")
             if open {
-                VStack(alignment: .leading, spacing: textStyle.scaled(2)) { ForEach(entries) { entry in row(entry, liveEntryIDs: liveEntryIDs) } }
+                // Each row is a scroll target of its own, so a jump from the
+                // activity strip lands on the row, not the fold's centre.
+                VStack(alignment: .leading, spacing: textStyle.scaled(2)) { ForEach(entries) { entry in row(entry, liveEntryIDs: liveEntryIDs).id(entry.id) } }
                     .padding(.leading, textStyle.scaled(18))
                     .overlay(alignment: .leading) {
                         Rectangle().fill(Semantic.hairline).frame(width: 1).padding(.leading, textStyle.scaled(7)).padding(.vertical, 2)

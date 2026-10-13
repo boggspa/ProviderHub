@@ -197,6 +197,19 @@ MUSE_EFFORT_ALIASES = {rank: rank for rank in MUSE_EFFORTS}
 # CLI-level flag accepting the full desktop ladder, so every model advertises
 # it; the documented default is "high".
 KNOWN_MODELS = (
+    # Muse Code 1.4.6-R6000.1 model/list, captured 2026-10-12. These are
+    # CLI limits rather than the API's documented 1,048,576-token window.
+    # Live discovery remains authoritative for subscription availability.
+    {"id": "muse-wonder-1.0",
+     "display_name": "muse-wonder-1.0",
+     "reasoning_levels": list(MUSE_EFFORTS),
+     "default_effort": "high",
+     "context": 1007997, "max_output": 128000},
+    {"id": "muse-wonder-full-1.0",
+     "display_name": "muse-wonder-full-1.0",
+     "reasoning_levels": list(MUSE_EFFORTS),
+     "default_effort": "high",
+     "context": 1007997, "max_output": 128000},
     {"id": "muse-spark-1.3",
      "display_name": "muse-spark-1.3",
      "reasoning_levels": list(MUSE_EFFORTS),

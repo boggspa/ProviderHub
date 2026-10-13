@@ -427,54 +427,55 @@ import Combine
         check(scalars(reselected.entries.first?.text) == scalars("\u{FEFF} @Builder") && drawsTag(reselected.entries.first),
               "a reopened transcript lost a leading U+FEFF")
         check(model.team?.taskMode == false, "legacy roster unexpectedly enabled Task mode")
-        var fiveMemberTeam = roster("ready")
-        let rosterTemplate = (fiveMemberTeam["members"] as! [[String: Any]])[0]
-        fiveMemberTeam["members"] = (1...5).map { number -> [String: Any] in
+        let fullRoster = ChatTeamSnapshot.maxMembers
+        var fullTeam = roster("ready")
+        let rosterTemplate = (fullTeam["members"] as! [[String: Any]])[0]
+        fullTeam["members"] = (1...fullRoster).map { number -> [String: Any] in
             var member = rosterTemplate
             member["id"] = "member-\(number)"; member["name"] = "Member \(number)"
             return member
         }
-        fiveMemberTeam["activeMemberID"] = NSNull()
-        let fiveMemberSpecs = (1...5).map { number -> [String: Any] in
+        fullTeam["activeMemberID"] = NSNull()
+        let fullSpecs = (1...fullRoster).map { number -> [String: Any] in
             var spec = memberSpec; spec["name"] = "Member \(number)"; return spec
         }
-        model.configureTeam(enabled: true, members: fiveMemberSpecs)
-        let fiveMemberRequest = commands.last?["request"] as! String
-        check((commands.last?["members"] as? [[String: Any]])?.count == 5 && model.teamRequest == fiveMemberRequest,
-              "five-member configure was not sent")
-        try send(["event":"team", "chat":"A", "request":fiveMemberRequest, "team":fiveMemberTeam])
-        check(model.team?.members.count == 5 && model.team?.enabled == true && model.teamRequest == nil && model.teamNotice.isEmpty,
-              "five-member configure acknowledgement was rejected")
-        var fiveMembers = fiveMemberTeam["members"] as! [[String: Any]]
-        fiveMembers[4]["status"] = "working"; fiveMembers[4]["contributionID"] = "fifth-run"
-        fiveMemberTeam["members"] = fiveMembers; fiveMemberTeam["status"] = "working"
-        fiveMemberTeam["activeMemberID"] = "member-5"; fiveMemberTeam["activeMemberIDs"] = ["member-5"]
-        try send(["event":"team", "chat":"A", "team":fiveMemberTeam])
-        check(model.team?.members.count == 5 && model.team?.members[4].status == "working" && model.team?.status == "working" &&
-              model.team?.activeMemberID == "member-5" && model.team?.activeMemberIDs == ["member-5"], "fifth member status stayed stale")
-        var optionalFields = fiveMembers
+        model.configureTeam(enabled: true, members: fullSpecs)
+        let fullRequest = commands.last?["request"] as! String
+        check((commands.last?["members"] as? [[String: Any]])?.count == fullRoster && model.teamRequest == fullRequest,
+              "full-roster configure was not sent")
+        try send(["event":"team", "chat":"A", "request":fullRequest, "team":fullTeam])
+        check(model.team?.members.count == fullRoster && model.team?.enabled == true && model.teamRequest == nil && model.teamNotice.isEmpty,
+              "full-roster configure acknowledgement was rejected")
+        var fullMembers = fullTeam["members"] as! [[String: Any]]
+        fullMembers[fullRoster - 1]["status"] = "working"; fullMembers[fullRoster - 1]["contributionID"] = "last-run"
+        fullTeam["members"] = fullMembers; fullTeam["status"] = "working"
+        fullTeam["activeMemberID"] = "member-\(fullRoster)"; fullTeam["activeMemberIDs"] = ["member-\(fullRoster)"]
+        try send(["event":"team", "chat":"A", "team":fullTeam])
+        check(model.team?.members.count == fullRoster && model.team?.members[fullRoster - 1].status == "working" && model.team?.status == "working" &&
+              model.team?.activeMemberID == "member-\(fullRoster)" && model.team?.activeMemberIDs == ["member-\(fullRoster)"], "last member status stayed stale")
+        var optionalFields = fullMembers
         for key in ["contributionID", "usage", "context", "failureReason", "waitReason", "modelContext", "checkpoints"] {
-            optionalFields[4][key] = ["unexpected":true]
+            optionalFields[fullRoster - 1][key] = ["unexpected":true]
         }
-        var optionalTeam = fiveMemberTeam; optionalTeam["members"] = optionalFields
+        var optionalTeam = fullTeam; optionalTeam["members"] = optionalFields
         try send(["event":"team", "chat":"A", "team":optionalTeam])
-        let tolerantMember = model.team!.members[4]
-        check(model.team?.members.count == 5 && tolerantMember.status == "working" && model.teamNotice.isEmpty,
+        let tolerantMember = model.team!.members[fullRoster - 1]
+        check(model.team?.members.count == fullRoster && tolerantMember.status == "working" && model.teamNotice.isEmpty,
               "malformed optional member data hid the roster")
         check(tolerantMember.contributionID == nil && tolerantMember.usage == nil && tolerantMember.context == nil &&
               tolerantMember.failureReason == nil && tolerantMember.waitReason == nil && tolerantMember.modelContext == nil &&
               tolerantMember.checkpoints == nil, "malformed optional fields were retained")
-        var sixthMember = rosterTemplate; sixthMember["id"] = "member-6"
-        var overLimit = fiveMemberTeam; overLimit["members"] = fiveMembers + [sixthMember]
-        var emptyTeam = fiveMemberTeam; emptyTeam["members"] = [[String: Any]]()
-        var duplicateMembers = fiveMembers; duplicateMembers[3]["id"] = duplicateMembers[0]["id"]
-        var duplicateTeam = fiveMemberTeam; duplicateTeam["members"] = duplicateMembers
-        var missingIdentity = fiveMembers; missingIdentity[3]["id"] = "  "
-        var missingIDTeam = fiveMemberTeam; missingIDTeam["members"] = missingIdentity
-        var requiredFields = fiveMembers; requiredFields[4].removeValue(forKey: "name")
-        var malformedTeam = fiveMemberTeam; malformedTeam["members"] = requiredFields
+        var extraMember = rosterTemplate; extraMember["id"] = "member-\(fullRoster + 1)"
+        var overLimit = fullTeam; overLimit["members"] = fullMembers + [extraMember]
+        var emptyTeam = fullTeam; emptyTeam["members"] = [[String: Any]]()
+        var duplicateMembers = fullMembers; duplicateMembers[3]["id"] = duplicateMembers[0]["id"]
+        var duplicateTeam = fullTeam; duplicateTeam["members"] = duplicateMembers
+        var missingIdentity = fullMembers; missingIdentity[3]["id"] = "  "
+        var missingIDTeam = fullTeam; missingIDTeam["members"] = missingIdentity
+        var requiredFields = fullMembers; requiredFields[fullRoster - 1].removeValue(forKey: "name")
+        var malformedTeam = fullTeam; malformedTeam["members"] = requiredFields
         for invalidTeam in [overLimit, emptyTeam, duplicateTeam, missingIDTeam, malformedTeam] {
-            model.configureTeam(enabled: true, members: fiveMemberSpecs)
+            model.configureTeam(enabled: true, members: fullSpecs)
             let pendingRequest = model.teamRequest!
             try send(["event":"team", "chat":"A", "request":"stale", "team":invalidTeam])
             try send(["event":"team", "chat":"B", "request":pendingRequest, "team":invalidTeam])
@@ -482,29 +483,29 @@ import Combine
             let rejected: [String: Any] = ["event":"team", "chat":"A", "request":pendingRequest, "team":invalidTeam,
                                           "notice":"Worker notice"]
             try send(rejected)
-            check(model.teamRequest == nil && model.canConfigureTeam && model.team?.members.count == 5 &&
+            check(model.teamRequest == nil && model.canConfigureTeam && model.team?.members.count == fullRoster &&
                   model.teamNotice.contains("could not refresh") && model.teamNotice.contains("Worker notice"),
                   "invalid Team silently kept stale state or stranded its request")
             var repeated = rejected; repeated.removeValue(forKey: "request"); try send(repeated)
-            try send(["event":"team", "chat":"A", "team":fiveMemberTeam])
-            check(model.team?.members[4].contributionID == "fifth-run" && model.teamNotice.isEmpty, "valid Team update did not recover")
+            try send(["event":"team", "chat":"A", "team":fullTeam])
+            check(model.team?.members[fullRoster - 1].contributionID == "last-run" && model.teamNotice.isEmpty, "valid Team update did not recover")
         }
-        model.configureTeam(enabled: true, members: fiveMemberSpecs)
+        model.configureTeam(enabled: true, members: fullSpecs)
         let missingTeamRequest = model.teamRequest!
         try send(["event":"team", "chat":"A", "request":missingTeamRequest])
-        check(model.teamRequest == nil && model.team?.members.count == 5 && model.teamNotice.contains("could not refresh"),
+        check(model.teamRequest == nil && model.team?.members.count == fullRoster && model.teamNotice.contains("could not refresh"),
               "missing snapshot silently cleared Team")
         try send(["event":"team", "chat":"A", "team":false])
-        check(model.team?.members.count == 5 && model.teamNotice.contains("could not refresh"), "invalid JSON snapshot cleared Team")
+        check(model.team?.members.count == fullRoster && model.teamNotice.contains("could not refresh"), "invalid JSON snapshot cleared Team")
         try send(["event":"team", "chat":"A", "team":NSNull()])
         check(model.team == nil && model.teamNotice.isEmpty, "explicit null snapshot did not clear Team")
-        try send(["event":"team", "chat":"A", "team":fiveMemberTeam])
-        model.configureTeam(enabled: true, members: fiveMemberSpecs)
+        try send(["event":"team", "chat":"A", "team":fullTeam])
+        model.configureTeam(enabled: true, members: fullSpecs)
         let correlatedRequest = model.teamRequest!
         try send(["event":"team", "chat":"A", "team":overLimit])
         check(model.teamRequest == correlatedRequest && model.teamNotice.contains("could not refresh"),
               "unsolicited invalid update settled a pending configure")
-        try send(["event":"team", "chat":"A", "request":correlatedRequest, "team":fiveMemberTeam])
+        try send(["event":"team", "chat":"A", "request":correlatedRequest, "team":fullTeam])
         check(model.teamRequest == nil && model.teamNotice.isEmpty, "matching reply did not settle after an invalid poll")
         var configuredTeam = roster("waiting", "waiting")
         configuredTeam["execution"] = execution.wire
@@ -935,14 +936,21 @@ import Combine
              "route":"test", "isError":false, "changedFiles":[]]
         }
         let largeLine = try JSONSerialization.data(withJSONObject: ["event":"selected", "id":"large", "entries":largeEntries]) + Data([10])
+        // The worker's pipe delivers a snapshot line in 16 KB reads. Each byte
+        // must be searched once: rescanning the buffer per read took minutes
+        // on a 35 MB transcript and would exceed this binary's time limit.
+        func pipeReads(_ data: Data) -> [Data] {
+            stride(from: 0, to: data.count, by: 16_384).map { data.subdata(in: $0 ..< min($0 + 16_384, data.count)) }
+        }
         let began = ProcessInfo.processInfo.systemUptime
         let reader = ChatEventReader()
         var applySeconds: TimeInterval = 0
         var mainQueueRan = false
         DispatchQueue.main.async { mainQueueRan = true }
+        let reads = pipeReads(largeLine)
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            reader.consume(largeLine.prefix(1024)) { _ in fatalError("partial line applied") }
-            reader.consume(largeLine.dropFirst(1024)) { parsed in
+            for read in reads.dropLast() { reader.consume(read) { _ in fatalError("partial line applied") } }
+            reader.consume(reads.last!) { parsed in
                 let start = ProcessInfo.processInfo.systemUptime
                 model.apply(parsed)
                 applySeconds = ProcessInfo.processInfo.systemUptime - start
@@ -952,6 +960,21 @@ import Combine
         }
         print("Large snapshot total seconds: \(ProcessInfo.processInfo.systemUptime - began); main actor apply seconds: \(applySeconds)")
         check(model.entries.count == 5000 && model.entries.last?.id == "large-4999", "large transcript lost entries")
+        // Lines split anywhere, several share a read, and a partial line waits for its newline.
+        var framer = ChatLineFramer()
+        let small = Data("{\"a\":1}\n\n{\"b\":2}\n".utf8)
+        var framed: [Data] = []
+        let framingBegan = ProcessInfo.processInfo.systemUptime
+        for read in pipeReads(small + largeLine + Data("{\"c\":3}\n{\"d\"".utf8)) { framed += framer.lines(appending: read) }
+        let framingSeconds = ProcessInfo.processInfo.systemUptime - framingBegan
+        check(framed == [Data("{\"a\":1}".utf8), Data(), Data("{\"b\":2}".utf8), largeLine.dropLast(), Data("{\"c\":3}".utf8)],
+              "framing split, merged or lost lines")
+        check(framer.lines(appending: Data()).isEmpty && framer.lines(appending: Data(":4}\n".utf8)) == [Data("{\"d\":4}".utf8)],
+              "a partial line was not held for its newline")
+        check(framingSeconds < 2, "framing \(largeLine.count) bytes in pipe-sized reads took \(framingSeconds) s")
+        var bytewise = ChatLineFramer(), single: [Data] = []
+        for byte in small { single += bytewise.lines(appending: Data([byte])) }
+        check(single == [Data("{\"a\":1}".utf8), Data(), Data("{\"b\":2}".utf8)], "byte-sized reads lost a line boundary")
         let ordered = try JSONSerialization.data(withJSONObject: ["event":"delta", "chat":"large", "id":"large-4999", "text":"after snapshot", "offset":model.entries.last!.text.unicodeScalars.count]) + Data([10])
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             reader.consume(largeLine + ordered) { parsed in
@@ -960,6 +983,11 @@ import Combine
             }
         }
         check(model.entries.last!.text.hasSuffix("after snapshot"), "reader reordered snapshot and delta")
+        let paneSnapshot = try JSONSerialization.data(withJSONObject: ["event":"snapshot", "chat":"large", "entries":largeEntries])
+        let parsedPane = ChatParsedEvent(line: paneSnapshot)!
+        check((parsedPane.fields["entries"] as? [ChatEntry])?.count == 5000, "pane snapshot decoding fell back to the main actor")
+        let preparedBoard = ChatParsedEvent(line: Data(#"{"event":"blackboard","chat":"large","blackboard":{"posts":[],"attachments":[],"limits":{"posts":96,"bodyBytes":16384,"boardBytes":524288,"usedBytes":0,"attachments":24,"attachmentBytes":20971520}}}"#.utf8))!
+        check(preparedBoard.fields["blackboard"] is ChatBlackboardSnapshot, "Blackboard decoding fell back to the main actor")
 
         // The Team Blackboard is per-chat inspector state: snapshots, correlated commands, no active work.
         var boardCommands: [[String: Any]] = []

@@ -9,9 +9,9 @@ import SwiftUI
 /// Local-only and opt-in per provider — there is no master flag. Choosing
 /// "Installed CLI login" *is* turning the experiment on for that one provider.
 fileprivate let cliAuthProviders: Set<String> = ["codex", "claude", "muse", "grok", "antigravity"]
-/// Mirrors hub_config.KEY_ACCOUNT_PROVIDERS: API-key providers that may hold
-/// several keys. Subscriptions and Muse's minted key stay single.
-let keyAccountProviders: Set<String> = ["mistral", "kimi", "mimo", "deepseek", "cerebras", "gemini", "grok", "qwen-token-plan", "minimax", "openrouter"]
+/// Mirrors hub_config.KEY_ACCOUNT_PROVIDERS: every hosted API-key connection.
+/// CLI subscription logins remain separately configured in CliAccountsSection.
+let keyAccountProviders: Set<String> = ["mistral", "kimi", "mimo", "deepseek", "cerebras", "gemini", "grok", "qwen-token-plan", "minimax", "openrouter", "claude", "codex", "muse", "devin"]
 /// CLI providers that can hold several logins side by side, one config folder
 /// each. Mirrors `hub_config.CLI_ACCOUNT_PROVIDERS`.
 fileprivate let cliAccountProviders: Set<String> = ["codex", "claude"]
@@ -288,7 +288,8 @@ struct ProviderPage: View {
 
 /// A provider's API-key slots: the default one plus any extra accounts
 /// (work, personal…). The active slot is where "Save key" writes and what
-/// the gateway reads; Save applies a switch, restarting the gateway.
+/// the gateway reads. Primary selection applies between API calls, while
+/// Chat may independently choose any registered account in its model picker.
 struct KeyAccountsSection: View {
     @ObservedObject var model: BridgeModel
     var provider: String
@@ -299,7 +300,7 @@ struct KeyAccountsSection: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 8) {
-                Text("Account").foregroundStyle(.secondary)
+                Text("Primary key").foregroundStyle(.secondary)
                 Picker("", selection: Binding(
                     get: { active ?? "" },
                     set: { model.settings.providers[provider]?.key_account = $0.isEmpty ? nil : $0 })) {
@@ -307,9 +308,12 @@ struct KeyAccountsSection: View {
                     ForEach(accounts) { Text($0.label).tag($0.id) }
                 }.labelsHidden().fixedSize()
                 Button("Add account") { model.addKeyAccount(provider) }.disabled(accounts.count >= 8)
+                Button("Apply") { Task { await model.saveKeyAccounts(provider) } }.disabled(model.busy)
                 if model.keyAccountsChecking.contains(provider) { ProgressView().controlSize(.mini) }
                 Spacer()
             }
+            Text("Desktop API requests use the primary key. Chat can choose any registered key independently. Save key writes to the selected slot.")
+                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             if !accounts.isEmpty {
                 row(id: nil, label: "Default")
                 ForEach(accounts) { row(id: $0.id, label: $0.label) }
@@ -333,7 +337,7 @@ struct KeyAccountsSection: View {
                 Text(label).font(.system(size: 12, weight: .medium))
             }
             Text(probe.map { $0.found ? "Key saved" : "No key yet" } ?? "").font(.system(size: 10.5)).foregroundStyle(.secondary)
-            if id == active { Text("active").font(.system(size: 9.5, weight: .semibold)).foregroundStyle(.secondary)
+            if id == active { Text("primary").font(.system(size: 9.5, weight: .semibold)).foregroundStyle(.secondary)
                 .padding(.horizontal, 6).padding(.vertical, 1).background(Color.secondary.opacity(0.15), in: Capsule()) }
             Spacer()
             if let id {

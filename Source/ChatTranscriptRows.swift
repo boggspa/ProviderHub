@@ -52,14 +52,93 @@ struct ChatSpeakerHeader: View {
     }
 }
 
-/// The user's turn, as a bubble on the trailing edge. In a Team its recorded
-/// `@Name` tags wear their members' accents, as they did in the composer.
+/// Reactions under a message as small capsules grouped by emoji with a count,
+/// iMessage tapback style; hovering names who reacted. With `onReact`, clicking
+/// a capsule adds the user's own reaction with that emoji or withdraws it.
+struct ChatReactionsRow: View {
+    var reactions: [ChatReaction]
+    /// (emoji, the user already reacted with it) -> add or withdraw.
+    var onReact: ((String, Bool) -> Void)? = nil
+    @Environment(\.chatTextStyle) private var textStyle
+
+    struct Cluster: Identifiable {
+        var emoji: String
+        var names: [String]
+        var mine: Bool
+        var id: String { emoji }
+        var caption: String {
+            let who = names.count <= 2 ? names.joined(separator: " and ")
+                : names.dropLast().joined(separator: ", ") + " and " + names[names.count - 1]
+            return who + " reacted " + emoji
+        }
+    }
+
+    static func clusters(_ reactions: [ChatReaction]) -> [Cluster] {
+        var order: [String] = []
+        var names: [String: [String]] = [:]
+        var mine = Set<String>()
+        for reaction in reactions {
+            if names[reaction.emoji] == nil { order.append(reaction.emoji); names[reaction.emoji] = [] }
+            names[reaction.emoji]?.append(reaction.authorName)
+            if reaction.author == "user" { mine.insert(reaction.emoji) }
+        }
+        return order.map { Cluster(emoji: $0, names: names[$0] ?? [], mine: mine.contains($0)) }
+    }
+
+    var body: some View {
+        HStack(spacing: textStyle.scaled(4)) {
+            ForEach(Self.clusters(reactions)) { cluster in
+                if let onReact {
+                    Button { onReact(cluster.emoji, cluster.mine) } label: { capsule(cluster) }
+                        .buttonStyle(.plain)
+                        .help(cluster.caption)
+                        .accessibilityLabel(cluster.caption)
+                } else {
+                    capsule(cluster).help(cluster.caption).accessibilityLabel(cluster.caption)
+                }
+            }
+        }
+    }
+
+    private func capsule(_ cluster: Cluster) -> some View {
+        HStack(spacing: textStyle.scaled(3)) {
+            Text(cluster.emoji).font(textStyle.system(12))
+            if cluster.names.count > 1 {
+                Text("\(cluster.names.count)").font(textStyle.system(10.5, weight: .semibold)).foregroundStyle(Semantic.secondaryInk)
+            }
+        }
+        .padding(.horizontal, textStyle.scaled(7)).padding(.vertical, textStyle.scaled(3))
+        .background(Capsule().fill(Semantic.raisedSurface))
+        .overlay(Capsule().stroke(cluster.mine ? Semantic.ink.opacity(0.35) : Semantic.hairline, lineWidth: 1))
+        .contentShape(Capsule())
+    }
+}
+
+/// The user's turn, as a bubble on the trailing edge, opening with a bold
+/// **User:** label. In a Team transcript members' replies and tool calls
+/// interleave with the user's messages, and an instruction has been read as
+/// the preceding member's words; the label names the speaker inside the
+/// bubble itself. In a Team its recorded `@Name` tags wear their members'
+/// accents, as they did in the composer.
 struct UserRow: View {
     var entry: ChatEntry
     var title = "You"
     /// A route's provider accent; without one, tags read as plain text.
     var accent: ((String) -> Color)? = nil
+    /// The user's reaction toggle; nil shows reactions without one.
+    var onReact: ((String, Bool) -> Void)? = nil
     @Environment(\.chatTextStyle) private var textStyle
+
+    /// The bubble's text: the speaker label in bold, then the message with its
+    /// mention tags. A message with only attachments still carries the label.
+    static func labelled(_ entry: ChatEntry, title: String, accent: ((String) -> Color)?) -> AttributedString {
+        var label = AttributedString(title == "You" ? "User:" : title + ":")
+        label.inlinePresentationIntent = .stronglyEmphasized
+        guard !entry.text.isEmpty else { return label }
+        let message = accent.map { ChatMentions.marked(entry.text, mentions: entry.mentions ?? [], accent: $0) }
+            ?? AttributedString(entry.text)
+        return label + AttributedString(" ") + message
+    }
 
     var body: some View {
         VStack(alignment: .trailing, spacing: 4) {
@@ -68,14 +147,16 @@ struct UserRow: View {
             }
             VStack(alignment: .leading, spacing: textStyle.scaled(6)) {
                 if let attachments = entry.attachments, !attachments.isEmpty { ChatAttachmentStrip(attachments: attachments) }
-                if !entry.text.isEmpty {
-                    ChatSelectableText(text: accent.map { ChatMentions.marked(entry.text, mentions: entry.mentions ?? [], accent: $0) }
-                                           ?? AttributedString(entry.text),
-                                       font: textStyle.nsFont, color: Semantic.nsInk, message: entry.text)
-                }
+                ChatSelectableText(text: Self.labelled(entry, title: title, accent: accent),
+                                   font: textStyle.nsFont, color: Semantic.nsInk, message: entry.text.isEmpty ? nil : entry.text)
             }
             .padding(.horizontal, textStyle.scaled(13)).padding(.vertical, textStyle.scaled(8))
             .background(RoundedRectangle(cornerRadius: textStyle.scaled(15), style: .continuous).fill(Semantic.selection))
+            if let reactions = entry.reactions, !reactions.isEmpty {
+                // Tapbacks hang off the bubble's bottom trailing corner.
+                ChatReactionsRow(reactions: reactions, onReact: onReact)
+                    .padding(.top, -textStyle.scaled(8)).padding(.trailing, textStyle.scaled(10))
+            }
         }
         .frame(maxWidth: .infinity, alignment: .trailing)
         .padding(.leading, 56)
@@ -92,6 +173,8 @@ struct AssistantRow: View {
     var entry: ChatEntry
     var accent: Color
     var streaming: Bool
+    /// The user's reaction toggle; nil shows reactions without one.
+    var onReact: ((String, Bool) -> Void)? = nil
     @Environment(\.chatTextStyle) private var textStyle
 
     var body: some View {
@@ -103,6 +186,8 @@ struct AssistantRow: View {
                 ChatTranscriptText(text: reply.body, streaming: streaming, message: entry.text)
             }
             if !reply.links.isEmpty { ChatSourcesRow(links: reply.links) }
+            // A quiet chip row under the reply; replies stay sections, never bubbles.
+            if let reactions = entry.reactions, !reactions.isEmpty { ChatReactionsRow(reactions: reactions, onReact: onReact) }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .accessibilityElement(children: .contain)

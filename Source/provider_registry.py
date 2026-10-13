@@ -539,6 +539,25 @@ _GROK_MODEL_METADATA = {
 
 
 _CLAUDE_CONTEXT_DOCS = "https://platform.claude.com/docs/en/build-with-claude/context-windows"
+_CLAUDE_EFFORT_DOCS = "https://platform.claude.com/docs/en/build-with-claude/effort"
+# Exact documented IDs only; the Models API's capability flags take precedence.
+_CLAUDE_FIVE_EFFORT_MODELS = {
+    "claude-fable-5-1", "claude-fable-5", "claude-mythos-5-1", "claude-mythos-5",
+    "claude-opus-5-5", "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7",
+    "claude-sonnet-5-5", "claude-sonnet-5", "claude-haiku-5-5",
+}
+_CLAUDE_FOUR_EFFORT_MODELS = {"claude-mythos-preview", "claude-opus-4-6", "claude-sonnet-4-6"}
+
+
+def claude_effort_modes(identifier: str) -> list[str]:
+    if identifier in _CLAUDE_FIVE_EFFORT_MODELS:
+        return ["low", "medium", "high", "xhigh", "max"]
+    if identifier in _CLAUDE_FOUR_EFFORT_MODELS:
+        return ["low", "medium", "high", "max"]
+    if identifier in {"claude-opus-4-5", "claude-opus-4-5-20251101"}:
+        return ["low", "medium", "high"]
+    return []
+
 # Exact published model ceilings, checked 2026-09-19; claude-opus-5-5 added
 # 2026-09-22, claude-sonnet-5-5 2026-09-28, claude-haiku-5-5 2026-10-07. These
 # are model capacities, not a claim that a particular subscription grants access.
@@ -574,6 +593,24 @@ def documented_context(provider_id: str, identifier: str) -> tuple[int | None, s
 
 
 _MUSE_MODEL_METADATA = {
+    # Launched 2026-10-12. Membership still comes from this account's API
+    # list; Wonder Full is subscription-only in Muse Code, so it has no
+    # invented API row here. No API output ceiling was documented.
+    "muse-wonder-1.0": {
+        "display_name": "Muse Wonder 1.0",
+        "context": 1048576,
+        "tools": True,
+        "vision": True,
+        "reasoning": True,
+        "streaming": True,
+        "adaptive_thinking": True,
+        "effort_modes": list(_MUSE_EFFORT_RANKS),
+        "fast_mode": False,
+        "parallel_tool_calls": True,
+        "tool_choice_modes": ["auto"],
+        "reasoning_history": "native",
+        "metadata_evidence": "https://dev.meta.ai/docs/models#muse-wonder",
+    },
     "muse-spark-1.3": {
         "display_name": "Muse Spark 1.3",
         "context": 1048576,

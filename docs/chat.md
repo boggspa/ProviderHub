@@ -154,7 +154,7 @@ The right-hand **inspector** has four views, each using the whole pane:
   login; an Open GitHub link remains available if that CLI is absent or the
   lookup fails. Refresh reloads repository information without changing Git
   state or fetching a remote.
-- **Team** configures up to five persistent members, including the current
+- **Team** configures up to six persistent members, including the current
   chat model. Each contributes once by default and may explicitly continue with
   a next step. Members think and read in parallel through one attributed
   transcript, refreshed before every model round, with separate provider histories.
@@ -186,18 +186,25 @@ The right-hand **inspector** has four views, each using the whole pane:
   running processes. See background shells under Files and commands.
 
 Drag the hairline at either side of the conversation to resize the workspace
-rail (150–360 points, default 190) or inspector (260–600 points, responsive
-default up to 360). Width preferences persist across sessions. Double-click a
-divider to reset it; accessibility adjustment and a Reset width action are also
-available. Resizing the window clamps displayed widths to leave at least 420
-points for the conversation. The inspector collapses the left workspace rail
-on narrower windows; growing the window restores the preferred widths.
+rail (150–360 points, default 190) or inspector (at least 260 points, at most
+everything but the conversation's 420). The inspector and the conversation
+share width equally: without a drag override the inspector takes half of what
+is left beside the rail, giving ground only so the rail stays available, so a
+wide window gives the browser, Team and other tabs real room instead of a
+fixed 360. Width preferences persist across sessions. Double-click a divider
+to reset it (the inspector returns to the even split); accessibility
+adjustment and a Reset width action are also available. Resizing the window
+clamps displayed widths to leave at least 420 points for the conversation. A
+wide inspector collapses the left workspace rail on narrower windows; growing
+the window restores the preferred widths.
 The main turn clock and context count describe the parent;
 Side Chat runs independently.
 
 The small gear at the bottom-left of the sidebar offers Allow web search, Theme, Glass/Solid,
-Font, and Text size. Glass lays a 10% scrim over the window material (black in
-Dark, white in Light) so text holds on a busy wallpaper. Font choices include
+Font, and Text size. Glass lays a 75% scrim over the window material (black in
+Dark, white in Light) so text holds on a busy wallpaper; the Hub window's Glass
+surface lays the same scrim beneath its chroma wash, so the two windows read as
+one. Font choices include
 System, System Mono, Inter, Source
 Serif 4 and JetBrains Mono. **Custom…** opens the native macOS font panel for
 fonts installed through Font Book. Only the chosen font name is saved; custom
@@ -304,8 +311,21 @@ Choosing YOLO in a
 folder for the first time asks once to confirm; that answer is remembered per
 folder on this Mac and never sent to the worker.
 
+A CLI-backed route (Claude Code, Codex or another CLI running as the model
+transport) may describe its own sandbox, plan or read-only mode and a temporary
+working directory. Those describe only the nested process. The host tools act
+on the workspace named in the system text under the approval mode above, and
+the note the host sends with its tools says so explicitly, because seats have
+read the nested CLI's posture as the host's and stopped editing.
+
 The transcript reads like Claude and Codex Desktop. Your messages sit in a
-bubble on the trailing edge. Each speaker (the chat's model, or a Team member
+bubble on the trailing edge and open with a bold **User:** label inside the
+bubble, so that in a Team transcript, where members' replies and tool calls
+interleave with yours, an instruction is never read as the preceding member's
+words; **Copy Message** still copies the message without the label. A helper's
+inspector transcript labels the parent's task the same way. Your messages and
+replies can carry emoji reactions from Team members or from you (right-click
+**React**, or click an existing chip); see [Reactions](chat-team.md#reactions). Each speaker (the chat's model, or a Team member
 by name) gets a section header; in a Team, every text reply starts a new section
 and later tools join that member's current section even when peers interleave.
 User messages and notices close all member sections; solo chats retain their
@@ -323,7 +343,28 @@ Three or more consecutive local tool rows fold into one disclosure such as
 run at the end of a live turn stays open as **Working** and folds once the
 reply begins, and a fold opened or closed by hand keeps that choice. Delegate
 rows keep their own lanes and are never folded. Recorded changed files can be
-revealed in Finder.
+revealed in Finder. A link in a reply that names a file or folder (a path
+relative to the chat's workspace, an absolute or `~` path, or a `file://` URL)
+opens the file in its default app or reveals a folder in Finder; a path that no
+longer exists reveals the nearest existing folder instead. Web links open in
+the browser as before. Previously every such link went to the system as a
+schemeless URL and failed with Finder's "The application can't be opened"
+(error -50). The newest row keeps a little headroom above the composer:
+the transcript follows a spacer below the last row, so auto-follow lands with
+breathing room, scrolling up still disengages it, and scrolling back to the
+end or the **Latest** button re-engages it.
+
+While a turn runs, a **live activity strip** sits between the transcript and
+the composer with one line per speaker that is working right now, in the
+rows' own words: "Sol Running `swift build -c release`", "Luna Editing
+main.swift", "MiniMax Thinking…", or "M3 Waiting" with the reason. A Team
+shows every working, continuing or waiting member in roster order; a solo
+chat shows its model. The line reads the speaker's newest row (a running tool
+in its live phrasing, a streaming reply as "Replying…", a model request in
+flight as "Thinking…"), so nothing is invented, and it disappears when the
+turn ends. Clicking a line scrolls to that speaker's current row (or the fold
+holding it, which opens) and pauses following, like a manual scroll; the
+**Latest** button brings the view back.
 
 Web search sources collapse into one pill under the reply (**12 sources ·
 github.com · …**) that opens into a numbered list; copied and saved text keeps
@@ -334,16 +375,43 @@ tooltip. A finished Team turn ends with a table of the files it changed.
 Older chats saved an "Older model context trimmed"
 notice on most rounds of a long turn; those are no longer drawn.
 
+Patches use Codex's `*** Begin Patch` format, which the tool description now
+spells out: `*** Add File:` lists every new line with a `+` prefix and no `@@`
+line, `*** Update File:` carries `@@` hunks whose ` `, `-` and `+` lines copy
+the file verbatim, and `*** Delete File:` removes a file. A rejection names what
+went wrong in the patch's own terms: the literal marker lines expected and
+found, the offending line by number, a hunk that matched zero or several times
+with the count, or the header to use instead (an Update of a missing file
+points to Add; an Add of an existing file points to Update). Blank lines around
+a patch or between its sections, trailing whitespace on marker lines and a
+stray `@@ -0,0 +1,N @@` line in an Add section are tolerated, since none can be
+content. Read file and patch handle UTF-8 text only; a binary or differently
+encoded file is refused with the offending byte and offset, and shell commands
+such as `file`, `xxd` or `od -c` inspect it.
+
 Shell commands use the user's normal macOS permissions, with the workspace as
 their working directory. They are not sandboxed. Output is bounded and commands
 time out after at most five minutes. Stopping a command cannot undo changes it
-already made.
+already made. A foreground command's whole process group ends when the call
+returns, so a trailing `&`, `nohup` or `setsid` keeps nothing running; the
+result says so when a command tried one, and points to `background`. Exit code
+127 adds a note that the command was not found on `PATH`: `rg`, `7z`,
+`ffprobe`, `bsdtar` with RAR support and similar tools are not bundled with
+Provider Hub, so they must already be installed on the Mac, and search files
+covers literal text searches without `rg`. Several Pythons can be on `PATH`,
+so a package one command installs may not be importable by the interpreter
+another command runs; create a virtual environment in the workspace and run
+both the install and the script through it.
 
 A shell command started with `background` (a dev server, watcher or long
 build) keeps running after the call returns and between turns. The call
 returns its first second of output and an id such as `p1`; **read process**
 returns only output the model has not yet seen, optionally waiting up to 30
-seconds for the process to finish, and **stop process** ends it. Starting one
+seconds for the process to finish, and **stop process** ends it. Every report
+states how long the process has run and how many bytes it has written in
+total, so a quiet build still shows progress, and a finished one says who
+ended it: `stop_process`, the user from the inspector, or its chat being
+deleted or Chat shutting down. Starting one
 needs the same approval as any shell command; reading or stopping the chat's
 own processes does not. Each process runs in its own process group, so Stop
 sends SIGTERM to everything it started and SIGKILL three seconds later; when
@@ -422,7 +490,13 @@ Workspace instructions and tool approvals continue to govern actions.
 
 The notebook holds at most sixteen notes, 800 UTF-8 bytes per note and 6,000
 bytes of serialized notes overall. A full notebook requires explicit replacement
-or removal; it never silently evicts an older decision. Notes share the chat's
+or removal; it never silently evicts an older decision. Each `record_decision`
+and `forget_decision` result reports the capacity used (notes and bytes, across
+every workspace scope that counts toward the caps), and a full notebook's
+refusal names those counts and how many bytes the note would have added.
+Rejections distinguish an empty text from one over the byte limit, naming its
+UTF-8 size, and a repeated source ID from one that is not a visible entry,
+since multi-byte characters and tool call IDs were the usual causes. Notes share the chat's
 atomic save, survive reopening and model/account changes, and are shown only
 in the workspace where they were recorded. Switching back restores that view.
 They reserve space before context trimming and are projected into each request
@@ -500,6 +574,12 @@ payloads on a serial background queue, then applies them in FIFO order on the
 main actor. Each worker gets a new reader; queued events from an older process
 are ignored after reconnecting. Streaming offsets and inspector request IDs
 therefore retain their original ordering.
+
+A transcript travels as one line, which the pipe delivers in 16 KB reads.
+Framing searches each byte once; rescanning the buffer on every read made a
+35 MB transcript take minutes to connect. The worker sends a transcript once
+before `ready`, and once per chat in a subscription: the `snapshot`, followed
+by that chat's helper, Side Chat and Team state.
 
 The transcript initially renders the last 100 layout segments. “Load earlier
 messages” reveals 100 more at a time, preserving the full transcript and its

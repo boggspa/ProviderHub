@@ -27,6 +27,9 @@ private typealias Semantic = HubTheme.Semantic
 
 private let subscriptionProviders: Set<String> = ["claude", "codex", "antigravity", "devin"]
 private let cliAccountProviders: Set<String> = ["codex", "claude"]
+/// Providers with both an API-key source and an installed-CLI source, which
+/// Chat can list side by side. Mirrors `hub_config.CHAT_SOURCE_PROVIDERS`.
+private let chatSourceProviders: Set<String> = ["codex", "claude", "muse", "grok"]
 private let tierOrder = ["fable", "opus", "sonnet", "haiku"]
 
 // MARK: - Model helpers the shell needs that the classic panes keep in views
@@ -135,7 +138,9 @@ struct CompactShell: View {
         .font(.system(size: 11.5))
         .background {
             if windowStyle == .glass {
-                VibrancyBackground().background(chromaWash)
+                // The same 75% scrim Chat lays over its glass, so the two
+                // windows read as one surface; the chroma wash stays beneath.
+                VibrancyBackground().overlay(HubTheme.Semantic.glassScrim).background(chromaWash)
             } else {
                 Color(nsColor: .windowBackgroundColor)
             }
@@ -405,12 +410,18 @@ struct CompactShell: View {
             ScrollView {
                 VStack(spacing: 2) {
                     ForEach(model.activity) { entry in
-                        HStack(spacing: 8) {
-                            Text(String(entry.time.dropFirst(11).prefix(8))).font(.system(size: 10, design: .monospaced)).foregroundStyle(.tertiary)
-                            Text(entry.event).frame(width: 90, alignment: .leading)
-                            Text(model.modelLabel(entry.model)).lineLimit(1).frame(maxWidth: .infinity, alignment: .leading)
-                            Text(entry.status.map(String.init) ?? "").font(.system(size: 10, design: .monospaced)).foregroundStyle(entry.event == "completed" ? Chroma.ok : Chroma.warn)
-                        }.font(.system(size: 11)).padding(.vertical, 2)
+                        VStack(alignment: .leading, spacing: 3) {
+                            HStack(spacing: 8) {
+                                Text(String(entry.time.dropFirst(11).prefix(8))).font(.system(size: 10, design: .monospaced)).foregroundStyle(.tertiary)
+                                Text(entry.event).frame(width: 90, alignment: .leading)
+                                Text(model.modelLabel(entry.model)).lineLimit(1).frame(maxWidth: .infinity, alignment: .leading)
+                                Text(entry.status.map(String.init) ?? "").font(.system(size: 10, design: .monospaced)).foregroundStyle(entry.event == "completed" ? Chroma.ok : Chroma.warn)
+                            }
+                            if let usage = entry.usage {
+                                Text(entry.sourceSummary).foregroundStyle(.secondary)
+                                Text(usage.summary).font(.system(size: 10)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                            }
+                        }.font(.system(size: 11)).padding(.vertical, 3)
                     }
                     if model.activity.isEmpty { Text("No requests yet").foregroundStyle(.secondary).padding() }
                 }
@@ -616,6 +627,7 @@ private struct ProviderShellPane: View {
                 default:
                     Text("Reads \(provider.credential_env ?? "the provider key") from the app’s launch environment.").foregroundStyle(.secondary)
                 }
+                if chatSourceProviders.contains(provider.id) { ChatSourceRow(model: model, provider: provider) }
             }
         }
     }
@@ -651,6 +663,7 @@ private struct SubscriptionPane: View {
             PaneHeader(presentation: provider.presentation, title: provider.presentation.displayProvider, subtitle: provider.id == "devin" ? "Agent sessions" : "Subscription · CLI route", accent: provider.presentation.color, state: (state.text, state.color))
             SectionLabel(text: provider.id == "devin" ? "Credential" : "Accounts")
             if provider.id == "devin" {
+                KeyAccountsSection(model: model, provider: provider.id).controlSize(.small)
                 HStack(spacing: 8) {
                     SecureField("Devin API key (cog_ / pat_ / apk_)", text: $model.secretDraft).textFieldStyle(.roundedBorder).controlSize(.small)
                     Button("Save key") { Task { await model.saveKey() } }.controlSize(.small).disabled(model.busy || model.secretDraft.isEmpty)
@@ -660,6 +673,7 @@ private struct SubscriptionPane: View {
                     Text("Installed CLI").tag("cli"); Text("Paste a key").tag("keychain")
                 }.pickerStyle(.segmented).labelsHidden().controlSize(.small).fixedSize()
                 if model.settings.providers[provider.id]?.credential_mode == "keychain" {
+                    if keyAccountProviders.contains(provider.id) { KeyAccountsSection(model: model, provider: provider.id).controlSize(.small) }
                     HStack(spacing: 8) {
                         SecureField("API key", text: $model.secretDraft).textFieldStyle(.roundedBorder).controlSize(.small)
                         Button("Save key") { Task { await model.saveKey() } }.controlSize(.small).disabled(model.busy || model.secretDraft.isEmpty)
@@ -669,6 +683,7 @@ private struct SubscriptionPane: View {
                 } else {
                     Text("Sign in through the \(provider.presentation.displayProvider) CLI itself, then save.").foregroundStyle(.secondary)
                 }
+                if chatSourceProviders.contains(provider.id) { ChatSourceRow(model: model, provider: provider) }
             }
             SectionLabel(text: "Routes", trailing: "\(model.providerModels(provider.id).count)")
             if model.providerModels(provider.id).isEmpty {
@@ -681,6 +696,25 @@ private struct SubscriptionPane: View {
                 }
             }
         }
+    }
+}
+
+/// Chat's second credential source (`chat_both_sources`): the Keychain key
+/// while the CLI is active, the installed CLI otherwise. Claude Desktop and
+/// Codex keep following the picker above; the worker drops an explicit false.
+private struct ChatSourceRow: View {
+    @ObservedObject var model: BridgeModel
+    var provider: ProviderDefinition
+    var body: some View {
+        let cli = model.settings.providers[provider.id]?.credential_mode == "cli"
+        VStack(alignment: .leading, spacing: 2) {
+            OptionRow(title: cli ? "Also list this provider’s API key models in Chat" : "Also list this provider’s installed CLI models in Chat",
+                      isOn: Binding(get: { model.settings.providers[provider.id]?.chat_both_sources ?? false },
+                                    set: { model.settings.providers[provider.id]?.chat_both_sources = $0 ? true : nil }),
+                      accent: provider.presentation.color)
+            Text("Chat shows both sources side by side, each row labelled with its source; Claude Desktop and Codex keep the source chosen above. Refresh after turning this on.")
+                .font(.system(size: 10.5)).foregroundStyle(.tertiary).fixedSize(horizontal: false, vertical: true)
+        }.padding(.top, 2)
     }
 }
 

@@ -35,6 +35,7 @@ import chat_blackboard
 import chat_memory
 import chat_execution
 import chat_processes
+import chat_reactions
 import chat_team
 import chat_questions
 from chat_git import git_status
@@ -494,6 +495,13 @@ class ChatService:
             self.emit({"event": "selected", "id": self.chat["id"], "entries": self.chat["entries"], "usage": self.chat.get("usage")})
         else:
             self.emit({"event": "selected", "id": None, "entries": [], "usage": None})
+        self._publish_inspector()
+
+    def publish_inspector(self):
+        """Republish helper, Side Chat and Team state without the transcript."""
+        with self._mutex: self._publish_inspector()
+
+    def _publish_inspector(self):
         if self.role == "parent" and self.chat and self.chat.get("agents"):
             from chat_agents import publish_agents
             publish_agents(self)
@@ -538,6 +546,8 @@ class ChatService:
                 chat["status"] = "interrupted"; self.store.save(chat)
         if chats:
             self.chat = self.store.load(chats[0]["id"])
+        # Saved chats show before the gateway answers. This is the only
+        # transcript sent before ready: the window decodes each copy in full.
         self.publish()
         try:
             self.refresh()
@@ -548,7 +558,7 @@ class ChatService:
                 self.create(self.models[0]["id"], self.current_workspace())
             except (ValueError, OSError) as exc:
                 self.emit({"event": "notice", "message": str(exc)})
-        self.publish(); self.emit({"event": "ready"})
+        self.emit({"event": "ready"})
 
     def choice(self, identifier=None):
         identifier = identifier or (self.chat["route"] + "|" + self.chat["account"] if self.chat else "")
@@ -716,6 +726,7 @@ class ChatService:
         if self.role == "parent":
             if chat_team.handle(self, command): return
             if chat_blackboard.handle(self, command): return
+            if chat_reactions.handle(self, command): return
             if handle_git_overview(self, command): return
             from chat_agents import handle_auxiliary
             if handle_auxiliary(self, command):
@@ -881,7 +892,8 @@ class ChatService:
             tools.append(delegate_definition(self.models))
             tools.extend(chat_memory.TOOL_DEFINITIONS)
         elif self.role == "team" and tools:
-            tools.extend([*chat_memory.TOOL_DEFINITIONS, chat_team.STATUS_TOOL, *chat_blackboard.TOOL_DEFINITIONS])
+            tools.extend([*chat_memory.TOOL_DEFINITIONS, chat_team.STATUS_TOOL, *chat_blackboard.TOOL_DEFINITIONS,
+                          *chat_reactions.TOOL_DEFINITIONS])
         if choice["supportsTools"]:
             tools.extend(chat_questions.TOOL_DEFINITIONS)
         context = choice.get("context")
@@ -918,7 +930,7 @@ class ChatService:
             payload["system"] += "\n" + chat_memory.GUIDANCE
         if self.role == "team":
             payload["system"] += "\n" + chat_team.GUIDANCE + "\nYour member name: " + self.team_member["name"]
-            if tools: payload["system"] += "\n" + chat_blackboard.GUIDANCE
+            if tools: payload["system"] += "\n" + chat_blackboard.GUIDANCE + "\n" + chat_reactions.GUIDANCE
             payload["system"] += "\nTeam directory (use these exact IDs for member dependencies): " + json.dumps(
                 [{"id": member["id"], "name": member["name"]} for member in self.team_parent.chat["team"]["members"]])
             if chat_execution.task(self): payload["system"] += "\n" + chat_team.TASK_GUIDANCE
@@ -1141,6 +1153,10 @@ class ChatService:
                                 if self.role != "team":
                                     raise ValueError("Blackboard tools are available only to Team members.")
                                 description = chat_blackboard.describe(name, arguments)
+                            elif name in chat_reactions.TOOLS:
+                                if self.role != "team":
+                                    raise ValueError("Reactions are available only to Team members.")
+                                description = chat_reactions.describe(name, arguments)
                             elif name in chat_questions.TOOLS:
                                 chat_questions.validate(name, arguments)
                                 description = {"summary": "Ask for user input", "requires_approval": False}
@@ -1169,6 +1185,8 @@ class ChatService:
                                     result = chat_team.memory_tool(self, name, arguments)
                                 elif name in chat_blackboard.TOOLS:
                                     result = chat_blackboard.execute(self, name, arguments)
+                                elif name in chat_reactions.TOOLS:
+                                    result = chat_reactions.execute(self, name, arguments)
                                 elif name in chat_questions.TOOLS:
                                     result = chat_questions.execute(self, name, arguments)
                                 elif self.capabilities and self.capabilities.handles(name):

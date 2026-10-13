@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import fcntl
 import hashlib
 import hmac
@@ -99,6 +100,33 @@ BUILD_IDENTITY = build_identity()
 MAX_PROVIDER_REQUESTS = 16
 
 
+def save_key_metadata(root: Path, provider_id: str, value: dict, *, credential_saved=True) -> dict:
+    """Persist only the credential slot, never a pane's pending routing edits."""
+    if provider_id not in PROVIDERS or not PROVIDERS[provider_id].get("credential_account"):
+        raise BridgeError("This provider does not have an API-key slot.")
+    if not isinstance(value, dict) or set(value) - {"key_account", "key_accounts"}:
+        raise BridgeError("Save key accepts only API-key account metadata.")
+    settings = load_settings(root)
+    connection = settings["providers"][provider_id]
+    if credential_saved:
+        connection["credential_mode"] = "keychain"
+        connection["credential_revision"] += 1
+    for field in ("key_account", "key_accounts"):
+        if field in value:
+            connection.pop(field, None)
+            if value[field] is not None: connection[field] = value[field]
+    settings = validate_settings(settings)
+    if not credential_saved:
+        # Selecting an existing primary key must not overwrite its secret or
+        # turn a live subscription route into a different credential source.
+        if settings["providers"][provider_id]["credential_mode"] == "keychain":
+            if not any(row["active"] and row["found"] for row in key_account_states(settings, provider_id)):
+                raise BridgeError("Save a key in the selected account before making it primary.")
+    private_directory(root)
+    atomic_json(root / "settings.json", settings)
+    return settings
+
+
 class Runtime:
     def __init__(self, root: Path, upstream_url=None, key=None, request_planner=None):
         self.root = root
@@ -186,13 +214,45 @@ class Runtime:
     def provider_key(self, provider_id):
         if self.key is not None:
             return self.key
+        live = self.credential_settings()
+        signature = connection_signature(provider_id, live["providers"][provider_id])
         with self.lock:
             cached = self.credential_cache.get(provider_id)
-        if cached is None:
-            cached = credentials(self.settings, provider_id)
+        if cached is None or cached[0] != signature:
+            resolved = credentials(live, provider_id)
             with self.lock:
-                self.credential_cache[provider_id] = cached
-        return cached[0]
+                self.credential_cache[provider_id] = (signature, resolved)
+            return resolved[0]
+        return cached[1][0]
+
+    def credential_settings(self):
+        """Reload key revisions/accounts between calls; keep running routes stable.
+
+        A provider request already owns its headers/key. Saving a replacement
+        never closes that socket or changes the model/source it is executing.
+        """
+        try:
+            stat = (self.root / "settings.json").stat()
+            stamp = (stat.st_ino, stat.st_mtime_ns, stat.st_size)
+        except OSError:
+            stamp = None
+        with self.lock:
+            cached = getattr(self, "_credential_settings", None)
+            if cached is not None and cached[0] == stamp: return cached[1]
+        live = copy.deepcopy(self.settings)
+        saved = load_settings(self.root) if stamp is not None else self.settings
+        for provider_id, connection in live["providers"].items():
+            current = saved["providers"][provider_id]
+            # A saved key may replace an environment/Vibe API credential too.
+            # An installed-CLI route keeps its process, login and protocol.
+            if connection["credential_mode"] != "cli" and current["credential_mode"] == "keychain":
+                connection["credential_mode"] = "keychain"
+            for field in ("credential_revision", "key_account", "key_accounts"):
+                connection.pop(field, None)
+                if field in current: connection[field] = copy.deepcopy(current[field])
+        with self.lock:
+            self._credential_settings = (stamp, live)
+        return live
 
     def chat_route(self, requested, connection, settings):
         """Resolve a Chat request's route and spec on the credential source its account names.
@@ -205,7 +265,9 @@ class Runtime:
         on both while the models behind it need not.
         """
         provider_id = split_route(requested)[0]
-        if connection["credential_mode"] == self.settings["providers"][provider_id]["credential_mode"]:
+        startup_mode = self.settings["providers"][provider_id]["credential_mode"]
+        if (connection["credential_mode"] == startup_mode
+                or connection["credential_mode"] != "cli" and startup_mode != "cli"):
             route = self.resolve_route(requested)
             return route, self.settings["_model_specs"][route]
         source = chat_extra_source(settings["providers"][provider_id], provider_id)
@@ -238,10 +300,10 @@ class Runtime:
         else:
             route = self.resolve_route(payload.get("model"))
             spec = self.settings["_model_specs"][route]
-            selected_settings = self.settings
+            selected_settings = self.credential_settings()
         provider_id, upstream_model = split_route(route)
         if not is_chat:
-            connection = self.settings["providers"][provider_id]
+            connection = selected_settings["providers"][provider_id]
         if is_chat:
             if not native_search_available(spec, connection, provider_id):
                 # Recheck the live route: Chat's model list may predate a refresh.
@@ -335,7 +397,11 @@ class Runtime:
         if provider_id == "mistral":
             payload = apply_mistral_prefix(payload)
             validate_mistral_roles(payload)
-        rewritten = rewrite_context_reminders(payload, context, estimate)
+        # A native Claude signature is bound to its original system/messages.
+        # Rewriting old remaining-token reminders on each call invalidates
+        # that prefix even in an otherwise append-only tool loop. The native
+        # request still enforces real context/output limits below.
+        rewritten = payload if provider_id == "claude" else rewrite_context_reminders(payload, context, estimate)
         reminders_rewritten = rewritten is not payload
         payload = rewritten
         key = (self.key if self.key is not None else credentials(selected_settings, provider_id)[0]) if is_chat else self.provider_key(provider_id)
@@ -381,6 +447,8 @@ class Runtime:
         plan.update(route=route, provider_id=provider_id, provider_name=PROVIDERS[provider_id]["name"],
                     private_key=key, upstream_model=upstream_model, replay_scope=scope, replay_required=replay_required,
                     model_spec=spec, estimate_raw=raw_estimate_fn(payload))
+        plan["credential_mode"] = connection.get("credential_mode")
+        plan["surface"] = ("chat" if is_chat else "responses" if payload.get("_provider_hub_surface") == "responses" else "messages")
         if calibration_factor < 1.0:
             plan.setdefault("compatibility", {})["estimate_calibration"] = round(calibration_factor, 3)
         if reminders_rewritten:
@@ -444,7 +512,8 @@ class Runtime:
                     "codex_catalogue_digest": self.codex_catalogue_digest,
                     "providers": {key: dict(value) for key, value in self.provider_counts.items()}}
 
-    def record(self, kind, model="", code=None, usage=None, model_unavailable=False, service_tier=None):
+    def record(self, kind, model="", code=None, usage=None, model_unavailable=False, service_tier=None,
+               credential_mode=None, surface=None):
         # Deliberately excludes prompts, tool arguments, response text, headers,
         # credentials, and raw upstream error bodies.
         event = {"time": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "event": kind}
@@ -455,6 +524,10 @@ class Runtime:
             event["status"] = code
         if usage:
             event["usage"] = usage
+        if isinstance(credential_mode, str) and credential_mode in {"keychain", "environment", "vibe", "cli", "none"}:
+            event["credential_mode"] = credential_mode
+        if isinstance(surface, str) and surface in {"chat", "responses", "messages"}:
+            event["surface"] = surface
         if service_tier in {"default", "priority"}:
             event["service_tier"] = service_tier
         if model_unavailable:
@@ -627,11 +700,7 @@ class Handler(BaseHTTPRequestHandler):
     # routes sit beside the LLM routes instead of flowing through plan().
     # ------------------------------------------------------------------
     def _devin_key(self):
-        # A test-harness key override wins, exactly like Runtime.provider_key().
-        if self.runtime.key is not None:
-            return self.runtime.key
-        key, _source = credentials(self.runtime.settings, "devin")
-        return key
+        return self.runtime.provider_key("devin")
 
     def _devin_org_id(self):
         connection = self.runtime.settings.get("providers", {}).get("devin", {})
@@ -1016,7 +1085,8 @@ they exit or restart, so none of them can interrupt another's requests.
                 # shared finally still runs (worker count, semaphore, lease).
                 if self._serve_cli_turn(plan, payload, disconnected, closed, write_lock, usage):
                     self.runtime.calibration.observe(plan["route"], plan.get("estimate_raw"), reported_input_tokens(usage))
-                    self.runtime.record("completed", plan["route"], 200, usage)
+                    self.runtime.record("completed", plan["route"], 200, usage,
+                                        credential_mode=plan.get("credential_mode"), surface=plan.get("surface"))
                 return
             encoded = json.dumps(upstream, ensure_ascii=False).encode()
             headers = {**plan["headers"], "Accept": "text/event-stream" if upstream.get("stream") else "application/json"}
@@ -1251,7 +1321,8 @@ they exit or restart, so none of them can interrupt another's requests.
                     self.wfile.flush()
                 self.close_connection = True
             self.runtime.calibration.observe(plan["route"], plan.get("estimate_raw"), reported_input_tokens(usage))
-            self.runtime.record("completed", plan["route"], 200, usage, service_tier=service_tier)
+            self.runtime.record("completed", plan["route"], 200, usage, service_tier=service_tier,
+                                credential_mode=plan.get("credential_mode"), surface=plan.get("surface"))
         except (BrokenPipeError, ConnectionResetError):
             self.runtime.record("cancelled", plan["route"])
         except Exception as exc:
@@ -1546,7 +1617,7 @@ def catalogue_command_result(settings, root, lifecycle):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=["inspect", "validate", "save", "discover", "refresh-all", "prepare-launch", "activate", "restore", "serve", "codex-status", "codex-projects", "codex-prepare", "codex-activate", "codex-restore", "codex-accent", "cli-accounts", "key-accounts"])
+    parser.add_argument("command", choices=["inspect", "validate", "save", "save-key-metadata", "save-key-accounts", "discover", "refresh-all", "prepare-launch", "activate", "restore", "serve", "codex-status", "codex-projects", "codex-prepare", "codex-activate", "codex-restore", "codex-accent", "cli-accounts", "key-accounts"])
     parser.add_argument("--provider", choices=list(PROVIDERS), default="mistral")
     parser.add_argument("--parent-pipe", action="store_true")
     parser.add_argument("--detach", action="store_true", help="serve: run as a detached service, stopped only on request")
@@ -1624,6 +1695,10 @@ def main():
         result = CodexProfile(root).activate(settings, inventory)
     elif args.command == "codex-restore":
         result = CodexProfile(root).restore()
+    elif args.command in {"save-key-metadata", "save-key-accounts"}:
+        settings = save_key_metadata(root, args.provider, json.load(sys.stdin),
+                                     credential_saved=args.command == "save-key-metadata")
+        result = {"saved": True, "settings": settings}
     elif args.command in {"validate", "save"}:
         settings = validate_settings(json.load(sys.stdin))
         if args.command == "save":
