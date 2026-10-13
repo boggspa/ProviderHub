@@ -76,11 +76,13 @@ _LOCAL_CREDENTIAL_FIELDS = {
 _MAX_SIGNATURE = 4 * 1024 * 1024
 _MAX_DISCOVERY_PAGES = 16
 
-# This is an explicit intersection with the current function-calling support
-# table.  Unknown generateContent models remain absent rather than being
+# This is an explicit intersection with documented function-calling models.
+# Unknown generateContent models remain absent rather than being
 # labelled tool-capable from their name.  Account membership and exact token
 # limits still come live from models.list.
 _MODEL_EFFORTS = {
+    # OpenAI compatibility maps minimal to Argon's low thinking level.
+    "gemini-4-argon": ("minimal", "low", "medium", "high"),
     "gemini-3.8-flash": ("low", "medium", "high"),
     "gemini-3.7-flash": ("low", "medium", "high"),
     "gemini-3.6-flash": ("minimal", "low", "medium", "high"),
@@ -97,6 +99,7 @@ _MODEL_EFFORTS = {
 }
 
 _UNDERLYING_EFFORTS = {
+    "gemini-4-argon": ("low", "medium", "high"),
     "gemini-3.8-flash": ("low", "medium", "high"),
     "gemini-3.7-flash": ("low", "medium", "high"),
     "gemini-3.6-flash": ("minimal", "low", "medium", "high"),
@@ -110,9 +113,10 @@ _UNDERLYING_EFFORTS = {
     "gemini-2.5-flash-lite": ("none", "low", "medium", "high"),
 }
 
-# Defaults explicitly listed in Google's thinking and Gemini 3 guides. Leave
+# Defaults explicitly listed in Google's thinking and model guides. Leave
 # unnamed defaults absent so the compatibility API keeps Google's own budget.
 _MODEL_DEFAULT_EFFORTS = {
+    "gemini-4-argon": "medium",
     "gemini-3.8-flash": "medium", "gemini-3.7-flash": "medium",
     "gemini-3.6-flash": "medium", "gemini-3.5-flash": "medium",
     "gemini-3.5-flash-lite": "minimal", "gemini-3.1-flash-lite": "minimal",
@@ -272,9 +276,15 @@ def _catalogue_entry(card: dict) -> dict | None:
         "inference_status": "advertised",
         "source": "provider_api",
         "evidence": MODELS_URL,
-        "capability_evidence": FUNCTION_CALLING_DOCS,
+        "capability_evidence": (
+            "https://ai.google.dev/gemini-api/docs/models/gemini-4-argon"
+            if capability_model == "gemini-4-argon" else FUNCTION_CALLING_DOCS
+        ),
         "thinking_evidence": THINKING_DOCS,
-        "context_kind": "provider_reported_input_limit",
+        "context_kind": (
+            "provider_reported_unified_limit" if capability_model == "gemini-4-argon"
+            else "provider_reported_input_limit"
+        ),
         "reasoning_history": "gateway_signed_replay" if thinking is True else "not_required_or_unknown",
         "complete_tool_cycles": True,
         "streaming": True,
@@ -674,12 +684,18 @@ def prepare_request(
     replays = validate_messages(source_messages, upstream_model, scope, replay_key)
     spec = copy.deepcopy(model_spec) if isinstance(model_spec, dict) else {}
     max_input = spec.get("max_input", spec.get("context"))
-    if type(max_input) is int and max_input > 0 and _estimated_input_tokens(anthropic_payload) >= max_input:
+    input_tokens = _estimated_input_tokens(anthropic_payload)
+    if type(max_input) is int and max_input > 0 and input_tokens >= max_input:
         raise GeminiError(f"Request exceeds the model's reported {max_input}-token input limit.")
-    # Google reports independent input and output limits. The shared Chat
-    # translator's context field is a combined-window clamp, so leave that
-    # field out here and retain max_output as the exact output ceiling.
+    # Use this adapter's estimate: encrypted replay metadata is not input
+    # text. Older models have independent input/output limits; Argon's shared
+    # window also bounds the output budget without counting that envelope.
     translation_spec = {**spec, "context": None}
+    if (_capability_model_id(upstream_model, spec.get("base_model_id")) == "gemini-4-argon"
+            and type(max_input) is int and max_input > 0):
+        translation_spec["max_output"] = min(
+            _positive_integer(spec.get("max_output")) or max_input, max_input - input_tokens,
+        )
     if translate_chat is None:
         # Delayed import avoids a providers -> gemini_provider import cycle.
         from providers import _translate_chat_payload as translate_chat
@@ -759,7 +775,7 @@ def _strict_tool_signature(upstream_model: str, model_spec: dict | None) -> bool
     base = (model_spec or {}).get("base_model_id")
     if not isinstance(base, str):
         base = upstream_model
-    return base.startswith("gemini-3")
+    return base.startswith(("gemini-3", "gemini-4"))
 
 
 def _parse_tool(call: dict, names: dict) -> tuple[dict, str | None]:
