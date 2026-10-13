@@ -11,6 +11,7 @@ import difflib
 import math
 import os
 from pathlib import Path
+import re
 import selectors
 import signal
 import stat
@@ -22,6 +23,24 @@ import uuid
 MAX_OUTPUT = 40_000
 MAX_FILE = 2_000_000
 MAX_SCAN = 5_000
+PATCH_BEGIN = "*** Begin Patch"
+PATCH_END = "*** End Patch"
+PATCH_HEADERS = ("Add", "Update", "Delete")
+# The format spelled out for models that were not trained on Codex's patch
+# syntax; the same slips (unified-diff headers, missing '+' prefixes) kept
+# costing seats several attempts each.
+PATCH_FORMAT = (
+    f"Format: the first line is exactly '{PATCH_BEGIN}' and the last line exactly '{PATCH_END}'. Between them each "
+    "file begins with one header line. '*** Add File: path' creates a file: every following line is content "
+    "prefixed with '+', with no @@ line. '*** Update File: path' edits an existing file with one or more hunks: each "
+    "starts with '@@' (or '@@ ' plus one exact existing line to anchor near), then lines prefixed ' ' (unchanged), "
+    "'-' (removed) or '+' (added) that copy the file verbatim and match exactly once; a blank context line is a single "
+    "space; '*** Move to: new/path' on the line after the header renames. '*** Delete File: path' removes a file. Paths "
+    "are relative to the workspace (or absolute within an attached folder). Not a unified diff: never '--- a/', "
+    "'+++ b/' or '@@ -1,3 +1,4 @@' line numbers.")
+# A bare '&', nohup, setsid or disown in a foreground command: the work it
+# detaches dies with the call's process group, which surprised several seats.
+_DETACH = re.compile(r"(?<![&>|])&(?![&>])|(?:^|[\s;&|(`])(?:nohup|setsid|disown)\b", re.M)
 
 
 def _tool(name, description, properties, required):
@@ -31,16 +50,19 @@ def _tool(name, description, properties, required):
 
 
 TOOL_DEFINITIONS = [
-    _tool("read_file", "Read UTF-8 text inside the workspace or an attached folder. Offset is a 1-based line number; output is bounded.", {
+    _tool("read_file", "Read UTF-8 text inside the workspace or an attached folder. Offset is a 1-based line number; output is bounded. "
+          "Binary or non-UTF-8 files are refused, naming the offending byte; inspect those with run_shell (file, xxd, od -c, strings, iconv).", {
         "path": {"type": "string"}, "offset": {"type": "integer", "minimum": 1},
         "limit": {"type": "integer", "minimum": 1, "maximum": 2000}}, ["path"]),
     _tool("search_files", "Search literal text in UTF-8 workspace files, including attached folders, excluding symlinks and .git. Bounded scan.", {
         "pattern": {"type": "string"}, "path": {"type": "string"},
         "glob": {"type": "string"}, "max_results": {"type": "integer", "minimum": 1, "maximum": 500}}, ["pattern"]),
-    _tool("apply_patch", "Apply a Codex *** Begin Patch patch (Add/Update/Delete File, optional Move to) inside the workspace or an attached folder. All hunks are validated first. The host applies the selected approval mode.", {
+    _tool("apply_patch", "Apply a Codex *** Begin Patch patch (Add/Update/Delete File, optional Move to) inside the workspace or an attached folder. All hunks are validated first. The host applies the selected approval mode. " + PATCH_FORMAT, {
         "patch": {"type": "string"}}, ["patch"]),
     _tool("run_shell", "Run a command with /bin/sh in the workspace under the host's selected approval mode. This is not sandboxed. Output is bounded; timeout is seconds (0.1–300). For CLI compatibility, values 1000–600000 are treated as milliseconds and capped at 300 seconds. "
-          "Set background to true for servers, watchers or long jobs: the command keeps running between turns, the call returns its first output and an id for read_process and stop_process, and timeout is not used. Stop background processes you no longer need.", {
+          "Set background to true for servers, watchers or long jobs: the command keeps running between turns, the call returns its first output and an id for read_process and stop_process, and timeout is not used. Stop background processes you no longer need. "
+          "Without background, the command's whole process group ends when the call returns, so a trailing '&', nohup or setsid keeps nothing running. "
+          "Exit code 127 means a command was not found on PATH: rg, 7z, ffprobe and similar tools are not bundled, so check with `command -v`, and use search_files for literal text in workspace files.", {
         "command": {"type": "string"}, "timeout": {"type": "number", "minimum": 0.1, "maximum": 600000},
         "background": {"type": "boolean"}}, ["command"]),
     _tool("read_process", "Read new output and the status of a background process this chat started. wait is seconds (at most 30) to wait for it to finish first; it returns early when the process exits.", {
@@ -166,6 +188,16 @@ class ChatToolRunner:
         finally:
             os.close(parent)
 
+    def _read_text(self, anchor, path):
+        """_read for read_file and patches: a decode failure names the byte instead of a traceback."""
+        try:
+            return self._read(anchor, path)
+        except UnicodeDecodeError as exc:
+            raise ValueError(
+                f"{path} is not UTF-8 text (byte 0x{exc.object[exc.start]:02x} at offset {exc.start}). read_file and "
+                "apply_patch handle UTF-8 text only; inspect binary or differently encoded files with run_shell, for "
+                "example `file`, `xxd | head`, `od -c`, `strings`, or `iconv -f <encoding> -t utf-8`.") from None
+
     def _validate(self, name, args):
         schemas = {tool["name"]: tool["input_schema"] for tool in TOOL_DEFINITIONS}
         if not isinstance(name, str) or name not in schemas:
@@ -234,7 +266,7 @@ class ChatToolRunner:
             self._cancel()
             summary = self.describe(name, args)["summary"]
             if name == "read_file":
-                content, _ = self._read(*self._resolve(args["path"]))
+                content, _ = self._read_text(*self._resolve(args["path"]))
                 lines = content.splitlines(keepends=True)
                 offset = args.get("offset", 1) - 1
                 selected = lines[offset:offset + args.get("limit", 500)]
@@ -316,15 +348,33 @@ class ChatToolRunner:
 
     def _plan_patch(self, patch):
         lines = patch.splitlines()
-        if len(lines) < 3 or lines[0] != "*** Begin Patch" or lines[-1] != "*** End Patch":
-            raise ValueError("Expected *** Begin Patch / *** End Patch")
+        # Blank lines around the patch and trailing whitespace on marker lines
+        # are slips, never content: content lines all carry a prefix.
+        while lines and not lines[0].strip():
+            lines.pop(0)
+        while lines and not lines[-1].strip():
+            lines.pop()
+        lines = [line.rstrip() if line.startswith("*** ") else line for line in lines]
+        if len(lines) < 3 or lines[0] != PATCH_BEGIN or lines[-1] != PATCH_END:
+            first, last = (lines[0] if lines else ""), (lines[-1] if len(lines) > 1 else "")
+            raise ValueError(f"The patch must start with the line {PATCH_BEGIN!r} and end with the line {PATCH_END!r}, "
+                             f"each on its own line. This patch starts with {first!r} and ends with {last!r}.")
         plans = {}
         i = 1
         while i < len(lines) - 1:
             header = lines[i]
-            kinds = [kind for kind in ("Add", "Update", "Delete") if header.startswith(f"*** {kind} File: ")]
+            if not header.strip():
+                # A blank line between file sections.
+                i += 1
+                continue
+            kinds = [kind for kind in PATCH_HEADERS if header.startswith(f"*** {kind} File: ")]
             if not kinds:
-                raise ValueError(f"Invalid patch header: {header}")
+                if header.startswith("@@") or header[0] in "+- ":
+                    hint = ("A hunk or content line needs a file header before it: '*** Update File: path' for an "
+                            "existing file, or '*** Add File: path' followed by '+' lines (no @@ line) for a new one.")
+                else:
+                    hint = "Expected '*** Add File: path', '*** Update File: path' or '*** Delete File: path'."
+                raise ValueError(f"Invalid patch header: {header!r}. {hint}")
             kind = kinds[0]
             base, path = self._resolve(header.split(": ", 1)[1])
             if path == Path(".") or (base, path) in plans:
@@ -339,14 +389,19 @@ class ChatToolRunner:
                     raise ValueError("Invalid move destination")
             if kind == "Add":
                 if os.path.lexists(base / path):
-                    raise ValueError(f"Add destination already exists: {path}")
+                    raise ValueError(f"Add destination already exists: {path}. Use '*** Update File: {path}' with @@ hunks to change it.")
                 added = []
-                while i < len(lines) - 1 and lines[i].startswith("+"):
-                    added.append(lines[i][1:])
+                while i < len(lines) - 1 and lines[i].startswith(("+", "@@")):
+                    # '@@ -0,0 +1,N @@' is a unified-diff slip; a new file has no hunks.
+                    if lines[i].startswith("+"):
+                        added.append(lines[i][1:])
                     i += 1
                 plans[(base, path)] = (None, "\n".join(added) + ("\n" if added else ""), 0o644)
                 continue
-            original, mode = self._read(base, path)
+            try:
+                original, mode = self._read_text(base, path)
+            except FileNotFoundError:
+                raise ValueError(f"{path} does not exist." + (f" Use '*** Add File: {path}' to create it." if kind == "Update" else "")) from None
             if kind == "Delete":
                 plans[(base, path)] = (original, None, mode)
                 continue
@@ -361,8 +416,18 @@ class ChatToolRunner:
                 old, new, eof = [], [], False
                 while i < len(lines) - 1 and not lines[i].startswith(("@@", "*** ")):
                     line = lines[i]
+                    if not line:
+                        # Blank lines running up to the next header or the end marker
+                        # separate sections; a blank context line is a single space.
+                        following = i
+                        while following < len(lines) - 1 and not lines[following]:
+                            following += 1
+                        if following >= len(lines) - 1 or lines[following].startswith("*** "):
+                            i = following
+                            break
                     if not line or line[0] not in " +-":
-                        raise ValueError("Every hunk line needs a context/add/delete prefix")
+                        raise ValueError(f"Every hunk line needs a context/add/delete prefix (' ', '+' or '-'); a blank "
+                                         f"context line is a single space. Line {i + 1} of the patch is {line!r}.")
                     if line[0] in " -":
                         old.append(line[1:])
                     if line[0] in " +":
@@ -386,7 +451,9 @@ class ChatToolRunner:
                     # Context-free insertion is only unambiguous at EOF.
                     matches = [len(source)] if eof or not source else []
                 if len(matches) != 1:
-                    raise ValueError(f"Missing or ambiguous hunk in {path}")
+                    raise ValueError(f"Hunk {hunks + 1} in {path} matches the file {len(matches)} times, not once: its ' ' and '-' "
+                                     "lines must copy existing lines verbatim, and the hunk must be unique (add an '@@ <existing line>' "
+                                     "anchor or more context). Re-read the file before retrying.")
                 position = matches[0]
                 pieces.extend(source[cursor:position])
                 pieces.extend(new)
@@ -524,4 +591,12 @@ class ChatToolRunner:
         decoded = tail.decode("utf-8", errors="replace")
         if total > len(tail) or len(decoded) + len(prefix) > MAX_OUTPUT:
             prefix += "[earlier output truncated]\n"
-        return prefix + decoded[-(MAX_OUTPUT - len(prefix)):], reason is not None or code != 0
+        notes = ""
+        if code == 127 and reason is None:
+            notes += ("\n[Exit code 127: a command was not found on PATH. Tools such as rg, 7z, ffprobe and bsdtar are not bundled; "
+                      "check with `command -v NAME`, use grep or find, or use search_files for literal text in workspace files.]")
+        if _DETACH.search(args["command"]):
+            notes += ("\n[The call's whole process group ended when the shell exited, so work started with '&', nohup, setsid or "
+                      "disown did not keep running. Use run_shell with background: true for servers and long jobs.]")
+        body = decoded[-(MAX_OUTPUT - len(prefix) - len(notes)):] if MAX_OUTPUT - len(prefix) - len(notes) > 0 else ""
+        return prefix + body + notes, reason is not None or code != 0

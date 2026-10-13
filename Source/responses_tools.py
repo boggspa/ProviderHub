@@ -456,7 +456,10 @@ def repair_apply_patch(text):
     similar '+' line marks the context line as the removed one (a replace
     written with the marker detached, Mistral Medium 3.5's habit); and stray
     '--- a/' / '+++ b/' headers for the section's file are dropped. Inside an
-    Add section bare lines get their '+'. Everything else passes through.
+    Add section bare lines get their '+', except a unified-diff hunk header
+    such as '@@ -0,0 +1,57 @@', which is dropped: a new file has no hunks, and
+    prefixing it would write the header into the file. Everything else passes
+    through.
     """
     if not isinstance(text, str) or _PATCH_BEGIN not in text:
         return text
@@ -498,6 +501,8 @@ def repair_apply_patch(text):
             out.append(" " + line); bare.append(True)
             continue
         if section == "add":
+            if header.startswith("@@"):
+                continue
             if line.startswith("+"):
                 out.append(line)
             else:

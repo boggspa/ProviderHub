@@ -238,6 +238,13 @@ class CustomApplyPatchAdapterTests(unittest.TestCase):
             "*** Begin Patch", "*** Update File: README.md", "@@", "-old", "+new",
             "*** Add File: notes.txt", "+first line", "+second line", "+", "*** End Patch"])
 
+    def test_repair_apply_patch_drops_unified_hunk_headers_from_add_sections(self):
+        raw = "*** Begin Patch\n*** Add File: new.py\n@@ -0,0 +1,2 @@\n+x\ny\n*** End Patch"
+        self.assertEqual(repair_apply_patch(raw).split("\n"),
+                         ["*** Begin Patch", "*** Add File: new.py", "+x", "+y", "*** End Patch"])
+        update = "*** Begin Patch\n*** Update File: a.py\n@@ -1,2 +1,2 @@\n-x\n+y\n*** End Patch"
+        self.assertEqual(repair_apply_patch(update), update)
+
     def test_repair_apply_patch_leaves_valid_patches_and_non_patches_alone(self):
         valid = "*** Begin Patch\n*** Update File: a.py\n@@ def f():\n     x = 1\n-    return 1\n+    return 2\n*** End Patch"
         self.assertEqual(repair_apply_patch(valid), valid)
