@@ -401,7 +401,8 @@ struct ChatFoldHeader: View {
                 Image(systemName: "exclamationmark.triangle.fill").font(textStyle.system(10)).foregroundStyle(Color(nsColor: .systemRed))
             }
             if !open, live, let latest = entries.last {
-                let step = ChatToolDisplay.describe(tool: latest.tool, summary: latest.summary ?? latest.text)
+                let step = ChatToolDisplay.describe(tool: latest.tool, summary: latest.summary ?? latest.text,
+                                                    live: latest.detail == "Running…")
                 Text(step.verb + (step.subject.isEmpty ? "" : " " + step.subject)).font(textStyle.system(11.5))
                     .foregroundStyle(.tertiary).lineLimit(1).truncationMode(.middle)
             }

@@ -497,8 +497,8 @@ private struct ChatInvitation: View {
 struct ChatTranscript: View {
     @ObservedObject var model: ChatModel
     @State private var expanded: Set<String> = []
-    /// Explicit open/closed choices per fold; a fold without one follows the
-    /// turn (open while it is the live tail, closed afterwards).
+    /// Explicit open/closed choices per fold; a fold without one stays closed
+    /// unless it holds a row the user expanded.
     @State private var foldChoice: [String: Bool] = [:]
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.chatTextStyle) private var textStyle
@@ -716,14 +716,15 @@ struct ChatTranscript: View {
         Binding(get: { expanded.contains(id) }, set: { if $0 { expanded.insert(id) } else { expanded.remove(id) } })
     }
 
-    /// A run of local tool rows behind one disclosure. The live tail run stays
-    /// open so progress is visible; once the reply begins it folds, and a
-    /// choice the user makes by hand sticks for that run. Collapsed and live,
-    /// the header carries the latest step so nothing goes dark mid-turn. Open,
-    /// the steps hang from a hairline under the header's glyphs.
+    /// A run of local tool rows behind one disclosure. It opens only by hand
+    /// (or a jump to a row inside it): opening a live run on each call and
+    /// closing it between rounds made busy Team transcripts jump. Collapsed
+    /// and live, the header carries the counts and latest step, so progress
+    /// updates in place. A row the user expanded before the run folded keeps
+    /// it open. Open, the steps hang from a hairline under the header's glyphs.
     @ViewBuilder private func fold(_ entries: [ChatEntry], live: Bool, liveEntryIDs: Set<String>) -> some View {
         let id = ChatTranscriptSegment<ChatEntry>.foldID(entries)
-        let open = foldChoice[id] ?? live
+        let open = foldChoice[id] ?? entries.contains { expanded.contains($0.id) }
         VStack(alignment: .leading, spacing: textStyle.scaled(4)) {
             Button {
                 if reduceMotion { foldChoice[id] = !open } else { withAnimation(.easeInOut(duration: 0.15)) { foldChoice[id] = !open } }
@@ -910,13 +911,13 @@ private struct ChatComposer: View {
             .help("Interrupt and send this update (Return)").accessibilityLabel("Interrupt and send update")
     }
 
+    /// The approval mode, any notice, and the turn clock. What is running
+    /// belongs to the activity strip above the composer: a status line here
+    /// wrapped and unwrapped as each tool started, moving the composer.
     private var footer: some View {
         HStack(alignment: .top) {
             approvalModeMenu
-            if model.notice.isEmpty {
-                ChatShimmerText(text: model.status, active: model.busy && model.approval == nil, accent: model.activeAccent)
-                    .font(HubTheme.Typography.detail)
-            } else {
+            if !model.notice.isEmpty {
                 Text(model.notice).font(HubTheme.Typography.detail).foregroundStyle(Semantic.accentOnSurface).textSelection(.enabled)
             }
             Spacer(minLength: 8)

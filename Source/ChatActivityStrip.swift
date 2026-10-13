@@ -98,10 +98,10 @@ struct ChatActivityStrip: View {
                     activityRow(row)
                 }
             }
+            // No panel or rule of its own: the lines float on the pane between
+            // the transcript and the composer.
             .padding(.horizontal, 20).padding(.vertical, textStyle.scaled(6))
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Semantic.raisedSurface)
-            .overlay(alignment: .top) { Rectangle().fill(Semantic.hairline).frame(height: HubTheme.Separator.width) }
             .accessibilityElement(children: .contain)
             .accessibilityLabel("Live activity")
         }
