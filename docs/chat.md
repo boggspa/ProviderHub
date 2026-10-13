@@ -323,7 +323,10 @@ Three or more consecutive local tool rows fold into one disclosure such as
 run at the end of a live turn stays open as **Working** and folds once the
 reply begins, and a fold opened or closed by hand keeps that choice. Delegate
 rows keep their own lanes and are never folded. Recorded changed files can be
-revealed in Finder.
+revealed in Finder. The newest row keeps a little headroom above the composer:
+the transcript follows a spacer below the last row, so auto-follow lands with
+breathing room, scrolling up still disengages it, and scrolling back to the
+end or the **Latest** button re-engages it.
 
 Web search sources collapse into one pill under the reply (**12 sources ·
 github.com · …**) that opens into a numbered list; copied and saved text keeps
