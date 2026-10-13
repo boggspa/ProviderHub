@@ -108,12 +108,13 @@ real results. Use Stop to cancel the Team.
 
 **Turn time** beneath the composer counts the active turn, including tool and
 approval waits. Steering and provider-request restarts keep the same clock;
-completion, failure or an acknowledged Stop resets it to `00:00`. The line
-beneath the composer holds only the approval mode, any notice and Turn time;
-what is running is shown in the live activity strip above the composer, so the
-composer does not shift as a long command wraps. While a turn runs, the
-activity strip and the **Thinking…** label in the transcript sweep the model's
-provider accent; with Reduce Motion on they take the accent without movement.
+completion, failure or an acknowledged Stop resets it to `00:00`. In a solo
+chat the status word sits beside the approval mode. A Team chat leaves it out
+and shows what is running only in the live activity strip above the composer,
+so the composer does not shift as members' commands wrap. While a turn runs,
+the status word, the activity strip and the **Thinking…** label in the
+transcript sweep the model's provider accent; with Reduce Motion on they take
+the accent without movement.
 
 The header's unboxed Git indicator shows changed files, tracked added/deleted
 lines, and gold/blue ahead/behind counts against the cached upstream. It never
@@ -367,9 +368,11 @@ shows every working, continuing or waiting member in roster order; a solo
 chat shows its model. The line reads the speaker's newest row (a running tool
 in its live phrasing, a streaming reply as "Replying…", a model request in
 flight as "Thinking…"), so nothing is invented, and it disappears when the
-turn ends. Clicking a line scrolls to that speaker's current row (or the fold
-holding it, which opens) and pauses following, like a manual scroll; the
-**Latest** button brings the view back.
+turn ends. After Stop, or while an update interrupts the turn, every line reads
+the turn's own status ("Stopping…", "Interrupting for your update…") until the
+cancelled work has finished. Clicking a line scrolls to that speaker's current
+row (or the fold holding it, which opens) and pauses following, like a manual
+scroll; the **Latest** button brings the view back.
 
 Web search sources collapse into one pill under the reply (**12 sources ·
 github.com · …**) that opens into a numbered list; copied and saved text keeps

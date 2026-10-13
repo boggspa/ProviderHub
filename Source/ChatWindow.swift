@@ -911,14 +911,18 @@ private struct ChatComposer: View {
             .help("Interrupt and send this update (Return)").accessibilityLabel("Interrupt and send update")
     }
 
-    /// The approval mode, any notice, and the turn clock. What is running
-    /// belongs to the activity strip above the composer: a status line here
-    /// wrapped and unwrapped as each tool started, moving the composer.
+    /// The approval mode, any notice or status, and the turn clock. A Team
+    /// leaves what is running to the activity strip above the composer: with
+    /// several members the status line here wrapped and unwrapped as each
+    /// tool started, moving the composer. A solo chat keeps its status line.
     private var footer: some View {
         HStack(alignment: .top) {
             approvalModeMenu
             if !model.notice.isEmpty {
                 Text(model.notice).font(HubTheme.Typography.detail).foregroundStyle(Semantic.accentOnSurface).textSelection(.enabled)
+            } else if model.team?.enabled != true {
+                ChatShimmerText(text: model.status, active: model.busy && model.approval == nil, accent: model.activeAccent)
+                    .font(HubTheme.Typography.detail)
             }
             Spacer(minLength: 8)
             ChatTurnTime(model: model)
