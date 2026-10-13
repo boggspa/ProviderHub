@@ -56,7 +56,7 @@ No historical chat is rewritten, and pending processes from an earlier build
 are not adopted or reused by the fix.
 
 Claude retains up to sixteen pending host-call sessions, matching gateway
-admission and accommodating a six-member Team. Pending calls expire after
+admission and accommodating an eight-member Team. Pending calls expire after
 fifteen minutes. Completed turns still close their process. This does not
 enable native tools or bypass host approvals.
 

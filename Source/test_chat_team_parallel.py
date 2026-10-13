@@ -55,7 +55,7 @@ class ParallelTeamTests(unittest.TestCase):
         self.assertTrue(any(any(m["usage"] == 12 for m in s["members"]) and
                             any(m["status"] == "working" for m in s["members"]) for s in live))
 
-    def test_four_members_contribute_in_one_wave(self):
+    def test_full_team_contributes_in_one_wave(self):
         together = threading.Barrier(chat_team.MAX_MEMBERS)
         def meet(payload, cancel, delta):
             together.wait(2)

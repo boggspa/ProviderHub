@@ -1521,7 +1521,7 @@ _continuation = live_session.continuation
 #: Each waiting CLI is a whole Claude Code process; past capacity, the oldest is
 #: retired and its task's next step replays instead.
 # Match the gateway's sixteen-request admission bound. Retained handoffs must
-# cover a six-member Team plus other active chats without evicting each other.
+# cover an eight-member Team plus other active chats without evicting each other.
 _POOL = SessionPool(_dispose_live, capacity=16, idle_ttl=0, pending_ttl=LIVE_PENDING_TTL, label="Claude")
 atexit.register(_POOL.close)
 

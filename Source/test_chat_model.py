@@ -427,7 +427,7 @@ import Combine
         check(scalars(reselected.entries.first?.text) == scalars("\u{FEFF} @Builder") && drawsTag(reselected.entries.first),
               "a reopened transcript lost a leading U+FEFF")
         check(model.team?.taskMode == false, "legacy roster unexpectedly enabled Task mode")
-        let fullRoster = ChatTeamSnapshot.maxMembers
+        let fullRoster = 8
         var fullTeam = roster("ready")
         let rosterTemplate = (fullTeam["members"] as! [[String: Any]])[0]
         fullTeam["members"] = (1...fullRoster).map { number -> [String: Any] in
