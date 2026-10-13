@@ -177,6 +177,25 @@ class TeamTests(unittest.TestCase):
         loaded = self.store.load(parent.chat["id"])
         self.assertIn("sig-A", json.dumps(loaded["team"]["members"][0]["messages"]))
 
+    def test_eight_members_persist_and_ninth_is_rejected_without_changing_roster(self):
+        parent = self.service([[] for _ in range(8)])
+        members = self.configure(parent, 8)
+        identifiers = [member["id"] for member in members]
+        self.assertEqual(len(identifiers), 8)
+        self.assertEqual(parent.chat["route"], members[0]["route"])
+        chat_team.validate_roster(parent)
+        self.assertEqual([member["id"] for member in chat_team.public(parent.chat["team"])["members"]], identifiers)
+        saved = self.store.load(parent.chat["id"])
+        self.assertEqual([member["id"] for member in saved["team"]["members"]], identifiers)
+
+        specs = [{"id": member["id"], "choice": member["choice"], "name": member["name"]} for member in members]
+        specs.append({"choice": parent.models[0]["id"], "name": "Member 9"})
+        parent.handle({"command": "configure_team", "id": parent.chat["id"], "enabled": True, "members": specs})
+        self.assertIn("one to 8 members total, including the current chat model", self.events[-1]["notice"])
+        self.assertEqual([member["id"] for member in parent.chat["team"]["members"]], identifiers)
+        self.assertEqual(self.store.load(parent.chat["id"])["team"], saved["team"])
+        self.assertFalse(any(transport.requests for transport in self.transports))
+
     def test_invalid_or_changed_roster_starts_nothing(self):
         parent = self.service([[], []])
         good = {"choice": parent.models[0]["id"], "name": "One"}

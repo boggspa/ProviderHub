@@ -157,7 +157,7 @@ The right-hand **inspector** has four views, each using the whole pane:
   login; an Open GitHub link remains available if that CLI is absent or the
   lookup fails. Refresh reloads repository information without changing Git
   state or fetching a remote.
-- **Team** configures up to six persistent members, including the current
+- **Team** configures up to eight persistent members, including the current
   chat model. Each contributes once by default and may explicitly continue with
   a next step. Members think and read in parallel through one attributed
   transcript, refreshed before every model round, with separate provider histories.

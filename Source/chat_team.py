@@ -18,7 +18,7 @@ import chat_team_mentions
 from chat_history import portable_history
 from chat_tools import _tool
 
-MAX_MEMBERS = 6
+MAX_MEMBERS = 8
 # Automatic peer delivery is a discovery digest, not a copy of the transcript.
 # Full user input and explicit peer mentions have independent delivery paths.
 MAX_SHARED_BYTES = 6000
@@ -361,7 +361,7 @@ def _text(value, label, maximum, *, empty=False):
 
 def validate_members(parent, specifications):
     if not isinstance(specifications, list) or not 1 <= len(specifications) <= MAX_MEMBERS:
-        raise ValueError("A Team has one to six members total, including the current chat model.")
+        raise ValueError(f"A Team has one to {MAX_MEMBERS} members total, including the current chat model.")
     existing = {m["id"]: m for m in (parent.chat.get("team") or {}).get("members", [])}
     members, used, archived = [], set(), []
     for position, spec in enumerate(specifications):
