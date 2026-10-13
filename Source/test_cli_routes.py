@@ -42,6 +42,11 @@ class ClaudeLeanScopeTests(unittest.TestCase):
                     "system": "host instructions", "_provider_hub_surface": surface}, {}, wanted_output=8192)
                 self.assertEqual(plan["body"]["lean_harness"], surface == "chat")
                 self.assertEqual(plan["body"]["max_tokens"], 8192)
+                self.assertFalse(plan["body"]["host_retries"])
+                team = plan_turn("claude", "claude-sonnet-5-5", {
+                    "messages": [{"role": "user", "content": "hello"}],
+                    "_provider_hub_surface": surface, "_provider_hub_host_retries": True}, {}, wanted_output=8192)
+                self.assertEqual(team["body"]["host_retries"], surface == "chat")
 
 
 def _fake_adapter(**overrides):

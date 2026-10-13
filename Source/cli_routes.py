@@ -501,6 +501,7 @@ def plan_turn(provider_id: str, upstream_model: str, payload: dict, spec: dict,
         # The lean host supplies its complete persona, tools and permission
         # policy. Desktop harnesses retain their existing append behaviour.
         request["lean_harness"] = payload.get("_provider_hub_surface") == "chat"
+        request["host_retries"] = request["lean_harness"] and payload.get("_provider_hub_host_retries") is True
     thinking = payload.get("thinking")
     if isinstance(thinking, dict):
         request["thinking"] = {key: thinking[key] for key in ("type", "display") if key in thinking}

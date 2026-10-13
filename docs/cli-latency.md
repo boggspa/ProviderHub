@@ -62,9 +62,11 @@ Keep optional capabilities disabled when unused to reduce that schema cost.
 `max_tokens` becomes the documented per-child `CLAUDE_CODE_MAX_OUTPUT_TOKENS`
 setting and is part of the session key. Claude may clamp it further for its
 model; it is a per-request output ceiling, not a subscription budget or a
-guarantee about internal model work. The lean route also sets
+guarantee about internal model work. Team requests also set
 `CLAUDE_CODE_MAX_RETRIES=2` to bound the inner retry loop beneath the Team host's
-existing retries. Account settings, selected effort and fast mode are unchanged.
+existing retries. Parent, Side Chat and helper lanes retain Claude's default
+retry policy because those roles have no outer retry loop. Account settings,
+selected effort and fast mode are unchanged.
 See [Claude environment variables](https://code.claude.com/docs/en/env-vars)
 and [system prompt flags](https://code.claude.com/docs/en/cli-reference).
 

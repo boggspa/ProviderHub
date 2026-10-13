@@ -991,11 +991,11 @@ class LiveSessionTests(unittest.TestCase):
         first_history = projector.apply(_TASK, {"content": [{"type": "text", "text": "Old notebook"}]}, key="chat")
         self.scripts = [[_MCP_INIT, *_host_leg(), _calls(("toolu_1", "exec_command", {"cmd": "ls"})),
                          _message_start("msg_2"), _text(0, "Done."), _result_event(result="Done."), _EXIT]]
-        self.turn(first_history, lean_harness=True, max_tokens=8192)
+        self.turn(first_history, lean_harness=True, host_retries=True, max_tokens=8192)
         history = _answered(_TASK, [("toolu_1", "exec_command", {"cmd": "ls"})], [("toolu_1", "a.txt")])
         append_note(history, "[Host budget: 3 rounds remain]")
         projected = projector.apply(history, {"content": [{"type": "text", "text": "New Blackboard"}]}, key="chat")
-        reply = self.turn(projected, lean_harness=True, max_tokens=8192)
+        reply = self.turn(projected, lean_harness=True, host_retries=True, max_tokens=8192)
         self.assertEqual(len(self.spawned), 1)
         self.assertEqual(reply[-1]["stop_reason"], "end_turn")
         cli = self.spawned[0]
@@ -1190,11 +1190,16 @@ class ContinuationTests(unittest.TestCase):
 
     def test_limits_and_prompt_scope_apply_to_stateless_fallback_too(self):
         request = {"model": "sonnet", "messages": [{"role": "user", "content": "hi"}],
-                   "max_tokens": 1024, "lean_harness": True}
+                   "max_tokens": 1024, "lean_harness": True, "host_retries": True}
         plan = m._plan_turn(request)
         env = m._turn_env(plan, live=False, mcp=False)
         self.assertEqual(env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"], "1024")
         self.assertEqual(env["CLAUDE_CODE_MAX_RETRIES"], "2")
+        solo = m._plan_turn({**request, "host_retries": False})
+        self.assertNotIn("CLAUDE_CODE_MAX_RETRIES", m._turn_env(solo, live=False))
+        self.assertNotIn("CLAUDE_CODE_MAX_RETRIES", m._turn_env(solo, live=True))
+        self.assertNotEqual(m._pool_key(m._plan_turn({**request, "tools": _HOST_TOOLS, "host_retries": False})),
+                            m._pool_key(m._plan_turn({**request, "tools": _HOST_TOOLS})))
         legacy = m._plan_turn({**request, "lean_harness": False, "max_tokens": None})
         self.assertNotIn("CLAUDE_CODE_MAX_OUTPUT_TOKENS", m._turn_env(legacy, live=False))
         self.assertNotIn("CLAUDE_CODE_MAX_RETRIES", m._turn_env(legacy, live=True))

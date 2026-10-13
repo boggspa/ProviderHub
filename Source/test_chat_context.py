@@ -95,6 +95,7 @@ class ContextTests(unittest.TestCase):
             choice = {**service.choice(), "source": "cli", "route": "claude/sonnet"}
             service.chat["messages"] = [reference("request")]
             first = chat_team.round_payload(service, choice, 0)
+            self.assertFalse(first["_provider_hub_host_retries"])
             service.chat["messages"] = answer(service.chat["messages"])
             # Near the budget boundary, only result content may be added.
             second = chat_team.round_payload(service, choice, service.max_rounds - 3)

@@ -909,7 +909,7 @@ class ChatService:
         payload = {"model": chat["route"], "messages": chat["messages"], "system": SYSTEM + "\nWorkspace: " + chat["workspace"] + "\nApproval mode: " + permission,
                    "tools": tools, "max_tokens": output,
                    "_provider_hub_surface": "chat", "_provider_hub_account": chat["account"],
-                   "_provider_hub_connection": chat["scope"]}
+                   "_provider_hub_connection": chat["scope"], "_provider_hub_host_retries": self.role == "team"}
         if attached:
             payload["system"] += ("\nAttached folders: " + ", ".join(attached) +
                                   ". They share this chat's file tools and approvals. Absolute paths may target "

@@ -1236,6 +1236,7 @@ def _plan_turn(request) -> dict:
         "account_env": account_env,
         "max_tokens": max_tokens,
         "lean_harness": request.get("lean_harness") is True,
+        "host_retries": request.get("host_retries") is True,
         "model": model, "messages": messages, "effort": effort, "system": system,
         "search": search_enabled(request.get("web_search")),
         "fast_mode": request.get("fast_mode"), "images": request.get("images") or [],
@@ -1254,7 +1255,7 @@ def _turn_env(plan, *, live, mcp=True):
     env = {**(_LIVE_ENV if live else _MCP_ENV if mcp else {}), **plan["account_env"]}
     if plan["max_tokens"] is not None:
         env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] = str(plan["max_tokens"])
-    if plan["lean_harness"]:
+    if plan["lean_harness"] and plan["host_retries"]:
         # The Team host already retries transient failures. Bound the inner
         # vendor retry loop so five host attempts cannot each hide ten retries.
         env["CLAUDE_CODE_MAX_RETRIES"] = "2"
@@ -1530,6 +1531,7 @@ def _pool_key(plan) -> str:
     system, _ = _surface(plan, "mcp")
     return digest({"account": plan["account_env"], "model": plan["model"], "effort": plan["effort"], "fast_mode": plan["fast_mode"],
                    "max_tokens": plan["max_tokens"], "lean_harness": plan["lean_harness"],
+                   "host_retries": plan["host_retries"],
                    "search": plan["search"], "system": system, "tools": plan["host_tools"],
                    "tool_choice": plan["tool_choice"]})
 
