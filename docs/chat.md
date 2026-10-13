@@ -108,10 +108,13 @@ real results. Use Stop to cancel the Team.
 
 **Turn time** beneath the composer counts the active turn, including tool and
 approval waits. Steering and provider-request restarts keep the same clock;
-completion, failure or an acknowledged Stop resets it to `00:00`. While a turn
-runs, the status word beside the approval mode and the **Thinking…** label in
-the transcript sweep the model's provider accent; with Reduce Motion on they
-take the accent without movement.
+completion, failure or an acknowledged Stop resets it to `00:00`. In a solo
+chat the status word sits beside the approval mode. A Team chat leaves it out
+and shows what is running only in the live activity strip above the composer,
+so the composer does not shift as members' commands wrap. While a turn runs,
+the status word, the activity strip and the **Thinking…** label in the
+transcript sweep the model's provider accent; with Reduce Motion on they take
+the accent without movement.
 
 The header's unboxed Git indicator shows changed files, tracked added/deleted
 lines, and gold/blue ahead/behind counts against the cached upstream. It never
@@ -339,9 +342,12 @@ hover and expands to show output and textual diffs; a shell row shows its full
 command above the output. A patch row shows its added and removed line counts
 in the Git indicator's colours. A call still running shimmers its verb.
 Three or more consecutive local tool rows fold into one disclosure such as
-**Worked · 4 commands, 2 edits** with the combined file and line counts; the
-run at the end of a live turn stays open as **Working** and folds once the
-reply begins, and a fold opened or closed by hand keeps that choice. Delegate
+**Worked · 4 commands, 2 edits** with the combined file and line counts. A
+fold opens only when you open it, jump to a row inside it, or had already
+expanded one of its rows; while its speaker works it stays one line reading
+**Working**, its counts and latest step updating in place, so a busy Team
+transcript does not jump as calls start and finish. A fold opened or closed by
+hand keeps that choice. Delegate
 rows keep their own lanes and are never folded. Recorded changed files can be
 revealed in Finder. A link in a reply that names a file or folder (a path
 relative to the chat's workspace, an absolute or `~` path, or a `file://` URL)
@@ -362,9 +368,11 @@ shows every working, continuing or waiting member in roster order; a solo
 chat shows its model. The line reads the speaker's newest row (a running tool
 in its live phrasing, a streaming reply as "Replying…", a model request in
 flight as "Thinking…"), so nothing is invented, and it disappears when the
-turn ends. Clicking a line scrolls to that speaker's current row (or the fold
-holding it, which opens) and pauses following, like a manual scroll; the
-**Latest** button brings the view back.
+turn ends. After Stop, or while an update interrupts the turn, every line reads
+the turn's own status ("Stopping…", "Interrupting for your update…") until the
+cancelled work has finished. Clicking a line scrolls to that speaker's current
+row (or the fold holding it, which opens) and pauses following, like a manual
+scroll; the **Latest** button brings the view back.
 
 Web search sources collapse into one pill under the reply (**12 sources ·
 github.com · …**) that opens into a numbered list; copied and saved text keeps

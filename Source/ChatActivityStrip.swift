@@ -53,10 +53,24 @@ struct ChatActivity: Identifiable, Equatable {
     }
 
     /// The strip's rows for the current state, in Team roster order; a solo
-    /// chat has one row for its model. Empty while nothing runs.
+    /// chat has one row for its model. Empty while nothing runs. While Stop
+    /// or an update is in flight, `transition` is the turn's own status
+    /// ("Stopping…", "Interrupting for your update…"): the newest rows still
+    /// show the work being cancelled, so each line says that instead.
     static func current(entries: [ChatEntry], team: ChatTeamSnapshot?, busy: Bool, liveEntryIDs: Set<String>,
-                        label: (String) -> String) -> [ChatActivity] {
+                        transition: String? = nil, label: (String) -> String) -> [ChatActivity] {
         guard busy else { return [] }
+        let rows = speakers(entries: entries, team: team, liveEntryIDs: liveEntryIDs, label: label)
+        guard let transition, !transition.isEmpty else { return rows }
+        return rows.map { row in
+            var row = row
+            row.verb = transition; row.subject = ""; row.code = false; row.live = true
+            return row
+        }
+    }
+
+    private static func speakers(entries: [ChatEntry], team: ChatTeamSnapshot?, liveEntryIDs: Set<String>,
+                                 label: (String) -> String) -> [ChatActivity] {
         if let team, team.enabled {
             return team.members.compactMap { member in
                 let latest = entries.last { $0.memberID == member.id && $0.contributionID == member.contributionID }
@@ -91,20 +105,29 @@ struct ChatActivityStrip: View {
 
     var body: some View {
         let rows = ChatActivity.current(entries: model.entries, team: model.team, busy: model.busy,
-                                        liveEntryIDs: model.streamingEntryIDs(), label: { model.label(for: $0) })
+                                        liveEntryIDs: model.streamingEntryIDs(),
+                                        transition: transition, label: { model.label(for: $0) })
         if !rows.isEmpty {
             VStack(alignment: .leading, spacing: textStyle.scaled(3)) {
                 ForEach(rows) { row in
                     activityRow(row)
                 }
             }
+            // No panel or rule of its own: the lines float on the pane between
+            // the transcript and the composer.
             .padding(.horizontal, 20).padding(.vertical, textStyle.scaled(6))
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Semantic.raisedSurface)
-            .overlay(alignment: .top) { Rectangle().fill(Semantic.hairline).frame(height: HubTheme.Separator.width) }
             .accessibilityElement(children: .contain)
             .accessibilityLabel("Live activity")
         }
+    }
+
+    /// The turn's status while Stop or an update is in flight. A reconnect
+    /// snapshot can carry a raw tool summary there, so anything else reads
+    /// as "Stopping…".
+    private var transition: String? {
+        guard model.interrupting else { return nil }
+        return ["Stopping…", "Interrupting for your update…"].contains(model.status) ? model.status : "Stopping…"
     }
 
     private func activityRow(_ row: ChatActivity) -> some View {
