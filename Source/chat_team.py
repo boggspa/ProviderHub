@@ -121,9 +121,12 @@ def round_payload(service, choice, index):
             note += " Tools are disabled; write the sign-off now."
         note += "]"
     if index == 0 or remaining <= 3:
+        from chat_context import append_note, native_context
         messages = service.chat["messages"]
         block = {"type": "text", "text": note}
-        if messages and messages[-1]["role"] == "user" and isinstance(messages[-1]["content"], list):
+        if native_context(choice):
+            append_note(messages, note)
+        elif messages and messages[-1]["role"] == "user" and isinstance(messages[-1]["content"], list):
             parts = messages[-1]["content"]
             before_images = next((i for i, part in enumerate(parts) if part.get("type") == "image"), len(parts))
             parts.insert(before_images, block)

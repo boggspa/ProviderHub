@@ -13,6 +13,17 @@ from test_cli_structured_reply import reply
 
 
 class LifecycleTests(unittest.TestCase):
+    def test_claude_usage_counters_preserve_cache_categories_without_content(self):
+        timing = TurnTiming("claude", "test")
+        events = iter([{"type": "text_delta", "text": "private reply"},
+                       {"type": "usage", "usage": {"input_tokens": 10, "output_tokens": 20,
+                         "cache_read_input_tokens": 900, "cache_creation_input_tokens": 30}}])
+        list(observe_events(events, timing))
+        self.assertEqual(timing.values["input_tokens"], 10)
+        self.assertEqual(timing.values["cache_read_input_tokens"], 900)
+        self.assertEqual(timing.values["output_tokens"], 20)
+        self.assertTrue(timing.values["usage_reported"])
+        self.assertNotIn("private reply", str(timing.values))
     def test_silent_session_observes_cancellation_without_waiting_for_output(self):
         from test_cli_session import FakeProcess, make_session
         fake = FakeProcess(script=None)

@@ -14,7 +14,7 @@ still respond to upstream rate limits.
 | --- | --- | --- |
 | Codex | Text streams immediately; native host calls remain validated | Initialized app-server processes are reused. A pending native call retains its thread and receives the real host result on the next matching request. |
 | Muse Code | First complete, validated structured response on the Messages surface; terminal completion on other requests | Fresh exec process per request. The four-step allowance remains; later speculative structured output is not consumed. |
-| Claude Code | Successful terminal result, without waiting for stdout EOF | Fresh process per request. |
+| Claude Code | Native host handoff or successful terminal result | Matching tool continuations retain the same process; new user turns and changed history start fresh. |
 | Grok | Successful terminal event or validated native host handoff | Fresh process per request. |
 | AntiGravity | Successful result or confirmed pre-execution denial receipt | Fresh process per request. The denial hook and private files remain until child exit. |
 | Mistral Vibe credentials | Existing streaming Mistral API route | This hub connection does not spawn Vibe CLI processes. |
@@ -35,6 +35,60 @@ the exec structured-response contract has not been verified over persistent MSP.
 Claude and AGY advertise stream-json input and session continuation; Grok
 advertises resume/session controls. These are candidates for a later persistent
 adapter, not a basis for sharing one active process among unrelated tasks.
+
+## Claude in the lean harness
+
+Claude retains up to sixteen pending host-call sessions, matching gateway
+admission and accommodating a six-member Team. Pending calls expire after
+fifteen minutes. Completed turns still close their process. This does not
+enable native tools or bypass host approvals.
+
+Notebook, Blackboard and work-record snapshots use an append-only in-memory
+projection. A changed snapshot travels as reference text in a fresh tool
+result; it does not rewrite the beginning of the conversation. Budget reminders
+use that same result boundary. Saved provider history stays portable and
+unchanged by reference projections. Old snapshots count toward the context
+budget; projection resets discard superseded snapshots. Compaction, history
+edits, route/account switches, genuine new user input and unmatched tool
+results still start a fresh native query. The exact continuation matcher is
+unchanged, so user steering cannot masquerade as a tool result.
+
+The lean route uses `--system-prompt` with the host's complete instructions
+and MCP bridge guidance. Desktop routes retain `--append-system-prompt`.
+Offered MCP definitions remain loaded eagerly: the host owns the tool set,
+and this bridge cannot safely enable an unprovided native tool-search loop.
+Keep optional capabilities disabled when unused to reduce that schema cost.
+
+`max_tokens` becomes the documented per-child `CLAUDE_CODE_MAX_OUTPUT_TOKENS`
+setting and is part of the session key. Claude may clamp it further for its
+model; it is a per-request output ceiling, not a subscription budget or a
+guarantee about internal model work. Team requests also set
+`CLAUDE_CODE_MAX_RETRIES=2` to bound the inner retry loop beneath the Team host's
+existing retries. Parent, Side Chat and helper lanes retain Claude's default
+retry policy because those roles have no outer retry loop. Account settings,
+selected effort and fast mode are unchanged.
+See [Claude environment variables](https://code.claude.com/docs/en/env-vars)
+and [system prompt flags](https://code.claude.com/docs/en/cli-reference).
+
+The opt-in `PROVIDER_HUB_CLI_TIMING_LOG` adds Claude process-start counts,
+reuse, prompt/system/schema byte counts, offered tool count and separately
+reported input/output/cache-read/cache-write tokens. It never records prompts,
+tool arguments/results or credentials. Missing token fields remain unknown.
+Cache reads contribute to context size and must not be treated as fresh input
+or as a subscription spend meter.
+
+For a bounded, real-account comparison (these commands consume model usage):
+
+```sh
+uv run python scripts/benchmark_cli_handoffs.py --provider claude --model claude-sonnet-5-5 --effort low --calls 3 --repeats 1 > .local-only/claude-live.jsonl
+uv run python scripts/benchmark_cli_handoffs.py --provider claude --model claude-sonnet-5-5 --effort low --calls 3 --repeats 1 --fresh > .local-only/claude-fresh.jsonl
+uv run python scripts/summarize_cli_timings.py .local-only/claude-live.jsonl
+uv run python scripts/summarize_cli_timings.py .local-only/claude-fresh.jsonl
+```
+
+Compare like-for-like model, effort and task. First-event latency, cache-read
+fraction and output tokens describe different effects; this summary does not
+claim a subscription saving or a generation tokens-per-second measurement.
 
 ## Images and app compaction
 

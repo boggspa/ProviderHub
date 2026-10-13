@@ -34,6 +34,7 @@ from chat_history import portable_history
 import chat_blackboard
 import chat_memory
 import chat_execution
+import chat_context
 import chat_processes
 import chat_reactions
 import chat_team
@@ -443,6 +444,7 @@ class ChatService:
         self.sides = {}
         self._branch_working = False
         self.max_rounds = MAX_ROUNDS
+        self.context_projection = chat_context.ContextProjection()
         self._delegations = 0
         self.models = []
         self.chat = None
@@ -907,7 +909,7 @@ class ChatService:
         payload = {"model": chat["route"], "messages": chat["messages"], "system": SYSTEM + "\nWorkspace: " + chat["workspace"] + "\nApproval mode: " + permission,
                    "tools": tools, "max_tokens": output,
                    "_provider_hub_surface": "chat", "_provider_hub_account": chat["account"],
-                   "_provider_hub_connection": chat["scope"]}
+                   "_provider_hub_connection": chat["scope"], "_provider_hub_host_retries": self.role == "team"}
         if attached:
             payload["system"] += ("\nAttached folders: " + ", ".join(attached) +
                                   ". They share this chat's file tools and approvals. Absolute paths may target "
@@ -969,7 +971,20 @@ class ChatService:
                     # a notice on every long-turn round only buried the work.
                     chat["messages"] = compacted["messages"]; payload = compacted
                     self.save()
-        if memory:
+        if chat_context.native_context(choice):
+            # Keep saved history portable; the projection retains only this
+            # service's current context and resets on edits/compaction/switches.
+            projection_key = (chat["id"], chat["workspace"], chat["route"], chat.get("account"), chat.get("scope"))
+            payload = {**payload, "messages": self.context_projection.apply(
+                payload["messages"], memory, key=projection_key)}
+            if isinstance(context, int) and context > 0 and estimated_tokens(payload) >= budget:
+                # Old projected snapshots consume context too. Resetting drops
+                # superseded snapshots and retains the latest one. A reset or
+                # actual compaction deliberately starts a fresh native query.
+                self.context_projection = chat_context.ContextProjection()
+                payload = {**payload, "messages": self.context_projection.apply(
+                    chat["messages"], memory, key=projection_key)}
+        elif memory:
             # Projection only: never duplicate notebook text in saved provider
             # history. Reserve its budget before trimming complete tool cycles.
             payload = {**payload, "messages": [memory, *payload["messages"]]}

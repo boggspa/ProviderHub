@@ -32,6 +32,23 @@ from hub_config import (CLI_AUTH_PROVIDERS, SLOTS, cli_auth_available,
 from providers import PROVIDERS, validate_connection
 
 
+class ClaudeLeanScopeTests(unittest.TestCase):
+    def test_only_chat_requests_select_the_lean_persona(self):
+        import claude_cli_agent
+        for surface in ("chat", "responses", "messages", None):
+            with self.subTest(surface=surface), patch.object(cli_routes, "adapter_for", return_value=claude_cli_agent):
+                plan = plan_turn("claude", "claude-sonnet-5-5", {
+                    "messages": [{"role": "user", "content": "hello"}],
+                    "system": "host instructions", "_provider_hub_surface": surface}, {}, wanted_output=8192)
+                self.assertEqual(plan["body"]["lean_harness"], surface == "chat")
+                self.assertEqual(plan["body"]["max_tokens"], 8192)
+                self.assertFalse(plan["body"]["host_retries"])
+                team = plan_turn("claude", "claude-sonnet-5-5", {
+                    "messages": [{"role": "user", "content": "hello"}],
+                    "_provider_hub_surface": surface, "_provider_hub_host_retries": True}, {}, wanted_output=8192)
+                self.assertEqual(team["body"]["host_retries"], surface == "chat")
+
+
 def _fake_adapter(**overrides):
     adapter = types.SimpleNamespace(
         PROVIDER_ID="claude",

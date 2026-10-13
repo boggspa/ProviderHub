@@ -985,6 +985,37 @@ def _answered(history, calls, results, *, text="Listing."):
 
 
 class LiveSessionTests(unittest.TestCase):
+    def test_reference_and_budget_updates_cross_the_real_bridge_on_one_process(self):
+        from chat_context import ContextProjection, append_note
+        projector = ContextProjection()
+        first_history = projector.apply(_TASK, {"content": [{"type": "text", "text": "Old notebook"}]}, key="chat")
+        self.scripts = [[_MCP_INIT, *_host_leg(), _calls(("toolu_1", "exec_command", {"cmd": "ls"})),
+                         _message_start("msg_2"), _text(0, "Done."), _result_event(result="Done."), _EXIT]]
+        self.turn(first_history, lean_harness=True, host_retries=True, max_tokens=8192)
+        history = _answered(_TASK, [("toolu_1", "exec_command", {"cmd": "ls"})], [("toolu_1", "a.txt")])
+        append_note(history, "[Host budget: 3 rounds remain]")
+        projected = projector.apply(history, {"content": [{"type": "text", "text": "New Blackboard"}]}, key="chat")
+        reply = self.turn(projected, lean_harness=True, host_retries=True, max_tokens=8192)
+        self.assertEqual(len(self.spawned), 1)
+        self.assertEqual(reply[-1]["stop_reason"], "end_turn")
+        cli = self.spawned[0]
+        self.assertEqual(cli.env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"], "8192")
+        self.assertEqual(cli.env["CLAUDE_CODE_MAX_RETRIES"], "2")
+        self.assertIn("--system-prompt", cli.argv)
+        self.assertNotIn("--append-system-prompt", cli.argv)
+        delivered = str(cli.results["toolu_1"])
+        self.assertIn("3 rounds", delivered)
+        self.assertIn("New Blackboard", delivered)
+
+    def test_changed_output_budget_does_not_resume_a_cli_with_the_old_limit(self):
+        self.scripts = [[_MCP_INIT, *_host_leg(), _calls(("toolu_1", "exec_command", {"cmd": "ls"}))],
+                        [_MCP_INIT, _message_start("msg_9"), _text(0, "Fresh."), _result_event(result="Fresh."), _EXIT]]
+        self.turn(_TASK, max_tokens=8192)
+        self.turn(_answered(_TASK, [("toolu_1", "exec_command", {"cmd": "ls"})], [("toolu_1", "a.txt")]), max_tokens=1536)
+        self.assertEqual(len(self.spawned), 2)
+        self.assertEqual(self.spawned[1].env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"], "1536")
+        self.assertNotIn("toolu_1", self.spawned[0].results)
+
     def setUp(self):
         self.pool = SessionPool(m._dispose_live, capacity=2, idle_ttl=0, pending_ttl=60, label="Claude")
         self.addCleanup(self.pool.close)
@@ -1147,6 +1178,35 @@ class LiveSessionTests(unittest.TestCase):
 
 
 class ContinuationTests(unittest.TestCase):
+    def test_six_waiting_claude_members_fit_without_eviction(self):
+        from types import SimpleNamespace
+        from codex_session_pool import Lease
+        pool = SessionPool(lambda lease: None, capacity=m._POOL.capacity, idle_ttl=0, pending_ttl=m.LIVE_PENDING_TTL)
+        for index in range(6):
+            lease = Lease(key=index, session=SimpleNamespace(returncode=None), pending={"calls": {}})
+            pool.leases.append(lease)
+            pool.release(lease, healthy=True)
+        self.assertEqual([lease.state for lease in pool.leases], ["idle"] * 6)
+
+    def test_limits_and_prompt_scope_apply_to_stateless_fallback_too(self):
+        request = {"model": "sonnet", "messages": [{"role": "user", "content": "hi"}],
+                   "max_tokens": 1024, "lean_harness": True, "host_retries": True}
+        plan = m._plan_turn(request)
+        env = m._turn_env(plan, live=False, mcp=False)
+        self.assertEqual(env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"], "1024")
+        self.assertEqual(env["CLAUDE_CODE_MAX_RETRIES"], "2")
+        solo = m._plan_turn({**request, "host_retries": False})
+        self.assertNotIn("CLAUDE_CODE_MAX_RETRIES", m._turn_env(solo, live=False))
+        self.assertNotIn("CLAUDE_CODE_MAX_RETRIES", m._turn_env(solo, live=True))
+        self.assertNotEqual(m._pool_key(m._plan_turn({**request, "tools": _HOST_TOOLS, "host_retries": False})),
+                            m._pool_key(m._plan_turn({**request, "tools": _HOST_TOOLS})))
+        legacy = m._plan_turn({**request, "lean_harness": False, "max_tokens": None})
+        self.assertNotIn("CLAUDE_CODE_MAX_OUTPUT_TOKENS", m._turn_env(legacy, live=False))
+        self.assertNotIn("CLAUDE_CODE_MAX_RETRIES", m._turn_env(legacy, live=True))
+        self.assertIn("--append-system-prompt", m.build_argv("sonnet", system="desktop"))
+        for invalid in (True, False, 0, -1, "8192"):
+            with self.subTest(invalid=invalid), self.assertRaises(m.ClaudeCliAgentError):
+                m._plan_turn({**request, "max_tokens": invalid})
     def lease(self, history, calls):
         blocks = history_blocks(history)
         return mock.Mock(pending={"calls": {identifier: {"id": identifier, "name": name, "input": arguments}

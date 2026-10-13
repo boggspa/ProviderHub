@@ -497,6 +497,11 @@ def plan_turn(provider_id: str, upstream_model: str, payload: dict, spec: dict,
                                                and (payload.get("tool_choice") or {}).get("type") != "none")
     if structured_tools:
         request["host_tool_schema"] = cli_structured_reply.reply_schema(tools, tool_choice)
+    if provider_id == "claude":
+        # The lean host supplies its complete persona, tools and permission
+        # policy. Desktop harnesses retain their existing append behaviour.
+        request["lean_harness"] = payload.get("_provider_hub_surface") == "chat"
+        request["host_retries"] = request["lean_harness"] and payload.get("_provider_hub_host_retries") is True
     thinking = payload.get("thinking")
     if isinstance(thinking, dict):
         request["thinking"] = {key: thinking[key] for key in ("type", "display") if key in thinking}
