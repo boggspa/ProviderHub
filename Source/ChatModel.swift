@@ -161,6 +161,14 @@ private final class ChatSessionStorage {
 }
 
 @MainActor
+/// A request to show one transcript row, from the activity strip; the token
+/// makes a repeated click on the same row a new request. Declared here, not
+/// with the strip, because the model compiles alone in its test target.
+struct ChatJumpRequest: Equatable {
+    var id: String
+    var token: Int
+}
+
 final class ChatModel: ObservableObject {
     @Published var chats: [ChatSummary] = []
     @Published var selectedID: String? { didSet { for pane in paneModels.values { pane.objectWillChange.send() } } }

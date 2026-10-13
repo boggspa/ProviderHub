@@ -10,13 +10,6 @@ import SwiftUI
 
 private typealias Semantic = HubTheme.Semantic
 
-/// A request from the strip to show one transcript row; the token makes a
-/// repeated click on the same row a new request.
-struct ChatJumpRequest: Equatable {
-    var id: String
-    var token: Int
-}
-
 extension ChatModel {
     /// Scroll the transcript to an entry's row (or the fold holding it).
     func jump(to entryID: String) {
