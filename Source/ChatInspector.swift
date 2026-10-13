@@ -364,6 +364,7 @@ private struct InspectorTranscript: View {
                     Color.clear.preference(key: InspectorBottomKey.self, value: inner.frame(in: .named("inspector-transcript")).maxY)
                 })
             }.coordinateSpace(name: "inspector-transcript")
+                .environment(\.chatWorkspace, workspace)
                 .onPreferenceChange(InspectorBottomKey.self) { y in nearBottom = y - outer.size.height < 100 }
                 .onChange(of: entries.count) { _, _ in if nearBottom || entries.last?.kind == "user" { proxy.scrollTo("inspector-bottom", anchor: .bottom) } }
                 .onChange(of: entries.last?.text.count) { _, _ in if nearBottom { proxy.scrollTo("inspector-bottom", anchor: .bottom) } }

@@ -343,7 +343,13 @@ Three or more consecutive local tool rows fold into one disclosure such as
 run at the end of a live turn stays open as **Working** and folds once the
 reply begins, and a fold opened or closed by hand keeps that choice. Delegate
 rows keep their own lanes and are never folded. Recorded changed files can be
-revealed in Finder. The newest row keeps a little headroom above the composer:
+revealed in Finder. A link in a reply that names a file or folder (a path
+relative to the chat's workspace, an absolute or `~` path, or a `file://` URL)
+opens the file in its default app or reveals a folder in Finder; a path that no
+longer exists reveals the nearest existing folder instead. Web links open in
+the browser as before. Previously every such link went to the system as a
+schemeless URL and failed with Finder's "The application can't be opened"
+(error -50). The newest row keeps a little headroom above the composer:
 the transcript follows a spacer below the last row, so auto-follow lands with
 breathing room, scrolling up still disengages it, and scrolling back to the
 end or the **Latest** button re-engages it.

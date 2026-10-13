@@ -686,6 +686,7 @@ struct ChatTranscript: View {
         }
         .environment(\.chatBlackboardPin, canPin ? { pinEntry(entry) } : nil)
         .environment(\.chatReact, canReact ? { emoji in model.react(entry, emoji: emoji) } : nil)
+        .environment(\.chatWorkspace, entry.workspace ?? model.selected?.workspace)
         .contextMenu {
             if canReact {
                 Menu("React") {
