@@ -186,12 +186,17 @@ The right-hand **inspector** has four views, each using the whole pane:
   running processes. See background shells under Files and commands.
 
 Drag the hairline at either side of the conversation to resize the workspace
-rail (150–360 points, default 190) or inspector (260–600 points, responsive
-default up to 360). Width preferences persist across sessions. Double-click a
-divider to reset it; accessibility adjustment and a Reset width action are also
-available. Resizing the window clamps displayed widths to leave at least 420
-points for the conversation. The inspector collapses the left workspace rail
-on narrower windows; growing the window restores the preferred widths.
+rail (150–360 points, default 190) or inspector (at least 260 points, at most
+everything but the conversation's 420). The inspector and the conversation
+share width equally: without a drag override the inspector takes half of what
+is left beside the rail, giving ground only so the rail stays available, so a
+wide window gives the browser, Team and other tabs real room instead of a
+fixed 360. Width preferences persist across sessions. Double-click a divider
+to reset it (the inspector returns to the even split); accessibility
+adjustment and a Reset width action are also available. Resizing the window
+clamps displayed widths to leave at least 420 points for the conversation. A
+wide inspector collapses the left workspace rail on narrower windows; growing
+the window restores the preferred widths.
 The main turn clock and context count describe the parent;
 Side Chat runs independently.
 

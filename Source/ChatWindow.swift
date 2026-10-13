@@ -49,8 +49,8 @@ struct ChatWindow: View {
                                          railVisible: panes.rail > 0, railAvailable: panes.railAvailable) { railPreferred.toggle() }
                     if model.inspectorVisible {
                         ChatPaneDivider(label: "Inspector width", width: panes.inspector, direction: -1,
-                            resize: { inspectorWidth = Double(ChatPaneSizing.clamp($0, 260,
-                                min(600, proxy.size.width - ChatPaneSizing.transcriptMinimum - ChatPaneSizing.divider))) },
+                            resize: { inspectorWidth = Double(ChatPaneSizing.clamp($0, ChatPaneSizing.inspectorMinimum,
+                                ChatPaneSizing.inspectorMaximum(proxy.size.width))) },
                             reset: { inspectorWidth = 0 })
                         ChatInspector(model: model, browserStore: browser,
                                       browserInPane: model.selectedID.flatMap { workspace.browserPane(for: $0) } != nil)

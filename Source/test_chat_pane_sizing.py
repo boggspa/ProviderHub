@@ -15,9 +15,13 @@ import Foundation
             ChatPaneSizing.layout(window: window, railPreferred: preferred,
                 inspectorVisible: visible, rail: rail, inspector: inspector)
         }
-        precondition(layout(1600).rail == 190 && layout(1600).inspector == 360)
-        precondition(layout(1600, 999, 999).rail == 360)
-        precondition(layout(1600, 999, 999).inspector == 600)
+        // Equal priority: beside a 190 rail and two dividers, 1600 splits 697/697.
+        precondition(layout(1600).rail == 190 && layout(1600).inspector == 697 && layout(1600).transcript == 697)
+        // A drag override is honoured up to the transcript's minimum, even past the rail.
+        precondition(layout(1600, 999, 999).inspector == 999 && layout(1600, 999, 999).rail == 0)
+        precondition(layout(1600, 999, 999).transcript == 593)
+        precondition(layout(1600, 999, 1172).inspector == 1172 && layout(1600, 999, 1172).transcript == 420)
+        precondition(layout(1600, 999, 1173).inspector == 1172)
         precondition(layout(1600, 1, 1).rail == 150 && layout(1600, 1, 1).inspector == 260)
         precondition(layout(720, 360, 600).transcript == 420)
         precondition(layout(720, 360, 600).rail == 0)
@@ -25,13 +29,19 @@ import Foundation
         precondition(layout(859, 190, 0, false).rail == 0)
         precondition(layout(860, 190, 0, false).rail == 190)
         precondition(layout(1600, 190, 0, true, false).rail == 0)
-        precondition(ChatPaneSizing.inspectorDefault(720) == 260)
-        precondition(ChatPaneSizing.inspectorDefault(900) == 315)
+        // Without a rail the default is half the window; it never squeezes the transcript below its minimum.
+        precondition(ChatPaneSizing.inspectorDefault(720) == 292)
+        precondition(ChatPaneSizing.inspectorDefault(900) == 446)
+        // Beside a rail the default gives ground so the rail stays available.
+        precondition(ChatPaneSizing.inspectorDefault(1600, rail: 190) == 697)
+        precondition(ChatPaneSizing.inspectorDefault(1400, rail: 190) == 532)
+        precondition(layout(1400).rail == 190 && layout(1400).inspector == 532)
         for window in stride(from: 720, through: 2400, by: 7) {
-            for inspector in [CGFloat(0), 260, 360, 600, 999] {
+            for inspector in [CGFloat(0), 260, 360, 600, 999, 2000] {
                 let sizes = layout(CGFloat(window), 360, inspector)
                 precondition(sizes.transcript >= 420)
-                precondition(sizes.inspector >= 260 && sizes.inspector <= 600)
+                precondition(sizes.inspector >= 260 && sizes.inspector <= CGFloat(window) - 428)
+                if inspector == 0 && window >= 1228 { precondition(sizes.rail > 0, "default split hid the rail at \(window)") }
                 precondition(sizes.rail == 0 || (sizes.rail >= 150 && sizes.rail <= 360))
                 let total = sizes.transcript + sizes.rail + sizes.inspector + 8 + (sizes.rail > 0 ? 8 : 0)
                 precondition(abs(total - CGFloat(window)) < 0.001)
