@@ -225,6 +225,19 @@ class ProcessRegistryTests(unittest.TestCase):
         self.assertTrue(wait_for(lambda: gone(child)), "a child the shell left behind survived its exit")
         self.assertEqual(self.rows()["p1"]["status"], "exited")
 
+    def test_reports_carry_progress_while_running_and_the_stop_reason_afterwards(self):
+        text, _ = self.start("echo begun; sleep 30")
+        self.assertRegex(text, r"is running \(\d+s so far, \d+ bytes of output in total\)")
+        text, _ = self.registry.read(self.chat, "p1", 0, self.chat.cancel)
+        self.assertIn("No new output.", text)
+        self.assertIn("bytes of output in total", text)
+        text, _ = self.registry.stop(self.chat, "p1", self.chat.cancel)
+        self.assertRegex(text, r"was stopped \(signal 15\) by stop_process after \d+s")
+        text, error = self.start("exit 3")
+        self.assertTrue(error)
+        self.assertRegex(text, r"exited \(exit code 3\) after \d+s")
+        self.assertNotIn("by stop_process", text)
+
     def test_signal_deaths_are_reported_as_signals(self):
         text, error = self.start("kill -9 $$")
         self.assertTrue(error)

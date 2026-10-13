@@ -647,12 +647,15 @@ struct ChatTranscript: View {
         let live = model.busy && entry.detail == "Running…"
         let canPin = model.team?.enabled == true && model.connected && ["user", "assistant", "tool"].contains(entry.kind)
             && !live && (!entry.text.isEmpty || entry.detail?.isEmpty == false)
+        let canReact = model.connected && ["user", "assistant"].contains(entry.kind) && !liveEntryIDs.contains(entry.id)
+            && (!entry.text.isEmpty || entry.attachments?.isEmpty == false)
+        let react: ((String, Bool) -> Void)? = canReact ? { emoji, mine in model.react(entry, emoji: emoji, remove: mine) } : nil
         Group {
         switch entry.kind {
         case "user":
-            UserRow(entry: entry, accent: { model.accent(for: $0) })
+            UserRow(entry: entry, accent: { model.accent(for: $0) }, onReact: react)
         case "assistant":
-            AssistantRow(entry: entry, accent: model.accent(for: entry.route), streaming: liveEntryIDs.contains(entry.id))
+            AssistantRow(entry: entry, accent: model.accent(for: entry.route), streaming: liveEntryIDs.contains(entry.id), onReact: react)
         case "question":
             if let question = entry.question {
                 ChatQuestionCard(question: question, accent: model.accent(for: entry.route), enabled: model.connected) { answers, dismiss in
@@ -682,7 +685,15 @@ struct ChatTranscript: View {
         }
         }
         .environment(\.chatBlackboardPin, canPin ? { pinEntry(entry) } : nil)
+        .environment(\.chatReact, canReact ? { emoji in model.react(entry, emoji: emoji) } : nil)
         .contextMenu {
+            if canReact {
+                Menu("React") {
+                    ForEach(chatReactionTapbacks, id: \.self) { emoji in
+                        Button(emoji) { model.react(entry, emoji: emoji) }
+                    }
+                }
+            }
             if canPin {
                 Button("Pin to Blackboard") { pinEntry(entry) }
             }

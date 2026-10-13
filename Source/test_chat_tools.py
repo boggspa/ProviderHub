@@ -176,6 +176,86 @@ class ChatToolsTests(unittest.TestCase):
             self.assertFalse(result["is_error"], self.text(result))
             self.assertEqual((self.root / "a").read_bytes(), after)
 
+    def test_patch_markers_tolerate_blank_edges_and_errors_name_the_literal_lines(self):
+        (self.root / "a").write_text("one\ntwo\n")
+        result = self.runner.execute("apply_patch", {"patch": "\n*** Begin Patch\n*** Update File: a\n@@\n-one\n+ONE\n*** End Patch  \n\n"})
+        self.assertFalse(result["is_error"], self.text(result))
+        self.assertEqual((self.root / "a").read_text(), "ONE\ntwo\n")
+        result = self.runner.execute("apply_patch", {"patch": "*** Begin Patch\n*** Update File: a\n@@\n-ONE\n+one"})
+        self.assertTrue(result["is_error"])
+        self.assertIn("start with the line '*** Begin Patch' and end with the line '*** End Patch'", self.text(result))
+        self.assertIn("ends with '+one'", self.text(result))
+        self.assertEqual((self.root / "a").read_text(), "ONE\ntwo\n")
+
+    def test_patch_add_ignores_unified_hunk_header_and_blank_lines_between_sections(self):
+        (self.root / "a").write_text("one\ntwo\n")
+        result = self.apply("*** Add File: new.py\n@@ -0,0 +1,2 @@\n+x\n+y\n\n*** Update File: a\n@@\n-one\n+ONE\n\n*** Add File: other\n+z\n")
+        self.assertFalse(result["is_error"], self.text(result))
+        self.assertEqual((self.root / "new.py").read_text(), "x\ny\n")
+        self.assertEqual((self.root / "a").read_text(), "ONE\ntwo\n")
+        self.assertEqual((self.root / "other").read_text(), "z\n")
+        self.assertEqual(set(result["changed_files"]), {"new.py", "a", "other"})
+        # Only a unified-diff header is dropped; another bare line is still an error.
+        result = self.apply("*** Add File: deco.py\n+x\n@@decorator\n+y")
+        self.assertTrue(result["is_error"])
+        self.assertIn("Invalid patch header: '@@decorator'", self.text(result))
+        self.assertFalse((self.root / "deco.py").exists())
+        # A blank line inside a hunk is still ambiguous: it is named, not guessed.
+        result = self.apply("*** Update File: a\n@@\n-ONE\n\n+one")
+        self.assertTrue(result["is_error"])
+        self.assertIn("Line 5 of the patch is ''", self.text(result))
+        self.assertEqual((self.root / "a").read_text(), "ONE\ntwo\n")
+
+    def test_patch_errors_point_to_the_right_header_and_line(self):
+        (self.root / "a").write_text("one\ntwo\n")
+        cases = [
+            ("@@ -0,0 +1,1 @@\n+x", "needs a file header before it"),
+            ("*** Update File: missing\n@@\n-one\n+ONE", "Use '*** Add File: missing' to create it"),
+            ("*** Add File: a\n+x", "Use '*** Update File: a' with @@ hunks"),
+            ("*** Update File: a\n@@\n-two\nbad", "Line 5 of the patch is 'bad'"),
+            ("*** Update File: a\n@@\n-nope\n+x", "matches the file 0 times, not once"),
+            ("*** Delete File: missing", "missing does not exist."),
+            ("*** Rename File: a", "Expected '*** Add File: path', '*** Update File: path' or '*** Delete File: path'"),
+        ]
+        for body, expected in cases:
+            with self.subTest(body=body):
+                result = self.apply(body)
+                self.assertTrue(result["is_error"], self.text(result))
+                self.assertIn(expected, self.text(result))
+                self.assertEqual(result["changed_files"], [])
+        self.assertEqual((self.root / "a").read_text(), "one\ntwo\n")
+        self.assertIn("*** Add File: path", next(t for t in TOOL_DEFINITIONS if t["name"] == "apply_patch")["description"])
+
+    def test_read_file_and_patch_name_the_non_utf8_byte(self):
+        (self.root / "bin").write_bytes(b"abc\xcd\x00")
+        result = self.runner.execute("read_file", {"path": "bin"})
+        self.assertTrue(result["is_error"])
+        self.assertIn("bin is not UTF-8 text (byte 0xcd at offset 3)", self.text(result))
+        self.assertIn("xxd", self.text(result))
+        result = self.apply("*** Update File: bin\n@@\n-abc\n+x")
+        self.assertTrue(result["is_error"])
+        self.assertIn("byte 0xcd at offset 3", self.text(result))
+        self.assertEqual((self.root / "bin").read_bytes(), b"abc\xcd\x00")
+
+    def test_shell_notes_missing_commands_and_detached_work(self):
+        result = self.runner.execute("run_shell", {"command": "definitely-missing-command-xyz"})
+        self.assertTrue(result["is_error"])
+        self.assertIn("Exit code: 127", self.text(result))
+        self.assertIn("not found on PATH", self.text(result))
+        self.assertIn("search_files", self.text(result))
+        result = self.runner.execute("run_shell", {"command": "sleep 5 &"})
+        self.assertFalse(result["is_error"])
+        self.assertIn("did not keep running", self.text(result))
+        self.assertIn("background: true", self.text(result))
+        result = self.runner.execute("run_shell", {"command": "setsid sleep 0.1 || true"})
+        self.assertIn("may still be running", self.text(result))
+        self.assertNotIn("did not keep running", self.text(result))
+        for command in ("true", "echo a && echo b", "echo x >&2", "echo y 2>&1"):
+            with self.subTest(command=command):
+                text = self.text(self.runner.execute("run_shell", {"command": command}))
+                self.assertNotIn("did not keep running", text)
+                self.assertNotIn("not found on PATH", text)
+
     def test_shell_exact_command_real_exit_and_environment(self):
         command = "printf 'actual output'; printf 'stderr output' >&2; exit 7"
         description = self.runner.describe("run_shell", {"command": command})

@@ -66,6 +66,19 @@ struct ChatEntry: Decodable, Identifiable {
     var question: ChatQuestionRecord?
     /// `@Name` tags as the worker resolved and routed them, in UTF-16 units.
     var mentions: [ChatMention]?
+    /// Emoji left on this message by Team members or the user, one each.
+    var reactions: [ChatReaction]?
+}
+
+/// One emoji a Team member or the user left on a message, iMessage tapback
+/// style. `author` is the member ID, or "user".
+struct ChatReaction: Decodable, Identifiable {
+    var emoji: String
+    var author: String
+    var authorName: String
+    var route: String?
+    var time: String?
+    var id: String { author }
 }
 
 struct ChatAttachment: Decodable, Identifiable {
@@ -813,6 +826,13 @@ final class ChatModel: ObservableObject {
         var command = command
         if let owner = command["id"] as? String ?? stateChatID { command["chat"] = owner }
         return write(command)
+    }
+
+    /// The user's reaction on a message, or its withdrawal. The worker answers
+    /// with the updated entry, which replaces the row like any other entry event.
+    func react(_ entry: ChatEntry, emoji: String, remove: Bool = false) {
+        guard connected, let owner = stateChatID else { return }
+        inspectorCommand(["command": "react", "id": owner, "entry": entry.id, "emoji": emoji, "remove": remove])
     }
 }
 
