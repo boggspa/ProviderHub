@@ -421,6 +421,7 @@ _UPDATE_FILE = "*** Update File: "
 _ADD_FILE = "*** Add File: "
 _DELETE_FILE = "*** Delete File: "
 _REPLACE_SIMILARITY = 0.6
+_UNIFIED_HUNK = re.compile(r"@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@")
 
 
 def _unified_diff_header(line, path):
@@ -501,7 +502,7 @@ def repair_apply_patch(text):
             out.append(" " + line); bare.append(True)
             continue
         if section == "add":
-            if header.startswith("@@"):
+            if _UNIFIED_HUNK.match(header):
                 continue
             if line.startswith("+"):
                 out.append(line)

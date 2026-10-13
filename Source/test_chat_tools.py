@@ -195,6 +195,11 @@ class ChatToolsTests(unittest.TestCase):
         self.assertEqual((self.root / "a").read_text(), "ONE\ntwo\n")
         self.assertEqual((self.root / "other").read_text(), "z\n")
         self.assertEqual(set(result["changed_files"]), {"new.py", "a", "other"})
+        # Only a unified-diff header is dropped; another bare line is still an error.
+        result = self.apply("*** Add File: deco.py\n+x\n@@decorator\n+y")
+        self.assertTrue(result["is_error"])
+        self.assertIn("Invalid patch header: '@@decorator'", self.text(result))
+        self.assertFalse((self.root / "deco.py").exists())
         # A blank line inside a hunk is still ambiguous: it is named, not guessed.
         result = self.apply("*** Update File: a\n@@\n-ONE\n\n+one")
         self.assertTrue(result["is_error"])
@@ -242,6 +247,9 @@ class ChatToolsTests(unittest.TestCase):
         self.assertFalse(result["is_error"])
         self.assertIn("did not keep running", self.text(result))
         self.assertIn("background: true", self.text(result))
+        result = self.runner.execute("run_shell", {"command": "setsid sleep 0.1 || true"})
+        self.assertIn("may still be running", self.text(result))
+        self.assertNotIn("did not keep running", self.text(result))
         for command in ("true", "echo a && echo b", "echo x >&2", "echo y 2>&1"):
             with self.subTest(command=command):
                 text = self.text(self.runner.execute("run_shell", {"command": command}))

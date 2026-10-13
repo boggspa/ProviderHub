@@ -38,9 +38,15 @@ PATCH_FORMAT = (
     "space; '*** Move to: new/path' on the line after the header renames. '*** Delete File: path' removes a file. Paths "
     "are relative to the workspace (or absolute within an attached folder). Not a unified diff: never '--- a/', "
     "'+++ b/' or '@@ -1,3 +1,4 @@' line numbers.")
-# A bare '&', nohup, setsid or disown in a foreground command: the work it
-# detaches dies with the call's process group, which surprised several seats.
-_DETACH = re.compile(r"(?<![&>|])&(?![&>])|(?:^|[\s;&|(`])(?:nohup|setsid|disown)\b", re.M)
+# A bare '&', nohup or disown in a foreground command: the work it detaches
+# stays in the call's process group and dies with it, which surprised several
+# seats. setsid is the opposite case: it starts a new session, so what it
+# launched escapes the group kill and keeps running where nothing tracks it.
+_DETACH = re.compile(r"(?<![&>|])&(?![&>])|(?:^|[\s;&|(`])(?:nohup|disown)\b", re.M)
+_SETSID = re.compile(r"(?:^|[\s;&|(`])setsid\b", re.M)
+# A unified-diff hunk header for a new file ('@@ -0,0 +1,57 @@'), the one
+# bare line an Add section tolerates; any other unprefixed line is an error.
+_UNIFIED_HUNK = re.compile(r"@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@")
 
 
 def _tool(name, description, properties, required):
@@ -61,7 +67,7 @@ TOOL_DEFINITIONS = [
         "patch": {"type": "string"}}, ["patch"]),
     _tool("run_shell", "Run a command with /bin/sh in the workspace under the host's selected approval mode. This is not sandboxed. Output is bounded; timeout is seconds (0.1–300). For CLI compatibility, values 1000–600000 are treated as milliseconds and capped at 300 seconds. "
           "Set background to true for servers, watchers or long jobs: the command keeps running between turns, the call returns its first output and an id for read_process and stop_process, and timeout is not used. Stop background processes you no longer need. "
-          "Without background, the command's whole process group ends when the call returns, so a trailing '&', nohup or setsid keeps nothing running. "
+          "Without background, the command's whole process group ends when the call returns, so a trailing '&', nohup or disown keeps nothing running, and setsid would leave an untracked stray. "
           "Exit code 127 means a command was not found on PATH: rg, 7z, ffprobe and similar tools are not bundled, so check with `command -v`, and use search_files for literal text in workspace files.", {
         "command": {"type": "string"}, "timeout": {"type": "number", "minimum": 0.1, "maximum": 600000},
         "background": {"type": "boolean"}}, ["command"]),
@@ -391,7 +397,7 @@ class ChatToolRunner:
                 if os.path.lexists(base / path):
                     raise ValueError(f"Add destination already exists: {path}. Use '*** Update File: {path}' with @@ hunks to change it.")
                 added = []
-                while i < len(lines) - 1 and lines[i].startswith(("+", "@@")):
+                while i < len(lines) - 1 and (lines[i].startswith("+") or _UNIFIED_HUNK.match(lines[i])):
                     # '@@ -0,0 +1,N @@' is a unified-diff slip; a new file has no hunks.
                     if lines[i].startswith("+"):
                         added.append(lines[i][1:])
@@ -595,8 +601,12 @@ class ChatToolRunner:
         if code == 127 and reason is None:
             notes += ("\n[Exit code 127: a command was not found on PATH. Tools such as rg, 7z, ffprobe and bsdtar are not bundled; "
                       "check with `command -v NAME`, use grep or find, or use search_files for literal text in workspace files.]")
-        if _DETACH.search(args["command"]):
-            notes += ("\n[The call's whole process group ended when the shell exited, so work started with '&', nohup, setsid or "
+        if _SETSID.search(args["command"]):
+            notes += ("\n[setsid started a new session outside this call's process group, so whatever it launched may still be "
+                      "running where nothing tracks it and stop_process cannot reach it. Use run_shell with background: true "
+                      "for servers and long jobs, and stop any stray process yourself.]")
+        elif _DETACH.search(args["command"]):
+            notes += ("\n[The call's whole process group ended when the shell exited, so work started with '&', nohup or "
                       "disown did not keep running. Use run_shell with background: true for servers and long jobs.]")
         body = decoded[-(MAX_OUTPUT - len(prefix) - len(notes)):] if MAX_OUTPUT - len(prefix) - len(notes) > 0 else ""
         return prefix + body + notes, reason is not None or code != 0
