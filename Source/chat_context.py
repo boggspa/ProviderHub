@@ -34,6 +34,52 @@ def append_note(messages, text):
     messages.append({"role": "user", "content": [block]})
 
 
+def append_peer_reference(messages, shared):
+    """Deliver host-classified peer reference at a completed tool boundary.
+
+    The caller must classify the source entries before portable_history erases
+    their provenance. Never decide whether something is user input from text
+    labels that a model could imitate. A mixed/unfinished boundary or non-text
+    reference falls back to ordinary messages, leaving continuation strict.
+    """
+    if not shared or len(messages) < 2:
+        return False
+    previous, latest = messages[-2:]
+    if previous.get("role") != "assistant" or latest.get("role") != "user":
+        return False
+    parts, results = previous.get("content"), latest.get("content")
+    if not isinstance(parts, list) or not isinstance(results, list) or not results:
+        return False
+    calls = [part.get("id") for part in parts if isinstance(part, dict) and part.get("type") == "tool_use"]
+    if not calls or any(not isinstance(identifier, str) for identifier in calls) or len(set(calls)) != len(calls):
+        return False
+    if any(not isinstance(result, dict) or result.get("type") != "tool_result" for result in results):
+        return False
+    ids = [result.get("tool_use_id") for result in results]
+    if any(not isinstance(identifier, str) for identifier in ids) or len(set(ids)) != len(ids) or set(ids) != set(calls):
+        return False
+    reference = []
+    for message in shared:
+        content = message.get("content")
+        if message.get("role") != "user" or not isinstance(content, list):
+            return False
+        if any(not isinstance(part, dict) or part.get("type") != "text" or not isinstance(part.get("text"), str)
+               for part in content):
+            return False
+        reference.extend(content)
+    if not reference:
+        return False
+    value = results[-1].get("content", [])
+    if isinstance(value, str):
+        value = [{"type": "text", "text": value}]
+    if not isinstance(value, list):
+        return False
+    # This result has not reached the model yet. Preserve IDs, actual results,
+    # errors, source attribution and order, and attach the reference once.
+    results[-1]["content"] = [*deepcopy(value), *deepcopy(reference)]
+    return True
+
+
 class ContextProjection:
     def __init__(self):
         self.key = None

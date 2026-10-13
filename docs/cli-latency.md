@@ -38,6 +38,23 @@ adapter, not a basis for sharing one active process among unrelated tasks.
 
 ## Claude in the lean harness
 
+Shared Team transcript updates are classified from their host-owned source
+entries before conversion to portable user-role messages. For a CLI-backed
+Claude member, a peer-only update is appended to a fresh, complete tool-result
+boundary. Source IDs, attribution, ordering and error flags are retained, and
+the cursor and messages are persisted together through the existing journal.
+This closes the separate peer-update replay path left after notebook and
+Blackboard projections were made append-only. Six-member regressions exercise
+durable publications, deferred rows, explicit peer mentions and three real MCP
+bridge handoffs on one scripted CLI process.
+
+Actual user entries (even ones imitating a peer-reference label), mixed user
+input, incomplete tool results and non-text references keep ordinary message
+boundaries. The strict native continuation matcher is unchanged. API-backed
+Claude and other provider routes retain their existing shared-context shape.
+No historical chat is rewritten, and pending processes from an earlier build
+are not adopted or reused by the fix.
+
 Claude retains up to sixteen pending host-call sessions, matching gateway
 admission and accommodating a six-member Team. Pending calls expire after
 fifteen minutes. Completed turns still close their process. This does not
