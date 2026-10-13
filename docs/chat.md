@@ -305,7 +305,11 @@ folder for the first time asks once to confirm; that answer is remembered per
 folder on this Mac and never sent to the worker.
 
 The transcript reads like Claude and Codex Desktop. Your messages sit in a
-bubble on the trailing edge. Each speaker (the chat's model, or a Team member
+bubble on the trailing edge and open with a bold **User:** label inside the
+bubble, so that in a Team transcript, where members' replies and tool calls
+interleave with yours, an instruction is never read as the preceding member's
+words; **Copy Message** still copies the message without the label. A helper's
+inspector transcript labels the parent's task the same way. Each speaker (the chat's model, or a Team member
 by name) gets a section header; in a Team, every text reply starts a new section
 and later tools join that member's current section even when peers interleave.
 User messages and notices close all member sections; solo chats retain their

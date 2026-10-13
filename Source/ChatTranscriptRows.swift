@@ -52,14 +52,29 @@ struct ChatSpeakerHeader: View {
     }
 }
 
-/// The user's turn, as a bubble on the trailing edge. In a Team its recorded
-/// `@Name` tags wear their members' accents, as they did in the composer.
+/// The user's turn, as a bubble on the trailing edge, opening with a bold
+/// **User:** label. In a Team transcript members' replies and tool calls
+/// interleave with the user's messages, and an instruction has been read as
+/// the preceding member's words; the label names the speaker inside the
+/// bubble itself. In a Team its recorded `@Name` tags wear their members'
+/// accents, as they did in the composer.
 struct UserRow: View {
     var entry: ChatEntry
     var title = "You"
     /// A route's provider accent; without one, tags read as plain text.
     var accent: ((String) -> Color)? = nil
     @Environment(\.chatTextStyle) private var textStyle
+
+    /// The bubble's text: the speaker label in bold, then the message with its
+    /// mention tags. A message with only attachments still carries the label.
+    static func labelled(_ entry: ChatEntry, title: String, accent: ((String) -> Color)?) -> AttributedString {
+        var label = AttributedString(title == "You" ? "User:" : title + ":")
+        label.inlinePresentationIntent = .stronglyEmphasized
+        guard !entry.text.isEmpty else { return label }
+        let message = accent.map { ChatMentions.marked(entry.text, mentions: entry.mentions ?? [], accent: $0) }
+            ?? AttributedString(entry.text)
+        return label + AttributedString(" ") + message
+    }
 
     var body: some View {
         VStack(alignment: .trailing, spacing: 4) {
@@ -68,11 +83,8 @@ struct UserRow: View {
             }
             VStack(alignment: .leading, spacing: textStyle.scaled(6)) {
                 if let attachments = entry.attachments, !attachments.isEmpty { ChatAttachmentStrip(attachments: attachments) }
-                if !entry.text.isEmpty {
-                    ChatSelectableText(text: accent.map { ChatMentions.marked(entry.text, mentions: entry.mentions ?? [], accent: $0) }
-                                           ?? AttributedString(entry.text),
-                                       font: textStyle.nsFont, color: Semantic.nsInk, message: entry.text)
-                }
+                ChatSelectableText(text: Self.labelled(entry, title: title, accent: accent),
+                                   font: textStyle.nsFont, color: Semantic.nsInk, message: entry.text.isEmpty ? nil : entry.text)
             }
             .padding(.horizontal, textStyle.scaled(13)).padding(.vertical, textStyle.scaled(8))
             .background(RoundedRectangle(cornerRadius: textStyle.scaled(15), style: .continuous).fill(Semantic.selection))
