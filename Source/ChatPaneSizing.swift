@@ -19,7 +19,10 @@ enum ChatPaneSizing {
     /// Equal priority with the transcript: with no drag override the inspector
     /// takes half of what is left beside the rail, giving ground only so the
     /// rail stays available and the transcript keeps its minimum. The browser
-    /// tab in particular was starved by the old fixed 360 cap.
+    /// tab in particular was starved by the old fixed 360 cap. The rail's
+    /// width is reserved even while the rail is hidden, so hiding it with the
+    /// inspector open never grows the inspector past the point where the rail
+    /// could be shown again.
     static func inspectorDefault(_ window: CGFloat, rail: CGFloat = 0) -> CGFloat {
         let beside = window - (rail > 0 ? rail + divider : 0) - divider
         var even = (beside / 2).rounded(.down)
@@ -34,7 +37,7 @@ enum ChatPaneSizing {
     }
     static func layout(window: CGFloat, railPreferred: Bool, inspectorVisible: Bool,
                        rail: CGFloat, inspector: CGFloat) -> Layout {
-        let railWanted = railPreferred ? clamp(rail, 150, 360) : 0
+        let railWanted = clamp(rail, 150, 360)
         let inspectorWidth = inspectorVisible
             ? clamp(inspector > 0 ? inspector : inspectorDefault(window, rail: railWanted), inspectorMinimum,
                     inspectorMaximum(window)) : 0

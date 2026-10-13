@@ -29,6 +29,9 @@ import Foundation
         precondition(layout(859, 190, 0, false).rail == 0)
         precondition(layout(860, 190, 0, false).rail == 190)
         precondition(layout(1600, 190, 0, true, false).rail == 0)
+        // A hidden rail keeps its room in the default split, so it can be shown again.
+        precondition(layout(1600, 190, 0, true, false).inspector == 697 && layout(1600, 190, 0, true, false).railAvailable)
+        precondition(layout(1600, 190, 0, true, false).transcript == 895)
         // Without a rail the default is half the window; it never squeezes the transcript below its minimum.
         precondition(ChatPaneSizing.inspectorDefault(720) == 292)
         precondition(ChatPaneSizing.inspectorDefault(900) == 446)
