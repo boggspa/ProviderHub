@@ -218,6 +218,8 @@ import Combine
         check(ChatFileLink.resolve(URL(string: "receipt.json")!, workspace: nil)?.path
               == (NSHomeDirectory() as NSString).appendingPathComponent("receipt.json"), "relative link without a workspace should use home")
         check(ChatFileLink.resolve(URL(string: "receipt%20two.json")!, workspace: "/tmp/ws")?.path == "/tmp/ws/receipt two.json", "percent encoding kept")
+        check(ChatFileLink.resolve(URL(string: "Source/Foo.swift#L42")!, workspace: "/tmp/ws")?.path == "/tmp/ws/Source/Foo.swift", "line fragment kept in the path")
+        check(ChatFileLink.resolve(URL(string: "notes.md?v=2")!, workspace: "/tmp/ws")?.path == "/tmp/ws/notes.md", "query kept in the path")
         var pinned = 0
         textView.blackboardPin = { pinned += 1 }
         _ = textView.menu(for: click)

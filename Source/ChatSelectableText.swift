@@ -31,7 +31,10 @@ enum ChatFileLink {
             if scheme == "file", let url { return url.standardizedFileURL }
             return nil
         }
-        var path = text.removingPercentEncoding ?? text
+        // The URL's path is already decoded and leaves a line fragment
+        // ("Foo.swift#L42") or query behind; raw text only when the link
+        // did not parse as a URL at all (a path with spaces, say).
+        var path = url.map(\.path).flatMap { $0.isEmpty ? nil : $0 } ?? (text.removingPercentEncoding ?? text)
         if path.hasPrefix("~") { path = (path as NSString).expandingTildeInPath }
         if !path.hasPrefix("/") {
             let root = workspace?.isEmpty == false ? workspace! : NSHomeDirectory()
