@@ -28,6 +28,7 @@ extension ChatTranscriptItem {
     var isError: Bool { false }
     var time: Double? { nil }
     var changedFiles: [String] { [] }
+    var isHiddenReaction: Bool { kind == "tool" && tool == "react_to_message" && !isError }
 }
 
 /// The visible attribution for one emoji, in the message's recorded arrival
@@ -175,9 +176,7 @@ struct ChatTranscriptSegment<Item: ChatTranscriptItem>: Identifiable {
         // never creates a speaker header, reorders peers, or pads a tool fold.
         // Their records remain available to the runtime and saved history;
         // failed calls still explain why no reaction appeared on the message.
-        let visible = items.filter { item in
-            !(item.kind == "tool" && item.tool == "react_to_message" && !item.isError)
-        }
+        let visible = items.filter { !$0.isHiddenReaction }
         let grouped = sections(visible, isLive: isLive)
         let arrival = Dictionary(items.enumerated().map { ($0.element.id, $0.offset) }, uniquingKeysWith: { first, _ in first })
         var result: [ChatTranscriptSegment] = []

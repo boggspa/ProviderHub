@@ -679,6 +679,57 @@ struct Item: ChatTranscriptItem {
 
 @unittest.skipUnless(sys.platform == "darwin" and shutil.which("xcrun"), "Native transcript tests need macOS")
 class ChatTranscriptTests(unittest.TestCase):
+    def test_activity_jump_targets_skip_hidden_reactions(self):
+        activity = (Path(__file__).parent / "ChatActivityStrip.swift").read_text()
+        # Compile the actual activity model with lightweight records; the
+        # unrelated SwiftUI view is covered by the full application build.
+        model = activity[activity.index("struct ChatActivity: Identifiable"):activity.index("struct ChatActivityStrip: View")]
+        stubs = r'''
+import Foundation
+struct ChatEntry: ChatTranscriptItem {
+    var id: String; var kind: String; var text = ""; var route = "claude/opus"
+    var tool: String? = nil; var summary: String? = nil; var detail: String? = nil
+    var isError = false; var memberID: String? = "member"; var memberName: String? = "Opus"
+    var contributionID: String? = "run"; var agentID: String? = nil; var agentIDs: [String]? = nil
+}
+struct ChatTeamSnapshot {
+    struct Member {
+        var id = "member"; var name = "Opus"; var route = "claude/opus"; var contributionID: String? = "run"
+        var status = "working"; var memberStoppedByUser: Bool? = false
+        var waitReason: String? = nil; var nextStep = ""
+    }
+    var enabled = true; var members = [Member()]
+}
+''' + model
+        cases = r'''
+import Foundation
+@main struct Cases {
+    static func main() {
+        func check(_ condition: Bool) { precondition(condition) }
+        let work = ChatEntry(id: "work", kind: "tool", tool: "read_file")
+        let reaction = ChatEntry(id: "reaction", kind: "tool", tool: "react_to_message", detail: "Running…")
+        func rows(_ entries: [ChatEntry], _ team: ChatTeamSnapshot?) -> [ChatActivity] {
+            ChatActivity.current(entries: entries, team: team, busy: true, liveEntryIDs: ["reaction"], label: { $0 })
+        }
+        for status in ["working", "continuing", "waiting"] {
+            var team = ChatTeamSnapshot(); team.members[0].status = status
+            check(rows([work, reaction], team).first?.entryID == "work")
+            check(rows([reaction], team).first?.entryID == nil)
+            team.members[0].memberStoppedByUser = true
+            check(rows([work, reaction], team).first?.entryID == "work")
+        }
+        check(rows([work, reaction], nil).first?.entryID == "work")
+        check(rows([reaction], nil).first?.entryID == nil)
+        var failed = reaction; failed.isError = true
+        check(rows([work, failed], ChatTeamSnapshot()).first?.entryID == "reaction")
+        let outline = ChatTranscriptSegment<ChatEntry>.outline([work, reaction]) { _ in false }
+        check(outline.contains { $0.id == "work" })
+        print("Activity reaction jump checks passed")
+    }
+}
+'''
+        self.run_native(["ChatTranscriptLayout.swift"], cases, "Activity reaction jump checks passed", stubs=stubs)
+
     def run_native(self, files, cases, marker, stubs=None):
         source = Path(__file__).parent
         with tempfile.TemporaryDirectory() as directory:
