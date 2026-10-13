@@ -1,7 +1,10 @@
 """MiniMax's native Messages route and current Token Plan model catalogue."""
 from __future__ import annotations
 
+from effort_map import nearest_effort
+
 API_DOCS = "https://platform.minimax.io/docs/api-reference/text-anthropic-api"
+MESSAGES_DOCS = "https://platform.minimax.io/docs/api-reference/text-chat-anthropic"
 PLAN_DOCS = "https://platform.minimax.io/docs/token-plan/faq"
 BASE_URL = "https://api.minimax.io/anthropic"
 DESCRIPTOR = {
@@ -17,34 +20,52 @@ DESCRIPTOR = {
                      "reasoning_history": "native"},
 }
 OFFICIAL_PATHS = {"", "/anthropic", "/anthropic/v1/messages"}
+#: (id, name, context, max output, vision[, checked, limit source]). Discovery
+#: reads this documented list, not the account, so a new model appears only
+#: once it is added here.
 MODEL_ROWS = (
     ("MiniMax-M3", "MiniMax M3", 1000000, 128000, True),
+    # Token Plan (Subscription Key) only while in preview. max_output clamps
+    # max_tokens, so it carries the documented 512K ceiling, not the 128K
+    # MiniMax recommends.
+    ("MiniMax-M3.1-Flash-Preview", "MiniMax M3.1 Flash Preview", 1000000, 524288, True,
+     "2026-10-13", MESSAGES_DOCS),
     ("MiniMax-M2.7", "MiniMax M2.7", 204800, 131072, False),
     ("MiniMax-M2.7-highspeed", "MiniMax M2.7 Highspeed", 204800, 131072, False),
 )
+#: Models that always think and take their depth as output_config.effort;
+#: MiniMax refuses a disabled thinking switch on them with HTTP 400, and uses
+#: max when effort is omitted, so that is their default here too.
+EFFORT_LADDERS = {"MiniMax-M3.1-Flash-Preview": ("low", "medium", "high", "xhigh", "max")}
 
 
 class MiniMaxError(ValueError):
     pass
 
 
-def catalogue():
-    models = [{
+def _model(identifier, name, context, maximum, vision, checked="2026-09-25",
+           limits="TaskWraith Pi model catalogue"):
+    return {
         "id": identifier, "canonical_id": identifier, "display_name": name,
         "aliases": [identifier], "context": context, "max_output": maximum,
         "context_kind": "catalogue_snapshot", "tools": True, "vision": vision,
         "reasoning": True, "streaming": True,
-        "effort_modes": ["none", "high"] if vision else ["high"],
-        "default_effort": "high", "fast_mode": False,
+        "effort_modes": list(EFFORT_LADDERS.get(identifier) or (["none", "high"] if vision else ["high"])),
+        "default_effort": "max" if identifier in EFFORT_LADDERS else "high", "fast_mode": False,
         "reasoning_history": "native", "complete_tool_cycles": True,
         "source": "provider_documentation", "evidence": API_DOCS,
-        "metadata_checked_at": "2026-09-25", "inference_status": "advertised",
-        "limit_evidence": {"source": "TaskWraith Pi model catalogue",
+        "metadata_checked_at": checked, "inference_status": "advertised",
+        "limit_evidence": {"source": limits,
                            "kind": "catalogue_snapshot; not an account capacity test"},
-    } for identifier, name, context, maximum, vision in MODEL_ROWS]
+    }
+
+
+def catalogue():
+    models = [_model(*row) for row in MODEL_ROWS]
     return models, [
         "Current MiniMax models; account access has not been inference-tested.",
         "Use a Subscription Key (sk-cp) for Token Plan usage or an API key for pay-as-you-go billing.",
+        "M3.1 Flash Preview is Token Plan only for now; it always thinks, and effort sets how deeply.",
         "M2.7 Highspeed is a separate model ID; M2.x thinking is always on.",
     ], API_DOCS
 
@@ -77,11 +98,22 @@ def normalize_controls(body, model_id, spec):
         (requested == "none") != (kind == "disabled")
     ):
         raise MiniMaxError("MiniMax received conflicting thinking and effort controls.")
-    # MiniMax publishes a switch, not token budgets or an effort ladder.
+    # M3 publishes a switch, not token budgets or an effort ladder; M3.1
+    # Flash always thinks and takes its depth from a five-rung ladder.
+    level = None
     if model_id.startswith("MiniMax-M2"):
         body.pop("thinking", None)
         if requested is not None or thinking is not None:
             compatibility["reasoning_effort"] = "fixed_thinking_always_on"
+    elif model_id in EFFORT_LADDERS:
+        if thinking is not None:
+            body["thinking"] = {"type": "adaptive"}
+        if requested == "none" or kind == "disabled":
+            compatibility["reasoning_effort"] = "fixed_thinking_always_on"
+        elif requested is not None:
+            level = nearest_effort(requested, EFFORT_LADDERS[model_id])
+            if level != requested:
+                compatibility["reasoning_effort"] = f"{requested}_normalized_to_{level}"
     elif requested is not None or thinking is not None:
         disabled = requested == "none" or kind == "disabled"
         body["thinking"] = {"type": "disabled" if disabled else "adaptive"}
@@ -90,4 +122,6 @@ def normalize_controls(body, model_id, spec):
         output.pop("effort", None)
         if not output:
             body.pop("output_config", None)
+    if level is not None:
+        body.setdefault("output_config", {})["effort"] = level
     return compatibility

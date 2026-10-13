@@ -12,6 +12,9 @@ from minimax_provider import BASE_URL
 from providers import PROVIDERS, ProviderError, discover, prepare_request, validate_connection
 
 
+FLASH = "MiniMax-M3.1-Flash-Preview"
+
+
 def spec(model_id="MiniMax-M3"):
     return next(row for row in discover("minimax", {}, None)["models"] if row["id"] == model_id)
 
@@ -38,11 +41,17 @@ class MiniMaxProviderTests(unittest.TestCase):
 
     def test_current_roster_and_brand_match_taskwraith(self):
         self.assertEqual([m["id"] for m in discover("minimax", {}, None)["models"]],
-                         ["MiniMax-M3", "MiniMax-M2.7", "MiniMax-M2.7-highspeed"])
+                         ["MiniMax-M3", "MiniMax-M3.1-Flash-Preview", "MiniMax-M2.7", "MiniMax-M2.7-highspeed"])
         self.assertEqual(spec()["context"], 1000000)
         self.assertTrue(spec()["vision"])
+        self.assertEqual(spec()["effort_modes"], ["none", "high"])
         self.assertEqual(spec("MiniMax-M2.7-highspeed")["effort_modes"], ["high"])
-        for model in ("", "MiniMax-M3", "MiniMax-M2.7", "MiniMax-M2.7-highspeed"):
+        flash = spec(FLASH)
+        self.assertEqual((flash["context"], flash["max_output"], flash["vision"]), (1000000, 524288, True))
+        self.assertEqual(flash["effort_modes"], ["low", "medium", "high", "xhigh", "max"])
+        self.assertEqual((flash["default_effort"], spec()["default_effort"]), ("max", "high"))
+        self.assertEqual(flash["metadata_checked_at"], "2026-10-13")
+        for model in ("", "MiniMax-M3", FLASH, "MiniMax-M2.7", "MiniMax-M2.7-highspeed"):
             brand = resolve_presentation("minimax", model)
             self.assertEqual(brand["runtimeProvider"], "minimax")
             self.assertEqual(brand["displayProvider"], "MiniMax")
@@ -63,6 +72,29 @@ class MiniMaxProviderTests(unittest.TestCase):
         self.assertEqual(disabled["body"]["thinking"], {"type": "disabled"})
         priority = prepare_request("minimax", {}, "key", payload(service_tier="priority"), "MiniMax-M3", spec())
         self.assertEqual(priority["body"]["service_tier"], "priority")
+
+    def test_m3_1_flash_always_thinks_and_takes_effort_as_depth(self):
+        source = payload()
+        original = copy.deepcopy(source)
+        plan = prepare_request("minimax", {}, "subscription-key", source, FLASH, spec(FLASH))
+        self.assertEqual(source, original)
+        self.assertEqual(plan["body"]["model"], FLASH)
+        self.assertEqual(plan["body"]["thinking"], {"type": "adaptive"})
+        self.assertEqual(plan["body"]["output_config"], {"effort": "high"})
+        self.assertNotIn("reasoning_effort", plan.get("compatibility", {}))
+        top = prepare_request("minimax", {}, "key", payload(output_config={"effort": "xhigh"}, max_tokens=300000),
+                              FLASH, spec(FLASH))
+        self.assertEqual(top["body"]["output_config"], {"effort": "xhigh"})
+        self.assertEqual(top["body"]["max_tokens"], 300000)
+        ultra = prepare_request("minimax", {}, "key", payload(output_config={"effort": "ultra"}), FLASH, spec(FLASH))
+        self.assertEqual(ultra["body"]["output_config"], {"effort": "max"})
+        self.assertEqual(ultra["compatibility"]["reasoning_effort"], "ultra_normalized_to_max")
+        # A disabled switch is a 400 on this model, so it is never sent.
+        off = prepare_request("minimax", {}, "key", payload(
+            thinking={"type": "disabled"}, output_config={"effort": "none"}), FLASH, spec(FLASH))
+        self.assertEqual(off["body"]["thinking"], {"type": "adaptive"})
+        self.assertNotIn("output_config", off["body"])
+        self.assertEqual(off["compatibility"]["reasoning_effort"], "fixed_thinking_always_on")
 
     def test_m2_fixed_thinking_is_reported_and_highspeed_is_not_a_toggle(self):
         model = "MiniMax-M2.7-highspeed"
