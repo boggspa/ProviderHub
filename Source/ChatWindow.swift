@@ -581,10 +581,15 @@ struct ChatTranscript: View {
                 }
                 .padding(.top, gap(segment.spacing))
             }
-            Color.clear.frame(height: 1).id(bottomID)
+            // Headroom: the follow target is this spacer's bottom edge, so the
+            // newest row sits a little above the composer instead of against
+            // it. Growing the spacer moves nothing else: scrollToEnd still
+            // anchors the same id, and the observer still measures the
+            // document's end, so following engages and disengages as before.
+            Color.clear.frame(height: textStyle.scaled(36)).id(bottomID)
         }
         .frame(maxWidth: textStyle.scaled(760)).frame(maxWidth: .infinity)
-        .padding(.horizontal, 20).padding(.vertical, 16)
+        .padding(.horizontal, 20).padding(.top, 16).padding(.bottom, 4)
     }
 
     /// Wide between speakers, tight inside one speaker's block.
