@@ -134,13 +134,13 @@ struct ChatWindow: View {
 
 // MARK: - Helpers over the parent's model
 
-fileprivate extension ChatModel {
+extension ChatModel {
     func route(named route: String) -> ChatRoute? { models.first { $0.route == route } }
     /// Only a provider with branding metadata may colour the transcript.
-    func isKnownRoute(_ route: String) -> Bool { self.route(named: route)?.presentation != nil }
+    fileprivate func isKnownRoute(_ route: String) -> Bool { self.route(named: route)?.presentation != nil }
     func label(for route: String) -> String { self.route(named: route)?.label ?? route }
-    func providerTitle(_ route: ChatRoute) -> String { route.presentation?.displayProvider ?? route.provider }
-    func hasSeveralAccounts(_ provider: String) -> Bool {
+    fileprivate func providerTitle(_ route: ChatRoute) -> String { route.presentation?.displayProvider ?? route.provider }
+    fileprivate func hasSeveralAccounts(_ provider: String) -> Bool {
         Set(models.filter { $0.provider == provider }.map(\.account)).count > 1
     }
 }
