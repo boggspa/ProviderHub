@@ -985,6 +985,37 @@ def _answered(history, calls, results, *, text="Listing."):
 
 
 class LiveSessionTests(unittest.TestCase):
+    def test_six_member_peer_publications_cross_three_real_bridge_handoffs_on_one_cli(self):
+        import tempfile
+        from test_chat_team_peer_context import team_fixture, complete_tool, publish_peer
+        import chat_team
+
+        with tempfile.TemporaryDirectory() as directory:
+            parent, children, choice = team_fixture(Path(directory))
+            reader = children[0]
+            self.scripts = [[_MCP_INIT,
+                *_host_leg("toolu_1"), _calls(("toolu_1", "exec_command", {"cmd": "ls"})),
+                _message_start("msg_2"), *_host_leg("toolu_2"), _calls(("toolu_2", "exec_command", {"cmd": "ls"})),
+                _message_start("msg_3"), *_host_leg("toolu_3"), _calls(("toolu_3", "exec_command", {"cmd": "ls"})),
+                _message_start("msg_4"), _text(0, "Finished."), _result_event(result="Finished."), _EXIT]]
+            payload = reader.payload(choice)
+            first = self.turn(payload["messages"], system=payload["system"], lean_harness=True, max_tokens=4096)
+            self.assertEqual(first[-1]["stop_reason"], "tool_use")
+            for index in range(1, 4):
+                identifier = f"toolu_{index}"
+                complete_tool(reader, identifier, "exec_command", {"cmd": "ls"})
+                sources = [publish_peer(peer, f"Peer {number} finding at step {index}",
+                                        kind="tool" if number % 2 else "assistant")
+                           for number, peer in enumerate(children[1:])]
+                chat_team.consume_update(reader, choice)
+                payload = reader.payload(choice)
+                reply = self.turn(payload["messages"], system=payload["system"], lean_harness=True, max_tokens=4096)
+                self.assertEqual(len(self.spawned), 1, "Peer updates caused a cold CLI replay")
+                delivered = str(self.spawned[0].results[identifier])
+                self.assertIn("actual tool result", delivered)
+                for source in sources: self.assertIn(source, delivered)
+                self.assertEqual(reply[-1]["stop_reason"], "end_turn" if index == 3 else "tool_use")
+
     def test_reference_and_budget_updates_cross_the_real_bridge_on_one_process(self):
         from chat_context import ContextProjection, append_note
         projector = ContextProjection()
