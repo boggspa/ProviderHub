@@ -312,6 +312,10 @@ def to_messages(body, route, spec, envelope, scope):
 
 
 def response_usage(value):
+    # Responses permits unavailable usage. Do not turn a fallback input
+    # estimate into a provider count with an invented zero output value.
+    if value.get("provider_hub_usage_source") == "estimate":
+        return None
     def integer(key):
         number = value.get(key, 0)
         return number if type(number) is int and number >= 0 else 0
@@ -573,7 +577,10 @@ class MessagesResponsesAdapter:
             return events
         if kind == "message_delta":
             self.stop_reason = value.get("delta", {}).get("stop_reason")
-            self.usage.update(value.get("usage", {}))
+            incoming = value.get("usage", {})
+            if "input_tokens" in incoming:
+                self.usage.pop("provider_hub_usage_source", None)
+            self.usage.update(incoming)
             return []
         if kind == "message_stop":
             if any(not state["closed"] for state in self.blocks.values()) or self.stop_reason is None:

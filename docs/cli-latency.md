@@ -86,6 +86,10 @@ harness also excludes them from measured Team consumption and marks its usage
 incomplete. A later native snapshot replaces the initial estimate and label.
 Historical logs cannot be retroactively disambiguated by this change.
 
+Responses-format clients receive `usage: null` when native usage is unavailable.
+A valid native snapshot replaces the estimate and restores reported usage in
+both streaming and buffered Responses replies.
+
 ## Claude-specific execution settings
 
 The lean route uses `--system-prompt` with the host's complete instructions
