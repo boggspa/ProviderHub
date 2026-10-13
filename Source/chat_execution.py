@@ -101,7 +101,7 @@ def progress(member):
 
 
 def evidence(service, name, arguments, result):
-    if not task(service) or name == "team_status" or result.get("is_error"):
+    if not task(service) or name == "team_status" or name == "react_to_message" or result.get("is_error"):
         return
     # New findings/read results count as progress, not only changed files.
     # Bounded exact evidence catches repeated searches and empty polling while
