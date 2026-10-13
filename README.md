@@ -1,6 +1,6 @@
 # Provider Hub
 
-**Version 0.5.11 (build 75).** Licensed Apache-2.0 — see [LICENSE](LICENSE),
+**Version 0.5.12 (build 76).** Licensed Apache-2.0 — see [LICENSE](LICENSE),
 with attributions in [NOTICE](NOTICE).
 
 A native macOS menu bar app that connects Claude Desktop and the Codex coding workspace to eleven model API connections: Mistral, Kimi Code, MiMo Token Plan, Ollama, DeepSeek, Cerebras, Muse, Grok, Qwen Token Plan, OpenRouter, and the Gemini API. Claude uses the local Messages endpoint. Codex uses Responses: Grok, Ollama, and OpenRouter retain native Responses transports, while the other eight use the local Messages bridge and their provider adapters.
@@ -233,7 +233,7 @@ python3 Source/build_provenance.py verify --require-clean \
 
 **Qualification**
 
-The [verification record](VERIFICATION.md) and the [Codex harness guide](HARNESS-OPTIONS.md) are **historical records**: dated logs of what was tested against the build named inside them, kept for provenance and deliberately not updated. They are not maintained against 0.5.11. Each result qualifies only the model, account and build recorded there, and catalogue discovery alone does not establish inference access. For the current test total see [`QUICK-START.md`](QUICK-START.md).
+The [verification record](VERIFICATION.md) and the [Codex harness guide](HARNESS-OPTIONS.md) are **historical records**: dated logs of what was tested against the build named inside them, kept for provenance and deliberately not updated. They are not maintained against 0.5.12. Each result qualifies only the model, account and build recorded there, and catalogue discovery alone does not establish inference access. For the current test total see [`QUICK-START.md`](QUICK-START.md).
 Launching another desktop app while a Chat turn or one of the desktop
 harnesses is active does not require finishing that work first. The shared
 gateway's auto-stop re-reads its in-flight count, keeps it running while Chat
