@@ -138,7 +138,9 @@ struct CompactShell: View {
         .font(.system(size: 11.5))
         .background {
             if windowStyle == .glass {
-                VibrancyBackground().background(chromaWash)
+                // The same 75% scrim Chat lays over its glass, so the two
+                // windows read as one surface; the chroma wash stays beneath.
+                VibrancyBackground().overlay(HubTheme.Semantic.glassScrim).background(chromaWash)
             } else {
                 Color(nsColor: .windowBackgroundColor)
             }

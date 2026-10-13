@@ -197,7 +197,9 @@ Side Chat runs independently.
 
 The small gear at the bottom-left of the sidebar offers Allow web search, Theme, Glass/Solid,
 Font, and Text size. Glass lays a 75% scrim over the window material (black in
-Dark, white in Light) so text holds on a busy wallpaper. Font choices include
+Dark, white in Light) so text holds on a busy wallpaper; the Hub window's Glass
+surface lays the same scrim beneath its chroma wash, so the two windows read as
+one. Font choices include
 System, System Mono, Inter, Source
 Serif 4 and JetBrains Mono. **Custom…** opens the native macOS font panel for
 fonts installed through Font Book. Only the chosen font name is saved; custom
