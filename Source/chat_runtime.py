@@ -388,7 +388,11 @@ class GatewayClient:
                         blocks[index]["input"] = value
                     open_blocks.remove(index)
                 elif kind == "message_delta":
-                    usage.update(event.get("usage") or {}); reason = (event.get("delta") or {}).get("stop_reason")
+                    incoming = event.get("usage") or {}
+                    if "input_tokens" in incoming:
+                        # A native CLI snapshot replaces its initial estimate.
+                        usage.pop("provider_hub_usage_source", None)
+                    usage.update(incoming); reason = (event.get("delta") or {}).get("stop_reason")
                 elif kind == "message_stop":
                     if open_blocks:
                         raise ModelRequestError("The model stream ended with incomplete content. No pending tool was executed.", code="incomplete_stream", retryable=True)
@@ -962,10 +966,15 @@ class ChatService:
             payload["output_config"] = {"effort": chat["effort"]}
         if isinstance(context, int) and context > 0:
             budget = max(1, int(context * .85) - payload["max_tokens"])
+            # Trim to a lower watermark rather than shaving one tool cycle
+            # from a full history on every round (which defeats CLI reuse).
+            compact_budget = max(1, int(context * .60) - payload["max_tokens"])
             if memory:
-                budget = max(1, budget - estimated_tokens({"messages": [memory]}))
+                reserve = estimated_tokens({"messages": [memory]})
+                budget = max(1, budget - reserve)
+                compact_budget = max(1, compact_budget - reserve)
             if estimated_tokens(payload) >= budget:
-                compacted = compact_conversation(payload, budget)
+                compacted = compact_conversation(payload, compact_budget)
                 if compacted["messages"] != chat["messages"]:
                     # Routine near the limit, so it stays out of the transcript:
                     # a notice on every long-turn round only buried the work.

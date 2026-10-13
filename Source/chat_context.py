@@ -10,7 +10,8 @@ from codex_session_pool import digest, history_blocks
 
 
 def native_context(choice):
-    return choice.get("source") == "cli" and choice.get("route", "").startswith("claude/")
+    return (choice.get("source") == "cli"
+            and choice.get("route", "").split("/", 1)[0] in {"claude", "codex", "grok"})
 
 
 def append_note(messages, text):

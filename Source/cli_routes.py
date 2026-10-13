@@ -857,7 +857,8 @@ def relay_cli_turn(events, emit, *, model, input_tokens=0) -> dict:
     error = None
     error_status = 502
     timing = getattr(events, "timing", None)
-    usage = {"input_tokens": int(input_tokens or 0), "output_tokens": 0}
+    usage = {"input_tokens": int(input_tokens or 0), "output_tokens": 0,
+             "provider_hub_usage_source": "estimate"}
 
     def start_message():
         nonlocal started

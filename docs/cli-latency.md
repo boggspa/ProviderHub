@@ -36,11 +36,11 @@ Claude and AGY advertise stream-json input and session continuation; Grok
 advertises resume/session controls. These are candidates for a later persistent
 adapter, not a basis for sharing one active process among unrelated tasks.
 
-## Claude in the lean harness
+## Stateful CLI context in the lean harness
 
 Shared Team transcript updates are classified from their host-owned source
 entries before conversion to portable user-role messages. For a CLI-backed
-Claude member, a peer-only update is appended to a fresh, complete tool-result
+Claude, Codex or Grok member, a peer-only preview update is appended to a fresh, complete tool-result
 boundary. Source IDs, attribution, ordering and error flags are retained, and
 the cursor and messages are persisted together through the existing journal.
 This closes the separate peer-update replay path left after notebook and
@@ -50,8 +50,10 @@ bridge handoffs on one scripted CLI process.
 
 Actual user entries (even ones imitating a peer-reference label), mixed user
 input, incomplete tool results and non-text references keep ordinary message
-boundaries. The strict native continuation matcher is unchanged. API-backed
-Claude and other provider routes retain their existing shared-context shape.
+boundaries. The native continuation matchers are unchanged. Codex still accepts
+real user steering with `turn/steer`; Claude and Grok replay genuine new user
+messages. API-backed and stateless routes receive the same small previews as
+ordinary messages rather than having peer references attached to tool results.
 No historical chat is rewritten, and pending processes from an earlier build
 are not adopted or reused by the fix.
 
@@ -60,15 +62,35 @@ admission and accommodating a six-member Team. Pending calls expire after
 fifteen minutes. Completed turns still close their process. This does not
 enable native tools or bypass host approvals.
 
-Notebook, Blackboard and work-record snapshots use an append-only in-memory
+For Claude, Codex and Grok, notebook, Blackboard and work-record snapshots use an append-only in-memory
 projection. A changed snapshot travels as reference text in a fresh tool
 result; it does not rewrite the beginning of the conversation. Budget reminders
 use that same result boundary. Saved provider history stays portable and
 unchanged by reference projections. Old snapshots count toward the context
 budget; projection resets discard superseded snapshots. Compaction, history
-edits, route/account switches, genuine new user input and unmatched tool
-results still start a fresh native query. The exact continuation matcher is
-unchanged, so user steering cannot masquerade as a tool result.
+edits, route/account switches and unmatched tool results still start a fresh
+native query. User steering never masquerades as a tool result. History that
+reaches its 85% input watermark is trimmed to a 60% target (minus output and
+notes) rather than shaving a few messages from a full prefix on every round.
+
+Routine Team peer content is now a source-linked preview, with full text
+available through recall tools. It does not auto-drain old overflow into later
+requests. See [Team context delivery](chat-team.md) for preview and mandatory
+input rules. Muse CLI and AntiGravity are still stateless; smaller inputs help
+them without claiming native continuation support.
+
+CLI usage without a native snapshot carries `provider_hub_usage_source: estimate`.
+The gateway retains that tag in activity logs, tracks estimated inputs separately
+and excludes them from provider-reported totals and token calibration. The lean
+harness also excludes them from measured Team consumption and marks its usage
+incomplete. A later native snapshot replaces the initial estimate and label.
+Historical logs cannot be retroactively disambiguated by this change.
+
+Responses-format clients receive `usage: null` when native usage is unavailable.
+A valid native snapshot replaces the estimate and restores reported usage in
+both streaming and buffered Responses replies.
+
+## Claude-specific execution settings
 
 The lean route uses `--system-prompt` with the host's complete instructions
 and MCP bridge guidance. Desktop routes retain `--append-system-prompt`.
