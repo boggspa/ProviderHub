@@ -685,7 +685,8 @@ class ParseToolStreamTest(unittest.TestCase):
             {"type": "usage", "usage": {"input_tokens": True, "output_tokens": 999999}},
             {"type": "message_stop", "stop_reason": "end_turn"}]),
             emitted.append, model="codex/gpt-budget", input_tokens=15000)
-        self.assertEqual(emitted[0]["message"]["usage"], {"input_tokens": 15000, "output_tokens": 0})
+        self.assertEqual(emitted[0]["message"]["usage"], {"input_tokens": 15000, "output_tokens": 0,
+                                                      "provider_hub_usage_source": "estimate"})
         self.assertEqual(result["usage"], {"input_tokens": 2000, "cache_read_input_tokens": 6000,
                                            "cache_creation_input_tokens": 0, "output_tokens": 50})
         self.assertEqual(emitted[-2]["usage"], result["usage"])
@@ -704,6 +705,7 @@ class ParseToolStreamTest(unittest.TestCase):
                     {"type": "message_stop", "stop_reason": "end_turn"}]),
                     lambda event: None, model="m", input_tokens=42)
                 self.assertEqual(result["usage"]["input_tokens"], expected)
+                self.assertEqual(result["usage"].get("provider_hub_usage_source"), "estimate" if reported in (None, {}) else None)
 
     def test_later_uncached_snapshot_clears_cache_already_sent_at_message_start(self):
         from responses_bridge import MessagesResponsesAdapter

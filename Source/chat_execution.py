@@ -73,9 +73,12 @@ def record(service, usage):
         run = service.team_parent.chat["team"].setdefault("runUsage", {})
         keys = ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
         values = [usage.get(key, 0) for key in keys]
-        measured = all(key in usage for key in ("input_tokens", "output_tokens"))
+        estimated = usage.get("provider_hub_usage_source") == "estimate"
+        measured = not estimated and all(key in usage for key in ("input_tokens", "output_tokens"))
         valid = all(type(value) is int and value >= 0 for value in values)
-        run["tokens"] = run.get("tokens", 0) + (sum(values) if valid else 0)
+        run["tokens"] = run.get("tokens", 0) + (sum(values) if valid and not estimated else 0)
+        if estimated and type(usage.get("input_tokens")) is int and usage["input_tokens"] >= 0:
+            run["estimatedInputTokens"] = run.get("estimatedInputTokens", 0) + usage["input_tokens"]
         run["requests"] = run.get("requests", 0) + 1
         run["usageComplete"] = run.get("usageComplete", True) and valid and measured
 

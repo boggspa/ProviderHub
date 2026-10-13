@@ -164,6 +164,7 @@ class Runtime:
         self.failed = 0
         self.input_tokens = 0
         self.output_tokens = 0
+        self.estimated_input_tokens = 0
         self.cache_read_input_tokens = 0
         self.cache_creation_input_tokens = 0
         self.last_error = ""
@@ -172,7 +173,8 @@ class Runtime:
         self.stopping = threading.Event()
         self.connections = set()
         self.provider_counts = {provider_id: {"completed": 0, "failed": 0, "input_tokens": 0, "output_tokens": 0,
-            "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0, "total_input_tokens": 0} for provider_id in PROVIDERS}
+            "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0, "total_input_tokens": 0,
+            "estimated_input_tokens": 0} for provider_id in PROVIDERS}
 
     def resolve_route(self, requested):
         if not isinstance(requested, str):
@@ -503,6 +505,7 @@ class Runtime:
         with self.lock:
             return {"running": True, "active": self.active, "completed": self.completed, "failed": self.failed,
                     "input_tokens": self.input_tokens, "output_tokens": self.output_tokens,
+                    "estimated_input_tokens": self.estimated_input_tokens,
                     "cache_read_input_tokens": self.cache_read_input_tokens,
                     "cache_creation_input_tokens": self.cache_creation_input_tokens,
                     "total_input_tokens": self.input_tokens + self.cache_read_input_tokens + self.cache_creation_input_tokens,
@@ -532,9 +535,18 @@ class Runtime:
             event["service_tier"] = service_tier
         if model_unavailable:
             event["model_unavailable"] = True
+        estimated_input = 0
+        if isinstance(usage, dict) and usage.get("provider_hub_usage_source") == "estimate":
+            value = usage.get("input_tokens")
+            if type(value) is int and value >= 0:
+                estimated_input = value
+            # Retain the tagged estimate in the activity log, but never add it
+            # to provider-reported totals or imply the output was really zero.
+            usage = None
         with self.lock:
             if kind == "completed":
                 self.completed += 1
+                self.estimated_input_tokens += estimated_input
                 self.input_tokens += (usage or {}).get("input_tokens", 0)
                 self.output_tokens += (usage or {}).get("output_tokens", 0)
                 for key in ("cache_read_input_tokens", "cache_creation_input_tokens"):
@@ -553,6 +565,7 @@ class Runtime:
                 counters = self.provider_counts[split_route(model)[0]]
                 if kind == "completed":
                     counters["completed"] += 1
+                    counters["estimated_input_tokens"] += estimated_input
                     counters["input_tokens"] += (usage or {}).get("input_tokens", 0)
                     counters["output_tokens"] += (usage or {}).get("output_tokens", 0)
                     for key in ("cache_read_input_tokens", "cache_creation_input_tokens"):

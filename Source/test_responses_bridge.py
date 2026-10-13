@@ -390,6 +390,32 @@ class ResponsesBridgeTests(unittest.TestCase):
                          {"input_tokens": 60, "output_tokens": 4, "total_tokens": 64,
                           "input_tokens_details": {"cached_tokens": 30}})
 
+    def test_cli_estimates_are_unavailable_responses_usage_until_native_counts_arrive(self):
+        from cli_routes import relay_cli_turn
+        estimate = {"input_tokens": 425000, "output_tokens": 0, "provider_hub_usage_source": "estimate"}
+        self.assertIsNone(response_usage(estimate))
+        for native in (None, {"input_tokens": 12, "output_tokens": 5, "cache_read_input_tokens": 100}):
+            with self.subTest(native=native):
+                adapter = MessagesResponsesAdapter("codex/test", None, "scope")
+                events = [{"type": "text_delta", "text": "Reply"}]
+                if native is not None:
+                    events.append({"type": "usage", "usage": native})
+                events.append({"type": "message_stop", "stop_reason": "end_turn"})
+                wire = []
+                relay_cli_turn(iter(events), lambda event: wire.extend(adapter.feed(event)),
+                               model="codex/test", input_tokens=425000)
+                final = wire[-1]["response"]
+                self.assertEqual(final["status"], "completed")
+                if native is None:
+                    self.assertIsNone(final["usage"])
+                else:
+                    self.assertEqual(final["usage"], {"input_tokens": 112, "output_tokens": 5,
+                        "total_tokens": 117, "input_tokens_details": {"cached_tokens": 100}})
+        buffered = MessagesResponsesAdapter("codex/test", None, "scope").from_message({
+            "type": "message", "content": [{"type": "text", "text": "Reply"}],
+            "usage": estimate, "stop_reason": "end_turn"})
+        self.assertIsNone(buffered["usage"])
+
 
 class CustomApplyPatchBridgeTests(unittest.TestCase):
     PATCH = "*** Begin Patch\n*** Update File: a.txt\n@@\n-old\n+new\n*** End Patch"

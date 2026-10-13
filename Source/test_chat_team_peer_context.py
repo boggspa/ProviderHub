@@ -103,7 +103,7 @@ class TeamPeerContextTests(unittest.TestCase):
     def test_peer_references_remain_ordinary_messages_without_fresh_results_and_on_other_routes(self):
         for source, route, finish_tool in [("cli", "claude/opus", False),
                                             ("api", "claude/opus", True),
-                                            ("cli", "codex/test", True)]:
+                                            ("cli", "muse/test", True)]:
             with self.subTest(source=source, route=route):
                 self.reader.chat["messages"] = [{"role": "user", "content": [{"type": "text", "text": "new request"}]}]
                 if finish_tool: complete_tool(self.reader)
