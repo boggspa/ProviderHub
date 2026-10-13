@@ -173,6 +173,14 @@ private final class ChatSessionStorage {
     var sideRequests: [String: String] = [:]
 }
 
+/// A request to show one transcript row, from the activity strip; the token
+/// makes a repeated click on the same row a new request. Declared here, not
+/// with the strip, because the model compiles alone in its test target.
+struct ChatJumpRequest: Equatable {
+    var id: String
+    var token: Int
+}
+
 @MainActor
 final class ChatModel: ObservableObject {
     @Published var chats: [ChatSummary] = []
@@ -183,6 +191,8 @@ final class ChatModel: ObservableObject {
     private var focusedViewChatID: String?
     @Published var models: [ChatRoute] = []
     @Published var connected = false
+    /// A transcript row the activity strip asked the window to show.
+    @Published var jumpRequest: ChatJumpRequest?
     @Published private(set) var webSearchEnabled: Bool
     @Published private(set) var browserUseEnabled = false
     @Published private(set) var pluginStatus: [[String: Any]] = []

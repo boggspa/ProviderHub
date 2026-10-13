@@ -341,6 +341,18 @@ the transcript follows a spacer below the last row, so auto-follow lands with
 breathing room, scrolling up still disengages it, and scrolling back to the
 end or the **Latest** button re-engages it.
 
+While a turn runs, a **live activity strip** sits between the transcript and
+the composer with one line per speaker that is working right now, in the
+rows' own words: "Sol Running `swift build -c release`", "Luna Editing
+main.swift", "MiniMax Thinking…", or "M3 Waiting" with the reason. A Team
+shows every working, continuing or waiting member in roster order; a solo
+chat shows its model. The line reads the speaker's newest row (a running tool
+in its live phrasing, a streaming reply as "Replying…", a model request in
+flight as "Thinking…"), so nothing is invented, and it disappears when the
+turn ends. Clicking a line scrolls to that speaker's current row (or the fold
+holding it, which opens) and pauses following, like a manual scroll; the
+**Latest** button brings the view back.
+
 Web search sources collapse into one pill under the reply (**12 sources ·
 github.com · …**) that opens into a numbered list; copied and saved text keeps
 the original **Sources:** line. Notices are quiet dividers. A Team checkpoint

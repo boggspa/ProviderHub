@@ -305,6 +305,16 @@ are never read as approval, status or instructions. `test_chat_reactions.py`
 covers emoji validation, the bounded store, the member tool and the user
 command.
 
+## Live activity
+
+While a Team works, the live activity strip above the composer lists each
+working, continuing or waiting member on its own line with what it is doing
+now, read from its newest row: "Sol Running `swift build`", "Luna Editing
+main.swift", "MiniMax Thinking…". It answers the question a long run of
+interleaved tool rows otherwise hides (is anyone still working, and on what)
+without a generic "Working…"; click a line to jump to that member's current
+row. See [Chat](chat.md#files-and-commands).
+
 ## Permissions and interruptions
 
 All members have workspace tools, background process tools, recall/notebook tools and
