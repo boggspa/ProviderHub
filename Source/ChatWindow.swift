@@ -625,13 +625,20 @@ struct ChatTranscript: View {
             }
         }) else { return }
         let target = segments[index].id
+        var inFold = false
         follow.pause()
-        if case .fold = segments[index].content { foldChoice[target] = true }
+        if case .fold = segments[index].content { foldChoice[target] = true; inFold = true }
         if segments.count - index > visibleSegmentLimit { visibleSegmentLimit = segments.count - index + 20 }
-        // After the paging and fold state above have laid out.
+        func scroll(to id: String) {
+            if reduceMotion { proxy.scrollTo(id, anchor: .center) }
+            else { withAnimation(.easeInOut(duration: 0.2)) { proxy.scrollTo(id, anchor: .center) } }
+        }
+        // After the paging and fold state above have laid out: the segment
+        // first, then, once an opened fold has its rows, the row itself, so a
+        // tall fold never leaves the current row off screen.
         DispatchQueue.main.async {
-            if reduceMotion { proxy.scrollTo(target, anchor: .center) }
-            else { withAnimation(.easeInOut(duration: 0.2)) { proxy.scrollTo(target, anchor: .center) } }
+            scroll(to: target)
+            if inFold { DispatchQueue.main.async { scroll(to: entryID) } }
         }
     }
 
@@ -715,7 +722,9 @@ struct ChatTranscript: View {
             .accessibilityLabel((live ? "Working, " : "Worked, ") + ChatToolDisplay.activity(entries.map(\.tool)))
             .accessibilityValue(open ? "Expanded" : "Collapsed")
             if open {
-                VStack(alignment: .leading, spacing: textStyle.scaled(2)) { ForEach(entries) { entry in row(entry, liveEntryIDs: liveEntryIDs) } }
+                // Each row is a scroll target of its own, so a jump from the
+                // activity strip lands on the row, not the fold's centre.
+                VStack(alignment: .leading, spacing: textStyle.scaled(2)) { ForEach(entries) { entry in row(entry, liveEntryIDs: liveEntryIDs).id(entry.id) } }
                     .padding(.leading, textStyle.scaled(18))
                     .overlay(alignment: .leading) {
                         Rectangle().fill(Semantic.hairline).frame(width: 1).padding(.leading, textStyle.scaled(7)).padding(.vertical, 2)
