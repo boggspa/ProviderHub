@@ -484,7 +484,7 @@ def catalogue(*, capture=None, timeout=30, config_dir=None) -> tuple[list[dict],
 # ---------------------------------------------------------------------------
 
 def build_argv(model, *, effort=None, system=None, stream=True, search=False,
-               fast_mode=None, mcp_config=None, run_host_tools=False) -> list[str]:
+               fast_mode=None, mcp_config=None, run_host_tools=False, lean_harness=False) -> list[str]:
     """Full argv for one print-mode turn. argv[0] is the bare binary name.
 
     ``run_turn`` replaces argv[0] with the resolved absolute path; keeping the
@@ -531,11 +531,12 @@ def build_argv(model, *, effort=None, system=None, stream=True, search=False,
         if not isinstance(system, str):
             raise ClaudeCliAgentError("system must be a string or None")
         if system.strip():
+            flag = "--system-prompt" if lean_harness else "--append-system-prompt"
             # Attached (=) form when the text could be mistaken for a flag.
             if system.startswith("-"):
-                argv += [f"--append-system-prompt={system}"]
+                argv += [f"{flag}={system}"]
             else:
-                argv += ["--append-system-prompt", system]
+                argv += [flag, system]
     if mcp_config is not None:
         if not isinstance(mcp_config, str) or not mcp_config.startswith("{"):
             raise ClaudeCliAgentError("mcp_config must be a JSON object string")
@@ -1220,7 +1221,7 @@ def _plan_turn(request) -> dict:
     if system is not None and not isinstance(system, str):
         raise ClaudeCliAgentError("system must be a string or None")
     max_tokens = request.get("max_tokens")
-    if max_tokens is not None and not isinstance(max_tokens, int):
+    if max_tokens is not None and type(max_tokens) is not int:
         raise ClaudeCliAgentError("max_tokens must be an integer or None")
     if isinstance(max_tokens, int) and max_tokens <= 0:
         raise ClaudeCliAgentError("max_tokens must be positive")
@@ -1233,6 +1234,8 @@ def _plan_turn(request) -> dict:
         raise ClaudeCliAgentError(str(exc)) from exc
     return {
         "account_env": account_env,
+        "max_tokens": max_tokens,
+        "lean_harness": request.get("lean_harness") is True,
         "model": model, "messages": messages, "effort": effort, "system": system,
         "search": search_enabled(request.get("web_search")),
         "fast_mode": request.get("fast_mode"), "images": request.get("images") or [],
@@ -1244,6 +1247,18 @@ def _plan_turn(request) -> dict:
         "history": history if isinstance(history, list) else None,
         "timing": request.get("_cli_timing"),
     }
+
+
+def _turn_env(plan, *, live, mcp=True):
+    """Per-child limits; never change the user's saved Claude configuration."""
+    env = {**(_LIVE_ENV if live else _MCP_ENV if mcp else {}), **plan["account_env"]}
+    if plan["max_tokens"] is not None:
+        env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] = str(plan["max_tokens"])
+    if plan["lean_harness"]:
+        # The Team host already retries transient failures. Bound the inner
+        # vendor retry loop so five host attempts cannot each hide ten retries.
+        env["CLAUDE_CODE_MAX_RETRIES"] = "2"
+    return env
 
 
 def _surface(plan, mode):
@@ -1284,7 +1299,13 @@ def _turn_argv(plan, mode, *, mcp_config=None, run_host_tools=False) -> tuple[li
     prompt = render_prompt(messages)
     argv = build_argv(plan["model"], effort=plan["effort"], system=system, stream=True,
                       search=plan["search"], fast_mode=plan["fast_mode"], mcp_config=mcp_config,
-                      run_host_tools=run_host_tools)
+                      run_host_tools=run_host_tools, lean_harness=plan["lean_harness"])
+    if plan["timing"]:
+        plan["timing"].increment("process_starts")
+        plan["timing"].label(prompt_bytes=len(prompt.encode()), system_bytes=len((system or "").encode()),
+                             tool_schema_bytes=len(json.dumps(plan["host_tools"], ensure_ascii=False).encode()),
+                             tool_count=len(plan["host_tools"]), max_output_tokens=plan["max_tokens"],
+                             lean_harness=plan["lean_harness"])
     if plan["images"]:
         argv[1:1] = ["--input-format", "stream-json"]
         prompt = json.dumps({"type": "user", "message": {"role": "user",
@@ -1319,6 +1340,10 @@ def run_turn(request, *, spawner=None, timeout=300, pool=None) -> Iterator[dict]
         yield {"type": "error", "message": _describe(exc, None, timeout)}
         return
     started = time.monotonic()
+    if plan["timing"]:
+        plan["timing"].label(reuse="stateless", history_bytes=len(json.dumps(
+            plan["history"], ensure_ascii=False).encode()), tool_count=len(plan["host_tools"]),
+            max_output_tokens=plan["max_tokens"], lean_harness=plan["lean_harness"])
     modes = ("mcp", "envelope") if plan["toolset"] else (None,)
     owner = pool if pool is not None else (_POOL if spawner is None else None)
     if owner is not None and plan["toolset"] and plan["history"] is not None:
@@ -1364,7 +1389,7 @@ def _attempt_turn(plan, mode, state, *, spawner, timeout):
         state.stderr_handle = tempfile.TemporaryFile(mode="w+", encoding="utf-8")
         session = StdioSession(
             argv,
-            env=minimal_env({**(_MCP_ENV if mode == "mcp" else {}), **plan["account_env"]}),
+            env=minimal_env(_turn_env(plan, live=False, mcp=mode == "mcp")),
             timeout=float(timeout),
             spawner=spawner,
             stderr=state.stderr_handle,
@@ -1492,9 +1517,11 @@ _mcp_result = live_session.mcp_result
 _continuation = live_session.continuation
 
 
-#: Each waiting CLI is a whole Claude Code process; past four, the oldest is
+#: Each waiting CLI is a whole Claude Code process; past capacity, the oldest is
 #: retired and its task's next step replays instead.
-_POOL = SessionPool(_dispose_live, capacity=4, idle_ttl=0, pending_ttl=LIVE_PENDING_TTL, label="Claude")
+# Match the gateway's sixteen-request admission bound. Retained handoffs must
+# cover a six-member Team plus other active chats without evicting each other.
+_POOL = SessionPool(_dispose_live, capacity=16, idle_ttl=0, pending_ttl=LIVE_PENDING_TTL, label="Claude")
 atexit.register(_POOL.close)
 
 
@@ -1502,6 +1529,7 @@ def _pool_key(plan) -> str:
     """What a waiting CLI must share with a request to continue it: argv and system text."""
     system, _ = _surface(plan, "mcp")
     return digest({"account": plan["account_env"], "model": plan["model"], "effort": plan["effort"], "fast_mode": plan["fast_mode"],
+                   "max_tokens": plan["max_tokens"], "lean_harness": plan["lean_harness"],
                    "search": plan["search"], "system": system, "tools": plan["host_tools"],
                    "tool_choice": plan["tool_choice"]})
 
@@ -1519,7 +1547,7 @@ def _spawn_live(plan, state, *, spawner, timeout) -> live_session.LiveSession:
             "timeout": _LIVE_CALL_TIMEOUT_MS}}}, separators=(",", ":"))
         argv, prompt = _turn_argv(plan, "mcp", mcp_config=mcp_config, run_host_tools=True)
         state.stderr_handle = tempfile.TemporaryFile(mode="w+", encoding="utf-8")
-        session = StdioSession(argv, env=minimal_env({**_LIVE_ENV, **plan["account_env"]}), timeout=float(timeout),
+        session = StdioSession(argv, env=minimal_env(_turn_env(plan, live=True)), timeout=float(timeout),
                                spawner=spawner, stderr=state.stderr_handle)
     except BaseException:
         if bridge is not None:
@@ -1556,6 +1584,7 @@ def _live_turn(plan, owner, *, spawner, timeout):
     except (RuntimeError, TimeoutError):
         # A full pool or a continuation still being released: this request
         # replays the conversation instead of waiting on either.
+        if timing: timing.label(fallback_reason="pool_unavailable")
         return "stateless"
     except Exception as exc:  # the client cancelled while the lease was awaited
         yield {"type": "error", "message": _describe(exc, None, timeout)}
@@ -1568,6 +1597,7 @@ def _live_turn(plan, owner, *, spawner, timeout):
             live = lease.session
             if results is None or not live.resume(results):
                 # Nothing has reached the client: retire the CLI and replay.
+                if timing: timing.label(fallback_reason="continuation_unavailable")
                 return "stateless"
         if timing:
             timing.label(reuse="resumed" if live is not None else "cold")

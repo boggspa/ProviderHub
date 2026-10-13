@@ -3,7 +3,7 @@
 
 Run from the repository with uv's Python 3.13. No file/network tools are offered
 to the model. Measurements contain timings and process IDs, never conversation
-content. --fresh disables Codex persistence for a controlled comparison.
+content. --fresh disables Codex or Claude persistence for a controlled comparison.
 """
 from __future__ import annotations
 
@@ -32,7 +32,8 @@ def exercise(provider, model, effort, calls, timeout, repeat, *, fresh=False):
     for leg in range(calls + 2):
         plan = cli_routes.plan_turn(provider, model, {"messages": history,
             "system": "Use only the offered host echo tool, one call per reply.",
-            "tools": tools, "stream": True, "output_config": {"effort": effort}}, {}, wanted_output=128)
+            "tools": tools, "stream": True, "output_config": {"effort": effort},
+            "_provider_hub_surface": "chat" if provider == "claude" else "benchmark"}, {}, wanted_output=1024)
         wire, records = [], []
         measured = threading.Event()
         stream = cli_routes.run_turn(provider, plan['body'], parse_tool_calls=True, timeout=timeout)
@@ -77,10 +78,12 @@ def exercise(provider, model, effort, calls, timeout, repeat, *, fresh=False):
             raise RuntimeError('Unexpected echo step; refusing to continue')
         followup = (f'Now call benchmark_echo with step {completed + 1}.' if completed < calls
                     else 'All requested echo calls have completed. Reply DONE.')
-        history.extend([{'role': 'assistant', 'content': content}, {'role': 'user', 'content': [
-            {'type': 'tool_result', 'tool_use_id': call['id'],
-             'content': json.dumps({'step': completed, 'verified': True})},
-            {'type': 'text', 'text': followup}]}])
+        result = {'type': 'tool_result', 'tool_use_id': call['id'],
+                  'content': json.dumps({'step': completed, 'verified': True, 'next_step': followup})}
+        # Claude accepts exact tool continuations; separate user text is real
+        # steering and deliberately cold-starts. Exercise the actual hot path.
+        continuation = [result] if provider == 'claude' else [result, {'type': 'text', 'text': followup}]
+        history.extend([{'role': 'assistant', 'content': content}, {'role': 'user', 'content': continuation}])
     raise RuntimeError('Model exceeded the benchmark turn budget')
 
 
@@ -92,12 +95,12 @@ def main():
     parser.add_argument('--calls', type=int, default=3)
     parser.add_argument('--repeats', type=int, default=2)
     parser.add_argument('--timeout', type=float, default=120)
-    parser.add_argument('--fresh', action='store_true', help='Codex only: start a new app-server for every leg')
+    parser.add_argument('--fresh', action='store_true', help='Codex/Claude: start a new process for every leg')
     args = parser.parse_args()
     if not 1 <= args.calls <= 8 or not 1 <= args.repeats <= 10:
         parser.error('calls must be 1..8 and repeats must be 1..10')
-    if args.fresh and args.provider != 'codex':
-        parser.error('--fresh applies only to Codex; the other adapters already use fresh processes')
+    if args.fresh and args.provider not in {'codex', 'claude'}:
+        parser.error('--fresh applies only to Codex and Claude')
     adapter = cli_routes.adapter_for(args.provider)
     try:
         if args.fresh:

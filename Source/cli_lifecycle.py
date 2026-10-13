@@ -96,6 +96,14 @@ def observe_events(events, timing):
                 _TIMING.reset(token)
             if timing and event.get("type") in {"text_delta", "thinking_delta", "tool_call"}:
                 timing.mark("first_model_event")
+            if timing and timing.values.get("provider") == "claude" and event.get("type") == "usage":
+                # Claude emits increments for this host leg, not its entire
+                # retained query. Keep cache reads separate from generation.
+                usage = event.get("usage") or {}
+                for name in ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"):
+                    if type(usage.get(name)) is int and usage[name] >= 0:
+                        timing.increment(name, usage[name])
+                timing.label(usage_reported=True)
             yield event
     finally:
         close = getattr(events, "close", None)
@@ -120,6 +128,10 @@ class TurnTiming:
     def label(self, **values):
         with self.lock:
             self.values.update(values)
+
+    def increment(self, name, value=1):
+        with self.lock:
+            self.values[name] = self.values.get(name, 0) + value
 
     def finish(self):
         # Releasing a pooled session does not shut its process down. Keep that
