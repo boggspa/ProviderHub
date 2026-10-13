@@ -10,7 +10,7 @@
 
 [project]
 name = "provider-hub"
-version = "0.5.12"
+version = "0.5.13"
 description = "Native macOS menu bar app connecting Claude Desktop and Codex / ChatGPT Desktop to multiple model API providers"
 readme = "README.md"
 requires-python = ">=3.11"
