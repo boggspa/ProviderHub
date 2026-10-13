@@ -47,8 +47,9 @@ class MiniMaxProviderTests(unittest.TestCase):
         self.assertEqual(spec()["effort_modes"], ["none", "high"])
         self.assertEqual(spec("MiniMax-M2.7-highspeed")["effort_modes"], ["high"])
         flash = spec(FLASH)
-        self.assertEqual((flash["context"], flash["max_output"], flash["vision"]), (1000000, 131072, True))
+        self.assertEqual((flash["context"], flash["max_output"], flash["vision"]), (1000000, 524288, True))
         self.assertEqual(flash["effort_modes"], ["low", "medium", "high", "xhigh", "max"])
+        self.assertEqual((flash["default_effort"], spec()["default_effort"]), ("max", "high"))
         self.assertEqual(flash["metadata_checked_at"], "2026-10-13")
         for model in ("", "MiniMax-M3", FLASH, "MiniMax-M2.7", "MiniMax-M2.7-highspeed"):
             brand = resolve_presentation("minimax", model)
@@ -81,8 +82,10 @@ class MiniMaxProviderTests(unittest.TestCase):
         self.assertEqual(plan["body"]["thinking"], {"type": "adaptive"})
         self.assertEqual(plan["body"]["output_config"], {"effort": "high"})
         self.assertNotIn("reasoning_effort", plan.get("compatibility", {}))
-        top = prepare_request("minimax", {}, "key", payload(output_config={"effort": "xhigh"}), FLASH, spec(FLASH))
+        top = prepare_request("minimax", {}, "key", payload(output_config={"effort": "xhigh"}, max_tokens=300000),
+                              FLASH, spec(FLASH))
         self.assertEqual(top["body"]["output_config"], {"effort": "xhigh"})
+        self.assertEqual(top["body"]["max_tokens"], 300000)
         ultra = prepare_request("minimax", {}, "key", payload(output_config={"effort": "ultra"}), FLASH, spec(FLASH))
         self.assertEqual(ultra["body"]["output_config"], {"effort": "max"})
         self.assertEqual(ultra["compatibility"]["reasoning_effort"], "ultra_normalized_to_max")

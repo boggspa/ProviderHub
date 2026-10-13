@@ -25,15 +25,17 @@ OFFICIAL_PATHS = {"", "/anthropic", "/anthropic/v1/messages"}
 #: once it is added here.
 MODEL_ROWS = (
     ("MiniMax-M3", "MiniMax M3", 1000000, 128000, True),
-    # Token Plan (Subscription Key) only while in preview. 131072 is MiniMax's
-    # recommended max_tokens; its documented ceiling is 512K.
-    ("MiniMax-M3.1-Flash-Preview", "MiniMax M3.1 Flash Preview", 1000000, 131072, True,
+    # Token Plan (Subscription Key) only while in preview. max_output clamps
+    # max_tokens, so it carries the documented 512K ceiling, not the 128K
+    # MiniMax recommends.
+    ("MiniMax-M3.1-Flash-Preview", "MiniMax M3.1 Flash Preview", 1000000, 524288, True,
      "2026-10-13", MESSAGES_DOCS),
     ("MiniMax-M2.7", "MiniMax M2.7", 204800, 131072, False),
     ("MiniMax-M2.7-highspeed", "MiniMax M2.7 Highspeed", 204800, 131072, False),
 )
 #: Models that always think and take their depth as output_config.effort;
-#: MiniMax refuses a disabled thinking switch on them with HTTP 400.
+#: MiniMax refuses a disabled thinking switch on them with HTTP 400, and uses
+#: max when effort is omitted, so that is their default here too.
 EFFORT_LADDERS = {"MiniMax-M3.1-Flash-Preview": ("low", "medium", "high", "xhigh", "max")}
 
 
@@ -49,7 +51,7 @@ def _model(identifier, name, context, maximum, vision, checked="2026-09-25",
         "context_kind": "catalogue_snapshot", "tools": True, "vision": vision,
         "reasoning": True, "streaming": True,
         "effort_modes": list(EFFORT_LADDERS.get(identifier) or (["none", "high"] if vision else ["high"])),
-        "default_effort": "high", "fast_mode": False,
+        "default_effort": "max" if identifier in EFFORT_LADDERS else "high", "fast_mode": False,
         "reasoning_history": "native", "complete_tool_cycles": True,
         "source": "provider_documentation", "evidence": API_DOCS,
         "metadata_checked_at": checked, "inference_status": "advertised",
