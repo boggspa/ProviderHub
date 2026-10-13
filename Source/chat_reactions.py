@@ -10,12 +10,15 @@ context, never read as approval, status or instructions.
 """
 from __future__ import annotations
 
+import copy
 import json
 
 from chat_tools import _tool
 
 MAX_REACTIONS = 16
-MAX_CODEPOINTS = 10
+# A bound on the structure walk below, not a grapheme rule: a ZWJ family with
+# four skin tones runs to eleven code points, so the limit sits well above.
+MAX_CODEPOINTS = 32
 TOOLS = {"react_to_message"}
 COMMANDS = {"react"}
 USER = {"id": "user", "name": "You", "route": ""}
@@ -94,7 +97,12 @@ def messages(chat):
 
 
 def react(chat, author, *, emoji, entry_id=None, remove=False, now):
-    """Set or withdraw ``author``'s reaction on one message. Returns (entry, status)."""
+    """Set or withdraw ``author``'s reaction on one message.
+
+    Returns (entry, status, previous): ``previous`` is the message's reaction
+    list before the change (None when it had none), for a rollback if the
+    save that follows fails.
+    """
     candidates = messages(chat)
     if entry_id is None:
         item = next((item for item in reversed(candidates) if item["kind"] == "user"), None)
@@ -109,6 +117,7 @@ def react(chat, author, *, emoji, entry_id=None, remove=False, now):
                              "not on tool rows or notices; find message IDs with search_history.")
     if author["id"] != "user" and item.get("memberID") == author["id"]:
         raise ValueError("React to the user's message or a peer's reply, not to your own.")
+    previous = copy.deepcopy(item.get("reactions"))
     reactions = [row for row in item.get("reactions") or [] if isinstance(row, dict)]
     mine = next((row for row in reactions if row.get("author") == author["id"]), None)
     if remove:
@@ -132,18 +141,30 @@ def react(chat, author, *, emoji, entry_id=None, remove=False, now):
         item["reactions"] = reactions
     else:
         item.pop("reactions", None)
-    return item, status
+    return item, status, previous
 
 
-def _record(parent, item, *, dirty=None):
-    """Persist and publish a changed message; the caller holds the parent lock."""
+def _record(parent, item, previous, *, dirty=None):
+    """Persist and publish a changed message; the caller holds the parent lock.
+
+    A failed save restores the message's earlier reactions before raising,
+    so a reaction the caller is told did not succeed cannot ride a later
+    save.
+    """
     import chat_team
+    try:
+        if not parent.busy:
+            parent.save()
+        elif chat_team.enabled(parent.chat):
+            chat_team.checkpoint(parent, None, {item["id"]: item})
+    except BaseException:
+        if previous is None:
+            item.pop("reactions", None)
+        else:
+            item["reactions"] = previous
+        raise
     if dirty is not None:
         dirty[item["id"]] = item
-    if not parent.busy:
-        parent.save()
-    elif chat_team.enabled(parent.chat):
-        chat_team.checkpoint(parent, None, {item["id"]: item})
     parent.emit({"event": "entry", "chat": parent.chat["id"], "entry": item})
 
 
@@ -172,9 +193,9 @@ def execute(service, name, args):
     parent, member = service.team_parent, service.team_member
     author = {"id": member["id"], "name": member["name"], "route": member.get("route", "")}
     with parent._mutex:
-        item, status = react(parent.chat, author, emoji=args.get("emoji"), entry_id=args.get("entry_id"),
-                             remove=bool(args.get("remove", False)), now=now())
-        _record(parent, item, dirty=getattr(service.store, "dirty", None))
+        item, status, previous = react(parent.chat, author, emoji=args.get("emoji"), entry_id=args.get("entry_id"),
+                                       remove=bool(args.get("remove", False)), now=now())
+        _record(parent, item, previous, dirty=getattr(service.store, "dirty", None))
         output = {"status": status, "entry_id": item["id"], "reactions": _listed(item)}
     mine = next((row for row in item.get("reactions") or [] if row.get("author") == member["id"]), None)
     summary = "Withdrew reaction" if status == "removed" else "Reacted " + mine["emoji"]
@@ -190,7 +211,7 @@ def handle(service, command):
     with service._mutex:
         if not service.chat or command.get("id") != service.chat["id"]:
             raise ValueError("Select the chat before reacting to one of its messages.")
-        item, _ = react(service.chat, USER, emoji=command.get("emoji"), entry_id=command.get("entry"),
-                        remove=bool(command.get("remove", False)), now=now())
-        _record(service, item)
+        item, _, previous = react(service.chat, USER, emoji=command.get("emoji"), entry_id=command.get("entry"),
+                                  remove=bool(command.get("remove", False)), now=now())
+        _record(service, item, previous)
     return True

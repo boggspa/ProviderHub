@@ -17,7 +17,8 @@ OPUS = {"id": "m2", "name": "Opus", "route": "ollama/other"}
 
 class EmojiTests(unittest.TestCase):
     def test_single_emoji_graphemes_are_accepted(self):
-        for value in ("👍", "❤️", "‼️", "❓", " 😂 ", "👍🏽", "👩‍💻", "🤷🏼‍♂️", "🇬🇧", "1️⃣", "#️⃣", "©️", "🫡", "☕"):
+        for value in ("👍", "❤️", "‼️", "❓", " 😂 ", "👍🏽", "👩‍💻", "🤷🏼‍♂️", "🇬🇧", "1️⃣", "#️⃣", "©️", "🫡", "☕",
+                      "👨🏿‍👩🏿‍👧🏿‍👦🏿", "🏳️‍🌈"):
             with self.subTest(value=value):
                 self.assertEqual(reactions.normalize_emoji(value), value.strip())
 
@@ -36,25 +37,25 @@ class ReactionStoreTests(unittest.TestCase):
         self.chat = {"id": "c", "workspace": "/w", "entries": [self.user, self.reply, self.tool, self.later], "messages": []}
 
     def test_defaults_to_the_latest_user_message_and_one_reaction_per_author(self):
-        item, status = reactions.react(self.chat, SOL, emoji="👍", now=NOW)
-        self.assertIs(item, self.later); self.assertEqual(status, "added")
+        item, status, previous = reactions.react(self.chat, SOL, emoji="👍", now=NOW)
+        self.assertIs(item, self.later); self.assertEqual((status, previous), ("added", None))
         self.assertEqual(self.later["reactions"], [{"emoji": "👍", "author": "m1", "authorName": "Sol", "route": "ollama/test", "time": NOW}])
-        _, status = reactions.react(self.chat, SOL, emoji="👍", now="later")
-        self.assertEqual(status, "kept")
-        _, status = reactions.react(self.chat, SOL, emoji="❤️", now="later")
+        _, status, previous = reactions.react(self.chat, SOL, emoji="👍", now="later")
+        self.assertEqual((status, [r["emoji"] for r in previous]), ("kept", ["👍"]))
+        _, status, _ = reactions.react(self.chat, SOL, emoji="❤️", now="later")
         self.assertEqual((status, [r["emoji"] for r in self.later["reactions"]]), ("replaced", ["❤️"]))
         reactions.react(self.chat, OPUS, emoji="❤️", now=NOW)
         reactions.react(self.chat, reactions.USER, emoji="😂", now=NOW)
         self.assertEqual([(r["author"], r["emoji"]) for r in self.later["reactions"]], [("m1", "❤️"), ("m2", "❤️"), ("user", "😂")])
-        _, status = reactions.react(self.chat, OPUS, emoji="x", remove=True, now=NOW)
+        _, status, _ = reactions.react(self.chat, OPUS, emoji="x", remove=True, now=NOW)
         self.assertEqual((status, [r["author"] for r in self.later["reactions"]]), ("removed", ["m1", "user"]))
         with self.assertRaisesRegex(ValueError, "no reaction"):
             reactions.react(self.chat, OPUS, emoji="👍", remove=True, now=NOW)
 
     def test_targets_are_messages_only_and_never_your_own(self):
-        item, _ = reactions.react(self.chat, OPUS, emoji="👀", entry_id=self.reply["id"], now=NOW)
+        item, _, _ = reactions.react(self.chat, OPUS, emoji="👀", entry_id=self.reply["id"], now=NOW)
         self.assertIs(item, self.reply)
-        item, _ = reactions.react(self.chat, reactions.USER, emoji="👍", entry_id=self.reply["id"], now=NOW)
+        item, _, _ = reactions.react(self.chat, reactions.USER, emoji="👍", entry_id=self.reply["id"], now=NOW)
         self.assertEqual([r["author"] for r in self.reply["reactions"]], ["m2", "user"])
         with self.assertRaisesRegex(ValueError, "not to your own"):
             reactions.react(self.chat, SOL, emoji="👍", entry_id=self.reply["id"], now=NOW)
@@ -76,7 +77,7 @@ class ReactionStoreTests(unittest.TestCase):
             reactions.react(self.chat, {"id": "m0", "name": "M0", "route": ""}, emoji="nope", now=NOW)
         self.assertEqual(json.dumps(self.later), before)
         # The holder of a slot may still replace its own reaction when full.
-        _, status = reactions.react(self.chat, {"id": "m0", "name": "M0", "route": ""}, emoji="❤️", now=NOW)
+        _, status, _ = reactions.react(self.chat, {"id": "m0", "name": "M0", "route": ""}, emoji="❤️", now=NOW)
         self.assertEqual(status, "replaced")
 
 
@@ -119,10 +120,12 @@ class ReactionServiceTests(unittest.TestCase):
         message = next(item for item in parent.chat["entries"] if item["kind"] == "user")
         self.assertEqual(sorted((r["authorName"], r["emoji"]) for r in message.get("reactions", [])),
                          [("Member 1", "👍")])
+        # Members run concurrently, so their rows interleave in either order.
         rows = [item for item in parent.chat["entries"] if item.get("tool") == "react_to_message"]
-        self.assertEqual([(row["summary"], row["isError"]) for row in rows],
+        self.assertEqual(sorted((row["summary"], row["isError"]) for row in rows),
                          [("Reacted 👍", False), ("Reacted 👍", False), ("Withdrew reaction", False)])
-        self.assertEqual(json.loads(rows[0]["detail"])["reactions"], [{"emoji": "👍", "by": "Member 1"}])
+        first = next(row for row in rows if row["memberName"] == "Member 1")
+        self.assertIn({"emoji": "👍", "by": "Member 1"}, json.loads(first["detail"])["reactions"])
         published = [e for e in self.events if e.get("event") == "entry" and e["entry"]["id"] == message["id"] and e["entry"].get("reactions")]
         self.assertTrue(published, "the updated user message never reached the window")
         self.assertEqual(self.store.load(parent.chat["id"])["entries"][0].get("reactions", [])[0]["authorName"], "Member 1")
@@ -180,6 +183,25 @@ class ReactionServiceTests(unittest.TestCase):
         service.handle({"command": "react", "id": service.chat["id"], "entry": reply["id"], "emoji": "❤️", "remove": True})
         self.assertNotIn("reactions", reply)
         self.assertNotIn("reactions", self.store.load(service.chat["id"])["entries"][-1])
+
+    def test_failed_save_rolls_the_reaction_back(self):
+        service = self.solo([response("Hello there.")])
+        self.run_turn(service, "Hi")
+        reply = next(item for item in service.chat["entries"] if item["kind"] == "assistant")
+        service.handle({"command": "react", "id": service.chat["id"], "entry": reply["id"], "emoji": "👍"})
+        before = json.dumps(reply["reactions"])
+        from unittest.mock import patch
+        with patch.object(service.store, "save", side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                service.handle({"command": "react", "id": service.chat["id"], "entry": reply["id"], "emoji": "❤️"})
+            with self.assertRaises(OSError):
+                service.handle({"command": "react", "id": service.chat["id"], "entry": reply["id"], "emoji": "👍", "remove": True})
+        self.assertEqual(json.dumps(reply["reactions"]), before)
+        self.assertEqual(self.store.load(service.chat["id"])["entries"][-1]["reactions"][0]["emoji"], "👍")
+        user = next(item for item in service.chat["entries"] if item["kind"] == "user")
+        with patch.object(service.store, "save", side_effect=OSError("disk full")), self.assertRaises(OSError):
+            service.handle({"command": "react", "id": service.chat["id"], "entry": user["id"], "emoji": "❤️"})
+        self.assertNotIn("reactions", user)
 
 
 if __name__ == "__main__":
