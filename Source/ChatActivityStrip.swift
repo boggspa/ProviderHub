@@ -95,28 +95,7 @@ struct ChatActivityStrip: View {
         if !rows.isEmpty {
             VStack(alignment: .leading, spacing: textStyle.scaled(3)) {
                 ForEach(rows) { row in
-                    Button {
-                        if let entryID = row.entryID { model.jump(to: entryID) }
-                    } label: {
-                        HStack(spacing: textStyle.scaled(6)) {
-                            ChatProviderIcon(presentation: model.route(named: row.route)?.presentation, size: textStyle.scaled(13))
-                            Text(row.name).font(textStyle.system(11.5, weight: .semibold)).foregroundStyle(Semantic.ink)
-                                .lineLimit(1).fixedSize()
-                            ChatShimmerText(text: row.verb, active: row.live, accent: model.accent(for: row.route))
-                                .font(textStyle.system(11.5, weight: .medium)).fixedSize()
-                            if !row.subject.isEmpty {
-                                Text(row.subject)
-                                    .font(row.code ? textStyle.system(11, design: .monospaced) : textStyle.system(11.5))
-                                    .foregroundStyle(Semantic.secondaryInk).lineLimit(1).truncationMode(.middle)
-                            }
-                            Spacer(minLength: 0)
-                        }
-                        .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(row.entryID == nil)
-                    .help(row.entryID == nil ? "" : "Show " + row.name + "’s current row")
-                    .accessibilityLabel(row.name + " " + row.verb + (row.subject.isEmpty ? "" : " " + row.subject))
+                    activityRow(row)
                 }
             }
             .padding(.horizontal, 20).padding(.vertical, textStyle.scaled(6))
@@ -126,5 +105,34 @@ struct ChatActivityStrip: View {
             .accessibilityElement(children: .contain)
             .accessibilityLabel("Live activity")
         }
+    }
+
+    private func activityRow(_ row: ChatActivity) -> some View {
+        Button {
+            if let entryID = row.entryID { model.jump(to: entryID) }
+        } label: {
+            activityLabel(row)
+        }
+        .buttonStyle(.plain)
+        .disabled(row.entryID == nil)
+        .help(row.entryID == nil ? "" : "Show " + row.name + "’s current row")
+        .accessibilityLabel(row.name + " " + row.verb + (row.subject.isEmpty ? "" : " " + row.subject))
+    }
+
+    private func activityLabel(_ row: ChatActivity) -> some View {
+        HStack(spacing: textStyle.scaled(6)) {
+            ChatProviderIcon(presentation: model.route(named: row.route)?.presentation, size: textStyle.scaled(13))
+            Text(row.name).font(textStyle.system(11.5, weight: .semibold)).foregroundStyle(Semantic.ink)
+                .lineLimit(1).fixedSize()
+            ChatShimmerText(text: row.verb, active: row.live, accent: model.accent(for: row.route))
+                .font(textStyle.system(11.5, weight: .medium)).fixedSize()
+            if !row.subject.isEmpty {
+                Text(row.subject)
+                    .font(row.code ? textStyle.system(11, design: .monospaced) : textStyle.system(11.5))
+                    .foregroundStyle(Semantic.secondaryInk).lineLimit(1).truncationMode(.middle)
+            }
+            Spacer(minLength: 0)
+        }
+        .contentShape(Rectangle())
     }
 }
