@@ -231,6 +231,19 @@ class ConversationTests(unittest.TestCase):
 
 
 class MatcherTests(unittest.TestCase):
+    def test_multiple_followup_images_have_distinct_ordered_labels(self):
+        from test_cli_images import IMAGE
+        receipt=conversation.ReplyReceipt();receipt.observe({'type':'text_delta','text':'Done'})
+        lease=Lease(key='test',pending=receipt.completed(fixture._TASK))
+        history=answered(fixture._TASK,'Done')
+        history.extend([{'role':'user','content':[IMAGE]},
+                        {'role':'user','content':[{'type':'text','text':'Compare these'},IMAGE]}])
+        _,content=conversation.advance(lease,history)
+        self.assertTrue(content[0]['text'].startswith('Image 1 attached'))
+        self.assertTrue(content[3]['text'].startswith('Image 2 attached'))
+        self.assertEqual([content[1],content[4]],[IMAGE,IMAGE])
+        self.assertEqual(content[2],{'type':'text','text':'Compare these'})
+
     def test_followup_image_keeps_bytes_and_dimensions_without_responses_detail(self):
         from test_cli_images import IMAGE
         receipt=conversation.ReplyReceipt();receipt.observe({'type':'text_delta','text':'Done'})

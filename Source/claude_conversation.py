@@ -87,6 +87,7 @@ def advance(lease, history):
         results = continuation(lease, prefix)
         if results is None: return None
     content = []
+    image_index = 0
     for role, block in blocks[cursor:]:
         if role != "user": return None
         if block.get("type") == "text" and isinstance(block.get("text"), str):
@@ -94,7 +95,8 @@ def advance(lease, history):
         elif block.get("type") in {"image", "input_image"}:
             try:
                 image = normalize_image(block)
-                content.extend([{"type": "text", "text": image_label(image, 1) + "."},
+                image_index += 1
+                content.extend([{"type": "text", "text": image_label(image, image_index) + "."},
                                 {"type": "image", "source": image["source"]}])
             except CliImageError: return None
         else:
