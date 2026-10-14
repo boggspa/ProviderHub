@@ -449,6 +449,7 @@ class ChatService:
         self._branch_working = False
         self.max_rounds = MAX_ROUNDS
         self.context_projection = chat_context.ContextProjection()
+        self.team_context_projections = {}
         self._delegations = 0
         self.models = []
         self.chat = None
@@ -914,6 +915,8 @@ class ChatService:
                    "tools": tools, "max_tokens": output,
                    "_provider_hub_surface": "chat", "_provider_hub_account": chat["account"],
                    "_provider_hub_connection": chat["scope"], "_provider_hub_host_retries": self.role == "team"}
+        payload["_provider_hub_conversation"] = ((self.team_parent.chat["id"] + ":")
+                                               if self.role == "team" else "") + chat["id"]
         if attached:
             payload["system"] += ("\nAttached folders: " + ", ".join(attached) +
                                   ". They share this chat's file tools and approvals. Absolute paths may target "
@@ -991,6 +994,8 @@ class ChatService:
                 # superseded snapshots and retains the latest one. A reset or
                 # actual compaction deliberately starts a fresh native query.
                 self.context_projection = chat_context.ContextProjection()
+                if self.role == "team":
+                    self.team_parent.team_context_projections[(self.team_parent.chat["id"], chat["id"])] = self.context_projection
                 payload = {**payload, "messages": self.context_projection.apply(
                     chat["messages"], memory, key=projection_key)}
         elif memory:

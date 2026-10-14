@@ -100,7 +100,8 @@ def observe_events(events, timing):
                 # Claude emits increments for this host leg, not its entire
                 # retained query. Keep cache reads separate from generation.
                 usage = event.get("usage") or {}
-                for name in ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"):
+                for name in ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens",
+                             "cache_creation_5m_tokens", "cache_creation_1h_tokens"):
                     if type(usage.get(name)) is int and usage[name] >= 0:
                         timing.increment(name, usage[name])
                 timing.label(usage_reported=True)
