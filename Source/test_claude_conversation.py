@@ -109,15 +109,24 @@ class ConversationTests(unittest.TestCase):
         self.scripts = [[take(), fixture._MCP_INIT, *leg,
                          fixture._calls(("toolu_1","exec_command",{"cmd":"ls"})),
                          *reply("Old answer", "old", frames=[0], queued=1, usage=old),
-                         take(), *reply("Steer answered", "new", frames=[1], usage=new)]]
+                         take(), *reply("Steer answered", "new", frames=[1], usage=new),
+                         take(), *reply("Follow-up answered", "next", frames=[2], usage=new)]]
         self.turn(fixture._TASK)
         history = user(fixture._answered(fixture._TASK, [("toolu_1","exec_command",{"cmd":"ls"})], [("toolu_1","a.txt")]), "Change direction")
         events = self.turn(history)
         self.assertEqual(events[-1]["stop_reason"], "end_turn")
-        self.assertEqual([e["text"] for e in events if e["type"]=="text_delta"], ["Old answer","Steer answered"])
+        self.assertEqual([e["text"] for e in events if e["type"]=="text_delta"], ["Old answer","\n\n","Steer answered"])
         self.assertEqual([e["usage"] for e in events if e["type"]=="usage"],
                          [{"input_tokens":15,"output_tokens":35,"cache_creation_input_tokens":0,"cache_read_input_tokens":110000}])
         self.assertEqual(len(self.spawned), 1)
+        from cli_routes import relay_cli_turn
+        wire=[]
+        relay_cli_turn(iter(events),wire.append,model='claude/sonnet')
+        visible=''.join(e.get('delta',{}).get('text','') for e in wire if e['type']=='content_block_delta')
+        self.assertEqual(visible,'Old answer\n\nSteer answered')
+        followup=user(answered(history,visible),'Another question')
+        self.assertEqual(self.turn(followup)[-1]['stop_reason'],'end_turn')
+        self.assertEqual(len(self.spawned),1)
 
     def test_result_without_answered_uuid_refuses_to_claim_steer_completion(self):
         self.scripts = [[take(), fixture._MCP_INIT, *reply("Unattributed", frames=[])]]
@@ -135,7 +144,7 @@ class ConversationTests(unittest.TestCase):
         self.turn(fixture._TASK)
         history=user(fixture._answered(fixture._TASK,[("toolu_1","exec_command",{"cmd":"ls"})],[("toolu_1","a.txt")]),"Change direction")
         events=self.turn(history)
-        self.assertEqual([e['text'] for e in events if e['type']=='text_delta'],['Old final-only answer','Steer answer'])
+        self.assertEqual([e['text'] for e in events if e['type']=='text_delta'],['Old final-only answer','\n\n','Steer answer'])
         self.assertEqual(events[-1]['stop_reason'],'end_turn')
 
     def test_unprovable_server_search_reply_is_not_retained_at_host_handoff(self):

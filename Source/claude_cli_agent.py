@@ -1492,10 +1492,12 @@ def _stream(session, state, *, timeout, on_handoff=None, on_result=None):
             if (kind == "json" and payload.get("type") == "result" and state.terminal
                     and on_result is not None):
                 suffix = state.result_suffix()
+                had_text = state.emitted_text or bool(suffix)
                 if on_result(payload):
                     # The callback resets query state. Preserve final-only
                     # output from the old query before reading the queued one.
                     if suffix: yield {"type": "text_delta", "text": suffix}
+                    if had_text: yield {"type": "text_delta", "text": "\n\n"}
                     continue
             if state.mcp_unavailable:
                 _interrupt(session)
