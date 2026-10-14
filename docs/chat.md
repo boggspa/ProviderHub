@@ -267,6 +267,11 @@ to copy. Each message is selected on its own.
 Right-click offers the native menu (Copy, Look Up, Translate, Share and
 Services) plus **Copy Message**, which copies the whole message with its
 original Markdown, whether or not anything is selected.
+Hover over a user or assistant message to reveal **Copy message** beside it.
+The button copies the whole saved text, including Markdown and source links,
+and shows a checkmark after copying. Tool calls and notices have no message
+copy button. The reserved action space keeps text still when the button appears;
+keyboard focus also reveals it.
 This applies to the main transcript, Side Chat and agent inspector.
 
 During streaming, only complete table lines become cells. The line currently
