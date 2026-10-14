@@ -489,6 +489,22 @@ def _normalize_native_payload(
     result["model"] = upstream_model
     compatibility = _normalize_native_controls(
         provider_id, result, upstream_model, model_spec)
+    if (provider_id == "claude" and payload.get("_provider_hub_surface") == "responses"
+            and normalized_messages[-1]["role"] == "assistant"):
+        # Responses asks for a new output message, not a Messages prefill.
+        # Codex can request continuation after commentary/compaction with an
+        # assistant tail. Keep that history (including native thinking) intact
+        # and supply a separate user turn accepted by current Claude models.
+        content = normalized_messages[-1].get("content")
+        if isinstance(content, list) and any(
+                isinstance(block, dict) and block.get("type") == "tool_use" for block in content):
+            raise ProviderError("The Claude Responses conversation is missing tool results. "
+                                "Return the pending tool results before requesting a continuation.")
+        normalized_messages.append({"role": "user", "content": [{"type": "text", "text":
+            "[Provider Hub continuation request]\nContinue responding to the user's latest request "
+            "under the existing instructions. The preceding assistant messages are completed "
+            "history. Do not repeat completed work."}]})
+        compatibility["assistant_tail_continuation"] = "user_turn"
     return result, normalized_count, compatibility
 
 
