@@ -45,8 +45,30 @@ class ClaudeLeanScopeTests(unittest.TestCase):
                 self.assertFalse(plan["body"]["host_retries"])
                 team = plan_turn("claude", "claude-sonnet-5-5", {
                     "messages": [{"role": "user", "content": "hello"}],
-                    "_provider_hub_surface": surface, "_provider_hub_host_retries": True}, {}, wanted_output=8192)
+                    "_provider_hub_surface": surface, "_provider_hub_host_retries": True,
+                    "_provider_hub_conversation": "chat:member"}, {}, wanted_output=8192)
                 self.assertEqual(team["body"]["host_retries"], surface == "chat")
+                self.assertEqual(team["body"].get("conversation"), "chat:member" if surface == "chat" else None)
+
+    def test_scoped_claude_system_is_stable_when_first_image_arrives(self):
+        import claude_cli_agent
+        from test_cli_images import IMAGE
+        payload={"messages":[{"role":"user","content":"hello"}],"system":"host instructions",
+                 "_provider_hub_surface":"chat","_provider_hub_conversation":"chat:member"}
+        with patch.object(cli_routes,"adapter_for",return_value=claude_cli_agent):
+            first=plan_turn("claude","claude-sonnet-5-5",payload,{},wanted_output=8192)
+            payload["messages"].append({"role":"user","content":[IMAGE]})
+            second=plan_turn("claude","claude-sonnet-5-5",payload,{},wanted_output=8192)
+        self.assertEqual(first["body"]["system"],second["body"]["system"])
+
+    def test_cache_write_lifetimes_survive_the_gateway_relay(self):
+        counts={"input_tokens":2,"output_tokens":5,"cache_read_input_tokens":100,
+                "cache_creation_input_tokens":12,"cache_creation_5m_tokens":3,"cache_creation_1h_tokens":9}
+        emitted=[]
+        summary=relay_cli_turn(iter([{"type":"text_delta","text":"ok"},{"type":"usage","usage":counts},
+                                      {"type":"message_stop","stop_reason":"end_turn"}]),emitted.append,model="claude/sonnet")
+        self.assertEqual(summary["usage"],counts)
+        self.assertEqual(next(e["usage"] for e in emitted if e["type"]=="message_delta"),counts)
 
 
 def _fake_adapter(**overrides):

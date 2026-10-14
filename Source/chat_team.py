@@ -1450,6 +1450,11 @@ def contribution(parent, member, transport):
     child = ChatService(MemberStore(parent, member, dirty), transport, emit,
                         runner=parent.runner_type, workspaces=parent.workspaces, role="team")
     child.team_parent, child.team_member, child.team_run_id = parent, member, run_id
+    from chat_context import ContextProjection
+    projection_key = (owner, member["id"])
+    child.context_projection = parent.team_context_projections.setdefault(projection_key, ContextProjection())
+    active = {(owner, item["id"]) for item in team["members"]}
+    parent.team_context_projections = {key: value for key, value in parent.team_context_projections.items() if key in active}
     child.process_registry = parent.process_registry
     child.models = copy.deepcopy(parent.models)
     child.preferences = parent.preferences

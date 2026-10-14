@@ -14,7 +14,7 @@ still respond to upstream rate limits.
 | --- | --- | --- |
 | Codex | Text streams immediately; native host calls remain validated | Initialized app-server processes are reused. A pending native call retains its thread and receives the real host result on the next matching request. |
 | Muse Code | First complete, validated structured response on the Messages surface; terminal completion on other requests | Fresh exec process per request. The four-step allowance remains; later speculative structured output is not consumed. |
-| Claude Code | Native host handoff or successful terminal result | Matching tool continuations retain the same process; new user turns and changed history start fresh. |
+| Claude Code | Native host handoff or successful terminal result | Lean Chat keeps a scoped streaming conversation across matching tools, user steering and completed contributions on CLI 2.1.290+. Other surfaces retain tool-handoff continuity. Changed history reconstructs portable context. |
 | Grok | Successful terminal event or validated native host handoff | Fresh process per request. |
 | AntiGravity | Successful result or confirmed pre-execution denial receipt | Fresh process per request. The denial hook and private files remain until child exit. |
 | Mistral Vibe credentials | Existing streaming Mistral API route | This hub connection does not spawn Vibe CLI processes. |
@@ -57,10 +57,63 @@ ordinary messages rather than having peer references attached to tool results.
 No historical chat is rewritten, and pending processes from an earlier build
 are not adopted or reused by the fix.
 
-Claude retains up to sixteen pending host-call sessions, matching gateway
-admission and accommodating an eight-member Team. Pending calls expire after
-fifteen minutes. Completed turns still close their process. This does not
-enable native tools or bypass host approvals.
+Claude retains up to sixteen sessions, matching gateway admission and
+accommodating an eight-member Team. Tool handoffs and completed lean Chat
+conversations expire after fifteen idle minutes. Other surfaces still close
+completed queries. Retention does not keep Anthropic's server cache warm by
+itself, and no paid keepalive requests are sent. Native workspace tools remain
+disabled; host approval and tool execution are unchanged.
+
+### Claude user steering and contribution boundaries
+
+Lean Chat sends a stable chat/member scope to the Claude adapter. With Claude
+Code 2.1.290 or later, the adapter keeps `--input-format stream-json` stdin
+open and sends only new user content on subsequent turns. It retains the
+CLI's native assistant messages and real MCP results instead of flattening
+the entire history into a new user prompt. A Team child also reuses its
+member's in-memory reference projection across contributions. Each member has
+an independent process; model/account/system/tools/effort and output-limit
+changes still prevent reuse. Older or unidentified CLI versions use the
+previous single-query behavior.
+
+The scope is not sufficient on its own: reuse requires an unchanged history
+prefix and the exact host-visible assistant reply. All pending tool results
+must match before new user text can follow them. Real user instructions are
+sent as native user frames, never inserted into MCP tool results. UUID
+acknowledgments and the terminal result's `user_message_uuids` identify the
+instruction Claude took. If an earlier query finishes while a steer remains
+queued, the adapter keeps reading until the steer is answered, preserves
+both replies, and sums each query's usage without subtracting a previous
+query's lifetime counters. Unknown usage stays unknown. Missing
+acknowledgments, cancellation, or partial delivery retire the session;
+duplicate host transitions are rejected rather than replaying their tools.
+
+Compaction, edited history, process exit/expiry and gateway restart still
+require reconstruction. Server-side web-search identities assigned by the
+outer relay cannot currently be verified by the adapter: those legs are not
+retained for scoped conversation reuse. This favors a safe reconstruction
+over silently skipping changed history. The ordinary tool-only continuation
+path on other CLI surfaces is unchanged.
+
+When supplied by Claude, `cache_creation_5m_tokens` and
+`cache_creation_1h_tokens` are retained alongside cache reads/writes in
+activity and timing telemetry. Timing also distinguishes tool-result reuse,
+steering, new user turns and missing matching conversations. No prompt text,
+task identity or tool output is added to those diagnostics. Token counts are
+provider telemetry, not a calculation of subscription allowance consumption.
+
+`test_claude_conversation.py` exercises eight-member isolation, steering at
+real socket-backed MCP handoffs, completed-turn follow-ups, delayed queued
+turns, per-query usage, exact reply matching, images and cancellation.
+An additional local qualification used the installed Claude 2.1.293 binary
+against a synthetic loopback Messages server: one native session handled a
+tool call, a user steer and a subsequent completed-turn follow-up, preserving
+typed history. It used a temporary config home, no live chat content and no
+paid inference. This verifies transport behavior, not server cache savings.
+
+Protocol references: [streaming input](https://code.claude.com/docs/en/agent-sdk/streaming-vs-single-mode),
+[CLI stream flags](https://code.claude.com/docs/en/cli-reference), and
+[SDK transport changes](https://github.com/anthropics/claude-agent-sdk-typescript/blob/main/CHANGELOG.md).
 
 For Claude, Codex and Grok, notebook, Blackboard and work-record snapshots use an append-only in-memory
 projection. A changed snapshot travels as reference text in a fresh tool

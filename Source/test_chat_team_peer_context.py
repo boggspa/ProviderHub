@@ -63,6 +63,22 @@ class TeamPeerContextTests(unittest.TestCase):
         self.parent, self.children, self.choice = team_fixture(Path(self.temp.name))
         self.reader = self.children[0]
 
+    def test_reference_projection_and_conversation_identity_survive_next_contribution(self):
+        before = self.reader.payload(self.choice)
+        complete_tool(self.reader)
+        after_tool = self.reader.payload(self.choice)
+        self.reader.chat["messages"].append({"role":"assistant","content":[{"type":"text","text":"Finished this contribution"}]})
+        self.reader.save()
+        member = self.reader.team_member
+        next_child = chat_team.contribution(self.parent, member, FakeTransport([]))
+        next_payload = next_child.payload(self.choice)
+        self.assertIs(next_child.context_projection, self.reader.context_projection)
+        self.assertEqual(next_payload["_provider_hub_conversation"], before["_provider_hub_conversation"])
+        count = len(history_blocks(after_tool["messages"]))
+        self.assertEqual(history_blocks(next_payload["messages"])[:count], history_blocks(after_tool["messages"]))
+        peer_payload = self.children[1].payload(self.children[1].choice())
+        self.assertNotEqual(peer_payload["_provider_hub_conversation"], before["_provider_hub_conversation"])
+
     def test_five_peers_publish_between_repeated_tool_handoffs_without_cold_replay(self):
         for round_number in range(3):
             with self.subTest(round=round_number):

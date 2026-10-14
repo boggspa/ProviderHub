@@ -478,7 +478,8 @@ def plan_turn(provider_id: str, upstream_model: str, payload: dict, spec: dict,
     if tools and searches and not dynamic_tools:
         # Only where _tool_turn enforces the budget it quotes.
         system = (system + "\n\n" if system else "") + hosted_search_note(CLI_SEARCH_BUDGET)
-    if images:
+    if images or (provider_id == "claude" and payload.get("_provider_hub_surface") == "chat"
+                  and payload.get("_provider_hub_conversation")):
         system = (system + "\n\n" if system else "") + IMAGE_COORDINATE_NOTE
     request = {
         "model": upstream_model,
@@ -502,6 +503,8 @@ def plan_turn(provider_id: str, upstream_model: str, payload: dict, spec: dict,
         # policy. Desktop harnesses retain their existing append behaviour.
         request["lean_harness"] = payload.get("_provider_hub_surface") == "chat"
         request["host_retries"] = request["lean_harness"] and payload.get("_provider_hub_host_retries") is True
+        if request["lean_harness"]:
+            request["conversation"] = payload.get("_provider_hub_conversation")
     thinking = payload.get("thinking")
     if isinstance(thinking, dict):
         request["thinking"] = {key: thinking[key] for key in ("type", "display") if key in thinking}
@@ -942,6 +945,9 @@ def relay_cli_turn(events, emit, *, model, input_tokens=0) -> dict:
                     # absent: missing telemetry is not a measured cache miss.
                     cache_reported = any(key in reported or key in usage for key in fields[2:])
                     usage = {key: reported.get(key, 0) for key in (fields if cache_reported else fields[:2])}
+                    for key in ("cache_creation_5m_tokens", "cache_creation_1h_tokens"):
+                        if type(reported.get(key)) is int and reported[key] >= 0:
+                            usage[key] = reported[key]
                 continue
             if kind == "error":
                 error = str(event.get("message") or "The CLI turn failed.")

@@ -103,8 +103,11 @@ from cli_tool_call import (MAX_ENVELOPE_BYTES, TOOL_RESULTS_KEY, TRANSCRIPT_HEAD
                            normalize_tools, render_tool_anchor, render_tool_manifest,
                            validate_host_call)
 import cli_live_session as live_session
+import claude_conversation
+import uuid
+from functools import lru_cache
 from cli_images import prompt_content
-from codex_session_pool import SessionPool, digest
+from codex_session_pool import SessionPool, digest, history_blocks
 from fast_models import supports_fast_toggle
 from model_names import CLAUDE_CLI_ALIASES, CLAUDE_MODEL_LABELS
 
@@ -390,6 +393,27 @@ def _parse_version(text: str) -> str | None:
     return match.group(1) if match else None
 
 
+@lru_cache(maxsize=8)
+def _streaming_version(binary, modified, size):
+    try:
+        code, out, err = _invoke(None, [binary, "--version"], timeout=5)
+        version = _parse_version(out) or _parse_version(err)
+        return code in (0, None) and version is not None and tuple(map(int, version.split("."))) >= (2, 1, 290)
+    except Exception:
+        return False
+
+
+def _conversation_supported():
+    # 2.1.290 fixes prematurely replayed queued UUIDs. Do not rely on the
+    # consumption acknowledgment of an older or unidentifiable binary.
+    try:
+        binary = _resolve_binary()
+        info = Path(binary).stat()
+        return _streaming_version(binary, info.st_mtime_ns, info.st_size)
+    except (OSError, TypeError):
+        return False
+
+
 # ---------------------------------------------------------------------------
 # Public read-only surface
 # ---------------------------------------------------------------------------
@@ -657,6 +681,10 @@ class _TurnState:
         self.usage_prior_keys = set()
         self.usage_changed = False
         self.result_usage = None
+        self.usage_carry = {}
+        self.usage_unavailable = False
+        self.expected_user = None
+        self.consumed_users = set()
 
     def next_leg(self) -> None:
         """Start the next host request on a live session.
@@ -671,6 +699,8 @@ class _TurnState:
         self.usage_prior_keys = set(self.usage_messages)
         self.usage_changed = False
         self.result_usage = None
+        self.usage_carry = {}
+        self.usage_unavailable = False
         self.handed.update(identifier for identifier in self.host_calls if isinstance(identifier, str))
         self.host_calls = {}
         self.pending_calls = {}
@@ -686,13 +716,20 @@ class _TurnState:
         self.raw_lines = self.raw_lines[-5:]
 
     def record_usage(self, value, message=None, *, terminal=False, final_output=False):
-        fields = ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
+        fields = ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens",
+                  "cache_creation_5m_tokens", "cache_creation_1h_tokens")
         current = None
         if not terminal and message is not None:
             key = message.setdefault("usage_key", len(self.usage_messages))
             current = self.usage_messages.setdefault(key, {})
         if not isinstance(value, dict):
             return
+        value = dict(value)
+        creation = value.get("cache_creation")
+        if isinstance(creation, dict):
+            for ttl in ("5m", "1h"):
+                key = f"ephemeral_{ttl}_input_tokens"
+                if key in creation: value[f"cache_creation_{ttl}_tokens"] = creation[key]
         counters = {key: value[key] for key in fields if key in value}
         if not counters or any(type(number) is not int or number < 0 for number in counters.values()):
             return
@@ -729,11 +766,14 @@ class _TurnState:
         return totals
 
     def usage_events(self):
+        if self.usage_unavailable:
+            return
         if not self.usage_changed:
             return
         if self.result_usage is not None:
-            yield {"type": "usage", "usage": {key: max(0, number - self.usage_baseline.get(key, 0))
-                                              for key, number in self.result_usage.items()}}
+            totals = {key: max(0, number - self.usage_baseline.get(key, 0)) for key, number in self.result_usage.items()}
+            for key, number in self.usage_carry.items(): totals[key] = totals.get(key, 0) + number
+            yield {"type": "usage", "usage": totals}
             return
         # If an earlier leg lacked usage, a query total cannot be assigned to
         # this leg. Use only newly observed message IDs, never earlier replay.
@@ -743,6 +783,7 @@ class _TurnState:
         totals = {}
         for value in values:
             for key, number in value.items(): totals[key] = totals.get(key, 0) + number
+        for key, number in self.usage_carry.items(): totals[key] = totals.get(key, 0) + number
         yield {"type": "usage", "usage": totals}
 
     def host_tool_for(self, name) -> str | None:
@@ -911,6 +952,13 @@ def _translate(payload: Any, state: _TurnState) -> list[dict]:
     if not isinstance(payload, dict):
         return []
     kind = payload.get("type")
+    if kind == "user" and payload.get("isReplay") is True:
+        identifier = payload.get("uuid")
+        if isinstance(identifier, str): state.consumed_users.add(identifier)
+        return []
+    identifiers = payload.get("user_message_uuids", [])
+    if isinstance(identifiers, list):
+        state.consumed_users.update(value for value in identifiers if isinstance(value, str))
 
     if kind == "system" and payload.get("subtype") == "init":
         tools = payload.get("tools")
@@ -1246,6 +1294,9 @@ def _plan_turn(request) -> dict:
         # Typed Messages history, when the route passes it: live sessions match
         # a host request to the CLI waiting on its calls with it.
         "history": history if isinstance(history, list) else None,
+        "conversation": (request.get("conversation") if request.get("lean_harness") is True
+                         and isinstance(request.get("conversation"), str)
+                         and 0 < len(request["conversation"]) <= 200 else None),
         "timing": request.get("_cli_timing"),
     }
 
@@ -1332,14 +1383,18 @@ def run_turn(request, *, spawner=None, timeout=300, pool=None) -> Iterator[dict]
     not attach, it is spawned once more with the text manifest before any
     event has reached the caller. With typed history and a session pool (the
     module's own unless a test ``spawner`` is given) it runs as a live
-    session, and a request that continues a waiting CLI resumes it; whenever
-    no live session can serve the request, it runs statelessly as before.
+    session. Scoped lean Chat also retains completed streaming queries for
+    subsequent user turns. Changed history reconstructs portable context;
+    duplicate scoped transitions fail instead of regenerating tool calls.
     """
     try:
         plan = _plan_turn(request)
     except Exception as exc:
         yield {"type": "error", "message": _describe(exc, None, timeout)}
         return
+    if plan["conversation"] and not _conversation_supported():
+        plan["conversation"] = None
+        if plan["timing"]: plan["timing"].label(fallback_reason="streaming_version_unavailable")
     started = time.monotonic()
     if plan["timing"]:
         plan["timing"].label(reuse="stateless", history_bytes=len(json.dumps(
@@ -1417,7 +1472,7 @@ def _attempt_turn(plan, mode, state, *, spawner, timeout):
     return outcome
 
 
-def _stream(session, state, *, timeout, on_handoff=None):
+def _stream(session, state, *, timeout, on_handoff=None, on_result=None):
     """Stream the CLI's output as route events until the turn, or this leg of it, ends.
 
     Returns "mcp_unavailable" when init showed the host tools missing before
@@ -1434,6 +1489,16 @@ def _stream(session, state, *, timeout, on_handoff=None):
             for event in _translate(payload, state):
                 produced = True
                 yield event
+            if (kind == "json" and payload.get("type") == "result" and state.terminal
+                    and on_result is not None):
+                suffix = state.result_suffix()
+                had_text = state.emitted_text or bool(suffix)
+                if on_result(payload):
+                    # The callback resets query state. Preserve final-only
+                    # output from the old query before reading the queued one.
+                    if suffix: yield {"type": "text_delta", "text": suffix}
+                    if had_text: yield {"type": "text_delta", "text": "\n\n"}
+                    continue
             if state.mcp_unavailable:
                 _interrupt(session)
                 if produced:
@@ -1447,6 +1512,9 @@ def _stream(session, state, *, timeout, on_handoff=None):
                 yield {"type": "error", "message": state.failure}
                 return None
             if state.host_handoff:
+                if state.expected_user and state.expected_user not in state.consumed_users:
+                    yield {"type": "error", "message": "Claude did not acknowledge the queued user instruction before its next tool call."}
+                    return None
                 if on_handoff is not None and on_handoff():
                     # The CLI waits in the bridge for the host's results.
                     yield from state.usage_events()
@@ -1529,7 +1597,8 @@ atexit.register(_POOL.close)
 def _pool_key(plan) -> str:
     """What a waiting CLI must share with a request to continue it: argv and system text."""
     system, _ = _surface(plan, "mcp")
-    return digest({"account": plan["account_env"], "model": plan["model"], "effort": plan["effort"], "fast_mode": plan["fast_mode"],
+    return digest({"conversation": plan["conversation"],
+                   "account": plan["account_env"], "model": plan["model"], "effort": plan["effort"], "fast_mode": plan["fast_mode"],
                    "max_tokens": plan["max_tokens"], "lean_harness": plan["lean_harness"],
                    "host_retries": plan["host_retries"],
                    "search": plan["search"], "system": system, "tools": plan["host_tools"],
@@ -1548,6 +1617,10 @@ def _spawn_live(plan, state, *, spawner, timeout) -> live_session.LiveSession:
             "type": "stdio", "command": command[0], "args": command[1:],
             "timeout": _LIVE_CALL_TIMEOUT_MS}}}, separators=(",", ":"))
         argv, prompt = _turn_argv(plan, "mcp", mcp_config=mcp_config, run_host_tools=True)
+        if plan["conversation"] and "--input-format" not in argv:
+            argv[1:1] = ["--input-format", "stream-json"]
+        if plan["conversation"]:
+            argv[1:1] = ["--replay-user-messages"]
         state.stderr_handle = tempfile.TemporaryFile(mode="w+", encoding="utf-8")
         session = StdioSession(argv, env=minimal_env(_turn_env(plan, live=True)), timeout=float(timeout),
                                spawner=spawner, stderr=state.stderr_handle)
@@ -1561,7 +1634,16 @@ def _spawn_live(plan, state, *, spawner, timeout) -> live_session.LiveSession:
         raise
     live = live_session.LiveSession(session, workspace, bridge, state, interrupt=_interrupt)
     try:
-        _write_prompt(session, prompt)
+        if plan["conversation"]:
+            # stream-json accepts subsequent user frames without EOF. Image
+            # turns already have a framed prompt from _turn_argv.
+            frame = json.loads(prompt) if plan["images"] else {
+                "type": "user", "message": {"role": "user", "content": prompt}}
+            frame.update(uuid=str(uuid.uuid4()), parent_tool_use_id=None)
+            state.expected_user = frame["uuid"]
+            _write_raw_stdin(session, json.dumps(frame, ensure_ascii=False) + "\n")
+        else:
+            _write_prompt(session, prompt)
     except BaseException:
         live.close()
         raise
@@ -1581,9 +1663,17 @@ def _live_turn(plan, owner, *, spawner, timeout):
     history = plan["history"]
     key = _pool_key(plan)
     try:
-        lease, reuse = owner.acquire(key, match=lambda entry: _continuation(entry, history) is not None,
-                                     timeout=max(0.01, deadline - time.monotonic()))
-    except (RuntimeError, TimeoutError):
+        lease, reuse = owner.acquire(key, match=lambda entry: (
+            claude_conversation.advance(entry, history) is not None if plan["conversation"]
+            else _continuation(entry, history) is not None),
+                                     timeout=max(0.01, deadline - time.monotonic()),
+                                     request_key=digest((key, history_blocks(history))) if plan["conversation"] else None)
+    except (RuntimeError, TimeoutError) as exc:
+        if plan["conversation"]:
+            # A duplicate or busy conversation must never regenerate its tools
+            # via a fresh process. Leave the earlier request's owner intact.
+            yield {"type": "error", "message": _describe(exc, None, timeout)}
+            return None
         # A full pool or a continuation still being released: this request
         # replays the conversation instead of waiting on either.
         if timing: timing.label(fallback_reason="pool_unavailable")
@@ -1594,15 +1684,45 @@ def _live_turn(plan, owner, *, spawner, timeout):
     try:
         live = None
         if reuse == "resumed":
-            results = _continuation(lease, history)
-            lease.pending = None
             live = lease.session
-            if results is None or not live.resume(results):
+            if plan["conversation"]:
+                transition = claude_conversation.advance(lease, history)
+                if transition is None or live.returncode is not None:
+                    if timing: timing.label(fallback_reason="continuation_unavailable")
+                    lease.pending = None
+                    return "stateless"
+                results, user = transition
+                completed = lease.pending.get("completed", False)
+                lease.pending = None
+                if completed:
+                    # Result usage belongs to one native query, not the entire
+                    # open stdin session. Start its counters and dedup state anew.
+                    old = live.state
+                    live.state = _new_state(plan, "mcp")
+                    live.state.stderr_handle, live.state.registry = old.stderr_handle, old.registry
+                else:
+                    live.state.next_leg()
+                if user:
+                    live.state.expected_user = str(uuid.uuid4())
+                    _write_raw_stdin(live.session, json.dumps({"type": "user", "uuid": live.state.expected_user, "parent_tool_use_id": None, "message": {
+                        "role": "user", "content": user}}, ensure_ascii=False) + "\n")
+                if not all(live.bridge.deliver(identifier, value) for identifier, value in results.items()):
+                    raise ClaudeCliAgentError("The retained Claude tool handoff could not accept its results")
+                if timing:
+                    timing.label(continuation_kind="user_turn" if completed else "steer" if user else "tool_result",
+                                 appended_user_bytes=len(json.dumps(user, ensure_ascii=False).encode()) if user else 0)
+            else:
+                results = _continuation(lease, history)
+                lease.pending = None
+                if results is None or not live.resume(results):
+                    live = None
+            if live is None:
                 # Nothing has reached the client: retire the CLI and replay.
                 if timing: timing.label(fallback_reason="continuation_unavailable")
                 return "stateless"
         if timing:
             timing.label(reuse="resumed" if live is not None else "cold")
+            if live is None: timing.label(fallback_reason="no_matching_conversation" if plan["conversation"] else "no_matching_handoff")
         if live is None:
             state = _new_state(plan, "mcp")
             try:
@@ -1613,14 +1733,51 @@ def _live_turn(plan, owner, *, spawner, timeout):
                 yield {"type": "error", "message": _describe(exc, state, timeout)}
                 return None
             lease.session = live
-        return (yield from _stream(live.session, live.state, timeout=max(0.01, deadline - time.monotonic()),
-                                   on_handoff=lambda: live_session.hold(
-                                       live, lease, history, deadline, events=_iter_events,
-                                       translate=_translate, seconds=_LIVE_CONFIRM_SECONDS)))
+        receipt = claude_conversation.ReplyReceipt()
+        def result_boundary(payload):
+            expected = live.state.expected_user
+            answered = payload.get("user_message_uuids", [])
+            if not expected or isinstance(answered, list) and expected in answered:
+                return False
+            if payload.get("queued_turn_count", 0) < 1:
+                raise ClaudeCliAgentError("Claude ended without answering the queued user instruction")
+            # The old query ended before the queued instruction was taken.
+            # Keep reading this process, accumulating only this host leg's
+            # native usage, until the query that answers that UUID completes.
+            usage = list(live.state.usage_events())
+            fresh = _new_state(plan, "mcp")
+            fresh.stderr_handle, fresh.registry = live.state.stderr_handle, live.state.registry
+            fresh.expected_user = expected
+            fresh.usage_carry = usage[-1]["usage"] if usage else {}
+            fresh.usage_unavailable = not usage
+            live.state.__dict__.update(fresh.__dict__)
+            if timing: timing.increment("queued_turn_boundaries")
+            return True
+        stream = _stream(live.session, live.state, timeout=max(0.01, deadline - time.monotonic()),
+                         on_result=result_boundary if plan["conversation"] else None,
+                         on_handoff=lambda: (not plan["conversation"] or receipt.supported) and live_session.hold(
+                             live, lease, history, deadline, events=_iter_events,
+                             translate=_translate, seconds=_LIVE_CONFIRM_SECONDS))
+        try:
+            while True:
+                try: event = next(stream)
+                except StopIteration as stop: return stop.value
+                receipt.observe(event)
+                if (plan["conversation"] and event.get("type") == "message_stop"
+                        and event.get("stop_reason") == "end_turn" and live.state.terminal):
+                    lease.pending = receipt.completed(history)
+                elif plan["conversation"] and event.get("type") == "message_stop" and lease.pending:
+                    recorded = receipt.completed(history)
+                    if recorded is not None: lease.pending["reply"] = recorded["reply"]
+                yield event
+        finally:
+            stream.close()
+    except Exception as exc:
+        lease.pending = None
+        yield {"type": "error", "message": _describe(exc, None, timeout)}
     finally:
-        # Only a handoff the client has received keeps the CLI waiting. Any
-        # other ending closes it now, as a stateless turn would, rather than
-        # leaving it to the pool's reaper.
+        # Retain only a handoff or completed reply the client received. Failed
+        # or cancelled deliveries retire the process, even with a receipt.
         keep = bool(lease.pending) and (timing is None or timing.delivered)
         if not keep and lease.session is not None:
             lease.session.close()
