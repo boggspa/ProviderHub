@@ -13,11 +13,20 @@ thinking signatures, or fabricate tool outcomes. A trailing tool call without
 results is rejected locally with a missing-results explanation. Histories
 already ending in user input or tool results are unchanged.
 
-The correction runs after system/developer messages move to Anthropic's
-system field and before request sizing and cache-marker placement. It is
-idempotent and records `assistant_tail_continuation: user_turn` in planning
-compatibility metadata. Direct Messages callers, lean Chat, CLI-backed
-Claude and other providers keep their existing behavior.
+The correction runs in the API Responses translation before request sizing
+and cache-marker placement. It checks the last user/assistant message even
+when system/developer instructions follow. Direct Messages callers, lean
+Chat, CLI-backed Claude and other providers keep their existing behavior.
+
+An authenticated, empty reasoning receipt precedes the response's output.
+It records the fixed continuation-boundary version so the next
+full-history Responses request can recreate the same user-turn boundary
+before replaying new signed thinking or assistant text. This applies even
+to text-only replies. The receipt is scoped to the model/account and does
+not contain provider reasoning or arbitrary instructions. It also works
+when ordinary compaction summarizes older input but retains the recent
+receipt. Native thinking remains subject to the provider's independent
+prefix-binding policy if the history changes.
 
 This is separate from the existing normalization of subagent messages into
 attributed user-role input. Tests cover both streaming and buffered requests

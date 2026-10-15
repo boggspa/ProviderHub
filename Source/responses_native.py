@@ -878,7 +878,8 @@ def prepare_native(runtime, payload):
         # Bound stored thinking traces for verbose reasoning providers;
         # descriptors without the field keep full fidelity.
         envelope = ReasoningEnvelope(runtime.root, PROVIDERS[provider_id].get("reasoning_store_cap") or 0)
-        translated = to_messages(body, route, spec, envelope, scope)
+        translated = to_messages(body, route, spec, envelope, scope,
+                                 assistant_continuation=provider_id == "claude" and not cli_mode)
         translated["_provider_hub_surface"] = "responses"
         if cli_mode:
             translated["_provider_hub_surface"] = "responses"
@@ -904,7 +905,8 @@ def prepare_native(runtime, payload):
                 "subagent_route": runtime.settings.get("codex_subagent_route"),
                 "provider_name": PROVIDERS[provider_id]["name"], "protocol": "messages_bridge",
                 "adapter": MessagesResponsesAdapter(requested, envelope, scope, tool_map,
-                                                    expose_reasoning_summaries=expose_summaries)}
+                                                    expose_reasoning_summaries=expose_summaries,
+                                                    continuation=translated.get("_provider_hub_continuation"))}
     if isinstance(body["input"], list):
         # Reasoning the hub sealed for a translated route (the thread was
         # switched here from one) means nothing to a native provider. Drop
