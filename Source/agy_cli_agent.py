@@ -146,6 +146,10 @@ _EFFORT_RANK = {"low": 0, "medium": 1, "high": 2}
 # pass to --model on the wire. provider_effort_rung is the agy-native rung
 # string (low/medium/high).
 _AGY_ROW_MAP: dict[str, tuple[str, str, str]] = {
+    # Gemini 4 Argon: agy 1.3.6 exposes three native reasoning rows.
+    "gemini-4-argon-low":    ("gemini-4-argon", "Gemini 4 Argon", "low"),
+    "gemini-4-argon-medium": ("gemini-4-argon", "Gemini 4 Argon", "medium"),
+    "gemini-4-argon-high":   ("gemini-4-argon", "Gemini 4 Argon", "high"),
     # Gemini 3.8 Flash: 3 rungs
     "gemini-3.8-flash-low":    ("gemini-3.8-flash", "Gemini 3.8 Flash", "low"),
     "gemini-3.8-flash-medium": ("gemini-3.8-flash", "Gemini 3.8 Flash", "medium"),
@@ -184,6 +188,9 @@ _AGY_RUNG_TO_CANONICAL: dict[str, str] = {
 # For families with fewer than 3 rungs, we map canonical ranks to the
 # nearest available rung. This is used by build_argv to pick the native row.
 _FAMILY_CANONICAL_TO_RUNG: dict[str, dict[str, str]] = {
+    "gemini-4-argon": {"none": "low", "minimal": "low", "low": "low",
+                        "medium": "medium", "high": "high",
+                        "xhigh": "high", "max": "high", "ultra": "high"},
     "gemini-3.8-flash": {"none": "low", "minimal": "low", "low": "low",
                          "medium": "medium", "high": "high",
                          "xhigh": "high", "max": "high", "ultra": "high"},
@@ -211,6 +218,7 @@ _FAMILY_CANONICAL_TO_RUNG: dict[str, dict[str, str]] = {
 
 # Effort modes that each family advertises (canonical ranks).
 _FAMILY_EFFORT_MODES: dict[str, list[str]] = {
+    "gemini-4-argon": ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"],
     "gemini-3.8-flash": ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"],
     "gemini-3.7-flash": ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"],
     "gemini-3.6-flash": ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"],
@@ -222,6 +230,7 @@ _FAMILY_EFFORT_MODES: dict[str, list[str]] = {
 
 # Default effort for each family (canonical rank).
 _FAMILY_DEFAULT_EFFORT: dict[str, str] = {
+    "gemini-4-argon": "medium",
     "gemini-3.8-flash": "medium",
     "gemini-3.7-flash": "medium",
     "gemini-3.6-flash": "medium",
@@ -233,6 +242,7 @@ _FAMILY_DEFAULT_EFFORT: dict[str, str] = {
 
 # Provider-native effort rungs exposed by each family (what agy accepts).
 _FAMILY_PROVIDER_EFFORT_MODES: dict[str, list[str]] = {
+    "gemini-4-argon": ["low", "medium", "high"],
     "gemini-3.8-flash": ["low", "medium", "high"],
     "gemini-3.7-flash": ["low", "medium", "high"],
     "gemini-3.6-flash": ["low", "medium", "high"],
