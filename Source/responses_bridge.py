@@ -16,6 +16,27 @@ from responses_visualize import VisualizeRewriter, wrap_text
 
 ENVELOPE_PREFIX = "ph_reasoning_v1."
 
+CLAUDE_CONTINUATION = (
+    "[Provider Hub continuation request]\nContinue responding to the user's latest request "
+    "under the existing instructions. The preceding assistant messages are completed "
+    "history. Do not repeat completed work."
+)
+
+
+CLAUDE_CONTINUATION_RECEIPT = "claude_user_turn_v1"
+
+
+def append_claude_continuation(messages):
+    """Add a real user-turn boundary and return its authenticated replay anchor."""
+    last = next((message for message in reversed(messages) if message["role"] in {"user", "assistant"}), None)
+    if last is None or last["role"] != "assistant": return None
+    content = last.get("content")
+    if isinstance(content, list) and any(isinstance(block, dict) and block.get("type") == "tool_use" for block in content):
+        raise BridgeError("The Claude Responses conversation is missing tool results. "
+                          "Return the pending tool results before requesting a continuation.")
+    messages.append({"role": "user", "content": [{"type": "text", "text": CLAUDE_CONTINUATION}]})
+    return CLAUDE_CONTINUATION_RECEIPT
+
 
 def bound_reasoning_blocks(blocks, cap):
     """Bound stored thinking traces to a head prefix of ``cap`` characters.
@@ -55,8 +76,9 @@ class ReasoningEnvelope:
         # Character cap for stored thinking traces; zero keeps full fidelity.
         self.store_cap = store_cap if type(store_cap) is int and store_cap > 0 else 0
 
-    def seal(self, blocks, scope):
-        value = json.dumps({"scope": scope, "blocks": bound_reasoning_blocks(blocks, self.store_cap)},
+    def seal(self, blocks, scope, *, continuation=None):
+        value = json.dumps({"scope": scope, "blocks": bound_reasoning_blocks(blocks, self.store_cap),
+                           **({"continuation": continuation} if continuation is not None else {})},
                            separators=(",", ":")).encode()
         return ENVELOPE_PREFIX + self.cipher.encrypt(value).decode()
 
@@ -94,6 +116,17 @@ class ReasoningEnvelope:
         if not isinstance(value, dict) or value.get("scope") != scope:
             return []
         return self.open(token, scope)
+
+    def continuation(self, token, scope):
+        """Only this connection's authenticated receipt may recreate a boundary."""
+        if not isinstance(token, str) or not token.startswith(ENVELOPE_PREFIX): return None
+        try: value = json.loads(self.cipher.decrypt(token[len(ENVELOPE_PREFIX):].encode()))
+        except Exception: return None
+        if not isinstance(value, dict) or value.get("scope") != scope: return None
+        anchor = value.get("continuation")
+        if anchor is not None and anchor != CLAUDE_CONTINUATION_RECEIPT:
+            raise BridgeError("The saved continuation receipt is malformed.")
+        return anchor
 
 
 def content_blocks(content):
@@ -196,7 +229,7 @@ def image_generation_message(item, *, include_image=True):
     return {"type": "message", "role": "user", "content": parts}
 
 
-def to_messages(body, route, spec, envelope, scope):
+def to_messages(body, route, spec, envelope, scope, *, assistant_continuation=False):
     if body.get("store") or body.get("previous_response_id"):
         raise BridgeError("This translated Responses connection requires full input history and store:false.")
     if body.get("truncation") not in (None, "disabled"):
@@ -253,6 +286,14 @@ def to_messages(body, route, spec, envelope, scope):
             # else (another model's after a switch, or a bare summary) is
             # dropped, never promoted to reasoning (see replayable).
             token = item.get("encrypted_content")
+            anchor = envelope.continuation(token, scope) if token and envelope is not None and assistant_continuation else None
+            if anchor is not None:
+                flush()
+                # Restore the boundary at the returned item's position. Do
+                # not bind the receipt to the entire preceding transcript:
+                # ordinary compaction can summarize that prefix while keeping
+                # this recent boundary. Native thinking has its own binding.
+                messages.append({"role": "user", "content": [{"type": "text", "text": CLAUDE_CONTINUATION}]})
             blocks = envelope.replayable(token, scope) if token and envelope is not None else []
             if blocks:
                 add("assistant", blocks)
@@ -278,8 +319,11 @@ def to_messages(body, route, spec, envelope, scope):
     flush()
     if not messages:
         raise BridgeError("The conversation history has no content to send.")
+    continuation = append_claude_continuation(messages) if assistant_continuation else None
     result = {"model": route, "messages": messages, "stream": body["stream"],
               "max_tokens": body.get("max_output_tokens") or min(spec.get("max_output") or 16384, 16384)}
+    if continuation is not None:
+        result["_provider_hub_continuation"] = continuation
     if body.get("instructions"):
         result["system"] = body["instructions"]
     tools = body.get("tools", [])
@@ -348,7 +392,7 @@ def search_action(value):
 
 class MessagesResponsesAdapter:
     def __init__(self, requested, envelope, scope, tool_map=None, *,
-                 expose_reasoning_summaries=False):
+                 expose_reasoning_summaries=False, continuation=None):
         self.requested, self.envelope, self.scope = requested, envelope, scope
         self.tool_map = tool_map or {}
         # Enabled only by the Codex CLI planner after requesting the native
@@ -362,6 +406,9 @@ class MessagesResponsesAdapter:
         self.usage = {}
         self.stop_reason = None
         self.sequence = 0
+        self.continuation_item = ({"id": "rs_" + uuid.uuid4().hex, "type": "reasoning", "summary": [],
+                                   "encrypted_content": envelope.seal([], scope, continuation=continuation)}
+                                  if continuation is not None else None)
 
     def has_published_summary(self, block):
         return self.expose_reasoning_summaries and block.get("type") == "thinking"
@@ -416,7 +463,7 @@ class MessagesResponsesAdapter:
     def from_message(self, value):
         if value.get("type") != "message" or not isinstance(value.get("content"), list):
             raise BridgeError("The Messages adapter returned an invalid response.")
-        self.output = [self.item(block) for block in value["content"]
+        self.output = ([copy.deepcopy(self.continuation_item)] if self.continuation_item else []) + [self.item(block) for block in value["content"]
                        if not isinstance(block, dict) or block.get("type") != "web_search_tool_result"]
         self.usage = value.get("usage") or {}
         return self.response("incomplete" if value.get("stop_reason") == "max_tokens" else "completed")
@@ -454,7 +501,13 @@ class MessagesResponsesAdapter:
                 "code": "provider_error", "message": error.get("message", "Provider generation failed.")}))]
         if kind == "message_start":
             self.usage.update(value.get("message", {}).get("usage", {}))
-            return [self.event("response.created", response=self.response("in_progress"))]
+            events = [self.event("response.created", response=self.response("in_progress"))]
+            if self.continuation_item and not self.output:
+                item = copy.deepcopy(self.continuation_item)
+                self.output.append(item)
+                events += [self.event("response.output_item.added", output_index=0, item=copy.deepcopy(item)),
+                           self.event("response.output_item.done", output_index=0, item=copy.deepcopy(item))]
+            return events
         if kind == "content_block_start":
             block = copy.deepcopy(value["content_block"])
             if block.get("type") == "web_search_tool_result":
