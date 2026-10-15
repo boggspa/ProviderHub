@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import contextvars
+import re
 import logging
 import os
 import queue
@@ -11,6 +12,27 @@ import time
 import uuid
 
 _TIMING = contextvars.ContextVar("cli_turn_timing", default=None)
+
+
+_CONTEXT_OVERFLOW = re.compile(
+    r"context_length_exceeded|prompt is too long|maximum context length"
+    r"|context (?:length|window) (?:is )?exceeded"
+    r"|exceeds? (?:the )?(?:model'?s? )?(?:maximum )?context (?:length|window)"
+    r"|above the [\d,]+-token context limit", re.I)
+
+
+def is_context_overflow(value):
+    """Recognize a provider overflow, never a generic failure or output cap."""
+    if isinstance(value, str):
+        return value in {"contextWindowExceeded", "context_length_exceeded"} or bool(_CONTEXT_OVERFLOW.search(value))
+    if isinstance(value, dict):
+        # Codex's codexErrorInfo is either a unit enum string or a tagged
+        # object. Do not search arbitrary diagnostics, requests or tool text.
+        info = value.get("codexErrorInfo")
+        if info == "contextWindowExceeded" or isinstance(info, dict) and "contextWindowExceeded" in info:
+            return True
+        return any(is_context_overflow(value.get(key)) for key in ("code", "message"))
+    return False
 
 
 def current_timing():

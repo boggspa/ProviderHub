@@ -10,6 +10,7 @@ import uuid
 
 from bridge_core import BridgeError, private_token
 from cli_images import recover_tool_content, responses_content
+from cli_lifecycle import is_context_overflow
 from responses_tools import APPLY_PATCH_PARAM, APPLY_PATCH_TOOL_NAME, is_custom_tool, repair_apply_patch
 from responses_visualize import VisualizeRewriter, wrap_text
 
@@ -451,7 +452,8 @@ class MessagesResponsesAdapter:
         if kind == "error":
             error = value.get("error") or {}
             return [self.event("response.failed", response=self.response("failed", {
-                "code": "provider_error", "message": error.get("message", "Provider generation failed.")}))]
+                "code": "context_length_exceeded" if is_context_overflow(error) else "provider_error",
+                "message": error.get("message", "Provider generation failed.")}))]
         if kind == "message_start":
             self.usage.update(value.get("message", {}).get("usage", {}))
             return [self.event("response.created", response=self.response("in_progress"))]

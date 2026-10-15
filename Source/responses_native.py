@@ -18,6 +18,7 @@ from hub_config import connection_signature, qualify, split_route
 from protocol import mask_effort_rejection
 from providers import PROVIDERS, ProviderError, _auth_headers, _chat_effort, validate_connection
 from catalogue import image_input_blocked
+from cli_lifecycle import is_context_overflow
 from responses_tools import (flatten_tools, input_names, normalize_custom_calls, output_names, register,
                              restore_custom_call, split_hosted_search, strip_goal_budget,
                              strip_sealed_keyword)
@@ -66,18 +67,6 @@ def ollama_output_cap(spec):
     return cap
 
 
-# A provider (or the hub's own Messages gateway, for a translated route)
-# refusing a request because the conversation no longer fits the window.
-_CONTEXT_OVERFLOW = re.compile(
-    r"context_length_exceeded|prompt is too long|maximum context length"
-    r"|context (?:length|window) (?:is )?exceeded"
-    r"|exceeds? (?:the )?(?:model'?s? )?(?:maximum )?context (?:length|window)"
-    r"|above the [\d,]+-token context limit", re.I)
-
-
-def is_context_overflow(message):
-    """True when a 400's text says the conversation is over the context window."""
-    return isinstance(message, str) and bool(_CONTEXT_OVERFLOW.search(message))
 MAX_BODY = 32 * 1024 * 1024
 # Leave room for compaction to receive the same history, plus JSON/base64
 # expansion on the internal Messages hop. This is a wire-byte budget, not a
@@ -1349,8 +1338,10 @@ def handle_responses(handler):
                         runtime.admission.note_success(plan["provider_id"])
                 break
             data = response.read(65536)
+            context_failure = False
             try:
                 error = json.loads(data).get("error", {})
+                context_failure = is_context_overflow(error)
                 detail = error.get("message", "") if isinstance(error, dict) else ""
             except (ValueError, AttributeError):
                 detail = ""
@@ -1402,7 +1393,7 @@ def handle_responses(handler):
                 # words are renamed. Which endpoint a request arrived on is
                 # no reason for it to be protected or not.
                 message = mask_effort_rejection(message)
-            if status == 400 and is_context_overflow(message):
+            if status == 400 and (context_failure or is_context_overflow(message)):
                 # Codex treats an HTTP 400 as a fatal invalid request. Only a
                 # response.failed carrying context_length_exceeded makes it
                 # mark the window full, so the next turn compacts first (and

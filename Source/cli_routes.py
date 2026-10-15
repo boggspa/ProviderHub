@@ -31,7 +31,7 @@ import time
 import uuid
 
 import cli_structured_reply
-from cli_lifecycle import ManagedTurn, TurnTiming, observe_events
+from cli_lifecycle import ManagedTurn, TurnTiming, observe_events, is_context_overflow
 from cli_image_history import compact_image_history
 from cli_tool_call import (HOST_EXECUTION_NOTE, MAX_CALLS_PER_TURN, TOOL_RESULTS_KEY, ToolCallError,
                            ToolCallParser, hosted_search_note, normalize_tools,
@@ -835,6 +835,23 @@ def _stop_reason(value):
     return value if value in _STOP_REASONS else None
 
 
+def current_context_spec(provider_id, model, spec, *, config_dir=None):
+    """Conservatively cap Codex CLI planning by its current native metadata."""
+    if provider_id != "codex": return spec
+    limits = getattr(adapter_for(provider_id), "context_limits", None)
+    if not callable(limits): return spec
+    current = limits(model, config_dir=config_dir)
+    if not isinstance(current, dict): return spec
+    runtime = current.get("runtime_context")
+    if type(runtime) is not int or runtime <= 0: return spec
+    saved = [spec.get(key) for key in ("context", "runtime_context", "max_input")]
+    saved = [value for value in saved if type(value) is int and value > 0]
+    if not saved: return spec
+    effective = min(runtime, *saved)
+    return {**spec, "context": effective, "runtime_context": effective,
+            "max_input": min(effective, spec["max_input"]) if type(spec.get("max_input")) is int and spec["max_input"] > 0 else effective}
+
+
 def relay_cli_turn(events, emit, *, model, input_tokens=0) -> dict:
     """Translate adapter turn events into Anthropic Messages wire events.
 
@@ -859,6 +876,7 @@ def relay_cli_turn(events, emit, *, model, input_tokens=0) -> dict:
     stop_reason = "end_turn"
     error = None
     error_status = 502
+    error_code = None
     timing = getattr(events, "timing", None)
     usage = {"input_tokens": int(input_tokens or 0), "output_tokens": 0,
              "provider_hub_usage_source": "estimate"}
@@ -951,7 +969,10 @@ def relay_cli_turn(events, emit, *, model, input_tokens=0) -> dict:
                 continue
             if kind == "error":
                 error = str(event.get("message") or "The CLI turn failed.")
-                if event.get("http_status") == 400:
+                if is_context_overflow(event):
+                    error_code = "context_length_exceeded"
+                    error_status = 400
+                elif event.get("http_status") == 400:
                     error_status = 400
                 break
             if kind == "message_stop":
@@ -1018,7 +1039,7 @@ def relay_cli_turn(events, emit, *, model, input_tokens=0) -> dict:
     try:
         if error is not None:
             return {"error": error, "started": started, "stop_reason": None, "usage": usage,
-                    "http_status": error_status}
+                    "http_status": error_status, "error_code": error_code}
         if not started:
             start_message()
         if open_block is not None:
