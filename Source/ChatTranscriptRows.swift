@@ -99,6 +99,54 @@ struct ChatReactionsRow: View {
     }
 }
 
+/// A stable action gutter beside message text. Hovering reveals the button
+/// without moving the text or covering selection, links, or reaction chips.
+private struct ChatMessageCopy: ViewModifier {
+    var text: String
+    var leading = false
+    @State private var hovering = false
+    @State private var copied = false
+    @FocusState private var focused: Bool
+    @Environment(\.chatTextStyle) private var textStyle
+
+    func body(content: Content) -> some View {
+        if text.isEmpty {
+            content
+        } else {
+            content
+                .padding(leading ? .leading : .trailing, textStyle.scaled(30))
+                .overlay(alignment: leading ? .topLeading : .topTrailing) {
+                    Button {
+                        ChatTranscriptTable.copy(text)
+                        copied = true
+                    } label: {
+                        Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                            .font(textStyle.system(11, weight: .medium))
+                            .foregroundStyle(Semantic.secondaryInk)
+                            .frame(width: textStyle.scaled(24), height: textStyle.scaled(26))
+                            .background(RoundedRectangle(cornerRadius: textStyle.scaled(5)).fill(Semantic.surface))
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .focused($focused)
+                    .opacity(hovering || focused || copied ? 1 : 0)
+                    .allowsHitTesting(hovering || focused || copied)
+                    .help(copied ? "Copied message" : "Copy message")
+                    .accessibilityLabel(copied ? "Message copied" : "Copy message")
+                }
+                .contentShape(Rectangle())
+                .onHover { value in
+                    hovering = value
+                    if !value { copied = false }
+                }
+                .onChange(of: text) { _, _ in copied = false }
+                .onChange(of: focused) { _, value in
+                    if !value && !hovering { copied = false }
+                }
+        }
+    }
+}
+
 /// The user's turn, as a bubble on the trailing edge, opening with a bold
 /// **User:** label. In a Team transcript members' replies and tool calls
 /// interleave with the user's messages, and an instruction has been read as
@@ -143,6 +191,7 @@ struct UserRow: View {
                     .padding(.top, -textStyle.scaled(8)).padding(.trailing, textStyle.scaled(10))
             }
         }
+        .modifier(ChatMessageCopy(text: entry.text, leading: true))
         .frame(maxWidth: .infinity, alignment: .trailing)
         .padding(.leading, 56)
         .accessibilityElement(children: .contain)
@@ -175,6 +224,7 @@ struct AssistantRow: View {
             if let reactions = entry.reactions, !reactions.isEmpty { ChatReactionsRow(reactions: reactions, onReact: onReact) }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        .modifier(ChatMessageCopy(text: entry.text))
         .accessibilityElement(children: .contain)
     }
 }
