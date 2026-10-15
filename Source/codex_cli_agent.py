@@ -147,7 +147,7 @@ import uuid
 
 from cli_session import CliSessionError, StdioSession, minimal_env, resolve_binary
 from codex_session_pool import SessionPool, digest as _digest, history_blocks as _history_blocks
-from cli_lifecycle import cleanup_after_exit
+from cli_lifecycle import cleanup_after_exit, is_context_overflow
 from cli_tool_call import HOST_EXECUTION_NOTE, ToolCallError, normalize_tools, validate_host_call
 from cli_images import normalize_images, recover_tool_content, responses_content
 from responses_tools import drop_schema_keyword
@@ -341,9 +341,10 @@ _DEVNULL = subprocess.DEVNULL
 class CodexCliAgentError(RuntimeError):
     """The Codex CLI route could not be resolved, started or completed."""
 
-    def __init__(self, message, *, http_status=502):
+    def __init__(self, message, *, http_status=502, error_code=None):
         super().__init__(message)
         self.http_status = http_status
+        self.error_code = error_code
 
 
 #: Characters an alias stem may carry: the nested runtime's own wire pattern.
@@ -1040,6 +1041,26 @@ def _bounded_timeout(value, *, default, minimum=1.0):
     return max(minimum, budget)
 
 
+def context_limits(model, *, config_dir=None):
+    """Read the native card used to construct new turns, without discovery I/O.
+
+    The model's current maximum and runtime reserve may shrink after a CLI
+    update while the Hub's provider catalogue remains cached. Missing or
+    malformed evidence supplies no new limit; callers must never enlarge a
+    saved limit from this read. No process or credential file is opened.
+    """
+    return _catalogue_context([], home=config_dir).get(model, {})
+
+
+def _turn_error(message, details=None, *, http_status=None):
+    event = {"type": "error", "message": message}
+    if is_context_overflow(details) or is_context_overflow(message):
+        event.update(code="context_length_exceeded", http_status=400)
+    elif http_status is not None:
+        event["http_status"] = http_status
+    return event
+
+
 def _result(response, *, context):
     """Unwrap a JSON-RPC response, or raise with the server's own message.
 
@@ -1054,7 +1075,8 @@ def _result(response, *, context):
             code = error.get("code")
             suffix = f" (code {code})" if code is not None else ""
             raise CodexCliAgentError(f"{context}: the Codex runtime reported an error{suffix}: {message}",
-                                    http_status=400 if code in {-32600, -32601, -32602} else 502)
+                                    http_status=400 if is_context_overflow(error) or code in {-32600, -32601, -32602} else 502,
+                                    error_code="context_length_exceeded" if is_context_overflow(error) else None)
         if "result" in response:
             result = response["result"]
             return result if isinstance(result, dict) else {}
@@ -1677,6 +1699,7 @@ def _stream_turn(session, *, turn_id, deadline, tools=None, thread_id=None, summ
     """
     fragments = lease.fragments if lease is not None else {}
     last_error = None
+    last_error_details = None
     rejected_calls = 0
     host_names = {_tool_alias(tool["name"]): tool["name"] for tool in tools or []}
 
@@ -1842,10 +1865,11 @@ def _stream_turn(session, *, turn_id, deadline, tools=None, thread_id=None, summ
                     # Reporting each as a failure would abort a turn Codex was
                     # still trying to finish, so only the last is kept, and the
                     # terminal ``turn/completed`` decides the outcome.
-                    if not params.get("willRetry"):
+                    if not params.get("willRetry") and _same_turn(event, turn_id):
                         error = params.get("error")
-                        if isinstance(error, dict) and error.get("message"):
-                            last_error = str(error["message"])
+                        if isinstance(error, dict):
+                            last_error_details = error
+                            last_error = str(error["message"]) if error.get("message") else None
                 elif method in ("turn/completed", "turn/failed"):
                     if not _same_turn(event, turn_id):
                         continue
@@ -1854,7 +1878,7 @@ def _stream_turn(session, *, turn_id, deadline, tools=None, thread_id=None, summ
                     status = str(turn.get("status") or ("failed" if method == "turn/failed" else "completed"))
                     if method == "turn/failed" or status == "failed":
                         message = _failure_message(turn) or last_error or "The Codex turn failed."
-                        yield {"type": "error", "message": message}
+                        yield _turn_error(message, turn.get("error") or last_error_details)
                         return
                     if status in {"interrupted", "cancelled", "canceled"}:
                         yield {"type": "error",
@@ -2103,7 +2127,7 @@ def run_turn(request, *, spawner=None, timeout=300, pool=None) -> Iterator[dict]
                     lease.pending.update(prefix=_digest(blocks), prefix_count=len(blocks))
             yield event
     except CodexCliAgentError as exc:
-        yield {"type": "error", "message": str(exc), "http_status": exc.http_status}
+        yield _turn_error(str(exc), {"code": exc.error_code}, http_status=exc.http_status)
     except CliSessionError as exc:
         yield {"type": "error", "message": f"The Codex app-server session failed: {exc}"}
     except subprocess.TimeoutExpired:

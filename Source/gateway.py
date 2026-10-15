@@ -306,6 +306,9 @@ class Runtime:
         provider_id, upstream_model = split_route(route)
         if not is_chat:
             connection = selected_settings["providers"][provider_id]
+        if provider_id == "codex" and connection.get("credential_mode") == "cli":
+            spec = cli_routes.current_context_spec(provider_id, upstream_model, spec,
+                config_dir=chat_directory if is_chat else self.cli_account_dir(provider_id))
         if is_chat:
             if not native_search_available(spec, connection, provider_id):
                 # Recheck the live route: Chat's model list may predate a refresh.
@@ -676,8 +679,9 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(encoded)
         self.close_connection = True
 
-    def error(self, status, message, headers=None):
-        self.json_response(status, {"type": "error", "error": {"type": error_type(status), "message": message}},
+    def error(self, status, message, headers=None, *, code=None):
+        self.json_response(status, {"type": "error", "error": {"type": error_type(status), "message": message,
+                            **({"code": code} if code else {})}},
                            headers=headers)
 
     def end_headers(self):
@@ -1483,13 +1487,14 @@ they exit or restart, so none of them can interrupt another's requests.
                 if streaming:
                     try:
                         emit({"type": "error", "error": {
-                            "type": "invalid_request_error" if status == 400 else "api_error", "message": message}})
+                            "type": "invalid_request_error" if status == 400 else "api_error", "message": message,
+                            **({"code": result["error_code"]} if result.get("error_code") else {})}})
                         finish_stream()
                     except OSError:
                         pass
                 else:
                     closed.set()
-                    self.error(status, message)
+                    self.error(status, message, code=result.get("error_code"))
             return False
         if stream:
             finish_stream()
