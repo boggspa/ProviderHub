@@ -8,6 +8,7 @@ struct CompanionBlackboard: View {
     @State private var key = ""
     @State private var bodyText = ""
     @State private var category = "note"
+    @State private var quoteEntryID = ""
     @State private var remove: RemoteValue?
     @State private var link = ""
     @State private var busy = false
@@ -25,11 +26,11 @@ struct CompanionBlackboard: View {
                     HStack {
                         Text("\(board["posts"].rows.count) / \(board["limits"]["posts"].int) posts").font(.caption)
                         Spacer()
-                        Button("New post") { key = ""; bodyText = ""; category = "note"; editing = true }
+                        Button("New post") { key = ""; bodyText = ""; category = "note"; quoteEntryID = ""; editing = true }
                     }
                     ForEach(board["posts"].rows, id: \.self) { post in
                         CompanionPostCard(model: model, post: post).contextMenu {
-                            if post["author"].text == "user" { Button("Edit") { key = post["key"].text; bodyText = post["body"].text; category = post["category"].text; editing = true } }
+                            if post["author"].text == "user" { Button("Edit") { key = post["key"].text; bodyText = post["body"].text; category = post["category"].text; quoteEntryID = post["quote"]["entryID"].text; editing = true } }
                             Button("Remove", role: .destructive) { remove = post }
                         }
                     }
@@ -84,7 +85,7 @@ struct CompanionBlackboard: View {
                     }.navigationTitle("Pin a post")
                     .toolbar {
                         ToolbarItem(placement: .cancellationAction) { Button("Cancel") { editing = false } }
-                        ToolbarItem(placement: .confirmationAction) { Button("Save") { run("blackboard_post", ["key": .string(key), "body": .string(bodyText), "category": .string(category)]) { editing = false } }.disabled(busy || key.isEmpty || bodyText.isEmpty || bodyText.utf8.count > 1500) }
+                        ToolbarItem(placement: .confirmationAction) { Button("Save") { run("blackboard_post", ["key": .string(key), "body": .string(bodyText), "category": .string(category), "quote": .string(quoteEntryID)]) { editing = false } }.disabled(busy || key.isEmpty || bodyText.isEmpty || bodyText.utf8.count > 1500) }
                     }
                 }
             }

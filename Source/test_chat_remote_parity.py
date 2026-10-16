@@ -229,6 +229,18 @@ class RemoteParityTests(unittest.TestCase):
         self.assertEqual(self.host.view_id, self.desktop)
         self.assertFalse(self.control("blackboard_post", {"key": "bad key", "body": "Keep draft", "category": "note"})["ok"])
 
+    def test_blackboard_post_edit_retains_projected_transcript_quote(self):
+        self.select(self.desktop)
+        service = self.host.sessions[self.desktop]
+        service.chat["entries"].append(entry("assistant", "Keep this citation", "codex/sol", id="quoted-entry"))
+        self.assertTrue(self.control("blackboard_post", {"key": "citation", "body": "Original", "category": "fact", "quote": "quoted-entry"})["ok"])
+        original = self.mac.view["controls"]["blackboard"]["posts"][0]
+        self.assertTrue(self.control("blackboard_post", {"key": original["key"], "body": "Edited from the phone", "category": "note", "quote": original["quote"]["entryID"]})["ok"])
+        edited = self.mac.view["controls"]["blackboard"]["posts"][0]
+        self.assertEqual(edited["id"], original["id"])
+        self.assertEqual(edited["body"], "Edited from the phone")
+        self.assertEqual(edited["quote"], original["quote"])
+
     def test_mac_restart_keeps_phone_trust_without_new_confirmation(self):
         from chat_remote import RemoteServer
         state = self.root / "remote-saved.json"
