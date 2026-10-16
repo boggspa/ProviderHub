@@ -994,7 +994,8 @@ class RemoteServer:
         # Explicit interfaces only. Never wildcard, public, multicast or link-local.
         allowed = address.is_loopback or (address.version == 4 and
             any(address in ipaddress.ip_network(net) for net in
-                ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10")))
+                ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10"))) or (
+            address.version == 6 and address in ipaddress.ip_network("fd7a:115c:a1e0::/48"))
         if not allowed:
             raise ValueError("choose an explicit LAN, Tailscale or loopback IP")
         if type(port) is not int or not 0 <= port <= 65535:

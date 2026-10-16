@@ -1,4 +1,5 @@
 import AppKit
+import Darwin
 import SwiftUI
 
 @MainActor
@@ -20,6 +21,9 @@ struct ChatDevicesSettings: View {
             Form {
                 Section("Remote access") {
                     TextField("Mac’s LAN or Tailscale IP", text: $address).disabled(listening)
+                    if !listening, let tailscale = tailscaleAddress {
+                        Button("Use Tailscale · \(tailscale)") { address = tailscale }
+                    }
                     HStack {
                         Text(model.remoteStatus["connected"] as? Bool == true ? "Phone connected" : listening ? "Waiting for a device" : "Off")
                             .font(.caption).foregroundStyle(.secondary)
@@ -29,7 +33,7 @@ struct ChatDevicesSettings: View {
                             else { model.startRemote(host: address.trimmingCharacters(in: .whitespacesAndNewlines)) }
                         }.disabled(!model.connected || !listening && address.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                     }
-                    Text("Your phone can view chats, send messages, stop work and answer pending approvals. Keep Provider Hub running on this Mac. Both devices need access to the same private network.")
+                    Text("Your phone can view chats, send messages, stop work and answer pending approvals. Keep Provider Hub running on this Mac. For access over cellular or another Wi-Fi network, connect both devices to the same Tailscale tailnet and use this Mac’s Tailscale IP. Allow TCP port 8765 in your tailnet policy.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 if listening {
@@ -44,7 +48,7 @@ struct ChatDevicesSettings: View {
                                 Text("Choose Scan QR code in the iOS companion, then compare the code shown on both devices.")
                                     .font(.caption).foregroundStyle(.secondary)
                                 Button("Copy pairing text") { copyBootstrap() }
-                                Text("Both devices must be able to reach this Mac’s private network address.")
+                                Text("For Tailscale, this QR code must contain the Mac’s Tailscale IP. You can also copy the pairing text to your phone.")
                                     .font(.caption).foregroundStyle(.secondary)
                             }
                         }
@@ -88,5 +92,24 @@ struct ChatDevicesSettings: View {
         guard let text = pairingText else { return }
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(text, forType: .string)
+    }
+
+    private var tailscaleAddress: String? {
+        var interfaces: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&interfaces) == 0 else { return nil }
+        defer { freeifaddrs(interfaces) }
+        var cursor = interfaces
+        while let interface = cursor {
+            defer { cursor = interface.pointee.ifa_next }
+            guard let socketAddress = interface.pointee.ifa_addr,
+                  socketAddress.pointee.sa_family == UInt8(AF_INET) else { continue }
+            var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+            guard getnameinfo(socketAddress, socklen_t(socketAddress.pointee.sa_len),
+                              &host, socklen_t(host.count), nil, 0, NI_NUMERICHOST) == 0 else { continue }
+            let address = String(cString: host)
+            let bytes = address.split(separator: ".").compactMap { Int($0) }
+            if bytes.count == 4, bytes[0] == 100, (64...127).contains(bytes[1]) { return address }
+        }
+        return nil
     }
 }

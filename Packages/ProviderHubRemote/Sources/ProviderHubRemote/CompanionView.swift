@@ -259,6 +259,8 @@ public struct CompanionView: View {
 
     private var pairingControls: some View {
         VStack(alignment: .leading, spacing: 14) {
+            Text("Away from home? Connect Tailscale on your iPhone and Mac to the same tailnet, then pair using the Mac’s Tailscale IP. Works over cellular and other Wi-Fi networks. Keep Provider Hub running on your Mac.")
+                .font(.caption).foregroundStyle(CompanionTheme.secondary)
             #if os(iOS)
             Button {
                 if settings { scanAfterSettings = true; settings = false }

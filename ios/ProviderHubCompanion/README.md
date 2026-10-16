@@ -6,6 +6,30 @@ chats, watches a selected transcript, sends text, stops that chat, and answers
 the exact pending approval. Text drafts are local to each chat and clear only
 after a successful acknowledgement.
 
+## Connect from cellular or another Wi-Fi network
+
+1. Install Tailscale on the Mac and iPhone, sign both into the same tailnet,
+   and connect the Tailscale VPN on the phone. Tailscale must permit cellular
+   connections if you use its VPN On Demand rules.
+2. Open **Devices** in Provider Hub on the Mac. Choose **Use Tailscale** to
+   fill its detected `100.x.x.x` address, or paste its Tailscale IPv4 or IPv6
+   address from Tailscale. Enable remote access. The QR code now advertises
+   that exact address; an old LAN pairing code will not reach the Mac from
+   another network.
+3. Scan the Mac's QR code, or expand **Use pairing text** on the iPhone and
+   paste the JSON copied from the Mac. This is useful when operating the Mac
+   remotely. Compare the six-digit code and approve on the Mac.
+4. Keep the Mac awake with Provider Hub running. The phone can now use
+   cellular or a different Wi-Fi network. Tailnet ACLs/grants and the Mac
+   firewall must permit the iPhone to reach TCP port 8765 on this Mac.
+
+Only explicit LAN, loopback, Tailscale IPv4 (`100.64.0.0/10`) and Tailscale
+IPv6 (`fd7a:115c:a1e0::/48`) addresses are accepted. No public listener,
+router port forwarding, exit node or Tailscale Funnel is needed. MagicDNS
+hostnames are not pairing addresses: use the numeric IP. The app allows
+metered and Low Data Mode paths and reconnects when its TCP session ends;
+pending drafts are retained. iOS may suspend the app in the background.
+
 ## Appearance and layout
 
 The companion uses the Mac's semantic colours, provider accents, compact
@@ -63,6 +87,30 @@ Tests exercise Python sockets, trust confirmation, revocation, reconnect,
 exact approval binding, duplicate commands, and actual Swift Network TCP
 handshake/encrypted snapshot/send/ack against Python, in addition to crypto
 golden vectors. Test peers auto-confirm only inside test fixtures.
+
+## TestFlight archive
+
+The app uses bundle ID `dev.providerhub.companion` and Apple team `8CZML8FK2D`.
+Set `ASC_API_KEY_ID`, `ASC_API_ISSUER_ID` and `ASC_API_KEY_PATH` to your team's
+App Store Connect API key, then run:
+
+```sh
+bash ios/ProviderHubCompanion/scripts/archive-testflight.sh
+```
+
+The script generates the Xcode project, archives with automatic provisioning,
+and exports the signed IPA beneath `.local-only/companion-release/export/`.
+It does not upload automatically. Create the matching iOS app record in App
+Store Connect before uploading with Transporter or `xcrun altool --upload-app`.
+Increase `CURRENT_PROJECT_VERSION` in `project.yml` for each uploaded build.
+The privacy manifest declares local preferences; the app includes no analytics
+or tracking SDKs. Encryption uses Apple's CryptoKit and device-only Keychain.
+The export declares only exempt operating-system encryption.
+
+After Apple processes the build, assign it to an internal TestFlight group
+containing your App Store Connect user and install it through TestFlight on
+your phone. External testers require Apple's beta review; an App Store release
+also needs its own metadata and review. Neither is needed for internal testing.
 
 ## Scope
 

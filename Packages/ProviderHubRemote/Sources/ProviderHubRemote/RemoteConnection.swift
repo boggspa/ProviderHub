@@ -25,7 +25,13 @@ public struct RemoteBootstrap: Codable {
                     bytes[0] == 172 && (16...31).contains(bytes[1]) ||
                     bytes[0] == 192 && bytes[1] == 168 ||
                     bytes[0] == 100 && (64...127).contains(bytes[1]) else { throw RemotePairingError.privateNetworkRequired }
-        } else if bootstrap.host != "::1" { throw RemotePairingError.privateNetworkRequired }
+        } else if let address = IPv6Address(bootstrap.host) {
+            let bytes = Array(address.rawValue)
+            let tailscalePrefix: [UInt8] = [0xfd, 0x7a, 0x11, 0x5c, 0xa1, 0xe0]
+            guard bootstrap.host == "::1" || Array(bytes.prefix(6)) == tailscalePrefix else {
+                throw RemotePairingError.privateNetworkRequired
+            }
+        } else { throw RemotePairingError.privateNetworkRequired }
         return bootstrap
     }
 }
@@ -160,7 +166,17 @@ public final class RemoteConnection: CompanionLink {
         buffer.removeAll()
         let channel = RemoteChannel(bootstrap: bootstrap, identity: identity)
         self.channel = channel
-        let connection = NWConnection(host: .init(bootstrap.host), port: .init(rawValue: bootstrap.port)!, using: .tcp)
+        let tcp = NWProtocolTCP.Options()
+        tcp.connectionTimeout = 15
+        tcp.enableKeepalive = true
+        tcp.keepaliveIdle = 30
+        tcp.keepaliveInterval = 10
+        tcp.keepaliveCount = 3
+        let parameters = NWParameters(tls: nil, tcp: tcp)
+        // A Tailscale tunnel may be carried by cellular or a metered hotspot.
+        parameters.prohibitExpensivePaths = false
+        parameters.prohibitConstrainedPaths = false
+        let connection = NWConnection(host: .init(bootstrap.host), port: .init(rawValue: bootstrap.port)!, using: parameters)
         self.connection = connection
         channel.emit = { [weak connection] frame in
             var data = try JSONSerialization.data(withJSONObject: frame)
@@ -179,6 +195,8 @@ public final class RemoteConnection: CompanionLink {
                 self.queue.asyncAfter(deadline: .now() + 3) {
                     if self.generation == current { self.open(bootstrap, identity: identity) }
                 }
+            case .waiting:
+                self.onStatus?("Waiting for network. For Tailscale, connect both devices to the same tailnet and allow access to the Mac’s port.", nil)
             default: break
             }
         }
