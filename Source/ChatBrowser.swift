@@ -928,6 +928,23 @@ final class ChatBrowserStore: ObservableObject, ChatBrowserHost {
                 let maxWidth = (arguments["max_width"] as? Int) ?? 1280
                 let maxHeight = (arguments["max_height"] as? Int) ?? 1280
                 return try await session.screenshot(maxWidth: maxWidth, maxHeight: maxHeight)
+            case "browser_remote_preview":
+                let shot = try await session.screenshot(maxWidth: 640, maxHeight: 480)
+                guard let blocks = shot["content"] as? [[String: Any]],
+                      let block = blocks.first(where: { $0["type"] as? String == "image" }),
+                      let source = block["source"] as? [String: Any], let base64 = source["data"] as? String,
+                      let png = Data(base64Encoded: base64), let bitmap = NSBitmapImageRep(data: png) else { return shot }
+                // Keep preview frames small enough for the existing encrypted
+                // transport. It is the Mac's page, including its cookie jar.
+                for quality in [0.55, 0.35, 0.2, 0.1] {
+                    if let jpeg = bitmap.representation(using: .jpeg, properties: [.compressionFactor: quality]), jpeg.count <= 32_000 {
+                        return ChatBrowserResult.ok("Mac browser preview", "Captured the shared page on your Mac.",
+                            details: ["url": session.page.url, "title": session.page.title],
+                            image: ChatBrowserResult.imageBlock(base64: jpeg.base64EncodedString(), mime: "image/jpeg",
+                                width: block["width"] as? Int ?? 640, height: block["height"] as? Int ?? 480))
+                    }
+                }
+                return ChatBrowserResult.failure("Mac browser preview", "This page is too detailed for a preview. Use Observe page to inspect its controls.")
             default:
                 return ChatBrowserResult.failure(tool, "Unknown browser tool: \(tool)")
             }

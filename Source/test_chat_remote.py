@@ -7,6 +7,7 @@ import json
 import socket
 import threading
 import unittest
+from unittest import mock
 import tempfile
 import queue
 import time
@@ -76,6 +77,30 @@ class PresentationProjectionTests(unittest.TestCase):
 
 
 class NetworkTests(unittest.TestCase):
+    def test_tailscale_addresses_bind_the_exact_interface(self):
+        with tempfile.TemporaryDirectory() as directory:
+            for host, family in (("100.64.0.1", socket.AF_INET),
+                                 ("100.127.255.254", socket.AF_INET),
+                                 ("fd7a:115c:a1e0::1", socket.AF_INET6)):
+                server = RemoteServer(lambda _: None, Path(directory) / "identity.json", dispatch=lambda task: task())
+                with mock.patch("chat_remote.socket.socket") as create_socket, mock.patch("chat_remote.threading.Thread"):
+                    create_socket.return_value.getsockname.return_value = (host, 8765)
+                    server.start(host)
+                    create_socket.assert_called_once_with(family)
+                    create_socket.return_value.bind.assert_called_once_with((host, 8765))
+                    self.assertEqual(server.bootstrap(host)["host"], host)
+                    server.stop()
+
+    def test_tailscale_boundaries_do_not_admit_other_networks(self):
+        with tempfile.TemporaryDirectory() as directory:
+            server = RemoteServer(lambda _: None, Path(directory) / "identity.json", dispatch=lambda task: task())
+            with mock.patch("chat_remote.socket.socket") as create_socket:
+                for host in ("100.63.255.255", "100.128.0.1", "fd7a:115c:a1df::1",
+                             "fd7a:115c:a1e1::1", "fd00::1", "2606:4700:4700::1111", "::", "0.0.0.0"):
+                    with self.assertRaises(ValueError, msg=host):
+                        server.start(host)
+                create_socket.assert_not_called()
+
     def test_private_transport_pair_reconnect_revoke_and_queue(self):
         tasks = queue.Queue()
         commands = []

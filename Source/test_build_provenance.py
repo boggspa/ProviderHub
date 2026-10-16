@@ -75,6 +75,21 @@ class BuildProvenanceTests(unittest.TestCase):
         self.assertEqual(verify_manifest(self.app, revision=self.revision,
                                          require_clean=True), manifest)
 
+    def test_shared_swift_alias_hashes_the_canonical_package_source(self):
+        shared = self.repository / "Packages/Shared/Presentation.swift"
+        shared.parent.mkdir(parents=True)
+        shared.write_text("import SwiftUI\n")
+        alias = self.source / "Presentation.swift"
+        alias.symlink_to("../Packages/Shared/Presentation.swift")
+        self.git("add", "--", "Packages/Shared/Presentation.swift", "Source/Presentation.swift")
+        self.git("-c", "user.name=Build Test", "-c", "user.email=build@example.invalid", "commit", "-qm", "Shared source")
+        manifest = create_manifest(self.source, self.app, [self.source / "App.swift", alias])
+        self.assertFalse(manifest["source"]["dirty"])
+        shared.write_text("import SwiftUI\n// Changed shared UI\n")
+        changed = create_manifest(self.source, self.app, [self.source / "App.swift", alias])
+        self.assertTrue(changed["source"]["dirty"])
+        self.assertIn("Packages/Shared/Presentation.swift", changed["source"]["changed_inputs"])
+
     def test_bundled_runtime_is_hashed_and_symlinks_are_recorded(self):
         self.add_runtime({"bin/python3.13": b"\xcf\xfa\xed\xfe",
                           "lib/python3.13/os.py": "x = 1\n"},

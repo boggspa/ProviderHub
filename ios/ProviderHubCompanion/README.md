@@ -6,6 +6,71 @@ chats, watches a selected transcript, sends text, stops that chat, and answers
 the exact pending approval. Text drafts are local to each chat and clear only
 after a successful acknowledgement.
 
+## Shared Mac and iOS control surface (local development)
+
+The control protocol now exposes the Mac's Team, model/account choices,
+reasoning effort and approval mode, along with Changes, Team, Side Chat,
+Processes and Browser inspector tabs. Commands remain bound to the phone's
+selected chat; selecting on the phone does not change the Mac's selection.
+The Mac validates configuration and execution against its existing handlers.
+YOLO changes require a confirmation on the phone. Configuration changes follow
+the Mac's existing idle/pending-question rules.
+
+iPad landscape uses chat rail, transcript and inspector columns. Phone and
+narrow iPad layouts use the same inspector in a sheet. The deployment target
+remains iOS/iPadOS 17. All UI calls are checked against that minimum target;
+the locally available Simulator runtime is newer, so physical iOS 17 testing
+is still needed.
+
+The Mac aliases the package's canonical Swift source for transcript section
+grouping, tool names/glyphs, speaker headers, member chips, inspector tabs,
+member cards/control icons, and colored diff disclosures. Provider artwork and
+branding metadata are bundled verbatim from `Source/provider-logos` and
+`Source/provider_branding.json`; a test enforces that the packaged copies stay
+identical. Runtime model presentations carry Mac branding overrides where the
+referenced artwork is bundled. iOS retains native text selection and Dynamic
+Type; the desktop's AppKit editor/text layout and custom-font installation are
+not shared.
+
+Changes show bounded working-tree and commit diffs with the same green/red
+line rendering, headers and dark canvas as macOS. Processes can be inspected,
+stopped and cleared. Team members can be edited and started/stopped with the
+same icon controls. Side Chat supports model selection, sending, stopping and
+closing; drafts clear only after acknowledgement. Browser controls operate the
+Mac's actual WebKit session through fresh observation refs, with an on-demand
+compressed page preview. This is not a second iOS browser or continuous remote
+video: the Mac Chat window must be attached and Browser Use enabled.
+
+This pass remains local: update both Mac host and iOS companion together to use
+the new controls. Older hosts keep basic chat working and show an update notice
+in the inspector. The existing TestFlight build does not contain these changes.
+Full history paging, file attachments, Git overview/branch operations, Blackboard
+and message reactions are not yet exposed by the remote control protocol.
+
+## Connect from cellular or another Wi-Fi network
+
+1. Install Tailscale on the Mac and iPhone, sign both into the same tailnet,
+   and connect the Tailscale VPN on the phone. Tailscale must permit cellular
+   connections if you use its VPN On Demand rules.
+2. Open **Devices** in Provider Hub on the Mac. Choose **Use Tailscale** to
+   fill its detected `100.x.x.x` address, or paste its Tailscale IPv4 or IPv6
+   address from Tailscale. Enable remote access. The QR code now advertises
+   that exact address; an old LAN pairing code will not reach the Mac from
+   another network.
+3. Scan the Mac's QR code, or expand **Use pairing text** on the iPhone and
+   paste the JSON copied from the Mac. This is useful when operating the Mac
+   remotely. Compare the six-digit code and approve on the Mac.
+4. Keep the Mac awake with Provider Hub running. The phone can now use
+   cellular or a different Wi-Fi network. Tailnet ACLs/grants and the Mac
+   firewall must permit the iPhone to reach TCP port 8765 on this Mac.
+
+Only explicit LAN, loopback, Tailscale IPv4 (`100.64.0.0/10`) and Tailscale
+IPv6 (`fd7a:115c:a1e0::/48`) addresses are accepted. No public listener,
+router port forwarding, exit node or Tailscale Funnel is needed. MagicDNS
+hostnames are not pairing addresses: use the numeric IP. The app allows
+metered and Low Data Mode paths and reconnects when its TCP session ends;
+pending drafts are retained. iOS may suspend the app in the background.
+
 ## Appearance and layout
 
 The companion uses the Mac's semantic colours, provider accents, compact
@@ -63,6 +128,30 @@ Tests exercise Python sockets, trust confirmation, revocation, reconnect,
 exact approval binding, duplicate commands, and actual Swift Network TCP
 handshake/encrypted snapshot/send/ack against Python, in addition to crypto
 golden vectors. Test peers auto-confirm only inside test fixtures.
+
+## TestFlight archive
+
+The app uses bundle ID `dev.providerhub.companion` and Apple team `8CZML8FK2D`.
+Set `ASC_API_KEY_ID`, `ASC_API_ISSUER_ID` and `ASC_API_KEY_PATH` to your team's
+App Store Connect API key, then run:
+
+```sh
+bash ios/ProviderHubCompanion/scripts/archive-testflight.sh
+```
+
+The script generates the Xcode project, archives with automatic provisioning,
+and exports the signed IPA beneath `.local-only/companion-release/export/`.
+It does not upload automatically. Create the matching iOS app record in App
+Store Connect before uploading with Transporter or `xcrun altool --upload-app`.
+Increase `CURRENT_PROJECT_VERSION` in `project.yml` for each uploaded build.
+The privacy manifest declares local preferences; the app includes no analytics
+or tracking SDKs. Encryption uses Apple's CryptoKit and device-only Keychain.
+The export declares only exempt operating-system encryption.
+
+After Apple processes the build, assign it to an internal TestFlight group
+containing your App Store Connect user and install it through TestFlight on
+your phone. External testers require Apple's beta review; an App Store release
+also needs its own metadata and review. Neither is needed for internal testing.
 
 ## Scope
 

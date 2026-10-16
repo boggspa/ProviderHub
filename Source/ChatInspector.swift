@@ -9,10 +9,11 @@ struct ChatInspector: View {
         VStack(spacing: 0) {
             // The inspector can be 290 pt wide; when every label will not fit,
             // only the selected tab keeps its label.
-            ViewThatFits(in: .horizontal) {
-                tabBar(compact: false)
-                tabBar(compact: true)
-            }.frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 14).padding(.top, 12)
+            ChatSharedInspectorTabs(items: ChatInspectorTab.allCases.map {
+                .init(id: $0.rawValue, label: $0.label, title: $0.title, icon: $0.icon, count: $0 == .processes ? model.runningProcessCount : 0)
+            }, selected: model.inspectorTab.rawValue, accent: model.activeAccent) {
+                if let tab = ChatInspectorTab(rawValue: $0) { model.inspectorTab = tab }
+            }
             Divider()
             switch model.inspectorTab {
             case .changes: ChatChangesPane(model: model)
@@ -25,30 +26,6 @@ struct ChatInspector: View {
                 else { Text("Choose a chat to open its browser.").font(.caption).foregroundStyle(.secondary).padding() }
             }
         }.frame(maxHeight: .infinity, alignment: .top)
-    }
-    private func tabBar(compact: Bool) -> some View {
-        HStack(spacing: compact ? 14 : 12) {
-            ForEach(ChatInspectorTab.allCases) { tab in tabButton(tab, compact: compact) }
-        }
-    }
-    private func tabButton(_ tab: ChatInspectorTab, compact: Bool) -> some View {
-        let selected = model.inspectorTab == tab
-        let running = tab == .processes ? model.runningProcessCount : 0
-        return Button { model.inspectorTab = tab } label: {
-            VStack(spacing: 8) {
-                HStack(spacing: 4) {
-                    if selected || !compact { Label(tab.label, systemImage: tab.icon) } else { Image(systemName: tab.icon) }
-                    if running > 0 {
-                        Text("\(running)").font(.system(size: 9.5, weight: .semibold)).monospacedDigit()
-                            .foregroundStyle(model.activeAccent).padding(.horizontal, 4.5).padding(.vertical, 1)
-                            .background(model.activeAccent.opacity(0.14), in: Capsule())
-                    }
-                }.font(.system(size: 11.5, weight: selected ? .medium : .regular)).lineLimit(1).fixedSize()
-                Rectangle().fill(selected ? model.activeAccent : .clear).frame(height: 2)
-            }.contentShape(Rectangle())
-        }.buttonStyle(.plain).foregroundStyle(selected ? .primary : .secondary).help(tab.title)
-            .accessibilityLabel(tab.title).accessibilityValue(running > 0 ? "\(running) running" : "")
-            .accessibilityAddTraits(selected ? .isSelected : [])
     }
 }
 
@@ -179,27 +156,11 @@ private struct ChatChangesPane: View {
     }
 
     @ViewBuilder private func fileDisclosure(id: String, path: String, oldPath: String?, added: Int, deleted: Int, binary: Bool, diff: String, showAuthor: Bool) -> some View {
-        DisclosureGroup(isExpanded: expansion(id)) {
-            if binary { Text("Binary file").font(.system(size: 11)).foregroundStyle(.secondary).padding(.vertical, 6) }
-            else {
-                ScrollView([.horizontal, .vertical]) { PatchText(text: diff, onDark: true).padding(10).fixedSize(horizontal: true, vertical: true) }
-                    .frame(minHeight: 80, maxHeight: 300).background(Color.black.opacity(0.88), in: RoundedRectangle(cornerRadius: 6))
-                    .padding(.top, 5)
+        ChatSharedDiffDisclosure(path: path, oldPath: oldPath, added: added, deleted: deleted, binary: binary, diff: diff, expanded: expansion(id)) {
+            if showAuthor, let author = model.fileAuthor(path: path) {
+                ChatProviderIcon(presentation: model.presentation(for: author), size: 12)
+                if !author.name.isEmpty { Text(author.name).font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1) }
             }
-        } label: {
-            HStack(spacing: 5) {
-                Text(path).font(.system(size: 11.5)).lineLimit(1).truncationMode(.middle)
-                if showAuthor, let author = model.fileAuthor(path: path) {
-                    ChatProviderIcon(presentation: model.presentation(for: author), size: 12)
-                    if !author.name.isEmpty {
-                        Text(author.name).font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1)
-                    }
-                }
-                Spacer(minLength: 0)
-                Text("+\(added)").foregroundStyle(Color(nsColor: .systemGreen))
-                Text("−\(deleted)").foregroundStyle(Color(nsColor: .systemRed))
-            }.font(.system(size: 10.5, design: .monospaced))
-                .help(oldPath.map { $0 + " → " + path } ?? path)
         }
     }
 }
@@ -486,37 +447,11 @@ private struct ChatProcessesPane: View {
     private func row(_ process: ChatProcess) -> some View {
         let route = route(process)
         let owner = process.owner.isEmpty ? route?.label ?? "Agent" : process.owner
-        let isExpanded = expanded.contains(process.id)
-        return VStack(alignment: .leading, spacing: 7) {
-            HStack(alignment: .top, spacing: 6) {
-                Button {
-                    if isExpanded { expanded.remove(process.id) } else { expanded.insert(process.id) }
-                } label: {
-                    HStack(alignment: .top, spacing: 6) {
-                        Image(systemName: "chevron.right").font(.system(size: 8.5, weight: .semibold)).foregroundStyle(.secondary)
-                            .rotationEffect(.degrees(isExpanded ? 90 : 0)).frame(width: 10, height: 15)
-                        ChatProviderIcon(presentation: route?.presentation).padding(.top, 0.5)
-                        VStack(alignment: .leading, spacing: 3) {
-                            HStack(spacing: 6) {
-                                Text(owner).font(.system(size: 11.5, weight: .medium)).lineLimit(1)
-                                Spacer(minLength: 4)
-                                status(process, accent: route?.accent ?? model.activeAccent)
-                            }
-                            Text(process.command).font(.system(size: 11, design: .monospaced)).lineLimit(2).truncationMode(.middle)
-                                .foregroundStyle(HubTheme.Semantic.ink).frame(maxWidth: .infinity, alignment: .leading)
-                        }
-                    }.contentShape(Rectangle())
-                }.buttonStyle(.plain).help(process.command)
-                    .accessibilityLabel("\(owner): \(process.command), \(process.statusText())")
-                    .accessibilityHint(isExpanded ? "Hides output" : "Shows output")
-                if process.status == "running" {
-                    Button { model.stopProcess(process.id) } label: { Image(systemName: "stop.circle").font(.system(size: 13)) }
-                        .buttonStyle(.plain).foregroundStyle(.secondary).disabled(!model.connected).padding(.top, 0.5)
-                        .help("Stop this process").accessibilityLabel("Stop \(process.command)")
-                }
-            }
-            if isExpanded { detail(process).padding(.leading, 16) }
-        }
+        return ChatSharedProcessRow(owner: owner, command: process.command, canStop: process.status == "running", stopDisabled: !model.connected,
+            expanded: Binding(get: { expanded.contains(process.id) }, set: { value in
+                if value { expanded.insert(process.id) } else { expanded.remove(process.id) }
+            }), stop: { model.stopProcess(process.id) }, mark: { ChatProviderIcon(presentation: route?.presentation) },
+            status: { status(process, accent: route?.accent ?? model.activeAccent) }, detail: { detail(process) })
     }
     @ViewBuilder private func status(_ process: ChatProcess, accent: Color) -> some View {
         switch process.status {

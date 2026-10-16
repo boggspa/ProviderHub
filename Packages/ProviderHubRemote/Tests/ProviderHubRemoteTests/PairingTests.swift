@@ -38,7 +38,7 @@ final class PairingTests: XCTestCase {
     }
 
     func testPrivatePairingPayloadPreservesIdentity() throws {
-        for address in ["192.168.1.23", "10.0.0.12", "172.16.0.4", "172.31.255.254", "100.64.0.1", "100.127.255.254", "127.0.0.1", "::1"] {
+        for address in ["192.168.1.23", "10.0.0.12", "172.16.0.4", "172.31.255.254", "100.64.0.1", "100.127.255.254", "fd7a:115c:a1e0::f501:834b", "FD7A:115C:A1E0::1", "127.0.0.1", "::1"] {
             let value = try RemoteBootstrap.decodePairingText("  \n" + payload(host: address) + "\n")
             XCTAssertEqual(value.host, address)
             XCTAssertEqual(value.port, 8765)
@@ -51,7 +51,7 @@ final class PairingTests: XCTestCase {
         for text in ["", "https://example.com", "providerhub://pair?token=unexpected", "{}", String(repeating: "x", count: 4097)] {
             XCTAssertThrowsError(try RemoteBootstrap.decodePairingText(text))
         }
-        for address in ["0.0.0.0", "8.8.8.8", "example.com", "169.254.169.254", "100.128.0.1", "172.32.0.1", "::", "fe80::1", "user@192.168.1.1", "192.168.1.2/path"] {
+        for address in ["0.0.0.0", "8.8.8.8", "example.com", "169.254.169.254", "100.63.255.255", "100.128.0.1", "172.32.0.1", "::", "fe80::1", "fd7a:115c:a1df::1", "fd7a:115c:a1e1::1", "fd00::1", "2606:4700:4700::1111", "user@192.168.1.1", "192.168.1.2/path"] {
             XCTAssertThrowsError(try RemoteBootstrap.decodePairingText(payload(host: address)), address)
         }
         for port in [0, -1, 65536] { XCTAssertThrowsError(try RemoteBootstrap.decodePairingText(payload(port: port))) }
