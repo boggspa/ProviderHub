@@ -61,8 +61,24 @@ public final class CompanionModel: ObservableObject {
                 let next = saved ?? store.selectedID ?? store.chats.first?.id
                 selectedChatID = next
                 if let next, store.selectedID != next { select(next) }
+                if let next, store.selectedID == next { requestControls(next) }
+            } else if message["method"] as? String == "session.delta",
+                      let event = (message["params"] as? [String: Any])?["event"] as? [String: Any],
+                      ["selected", "snapshot"].contains(event["event"] as? String ?? ""),
+                      let next = store.selectedID {
+                if selectedChatID == nil || !store.chats.contains(where: { $0.id == selectedChatID }) {
+                    selectedChatID = next
+                }
+                if next == selectedChatID {
+                requestControls(next)
+                }
             }
             if store.needsSnapshot { connection.snapshot() }
+            if let selected = selectedChatID, !store.chats.contains(where: { $0.id == selected }),
+               let replacement = store.selectedID, store.chats.contains(where: { $0.id == replacement }) {
+                selectedChatID = replacement
+                requestControls(replacement)
+            }
         } catch { status = "Invalid server event" }
     }
 
@@ -82,6 +98,12 @@ public final class CompanionModel: ObservableObject {
     public func select(_ id: String) {
         selectedChatID = id
         link?.send(RemoteCommand(method: "chat.select", requestId: UUID().uuidString, chat: id))
+    }
+    private func requestControls(_ id: String) {
+        guard controlSurfaceAvailable else { return }
+        var command = RemoteCommand(method: "chat.control", requestId: UUID().uuidString, chat: id)
+        command.action = "remote_inspect"; command.arguments = [:]
+        link?.send(command)
     }
 
     public func apply(method: String, snapshot: RemoteSnapshot? = nil, delta: RemoteDelta? = nil, requestId: String? = nil, ok: Bool? = nil) {
@@ -122,6 +144,11 @@ public struct CompanionView: View {
     @State private var settings = false
     @State private var scanAfterSettings = false
     @State private var chatList = false
+    @State private var inspector = false
+    @State private var inspectorTab: RemoteInspectorTab = .agents
+    @State private var permissionChange: String?
+    @State private var choosingModel = false
+    @State private var viewWidth: CGFloat = 0
     @AppStorage("companionAppearance") private var appearance = "system"
     @AppStorage("companionSurface") private var surfaceStyle = "solid"
 
@@ -140,7 +167,8 @@ public struct CompanionView: View {
                     CompanionTheme.hairline.frame(height: 1)
                     if let chat = model.selectedChat {
                         if model.store.selectedID == chat.id {
-                            CompanionTranscript(entries: model.store.entries, chat: chat, connected: model.isConnected) { question, answers, dismiss in
+                            CompanionTranscript(entries: model.store.entries, chat: chat, connected: model.isConnected,
+                                models: model.models, members: model.members, fallbackRoute: String(model.configuration["choice"].text.split(separator: "|").first ?? "")) { question, answers, dismiss in
                                 model.answerQuestion(question, chat: chat.id, answers: answers, dismiss: dismiss)
                             }.id(chat.id)
                         } else {
@@ -151,7 +179,12 @@ public struct CompanionView: View {
                         composer(chat)
                     } else { welcome }
                 }.frame(maxWidth: .infinity, maxHeight: .infinity)
+                if !horizontalInspectorIsSheet && inspector, model.selectedChat != nil {
+                    CompanionTheme.hairline.frame(width: 1)
+                    CompanionInspector(model: model, tab: $inspectorTab).frame(width: min(370, geometry.size.width * 0.32))
+                }
             }
+            .onChange(of: geometry.size.width, initial: true) { _, width in viewWidth = width }
         }
         .foregroundStyle(CompanionTheme.ink)
         .background {
@@ -167,6 +200,25 @@ public struct CompanionView: View {
         .sheet(isPresented: $settings, onDismiss: {
             if scanAfterSettings { scanAfterSettings = false; scanning = true }
         }) { settingsSheet }
+        .sheet(isPresented: $choosingModel) {
+            CompanionRoutePicker(model: model) { row in model.configure(["choice": row["id"], "effort": .string("")]) }
+        }
+        .sheet(isPresented: Binding(get: { inspector && horizontalInspectorIsSheet }, set: { inspector = $0 })) {
+            NavigationStack {
+                CompanionInspector(model: model, tab: $inspectorTab)
+                    .navigationTitle("Inspector")
+                    .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Done") { inspector = false } } }
+            }.presentationDetents([.large])
+        }
+        .confirmationDialog("Change permissions for this chat?", isPresented: Binding(get: { permissionChange != nil }, set: { if !$0 { permissionChange = nil } })) {
+            if let mode = permissionChange {
+                Button("Use \(permissionLabel(mode))", role: mode == "yolo" ? .destructive : nil) {
+                    model.configure(["approvalMode": .string(mode)]); permissionChange = nil
+                }
+            }
+        } message: {
+            Text(permissionChange == "yolo" ? "YOLO allows available tools on your Mac without approval prompts. This also applies to the Team." : "This changes the Mac’s approval policy for this chat and its Team.")
+        }
         #if os(iOS)
         .sheet(isPresented: $scanning) {
             PairingScannerView { text in
@@ -189,6 +241,11 @@ public struct CompanionView: View {
                 Spacer(minLength: 4)
                 Circle().fill(model.isConnected ? Color.green : CompanionTheme.secondary).frame(width: 6, height: 6)
                 Text(model.isConnected ? "Mac connected" : "Offline").font(.caption2).foregroundStyle(CompanionTheme.secondary)
+                if model.selectedChat != nil {
+                    Button { inspector.toggle() } label: { Image(systemName: "sidebar.right").frame(width: 40, height: 40) }
+                        .accessibilityLabel("Show inspector")
+                        .keyboardShortcut("i", modifiers: [.command, .option])
+                }
                 Button { settings = true } label: { Image(systemName: "gearshape").frame(width: 40, height: 40) }
                     .accessibilityLabel("Connection and appearance settings")
             }.buttonStyle(.plain)
@@ -196,13 +253,64 @@ public struct CompanionView: View {
                 VStack(alignment: .leading, spacing: 5) {
                     Text(chat.title).font(.headline).lineLimit(1)
                     HStack(spacing: 6) {
-                        Circle().fill(chat.providerAccent).frame(width: 6, height: 6)
-                        Text(chat.displayModel).font(.caption.weight(.medium))
+                        CompanionProviderMark(presentation: CompanionBranding.presentation(route: chat.route ?? String(model.configuration["choice"].text.split(separator: "|").first ?? ""), label: chat.displayModel, models: model.models), size: 15)
+                        if model.team["enabled"].flag {
+                            Button { inspectorTab = .agents; inspector = true } label: {
+                                Text("Team · \(model.members.count) models").font(.caption.weight(.medium))
+                            }.buttonStyle(.plain)
+                        } else {
+                            Button { choosingModel = true } label: {
+                                HStack(spacing: 5) { Text(chat.displayModel).font(.caption.weight(.medium)); Image(systemName: "chevron.down").font(.system(size: 9)) }
+                            }.buttonStyle(.plain)
+                                .disabled(!model.isConnected || model.configuration["busy"].flag || !model.controlSurfaceAvailable)
+                        }
+                        Menu {
+                            ForEach(["manual", "accept_edits", "yolo"], id: \.self) { mode in
+                                Button(permissionLabel(mode)) { permissionChange = mode }
+                            }
+                        } label: {
+                            Label(permissionLabel(model.configuration["approvalMode"].text.isEmpty ? chat.approvalMode ?? "manual" : model.configuration["approvalMode"].text), systemImage: "lock.shield")
+                                .font(.caption)
+                        }.disabled(!model.isConnected || model.configuration["busy"].flag || !model.controlSurfaceAvailable)
+                        if !model.team["enabled"].flag {
+                            Menu {
+                                Button("Default") { model.configure(["effort": .string("")]) }
+                                ForEach(model.models.first(where: { $0["id"] == model.configuration["choice"] })?["efforts"].rows ?? [], id: \.self) { effort in
+                                    Button(effort.text.capitalized) { model.configure(["effort": effort]) }
+                                }
+                            } label: {
+                                Text(model.configuration["effort"].text.isEmpty ? "Reasoning" : model.configuration["effort"].text.capitalized).font(.caption)
+                            }.disabled(!model.isConnected || model.configuration["busy"].flag || !model.controlSurfaceAvailable)
+                        }
                         Text("· On your Mac").font(.caption).foregroundStyle(CompanionTheme.secondary)
                     }.lineLimit(1)
+                    if model.team["enabled"].flag {
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            HStack(spacing: 8) {
+                                ForEach(model.members, id: \.self) { member in
+                                    Button { inspectorTab = .agents; inspector = true } label: {
+                                        let brand = CompanionBranding.presentation(route: member["route"].text.isEmpty ? String(member["choice"].text.split(separator: "|").first ?? "") : member["route"].text, label: member["label"].text, models: model.models)
+                                        ChatSharedMemberChip(name: member["name"].text, model: member["label"].text,
+                                            used: member["usage"].optionalInt, limit: member["context"].optionalInt,
+                                            active: member["status"].text == "working", accent: brand.accent,
+                                            ink: CompanionTheme.ink, secondary: CompanionTheme.secondary) {
+                                                CompanionProviderMark(presentation: brand, size: 13)
+                                            }.padding(.vertical, 6)
+                                    }.buttonStyle(.plain)
+                                }
+                            }
+                        }
+                    }
                 }.padding(.bottom, 12)
             }
         }.padding(.horizontal, CompanionTheme.margin)
+    }
+
+    private var horizontalInspectorIsSheet: Bool {
+        viewWidth < 1000
+    }
+    private func permissionLabel(_ mode: String) -> String {
+        switch mode { case "accept_edits": return "Accept Edits"; case "yolo": return "YOLO"; default: return "Manual" }
     }
 
     private var sidebar: some View {
@@ -259,6 +367,8 @@ public struct CompanionView: View {
 
     private var pairingControls: some View {
         VStack(alignment: .leading, spacing: 14) {
+            Text("Away from home? Connect Tailscale on your iPhone and Mac to the same tailnet, then pair using the Mac’s Tailscale IP. Works over cellular and other Wi-Fi networks. Keep Provider Hub running on your Mac.")
+                .font(.caption).foregroundStyle(CompanionTheme.secondary)
             #if os(iOS)
             Button {
                 if settings { scanAfterSettings = true; settings = false }

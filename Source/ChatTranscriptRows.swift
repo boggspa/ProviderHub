@@ -36,19 +36,11 @@ struct ChatSpeakerHeader: View {
     @Environment(\.chatTextStyle) private var textStyle
 
     var body: some View {
-        HStack(spacing: textStyle.scaled(7)) {
-            ChatProviderIcon(presentation: presentation, size: textStyle.scaled(15))
-            Text(member ?? label).font(textStyle.system(12, weight: .semibold)).foregroundStyle(Semantic.ink)
-            if member != nil { Text(label).font(textStyle.system(11.5)).foregroundStyle(Semantic.secondaryInk) }
-            if let timestamp = ChatSectionTime.label(time) {
-                Text(timestamp).font(textStyle.system(10.5)).foregroundStyle(Semantic.secondaryInk)
-                    .help(ChatSectionTime.help(time) ?? timestamp)
-            }
-            if live { ProgressView().controlSize(.mini).tint(accent).accessibilityLabel("Working") }
+        ChatSharedSpeakerHeader(member: member, label: label, timestamp: ChatSectionTime.label(time),
+            accent: accent, ink: Semantic.ink, secondary: Semantic.secondaryInk, live: live, scale: textStyle.scaled(1)) {
+                ChatProviderIcon(presentation: presentation, size: textStyle.scaled(15))
         }
-        .lineLimit(1)
-        .accessibilityElement(children: .combine)
-        .accessibilityAddTraits(.isHeader)
+        .help(ChatSectionTime.help(time) ?? label)
     }
 }
 
@@ -459,39 +451,8 @@ struct PatchText: View {
     var text: String
     var onDark = false
     var size: CGFloat = 11.5
-    private static let lineLimit = 600
-
     var body: some View {
-        Text(attributed).font(.system(size: size, design: .monospaced)).textSelection(.enabled)
-            .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    private var attributed: AttributedString {
-        let lines = text.split(separator: "\n", omittingEmptySubsequences: false)
-        let isPatch = lines.contains { $0.hasPrefix("@@") || $0.hasPrefix("+++ ") || $0.hasPrefix("--- ") || $0.hasPrefix("*** ") }
-        var result = AttributedString()
-        for (index, line) in lines.prefix(Self.lineLimit).enumerated() {
-            var piece = AttributedString(String(line))
-            piece.foregroundColor = isPatch ? colour(line) : ink
-            result.append(piece)
-            if index < lines.count - 1 { result.append(AttributedString("\n")) }
-        }
-        if lines.count > Self.lineLimit {
-            var more = AttributedString("… \(lines.count - Self.lineLimit) more lines")
-            more.foregroundColor = secondaryInk
-            result.append(more)
-        }
-        return result
-    }
-
-    private var ink: Color { onDark ? .white.opacity(0.88) : Semantic.ink }
-    private var secondaryInk: Color { onDark ? .white.opacity(0.5) : Semantic.secondaryInk }
-
-    private func colour(_ line: Substring) -> Color {
-        if line.hasPrefix("+++") || line.hasPrefix("---") || line.hasPrefix("@@") || line.hasPrefix("*** ") { return secondaryInk }
-        if line.hasPrefix("+") { return Color(nsColor: .systemGreen) }
-        if line.hasPrefix("-") { return Color(nsColor: .systemRed) }
-        return ink
+        ChatSharedPatchText(text: text, onDark: onDark, size: size, ink: Semantic.ink, secondaryInk: Semantic.secondaryInk)
     }
 }
 

@@ -11,13 +11,23 @@ targets:
     platform: iOS
     sources:
       - Sources/ProviderHubCompanion
+      - Resources
     dependencies:
       - package: ProviderHubRemote
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.providerhub.companion
+        DEVELOPMENT_TEAM: 8CZML8FK2D
+        MARKETING_VERSION: "0.1.1"
+        CURRENT_PROJECT_VERSION: "2"
+        TARGETED_DEVICE_FAMILY: "1,2"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        INFOPLIST_KEY_CFBundleDisplayName: Provider Hub
+        INFOPLIST_KEY_ITSAppUsesNonExemptEncryption: NO
         SWIFT_VERSION: "5.0"
         GENERATE_INFOPLIST_FILE: YES
-        INFOPLIST_KEY_NSLocalNetworkUsageDescription: Connect to your paired Mac on your private network.
+        INFOPLIST_KEY_NSLocalNetworkUsageDescription: Connect to your paired Mac over your LAN or Tailscale network.
         INFOPLIST_KEY_NSCameraUsageDescription: Scan the pairing QR code shown by Provider Hub on your Mac.
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone: "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight"
+        INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad: "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight"
