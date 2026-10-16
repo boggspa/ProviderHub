@@ -268,6 +268,56 @@ struct ChatTranscriptSegment<Item: ChatTranscriptItem>: Identifiable {
     }
 }
 
+/// Added/removed counts from recorded patches; headers never count as edits.
+struct ChatPatchStats: Equatable {
+    var added = 0
+    var removed = 0
+
+    static func count(_ text: String) -> ChatPatchStats? {
+        var stats = ChatPatchStats()
+        var isPatch = false
+        for line in text.split(separator: "\n", omittingEmptySubsequences: false) {
+            if line.hasPrefix("@@") || line.hasPrefix("*** ") || line.hasPrefix("+++ ") || line.hasPrefix("--- ") { isPatch = true; continue }
+            if line.hasPrefix("+") { stats.added += 1 } else if line.hasPrefix("-") { stats.removed += 1 }
+        }
+        return isPatch && stats.added + stats.removed > 0 ? stats : nil
+    }
+
+    static func + (lhs: ChatPatchStats, rhs: ChatPatchStats) -> ChatPatchStats {
+        ChatPatchStats(added: lhs.added + rhs.added, removed: lhs.removed + rhs.removed)
+    }
+}
+
+/// Shared summary of the exact records in a folded tool run. Keep glyph order,
+/// counts, failures and the latest step identical on both shells.
+struct ChatToolFoldSummary: Equatable {
+    var glyphs: [String]
+    var activity: String
+    var files: Int
+    var stats: ChatPatchStats?
+    var failed: Bool
+    var latest: String
+
+    static func collect<Item: ChatTranscriptItem>(_ items: [Item]) -> Self {
+        var glyphs: [String] = []
+        for item in items {
+            let glyph = ChatToolDisplay.glyph(item.tool)
+            if !glyphs.contains(glyph) { glyphs.append(glyph) }
+        }
+        let patches = items.filter { $0.tool == "apply_patch" }.compactMap {
+            ChatPatchStats.count($0.detail?.isEmpty == false ? $0.detail! : $0.text)
+        }
+        let latest = items.last.map {
+            ChatToolDisplay.describe(tool: $0.tool, summary: $0.summary ?? $0.text, live: $0.detail == "Running…")
+        }
+        return Self(glyphs: Array(glyphs.prefix(3)), activity: ChatToolDisplay.activity(items.map(\.tool)),
+            files: Set(items.flatMap(\.changedFiles)).count,
+            stats: patches.isEmpty ? nil : patches.reduce(ChatPatchStats(), +),
+            failed: items.contains(where: \.isError),
+            latest: latest.map { $0.verb + ($0.subject.isEmpty ? "" : " " + $0.subject) } ?? "")
+    }
+}
+
 /// What a Team's collective turn did to files, read from its recorded patches:
 /// one row per file, in first-touched order, with the members who changed it,
 /// its line counts and its diff sections. Edits made through shell commands

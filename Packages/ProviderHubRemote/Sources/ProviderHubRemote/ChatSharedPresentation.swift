@@ -1,5 +1,51 @@
 import SwiftUI
 
+struct ChatSharedPatchStatsLabel: View {
+    var stats: ChatPatchStats
+    var size: CGFloat = 11
+    var body: some View {
+        HStack(spacing: 4) {
+            Text("+\(stats.added)").foregroundStyle(.green)
+            Text("−\(stats.removed)").foregroundStyle(.red)
+        }.font(.system(size: size, weight: .medium, design: .monospaced)).fixedSize()
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("\(stats.added) lines added, \(stats.removed) removed")
+    }
+}
+
+/// One folded tool-run header, including provider-accented glyphs. Platform
+/// wrappers supply their theme and interaction, while this layout stays shared.
+struct ChatSharedFoldHeader: View {
+    var summary: ChatToolFoldSummary
+    var live: Bool
+    var open: Bool
+    var accent: Color
+    var ink: Color
+    var secondary: Color
+    var scale: CGFloat = 1
+    var hovering = false
+    var body: some View {
+        HStack(spacing: 7 * scale) {
+            HStack(spacing: 1 * scale) {
+                ForEach(summary.glyphs, id: \.self) { ChatToolGlyph(name: $0, size: 15 * scale).foregroundStyle(accent) }
+            }
+            ChatSharedShimmerText(text: live ? "Working" : "Worked", active: live, accent: accent, base: ink)
+                .font(.system(size: 12 * scale, weight: .medium)).fixedSize()
+            Text("· " + summary.activity + (summary.files > 0 ? " · \(summary.files) \(summary.files == 1 ? "file" : "files")" : ""))
+                .font(.system(size: 11.5 * scale)).foregroundStyle(secondary).lineLimit(1)
+            if let stats = summary.stats { ChatSharedPatchStatsLabel(stats: stats, size: 11 * scale) }
+            if summary.failed { Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 10 * scale)).foregroundStyle(.red) }
+            if !open, live, !summary.latest.isEmpty {
+                Text(summary.latest).font(.system(size: 11.5 * scale))
+                    .foregroundStyle(.tertiary).lineLimit(1).truncationMode(.middle)
+            }
+            Spacer(minLength: 0)
+            Image(systemName: "chevron.right").font(.system(size: 8.5 * scale, weight: .semibold)).foregroundStyle(secondary)
+                .rotationEffect(.degrees(open ? 90 : 0)).opacity(hovering || open ? 1 : 0.4)
+        }
+    }
+}
+
 /// Shared chrome primitives. The Mac supplies its theme/font scale and the
 /// companion supplies the same semantics with iOS Dynamic Type scaling.
 struct ChatSharedSpeakerHeader<Mark: View>: View {

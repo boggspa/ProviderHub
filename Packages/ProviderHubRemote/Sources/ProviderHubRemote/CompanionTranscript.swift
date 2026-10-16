@@ -19,6 +19,22 @@ struct RemoteTranscriptItem: ChatTranscriptItem {
     var changedFiles: [String] { entry.changedFiles }
 }
 
+/// A recorded streaming flag describes the row's transport state, not whether
+/// that model round is still active. Match desktop's current-entry selection
+/// so empty placeholders from previous rounds cannot split a tool fold.
+enum CompanionTranscriptState {
+    static func liveEntryIDs(entries: [RemoteEntry], runIsOpen: Bool, activities: [CompanionActivity]) -> Set<String> {
+        guard runIsOpen else { return [] }
+        if !activities.isEmpty {
+            return Set(activities.filter { $0.description.live && !$0.entryID.isEmpty }.map(\.entryID))
+        }
+        // Solo hosts without activity metadata can still identify their last
+        // row. Team liveness requires the member's current contribution.
+        guard let last = entries.last, last.memberID.isEmpty, last.memberName.isEmpty else { return [] }
+        return [last.id]
+    }
+}
+
 struct CompanionTranscript: View {
     let entries: [RemoteEntry]
     let chat: RemoteChat
@@ -37,16 +53,18 @@ struct CompanionTranscript: View {
     var answer: (RemoteQuestion, [String: [String]], Bool) -> Void = { _, _, _ in }
     @State private var followsLatest = true
     @State private var expanded = Set<String>()
+    @State private var foldChoice: [String: Bool] = [:]
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @ScaledMetric(relativeTo: .body) private var textSize: CGFloat = 13
 
     private var scale: CGFloat { textSize / 13 }
     private var items: [RemoteTranscriptItem] { entries.map(RemoteTranscriptItem.init) }
     private var outline: [ChatTranscriptSegment<RemoteTranscriptItem>] {
-        ChatTranscriptSegment.outline(items, open: runIsOpen, isLive: { $0.entry.isLive })
+        let live = liveEntryIDs
+        return ChatTranscriptSegment.outline(items, open: runIsOpen, isLive: { live.contains($0.id) })
     }
     private var liveEntryIDs: Set<String> {
-        guard runIsOpen else { return [] }
-        return Set(activities.filter { $0.description.live && !$0.entryID.isEmpty }.map(\.entryID))
+        CompanionTranscriptState.liveEntryIDs(entries: entries, runIsOpen: runIsOpen, activities: activities)
     }
     private var liveSpeakerIDs: Set<String> {
         var result = Set<String>()
@@ -78,23 +96,12 @@ struct CompanionTranscript: View {
                             switch segment.content {
                             case .speaker(let item): speaker(item, live: liveSpeakerIDs.contains(segment.id))
                             case .entry(let item): row(item)
-                            case .fold(let items):
-                                let live = activities.contains { activity in items.contains { $0.id == activity.entryID } && activity.description.live }
-                                DisclosureGroup(isExpanded: expandedBinding(segment.id)) {
-                                    VStack(alignment: .leading, spacing: 6 * scale) { ForEach(items, id: \.id) { row($0) } }.padding(.top, 6 * scale)
-                                } label: {
-                                    HStack(spacing: 7 * scale) {
-                                        ChatSharedShimmerText(text: live ? "Working" : "Worked", active: live,
-                                            accent: items.first.map(presentation)?.accent ?? chat.providerAccent, base: CompanionTheme.ink)
-                                            .font(.system(size: 12 * scale, weight: .medium))
-                                        Text(ChatToolDisplay.activity(items.map(\.tool))).font(.system(size: 11.5 * scale)).foregroundStyle(CompanionTheme.secondary)
-                                    }
-                                }.tint(CompanionTheme.secondary)
+                            case .fold(let items): fold(items)
                             case .changes(let items): changes(items)
                             }
                         }.padding(.top, gap(segment.spacing)).id(segment.id)
                     }
-                    if runIsOpen && activities.isEmpty && entries.last?.isLive != true {
+                    if runIsOpen && activities.isEmpty && liveEntryIDs.isEmpty {
                         HStack(spacing: 8) {
                             ProgressView().controlSize(.small).tint(chat.providerAccent)
                             Text("Thinking…").font(.system(size: textSize)).foregroundStyle(CompanionTheme.secondary)
@@ -122,7 +129,7 @@ struct CompanionTranscript: View {
                     }
                 }
                 if let target {
-                    if case .fold = target.content { expanded.insert(target.id) }
+                    if case .fold = target.content { foldChoice[target.id] = true }
                     followsLatest = false; proxy.scrollTo(target.id, anchor: .center)
                 }
             }
@@ -172,7 +179,7 @@ struct CompanionTranscript: View {
         case "assistant":
             let reply = ChatReplySources.split(entry.text)
             VStack(alignment: .leading, spacing: 8 * scale) {
-                if ChatReplySources.isBlank(reply.body), entry.isLive {
+                if ChatReplySources.isBlank(reply.body), liveEntryIDs.contains(item.id) {
                     ChatSharedShimmerText(text: "Thinking…", active: runIsOpen, accent: brand.accent, base: CompanionTheme.secondary)
                         .font(.system(size: textSize))
                 } else { CompanionMessageText(text: reply.body, size: textSize) }
@@ -186,7 +193,7 @@ struct CompanionTranscript: View {
         }
     }
     private func tool(_ item: RemoteTranscriptItem, brand: CompanionPresentation) -> some View {
-        let live = runIsOpen && item.detail == "Running…"
+        let live = liveEntryIDs.contains(item.id) && item.detail == "Running…"
         let display = ChatToolDisplay.describe(tool: item.tool, summary: item.summary ?? item.text, live: live)
         return VStack(alignment: .leading, spacing: 6 * scale) {
             Button { withAnimation(.easeInOut(duration: 0.15)) { toggle(item.id) } } label: {
@@ -235,8 +242,33 @@ struct CompanionTranscript: View {
         switch spacing { case .none: return 0; case .speaker: return 26 * scale; case .header, .item: return 6 * scale }
     }
     private func toggle(_ id: String) { if expanded.contains(id) { expanded.remove(id) } else { expanded.insert(id) } }
-    private func expandedBinding(_ id: String) -> Binding<Bool> {
-        Binding(get: { expanded.contains(id) }, set: { value in if value { expanded.insert(id) } else { expanded.remove(id) } })
+    private func fold(_ items: [RemoteTranscriptItem]) -> some View {
+        let id = ChatTranscriptSegment<RemoteTranscriptItem>.foldID(items)
+        let open = foldChoice[id] ?? items.contains { expanded.contains($0.id) }
+        let live = items.contains { liveEntryIDs.contains($0.id) }
+        let summary = ChatToolFoldSummary.collect(items)
+        return VStack(alignment: .leading, spacing: 4 * scale) {
+            Button {
+                if reduceMotion { foldChoice[id] = !open }
+                else { withAnimation(.easeInOut(duration: 0.15)) { foldChoice[id] = !open } }
+            } label: {
+                ChatSharedFoldHeader(summary: summary, live: live, open: open,
+                    accent: items.first.map(presentation)?.accent ?? chat.providerAccent,
+                    ink: CompanionTheme.ink, secondary: CompanionTheme.secondary, scale: scale)
+                    .padding(.horizontal, 6).padding(.vertical, 4 * scale)
+                    .contentShape(Rectangle()).padding(.horizontal, -6)
+            }.buttonStyle(.plain)
+                .accessibilityLabel((live ? "Working, " : "Worked, ") + summary.activity)
+                .accessibilityValue(open ? "Expanded" : "Collapsed")
+            if open {
+                VStack(alignment: .leading, spacing: 2 * scale) {
+                    ForEach(items, id: \.id) { row($0).id($0.id) }
+                }.padding(.leading, 18 * scale)
+                    .overlay(alignment: .leading) {
+                        CompanionTheme.hairline.frame(width: 1).padding(.leading, 7 * scale).padding(.vertical, 2)
+                    }
+            }
+        }
     }
 }
 
