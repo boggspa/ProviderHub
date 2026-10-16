@@ -41,6 +41,10 @@ wait blocked the main queue, the graceful-shutdown Task never ran, and the
 installer was never launched; builds up to 0.5.18 (82) have that defect, so
 their **Restart** hangs and needs one manual update.
 
+**Version 0.5.19 (build 83) fixes that restart path.** Install this version
+manually once if an older copy hangs on Restart. Later updates can then use
+the in-app updater; the signature, checksum and rollback checks are unchanged.
+
 This updater first ships in the release containing this change. Older copies
 need one manual download before they can show the Update pill. The classic Hub
 layout continues to use its existing header; the pill appears in compact Hub

@@ -1,4 +1,4 @@
-# Provider Hub 0.5.15 (build 79)
+# Provider Hub 0.5.19 (build 83)
 
 Use your model accounts inside Claude Desktop, the Codex coding workspace, or Provider Hub's lightweight **Chat with Model…** window. See [Chat in Provider Hub](docs/chat.md) for its tools, attachments, approvals and model switching.
 
@@ -234,7 +234,7 @@ provider-specific reasoning history.
 
 ## What has been checked
 
-Build 79's combined source passes 2,436 pytest tests with CPython 3.13 and Node available, with no skips. Native fixture rendering and pointer checks cover the revised inspector, Blackboard and pane dividers. In earlier live checks, the
+Build 83 combines the companion relay, shared Mac/iOS presentation, current native Codex context budgets, provider conversation continuity and the updater restart fix. Release checks cover the Python suite, Swift companion tests, macOS/iOS 17 source typechecks, native updater shutdown, and signed artifact verification. Native fixture rendering and pointer checks cover the inspector, Blackboard and pane dividers. In earlier live checks, the
 installed Codex engine completed read/edit/read cycles using Ollama's
 DeepSeek V4 Flash cloud route and Cerebras GPT OSS 120B. Their reported context
 limits were preserved. Other provider translations have deterministic protocol
