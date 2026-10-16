@@ -49,6 +49,9 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import atexit
+from contextlib import nullcontext
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Iterable, Iterator
 
@@ -58,6 +61,8 @@ from cli_tool_call import TOOL_RESULTS_KEY, TRANSCRIPT_HEADER, ToolCallError, tr
 from cli_structured_reply import parse_reply
 from cli_images import write_images
 from agy_context import MAX_PROMPT_BYTES, ContextReads, package_prompt
+from codex_session_pool import SessionPool, digest, history_blocks
+from cli_conversation import Receipt, completed_delta, scope as conversation_scope
 
 try:  # Repo-native effort ladder; degrade to a local copy if unavailable.
     from effort_map import map_effort as _map_effort
@@ -1180,6 +1185,8 @@ def _translate(payload: Any, state: _TurnState) -> list[dict]:
         result = payload.get("result")
         if not isinstance(result, dict):
             return []
+        state.conversation_id = result.get("conversation_id")
+        state.usage = result.get("usage")
         if state.structured and state.saw_tool_step:
             state.failure = "agy ended with an unresolved native tool request; no host action was dispatched."
             state.failure_status = 400
@@ -1311,7 +1318,7 @@ def _describe(exc: BaseException, state: _TurnState | None = None,
     return text + extra
 
 
-def run_turn(request, *, spawner=None, timeout=300) -> Iterator[dict]:
+def _single_turn(request, *, spawner=None, timeout=300, retained=None) -> Iterator[dict]:
     """Stream one stateless turn as text_delta / thinking_delta / message_stop.
 
     Always terminates with exactly one message_stop or error event, and never
@@ -1362,12 +1369,14 @@ def run_turn(request, *, spawner=None, timeout=300) -> Iterator[dict]:
                 "switch this route to API-key credentials"
             )
         argv[0] = binary
+        if retained is not None:
+            argv[argv.index("--input-format") + 1] = "stream-json"
         if request.get("host_tool_schema"):
             state.structured = True
             state.tools = request.get("tools") or []
             state.tool_choice = request.get("tool_choice")
             argv += ["--json-schema", json.dumps(request["host_tool_schema"], ensure_ascii=False)]
-        if state.structured or request.get("images") or len(prompt.encode("utf-8")) > MAX_PROMPT_BYTES:
+        if retained is not None or state.structured or request.get("images") or len(prompt.encode("utf-8")) > MAX_PROMPT_BYTES:
             workspace_path = str(Path(tempfile.mkdtemp(prefix="agy_host_")).resolve())
             argv += ["--add-dir", workspace_path]
         suffix = ""
@@ -1407,6 +1416,8 @@ def run_turn(request, *, spawner=None, timeout=300) -> Iterator[dict]:
             spawner=spawner,
             stderr=state.stderr_handle,
         )
+        if retained is not None:
+            retained.session, retained.workspace, retained.state = session, workspace_path, state
     except Exception as exc:
         message = _describe(exc, state, timeout)
         if workspace_path:
@@ -1418,8 +1429,9 @@ def run_turn(request, *, spawner=None, timeout=300) -> Iterator[dict]:
 
     stop_reason = state.stop_reason or "end_turn"
     try:
-        with session:
-            _write_prompt(session, prompt)
+        with nullcontext(session) if retained is not None else session:
+            if retained is not None: _write_frame(session, prompt)
+            else: _write_prompt(session, prompt)
             for kind, payload in _iter_events(session, timeout=timeout):
                 if kind == "raw":
                     state.raw_lines.append(payload)
@@ -1456,6 +1468,7 @@ def run_turn(request, *, spawner=None, timeout=300) -> Iterator[dict]:
                     if fallback:
                         state.emitted_text = True
                         yield {"type": "text_delta", "text": fallback}
+                    if retained is not None: retained.completed = True
                     yield {"type": "message_stop", "stop_reason": state.stop_reason or "end_turn"}
                     return
 
@@ -1500,6 +1513,173 @@ def run_turn(request, *, spawner=None, timeout=300) -> Iterator[dict]:
                 shutil.rmtree(workspace_path, ignore_errors=True)
             if state.stderr_handle is not None:
                 state.stderr_handle.close()
-        cleanup_after_exit(session, release_files)
+        if retained is None: cleanup_after_exit(session, release_files)
 
     yield {"type": "message_stop", "stop_reason": stop_reason}
+
+
+class _RetainedAgy:
+    session = None
+    workspace = None
+    state = None
+    completed = False
+    usage = None
+    usage_seen = False
+
+    @property
+    def returncode(self):
+        return self.session.returncode if self.session is not None else None
+
+    def close(self):
+        if self.session is not None:
+            self.session.close()
+            def release():
+                if self.state.stderr_handle is not None: self.state.stderr_handle.close()
+                if self.workspace: shutil.rmtree(self.workspace, ignore_errors=True)
+            cleanup_after_exit(self.session, release)
+
+
+_CONVERSATIONS = SessionPool(lambda lease: lease.session.close() if lease.session else None,
+                             capacity=16, idle_ttl=0, pending_ttl=900, label="AntiGravity")
+atexit.register(_CONVERSATIONS.close)
+
+
+@lru_cache(maxsize=8)
+def _streaming_supported(binary, modified, size):
+    # Capability discovery is read-only, keyed by the installed binary. No
+    # model call or credential probe is used to guess protocol availability.
+    try:
+        result = subprocess.run([binary, "--help"], capture_output=True, text=True,
+                                env=minimal_env(), timeout=5)
+        return result.returncode == 0 and "stream-json reads one NDJSON message" in result.stdout + result.stderr
+    except (OSError, subprocess.TimeoutExpired): return False
+
+
+def _write_frame(session, prompt):
+    # Slash commands are CLI control messages, not host-approved model input.
+    if prompt.lstrip().startswith("/"):
+        prompt = "[User message supplied by Provider Hub]\n" + prompt
+    value = json.dumps({"event": "user", "message": {"content": prompt}}, ensure_ascii=False) + "\n"
+    session.stdin.write(value)
+    session.stdin.flush()
+
+
+def _followup(request, live, messages, *, timeout):
+    from cli_routes import _messages_for_cli
+    flattened, _ = _messages_for_cli(messages, None)
+    prompt = render_prompt(flattened)
+    if len(prompt.encode()) > MAX_PROMPT_BYTES:
+        raise AgyCliAgentError("AntiGravity continuation exceeds the inline input limit")
+    old = live.state
+    state = live.state = _TurnState()
+    state.structured, state.tools, state.tool_choice = old.structured, old.tools, old.tool_choice
+    state.hook_root, state.stderr_handle, state.image_paths = old.hook_root, old.stderr_handle, old.image_paths
+    state.context_reads = old.context_reads
+    live.completed = False
+    _write_frame(live.session, prompt)
+    for kind, payload in _iter_events(live.session, timeout=timeout):
+        if kind == "raw": state.raw_lines.append(payload); continue
+        for event in _translate(payload, state): yield event
+        if state.handoff_reply is not None:
+            yield {"type": "text_delta", "text": state.handoff_reply}
+            yield {"type": "message_stop", "stop_reason": "end_turn"}
+            return
+        if state.failure:
+            yield {"type": "error", "message": state.failure}
+            return
+        if state.terminal:
+            if getattr(state, "conversation_id", None) != getattr(old, "conversation_id", None):
+                raise AgyCliAgentError("AntiGravity returned a different conversation")
+            fallback = state.result_suffix()
+            if fallback:
+                state.emitted_text = True
+                yield {"type": "text_delta", "text": fallback}
+            if not state.emitted_text: raise AgyCliAgentError("AntiGravity continuation produced no output")
+            live.completed = True
+            yield {"type": "message_stop", "stop_reason": "end_turn"}
+            return
+    raise AgyCliAgentError("AntiGravity continuation ended without a result")
+
+
+def _matching_delta(entry, history):
+    from cli_routes import _messages_for_cli
+    messages = completed_delta(entry, history)
+    if messages is None: return None
+    flattened, _ = _messages_for_cli(messages, None)
+    # Oversized follow-ups must use the existing lossless context-file path
+    # before any stdin is written, rather than failing after acquiring a lease.
+    return messages if len(render_prompt(flattened).encode()) <= MAX_PROMPT_BYTES else None
+
+
+def _usage_delta(live):
+    value = getattr(live.state, "usage", None)
+    previous = live.usage
+    first = not live.usage_seen
+    live.usage_seen = True
+    live.usage = value
+    fields = ("input_tokens", "output_tokens", "cache_read_tokens")
+    if not isinstance(value, dict) or any(type(value.get(k)) is not int or value[k] < 0 for k in fields): return None
+    if not first and (not isinstance(previous, dict) or any(
+            type(previous.get(k)) is not int or previous[k] < 0 or value[k] < previous[k] for k in fields)): return None
+    totals = {k: value[k] - (previous or {}).get(k, 0) for k in fields}
+    return {"input_tokens": totals["input_tokens"], "output_tokens": totals["output_tokens"],
+            "cache_read_input_tokens": totals["cache_read_tokens"]}
+
+
+def run_turn(request, *, spawner=None, timeout=300, pool=None):
+    scope = conversation_scope(request) if isinstance(request, dict) else None
+    if not scope or not isinstance(request.get("history"), list) or (spawner is not None and pool is None):
+        yield from _single_turn(request, spawner=spawner, timeout=timeout)
+        return
+    binary = _resolve_binary()
+    try:
+        info = Path(binary).stat()
+        supported = _streaming_supported(binary, info.st_mtime_ns, info.st_size)
+    except (OSError, TypeError): supported = False
+    if not supported:
+        yield from _single_turn(request, spawner=spawner, timeout=timeout)
+        return
+    owner = pool or _CONVERSATIONS
+    key = digest({"binary": (binary, info.st_mtime_ns, info.st_size), "request": {
+        k: request.get(k) for k in ("conversation", "connection", "model", "effort", "thinking", "system", "tools",
+                                   "tool_choice", "host_tool_schema", "max_tokens")}})
+    history = request["history"]
+    timing = request.get("_cli_timing")
+    try:
+        lease, reuse = owner.acquire(key, match=lambda entry: _matching_delta(entry, history) is not None,
+                                     timeout=timeout, request_key=digest((key, history_blocks(history))))
+    except Exception as exc:
+        yield {"type": "error", "message": _describe(exc, None, timeout)}
+        return
+    live = lease.session
+    try:
+        if reuse == "resumed":
+            messages = completed_delta(lease, history)
+            lease.pending = None
+            events = _followup(request, live, messages, timeout=timeout)
+        else:
+            live = lease.session = _RetainedAgy()
+            events = _single_turn(request, spawner=spawner, timeout=timeout, retained=live)
+        if timing: timing.label(reuse="resumed" if reuse == "resumed" else "cold")
+        receipt = Receipt()
+        raw = []
+        try:
+            for event in events:
+                if request.get("host_tool_schema") and event.get("type") == "text_delta": raw.append(event.get("text", ""))
+                else: receipt.observe(event)
+                if event.get("type") == "message_stop" and live.completed and getattr(live.state, "conversation_id", None):
+                    if request.get("host_tool_schema"):
+                        text, calls = parse_reply("".join(raw), request.get("tools"), request.get("tool_choice"))
+                        receipt.observe({"type": "text_delta", "text": text})
+                        for call in calls: receipt.observe({"type": "tool_call", **call})
+                    lease.pending = receipt.completed(history, generated_ids=bool(request.get("host_tool_schema")))
+                    usage = _usage_delta(live)
+                    if usage: yield {"type": "usage", "usage": usage}
+                yield event
+        finally: events.close()
+    except Exception as exc:
+        lease.pending = None
+        yield {"type": "error", "message": _describe(exc, None, timeout)}
+    finally:
+        healthy = bool(lease.pending) and (timing is None or timing.delivered)
+        owner.release(lease, healthy=healthy)

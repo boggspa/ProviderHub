@@ -249,6 +249,27 @@ def latest_request(chat):
     return next((e for e in reversed(chat["entries"]) if e.get("kind") == "user"), None)
 
 
+def request_reference(chat, member):
+    """Keep an exact source locator for the latest instruction to this seat.
+
+    Long originals remain in saved history, never replaced with a misleading
+    clipped excerpt. Peer output cannot supply this user-request reference.
+    """
+    item = next((row for row in reversed(chat["entries"])
+                 if row.get("kind") == "user" and _addresses(row, member)), None)
+    if item is None: return None
+    text, identifier = item.get("text", ""), item.get("id")
+    if not isinstance(identifier, str) or not isinstance(text, str): return None
+    note = (f"[Saved user request addressed to you · source {identifier}]\n"
+            f"The original request is {len(text.encode('utf-8'))} UTF-8 bytes. "
+            "It was delivered separately as user input. If it is no longer in your active context, "
+            f"read_history using source {identifier} retrieves it directly; page until complete. "
+            "No excerpt is substituted for the full request. Do not re-read it when it is already available.")
+    if item.get("attachments"):
+        note += "\nThe saved request includes attachments; inspect the source record for their references."
+    return {"role": "user", "content": [{"type": "text", "text": note}]}
+
+
 def _stand_by(team, member):
     """A member the latest message does not tag waits for one that does."""
     member["status"] = "ready"
@@ -718,7 +739,7 @@ def _shared_context_update(chat, member, choice, *, dirty=None):
         # remain reachable by source ID through the shared recall tools.
         if item.get("kind") == "user":
             reference_only = False
-            chosen.append(_tagged(item, member))
+            chosen.append({**_tagged(item, member), "_direct_user": True})
             continue
         kind = item.get("kind")
         if kind == "tool" and item.get("tool") == "react_to_message" and not item.get("isError"):
@@ -759,7 +780,26 @@ def _shared_context_update(chat, member, choice, *, dirty=None):
     reason += "Peer previews are notifications; read full records only when relevant to your task. "
     if shortened: reason += "Previews were shortened; use read_history with the source ID for full text. "
     if omitted: reason += f"{omitted} additional peer records remain in the saved transcript; use search_history to find them. "
-    return portable_history(chosen, vision=choice.get("vision") is not False, reason=reason), reference_only
+    # A real user instruction must not inherit the portable peer-history
+    # disclaimer. Preserve its exact text/attachments on a distinct boundary,
+    # including the first request delivered to a newly added Team member.
+    from chat_history import attachment_content
+    messages, references = [], []
+    def flush_references():
+        if references:
+            messages.extend(portable_history(references, vision=choice.get("vision") is not False, reason=reason))
+            references.clear()
+    for item in chosen:
+        if not item.get("_direct_user"):
+            references.append(item)
+            continue
+        flush_references()
+        content = [{"type": "text", "text": f"[User instruction · source {item['id']}]"}]
+        if item.get("text"): content.append({"type": "text", "text": item["text"]})
+        content.extend(attachment_content(item.get("attachments"), vision=choice.get("vision") is not False))
+        messages.append({"role": "user", "content": content})
+    flush_references()
+    return messages, reference_only
 
 
 def journal_path(store, chat_id):

@@ -885,8 +885,16 @@ def visible_text(content) -> str:
 
 
 def usage_counts(usage):
-    return {"input_tokens": max(0, usage.get("prompt_tokens", 0)),
-            "output_tokens": max(0, usage.get("completion_tokens", 0))}
+    result = {"input_tokens": max(0, usage.get("prompt_tokens", 0)),
+              "output_tokens": max(0, usage.get("completion_tokens", 0))}
+    details = usage.get("prompt_tokens_details")
+    cached = details.get("cached_tokens") if isinstance(details, dict) else None
+    if type(cached) is int and 0 <= cached <= result["input_tokens"]:
+        # Chat Completions counts cache hits inside prompt_tokens; Messages
+        # reports them separately. Split once, never add them to total input.
+        result["input_tokens"] -= cached
+        result["cache_read_input_tokens"] = cached
+    return result
 
 
 def stop_reason(reason, has_tools=False):

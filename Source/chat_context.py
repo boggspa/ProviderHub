@@ -14,6 +14,18 @@ def native_context(choice):
             and choice.get("route", "").split("/", 1)[0] in {"claude", "codex", "grok"})
 
 
+def stable_reference_context(choice):
+    """Reference placement is independent of whether a transport keeps a CLI.
+
+    API caches can reuse a stable prefix too. This is a request-shape policy,
+    not a promise of provider cache hits, billing discounts or native sessions.
+    """
+    provider = choice.get("route", "").split("/", 1)[0]
+    return (native_context(choice) or provider == "antigravity" and choice.get("source") == "cli"
+            or provider in {"kimi", "mistral", "ollama"}
+            and choice.get("source") in {"keychain", "environment", "vibe", "none"})
+
+
 def append_note(messages, text):
     """Attach a trusted host note to the newest result or the current user turn."""
     block = {"type": "text", "text": text}

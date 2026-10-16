@@ -505,6 +505,9 @@ def plan_turn(provider_id: str, upstream_model: str, payload: dict, spec: dict,
         request["host_retries"] = request["lean_harness"] and payload.get("_provider_hub_host_retries") is True
         if request["lean_harness"]:
             request["conversation"] = payload.get("_provider_hub_conversation")
+    if provider_id in {"grok", "antigravity"} and payload.get("_provider_hub_surface") == "chat":
+        request["conversation"] = payload.get("_provider_hub_conversation")
+        request["connection"] = payload.get("_provider_hub_connection")
     thinking = payload.get("thinking")
     if isinstance(thinking, dict):
         request["thinking"] = {key: thinking[key] for key in ("type", "display") if key in thinking}
@@ -545,7 +548,7 @@ def plan_turn(provider_id: str, upstream_model: str, payload: dict, spec: dict,
         if getattr(adapter, "WEB_SEARCH", False) is not True:
             raise CliRouteError("This CLI route cannot run hosted web search.")
         request["web_search"] = search
-    if dynamic_tools or (tools and getattr(adapter, "LIVE_HOST_CALLS", False)):
+    if dynamic_tools or (tools and getattr(adapter, "LIVE_HOST_CALLS", False)) or request.get("conversation"):
         # Keep typed tool calls/results for Codex's native history injection,
         # and for an adapter that matches a host request to the live CLI
         # waiting on its calls. Flattening these loses the tool loop.
