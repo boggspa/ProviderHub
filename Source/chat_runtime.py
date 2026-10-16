@@ -954,14 +954,16 @@ class ChatService:
             board = chat_blackboard.digest_message(memory_chat) if self.role == "team" else None
             progress = chat_execution.progress(self.team_member) if self.role == "team" else None
             request_note = chat_team.request_reference(memory_chat, self.team_member) if self.role == "team" else None
-            if request_note:
-                memory = {"role": "user", "content": [*request_note["content"], *(memory["content"] if memory else [])]}
             if progress:
                 memory = {"role": "user", "content": [*progress["content"], *(memory["content"] if memory else [])]}
         if memory and isinstance(context, int) and context > 0 and estimated_tokens({"messages": [memory]}) > context // 4:
             memory = {"role": "user", "content": [{"type": "text", "text":
                 "[Saved decision notebook omitted because this model's context is small. "
                 "Notes remain saved. Use search_history/read_history to recover original decisions.]"}]}
+        if request_note:
+            # Keep the exact source locator even when the bounded notebook and
+            # progress projection is replaced by its small-context fallback.
+            memory = {"role": "user", "content": [*request_note["content"], *(memory["content"] if memory else [])]}
         if board and isinstance(context, int) and context > 0 and estimated_tokens({"messages": [board]}) > context // 8:
             board = {"role": "user", "content": [{"type": "text", "text":
                 "[Team Blackboard digest omitted because this model's context is small. Posts remain saved; use blackboard_read.]"}]}

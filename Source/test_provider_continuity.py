@@ -269,6 +269,27 @@ class TeamPromptDeliveryTests(unittest.TestCase):
             self.assertEqual(wire.count('Update only this Team'),1)
             self.assertIn('source '+correction['id'],wire)
 
+    def test_request_locator_survives_oversized_notebook_and_progress(self):
+        for provider in ('kimi', 'grok'):
+            for oversized in ('notebook', 'progress'):
+                with self.subTest(provider=provider, oversized=oversized), tempfile.TemporaryDirectory() as directory:
+                    parent,children,choice=team_fixture(Path(directory));child=children[0]
+                    choice={**choice,'route':provider+'/synthetic','source':'keychain','context':16000}
+                    from chat_runtime import entry
+                    correction=entry('user','Exact fresh instruction')
+                    parent.chat['entries'].append(correction)
+                    chat_team.consume_update(child,choice)
+                    large={'role':'user','content':[{'type':'text','text':'oversized context '*20000}]}
+                    with patch('chat_memory.memory_message',return_value=large if oversized=='notebook' else None), \
+                         patch('chat_execution.progress',return_value=large if oversized=='progress' else None):
+                        payload=child.payload(choice)
+                    wire=json.dumps(payload)
+                    self.assertIn('source '+correction['id'],wire)
+                    self.assertIn('Saved decision notebook omitted',wire)
+                    self.assertNotIn('oversized context',wire)
+                    self.assertEqual(wire.count('Exact fresh instruction'),1)
+                    self.assertLess(len(json.dumps(payload['messages'])),8000)
+
     def test_shared_digest_still_bounds_peers_and_keeps_real_instructions_separate(self):
         text='Current user instruction'
         chat={'team':{'members':[{'id':'reader'},{'id':'peer'}]},'entries':[{'kind':'assistant','id':'p','memberID':'peer','memberName':'Peer','text':'x'*20000},
