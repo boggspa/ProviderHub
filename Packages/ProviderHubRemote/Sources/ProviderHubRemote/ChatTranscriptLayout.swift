@@ -126,8 +126,33 @@ struct ChatTranscriptSegment<Item: ChatTranscriptItem>: Identifiable {
 
     /// Paging may cut into a member section. Keep its header with the visible
     /// tail so the first message still has an author and its recorded time.
-    static func visibleTail(_ segments: [Self], limit: Int) -> [Self] {
+    static func visibleTail(_ segments: [Self], limit: Int, liveEntryIDs: Set<String> = []) -> [Self] {
         let start = max(0, segments.count - max(1, limit))
+        // A member's new activity can join a section above the paged tail.
+        // Include only its live segment and author header, not the entire
+        // intervening history. Keep stable IDs/order and avoid duplicates.
+        if !liveEntryIDs.isEmpty {
+            var selected = Set(start..<segments.count)
+            for (index, segment) in segments.enumerated() where index < start {
+                switch segment.content {
+                case .entry(let item) where liveEntryIDs.contains(item.id): selected.insert(index)
+                case .fold(let items) where items.contains(where: { liveEntryIDs.contains($0.id) }): selected.insert(index)
+                default: break
+                }
+            }
+            for index in Array(selected) {
+                switch segments[index].content {
+                case .entry(let item) where item.kind == "assistant" || item.kind == "tool": break
+                case .fold: break
+                default: continue
+                }
+                if let speaker = segments[index].previousSpeaker,
+                   let header = segments[..<index].lastIndex(where: { $0.id == "speaker-" + speaker.id }) {
+                    selected.insert(header)
+                }
+            }
+            return selected.sorted().map { segments[$0] }
+        }
         var tail = Array(segments[start...])
         guard start > 0, let first = tail.first, let speaker = first.previousSpeaker else { return tail }
         switch first.content {

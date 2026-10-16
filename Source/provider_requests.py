@@ -1145,6 +1145,12 @@ def prepare_request(
         reasoning_by_message=normalized_reasoning, estimate_factor=estimate_factor
     )
     reasoning_replay = _requires_cerebras_replay(provider_id, model_spec)
+    if provider_id == "mistral" and anthropic_payload.get("_provider_hub_surface") == "chat":
+        conversation = anthropic_payload.get("_provider_hub_conversation")
+        if isinstance(conversation, str) and 0 < len(conversation) <= 200:
+            body["prompt_cache_key"] = hashlib.sha256(json.dumps([
+                upstream_model, conversation, anthropic_payload.get("_provider_hub_connection")
+            ], separators=(",", ":")).encode()).hexdigest()
     controls = {}
     requested = (anthropic_payload.get("output_config") or {}).get("effort")
     actual = body.get("reasoning_effort")

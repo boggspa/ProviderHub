@@ -531,6 +531,11 @@ struct Item: ChatTranscriptItem {
         check(Segment.visibleTail(Array(grouped.prefix(4)), limit: 1).map(\.id) == ["speaker-o1", "fold-o1"], "Paged tools lost their member header")
         check(Segment.visibleTail(grouped, limit: 100).map(\.id) == grouped.map(\.id), "Unpaged transcript changed")
         check(Segment.visibleTail([], limit: 100).isEmpty, "Empty transcript paging failed")
+        let pagedLive = Segment.visibleTail(grouped, limit: 2, liveEntryIDs: ["o2"])
+        check(pagedLive.map(\.id).contains("fold-o1") && pagedLive.map(\.id).contains("speaker-o1"),
+              "Live tools outside the visible tail lost their section")
+        check(Set(pagedLive.map(\.id)).count == pagedLive.count, "Live paging duplicated a row")
+        check(!pagedLive.map(\.id).contains("fold-s1"), "Live paging expanded unrelated old sections")
         if case .fold(let tools) = grouped[1].content { check(tools.map(\.id) == ["s1", "s2", "s3"], "Sol tools crossed sections") }
         else { fatalError("Sol tools did not fold") }
         if case .fold(let tools) = grouped[3].content { check(tools.map(\.id) == ["o1", "o2", "o3"], "Opus tools crossed sections") }
