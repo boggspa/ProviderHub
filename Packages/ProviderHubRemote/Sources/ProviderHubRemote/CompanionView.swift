@@ -5,6 +5,12 @@ public protocol CompanionLink: AnyObject {
     func send(_ command: RemoteCommand)
 }
 
+public protocol CompanionTransport: CompanionLink {
+    func connect(text: String)
+    func disconnect()
+    func snapshot()
+}
+
 public final class CompanionModel: ObservableObject {
     @Published public var store = CompanionStore()
     @Published public var draft = ""
@@ -20,7 +26,9 @@ public final class CompanionModel: ObservableObject {
     private var pendingDrafts: [String: (String, String)] = [:]
     public weak var link: CompanionLink?
     @Published public var pairingText = ""
-    private let connection = RemoteConnection()
+    private let connection: CompanionTransport
+    private let preferences: UserDefaults
+    private var resumeEnabled = true
     public var selectedChat: RemoteChat? { store.chats.first { $0.id == selectedChatID } }
     public var isConnected: Bool { status == "Connected" }
     public var canSend: Bool {
@@ -29,9 +37,12 @@ public final class CompanionModel: ObservableObject {
             !pendingDrafts.values.contains(where: { $0.0 == selectedChatID && $0.1 == draft })
     }
 
-    public init() {
+    public init(preferences: UserDefaults = .standard, transport: CompanionTransport? = nil) {
+        self.preferences = preferences
+        let native = transport == nil ? RemoteConnection() : nil
+        connection = transport ?? native!
         link = connection
-        connection.onStatus = { [weak self] status, code in
+        native?.onStatus = { [weak self] status, code in
             DispatchQueue.main.async {
                 self?.status = status; self?.confirmCode = code
                 if status.hasPrefix("Disconnected") || status.hasPrefix("Command failed") {
@@ -39,10 +50,10 @@ public final class CompanionModel: ObservableObject {
                 }
             }
         }
-        connection.onMessage = { [weak self] message in
+        native?.onMessage = { [weak self] message in
             DispatchQueue.main.async { self?.receiveRemote(message) }
         }
-        pairingText = UserDefaults.standard.string(forKey: "remote-bootstrap") ?? ""
+        pairingText = preferences.string(forKey: "remote-bootstrap") ?? ""
     }
 
     func receiveRemote(_ message: [String: Any]) {
@@ -85,7 +96,8 @@ public final class CompanionModel: ObservableObject {
     public func connect() {
         do { _ = try RemoteBootstrap.decodePairingText(pairingText) }
         catch { status = error.localizedDescription; return }
-        UserDefaults.standard.set(pairingText, forKey: "remote-bootstrap")
+        resumeEnabled = true
+        preferences.set(pairingText, forKey: "remote-bootstrap")
         connection.connect(text: pairingText)
     }
     public func connect(scannedCode: String) {
@@ -94,7 +106,18 @@ public final class CompanionModel: ObservableObject {
         pairingText = scannedCode
         connect()
     }
-    public func disconnect() { connection.disconnect() }
+    public func disconnect() {
+        resumeEnabled = false
+        connection.disconnect()
+    }
+    /// Resume the pinned Mac endpoint, not an unsubmitted edit in the pairing
+    /// field. Keychain identity and Mac allowlist decide trust as before.
+    public func resumeSavedConnection() {
+        guard resumeEnabled, !isConnected,
+              let saved = preferences.string(forKey: "remote-bootstrap"),
+              (try? RemoteBootstrap.decodePairingText(saved)) != nil else { return }
+        connection.connect(text: saved)
+    }
     public func select(_ id: String) {
         selectedChatID = id
         link?.send(RemoteCommand(method: "chat.select", requestId: UUID().uuidString, chat: id))
@@ -148,6 +171,7 @@ public struct CompanionView: View {
     @State private var inspectorTab: RemoteInspectorTab = .agents
     @State private var permissionChange: String?
     @State private var choosingModel = false
+    @Environment(\.scenePhase) private var scenePhase
     @State private var viewWidth: CGFloat = 0
     @AppStorage("companionAppearance") private var appearance = "system"
     @AppStorage("companionSurface") private var surfaceStyle = "solid"
@@ -192,6 +216,9 @@ public struct CompanionView: View {
             else { CompanionTheme.surface.ignoresSafeArea() }
         }
         .preferredColorScheme(appearance == "light" ? .light : appearance == "dark" ? .dark : nil)
+        .onChange(of: scenePhase, initial: true) { _, phase in
+            if phase == .active { model.resumeSavedConnection() }
+        }
         .sheet(isPresented: $chatList) {
             NavigationStack { sidebar.navigationTitle("Chats").toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Done") { chatList = false } }

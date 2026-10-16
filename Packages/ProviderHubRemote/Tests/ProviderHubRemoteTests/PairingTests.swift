@@ -4,6 +4,61 @@ import XCTest
 
 final class PairingTests: XCTestCase {
     @MainActor
+    func testLaunchRestoresSavedMacAndDisconnectPausesForegroundResume() throws {
+        final class Transport: CompanionTransport {
+            var endpoints: [String] = []
+            var disconnects = 0
+            func connect(text: String) { endpoints.append(text) }
+            func disconnect() { disconnects += 1 }
+            func snapshot() {}
+            func send(_ command: RemoteCommand) {}
+        }
+        let suite = "companion-pairing-test-" + UUID().uuidString
+        let preferences = UserDefaults(suiteName: suite)!
+        defer { preferences.removePersistentDomain(forName: suite) }
+        let transport = Transport()
+        let model = CompanionModel(preferences: preferences, transport: transport)
+        model.resumeSavedConnection()
+        XCTAssertTrue(transport.endpoints.isEmpty)
+        let saved = try payload(host: "100.99.131.73")
+        model.connect(scannedCode: saved)
+        XCTAssertEqual(preferences.string(forKey: "remote-bootstrap"), saved)
+
+        // A new process/model reuses the saved Mac; no QR scan is needed.
+        let reopened = CompanionModel(preferences: preferences, transport: transport)
+        reopened.pairingText = "unsaved edit"
+        reopened.resumeSavedConnection()
+        XCTAssertEqual(transport.endpoints, [saved, saved])
+        reopened.status = "Connected"
+        reopened.resumeSavedConnection()
+        XCTAssertEqual(transport.endpoints.count, 2)
+        reopened.disconnect()
+        reopened.status = "Disconnected"
+        reopened.resumeSavedConnection()
+        XCTAssertEqual(transport.endpoints.count, 2)
+        XCTAssertEqual(transport.disconnects, 1)
+        XCTAssertEqual(preferences.string(forKey: "remote-bootstrap"), saved)
+    }
+
+    @MainActor
+    func testInvalidSavedPairingDoesNotOpenAConnection() {
+        final class Transport: CompanionTransport {
+            var connects = 0
+            func connect(text: String) { connects += 1 }
+            func disconnect() {}
+            func snapshot() {}
+            func send(_ command: RemoteCommand) {}
+        }
+        let suite = "companion-invalid-pairing-test-" + UUID().uuidString
+        let preferences = UserDefaults(suiteName: suite)!
+        defer { preferences.removePersistentDomain(forName: suite) }
+        preferences.set("not a pairing code", forKey: "remote-bootstrap")
+        let transport = Transport()
+        CompanionModel(preferences: preferences, transport: transport).resumeSavedConnection()
+        XCTAssertEqual(transport.connects, 0)
+    }
+
+    @MainActor
     func testFirstChatSubscribesAndReconnectPreservesDraft() async {
         final class Link: CompanionLink {
             var commands: [RemoteCommand] = []
