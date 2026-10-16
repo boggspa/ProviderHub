@@ -423,7 +423,7 @@ gpt-oss-120b-medium	GPT-OSS 120B (Medium)
         self.assertEqual(row["source"], "cli")
         self.assertTrue(row["tools"])
         argv = build_argv(row["id"])
-        self.assertEqual(argv[argv.index("--model") + 1], "gemini-4-argon-medium")
+        self.assertEqual(argv[argv.index("--model") + 1], "gemini-4-argon")
 
     def test_argon_native_rows_collapse_and_route_every_effort(self):
         from agy_cli_agent import build_argv, catalogue
@@ -452,7 +452,7 @@ gpt-oss-120b-medium	GPT-OSS 120B (Medium)
         self.assertEqual(row["effort_modes"], list(expected))
         for effort, rung in expected.items():
             with self.subTest(effort=effort):
-                argv = build_argv(row["id"], effort=effort)
+                argv = build_argv(row["id"], effort=effort, available_rows=row["aliases"])
                 self.assertEqual(argv[argv.index("--model") + 1], f"gemini-4-argon-{rung}")
                 self.assertEqual(argv[argv.index("--effort") + 1], rung)
         for alias in row["aliases"]:
@@ -467,6 +467,39 @@ gpt-oss-120b-medium	GPT-OSS 120B (Medium)
         self.assertEqual(_collapse_models([]), [])
         rows = _collapse_models([{"id": "future-model", "display_name": "Future Model"}])
         self.assertEqual([row["id"] for row in rows], ["future-model"])
+
+    def test_argon_dispatch_uses_this_turns_advertised_ids(self):
+        import agy_cli_agent as module
+
+        ladder = ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]
+        inventories = [[], ["gemini-4-argon"],
+                       [f"gemini-4-argon-{rung}" for rung in ("low", "medium", "high")],
+                       ["gemini-4-argon-low", "gemini-4-argon-high"]]
+        for aliases in inventories:
+            for effort in [None, *ladder]:
+                with self.subTest(aliases=aliases, effort=effort):
+                    session = mock.MagicMock()
+                    session.returncode = 0
+                    session.__enter__.return_value = session
+                    session.__exit__.return_value = False
+                    session.events.return_value = iter([])
+                    inventory = [{"id": "gemini-4-argon", "aliases": aliases}]
+                    with mock.patch.object(module, "catalogue", return_value=(inventory, [])), \
+                            mock.patch.object(module, "_resolve_binary", return_value="/fake/agy"), \
+                            mock.patch.object(module, "StdioSession", return_value=session) as spawn:
+                        list(module.run_turn({"model": "gemini-4-argon", "effort": effort,
+                            "messages": [{"role": "user", "content": "Test"}]}))
+                    argv = spawn.call_args.args[0]
+                    selected = argv[argv.index("--model") + 1]
+                    self.assertIn(selected, aliases or ["gemini-4-argon"])
+                    if len(aliases) == 3:
+                        rung = module.AGY_EFFORT_ALIASES.get(effort, "medium")
+                        self.assertEqual(selected, f"gemini-4-argon-{rung}")
+                    if len(aliases) == 2:
+                        rung = "low" if effort in ("none", "minimal", "low") else "high"
+                        self.assertEqual(selected, f"gemini-4-argon-{rung}")
+                    if selected != "gemini-4-argon" and effort is not None:
+                        self.assertEqual(argv[argv.index("--effort") + 1], selected.rsplit("-", 1)[1])
 
     def test_catalogue_empty_output(self):
         """Test catalogue handles empty agy models output."""

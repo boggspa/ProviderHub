@@ -346,7 +346,7 @@ def _resolve_native_row(family_id: str, effort: str | None) -> str:
     return family_id
 
 
-def _validate_model(model: Any) -> str:
+def _validate_model(model: Any, *, resolve_family=True) -> str:
     """Validate and resolve a model identifier.
     
     Accepts either a family id (e.g., "gemini-3.8-flash") or a native row id
@@ -360,7 +360,7 @@ def _validate_model(model: Any) -> str:
         raise AgyCliAgentError(f"refusing suspicious model id {model!r}")
     
     # If it's a known family id, resolve to its default native row
-    if candidate in _FAMILY_DEFAULT_EFFORT:
+    if resolve_family and candidate in _FAMILY_DEFAULT_EFFORT:
         # Map family id to default native row
         default_rung = _FAMILY_CANONICAL_TO_RUNG.get(candidate, {}).get(
             _FAMILY_DEFAULT_EFFORT.get(candidate)
@@ -671,7 +671,7 @@ def catalogue(*, capture=None, timeout=30) -> tuple[list[dict], list[str]]:
 # argv construction
 # ---------------------------------------------------------------------------
 
-def build_argv(model, *, effort=None, system=None, stream=True) -> list[str]:
+def build_argv(model, *, effort=None, system=None, stream=True, available_rows=None) -> list[str]:
     """Full argv for one print-mode turn. argv[0] is the bare binary name.
 
     No ``-p``/``--print``/``--prompt`` flag is emitted: on agy that flag takes
@@ -685,7 +685,19 @@ def build_argv(model, *, effort=None, system=None, stream=True) -> list[str]:
     """
     # Resolve the model to a native row id, using effort if provided
     native_row = _resolve_native_row(model, effort)
-    validated_model = _validate_model(native_row)
+    if model == "gemini-4-argon":
+        # The older CLI advertised the bare ID. Only select a suffixed row
+        # when this turn's inventory actually advertises it; never cache
+        # account-dependent availability across requests.
+        available = set(available_rows or ())
+        if native_row not in available:
+            candidates = [row for row in available if row.startswith("gemini-4-argon-")
+                          and row in _AGY_ROW_MAP]
+            target = _EFFORT_RANK[AGY_EFFORT_ALIASES.get(effort, "medium")]
+            native_row = (min(candidates, key=lambda row:
+                (abs(_EFFORT_RANK[_AGY_ROW_MAP[row][2]] - target), row))
+                if candidates and model not in available else model)
+    validated_model = _validate_model(native_row, resolve_family=False)
     validated_effort = _validate_effort(effort)
     if system is not None and not isinstance(system, str):
         raise AgyCliAgentError(
@@ -1335,7 +1347,13 @@ def run_turn(request, *, spawner=None, timeout=300) -> Iterator[dict]:
         # agy has no system-prompt flag, so the system text is folded into the
         # prompt here and deliberately NOT passed to build_argv.
         prompt = render_prompt(messages, system=system)
-        argv = build_argv(model, effort=effort, system=None, stream=True)
+        available_rows = None
+        if model == "gemini-4-argon":
+            inventory, _ = catalogue()
+            available_rows = [alias for row in inventory
+                              if row["id"] == model for alias in row.get("aliases", [])]
+        argv = build_argv(model, effort=effort, system=None, stream=True,
+                          available_rows=available_rows)
 
         binary = _resolve_binary()
         if not binary:
