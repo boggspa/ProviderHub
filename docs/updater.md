@@ -35,6 +35,12 @@ The rollback copy is retained after success. An external replacement with a
 different version/build is preserved. The pending record and installer log
 live in the Hub state folder's `updates` directory.
 
+Restart is requested from a Swift Task, so the app calls `NSApp.terminate`
+from a run-loop source rather than inline. Inline, AppKit's `.terminateLater`
+wait blocked the main queue, the graceful-shutdown Task never ran, and the
+installer was never launched; builds up to 0.5.18 (82) have that defect, so
+their **Restart** hangs and needs one manual update.
+
 This updater first ships in the release containing this change. Older copies
 need one manual download before they can show the Update pill. The classic Hub
 layout continues to use its existing header; the pill appears in compact Hub
