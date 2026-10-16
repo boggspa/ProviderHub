@@ -41,14 +41,38 @@ Mac's actual WebKit session through fresh observation refs, with an on-demand
 compressed page preview. This is not a second iOS browser or continuous remote
 video: the Mac Chat window must be attached and Browser Use enabled.
 
-This pass remains local: update both Mac host and iOS companion together to use
-the new controls. Older hosts keep basic chat working and show an update notice
-in the inspector. The existing TestFlight build does not contain these changes.
+The matched Mac build 82 and iOS TestFlight build 4 contain the controls below.
+Older hosts keep basic chat working and show an update notice in the inspector.
 The extended protocol adds **New chat**, **Load earlier messages**,
 attachment uploads and **Blackboard**. Git overview/branch operations and
 message reactions are still not remote controls.
 
-### Create, read older messages, attach and pin
+### Local follow-up: live activity and run boundaries
+
+The local source now carries the selected chat's authoritative running,
+interrupting and status fields independently of the recent-chat list. The
+iOS transcript passes that running state into the same outline as macOS:
+the current turn's changed-files close-out waits for the run to end, while
+a steered user message closes the preceding turn immediately. Older completed
+turns stay visible. A reconnect snapshot preserves the active-run state and
+always rebinds the phone's chat subscription, even when its saved selection
+already matches the Mac snapshot.
+
+The live strip above the composer uses the desktop's shared activity label
+and shimmer. It shows every active member's newest contribution: Thinking,
+Replying, the running tool/action, Continuing, Waiting or Stopping. Host-side
+activity includes current work outside the phone's bounded transcript window.
+Identical labels are deduplicated, and subsequent tokens in an already
+streaming reply do not rescan the saved transcript for activity. No broader
+network/performance tuning is included. These follow-up edits are local and
+are not in Mac build 82 or TestFlight build 4.
+
+The Codex catalogue display is also reconciled against each CLI account's
+current native cards. Raw maximum and reserved runtime budget stay distinct;
+stale cached or configured larger windows cannot enlarge the current ceiling.
+No credentials, native config files or cached catalogues are rewritten.
+
+### Compose and inspect from either device
 
 The combined model picker is now shared with the desktop: provider icon rail,
 enabled model/account rows, context sizes, search and reasoning sidecar. It is

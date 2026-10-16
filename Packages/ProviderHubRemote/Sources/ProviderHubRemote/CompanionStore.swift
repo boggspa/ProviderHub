@@ -36,6 +36,7 @@ public struct RemoteEntry: Equatable, Identifiable {
     public var agentID: String = ""
     public var time: Double? = nil
     public var changedFiles: [String] = []
+    public var contributionID: String = ""
     public var attachments: [RemoteAttachment] = []
 
     static func decode(_ row: [String: Any], fallback: String) -> RemoteEntry {
@@ -50,6 +51,7 @@ public struct RemoteEntry: Equatable, Identifiable {
         }
         decoded.route = row["route"] as? String ?? ""
         decoded.memberID = row["memberID"] as? String ?? ""
+        decoded.contributionID = row["contributionID"] as? String ?? ""
         decoded.agentID = row["agentID"] as? String ?? ""
         decoded.time = row["time"] as? Double
         decoded.changedFiles = row["changedFiles"] as? [String] ?? []
@@ -102,6 +104,11 @@ public struct CompanionStore: Equatable {
     public private(set) var turnSummaries: [RemoteValue] = []
     public private(set) var olderEntries: [RemoteEntry] = []
     public private(set) var hasOlder = false
+    /// State events belong to this selected chat; recent-list summaries may
+    /// arrive later and must not close a run that is still active.
+    public private(set) var selectedBusy: Bool?
+    public private(set) var selectedInterrupting = false
+    public private(set) var selectedStatus = ""
     public var visibleEntries: [RemoteEntry] {
         let latest = Set(entries.map(\.id))
         return olderEntries.filter { !latest.contains($0.id) } + entries
@@ -123,6 +130,9 @@ public struct CompanionStore: Equatable {
             let selected = params["selected"] as? [String: Any]
             if selectedID != selected?["id"] as? String { olderEntries = []; turnSummaries = [] }
             selectedID = selected?["id"] as? String
+            selectedBusy = selected?["busy"] as? Bool
+            selectedInterrupting = selected?["interrupting"] as? Bool ?? false
+            selectedStatus = selected?["status"] as? String ?? ""
             if olderEntries.isEmpty { hasOlder = selected?["hasMore"] as? Bool ?? false }
             controls = try decode([String: RemoteValue].self, params["controls"] ?? [:])
             setEntries(selected?["entries"])
@@ -143,6 +153,12 @@ public struct CompanionStore: Equatable {
             guard let event = params["event"] as? [String: Any], let kind = event["event"] as? String else { throw RemoteProtocolError.rejected }
             cursor = next
             switch kind {
+            case "state":
+                if event["chat"] as? String == selectedID {
+                    selectedBusy = event["busy"] as? Bool
+                    selectedInterrupting = event["interrupting"] as? Bool ?? false
+                    selectedStatus = event["status"] as? String ?? ""
+                }
             case "history":
                 if event["chat"] as? String == selectedID,
                    event["before"] as? String == visibleEntries.first?.id {
@@ -171,6 +187,12 @@ public struct CompanionStore: Equatable {
                 let owner = event["chat"] as? String
                 if owner == nil || owner == selectedID, let panel = event["panel"] as? String {
                     controls[panel] = try decode(RemoteValue.self, event["value"] ?? NSNull())
+                    if panel == "activity" || panel == "configuration", let value = controls[panel] {
+                        let busy = panel == "configuration" ? value["runBusy"] : value["busy"]
+                        if case .bool(let running) = busy { selectedBusy = running }
+                        if case .bool(let interrupting) = value["interrupting"] { selectedInterrupting = interrupting }
+                        if case .string(let status) = value["status"] { selectedStatus = status }
+                    }
                     if panel == "turnChanges", let value = controls[panel], !value["turnID"].text.isEmpty {
                         turnSummaries.removeAll { $0["turnID"] == value["turnID"] }
                         turnSummaries.append(value)
@@ -188,6 +210,9 @@ public struct CompanionStore: Equatable {
                 let next = (event["id"] ?? event["chat"]) as? String
                 if next != selectedID { controls = controls.filter { ["version", "extensionVersion", "models", "browserEnabled", "options"].contains($0.key) }; olderEntries = []; turnSummaries = [] }
                 selectedID = next
+                selectedBusy = event["busy"] as? Bool
+                selectedInterrupting = event["interrupting"] as? Bool ?? false
+                selectedStatus = event["status"] as? String ?? ""
                 if olderEntries.isEmpty { hasOlder = event["hasMore"] as? Bool ?? false }
                 setEntries(event["entries"])
             case "delta":

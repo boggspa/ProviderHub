@@ -77,32 +77,8 @@ struct ChatShimmerText: View {
     var active: Bool
     var accent: Color
     var base: Color = HubTheme.Semantic.secondaryInk
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    private static let period: TimeInterval = 1.6
-
     var body: some View {
-        if active, !reduceMotion {
-            TimelineView(.animation(minimumInterval: 1 / 30)) { context in
-                sweep(phase: context.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: Self.period) / Self.period)
-            }
-        } else {
-            Text(text).foregroundStyle(active ? accent : base)
-        }
-    }
-
-    private func sweep(phase: Double) -> some View {
-        Text(text).foregroundStyle(base)
-            .overlay {
-                GeometryReader { geometry in
-                    let width = geometry.size.width
-                    LinearGradient(stops: [.init(color: .clear, location: 0), .init(color: accent, location: 0.5), .init(color: .clear, location: 1)],
-                                   startPoint: .leading, endPoint: .trailing)
-                        .frame(width: width * 0.7)
-                        .offset(x: -width * 0.7 + width * 1.7 * phase)
-                }
-            }
-            .mask(Text(text))
-            .accessibilityLabel(text)
+        ChatSharedShimmerText(text: text, active: active, accent: accent, base: base)
     }
 }
 

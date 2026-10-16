@@ -1014,13 +1014,19 @@ def _catalogue_context(argv, configured_window=None, home=None):
     turns run with it applied (see _max_context_override), so a 1M-class
     model is not metered and compacted at its 272K default. Preserve the
     runtime's reserved percentage in runtime_context.
+
+    An explicit model_context_window may lower a card's window but never lift
+    it past the card's own ceiling: a setting left over from a larger model
+    generation must not advertise capacity the account no longer offers.
     """
     path, cards = _native_cards(argv, home)
     result = {}
     for card in cards:
         if not isinstance(card, dict) or not isinstance(card.get("slug"), str):
             continue
-        window = configured_window if type(configured_window) is int and configured_window > 0 else _card_window(card)
+        window = _card_window(card)
+        if type(configured_window) is int and configured_window > 0:
+            window = min(configured_window, window) if type(window) is int and window > 0 else configured_window
         percent = card.get("effective_context_window_percent")
         if type(window) is not int or window <= 0 or type(percent) is not int or not 0 < percent <= 100:
             continue
@@ -1050,6 +1056,11 @@ def context_limits(model, *, config_dir=None):
     saved limit from this read. No process or credential file is opened.
     """
     return _catalogue_context([], home=config_dir).get(model, {})
+
+
+def context_catalogue(*, config_dir=None):
+    """Every model's :func:`context_limits` from one read of the native card file."""
+    return _catalogue_context([], home=config_dir)
 
 
 def _turn_error(message, details=None, *, http_status=None):

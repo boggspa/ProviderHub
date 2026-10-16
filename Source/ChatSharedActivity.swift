@@ -1,0 +1,1 @@
+../Packages/ProviderHubRemote/Sources/ProviderHubRemote/ChatSharedActivity.swift

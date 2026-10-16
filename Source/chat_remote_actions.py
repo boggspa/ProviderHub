@@ -10,6 +10,39 @@ ACTIONS = GLOBAL | {"remote_history", "remote_upload_begin", "remote_upload_chun
                     "remote_upload_drop", "remote_send", "remote_board_attach", "remote_attachment_read", "remote_attachment_thumbnail"}
 
 
+def activity(service):
+    """The newest visible work for each current contribution, in roster order."""
+    chat = service.chat or {}
+    team = chat.get("team") or {}
+    entries = chat.get("entries", [])
+    if not service.busy: return []
+    members = team.get("members", []) if team.get("enabled") else []
+    def visible(entry):
+        return not (entry.get("kind") == "tool" and entry.get("tool") == "react_to_message" and not entry.get("isError"))
+    def row(identifier, name, route, status, latest=None, reason="", stopping=False):
+        latest = latest or {}
+        return {"id": identifier, "name": str(name)[:120], "route": str(route)[:160], "status": status,
+                "entryID": str(latest.get("id") or "")[:128], "kind": str(latest.get("kind") or "")[:40],
+                "tool": str(latest.get("tool") or "")[:100],
+                "summary": str(latest.get("summary") or latest.get("text") or "")[:500] if latest.get("kind") == "tool" else "",
+                "runningTool": latest.get("kind") == "tool" and latest.get("detail") == "Running…",
+                "streaming": latest.get("kind") == "assistant" and latest.get("recorded") is False and bool(latest.get("text", "").strip()),
+                "reason": str(reason)[:500], "stopping": stopping}
+    if members:
+        active = [m for m in members if m.get("status") in {"working", "continuing", "waiting"}]
+        wanted = {(m["id"], m.get("contributionID")) for m in active}
+        latest = {}
+        for entry in reversed(entries):
+            key = (entry.get("memberID"), entry.get("contributionID"))
+            if key in wanted and key not in latest and visible(entry): latest[key] = entry
+            if len(latest) == len(wanted): break
+        return [row(m["id"], m["name"], m.get("route", ""), m["status"], latest.get((m["id"], m.get("contributionID"))),
+                    m.get("waitReason") or m.get("nextStep", ""), m.get("memberStoppedByUser") is True) for m in active]
+    latest = next((e for e in reversed(entries) if visible(e)), {})
+    choice = next((r for r in service.models if r.get("route") == chat.get("route") and r.get("account") == chat.get("account")), {})
+    return [row("solo-" + chat.get("route", ""), choice.get("label", "Assistant"), chat.get("route", ""), "working", latest)]
+
+
 def turn_changes(entries):
     """Mirror ChatTurnChanges.collect over the full current turn, not its tail."""
     start = next((i for i in range(len(entries) - 1, -1, -1) if entries[i].get("kind") == "user"), -1)

@@ -146,19 +146,9 @@ struct ChatActivityStrip: View {
     }
 
     private func activityLabel(_ row: ChatActivity) -> some View {
-        HStack(spacing: textStyle.scaled(6)) {
-            ChatProviderIcon(presentation: model.route(named: row.route)?.presentation, size: textStyle.scaled(13))
-            Text(row.name).font(textStyle.system(11.5, weight: .semibold)).foregroundStyle(Semantic.ink)
-                .lineLimit(1).fixedSize()
-            ChatShimmerText(text: row.verb, active: row.live, accent: model.accent(for: row.route))
-                .font(textStyle.system(11.5, weight: .medium)).fixedSize()
-            if !row.subject.isEmpty {
-                Text(row.subject)
-                    .font(row.code ? textStyle.system(11, design: .monospaced) : textStyle.system(11.5))
-                    .foregroundStyle(Semantic.secondaryInk).lineLimit(1).truncationMode(.middle)
+        ChatSharedActivityLabel(name: row.name, verb: row.verb, subject: row.subject, code: row.code, live: row.live,
+            accent: model.accent(for: row.route), ink: Semantic.ink, secondary: Semantic.secondaryInk, scale: textStyle.scaled(1)) {
+                ChatProviderIcon(presentation: model.route(named: row.route)?.presentation, size: textStyle.scaled(13))
             }
-            Spacer(minLength: 0)
-        }
-        .contentShape(Rectangle())
     }
 }

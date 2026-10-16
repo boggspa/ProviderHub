@@ -30,6 +30,10 @@ struct CompanionTranscript: View {
     var loadingOlder = false
     var loadOlder: () -> Void = {}
     var turnSummaries: [RemoteValue] = []
+    var runIsOpen = false
+    var activities: [CompanionActivity] = []
+    var jumpEntryID: String?
+    var jumpToken = 0
     var answer: (RemoteQuestion, [String: [String]], Bool) -> Void = { _, _, _ in }
     @State private var followsLatest = true
     @State private var expanded = Set<String>()
@@ -38,7 +42,26 @@ struct CompanionTranscript: View {
     private var scale: CGFloat { textSize / 13 }
     private var items: [RemoteTranscriptItem] { entries.map(RemoteTranscriptItem.init) }
     private var outline: [ChatTranscriptSegment<RemoteTranscriptItem>] {
-        ChatTranscriptSegment.outline(items, isLive: { $0.entry.isLive })
+        ChatTranscriptSegment.outline(items, open: runIsOpen, isLive: { $0.entry.isLive })
+    }
+    private var liveEntryIDs: Set<String> {
+        guard runIsOpen else { return [] }
+        return Set(activities.filter { $0.description.live && !$0.entryID.isEmpty }.map(\.entryID))
+    }
+    private var liveSpeakerIDs: Set<String> {
+        var result = Set<String>()
+        var speaker: String?
+        for segment in outline {
+            switch segment.content {
+            case .speaker: speaker = segment.id
+            case .entry(let item):
+                if liveEntryIDs.contains(item.id), let speaker { result.insert(speaker) }
+            case .fold(let items):
+                if items.contains(where: { liveEntryIDs.contains($0.id) }), let speaker { result.insert(speaker) }
+            case .changes: speaker = nil
+            }
+        }
+        return result
     }
 
     var body: some View {
@@ -53,14 +76,17 @@ struct CompanionTranscript: View {
                     ForEach(outline) { segment in
                         Group {
                             switch segment.content {
-                            case .speaker(let item): speaker(item)
+                            case .speaker(let item): speaker(item, live: liveSpeakerIDs.contains(segment.id))
                             case .entry(let item): row(item)
                             case .fold(let items):
+                                let live = activities.contains { activity in items.contains { $0.id == activity.entryID } && activity.description.live }
                                 DisclosureGroup(isExpanded: expandedBinding(segment.id)) {
                                     VStack(alignment: .leading, spacing: 6 * scale) { ForEach(items, id: \.id) { row($0) } }.padding(.top, 6 * scale)
                                 } label: {
                                     HStack(spacing: 7 * scale) {
-                                        Text("Worked").font(.system(size: 12 * scale, weight: .medium))
+                                        ChatSharedShimmerText(text: live ? "Working" : "Worked", active: live,
+                                            accent: items.first.map(presentation)?.accent ?? chat.providerAccent, base: CompanionTheme.ink)
+                                            .font(.system(size: 12 * scale, weight: .medium))
                                         Text(ChatToolDisplay.activity(items.map(\.tool))).font(.system(size: 11.5 * scale)).foregroundStyle(CompanionTheme.secondary)
                                     }
                                 }.tint(CompanionTheme.secondary)
@@ -68,7 +94,7 @@ struct CompanionTranscript: View {
                             }
                         }.padding(.top, gap(segment.spacing)).id(segment.id)
                     }
-                    if chat.busy && entries.last?.isLive != true {
+                    if runIsOpen && activities.isEmpty && entries.last?.isLive != true {
                         HStack(spacing: 8) {
                             ProgressView().controlSize(.small).tint(chat.providerAccent)
                             Text("Thinking…").font(.system(size: textSize)).foregroundStyle(CompanionTheme.secondary)
@@ -85,6 +111,20 @@ struct CompanionTranscript: View {
                 if let first = old.first, new.first?.id != first.id, new.contains(where: { $0.id == first.id }) {
                     followsLatest = false; proxy.scrollTo(first.id, anchor: .top)
                 } else if followsLatest { proxy.scrollTo("transcript-bottom", anchor: .bottom) }
+            }
+            .onChange(of: jumpToken) { _, _ in
+                guard let jumpEntryID else { return }
+                let target = outline.first { segment in
+                    switch segment.content {
+                    case .entry(let item): return item.id == jumpEntryID
+                    case .fold(let items), .changes(let items): return items.contains { $0.id == jumpEntryID }
+                    case .speaker: return false
+                    }
+                }
+                if let target {
+                    if case .fold = target.content { expanded.insert(target.id) }
+                    followsLatest = false; proxy.scrollTo(target.id, anchor: .center)
+                }
             }
             .overlay(alignment: .bottomTrailing) {
                 if !followsLatest {
@@ -104,10 +144,10 @@ struct CompanionTranscript: View {
         let route = item.route.isEmpty ? fallback : item.route
         return CompanionBranding.presentation(route: route, label: member?["label"].text ?? chat.displayModel, models: models)
     }
-    private func speaker(_ item: RemoteTranscriptItem) -> some View {
+    private func speaker(_ item: RemoteTranscriptItem, live: Bool) -> some View {
         let brand = presentation(item)
         return ChatSharedSpeakerHeader(member: item.memberName, label: brand.label, timestamp: ChatSectionTime.label(item.time),
-            accent: brand.accent, ink: CompanionTheme.ink, secondary: CompanionTheme.secondary, live: item.entry.isLive, scale: scale) {
+            accent: brand.accent, ink: CompanionTheme.ink, secondary: CompanionTheme.secondary, live: live, scale: scale) {
                 CompanionProviderMark(presentation: brand, size: 15 * scale)
             }
     }
@@ -133,7 +173,8 @@ struct CompanionTranscript: View {
             let reply = ChatReplySources.split(entry.text)
             VStack(alignment: .leading, spacing: 8 * scale) {
                 if ChatReplySources.isBlank(reply.body), entry.isLive {
-                    Text("Thinking…").font(.system(size: textSize)).foregroundStyle(brand.accent)
+                    ChatSharedShimmerText(text: "Thinking…", active: runIsOpen, accent: brand.accent, base: CompanionTheme.secondary)
+                        .font(.system(size: textSize))
                 } else { CompanionMessageText(text: reply.body, size: textSize) }
                 if !reply.links.isEmpty {
                     HStack { ForEach(reply.links) { link in if let url = URL(string: link.url) { Link(link.title, destination: url).font(.system(size: 11 * scale)) } } }
@@ -145,12 +186,14 @@ struct CompanionTranscript: View {
         }
     }
     private func tool(_ item: RemoteTranscriptItem, brand: CompanionPresentation) -> some View {
-        let display = ChatToolDisplay.describe(tool: item.tool, summary: item.summary ?? item.text, live: item.entry.isLive)
+        let live = runIsOpen && item.detail == "Running…"
+        let display = ChatToolDisplay.describe(tool: item.tool, summary: item.summary ?? item.text, live: live)
         return VStack(alignment: .leading, spacing: 6 * scale) {
             Button { withAnimation(.easeInOut(duration: 0.15)) { toggle(item.id) } } label: {
                 HStack(spacing: 7 * scale) {
                     ChatToolGlyph(name: ChatToolDisplay.glyph(item.tool), size: 15 * scale).foregroundStyle(brand.accent)
-                    Text(display.verb).font(.system(size: 12 * scale, weight: .medium)).fixedSize()
+                    ChatSharedShimmerText(text: display.verb, active: live, accent: brand.accent, base: CompanionTheme.ink)
+                        .font(.system(size: 12 * scale, weight: .medium)).fixedSize()
                     if !display.subject.isEmpty {
                         Text(display.subject).font(.system(size: 11.5 * scale, design: display.code ? .monospaced : .default))
                             .foregroundStyle(CompanionTheme.secondary).lineLimit(1).truncationMode(.middle)

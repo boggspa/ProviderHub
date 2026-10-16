@@ -37,6 +37,8 @@ public final class CompanionModel: ObservableObject {
     @Published public var downloadedFiles: [String: URL] = [:]
     @Published public var fullModelCatalogue: [RemoteValue] = []
     @Published public var attachmentThumbnails: [String: Data] = [:]
+    @Published var activityJumpID: String?
+    @Published var activityJumpToken = 0
     var fileDownloads = Set<String>()
     public weak var link: CompanionLink?
     @Published public var pairingText = ""
@@ -98,8 +100,10 @@ public final class CompanionModel: ObservableObject {
                 let saved = selectedChatID.flatMap { id in store.chats.contains(where: { $0.id == id }) ? id : nil }
                 let next = saved ?? store.selectedID ?? store.chats.first?.id
                 selectedChatID = next
-                if let next, store.selectedID != next { select(next) }
-                if let next, store.selectedID == next { requestControls(next) }
+                // A full snapshot restores presentation, not the server's
+                // remote subscription. Rebind even when both IDs match so
+                // controls and live activity are admitted after a reconnect.
+                if let next { select(next) }
             } else if message["method"] as? String == "session.delta",
                       let event = (message["params"] as? [String: Any])?["event"] as? [String: Any],
                       ["selected", "snapshot"].contains(event["event"] as? String ?? ""),
@@ -108,7 +112,7 @@ public final class CompanionModel: ObservableObject {
                     selectedChatID = next
                 }
                 if next == selectedChatID {
-                requestControls(next)
+                    requestControls(next)
                 }
             }
             if store.needsSnapshot { connection.snapshot() }
@@ -237,13 +241,16 @@ public struct CompanionView: View {
                             CompanionTranscript(entries: model.store.visibleEntries, chat: chat, connected: model.isConnected,
                                 models: model.models, members: model.members, fallbackRoute: String(model.configuration["choice"].text.split(separator: "|").first ?? ""),
                                 hasOlder: model.store.hasOlder && model.extendedControlsAvailable, loadingOlder: model.historyLoading,
-                                loadOlder: { Task { @MainActor in await model.loadOlder() } }, turnSummaries: model.store.turnSummaries) { question, answers, dismiss in
+                                loadOlder: { Task { @MainActor in await model.loadOlder() } }, turnSummaries: model.store.turnSummaries,
+                                runIsOpen: model.runIsOpen, activities: model.liveActivities, jumpEntryID: model.activityJumpID,
+                                jumpToken: model.activityJumpToken) { question, answers, dismiss in
                                 model.answerQuestion(question, chat: chat.id, answers: answers, dismiss: dismiss)
                             }.id(chat.id)
                         } else {
                             VStack(spacing: 10) { ProgressView(); Text("Opening conversation…").font(.caption).foregroundStyle(CompanionTheme.secondary) }
                                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                         }
+                        CompanionActivityStrip(model: model)
                         if let approval = model.store.approval { approvalStrip(approval) }
                         composer(chat)
                     } else { welcome }
@@ -564,13 +571,13 @@ public struct CompanionView: View {
                 TextField("Message…", text: $model.draft, axis: .vertical)
                     .textFieldStyle(.plain).lineLimit(1...6).font(.body).padding(.vertical, 10)
                     .accessibilityLabel("Message to \(chat.title)")
-                Button { if chat.busy { model.stop() } else { model.sendDraft() } } label: {
-                    Image(systemName: chat.busy ? "stop.fill" : "arrow.up")
+                Button { if model.runIsOpen { model.stop() } else { model.sendDraft() } } label: {
+                    Image(systemName: model.runIsOpen ? "stop.fill" : "arrow.up")
                         .font(.system(size: 16, weight: .bold)).foregroundStyle(CompanionTheme.surface)
                         .frame(width: 36, height: 36).background(CompanionTheme.ink, in: Circle()).padding(.vertical, 4)
-                }.buttonStyle(.plain).disabled(!model.isConnected || !chat.busy && !model.canSend)
-                    .opacity(!chat.busy && !model.canSend ? 0.4 : 1)
-                    .accessibilityLabel(chat.busy ? "Stop this chat" : "Send message")
+                }.buttonStyle(.plain).disabled(!model.isConnected || !model.runIsOpen && !model.canSend)
+                    .opacity(!model.runIsOpen && !model.canSend ? 0.4 : 1)
+                    .accessibilityLabel(model.runIsOpen ? "Stop this chat" : "Send message")
             }.padding(.horizontal, 14).padding(.vertical, 4)
                 .companionCard(cornerRadius: 20, accent: chat.approvalMode == "yolo" ? .red : chat.providerAccent)
             HStack(spacing: 6) {
@@ -586,7 +593,7 @@ public struct CompanionView: View {
                 } label: { HStack(spacing: 3) { Text(chat.approvalLabel); Image(systemName: "chevron.down").font(.system(size: 8)) } }
                     .foregroundStyle(chat.approvalColor).disabled(!model.isConnected || chat.busy || !model.controlSurfaceAvailable)
                     .accessibilityLabel("Change chat permissions")
-                Text(chat.busy ? "Working…" : "Ready").foregroundStyle(CompanionTheme.secondary)
+                Text(model.runIsOpen ? "Working…" : "Ready").foregroundStyle(CompanionTheme.secondary)
                 Spacer()
                 Text("Runs on your Mac").foregroundStyle(CompanionTheme.secondary)
             }.font(.caption2).padding(.horizontal, 5)

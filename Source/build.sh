@@ -27,6 +27,7 @@ SWIFT_SOURCES=(
   "$SOURCE_DIR/ChatSharedPresentation.swift"
   "$SOURCE_DIR/ChatSharedInspector.swift"
   "$SOURCE_DIR/ChatSharedModelPicker.swift"
+  "$SOURCE_DIR/ChatSharedActivity.swift"
 )
 xcrun swiftc -swift-version 5 -parse-as-library -O -target arm64-apple-macosx14.0 \
   -module-cache-path "$BUILD_DIR/ModuleCache" \

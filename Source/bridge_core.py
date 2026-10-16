@@ -21,7 +21,7 @@ import uuid
 
 from model_names import friendly_model_name, label_catalog
 from catalogue import build_catalogue, read_observations, route_specs
-from cli_routes import cli_credential_mode, discover_via_cli
+from cli_routes import cli_credential_mode, discover_via_cli, native_context_models
 from claude_accent import profile_accents
 from hub_config import (CHAT_SOURCE_LABELS, CLAUDE_TIER_MODELS, SLOTS, chat_extra_source, chat_source_settings,
                         claude_picker_rows, claude_routes, cli_account_dir, connection_signature, key_account_label, keychain_account,
@@ -345,6 +345,10 @@ def cached_catalogue(settings, root=None):
             summaries[provider_id] = {"needs_refresh": True}
             continue
         projected = project_catalogue(provider_id, inventory, settings, observations)
+        # A cached Codex inventory can outlive the account's window; every
+        # surface reads it from here, so lower it to the current native card.
+        if settings["providers"][provider_id].get("credential_mode") == "cli":
+            projected = native_context_models(provider_id, projected, config_dir=cli_account_dir(settings, provider_id))
         models.extend(projected)
         summaries[provider_id] = {"model_count": len(projected), "source": inventory.get("source", "provider"),
                                   "fetched_at": inventory.get("fetched_at"), "warnings": inventory.get("warnings", [])}
@@ -388,6 +392,8 @@ def chat_source_inventories(settings, root, observations=None):
                              "warnings": [f"Refresh this provider's catalogue to list its {CHAT_SOURCE_LABELS[source]} models in Chat."]}
             continue
         models = project_catalogue(provider_id, inventory, alternate, observations)
+        if source == "cli":
+            models = native_context_models(provider_id, models, config_dir=cli_account_dir(alternate, provider_id))
         projected.setdefault(provider_id, {})[source] = models
         entry[source] = {"model_count": len(models), "source": inventory.get("source", "provider"),
                          "fetched_at": inventory.get("fetched_at"), "warnings": inventory.get("warnings", [])}

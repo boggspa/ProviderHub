@@ -339,7 +339,21 @@ class ChatHost:
             self.emit({"event": "remote_configuration", "chat": chat["id"],
                        "choice": chat["route"] + "|" + chat.get("account", ""),
                        "effort": chat.get("effort", ""), "approvalMode": chat.get("approvalMode", "manual"),
-                       "workspace": chat["workspace"], "busy": self.active(service)})
+                       "workspace": chat["workspace"], "busy": self.active(service),
+                       "runBusy": service.busy, "interrupting": self.state(service)["interrupting"],
+                       "status": self.state(service)["status"]})
+
+    def publish_remote_activity(self, service):
+        if not self.remote or self.remote.bridge.selected_chat != (service.chat or {}).get("id"): return
+        from chat_remote_actions import activity
+        state = self.state(service)
+        event = {"event": "remote_activity", "chat": service.chat["id"], "busy": state["busy"],
+                 "interrupting": state["interrupting"], "status": state["status"], "rows": activity(service)}
+        # Streaming token deltas seldom change the activity label. Do not copy
+        # the same status frame for each token; still publish every real change.
+        if getattr(service, "_last_remote_activity", None) != event:
+            service._last_remote_activity = event
+            self.emit(event)
 
     def session_event(self, service, event):
         kind = event.get("event")
@@ -376,6 +390,15 @@ class ChatHost:
             self.emit(event)
             if kind in {"selected", "snapshot", "state"} and service.chat:
                 self.publish_remote_configuration(service)
+            if kind in {"selected", "snapshot", "state", "team", "entry", "delta"} and service.chat:
+                previous = getattr(service, "_last_remote_activity", None) or {}
+                # Once a reply has started streaming, later tokens cannot
+                # change its activity wording. Avoid rescanning saved history
+                # on every token, especially while a peer has no new row yet.
+                same_reply = kind == "delta" and any(
+                    row.get("entryID") == event.get("id") and row.get("streaming")
+                    for row in previous.get("rows", []))
+                if not same_reply: self.publish_remote_activity(service)
         if kind in {"state", "approval", "branch_state", "side", "agents"}: self.publish_summaries()
 
     def new_session(self, chat=None):
@@ -561,6 +584,8 @@ the same publication `initialize` and `select` perform, ending with `ready`.
                 if not service.side: self.emit({"event": "side", "chat": identifier, "side": None})
                 self.publish_remote_configuration(service)
                 self.publish_processes(identifier)
+                service._last_remote_activity = None
+                self.publish_remote_activity(service)
                 from chat_remote_actions import publish_turn_changes
                 publish_turn_changes(self, service)
                 return

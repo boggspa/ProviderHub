@@ -15,6 +15,52 @@ from test_chat_runtime import FakeTransport, response
 
 
 class RemoteParityTests(unittest.TestCase):
+    def test_activity_tracks_current_contribution_and_clears_when_idle(self):
+        from chat_remote_actions import activity
+        service = self.host.sessions[self.desktop]
+        service._working = True
+        service.chat["team"] = {"enabled": True, "members": [
+            {"id": "m1", "name": "Sol", "route": "codex/sol", "status": "working", "contributionID": "current"},
+            {"id": "m2", "name": "Flash", "route": "minimax/flash", "status": "working", "contributionID": "new"},
+            {"id": "m3", "name": "Luna", "route": "codex/luna", "status": "waiting", "waitReason": "Process p1"}]}
+        service.chat["entries"] = [
+            entry("tool", "", "codex/sol", id="tool", memberID="m1", contributionID="current", tool="run_shell", summary="Run in /workspace:\nswift build", detail="Running…"),
+            entry("tool", "", "minimax/flash", id="old", memberID="m2", contributionID="prior", tool="run_shell", summary="Outdated command", detail="Running…")]
+        rows = activity(service)
+        self.assertEqual([row["name"] for row in rows], ["Sol", "Flash", "Luna"])
+        self.assertTrue(rows[0]["runningTool"])
+        self.assertEqual(rows[0]["entryID"], "tool")
+        self.assertEqual(rows[1]["entryID"], "")
+        self.assertFalse(rows[1]["runningTool"])
+        self.assertEqual(rows[2]["reason"], "Process p1")
+        service._working = False
+        self.assertEqual(activity(service), [])
+        service.chat.pop("team")
+
+    def test_selected_activity_is_published_once_for_identical_token_state(self):
+        self.select(self.desktop)
+        service = self.host.sessions[self.desktop]
+        # Exercise the real host path without a listening socket fixture.
+        from types import SimpleNamespace
+        self.host.remote = SimpleNamespace(bridge=self.mac)
+        service._last_remote_activity = None
+        self.host.publish_remote_activity(service)
+        first = sum(e.get("event") == "remote_activity" for e in self.events)
+        self.host.publish_remote_activity(service)
+        self.assertEqual(sum(e.get("event") == "remote_activity" for e in self.events), first)
+        self.assertFalse(self.mac.view["controls"]["activity"]["busy"])
+        self.host.remote = None
+
+    def test_busy_state_survives_encrypted_reconnect_snapshot(self):
+        self.select(self.desktop)
+        self.mac.publish({"event": "state", "chat": self.desktop, "busy": True, "interrupting": False, "status": "Thinking…"})
+        selected = self.mac._snapshot()["selected"]
+        self.assertTrue(selected["busy"])
+        self.mac.publish({"event": "state", "chat": "cd" * 16, "busy": False, "status": "Ready"})
+        self.assertTrue(self.mac._snapshot()["selected"]["busy"])
+        self.mac.publish({"event": "state", "chat": self.desktop, "busy": False, "status": "Ready"})
+        self.assertFalse(self.mac._snapshot()["selected"]["busy"])
+
     def test_turn_changes_uses_complete_turn_instead_of_tail(self):
         from chat_remote_actions import turn_changes
         rows = [entry("user", "Start")]

@@ -82,7 +82,10 @@ final class PairingTests: XCTestCase {
         XCTAssertEqual(link.commands.count, 2, "Reconnect without a subscription must rebind it")
         model.receiveRemote(["method":"session.snapshot", "params":["cursor":2, "chats":chats,
             "selected":["id":"fixture", "entries":[["role":"assistant", "text":"Connected"]]]]])
-        XCTAssertEqual(link.commands.count, 2, "A valid snapshot must not loop subscriptions")
+        XCTAssertEqual(link.commands.count, 3, "A full snapshot must rebind even when the saved selection matches")
+        XCTAssertEqual(link.commands.last?.method, "chat.select")
+        model.receiveRemote(["method":"session.delta", "params":["cursor":3, "event":["event":"snapshot", "chat":"fixture", "entries":[["role":"assistant", "text":"Connected"]]]]])
+        XCTAssertEqual(link.commands.count, 3, "A subscription response must not send another subscription")
         XCTAssertTrue(model.store.transcript.contains("Connected"))
         XCTAssertEqual(model.draft, "Keep this draft")
     }

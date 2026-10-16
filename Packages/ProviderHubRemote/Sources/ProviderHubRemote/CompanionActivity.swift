@@ -1,0 +1,86 @@
+import SwiftUI
+
+struct CompanionActivity: Identifiable, Equatable {
+    var id: String
+    var name: String
+    var route: String
+    var entryID: String
+    var description: ChatActivityDescription
+
+    static func current(entries: [RemoteEntry], members: [RemoteValue], teamEnabled: Bool,
+                        busy: Bool, transition: String? = nil, authoritative: RemoteValue = .null,
+                        soloName: String = "Assistant", soloRoute: String = "") -> [Self] {
+        guard busy else { return [] }
+        if case .array(let rows) = authoritative["rows"] {
+            return rows.map { row in
+                Self(id: row["id"].text, name: row["name"].text, route: row["route"].text, entryID: row["entryID"].text,
+                     description: .describe(status: row["status"].text, kind: row["kind"].text,
+                        tool: row["tool"].text, summary: row["summary"].text, runningTool: row["runningTool"].flag,
+                        streaming: row["streaming"].flag, reason: row["reason"].text, stopping: row["stopping"].flag,
+                        transition: transition))
+            }
+        }
+        // Older hosts already send enough of the newest tool row for useful
+        // fallback activity. New hosts supply rows even outside the tail.
+        if teamEnabled {
+            return members.compactMap { member in
+                let status = member["status"].text
+                guard ["working", "continuing", "waiting"].contains(status) else { return nil }
+                let contribution = member["contributionID"].text
+                let entry = entries.last {
+                    $0.memberID == member["id"].text && (contribution.isEmpty || $0.contributionID == contribution) &&
+                    !($0.tool == "react_to_message" && !$0.isError)
+                }
+                let reason = member["waitReason"].text.isEmpty ? member["nextStep"].text : member["waitReason"].text
+                return Self(id: member["id"].text, name: member["name"].text, route: member["route"].text,
+                    entryID: entry?.id ?? "", description: .describe(status: status, kind: entry?.role ?? "",
+                        tool: entry?.tool, summary: entry?.summary.isEmpty == false ? entry?.summary : entry?.text,
+                        runningTool: entry?.detail == "Running…", streaming: entry?.isLive == true && entry?.text.isEmpty == false,
+                        reason: reason, stopping: member["memberStoppedByUser"].flag, transition: transition))
+            }
+        }
+        let entry = entries.last { !($0.tool == "react_to_message" && !$0.isError) }
+        return [Self(id: "solo-" + soloRoute, name: soloName, route: soloRoute, entryID: entry?.id ?? "",
+            description: .describe(status: "working", kind: entry?.role ?? "", tool: entry?.tool,
+                summary: entry?.summary.isEmpty == false ? entry?.summary : entry?.text,
+                runningTool: entry?.detail == "Running…", streaming: entry?.isLive == true && entry?.text.isEmpty == false,
+                transition: transition))]
+    }
+}
+
+extension CompanionModel {
+    public var runIsOpen: Bool { store.selectedBusy ?? selectedChat?.busy ?? false }
+    var liveActivities: [CompanionActivity] {
+        let transition = store.selectedInterrupting
+            ? (["Stopping…", "Interrupting for your update…"].contains(store.selectedStatus) ? store.selectedStatus : "Stopping…") : nil
+        return CompanionActivity.current(entries: store.visibleEntries, members: members, teamEnabled: team["enabled"].flag,
+            busy: runIsOpen, transition: transition, authoritative: store.controls["activity"] ?? .null,
+            soloName: selectedChat?.displayModel ?? "Assistant", soloRoute: selectedChat?.route ?? "")
+    }
+    func jumpToActivity(_ id: String) { activityJumpID = id; activityJumpToken += 1 }
+}
+
+struct CompanionActivityStrip: View {
+    @ObservedObject var model: CompanionModel
+    @ScaledMetric(relativeTo: .body) private var scale: CGFloat = 1
+    var body: some View {
+        let rows = model.liveActivities
+        if !rows.isEmpty {
+            VStack(alignment: .leading, spacing: 3 * scale) {
+                ForEach(rows) { row in
+                    let brand = CompanionBranding.presentation(route: row.route, label: row.name, models: model.models)
+                    Button { model.jumpToActivity(row.entryID) } label: {
+                        ChatSharedActivityLabel(name: row.name, verb: row.description.verb, subject: row.description.subject,
+                            code: row.description.code, live: row.description.live, accent: brand.accent,
+                            ink: CompanionTheme.ink, secondary: CompanionTheme.secondary, scale: scale) {
+                                CompanionProviderMark(presentation: brand, size: 13 * scale)
+                            }
+                    }.buttonStyle(.plain).disabled(row.entryID.isEmpty)
+                        .accessibilityLabel(row.name + " " + row.description.verb + (row.description.subject.isEmpty ? "" : " " + row.description.subject))
+                }
+            }.padding(.horizontal, 20).padding(.vertical, 6 * scale)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .accessibilityElement(children: .contain).accessibilityLabel("Live activity")
+        }
+    }
+}

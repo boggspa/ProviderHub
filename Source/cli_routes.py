@@ -852,6 +852,82 @@ def current_context_spec(provider_id, model, spec, *, config_dir=None):
             "max_input": min(effective, spec["max_input"]) if type(spec.get("max_input")) is int and spec["max_input"] > 0 else effective}
 
 
+def _positive(value):
+    return type(value) is int and value > 0
+
+
+def native_context_limits(provider_id, *, config_dir=None):
+    """``{model: limits}`` from the CLI account's current native cards, or {}.
+
+    Only Codex publishes a per-account window and runtime reserve. A missing
+    adapter, card file or malformed card supplies nothing, so callers keep
+    what they already had rather than inventing a limit.
+    """
+    if provider_id != "codex":
+        return {}
+    try:
+        adapter = adapter_for(provider_id)
+    except CliRouteError:
+        return {}
+    read = getattr(adapter, "context_catalogue", None)
+    try:
+        table = read(config_dir=config_dir) if callable(read) else None
+    except (OSError, ValueError, TypeError):
+        table = None
+    return table if isinstance(table, dict) else {}
+
+
+def native_context_spec(provider_id, model, spec, *, config_dir=None, limits=None):
+    """Lower a Codex CLI route's displayed window to its current native card.
+
+    ``context`` stays the raw window and ``runtime_context`` the runtime's
+    usable share of it (the card's effective_context_window_percent), so the
+    reserve is not folded into the headline number. Each is the smaller of
+    the saved value and the current account's, so a cached catalogue from
+    before the account's ceiling shrank stops advertising the old one, and a
+    card can never enlarge a saved or user-chosen smaller window. A spec with
+    no known capacity stays unknown. ``spec`` itself is never modified.
+    """
+    if provider_id != "codex" or not isinstance(spec, dict):
+        return spec
+    if limits is None:
+        limits = native_context_limits(provider_id, config_dir=config_dir).get(model)
+    if not isinstance(limits, dict) or not _positive(limits.get("runtime_context")):
+        return spec
+    saved_window = spec["context"] if _positive(spec.get("context")) else None
+    saved_runtime = spec["runtime_context"] if _positive(spec.get("runtime_context")) else saved_window
+    if saved_runtime is None:
+        return spec
+    result = dict(spec)
+    if saved_window is not None and _positive(limits.get("context")):
+        result["context"] = min(saved_window, limits["context"])
+    runtime = min(saved_runtime, limits["runtime_context"], *([result["context"]] if saved_window is not None else []))
+    if _positive(spec.get("runtime_context")) or runtime < saved_runtime:
+        result["runtime_context"] = runtime
+    if _positive(spec.get("max_input")):
+        result["max_input"] = min(spec["max_input"], runtime)
+    if any(result.get(key) != spec.get(key) for key in ("context", "runtime_context", "max_input")):
+        result["context_kind"] = "runtime_catalogue"
+        if isinstance(limits.get("context_evidence"), str) and limits["context_evidence"]:
+            result["context_evidence"] = limits["context_evidence"]
+        return result
+    return spec
+
+
+def native_context_models(provider_id, models, *, config_dir=None):
+    """Projected catalogue rows with :func:`native_context_spec` applied to each."""
+    table = native_context_limits(provider_id, config_dir=config_dir)
+    if not table:
+        return models
+    lowered = []
+    for model in models:
+        if isinstance(model, dict):
+            native = model.get("model_id") or str(model.get("id", "")).split("/", 1)[-1]
+            model = native_context_spec(provider_id, native, model, limits=table.get(native) or {})
+        lowered.append(model)
+    return lowered
+
+
 def relay_cli_turn(events, emit, *, model, input_tokens=0) -> dict:
     """Translate adapter turn events into Anthropic Messages wire events.
 

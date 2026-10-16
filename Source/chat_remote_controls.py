@@ -10,7 +10,7 @@ import re
 VERSION = 3
 FIELDS = {
     "team": ("enabled", "status", "activeMemberID", "activeMemberIDs", "execution", "runUsage", "limitReason", "members"),
-    "member": ("id", "name", "label", "choice", "route", "effort", "responsibility", "status", "nextStep", "contributions", "usage", "context", "failureReason", "waitReason", "pendingChange", "memberStoppedByUser"),
+    "member": ("id", "name", "label", "choice", "route", "effort", "responsibility", "status", "nextStep", "contributions", "contributionID", "usage", "context", "failureReason", "waitReason", "pendingChange", "memberStoppedByUser"),
     "model": ("id", "route", "label", "provider", "accountLabel", "efforts", "context", "supportsTools", "presentation", "connectionPresentation"),
     "side": ("id", "label", "route", "effort", "status", "busy", "notice", "entries", "truncated"),
     "process": ("id", "pid", "command", "status", "code", "output", "started", "ended", "memberID", "route", "truncated"),
@@ -85,6 +85,14 @@ def project(event, entry_projector):
                 "entries": event.get("entries", []), "hasMore": event.get("hasMore", False)}
     elif kind == "remote_turn_changes":
         return {"event": "control", "chat": event.get("chat"), "panel": "turnChanges", "value": event.get("changes", {}), "notice": ""}
+    elif kind == "remote_activity":
+        # Each record is already built from the owning service's live state.
+        # No provider history, input arguments or process environment are used.
+        return {"event": "control", "chat": event.get("chat"), "panel": "activity",
+                "value": {"busy": event.get("busy") is True, "interrupting": event.get("interrupting") is True,
+                          "status": str(event.get("status") or "")[:160],
+                          "rows": [bounded(pick(row, ("id", "name", "route", "status", "entryID", "kind", "tool", "summary", "runningTool", "streaming", "reason", "stopping")), 2400)
+                                   for row in event.get("rows", [])[:8] if isinstance(row, dict)]}, "notice": ""}
     elif kind == "team":
         team = event.get("team")
         if isinstance(team, dict):
@@ -124,7 +132,7 @@ def project(event, entry_projector):
     elif kind == "plugins":
         panel, value = "browserEnabled", event.get("browserUse") is True
     elif kind == "remote_configuration":
-        panel, value = "configuration", pick(event, ("choice", "effort", "approvalMode", "workspace", "busy"))
+        panel, value = "configuration", pick(event, ("choice", "effort", "approvalMode", "workspace", "busy", "runBusy", "interrupting", "status"))
     elif kind == "side_delta":
         return {"event": "side_delta", "chat": event.get("chat"), "side": event.get("side"),
                 "id": event.get("id"), "text": str(event.get("text") or "")[:4000],

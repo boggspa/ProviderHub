@@ -449,6 +449,7 @@ def project_entry(entry, fallback="legacy"):
             "isError": entry.get("isError") is True,
             "isLive": (entry.get("role") or entry.get("kind")) == "assistant" and entry.get("recorded") is False}
     row.update(route=str(entry.get("route") or "")[:160], memberID=str(entry.get("memberID") or "")[:128],
+               contributionID=str(entry.get("contributionID") or "")[:128],
                agentID=str(entry.get("agentID") or "")[:128],
                changedFiles=[str(path)[:300] for path in (entry.get("changedFiles") or [])[:32] if isinstance(path, str)])
     attachments = [{"id": str(attachment["id"])[:128], "name": str(attachment["name"])[:240],
@@ -527,6 +528,9 @@ def project_event(event):
     if kind == "entry" and isinstance(event.get("entry"), dict):
         entry = event["entry"]
         return {"event": "entry", "chat": event.get("chat"), "entry": project_entry(entry)}
+    if kind == "state":
+        return {"event": "state", "chat": event.get("chat"), "busy": event.get("busy") is True,
+                "interrupting": event.get("interrupting") is True, "status": str(event.get("status") or "")[:160]}
     if kind in {"selected", "snapshot"}:
         entries = []
         for index, entry in enumerate((event.get("entries") or [])[-30:]):
@@ -535,7 +539,8 @@ def project_event(event):
         bounded_entries = bound_entries(entries)
         return {"event": kind, "chat": event.get("chat") or event.get("id"), "id": event.get("id"),
                 "entries": bounded_entries, "hasMore": len(event.get("entries") or []) > len(bounded_entries),
-                "busy": bool(event.get("busy")), "status": str(event.get("status") or "")[:80]}
+                "busy": bool(event.get("busy")), "interrupting": event.get("interrupting") is True,
+                "status": str(event.get("status") or "")[:160]}
     if kind in {"notice", "rejected", "error"} and isinstance(event.get("message"), str):
         return {"event": kind, "chat": event.get("chat"), "message": event["message"][:500]}
     from chat_remote_controls import project
@@ -639,6 +644,12 @@ class MacBridge:
         if kind == "control":
             self.view["controls"][projected["panel"]] = projected["value"]
             self.view["controls"]["version"] = 1
+            if projected["panel"] == "activity" and self.view.get("selected") and self.view["selected"].get("id") == projected.get("chat"):
+                for key in ("busy", "interrupting", "status"):
+                    self.view["selected"][key] = projected["value"].get(key)
+        elif kind == "state" and self.view.get("selected") and self.view["selected"].get("id") == projected.get("chat"):
+            for key in ("busy", "interrupting", "status"):
+                self.view["selected"][key] = projected.get(key)
         elif kind == "side_delta":
             side = self.view["controls"].get("side")
             if isinstance(side, dict) and side.get("id") == projected.get("side"):
@@ -662,6 +673,7 @@ class MacBridge:
                 "id": projected.get("id") or projected.get("chat"),
                 "entries": projected.get("entries") or [],
                 "busy": projected.get("busy"),
+                "interrupting": projected.get("interrupting", False),
                 "status": projected.get("status") or "",
                 "live": "",
                 "liveID": None,
