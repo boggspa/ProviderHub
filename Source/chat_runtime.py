@@ -953,6 +953,9 @@ class ChatService:
             memory = chat_memory.memory_message(memory_chat) if self.role in {"parent", "team"} else None
             board = chat_blackboard.digest_message(memory_chat) if self.role == "team" else None
             progress = chat_execution.progress(self.team_member) if self.role == "team" else None
+            request_note = chat_team.request_reference(memory_chat, self.team_member) if self.role == "team" else None
+            if request_note:
+                memory = {"role": "user", "content": [*request_note["content"], *(memory["content"] if memory else [])]}
             if progress:
                 memory = {"role": "user", "content": [*progress["content"], *(memory["content"] if memory else [])]}
         if memory and isinstance(context, int) and context > 0 and estimated_tokens({"messages": [memory]}) > context // 4:
@@ -983,7 +986,7 @@ class ChatService:
                     # a notice on every long-turn round only buried the work.
                     chat["messages"] = compacted["messages"]; payload = compacted
                     self.save()
-        if chat_context.native_context(choice):
+        if chat_context.stable_reference_context(choice):
             # Keep saved history portable; the projection retains only this
             # service's current context and resets on edits/compaction/switches.
             projection_key = (chat["id"], chat["workspace"], chat["route"], chat.get("account"), chat.get("scope"))

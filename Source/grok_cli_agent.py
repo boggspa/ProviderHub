@@ -123,6 +123,9 @@ from cli_tool_call import (MAX_ENVELOPE_BYTES, TOOL_RESULTS_KEY, TRANSCRIPT_HEAD
                            render_use_tool_manifest, validate_host_call)
 from cli_images import prompt_content
 from codex_session_pool import SessionPool, digest
+from codex_session_pool import history_blocks
+from cli_conversation import Receipt, completed_delta, scope as conversation_scope
+import uuid
 
 try:
     from effort_map import map_effort as _map_effort
@@ -899,6 +902,12 @@ def _translate(payload: Any, state: _TurnState) -> list[dict]:
     kind = payload.get("type")
 
     if kind == "system" and payload.get("subtype") == "init":
+        identifier = payload.get("session_id")
+        if isinstance(identifier, str):
+            state.session_id = identifier
+        if getattr(state, "expected_session_id", None) and identifier != state.expected_session_id:
+            state.failure = "Grok resumed a different conversation; no output was accepted."
+            return []
         # A search turn may keep web_search (or lose it to the user's own
         # disable_web_search); any other registered tool fails the turn, and
         # is named so the cause (a new built-in, an MCP server) is visible.
@@ -1216,6 +1225,8 @@ def _plan_turn(request) -> dict:
         # Typed Messages history, when the route passes it: live sessions match
         # a host request to the CLI waiting on its calls with it.
         "history": history if isinstance(history, list) else None,
+        "conversation": conversation_scope(request),
+        "connection": request.get("connection"),
         "timing": request.get("_cli_timing"),
     }
 
@@ -1524,17 +1535,58 @@ def run_turn(request, *, spawner=None, timeout=300, pool=None) -> Iterator[dict]
 # Live sessions
 # ---------------------------------------------------------------------------
 
-#: Each waiting CLI is a whole Grok process; past four, the oldest is retired
+#: Each waiting CLI is a whole Grok process; past sixteen, the oldest is retired
 #: and its task's next step replays instead.
-_POOL = SessionPool(live_session.dispose, capacity=4, idle_ttl=0, pending_ttl=LIVE_PENDING_TTL, label="Grok")
+_POOL = SessionPool(live_session.dispose, capacity=16, idle_ttl=0, pending_ttl=LIVE_PENDING_TTL, label="Grok")
 atexit.register(_POOL.close)
 
 
 def _pool_key(plan) -> str:
     """What a waiting CLI must share with a request to continue it: argv and system text."""
-    return digest({"model": plan["model"], "effort": plan["effort"], "search": plan["search"],
+    binary = _resolve_binary()
+    try:
+        stat = Path(binary).stat()
+        version = (binary, stat.st_mtime_ns, stat.st_size)
+    except (OSError, TypeError): version = binary
+    return digest({"binary": version, "conversation": plan["conversation"], "connection": plan["connection"], "model": plan["model"], "effort": plan["effort"], "search": plan["search"],
                    "system": _surface(plan, "live")["system"], "tools": plan["host_tools"],
                    "tool_choice": plan["tool_choice"]})
+
+
+class _RetainedGrok(live_session.LiveSession):
+    completed = False
+
+    @property
+    def returncode(self):
+        # A successfully exited single-turn process has a resumable native
+        # session. The receipt and private MCP workspace retain its identity.
+        return None if self.completed else super().returncode
+
+
+def _resume_completed(plan, live, messages, *, spawner, timeout):
+    old = live.session
+    process = getattr(old, "process", None)
+    if process is None or process.wait(timeout=min(timeout, 5)) != 0:
+        raise GrokCliAgentError("Grok's prior query did not exit cleanly; retry with portable history.")
+    old.close()
+    if live.state.stderr_handle is not None: live.state.stderr_handle.close()
+    state = _new_state(plan, "live")
+    state.expected_session_id = live.state.session_id
+    state.stderr_handle = tempfile.TemporaryFile(mode="w+", encoding="utf-8")
+    live.state = state
+    # No previous assistant/tool text is replayed. Resume exactly the session
+    # created by this lease, never --continue or a user's most-recent session.
+    from cli_routes import _messages_for_cli
+    flattened, _ = _messages_for_cli(messages, None)
+    surface = _surface({**plan, "messages": flattened, "images": []}, "live")
+    path = Path(live.workspace) / "prompt.json"
+    path.unlink(missing_ok=True)
+    argv = _turn_argv(surface, live.workspace, extra_removals=sorted(_LEARNED_REMOVALS))
+    argv[0] = _resolve_binary()
+    argv[1:1] = ["--resume", state.expected_session_id]
+    live.session = StdioSession(argv, env=minimal_env({**_CHILD_ENV, **_LIVE_ENV_EXTRA}), cwd=live.workspace,
+                                timeout=float(timeout), spawner=spawner, stderr=state.stderr_handle)
+    live.completed = False
 
 
 def _write_server_config(workspace_path, command) -> None:
@@ -1567,6 +1619,9 @@ def _spawn_live(surface, state, *, spawner, timeout, extra_removals) -> live_ses
         bridge = HostCallBridge(workspace_path, lambda served: toolset.host_name(_HOST_KEY_PREFIX + served))
         _write_server_config(workspace_path, server_command(toolset.write(workspace_path, bridge=bridge)))
         argv = _turn_argv(surface, workspace_path, extra_removals=extra_removals)
+        if surface.get("conversation"):
+            state.expected_session_id = str(uuid.uuid4())
+            argv[1:1] = ["--session-id", state.expected_session_id]
         argv[0] = binary
         state.stderr_handle = tempfile.TemporaryFile(mode="w+", encoding="utf-8")
         session = StdioSession(argv, env=minimal_env({**_CHILD_ENV, **_LIVE_ENV_EXTRA}), cwd=workspace_path,
@@ -1579,7 +1634,7 @@ def _spawn_live(surface, state, *, spawner, timeout, extra_removals) -> live_ses
             state.stderr_handle = None
         shutil.rmtree(workspace_path, ignore_errors=True)
         raise
-    return live_session.LiveSession(session, workspace_path, bridge, state, interrupt=_interrupt)
+    return _RetainedGrok(session, workspace_path, bridge, state, interrupt=_interrupt)
 
 
 def _live_turn(plan, owner, *, spawner, timeout):
@@ -1598,9 +1653,14 @@ def _live_turn(plan, owner, *, spawner, timeout):
         # Grok's MCP client is not shown to pass images to the model, so a
         # screenshot result replays through the verified image transport.
         lease, reuse = owner.acquire(
-            key, match=lambda entry: live_session.continuation(entry, history, images=False) is not None,
-            timeout=max(0.01, deadline - time.monotonic()))
-    except (RuntimeError, TimeoutError):
+            key, match=lambda entry: (completed_delta(entry, history) is not None
+                if entry.pending.get("completed") else live_session.continuation(entry, history, images=False) is not None),
+            timeout=max(0.01, deadline - time.monotonic()),
+            request_key=digest((key, history_blocks(history))) if plan["conversation"] else None)
+    except (RuntimeError, TimeoutError) as exc:
+        if plan["conversation"]:
+            yield {"type": "error", "message": str(exc)}
+            return None
         return "stateless"
     except Exception as exc:  # the client cancelled while the lease was awaited
         yield {"type": "error", "message": _describe(exc, None, timeout)}
@@ -1613,17 +1673,40 @@ def _live_turn(plan, owner, *, spawner, timeout):
     def ready(live):
         return lambda: live.bridge.check(live.state.host_calls) == "ready"
 
+    def stream(live, **options):
+        receipt = Receipt()
+        events = _stream(live.session, live.state, timeout=max(.01, deadline - time.monotonic()),
+                         on_handoff=on_handoff(live), ready=ready(live), **options)
+        try:
+            while True:
+                try: event = next(events)
+                except StopIteration as stop: return stop.value
+                receipt.observe(event)
+                if (plan["conversation"] and event.get("type") == "message_stop"
+                        and event.get("stop_reason") == "end_turn" and live.state.terminal
+                        and getattr(live.state, "session_id", None) == getattr(live.state, "expected_session_id", None)):
+                    lease.pending = receipt.completed(history)
+                    live.completed = bool(lease.pending)
+                yield event
+        finally: events.close()
+
     try:
         if reuse == "resumed":
-            results = live_session.continuation(lease, history, images=False)
-            lease.pending = None
             live = lease.session
-            if results is None or not live.resume(results):
-                return "stateless"
+            completed = lease.pending.get("completed", False)
+            if completed:
+                messages = completed_delta(lease, history)
+                lease.pending = None
+                if messages is None: raise GrokCliAgentError("Grok conversation history changed before resume")
+                _resume_completed(plan, live, messages, spawner=spawner, timeout=max(.01, deadline-time.monotonic()))
+            else:
+                results = live_session.continuation(lease, history, images=False)
+                lease.pending = None
+                if results is None or not live.resume(results): return "stateless"
             if timing:
                 timing.label(reuse="resumed")
-            return (yield from _stream(live.session, live.state, timeout=max(0.01, deadline - time.monotonic()),
-                                       retry_allowed=False, on_handoff=on_handoff(live), ready=ready(live)))
+                timing.label(continuation_kind="native_session" if completed else "tool_result")
+            return (yield from stream(live, retry_allowed=False))
         if timing:
             timing.label(reuse="cold")
         surface = _surface(plan, "live")
@@ -1639,9 +1722,7 @@ def _live_turn(plan, owner, *, spawner, timeout):
                 yield {"type": "error", "message": _describe(exc, state, timeout)}
                 return None
             lease.session = live
-            outcome = yield from _stream(live.session, state, timeout=max(0.01, deadline - time.monotonic()),
-                                         retry_allowed=attempt == 1, on_handoff=on_handoff(live),
-                                         ready=ready(live))
+            outcome = yield from stream(live, retry_allowed=attempt == 1)
             if attempt == 2 and state.native_tools_disabled and len(_LEARNED_REMOVALS) < _MAX_LEARNED_REMOVALS:
                 _LEARNED_REMOVALS.update(name for name in removals if _REMOVAL_NAME.fullmatch(name))
             if not isinstance(outcome, frozenset):
@@ -1652,8 +1733,12 @@ def _live_turn(plan, owner, *, spawner, timeout):
             lease.session = None
             removals = removals | outcome
         return None
+    except Exception as exc:
+        lease.pending = None
+        yield {"type": "error", "message": _describe(exc, None, timeout)}
+        return None
     finally:
-        # Only a handoff the client has received keeps the CLI waiting. Any
+        # Only a handoff or completed reply received by the client is kept. Any
         # other ending closes it now, as a stateless turn would, rather than
         # leaving it to the pool's reaper.
         keep = bool(lease.pending) and (timing is None or timing.delivered)

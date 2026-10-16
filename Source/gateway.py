@@ -406,7 +406,11 @@ class Runtime:
         # Rewriting old remaining-token reminders on each call invalidates
         # that prefix even in an otherwise append-only tool loop. The native
         # request still enforces real context/output limits below.
-        rewritten = payload if provider_id == "claude" else rewrite_context_reminders(payload, context, estimate)
+        # Lean Chat enforces its own live budget and reference snapshots.
+        # Rewriting historical budget text at each step would invalidate the
+        # append-only prefix used by these audited transports.
+        stable_chat = is_chat and provider_id in {"codex", "grok", "antigravity", "kimi", "mistral", "ollama"}
+        rewritten = payload if provider_id == "claude" or stable_chat else rewrite_context_reminders(payload, context, estimate)
         reminders_rewritten = rewritten is not payload
         payload = rewritten
         key = (self.key if self.key is not None else credentials(selected_settings, provider_id)[0]) if is_chat else self.provider_key(provider_id)

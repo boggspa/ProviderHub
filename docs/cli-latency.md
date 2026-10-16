@@ -15,8 +15,8 @@ still respond to upstream rate limits.
 | Codex | Text streams immediately; native host calls remain validated | Initialized app-server processes are reused. A pending native call retains its thread and receives the real host result on the next matching request. |
 | Muse Code | First complete, validated structured response on the Messages surface; terminal completion on other requests | Fresh exec process per request. The four-step allowance remains; later speculative structured output is not consumed. |
 | Claude Code | Native host handoff or successful terminal result | Lean Chat keeps a scoped streaming conversation across matching tools, user steering and completed contributions on CLI 2.1.290+. Other surfaces retain tool-handoff continuity. Changed history reconstructs portable context. |
-| Grok | Successful terminal event or validated native host handoff | Fresh process per request. |
-| AntiGravity | Successful result or confirmed pre-execution denial receipt | Fresh process per request. The denial hook and private files remain until child exit. |
+| Grok | Successful terminal event or validated native host handoff | Matching tool calls keep the process. Scoped lean Chat follow-ups after a completed turn use that lease's explicit native session ID and send only new input. |
+| AntiGravity | Successful result or confirmed pre-execution denial receipt | Scoped lean Chat retains a stream-json process after a successful result when the installed CLI advertises that protocol. Early denied native handoffs still retire the process. |
 | Mistral Vibe credentials | Existing streaming Mistral API route | This hub connection does not spawn Vibe CLI processes. |
 
 Codex retains up to eight idle processes. Ordinary idle leases expire after two
@@ -32,9 +32,8 @@ dropped. Process reuse after a completed task starts a fresh native thread.
 The installed Muse MSP schema exposes session/start and turn/steer, but the
 published session configuration inspected here only exposes MCP configuration;
 the exec structured-response contract has not been verified over persistent MSP.
-Claude and AGY advertise stream-json input and session continuation; Grok
-advertises resume/session controls. These are candidates for a later persistent
-adapter, not a basis for sharing one active process among unrelated tasks.
+Persistent transports keep one exclusive native conversation per host
+chat/member; they never share an active reader between unrelated tasks.
 
 ## Stateful CLI context in the lean harness
 
@@ -51,8 +50,9 @@ bridge handoffs on one scripted CLI process.
 Actual user entries (even ones imitating a peer-reference label), mixed user
 input, incomplete tool results and non-text references keep ordinary message
 boundaries. The native continuation matchers are unchanged. Codex still accepts
-real user steering with `turn/steer`; Claude and Grok replay genuine new user
-messages. API-backed and stateless routes receive the same small previews as
+real user steering with `turn/steer`; Claude also has scoped native user-frame
+continuation. Grok still reconstructs history for new user input interleaved
+with an unresolved native tool handoff. API-backed and stateless routes receive the same small previews as
 ordinary messages rather than having peer references attached to tool results.
 No historical chat is rewritten, and pending processes from an earlier build
 are not adopted or reused by the fix.
@@ -114,6 +114,103 @@ paid inference. This verifies transport behavior, not server cache savings.
 Protocol references: [streaming input](https://code.claude.com/docs/en/agent-sdk/streaming-vs-single-mode),
 [CLI stream flags](https://code.claude.com/docs/en/cli-reference), and
 [SDK transport changes](https://github.com/anthropics/claude-agent-sdk-typescript/blob/main/CHANGELOG.md).
+
+### Grok completed-turn continuity
+
+Lean Chat supplies a chat/member scope and connection identity. Grok starts
+with a fresh UUID via `--session-id`; an unchanged prefix and exact returned
+assistant reply permit a later user turn to use `--resume <that UUID>` in the
+same private MCP workspace. Only the appended user content is sent. It never
+uses the user's most-recent session, never restores code, and verifies the
+session ID returned by the CLI before accepting output. A previous query must
+exit cleanly before resume. Tool registries and permission checks remain the
+same as fresh requests. The pool retains at most sixteen idle leases for up
+to fifteen minutes, covering an eight-member Team; cached replay identifiers
+expire with the existing pool policy. Duplicate host requests are refused.
+
+Completed-turn resume starts a new Grok process; matching pending host calls
+continue to reuse their existing process. User steering at an unresolved
+handoff and newly appended images still use portable reconstruction rather
+than pretending Grok supports Claude's input protocol. Changed model, effort,
+connection, tools, system text, CLI binary or history also prevents reuse.
+The CLI's own session storage follows its existing retention policy; Provider
+Hub does not read credentials or delete vendor transcripts.
+
+Installed Grok 1.0.60 was qualified against an isolated loopback fake API:
+explicit session resume preserved native history, and the actual adapter sent
+only the new prompt on its second invocation. This used a temporary home and
+synthetic data, with no paid inference. Fixtures also test exact reply matching,
+scope isolation, foreign session IDs and duplicate requests.
+See [Grok CLI reference](https://docs.x.ai/build/cli/reference).
+
+### AntiGravity streaming continuation
+
+The installed `--help` must advertise stream-json input before the lean Chat
+adapter uses it. A single process then receives sequential
+`{"event":"user","message":{"content":"..."}}` frames. Only matching
+completed replies can continue: host history, configuration and connection
+identity are checked first. Structured replies are parsed into the same
+host-visible text/calls for matching, ignoring only host-generated call IDs;
+each real tool result must still match the saved call exactly. The native
+conversation ID must remain unchanged. There is no concurrent prompt queue.
+
+The sandbox, plan mode and pre-tool denial hook remain active. A confirmed
+early native-tool denial is returned to the host and retires the process,
+because that native turn has not reached a successful terminal boundary.
+Images, malformed history and oversized appended content use the existing
+lossless fresh context transport. Files from prior context reads remain scoped
+until the process is reaped. No tool result or user instruction is invented.
+
+AGY's documented cumulative session counters are differenced per completed
+query. Missing or decreasing counters remain unknown; they are not replaced
+with invented cache hits. This path is qualified with protocol fixtures and
+the installed 1.3.6 help contract; live subscription cache savings have not been
+measured. See [AntiGravity headless protocol](https://www.antigravity.google/docs/cli/headless/).
+
+### API prefix and cache audit
+
+Kimi, Mistral (including Vibe credentials) and Ollama use API transports here.
+They already receive the same bounded Team peer digest. Their lean Chat
+notebook/Blackboard/work-record updates now use the append-only in-memory
+projection rather than replacing the first history message every round.
+Historical budget-reminder text is left unchanged on these audited lean Chat
+routes; current context/output limits are still enforced. Compaction and
+projection resets intentionally rebuild a shorter prefix.
+
+Mistral lean Chat sends an opaque `prompt_cache_key` derived from model,
+conversation/member and connection scope, never prompt text or credentials.
+Reported `prompt_tokens_details.cached_tokens` is split from total input once
+in both streaming and buffered Chat-Completions translation. Missing or invalid
+cache counts remain absent. Mistral documents that the key improves routing
+but does not guarantee hits: [prompt caching](https://docs.mistral.ai/studio/conversations/advanced/prompt-caching).
+
+No unverified Kimi cache flags or TTLs are added. The existing Kimi Messages
+cache counters pass through when the provider supplies them. Ollama model
+residency (`keep_alive`) remains distinct from cached prompt evaluation; its
+native API documents `prompt_eval_cached_count` and `prompt_eval_duration`, but
+this route uses compatibility endpoints and does not infer missing native
+metrics. See [Ollama chat metrics](https://docs.ollama.com/api/chat).
+Synthetic fixtures verify request prefixes and telemetry arithmetic; they do
+not establish provider-side hit rates or subscription savings.
+
+### Prompt delivery and visible activity
+
+True Team user messages are delivered in a separate user-instruction block,
+with exact text, attachments, mention targeting and source identity. They are
+not shortened by the peer-preview budget and are no longer wrapped as portable
+peer history. Every member also receives an exact source locator for its latest
+addressed request through the bounded reference projection. The locator does
+not repeat the instruction text: it provides a direct paginated `read_history`
+source to use only if the original is no longer in active context. Saved records
+remain complete. Fresh-member Grok and MiniMax plans are tested for exact
+beginning-to-end delivery, without asserting that a model will always use it.
+
+Transcript paging includes live segments and their speaker headers even when
+those segments belong to an older member section outside the normal tail.
+It does not expand unrelated old sections or alter worker scheduling. A
+`needs_input` outcome still blocks new contributions while current work
+settles. Hidden display activity, prompt reconstruction and deliberate input
+pauses are separate conditions.
 
 For Claude, Codex and Grok, notebook, Blackboard and work-record snapshots use an append-only in-memory
 projection. A changed snapshot travels as reference text in a fresh tool
