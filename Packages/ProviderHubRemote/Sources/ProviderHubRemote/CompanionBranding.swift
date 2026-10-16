@@ -16,7 +16,7 @@ struct CompanionPresentation {
     init(_ value: RemoteValue, fallback: String = "Assistant") {
         provider = value["displayProvider"].text
         label = value["modelLabel"].text.isEmpty ? fallback : value["modelLabel"].text
-        shortCode = value["shortCode"].text.isEmpty ? String(fallback.prefix(3)).uppercased() : value["shortCode"].text
+        shortCode = value["shortCode"].text.isEmpty ? "" : value["shortCode"].text
         accentHex = value["accent"].text
         logo = value["logo"]
     }
@@ -79,7 +79,11 @@ struct CompanionProviderMark: View {
                 .foregroundStyle(presentation.logo["tint"].text == "accent" ? presentation.accent : CompanionTheme.ink)
                 .scaleEffect(scale)
             } else {
-                Text(presentation.shortCode).font(.system(size: size * 0.4, weight: .bold, design: .rounded)).foregroundStyle(presentation.accent)
+                if presentation.shortCode.isEmpty {
+                    Image(systemName: "sparkle").font(.system(size: max(9, size - 2))).foregroundStyle(CompanionTheme.secondary)
+                } else {
+                    Text(presentation.shortCode).font(.system(size: size * 0.4, weight: .bold, design: .rounded)).foregroundStyle(presentation.accent)
+                }
             }
         }.frame(width: size, height: size).accessibilityLabel(presentation.provider)
     }

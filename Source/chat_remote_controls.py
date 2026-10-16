@@ -7,7 +7,7 @@ injection are never accepted from a remote client.
 import json
 import re
 
-VERSION = 1
+VERSION = 2
 FIELDS = {
     "team": ("enabled", "status", "activeMemberID", "activeMemberIDs", "execution", "runUsage", "limitReason", "members"),
     "member": ("id", "name", "label", "choice", "route", "effort", "responsibility", "status", "nextStep", "contributions", "usage", "context", "failureReason", "waitReason", "pendingChange", "memberStoppedByUser"),
@@ -68,6 +68,20 @@ def project(event, entry_projector):
         value = [pick(row, FIELDS["model"]) for row in event.get("models", []) if isinstance(row, dict)]
         for row in value:
             if "presentation" in row: row["presentation"] = presentation(row["presentation"])
+    elif kind == "remote_options":
+        return {"event": "control", "chat": None, "panel": "options", "value": {"version": VERSION, "workspaces": event.get("workspaces", [])}, "notice": ""}
+    elif kind == "blackboard":
+        board = event.get("blackboard") or {}
+        panel = "blackboard"
+        # The board's post text already has a 24 KB cap. Preserve every post
+        # rather than truncating its identity or full edit body.
+        value = {"posts": [pick(row, ("id", "author", "authorName", "route", "key", "body", "category", "created", "updated", "quote")) for row in board.get("posts", [])[:48]],
+                 "attachments": [pick(row, ("id", "name", "kind", "url", "size", "authorName", "source")) for row in board.get("attachments", [])[:64]],
+                 "limits": pick(board.get("limits"), ("posts", "bodyBytes", "boardBytes", "usedBytes", "attachments"))}
+        return {"event": "control", "chat": event.get("chat"), "panel": panel, "value": value, "notice": str(event.get("notice") or "")[:500]}
+    elif kind == "remote_history":
+        return {"event": "history", "chat": event.get("chat"), "before": event.get("before"), "request": event.get("request"),
+                "entries": event.get("entries", []), "hasMore": event.get("hasMore", False)}
     elif kind == "team":
         team = event.get("team")
         if isinstance(team, dict):
@@ -118,6 +132,12 @@ def project(event, entry_projector):
 
 
 COMMANDS = {
+    "remote_options": (), "remote_create": ("choice", "workspace"),
+    "remote_history": ("before",), "remote_upload_begin": ("upload", "name", "size", "sha256"),
+    "remote_upload_chunk": ("upload", "offset", "data"), "remote_upload_finish": ("upload",), "remote_upload_drop": ("upload",),
+    "remote_send": ("text", "uploads"), "remote_board_attach": ("uploads",),
+    "blackboard": (), "blackboard_post": ("key", "body", "category", "quote"),
+    "blackboard_remove": ("post",), "blackboard_attach": ("url", "title"), "blackboard_detach": ("attachment",),
     "remote_inspect": (), "inspect_git": (), "processes": (), "clear_processes": (),
     "configure": ("choice", "effort", "approvalMode", "expectedWorkspace"),
     "configure_team": ("enabled", "members", "execution"),
@@ -132,9 +152,14 @@ COMMANDS = {
 def command(params, request_id):
     action, args, chat = params.get("action"), params.get("arguments", {}), params.get("chat")
     if not isinstance(action, str) or action not in COMMANDS: raise ValueError("Unsupported control action")
-    if not isinstance(chat, str) or not re.fullmatch(r"[0-9a-f]{32}", chat): raise ValueError("Exact chat required")
+    if action not in {"remote_options", "remote_create"} and (not isinstance(chat, str) or not re.fullmatch(r"[0-9a-f]{32}", chat)): raise ValueError("Exact chat required")
     if not isinstance(args, dict) or set(args) - set(COMMANDS[action]): raise ValueError("Unexpected control fields")
     if len(json.dumps(args).encode()) > 32000: raise ValueError("Control request too large")
+    if action == "remote_create" and (not isinstance(args.get("choice"), str) or not isinstance(args.get("workspace"), str)): raise ValueError("Choose a model and Mac workspace")
+    if action == "remote_history" and (not isinstance(args.get("before"), str) or len(args["before"]) > 128): raise ValueError("History cursor required")
+    if action in {"remote_send", "remote_board_attach"}:
+        uploads = args.get("uploads", [])
+        if not isinstance(uploads, list) or len(uploads) > 8 or any(not isinstance(u, str) or not re.fullmatch(r"[0-9a-f]{32}", u) for u in uploads): raise ValueError("Invalid attachment handles")
     if action == "configure":
         if not args or not isinstance(args.get("expectedWorkspace"), str): raise ValueError("Refresh this chat before changing its configuration")
         if "approvalMode" in args and args["approvalMode"] not in ("manual", "accept_edits", "yolo"): raise ValueError("Invalid approval mode")
@@ -146,4 +171,5 @@ def command(params, request_id):
     if action == "remote_browser":
         if args.get("tool") not in {"browser_open", "browser_navigate", "browser_list", "browser_observe", "browser_act", "browser_close", "browser_remote_preview"}: raise ValueError("Unsupported browser action")
         if not isinstance(args.get("arguments", {}), dict): raise ValueError("Invalid browser arguments")
-    return {"command": action, "id": chat, "chat": chat, "request": request_id, **args}
+    return {"command": action, "id": chat, "chat": chat, "request": request_id, **args,
+            **({"_remoteControl": True} if action.startswith("blackboard") else {})}

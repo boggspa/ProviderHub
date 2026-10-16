@@ -658,4 +658,5 @@ def handle(service, command):
         publish(service, request=request)
     except (ValueError, OSError, TypeError, KeyError) as exc:
         publish(service, request=request, notice=str(exc))
+        if command.get("_remoteControl") is True: raise ValueError(str(exc)) from exc
     return True

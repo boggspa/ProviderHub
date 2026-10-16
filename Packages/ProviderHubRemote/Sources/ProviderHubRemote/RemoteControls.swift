@@ -48,7 +48,7 @@ extension CompanionModel {
     public var team: RemoteValue { store.controls["team"] ?? .null }
     public var members: [RemoteValue] { team["members"].rows }
     public var models: [RemoteValue] { store.controls["models"]?.rows ?? [] }
-    public var controlSurfaceAvailable: Bool { store.controls["version"]?.int == 1 }
+    public var controlSurfaceAvailable: Bool { (store.controls["version"]?.int ?? 0) >= 1 }
     @discardableResult
     public func control(_ action: String, _ arguments: [String: RemoteValue] = [:]) -> String? {
         guard isConnected, let chat = selectedChatID, store.selectedID == chat else { return nil }

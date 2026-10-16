@@ -451,6 +451,10 @@ def project_entry(entry, fallback="legacy"):
     row.update(route=str(entry.get("route") or "")[:160], memberID=str(entry.get("memberID") or "")[:128],
                agentID=str(entry.get("agentID") or "")[:128],
                changedFiles=[str(path)[:300] for path in (entry.get("changedFiles") or [])[:32] if isinstance(path, str)])
+    attachments = [{"id": str(attachment["id"])[:128], "name": str(attachment["name"])[:240],
+                    "kind": str(attachment.get("kind") or "file")[:20], "size": max(0, attachment.get("size", 0)) if type(attachment.get("size", 0)) is int else 0}
+                   for attachment in (entry.get("attachments") or [])[:8] if isinstance(attachment, dict) and attachment.get("id") and attachment.get("name")]
+    if attachments: row["attachments"] = attachments
     timestamp = entry.get("time")
     if type(timestamp) in (int, float) and 0 <= timestamp < 10_000_000_000: row["time"] = timestamp
     question = entry.get("question")
@@ -528,8 +532,10 @@ def project_event(event):
         for index, entry in enumerate((event.get("entries") or [])[-30:]):
             if isinstance(entry, dict):
                 entries.append(project_entry(entry, "snapshot-" + str(index)))
+        bounded_entries = bound_entries(entries)
         return {"event": kind, "chat": event.get("chat") or event.get("id"), "id": event.get("id"),
-                "entries": bound_entries(entries), "busy": bool(event.get("busy")), "status": str(event.get("status") or "")[:80]}
+                "entries": bounded_entries, "hasMore": len(event.get("entries") or []) > len(bounded_entries),
+                "busy": bool(event.get("busy")), "status": str(event.get("status") or "")[:80]}
     if kind in {"notice", "rejected", "error"} and isinstance(event.get("message"), str):
         return {"event": kind, "chat": event.get("chat"), "message": event["message"][:500]}
     from chat_remote_controls import project
@@ -546,7 +552,7 @@ class MacBridge:
         self.auto_accept = auto_accept
         self.session = Session("mac", self.identity, session_id, self._trust)
         self.session.on_app = self._on_app
-        self.view = {"chats": [], "selected": None, "approval": None, "controls": {"version": 1}}
+        self.view = {"chats": [], "selected": None, "approval": None, "controls": {"version": 1, "extensionVersion": 2}}
         self.pending_pairing = None
         self.hold_pairing = False
         self.selected_chat = None
@@ -659,6 +665,7 @@ class MacBridge:
                 "status": projected.get("status") or "",
                 "live": "",
                 "liveID": None,
+                "hasMore": projected.get("hasMore", False),
             }
         elif kind == "delta" and self.view.get("selected") and self.view["selected"].get("id") == projected.get("chat"):
             selected = self.view["selected"]
@@ -686,7 +693,7 @@ class MacBridge:
     def _snapshot(self):
         # Refresh images on demand; snapshots prioritize text, control state and
         # chat history within the fixed encrypted frame limit.
-        controls = {k: v for k, v in self.view["controls"].items() if k != "browserPreview"}
+        controls = {k: v for k, v in self.view["controls"].items() if k not in {"browserPreview", "blackboard", "options"}}
         return {"cursor": self.cursor, "chats": self.view["chats"], "approval": self.view["approval"],
                 "selected": self.view["selected"], "controls": controls}
 
@@ -744,9 +751,17 @@ class MacBridge:
             from chat_remote_controls import command
             try: control = command(params, request_id)
             except (ValueError, TypeError) as exc: raise RemoteError(str(exc)) from exc
-            if params.get("chat") != self.selected_chat: raise RemoteError("Select this chat before using its controls")
-            self._execute(control)
-            return {"requestId": request_id, "ok": True}
+            action = control["command"]
+            if action not in {"remote_create", "remote_options"} and params.get("chat") != self.selected_chat: raise RemoteError("Select this chat before using its controls")
+            result = self._execute(control) or {}
+            if action == "remote_create":
+                created = result.get("chat")
+                if not isinstance(created, str) or not CHAT_ID.fullmatch(created): raise RemoteError("Chat creation did not return a chat")
+                self.selected_chat = created
+                self.view["controls"] = {key: value for key, value in self.view["controls"].items() if key in {"version", "extensionVersion", "models", "browserEnabled", "options"}}
+                self.view["approval"] = None
+                self._execute({"command": "subscribe", "client": "remote", "chats": [created]})
+            return {"requestId": request_id, "ok": True, "result": result}
         if method == "chat.approve":
             return self._approve(peer, params, request_id)
         chat = params.get("chat") if method != "chat.select" else params.get("chat")
@@ -768,7 +783,7 @@ class MacBridge:
                            "answers": params.get("answers"), "dismiss": params.get("dismiss") is True})
         elif method == "chat.select":
             if self.selected_chat != chat:
-                self.view["controls"] = {key: value for key, value in self.view["controls"].items() if key in {"version", "models", "browserEnabled"}}
+                self.view["controls"] = {key: value for key, value in self.view["controls"].items() if key in {"version", "extensionVersion", "models", "browserEnabled", "options"}}
                 if self.view["approval"] and self.view["approval"].get("chat") != chat:
                     self.view["approval"] = None
             self.selected_chat = chat
@@ -779,7 +794,7 @@ class MacBridge:
 
     def _execute(self, command):
         try:
-            self.execute(command)
+            return self.execute(command)
         except RemoteError:
             raise
         except Exception as exc:
@@ -1137,11 +1152,15 @@ class RemoteServer:
         except (OSError, ValueError, RemoteError) as exc:
             self.error = str(exc)[:300]
         finally:
+            # Stop/revocation already cleared this socket on the serial owner.
+            # Do not enqueue a late callback after that owner has shut down.
+            with self.lock:
+                notify_closed = self.connection is connection and self.listener is not None
             def closed():
                 with self.lock:
                     if self.connection is connection:
                         self._disconnect()
-            self.dispatch(closed)
+            if notify_closed: self.dispatch(closed)
 
     def publish(self, event):
         with self.lock:

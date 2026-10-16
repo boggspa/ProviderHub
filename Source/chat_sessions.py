@@ -523,6 +523,9 @@ the same publication `initialize` and `select` perform, ending with `ready`.
         if self.closing: raise ValueError("Chat is closing.")
         if self.remote_command(command): return
         if self.capabilities.handle(command): return
+        from chat_remote_actions import handle as remote_action
+        handled, result = remote_action(self, command)
+        if handled: return result
         if action == "subscribe":
             client, identifiers = command.get("client", "desktop"), command.get("chats")
             if (not isinstance(client, str) or not client or len(client) > 128 or
@@ -552,6 +555,7 @@ the same publication `initialize` and `select` perform, ending with `ready`.
                 self.publish_workspaces()
                 self.capabilities.publish()
                 service.publish_inspector()
+                service.handle({"command": "blackboard", "id": identifier})
                 # Empty panels must clear a previous chat's cached state too.
                 if not service.chat.get("team"): self.emit({"event": "team", "chat": identifier, "team": None})
                 if not service.side: self.emit({"event": "side", "chat": identifier, "side": None})
@@ -741,6 +745,7 @@ the same publication `initialize` and `select` perform, ending with `ready`.
             self.processes.shutdown()
             self.capabilities.close()
             if self.remote is not None: self.remote.stop()
+            if hasattr(self, "remote_files"): self.remote_files.close()
         deadline = time.monotonic() + timeout
         for service in services:
             for thread in (service.thread, service.restart_thread, service.branch_thread):

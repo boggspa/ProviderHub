@@ -26,6 +26,9 @@ struct CompanionTranscript: View {
     var models: [RemoteValue] = []
     var members: [RemoteValue] = []
     var fallbackRoute = ""
+    var hasOlder = false
+    var loadingOlder = false
+    var loadOlder: () -> Void = {}
     var answer: (RemoteQuestion, [String: [String]], Bool) -> Void = { _, _, _ in }
     @State private var followsLatest = true
     @State private var expanded = Set<String>()
@@ -41,6 +44,11 @@ struct CompanionTranscript: View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
+                    if hasOlder {
+                        Button(action: loadOlder) {
+                            HStack { if loadingOlder { ProgressView().controlSize(.small) }; Text(loadingOlder ? "Loading older messages…" : "Load earlier messages") }
+                        }.buttonStyle(.plain).font(.system(size: 12 * scale)).frame(maxWidth: .infinity).padding(.bottom, 16).disabled(loadingOlder)
+                    }
                     ForEach(outline) { segment in
                         Group {
                             switch segment.content {
@@ -57,7 +65,7 @@ struct CompanionTranscript: View {
                                 }.tint(CompanionTheme.secondary)
                             case .changes(let items): changes(items)
                             }
-                        }.padding(.top, gap(segment.spacing))
+                        }.padding(.top, gap(segment.spacing)).id(segment.id)
                     }
                     if chat.busy && entries.last?.isLive != true {
                         HStack(spacing: 8) {
@@ -72,7 +80,11 @@ struct CompanionTranscript: View {
                 .padding(.horizontal, 20).padding(.top, 16).padding(.bottom, 4)
             }
             .onAppear { proxy.scrollTo("transcript-bottom", anchor: .bottom) }
-            .onChange(of: entries) { _, _ in if followsLatest { proxy.scrollTo("transcript-bottom", anchor: .bottom) } }
+            .onChange(of: entries) { old, new in
+                if let first = old.first, new.first?.id != first.id, new.contains(where: { $0.id == first.id }) {
+                    followsLatest = false; proxy.scrollTo(first.id, anchor: .top)
+                } else if followsLatest { proxy.scrollTo("transcript-bottom", anchor: .bottom) }
+            }
             .overlay(alignment: .bottomTrailing) {
                 if !followsLatest {
                     Button { followsLatest = true; proxy.scrollTo("transcript-bottom", anchor: .bottom) } label: {
@@ -107,11 +119,14 @@ struct CompanionTranscript: View {
                 CompanionQuestionCard(question: question, accent: brand.accent, enabled: connected) { values, dismiss in answer(question, values, dismiss) }
             }
         case "user":
-            HStack {
+            VStack(alignment: .trailing, spacing: 6) {
+                attachmentStrip(entry)
+                HStack {
                 Spacer(minLength: 56 * scale)
                 (Text("User: ").bold() + Text(entry.text)).font(.system(size: textSize)).textSelection(.enabled)
                     .padding(.horizontal, 13 * scale).padding(.vertical, 8 * scale)
                     .background(RoundedRectangle(cornerRadius: 15 * scale, style: .continuous).fill(CompanionTheme.selection))
+                }
             }.accessibilityLabel("You: " + entry.text)
         case "assistant":
             let reply = ChatReplySources.split(entry.text)
@@ -158,6 +173,16 @@ struct CompanionTranscript: View {
                 HStack { Text(file.path).lineLimit(1); Spacer(); Text(file.members.joined(separator: ", ")).foregroundStyle(CompanionTheme.secondary) }.font(.system(size: 11 * scale))
             }
         }.padding(10).companionCard(cornerRadius: 8)
+    }
+    private func attachmentStrip(_ entry: RemoteEntry) -> some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack {
+                ForEach(entry.attachments) { file in
+                    Label(file.name + " · " + ByteCountFormatter.string(fromByteCount: Int64(file.size), countStyle: .file), systemImage: file.kind == "image" ? "photo" : "doc")
+                        .font(.system(size: 11 * scale)).padding(8).companionCard(cornerRadius: 8)
+                }
+            }
+        }.frame(height: entry.attachments.isEmpty ? 0 : nil)
     }
     private func gap(_ spacing: ChatTranscriptSegment<RemoteTranscriptItem>.Spacing) -> CGFloat {
         switch spacing { case .none: return 0; case .speaker: return 26 * scale; case .header, .item: return 6 * scale }

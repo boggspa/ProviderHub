@@ -1,4 +1,8 @@
 import SwiftUI
+import UniformTypeIdentifiers
+#if os(iOS)
+import PhotosUI
+#endif
 
 /// Commands the phone is allowed to ask the Mac to perform. The Mac owns execution.
 public protocol CompanionLink: AnyObject {
@@ -24,6 +28,12 @@ public final class CompanionModel: ObservableObject {
     }
     private var drafts: [String: String] = [:]
     private var pendingDrafts: [String: (String, String)] = [:]
+    var pendingControls: [String: CheckedContinuation<RemoteValue, Error>] = [:]
+    @Published public var attachmentDrafts: [String: [RemoteDraftAttachment]] = [:]
+    @Published public var attachmentSending = false
+    @Published public var uploadProgress = ""
+    @Published public var composeNotice = ""
+    @Published public var historyLoading = false
     public weak var link: CompanionLink?
     @Published public var pairingText = ""
     private let connection: CompanionTransport
@@ -33,7 +43,7 @@ public final class CompanionModel: ObservableObject {
     public var isConnected: Bool { status == "Connected" }
     public var canSend: Bool {
         isConnected && selectedChat != nil && selectedChat?.busy != true &&
-            !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+            (!draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !(attachmentDrafts[selectedChatID ?? ""] ?? []).isEmpty) && !attachmentSending &&
             !pendingDrafts.values.contains(where: { $0.0 == selectedChatID && $0.1 == draft })
     }
 
@@ -47,6 +57,10 @@ public final class CompanionModel: ObservableObject {
                 self?.status = status; self?.confirmCode = code
                 if status.hasPrefix("Disconnected") || status.hasPrefix("Command failed") {
                     self?.pendingDrafts.removeAll()
+                    if let self {
+                        let pending = self.pendingControls; self.pendingControls.removeAll()
+                        for continuation in pending.values { continuation.resume(throwing: RemoteControlFailure.rejected("Disconnected; reconnect and inspect before retrying. Your draft is retained.")) }
+                    }
                 }
             }
         }
@@ -59,6 +73,15 @@ public final class CompanionModel: ObservableObject {
     func receiveRemote(_ message: [String: Any]) {
         do {
             try store.receive(message)
+            if message["method"] as? String == "session.ack", let params = message["params"] as? [String: Any],
+               let id = params["requestId"] as? String, let continuation = pendingControls.removeValue(forKey: id) {
+                if params["ok"] as? Bool == true {
+                    do {
+                        let data = try JSONSerialization.data(withJSONObject: params["result"] ?? [:], options: [.fragmentsAllowed])
+                        continuation.resume(returning: try JSONDecoder().decode(RemoteValue.self, from: data))
+                    } catch { continuation.resume(throwing: error) }
+                } else { continuation.resume(throwing: RemoteControlFailure.rejected(params["error"] as? String ?? "The Mac rejected this action")) }
+            }
             if message["method"] as? String == "session.ack",
                let params = message["params"] as? [String: Any],
                let id = params["requestId"] as? String,
@@ -135,6 +158,11 @@ public final class CompanionModel: ObservableObject {
     }
 
     public func sendDraft() {
+        if !(attachmentDrafts[selectedChatID ?? ""] ?? []).isEmpty {
+            guard canSend else { return }
+            Task { @MainActor in await sendWithAttachments() }
+            return
+        }
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard canSend, let chat = selectedChatID, !text.isEmpty,
               !pendingDrafts.values.contains(where: { $0.0 == chat && $0.1 == draft }) else { return }
@@ -171,6 +199,11 @@ public struct CompanionView: View {
     @State private var inspectorTab: RemoteInspectorTab = .agents
     @State private var permissionChange: String?
     @State private var choosingModel = false
+    @State private var creatingChat = false
+    @State private var importingFiles = false
+    #if os(iOS)
+    @State private var photos: [PhotosPickerItem] = []
+    #endif
     @Environment(\.scenePhase) private var scenePhase
     @State private var viewWidth: CGFloat = 0
     @AppStorage("companionAppearance") private var appearance = "system"
@@ -191,8 +224,10 @@ public struct CompanionView: View {
                     CompanionTheme.hairline.frame(height: 1)
                     if let chat = model.selectedChat {
                         if model.store.selectedID == chat.id {
-                            CompanionTranscript(entries: model.store.entries, chat: chat, connected: model.isConnected,
-                                models: model.models, members: model.members, fallbackRoute: String(model.configuration["choice"].text.split(separator: "|").first ?? "")) { question, answers, dismiss in
+                            CompanionTranscript(entries: model.store.visibleEntries, chat: chat, connected: model.isConnected,
+                                models: model.models, members: model.members, fallbackRoute: String(model.configuration["choice"].text.split(separator: "|").first ?? ""),
+                                hasOlder: model.store.hasOlder && model.extendedControlsAvailable, loadingOlder: model.historyLoading,
+                                loadOlder: { Task { @MainActor in await model.loadOlder() } }) { question, answers, dismiss in
                                 model.answerQuestion(question, chat: chat.id, answers: answers, dismiss: dismiss)
                             }.id(chat.id)
                         } else {
@@ -219,6 +254,35 @@ public struct CompanionView: View {
         .onChange(of: scenePhase, initial: true) { _, phase in
             if phase == .active { model.resumeSavedConnection() }
         }
+        .task(id: "\(model.isConnected)-\(model.store.controls["extensionVersion"]?.int ?? 0)") {
+            if model.isConnected && model.controlSurfaceAvailable { await model.refreshRemoteOptions() }
+        }
+        .sheet(isPresented: $creatingChat) { CompanionNewChat(model: model) }
+        .fileImporter(isPresented: $importingFiles, allowedContentTypes: [.image, .pdf, .text, .sourceCode, .json, .data], allowsMultipleSelection: true) { result in
+            do {
+                for url in try result.get() {
+                    let access = url.startAccessingSecurityScopedResource()
+                    defer { if access { url.stopAccessingSecurityScopedResource() } }
+                    let values = try url.resourceValues(forKeys: [.fileSizeKey])
+                    guard (values.fileSize ?? 0) <= 8 * 1024 * 1024 else { throw RemoteControlFailure.rejected("Choose files under 8 MiB") }
+                    try model.addAttachment(name: url.lastPathComponent, data: Data(contentsOf: url))
+                }
+            } catch { model.composeNotice = error.localizedDescription }
+        }
+        #if os(iOS)
+        .onChange(of: photos) { _, selected in
+            Task { @MainActor in
+                for item in selected {
+                    do {
+                        guard let data = try await item.loadTransferable(type: Data.self) else { continue }
+                        guard let image = UIImage(data: data), let jpeg = image.jpegData(compressionQuality: 0.88) else { throw RemoteControlFailure.rejected("This photo could not be decoded") }
+                        try model.addAttachment(name: "Photo-\(UUID().uuidString.prefix(8)).jpg", data: jpeg)
+                    } catch { model.composeNotice = error.localizedDescription }
+                }
+                photos = []
+            }
+        }
+        #endif
         .sheet(isPresented: $chatList) {
             NavigationStack { sidebar.navigationTitle("Chats").toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Done") { chatList = false } }
@@ -265,9 +329,13 @@ public struct CompanionView: View {
                 }
                 Image(systemName: "square.stack.3d.up.fill").font(.caption).foregroundStyle(CompanionTheme.brand)
                 Text("Provider Hub").font(.subheadline.weight(.semibold))
+                if model.isConnected {
+                    Button { creatingChat = true } label: { Image(systemName: "square.and.pencil").frame(width: 40, height: 40) }
+                        .accessibilityLabel("New chat").keyboardShortcut("n", modifiers: .command)
+                }
                 Spacer(minLength: 4)
                 Circle().fill(model.isConnected ? Color.green : CompanionTheme.secondary).frame(width: 6, height: 6)
-                Text(model.isConnected ? "Mac connected" : "Offline").font(.caption2).foregroundStyle(CompanionTheme.secondary)
+                if viewWidth >= 600 { Text(model.isConnected ? "Mac connected" : "Offline").font(.caption2).foregroundStyle(CompanionTheme.secondary) }
                 if model.selectedChat != nil {
                     Button { inspector.toggle() } label: { Image(systemName: "sidebar.right").frame(width: 40, height: 40) }
                         .accessibilityLabel("Show inspector")
@@ -384,6 +452,7 @@ public struct CompanionView: View {
                     Text(model.isConnected ? "Start a chat in Provider Hub on your Mac. It will appear here." : "Continue a conversation, check on work and answer approvals from your phone.")
                         .font(.callout).foregroundStyle(CompanionTheme.secondary).multilineTextAlignment(.center)
                 }
+                if model.isConnected { Button("New chat") { creatingChat = true }.buttonStyle(.borderedProminent) }
                 if !model.isConnected { pairingControls }
                 if !model.isConnected && !["Not paired", "Disconnected"].contains(model.status) {
                     Text(model.status).font(.caption).foregroundStyle(CompanionTheme.secondary).multilineTextAlignment(.center)
@@ -445,6 +514,22 @@ public struct CompanionView: View {
 
     private func composer(_ chat: RemoteChat) -> some View {
         VStack(alignment: .leading, spacing: 8) {
+            if !model.composeNotice.isEmpty { Text(model.composeNotice).font(.caption).foregroundStyle(.red).textSelection(.enabled) }
+            if !model.uploadProgress.isEmpty { Text(model.uploadProgress).font(.caption).foregroundStyle(CompanionTheme.secondary) }
+            if let files = model.attachmentDrafts[chat.id], !files.isEmpty {
+                ScrollView(.horizontal) {
+                    HStack {
+                        ForEach(files) { file in
+                            HStack(spacing: 6) {
+                                Image(systemName: "paperclip")
+                                Text(file.name).lineLimit(1)
+                                Button { model.removeAttachment(file.id, chat: chat.id) } label: { Image(systemName: "xmark.circle.fill") }
+                                    .buttonStyle(.plain).accessibilityLabel("Remove \(file.name)").disabled(model.attachmentSending)
+                            }.font(.caption).padding(8).companionCard(cornerRadius: 8)
+                        }
+                    }
+                }
+            }
             if !model.isConnected || model.store.needsSnapshot {
                 Text(model.store.needsSnapshot ? "Refreshing after a missed update…" : model.status)
                     .font(.caption).foregroundStyle(CompanionTheme.secondary).lineLimit(2)
@@ -452,6 +537,15 @@ public struct CompanionView: View {
                 Text(notice).font(.caption).foregroundStyle(CompanionTheme.secondary).lineLimit(2)
             }
             HStack(alignment: .bottom, spacing: 10) {
+                if model.extendedControlsAvailable {
+                    Menu {
+                        Button("Attach files…") { importingFiles = true }
+                        #if os(iOS)
+                        PhotosPicker(selection: $photos, maxSelectionCount: 8, matching: .images) { Label("Photo library", systemImage: "photo") }
+                        #endif
+                    } label: { Image(systemName: "plus").frame(width: 32, height: 40) }
+                        .disabled(model.attachmentSending).accessibilityLabel("Add attachment")
+                }
                 TextField("Message…", text: $model.draft, axis: .vertical)
                     .textFieldStyle(.plain).lineLimit(1...6).font(.body).padding(.vertical, 10)
                     .accessibilityLabel("Message to \(chat.title)")

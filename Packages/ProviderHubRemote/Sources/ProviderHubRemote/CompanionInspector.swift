@@ -19,6 +19,7 @@ struct CompanionInspector: View {
     @State private var sentSideDraft = ""
     @State private var expandedFiles = Set<String>()
     @State private var expandedProcesses = Set<String>()
+    @State private var blackboard = false
 
     private var side: RemoteValue { model.store.controls["side"] ?? .null }
     private var browser: RemoteValue { model.store.controls["browser"] ?? .null }
@@ -36,6 +37,10 @@ struct CompanionInspector: View {
                     .font(.system(size: tab == .agents ? 13 : 11.5, weight: tab == .agents ? .semibold : .regular))
                     .foregroundStyle(tab == .agents ? CompanionTheme.ink : CompanionTheme.secondary)
                 Spacer()
+                if model.extendedControlsAvailable {
+                    Button { blackboard = true } label: { Image(systemName: "pin").frame(width: 32, height: 32) }
+                        .buttonStyle(.plain).accessibilityLabel("Open Blackboard")
+                }
                 if tab == .agents {
                     Button(model.members.isEmpty ? "Set up" : "Edit") { editingTeam = true }.controlSize(.small).disabled(!connected)
                 } else {
@@ -63,6 +68,7 @@ struct CompanionInspector: View {
                 Text(notice).font(.caption).foregroundStyle(CompanionTheme.secondary).textSelection(.enabled).padding(12)
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(CompanionTheme.surface).foregroundStyle(CompanionTheme.ink)
         .disabled(!model.isConnected)
         .task(id: "\(model.selectedChatID ?? "")-\(tab.rawValue)") {
@@ -80,6 +86,7 @@ struct CompanionInspector: View {
         }
         .onChange(of: model.isConnected) { _, connected in if !connected { sideRequest = nil } }
         .sheet(isPresented: $editingTeam) { CompanionTeamEditor(model: model) }
+        .sheet(isPresented: $blackboard) { CompanionBlackboard(model: model) }
         .confirmationDialog("Close this temporary Side Chat?", isPresented: $closeSide) {
             Button("Close Side Chat", role: .destructive) { model.control("close_side", ["side": side["id"]]) }
         } message: { Text("Its temporary conversation will be discarded on the Mac.") }

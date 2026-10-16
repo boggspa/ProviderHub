@@ -32,10 +32,13 @@ final class PairingTests: XCTestCase {
         reopened.status = "Connected"
         reopened.resumeSavedConnection()
         XCTAssertEqual(transport.endpoints.count, 2)
+        reopened.status = "Disconnected. Reconnecting…"
+        reopened.resumeSavedConnection()
+        XCTAssertEqual(transport.endpoints, [saved, saved, saved], "Foreground after a suspended socket reuses the saved Mac")
         reopened.disconnect()
         reopened.status = "Disconnected"
         reopened.resumeSavedConnection()
-        XCTAssertEqual(transport.endpoints.count, 2)
+        XCTAssertEqual(transport.endpoints.count, 3)
         XCTAssertEqual(transport.disconnects, 1)
         XCTAssertEqual(preferences.string(forKey: "remote-bootstrap"), saved)
     }
