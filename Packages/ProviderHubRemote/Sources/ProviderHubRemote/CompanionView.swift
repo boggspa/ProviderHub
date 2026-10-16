@@ -34,6 +34,10 @@ public final class CompanionModel: ObservableObject {
     @Published public var uploadProgress = ""
     @Published public var composeNotice = ""
     @Published public var historyLoading = false
+    @Published public var downloadedFiles: [String: URL] = [:]
+    @Published public var fullModelCatalogue: [RemoteValue] = []
+    @Published public var attachmentThumbnails: [String: Data] = [:]
+    var fileDownloads = Set<String>()
     public weak var link: CompanionLink?
     @Published public var pairingText = ""
     private let connection: CompanionTransport
@@ -198,11 +202,13 @@ public struct CompanionView: View {
     @State private var inspector = false
     @State private var inspectorTab: RemoteInspectorTab = .agents
     @State private var permissionChange: String?
+    @State private var showingPermissionConfirmation = false
     @State private var choosingModel = false
     @State private var creatingChat = false
     @State private var importingFiles = false
     #if os(iOS)
     @State private var photos: [PhotosPickerItem] = []
+    @State private var showingPhotos = false
     #endif
     @Environment(\.scenePhase) private var scenePhase
     @State private var viewWidth: CGFloat = 0
@@ -221,13 +227,17 @@ public struct CompanionView: View {
                 }
                 VStack(spacing: 0) {
                     header(showsRailButton: !wide)
+                    if model.isConnected && !model.extendedControlsAvailable {
+                        Text("Update the Mac host to enable older messages, attachments, new chats and Blackboard.")
+                            .font(.caption).foregroundStyle(.orange).padding(.horizontal, 18).padding(.bottom, 8)
+                    }
                     CompanionTheme.hairline.frame(height: 1)
                     if let chat = model.selectedChat {
                         if model.store.selectedID == chat.id {
                             CompanionTranscript(entries: model.store.visibleEntries, chat: chat, connected: model.isConnected,
                                 models: model.models, members: model.members, fallbackRoute: String(model.configuration["choice"].text.split(separator: "|").first ?? ""),
                                 hasOlder: model.store.hasOlder && model.extendedControlsAvailable, loadingOlder: model.historyLoading,
-                                loadOlder: { Task { @MainActor in await model.loadOlder() } }) { question, answers, dismiss in
+                                loadOlder: { Task { @MainActor in await model.loadOlder() } }, turnSummaries: model.store.turnSummaries) { question, answers, dismiss in
                                 model.answerQuestion(question, chat: chat.id, answers: answers, dismiss: dismiss)
                             }.id(chat.id)
                         } else {
@@ -270,6 +280,7 @@ public struct CompanionView: View {
             } catch { model.composeNotice = error.localizedDescription }
         }
         #if os(iOS)
+        .photosPicker(isPresented: $showingPhotos, selection: $photos, maxSelectionCount: 8, matching: .images)
         .onChange(of: photos) { _, selected in
             Task { @MainActor in
                 for item in selected {
@@ -291,9 +302,6 @@ public struct CompanionView: View {
         .sheet(isPresented: $settings, onDismiss: {
             if scanAfterSettings { scanAfterSettings = false; scanning = true }
         }) { settingsSheet }
-        .sheet(isPresented: $choosingModel) {
-            CompanionRoutePicker(model: model) { row in model.configure(["choice": row["id"], "effort": .string("")]) }
-        }
         .sheet(isPresented: Binding(get: { inspector && horizontalInspectorIsSheet }, set: { inspector = $0 })) {
             NavigationStack {
                 CompanionInspector(model: model, tab: $inspectorTab)
@@ -301,7 +309,7 @@ public struct CompanionView: View {
                     .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Done") { inspector = false } } }
             }.presentationDetents([.large])
         }
-        .confirmationDialog("Change permissions for this chat?", isPresented: Binding(get: { permissionChange != nil }, set: { if !$0 { permissionChange = nil } })) {
+        .confirmationDialog("Allow tools without approval prompts?", isPresented: $showingPermissionConfirmation) {
             if let mode = permissionChange {
                 Button("Use \(permissionLabel(mode))", role: mode == "yolo" ? .destructive : nil) {
                     model.configure(["approvalMode": .string(mode)]); permissionChange = nil
@@ -357,11 +365,14 @@ public struct CompanionView: View {
                             Button { choosingModel = true } label: {
                                 HStack(spacing: 5) { Text(chat.displayModel).font(.caption.weight(.medium)); Image(systemName: "chevron.down").font(.system(size: 9)) }
                             }.buttonStyle(.plain)
+                                .sheet(isPresented: $choosingModel) {
+                                    CompanionRoutePicker(model: model) { row, effort in model.configure(["choice": row["id"], "effort": .string(effort)]) }
+                                }
                                 .disabled(!model.isConnected || model.configuration["busy"].flag || !model.controlSurfaceAvailable)
                         }
                         Menu {
                             ForEach(["manual", "accept_edits", "yolo"], id: \.self) { mode in
-                                Button(permissionLabel(mode)) { permissionChange = mode }
+                                Button(permissionLabel(mode)) { choosePermission(mode) }
                             }
                         } label: {
                             Label(permissionLabel(model.configuration["approvalMode"].text.isEmpty ? chat.approvalMode ?? "manual" : model.configuration["approvalMode"].text), systemImage: "lock.shield")
@@ -406,6 +417,10 @@ public struct CompanionView: View {
     }
     private func permissionLabel(_ mode: String) -> String {
         switch mode { case "accept_edits": return "Accept Edits"; case "yolo": return "YOLO"; default: return "Manual" }
+    }
+    private func choosePermission(_ mode: String) {
+        if mode == "yolo" { permissionChange = mode; showingPermissionConfirmation = true }
+        else { model.configure(["approvalMode": .string(mode)]) }
     }
 
     private var sidebar: some View {
@@ -541,7 +556,7 @@ public struct CompanionView: View {
                     Menu {
                         Button("Attach files…") { importingFiles = true }
                         #if os(iOS)
-                        PhotosPicker(selection: $photos, maxSelectionCount: 8, matching: .images) { Label("Photo library", systemImage: "photo") }
+                        Button { showingPhotos = true } label: { Label("Photo library", systemImage: "photo") }
                         #endif
                     } label: { Image(systemName: "plus").frame(width: 32, height: 40) }
                         .disabled(model.attachmentSending).accessibilityLabel("Add attachment")
@@ -560,7 +575,17 @@ public struct CompanionView: View {
                 .companionCard(cornerRadius: 20, accent: chat.approvalMode == "yolo" ? .red : chat.providerAccent)
             HStack(spacing: 6) {
                 Circle().fill(chat.approvalColor).frame(width: 5, height: 5)
-                Text(chat.approvalLabel).foregroundStyle(chat.approvalColor)
+                Menu {
+                    ForEach(["manual", "accept_edits", "yolo"], id: \.self) { mode in
+                        Button { choosePermission(mode) } label: {
+                            if mode == (model.configuration["approvalMode"].text.isEmpty ? chat.approvalMode ?? "manual" : model.configuration["approvalMode"].text) {
+                                Label(permissionLabel(mode), systemImage: "checkmark")
+                            } else { Text(permissionLabel(mode)) }
+                        }
+                    }
+                } label: { HStack(spacing: 3) { Text(chat.approvalLabel); Image(systemName: "chevron.down").font(.system(size: 8)) } }
+                    .foregroundStyle(chat.approvalColor).disabled(!model.isConnected || chat.busy || !model.controlSurfaceAvailable)
+                    .accessibilityLabel("Change chat permissions")
                 Text(chat.busy ? "Working…" : "Ready").foregroundStyle(CompanionTheme.secondary)
                 Spacer()
                 Text("Runs on your Mac").foregroundStyle(CompanionTheme.secondary)
@@ -573,6 +598,10 @@ public struct CompanionView: View {
             Form {
                 Section("Your Mac") {
                     LabeledContent("Connection", value: model.isConnected ? "Connected" : "Offline")
+                    let host = model.store.controls["options"]?["host"] ?? .null
+                    LabeledContent("Mac host", value: host["version"].text.isEmpty ? "Older host — update required for all controls" : host["version"].text + " (" + host["build"].text + ")")
+                    LabeledContent("iOS companion", value: (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "Development") + " (" + (Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "source") + ")")
+                    if !model.extendedControlsAvailable { Text("Update the Mac host to use older messages, attachments, New Chat and Blackboard. Pairing is already saved; an update does not require pairing again.").font(.caption).foregroundStyle(.orange) }
                     if model.isConnected { Button("Disconnect", action: model.disconnect) }
                     else { pairingControls }
                     Text("Provider keys and execution stay on your Mac. Remote actions use the chat’s existing approval mode.").font(.caption).foregroundStyle(.secondary)

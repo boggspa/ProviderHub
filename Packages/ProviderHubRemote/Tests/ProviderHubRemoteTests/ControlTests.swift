@@ -4,6 +4,36 @@ import SwiftUI
 @testable import ProviderHubRemote
 
 final class ControlTests: XCTestCase {
+    func testTurnSummariesRetainPriorTurnAndClearOnChatChange() throws {
+        var store = CompanionStore()
+        try store.receive(["method": "session.snapshot", "params": ["cursor": 0, "chats": [], "selected": ["id": "a", "entries": []]]])
+        for (cursor, turn) in [(1, "turn1"), (2, "turn2")] {
+            try store.receive(["method": "session.delta", "params": ["cursor": cursor,
+                "event": ["event": "control", "chat": "a", "panel": "turnChanges",
+                    "value": ["turnID": turn, "entryIDs": ["patch-" + turn], "files": [["path": turn + ".swift", "added": 1, "removed": 0]]]]]])
+        }
+        XCTAssertEqual(store.turnSummaries.map { $0["turnID"].text }, ["turn1", "turn2"])
+        try store.receive(["method": "session.delta", "params": ["cursor": 3, "event": ["event": "snapshot", "chat": "b", "entries": []]]])
+        XCTAssertTrue(store.turnSummaries.isEmpty)
+    }
+    @MainActor
+    func testExtendedCapabilitiesSurviveSnapshotWithoutOptions() throws {
+        let model = CompanionModel()
+        model.receiveRemote(["method": "session.snapshot", "params": ["cursor": 1, "chats": [], "controls": ["version": 1, "extensionVersion": 3]]])
+        XCTAssertTrue(model.extendedControlsAvailable)
+    }
+    func testPickerUsesConnectionBrandAndModelBrandIndependently() {
+        let value: RemoteValue = .object(["id": .string("ollama/qwen|work"), "route": .string("ollama/qwen"), "label": .string("Qwen"),
+            "accountLabel": .string("Work"), "context": .number(128000), "efforts": .array([.string("high"), .string("xhigh")]),
+            "connectionPresentation": .object(["runtimeProvider": .string("ollama"), "displayProvider": .string("Local Ollama"), "accent": .string("#976C52")]),
+            "presentation": .object(["displayProvider": .string("Qwen"), "accent": .string("#8C52EF")])])
+        let choice = CompanionPickerChoice(row: value)
+        XCTAssertEqual(choice.connectionID, "ollama")
+        XCTAssertEqual(choice.connectionLabel, "Local Ollama")
+        XCTAssertEqual(choice.presentation.provider, "Qwen")
+        XCTAssertEqual(choice.efforts, ["high", "xhigh"])
+        XCTAssertEqual(choice.context, 128000)
+    }
     func testDiffKeepsCopyableTextAndUsesDistinctAdditionRemovalColors() {
         let text = "@@ -1 +1 @@\n-old line\n+new line\n context"
         let rendered = ChatSharedPatchText(text: text, onDark: true).attributed

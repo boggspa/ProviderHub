@@ -28,25 +28,20 @@ struct CompanionBlackboard: View {
                         Button("New post") { key = ""; bodyText = ""; category = "note"; editing = true }
                     }
                     ForEach(board["posts"].rows, id: \.self) { post in
-                        VStack(alignment: .leading, spacing: 6) {
-                            HStack(spacing: 6) {
-                                if !post["route"].text.isEmpty { CompanionProviderMark(presentation: CompanionBranding.presentation(route: post["route"].text, models: model.models), size: 14) }
-                                Text(post["authorName"].text).font(.system(size: 12, weight: .medium))
-                                Text(post["category"].text).font(.system(size: 10.5)).foregroundStyle(CompanionTheme.secondary)
-                                Spacer()
-                                Menu {
-                                    if post["author"].text == "user" { Button("Edit") { key = post["key"].text; bodyText = post["body"].text; category = post["category"].text; editing = true } }
-                                    Button("Remove", role: .destructive) { remove = post }
-                                } label: { Image(systemName: "ellipsis").frame(width: 32, height: 28) }.accessibilityLabel("Post actions")
-                            }
-                            Text(post["key"].text).font(.system(size: 10.5, design: .monospaced)).foregroundStyle(CompanionTheme.secondary)
-                            Text(post["body"].text).font(.system(size: 12)).textSelection(.enabled)
-                            if !post["quote"]["excerpt"].text.isEmpty { Text(post["quote"]["excerpt"].text).font(.caption).foregroundStyle(CompanionTheme.secondary).padding(.leading, 8) }
-                        }.padding(10).companionCard(cornerRadius: 7)
+                        CompanionPostCard(model: model, post: post).contextMenu {
+                            if post["author"].text == "user" { Button("Edit") { key = post["key"].text; bodyText = post["body"].text; category = post["category"].text; editing = true } }
+                            Button("Remove", role: .destructive) { remove = post }
+                        }
                     }
                     Divider()
                     Text("Files and links").font(.system(size: 13, weight: .semibold))
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 108), alignment: .top)], alignment: .leading, spacing: 10) {
                     ForEach(board["attachments"].rows, id: \.self) { file in
+                        if file["url"].text.isEmpty, let chat = model.selectedChatID {
+                            CompanionFileTile(model: model, file: file, chat: chat).contextMenu {
+                                if file["source"].text == "board" { Button("Remove", role: .destructive) { remove = file } }
+                            }
+                        } else {
                         HStack {
                             Image(systemName: file["kind"].text == "url" ? "link" : "paperclip")
                             if let url = URL(string: file["url"].text), ["http", "https"].contains(url.scheme ?? "") { Link(file["name"].text.isEmpty ? url.host ?? "Link" : file["name"].text, destination: url) }
@@ -54,6 +49,8 @@ struct CompanionBlackboard: View {
                             Spacer()
                             if file["source"].text == "board" { Button(role: .destructive) { remove = file } label: { Image(systemName: "trash").frame(width: 32, height: 32) }.accessibilityLabel("Remove \(file["name"].text)") }
                         }.font(.system(size: 11.5))
+                        }
+                    }
                     }
                     HStack {
                         TextField("https://…", text: $link).textFieldStyle(.roundedBorder)

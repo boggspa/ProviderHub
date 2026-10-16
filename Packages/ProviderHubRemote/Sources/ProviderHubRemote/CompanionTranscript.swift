@@ -29,6 +29,7 @@ struct CompanionTranscript: View {
     var hasOlder = false
     var loadingOlder = false
     var loadOlder: () -> Void = {}
+    var turnSummaries: [RemoteValue] = []
     var answer: (RemoteQuestion, [String: [String]], Bool) -> Void = { _, _, _ in }
     @State private var followsLatest = true
     @State private var expanded = Set<String>()
@@ -166,13 +167,16 @@ struct CompanionTranscript: View {
         }
     }
     private func changes(_ items: [RemoteTranscriptItem]) -> some View {
-        let changes = ChatTurnChanges.collect(items)
-        return VStack(alignment: .leading, spacing: 6 * scale) {
-            Text("Changed \(changes.files.count) files · +\(changes.added) −\(changes.removed)").font(.system(size: 11.5 * scale, weight: .medium))
-            ForEach(changes.files) { file in
-                HStack { Text(file.path).lineLimit(1); Spacer(); Text(file.members.joined(separator: ", ")).foregroundStyle(CompanionTheme.secondary) }.font(.system(size: 11 * scale))
+        var changes = ChatTurnChanges.collect(items)
+        let entryIDs = Set(items.map(\.id))
+        if let summary = turnSummaries.last(where: { !$0["files"].rows.isEmpty && $0["entryIDs"].rows.contains { entryIDs.contains($0.text) } }) {
+            changes.files = summary["files"].rows.map { row in
+                ChatTurnChanges.File(path: row["path"].text, members: row["members"].rows.map(\.text), added: row["added"].int, removed: row["removed"].int, diff: row["diff"].text)
             }
-        }.padding(10).companionCard(cornerRadius: 8)
+        }
+        return ChatSharedTurnChanges(changes: changes, scale: scale,
+            ink: CompanionTheme.ink, secondary: CompanionTheme.secondary, hairline: CompanionTheme.hairline,
+            fill: CompanionTheme.cardFill, rim: CompanionTheme.cardRim) { _ in EmptyView() }
     }
     private func attachmentStrip(_ entry: RemoteEntry) -> some View {
         ScrollView(.horizontal, showsIndicators: false) {

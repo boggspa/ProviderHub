@@ -26,7 +26,7 @@ enum RemoteControlFailure: LocalizedError {
 }
 
 extension CompanionModel {
-    public var extendedControlsAvailable: Bool { (store.controls["extensionVersion"]?.int ?? 0) >= 2 && (store.controls["options"]?["version"].int ?? 0) >= 2 }
+    public var extendedControlsAvailable: Bool { (store.controls["extensionVersion"]?.int ?? 0) >= 2 }
     public var remoteWorkspaces: [RemoteValue] { store.controls["options"]?["workspaces"].rows ?? [] }
 
     @MainActor
@@ -48,12 +48,26 @@ extension CompanionModel {
     @MainActor
     public func refreshRemoteOptions() async {
         guard (store.controls["extensionVersion"]?.int ?? 0) >= 2 else { return }
-        _ = try? await performControl("remote_options")
+        do {
+            let options = try await performControl("remote_options")
+            if options["version"].int >= 3 {
+                var rows: [RemoteValue] = []
+                var offset = 0
+                while true {
+                    let page = try await performControl("remote_models", ["offset": .number(Double(offset))])
+                    rows += page["models"].rows
+                    guard page["nextOffset"] != .null else { break }
+                    guard page["nextOffset"].int > offset else { throw RemoteControlFailure.rejected("Model catalogue changed; refresh again") }
+                    offset = page["nextOffset"].int
+                }
+                fullModelCatalogue = rows
+            }
+        } catch { composeNotice = error.localizedDescription }
     }
 
     @MainActor
-    public func createRemoteChat(choice: String, workspace: String) async throws {
-        let result = try await performControl("remote_create", ["choice": .string(choice), "workspace": .string(workspace)])
+    public func createRemoteChat(choice: String, workspace: String, effort: String = "") async throws {
+        let result = try await performControl("remote_create", ["choice": .string(choice), "workspace": .string(workspace), "effort": .string(effort)])
         let id = result["chat"].text
         guard !id.isEmpty else { throw RemoteControlFailure.rejected("The Mac did not return a new chat") }
         selectedChatID = id
@@ -133,14 +147,20 @@ struct CompanionNewChat: View {
     @State private var workspace = ""
     @State private var creating = false
     @State private var notice = ""
+    @State private var effort = ""
+    @State private var pickingModel = false
     var body: some View {
         NavigationStack {
             Form {
                 Section("Model and account") {
-                    Picker("Model", selection: $choice) {
-                        Text("Choose a model").tag("")
-                        ForEach(model.models, id: \.self) { row in Text(row["label"].text + " · " + row["accountLabel"].text).tag(row["id"].text) }
-                    }
+                    Button { pickingModel = true } label: {
+                        HStack { Text(model.models.first(where: { $0["id"].text == choice })?["label"].text ?? "Choose a model"); Spacer(); Text(effort).foregroundStyle(.secondary); Image(systemName: "chevron.right").font(.caption) }
+                    }.buttonStyle(.plain)
+                        .sheet(isPresented: $pickingModel) {
+                            CompanionRoutePicker(model: model, initialChoiceID: choice, initialEffort: effort) { row, selectedEffort in
+                                choice = row["id"].text; effort = selectedEffort; pickingModel = false
+                            }
+                        }
                 }
                 Section("Workspace on your Mac") {
                     Picker("Folder", selection: $workspace) {
@@ -160,7 +180,7 @@ struct CompanionNewChat: View {
                     Button(creating ? "Creating…" : "Create") {
                         creating = true
                         Task { @MainActor in
-                            do { try await model.createRemoteChat(choice: choice, workspace: workspace); dismiss() }
+                            do { try await model.createRemoteChat(choice: choice, workspace: workspace, effort: effort); dismiss() }
                             catch { notice = error.localizedDescription }
                             creating = false
                         }

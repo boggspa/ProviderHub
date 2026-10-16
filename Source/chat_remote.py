@@ -552,7 +552,7 @@ class MacBridge:
         self.auto_accept = auto_accept
         self.session = Session("mac", self.identity, session_id, self._trust)
         self.session.on_app = self._on_app
-        self.view = {"chats": [], "selected": None, "approval": None, "controls": {"version": 1, "extensionVersion": 2}}
+        self.view = {"chats": [], "selected": None, "approval": None, "controls": {"version": 1, "extensionVersion": 3}}
         self.pending_pairing = None
         self.hold_pairing = False
         self.selected_chat = None
@@ -685,7 +685,9 @@ class MacBridge:
             index = next((i for i, row in enumerate(rows) if row.get("id") == updated["id"] and updated["id"] != "legacy"), None)
             if index is None: rows.append(updated)
             else: rows[index] = updated
-            self.view["selected"]["entries"] = bound_entries(rows)
+            kept = bound_entries(rows)
+            self.view["selected"]["hasMore"] = self.view["selected"].get("hasMore", False) or len(rows) > len(kept)
+            self.view["selected"]["entries"] = kept
             if projected["entry"].get("role") == "assistant":
                 self.view["selected"]["live"] = ""
                 self.view["selected"]["liveID"] = None
@@ -693,7 +695,8 @@ class MacBridge:
     def _snapshot(self):
         # Refresh images on demand; snapshots prioritize text, control state and
         # chat history within the fixed encrypted frame limit.
-        controls = {k: v for k, v in self.view["controls"].items() if k not in {"browserPreview", "blackboard", "options"}}
+        controls = {k: v for k, v in self.view["controls"].items() if k not in {"browserPreview", "blackboard", "options", "turnChanges"}}
+        if len(json.dumps(controls, ensure_ascii=False).encode()) > 80000: controls.pop("team", None)
         return {"cursor": self.cursor, "chats": self.view["chats"], "approval": self.view["approval"],
                 "selected": self.view["selected"], "controls": controls}
 
@@ -752,7 +755,7 @@ class MacBridge:
             try: control = command(params, request_id)
             except (ValueError, TypeError) as exc: raise RemoteError(str(exc)) from exc
             action = control["command"]
-            if action not in {"remote_create", "remote_options"} and params.get("chat") != self.selected_chat: raise RemoteError("Select this chat before using its controls")
+            if action not in {"remote_create", "remote_options", "remote_models"} and params.get("chat") != self.selected_chat: raise RemoteError("Select this chat before using its controls")
             result = self._execute(control) or {}
             if action == "remote_create":
                 created = result.get("chat")

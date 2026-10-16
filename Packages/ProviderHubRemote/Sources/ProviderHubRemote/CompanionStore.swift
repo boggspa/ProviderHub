@@ -99,6 +99,7 @@ public struct CompanionStore: Equatable {
     public private(set) var acks: [String: Bool] = [:]
     public private(set) var entries: [RemoteEntry] = []
     public private(set) var controls: [String: RemoteValue] = [:]
+    public private(set) var turnSummaries: [RemoteValue] = []
     public private(set) var olderEntries: [RemoteEntry] = []
     public private(set) var hasOlder = false
     public var visibleEntries: [RemoteEntry] {
@@ -120,7 +121,7 @@ public struct CompanionStore: Equatable {
             chats = try decode([RemoteChat].self, params["chats"] ?? [])
             approval = try (params["approval"] as? [String: Any]).map { try decode(RemoteApproval.self, $0) }
             let selected = params["selected"] as? [String: Any]
-            if selectedID != selected?["id"] as? String { olderEntries = [] }
+            if selectedID != selected?["id"] as? String { olderEntries = []; turnSummaries = [] }
             selectedID = selected?["id"] as? String
             if olderEntries.isEmpty { hasOlder = selected?["hasMore"] as? Bool ?? false }
             controls = try decode([String: RemoteValue].self, params["controls"] ?? [:])
@@ -170,6 +171,11 @@ public struct CompanionStore: Equatable {
                 let owner = event["chat"] as? String
                 if owner == nil || owner == selectedID, let panel = event["panel"] as? String {
                     controls[panel] = try decode(RemoteValue.self, event["value"] ?? NSNull())
+                    if panel == "turnChanges", let value = controls[panel], !value["turnID"].text.isEmpty {
+                        turnSummaries.removeAll { $0["turnID"] == value["turnID"] }
+                        turnSummaries.append(value)
+                        if turnSummaries.count > 32 { turnSummaries.removeFirst(turnSummaries.count - 32) }
+                    }
                     controls["version"] = .number(1)
                     if let notice = event["notice"] as? String, !notice.isEmpty { notices.append(notice) }
                 }
@@ -180,7 +186,7 @@ public struct CompanionStore: Equatable {
                 approval = try value.map { try decode(RemoteApproval.self, $0) }
             case "selected", "snapshot":
                 let next = (event["id"] ?? event["chat"]) as? String
-                if next != selectedID { controls = controls.filter { ["version", "extensionVersion", "models", "browserEnabled", "options"].contains($0.key) }; olderEntries = [] }
+                if next != selectedID { controls = controls.filter { ["version", "extensionVersion", "models", "browserEnabled", "options"].contains($0.key) }; olderEntries = []; turnSummaries = [] }
                 selectedID = next
                 if olderEntries.isEmpty { hasOlder = event["hasMore"] as? Bool ?? false }
                 setEntries(event["entries"])

@@ -15,6 +15,63 @@ from test_chat_runtime import FakeTransport, response
 
 
 class RemoteParityTests(unittest.TestCase):
+    def test_turn_changes_uses_complete_turn_instead_of_tail(self):
+        from chat_remote_actions import turn_changes
+        rows = [entry("user", "Start")]
+        for i in range(31):
+            path = f"Sources/File{i}.swift"
+            rows.append(entry("tool", "", tool="apply_patch", changedFiles=[path], memberName="Astra",
+                              detail=f"--- a/{path}\n+++ b/{path}\n@@ -1 +1 @@\n-old\n+new"))
+        summary = turn_changes(rows)
+        self.assertEqual(summary["totalFiles"], 31)
+        self.assertEqual(sum(f["added"] for f in summary["files"]), 31)
+        self.assertEqual(sum(f["removed"] for f in summary["files"]), 31)
+        self.assertEqual(turn_changes(rows + [entry("user", "New turn")])["files"], [])
+    def test_full_responsibility_survives_remote_team_edit(self):
+        self.select(self.desktop)
+        members = [{"name": "Lead", "choice": self.host.models[0]["id"], "responsibility": "A long responsibility. " * 70}]
+        self.assertTrue(self.control("configure_team", {"enabled": True, "members": members})["ok"])
+        original = self.host.sessions[self.desktop].chat["team"]["members"][0]
+        projected = self.mac.view["controls"]["team"]["members"][0]
+        self.assertEqual(projected["responsibility"], original["responsibility"])
+        fields = {key: projected[key] for key in ("id", "name", "choice", "effort", "responsibility")}
+        self.assertTrue(self.control("configure_team", {"enabled": True, "members": [fields]})["ok"])
+        self.assertEqual(self.host.sessions[self.desktop].chat["team"]["members"][0]["id"], original["id"])
+
+    def test_download_only_serves_chat_owned_regular_files(self):
+        self.select(self.desktop)
+        data = b"private attachment" * 4000
+        token = self.upload(data)
+        self.assertTrue(self.control("remote_board_attach", {"uploads": [token]})["ok"])
+        file = self.mac.view["controls"]["blackboard"]["attachments"][0]
+        offset, received, revision = 0, b"", None
+        while True:
+            args = {"attachment": file["id"], "offset": offset}
+            if revision: args["revision"] = revision
+            ack = self.control("remote_attachment_read", args)
+            self.assertTrue(ack["ok"], ack)
+            chunk = ack["result"]; received += base64.b64decode(chunk["data"])
+            revision, offset = chunk["revision"], chunk["nextOffset"]
+            if chunk["done"]: break
+        self.assertEqual(received, data)
+        self.assertFalse(self.control("remote_attachment_read", {"attachment": "/etc/passwd", "offset": 0})["ok"])
+        from chat_blackboard import attachments
+        original = Path(attachments(self.host.sessions[self.desktop].chat)[0]["path"])
+        original.unlink(); original.symlink_to(self.root / "remote.json")
+        self.assertFalse(self.control("remote_attachment_read", {"attachment": file["id"], "offset": 0})["ok"])
+
+    def test_full_model_pages_preserve_provider_group_and_all_models(self):
+        self.host.models *= 40
+        offset = 0; models = []
+        while True:
+            reply = self.control("remote_models", {"offset": offset})
+            self.assertTrue(reply["ok"], reply)
+            models += reply["result"]["models"]
+            offset = reply["result"]["nextOffset"]
+            if offset is None: break
+        self.assertEqual(len(models), len(self.host.models))
+        self.assertIn("context", models[0]); self.assertNotIn("scope", models[0])
+
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)

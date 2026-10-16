@@ -44,11 +44,30 @@ video: the Mac Chat window must be attached and Browser Use enabled.
 This pass remains local: update both Mac host and iOS companion together to use
 the new controls. Older hosts keep basic chat working and show an update notice
 in the inspector. The existing TestFlight build does not contain these changes.
-The next local protocol revision adds **New chat**, **Load earlier messages**,
+The extended protocol adds **New chat**, **Load earlier messages**,
 attachment uploads and **Blackboard**. Git overview/branch operations and
 message reactions are still not remote controls.
 
 ### Create, read older messages, attach and pin
+
+The combined model picker is now shared with the desktop: provider icon rail,
+enabled model/account rows, context sizes, search and reasoning sidecar. It is
+used for the main chat, New Chat, Team members and Side Chat. On narrow phones
+reasoning moves below the list; iPad and Mac retain the sidecar. iOS uses an
+adaptive sheet so a popover beside an editor cannot clip the provider rail. Model lists
+load in pages so a large catalogue does not silently lose later providers.
+
+Team's inline Blackboard now uses the same post-card component as the Mac,
+with recent posts, attachments and a composer beneath the member roster. Tap
+a file for its original through native Quick Look; image thumbnails are
+bounded JPEG previews. Files are retrieved only by an attachment ID in the
+selected chat, with path/symlink checks, chunk limits and a revision check.
+Settings displays the connected host version, and older hosts get a visible
+compatibility notice instead of silently missing controls.
+
+The transcript's changed-files table also uses the same SwiftUI component as
+desktop. Its final-turn summary is computed on the Mac from the whole turn,
+so a 30-entry phone window no longer reduces a 31-file change to two files.
 
 - **New chat** (compose icon or Command-N) lets you choose an enabled model/account
   and a registered Mac workspace. It starts with Manual approvals and selects
@@ -66,16 +85,17 @@ message reactions are still not remote controls.
   chat-bound handles. They never accept phone-supplied Mac paths. Failed sends
   retain the local draft/files; unaccepted staging expires after 15 minutes.
   Accepted originals are copied into private chat storage and appear in both
-  transcripts. The phone currently shows file metadata chips; remote original
-  downloads, full image previews and media playback are not implemented.
+  transcripts. Blackboard originals download on demand (up to 64 MiB) for native
+  Quick Look; supported images/PDFs/media can be previewed without a second
+  provider request. Thumbnail rendering does not transfer full images.
 - The inspector’s **pin** opens the chat’s **Blackboard**: view posts and
   referenced files/links, create or edit your posts, remove items, add a link,
   or upload and pin files. Posts and limits use the existing Mac Blackboard
   handlers; removal asks for confirmation. Files already attached to the chat
   also appear in its Blackboard list.
 
-These additions require the next matching Mac and iOS builds. They are not in
-the existing Mac build 81 or TestFlight 0.1.1 (2). Saved pairing now resumes
+These additions ship together in **Mac 0.5.18 (82)** and **iOS 0.1.3 (4)**.
+Mac build 81 lacks the extended protocol, even with iOS 0.1.2 (3). Saved pairing resumes
 automatically on launch/foreground in local iOS source; explicit Disconnect
 pauses that for the current app session. The Keychain identity, pinned Mac key
 and Mac allowlist continue to provide trust, without scanning again.

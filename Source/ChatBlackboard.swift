@@ -148,46 +148,13 @@ struct ChatBlackboardPostCard: View {
         }
     }
     var body: some View {
-        VStack(alignment: .leading, spacing: 5) {
-            HStack(spacing: 6) {
-                HStack(spacing: 3) {
-                    if post.byUser { Image(systemName: "person.fill").font(.system(size: 8)) }
-                    else { ChatProviderIcon(presentation: model.models.first { $0.route == post.route }?.presentation, size: 10) }
-                    Text(post.authorName).lineLimit(1)
-                }
-                .font(.system(size: 10.5, weight: .medium)).foregroundStyle(accent)
-                Text(post.key).font(.system(size: 11, weight: .medium, design: .monospaced)).lineLimit(1).truncationMode(.middle)
-                Spacer(minLength: 4)
-                Text(ChatBlackboardSnapshot.label(post.category)).font(.system(size: 9.5, weight: .medium))
-                    .foregroundStyle(Self.tint(post.category))
-                    .fixedSize()
+        ChatSharedBlackboardPost(author: post.authorName, key: post.key, text: post.body, category: post.category,
+            quote: post.quote?.excerpt ?? "", quoteAuthor: post.quote.map { $0.author + " · " + ($0.tool ?? $0.kind) } ?? "",
+            updated: post.updatedDate, accent: accent, ink: Semantic.ink, secondary: Semantic.secondaryInk,
+            fill: Semantic.cardFill, rim: Semantic.cardRim) {
+                if post.byUser { Image(systemName: "person.fill").font(.system(size: 8)) }
+                else { ChatProviderIcon(presentation: model.models.first { $0.route == post.route }?.presentation, size: 10) }
             }
-            Text(post.body).font(.system(size: 11.5)).foregroundStyle(Semantic.ink)
-                .lineLimit(expanded ? nil : 3).fixedSize(horizontal: false, vertical: true)
-            if let quote = post.quote {
-                HStack(alignment: .top, spacing: 6) {
-                    RoundedRectangle(cornerRadius: 1).fill(Semantic.hairline).frame(width: 2)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(quote.author + " · " + (quote.tool ?? quote.kind)).font(.system(size: 10)).foregroundStyle(.secondary)
-                        Text(quote.excerpt).font(.system(size: 10.5)).foregroundStyle(.secondary).lineLimit(expanded ? nil : 2)
-                    }
-                }.fixedSize(horizontal: false, vertical: true)
-            }
-            HStack(spacing: 4) {
-                if let date = post.updatedDate {
-                    Text(date.formatted(.relative(presentation: .named))).font(.system(size: 9.5)).foregroundStyle(.secondary)
-                        .help(date.formatted(date: .abbreviated, time: .standard))
-                }
-                Spacer(minLength: 0)
-                if verbose {
-                    Image(systemName: expanded ? "chevron.up" : "chevron.down").font(.system(size: 8.5)).foregroundStyle(.secondary)
-                }
-            }
-        }
-        .padding(8).frame(maxWidth: .infinity, alignment: .leading)
-        .hubCard(cornerRadius: 7)
-        .contentShape(Rectangle())
-        .onTapGesture { if verbose { withAnimation(.easeOut(duration: 0.12)) { expanded.toggle() } } }
         .contextMenu {
             Button("Copy") {
                 NSPasteboard.general.clearContents(); NSPasteboard.general.setString(post.key + ": " + post.body, forType: .string)

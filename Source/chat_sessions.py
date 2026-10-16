@@ -339,7 +339,7 @@ class ChatHost:
             self.emit({"event": "remote_configuration", "chat": chat["id"],
                        "choice": chat["route"] + "|" + chat.get("account", ""),
                        "effort": chat.get("effort", ""), "approvalMode": chat.get("approvalMode", "manual"),
-                       "workspace": chat["workspace"], "busy": service.busy})
+                       "workspace": chat["workspace"], "busy": self.active(service)})
 
     def session_event(self, service, event):
         kind = event.get("event")
@@ -561,6 +561,8 @@ the same publication `initialize` and `select` perform, ending with `ready`.
                 if not service.side: self.emit({"event": "side", "chat": identifier, "side": None})
                 self.publish_remote_configuration(service)
                 self.publish_processes(identifier)
+                from chat_remote_actions import publish_turn_changes
+                publish_turn_changes(self, service)
                 return
             tool, arguments = command.get("tool"), command.get("arguments", {})
             preview = tool == "browser_remote_preview"
@@ -700,6 +702,18 @@ the same publication `initialize` and `select` perform, ending with `ready`.
             self.publish_summaries()
             return
         old_id = service.chat["id"]
+        if action == "configure_team" and command.get("_remoteControl") is True and isinstance(command.get("members"), list):
+            # Compatibility with companion build 2/3's 240-character roster
+            # preview: an unchanged preview is not an edit to the saved role.
+            existing = {m["id"]: m for m in (service.chat.get("team") or {}).get("members", [])}
+            restored = []
+            for item in command["members"]:
+                item = dict(item)
+                prior = existing.get(item.get("id"))
+                if prior and len(prior.get("responsibility", "")) > 240 and item.get("responsibility") == prior["responsibility"][:240]:
+                    item["responsibility"] = prior["responsibility"]
+                restored.append(item)
+            command = {**command, "members": restored}
         if action in {"send", "retry", "team_resume"}: service.display_status = "Connecting…"
         if action == "stop": service.display_status = "Stopping…"
         self._replacing = (service, old_id) if action == "configure" else None

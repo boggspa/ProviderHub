@@ -47,7 +47,7 @@ extension CompanionModel {
     public var configuration: RemoteValue { store.controls["configuration"] ?? .null }
     public var team: RemoteValue { store.controls["team"] ?? .null }
     public var members: [RemoteValue] { team["members"].rows }
-    public var models: [RemoteValue] { store.controls["models"]?.rows ?? [] }
+    public var models: [RemoteValue] { fullModelCatalogue.isEmpty ? store.controls["models"]?.rows ?? [] : fullModelCatalogue }
     public var controlSurfaceAvailable: Bool { (store.controls["version"]?.int ?? 0) >= 1 }
     @discardableResult
     public func control(_ action: String, _ arguments: [String: RemoteValue] = [:]) -> String? {
@@ -66,8 +66,17 @@ extension CompanionModel {
         }
     }
     public func configure(_ values: [String: RemoteValue]) {
-        guard !configuration["busy"].flag, !configuration["workspace"].text.isEmpty else { return }
-        control("configure", values.merging(["expectedWorkspace": configuration["workspace"]]) { _, new in new })
+        guard !configuration["busy"].flag else { composeNotice = "Stop this chat before changing its settings, as on your Mac."; return }
+        guard !configuration["workspace"].text.isEmpty else { composeNotice = "Refresh this chat’s Mac connection before changing settings."; return }
+        let owner = selectedChatID
+        let arguments = values.merging(["expectedWorkspace": configuration["workspace"]]) { _, new in new }
+        Task { @MainActor in
+            do {
+                _ = try await performControl("configure", arguments, chat: owner)
+                _ = try await performControl("remote_inspect", chat: owner)
+                composeNotice = ""
+            } catch { composeNotice = error.localizedDescription }
+        }
     }
     public func configureMembers(_ rows: [RemoteValue], enabled: Bool = true, execution: RemoteValue? = nil) {
         var arguments: [String: RemoteValue] = ["enabled": .bool(enabled), "members": .array(rows.map { row in

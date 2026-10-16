@@ -5,9 +5,63 @@ from pathlib import Path
 
 from chat_remote_files import RemoteFiles
 
-GLOBAL = {"remote_options", "remote_create"}
+GLOBAL = {"remote_options", "remote_models", "remote_create"}
 ACTIONS = GLOBAL | {"remote_history", "remote_upload_begin", "remote_upload_chunk", "remote_upload_finish",
-                    "remote_upload_drop", "remote_send", "remote_board_attach"}
+                    "remote_upload_drop", "remote_send", "remote_board_attach", "remote_attachment_read", "remote_attachment_thumbnail"}
+
+
+def turn_changes(entries):
+    """Mirror ChatTurnChanges.collect over the full current turn, not its tail."""
+    start = next((i for i in range(len(entries) - 1, -1, -1) if entries[i].get("kind") == "user"), -1)
+    rows = {}
+    def file(path, member):
+        if path not in rows: rows[path] = {"path": path, "members": [], "added": 0, "removed": 0, "diff": ""}
+        if member not in rows[path]["members"]: rows[path]["members"].append(member)
+        return rows[path]
+    for entry in entries[start + 1:]:
+        if not entry.get("changedFiles"): continue
+        member = entry.get("memberName") or "Chat"
+        for path in entry["changedFiles"]:
+            if isinstance(path, str) and path: file(path, member)
+        if entry.get("tool") != "apply_patch": continue
+        lines = (entry.get("detail") or entry.get("text") or "").split("\n")
+        current = None; i = 0
+        while i < len(lines):
+            line = lines[i]
+            if line.startswith("--- ") and i + 1 < len(lines) and lines[i + 1].startswith("+++ "):
+                old, new = line[4:].split("\t")[0], lines[i + 1][4:].split("\t")[0]
+                path = new[2:] if new.startswith("b/") else new
+                if new == "/dev/null": path = old[2:] if old.startswith("a/") else old
+                current = file(path, member)
+                if len(current["diff"]) < 1000: current["diff"] += ("\n" if current["diff"] else "") + line + "\n" + lines[i + 1]
+                i += 2; continue
+            if current:
+                if line.startswith("+"): current["added"] += 1
+                elif line.startswith("-"): current["removed"] += 1
+                if len(current["diff"]) < 1000: current["diff"] += "\n" + line
+            i += 1
+    # Identity/counts survive even when inline diff excerpts use their budget.
+    output = []; budget = 32000
+    for row in list(rows.values())[:256]:
+        row["path"] = row["path"][:1024]
+        row["members"] = [str(m)[:120] for m in row["members"][:8]]
+        if len(json.dumps(row, ensure_ascii=False).encode()) > budget: row["diff"] = ""
+        size = len(json.dumps(row, ensure_ascii=False).encode())
+        if size > budget: break
+        output.append(row); budget -= size
+    return {"files": output, "totalFiles": len(rows), "truncated": len(output) < len(rows),
+            "turnID": entries[start].get("id", "initial") if start >= 0 else "initial",
+            "entryIDs": [e.get("id") for e in entries[start + 1:] if e.get("changedFiles") and e.get("id")][-512:]}
+
+
+def publish_turn_changes(host, service, *, through=None):
+    entries = service.chat["entries"][:through]
+    # Include earlier turns visible in the phone's tail. Each summary travels
+    # independently so combined history never exceeds the encrypted frame cap.
+    ends = [len(entries)] + [i for i in range(len(entries) - 1, -1, -1) if entries[i].get("kind") == "user"][:4]
+    for end in reversed(ends):
+        summary = turn_changes(entries[:end])
+        if summary["files"]: host.emit({"event": "remote_turn_changes", "chat": service.chat["id"], "changes": summary})
 
 
 def workspaces(host):
@@ -21,8 +75,22 @@ def handle(host, command):
     if action not in ACTIONS: return False, None
     if action == "remote_options":
         host.publish_workspaces()
-        host.emit({"event": "remote_options", "workspaces": workspaces(host)})
-        return True, {"version": 2}
+        try: application = json.loads((Path(__file__).parent.parent / "build-manifest.json").read_text())["application"]
+        except (OSError, ValueError, KeyError): application = {"version": "development", "build": "source"}
+        host.emit({"event": "remote_options", "workspaces": workspaces(host), "host": application})
+        return True, {"version": 3}
+    if action == "remote_models":
+        from chat_remote_controls import FIELDS, pick, presentation
+        offset = command.get("offset", 0)
+        if type(offset) is not int or not 0 <= offset <= len(host.models): raise ValueError("Invalid model page")
+        rows = []
+        for row in host.models[offset:offset + 20]:
+            safe = pick(row, FIELDS["model"])
+            for key in ("presentation", "connectionPresentation"):
+                if key in safe: safe[key] = presentation(safe[key])
+            rows.append(safe)
+        end = offset + len(rows)
+        return True, {"models": rows, "nextOffset": end if end < len(host.models) else None}
     if action == "remote_create":
         # Remote creation must not invoke the desktop's select/create cursor.
         workspace = command.get("workspace")
@@ -31,7 +99,7 @@ def handle(host, command):
         host.prune()
         if len(host.sessions) >= 16 and all(host.active(s) for s in host.sessions.values()): raise ValueError("Stop an active chat before creating another")
         service = host.new_session()
-        service.create(command["choice"], workspace)
+        service.create(command["choice"], workspace, effort=command.get("effort", ""))
         identifier = service.chat["id"]
         host.sessions[identifier] = service
         host.publish_summaries()
@@ -39,6 +107,10 @@ def handle(host, command):
     chat = command.get("chat")
     if chat not in host.headers: raise ValueError("Choose an existing chat")
     service = host.session(chat)
+    if action in {"remote_attachment_read", "remote_attachment_thumbnail"}:
+        from chat_remote_files import read_attachment
+        with service._mutex:
+            return True, read_attachment(service.chat, host.store.root, command.get("attachment"), command.get("offset", 0), expected=command.get("revision"), thumbnail=action == "remote_attachment_thumbnail")
     if action == "remote_history":
         from chat_remote import project_entry
         before = command.get("before")
@@ -55,6 +127,7 @@ def handle(host, command):
             page.reverse()
         host.emit({"event": "remote_history", "chat": chat, "before": before, "request": command.get("request"),
                    "entries": page, "hasMore": index > len(page)})
+        publish_turn_changes(host, service, through=index)
         return True, {"count": len(page)}
     if not hasattr(host, "remote_files"): host.remote_files = RemoteFiles(host.store.root)
     files = host.remote_files
