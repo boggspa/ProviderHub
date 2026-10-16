@@ -11,7 +11,7 @@ let package = Package(
         .library(name: "ProviderHubRemote", targets: ["ProviderHubRemote"]),
     ],
     targets: [
-        .target(name: "ProviderHubRemote"),
+        .target(name: "ProviderHubRemote", resources: [.copy("Resources/provider-logos"), .copy("Resources/provider_branding.json")]),
         .testTarget(name: "ProviderHubRemoteTests", dependencies: ["ProviderHubRemote"]),
     ],
     swiftLanguageVersions: [.v5]

@@ -6,6 +6,7 @@ ChatService. There is no idle timer, scheduler, or process per saved chat.
 from __future__ import annotations
 
 import copy
+import json
 from pathlib import Path
 import subprocess
 import threading
@@ -321,7 +322,8 @@ class ChatHost:
         if service is not None: service.team_wake.set()
         # Output tails go only to the chat on screen; others get the rows.
         with self._output:
-            event = {"event": "processes", "chat": chat, "processes": self.processes.snapshot(chat, output=chat == self.view_id)}
+            remote_selected = self.remote is not None and self.remote.bridge.selected_chat == chat
+            event = {"event": "processes", "chat": chat, "processes": self.processes.snapshot(chat, output=chat == self.view_id or remote_selected)}
             if notice: event["notice"] = notice
             self.emit(event)
 
@@ -330,6 +332,14 @@ class ChatHost:
             "error": "Request failed", "stopped": "Stopped", "interrupted": "Interrupted"}.get(service.chat.get("status"), "Ready")
         return {"busy": service.busy, "interrupting": service._steering or service.busy and service.cancel.is_set(), "status": status,
                 "approval": copy.deepcopy(service.approval), "usage": service.chat.get("usage")}
+
+    def publish_remote_configuration(self, service):
+        chat = service.chat
+        if chat:
+            self.emit({"event": "remote_configuration", "chat": chat["id"],
+                       "choice": chat["route"] + "|" + chat.get("account", ""),
+                       "effort": chat.get("effort", ""), "approvalMode": chat.get("approvalMode", "manual"),
+                       "workspace": chat["workspace"], "busy": service.busy})
 
     def session_event(self, service, event):
         kind = event.get("event")
@@ -364,6 +374,8 @@ class ChatHost:
                     if kind == "side" and event.get("side"):
                         event = {**event, "side": {**event["side"], "entries": []}}
             self.emit(event)
+            if kind in {"selected", "snapshot", "state"} and service.chat:
+                self.publish_remote_configuration(service)
         if kind in {"state", "approval", "branch_state", "side", "agents"}: self.publish_summaries()
 
     def new_session(self, chat=None):
@@ -529,7 +541,58 @@ the same publication `initialize` and `select` perform, ending with `ready`.
                     # The snapshot is this chat's only transcript copy; its
                     # helper, Side Chat and Team state follow for the inspector.
                     service.publish_inspector()
+                    self.publish_remote_configuration(service)
             self.prune()
+            return
+        if action in {"remote_inspect", "remote_browser"}:
+            identifier = command.get("chat")
+            if identifier not in self.headers: raise ValueError("Choose an existing chat.")
+            service = self.session(identifier)
+            if action == "remote_inspect":
+                self.publish_workspaces()
+                self.capabilities.publish()
+                service.publish_inspector()
+                # Empty panels must clear a previous chat's cached state too.
+                if not service.chat.get("team"): self.emit({"event": "team", "chat": identifier, "team": None})
+                if not service.side: self.emit({"event": "side", "chat": identifier, "side": None})
+                self.publish_remote_configuration(service)
+                self.publish_processes(identifier)
+                return
+            tool, arguments = command.get("tool"), command.get("arguments", {})
+            preview = tool == "browser_remote_preview"
+            if preview:
+                if arguments: raise ValueError("Preview takes no arguments.")
+                self.capabilities.describe(service, "browser_list", {})
+            else: self.capabilities.describe(service, tool, arguments)
+            browser_generation = self.capabilities.native.generation()
+            pending = getattr(self, "_remote_browser_pending", set())
+            if identifier in pending: raise ValueError("Wait for this browser action to finish.")
+            self._remote_browser_pending = pending
+            pending.add(identifier)
+            def browse():
+                try:
+                    # These are direct human controls, independent of a model's
+                    # Stop token. Still use the same validated native surface
+                    # and revocation generation as agent browser actions.
+                    result = self.capabilities.native.call(identifier, tool, arguments, None, generation=browser_generation)
+                    details, text = {}, []
+                    for block in result.get("content", []):
+                        if preview and block.get("type") == "image":
+                            self.emit({"event": "remote_browser_preview", "chat": identifier,
+                                       "image": (block.get("source") or {}).get("data")})
+                        if block.get("type") != "text": continue
+                        value = block.get("text", "")
+                        try:
+                            parsed = json.loads(value)
+                            if isinstance(parsed, dict): details.update(parsed)
+                            else: text.append(value)
+                        except (ValueError, TypeError): text.append(value)
+                    self.emit({"event": "remote_browser", "chat": identifier, "summary": result.get("summary", ""),
+                               "text": "\n".join(text), "details": details, "isError": bool(result.get("is_error"))})
+                except Exception as exc:
+                    self.emit({"event": "remote_browser", "chat": identifier, "summary": "Browser unavailable", "text": str(exc), "isError": True})
+                finally: pending.discard(identifier)
+            threading.Thread(target=browse, name="remote-browser", daemon=True).start()
             return
         self.prune(keep=command.get("chat") or command.get("id"))
         if action == "preferences":
@@ -641,6 +704,12 @@ the same publication `initialize` and `select` perform, ending with `ready`.
             if service.chat["id"] != old_id:
                 self.sessions.pop(old_id, None)
                 self.sessions[service.chat["id"]] = service
+                if self.remote is not None and self.remote.bridge.selected_chat == old_id:
+                    replacement = service.chat["id"]
+                    self.remote.bridge.selected_chat = replacement
+                    self.subscriptions["remote"] = {replacement}
+                    self.publish_remote_configuration(service)
+                    service.publish()
             self.publish_summaries()
         finally: self._replacing = None
 

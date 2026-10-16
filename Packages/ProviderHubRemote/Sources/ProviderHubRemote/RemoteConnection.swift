@@ -237,6 +237,10 @@ public final class RemoteConnection: CompanionLink {
                 if let value = command.questionId { params["questionId"] = value }
                 if let value = command.answers { params["answers"] = value }
                 if let value = command.dismiss { params["dismiss"] = value }
+                if let value = command.action { params["action"] = value }
+                if let value = command.arguments {
+                    params["arguments"] = try JSONSerialization.jsonObject(with: JSONEncoder().encode(value))
+                }
                 try self.channel?.send(method: command.method, params: params)
             } catch { self.onStatus?("Command failed: \(error)", nil) }
         }

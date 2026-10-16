@@ -33,7 +33,7 @@ struct ChatDevicesSettings: View {
                             else { model.startRemote(host: address.trimmingCharacters(in: .whitespacesAndNewlines)) }
                         }.disabled(!model.connected || !listening && address.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                     }
-                    Text("Your phone can view chats, send messages, stop work and answer pending approvals. Keep Provider Hub running on this Mac. For access over cellular or another Wi-Fi network, connect both devices to the same Tailscale tailnet and use this Mac’s Tailscale IP. Allow TCP port 8765 in your tailnet policy.")
+                    Text("Your paired device can manage chats, Team members, permissions and the inspector. Keep Provider Hub running on this Mac. For access over cellular or another Wi-Fi network, connect both devices to the same Tailscale tailnet and use this Mac’s Tailscale IP. Allow TCP port 8765 in your tailnet policy.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 if listening {

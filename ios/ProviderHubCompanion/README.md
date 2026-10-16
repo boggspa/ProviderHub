@@ -6,6 +6,47 @@ chats, watches a selected transcript, sends text, stops that chat, and answers
 the exact pending approval. Text drafts are local to each chat and clear only
 after a successful acknowledgement.
 
+## Shared Mac and iOS control surface (local development)
+
+The control protocol now exposes the Mac's Team, model/account choices,
+reasoning effort and approval mode, along with Changes, Team, Side Chat,
+Processes and Browser inspector tabs. Commands remain bound to the phone's
+selected chat; selecting on the phone does not change the Mac's selection.
+The Mac validates configuration and execution against its existing handlers.
+YOLO changes require a confirmation on the phone. Configuration changes follow
+the Mac's existing idle/pending-question rules.
+
+iPad landscape uses chat rail, transcript and inspector columns. Phone and
+narrow iPad layouts use the same inspector in a sheet. The deployment target
+remains iOS/iPadOS 17. All UI calls are checked against that minimum target;
+the locally available Simulator runtime is newer, so physical iOS 17 testing
+is still needed.
+
+The Mac aliases the package's canonical Swift source for transcript section
+grouping, tool names/glyphs, speaker headers, member chips, inspector tabs,
+member cards/control icons, and colored diff disclosures. Provider artwork and
+branding metadata are bundled verbatim from `Source/provider-logos` and
+`Source/provider_branding.json`; a test enforces that the packaged copies stay
+identical. Runtime model presentations carry Mac branding overrides where the
+referenced artwork is bundled. iOS retains native text selection and Dynamic
+Type; the desktop's AppKit editor/text layout and custom-font installation are
+not shared.
+
+Changes show bounded working-tree and commit diffs with the same green/red
+line rendering, headers and dark canvas as macOS. Processes can be inspected,
+stopped and cleared. Team members can be edited and started/stopped with the
+same icon controls. Side Chat supports model selection, sending, stopping and
+closing; drafts clear only after acknowledgement. Browser controls operate the
+Mac's actual WebKit session through fresh observation refs, with an on-demand
+compressed page preview. This is not a second iOS browser or continuous remote
+video: the Mac Chat window must be attached and Browser Use enabled.
+
+This pass remains local: update both Mac host and iOS companion together to use
+the new controls. Older hosts keep basic chat working and show an update notice
+in the inspector. The existing TestFlight build does not contain these changes.
+Full history paging, file attachments, Git overview/branch operations, Blackboard
+and message reactions are not yet exposed by the remote control protocol.
+
 ## Connect from cellular or another Wi-Fi network
 
 1. Install Tailscale on the Mac and iPhone, sign both into the same tailnet,

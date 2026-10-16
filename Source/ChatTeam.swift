@@ -20,56 +20,17 @@ struct ChatTeamControls: View {
             if let team = model.team {
                 if !team.enabled { Text("Team is off").font(.system(size: 11.5)).foregroundStyle(.secondary) }
                 ForEach(team.members) { member in
-                    VStack(alignment: .leading, spacing: 4) {
-                        HStack(spacing: 6) {
+                    ChatSharedMemberRow(name: member.name, model: member.label + (member.account.isEmpty ? "" : " · " + member.account),
+                        status: member.status, responsibility: member.responsibility, nextStep: member.nextStep,
+                        failure: member.failureReason ?? "", waitReason: member.waitReason ?? "",
+                        pendingLabel: member.pendingChange?.remove == true ? "Removing…" : member.pendingChange?.label,
+                        pending: member.pendingChange != nil, used: member.usage, limit: member.context,
+                        canControl: model.canControlTeamMember, stoppedByUser: member.memberStoppedByUser == true,
+                        needsInput: team.needsInput, accent: model.activeAccent, fill: HubTheme.Semantic.cardFill,
+                        ink: HubTheme.Semantic.ink, secondary: HubTheme.Semantic.secondaryInk,
+                        control: { model.controlTeamMember(member.id, start: $0) }) {
                             ChatProviderIcon(presentation: model.models.first { $0.id == member.choice }?.presentation)
-                            Text(member.name).font(.system(size: 12, weight: .medium))
-                            Spacer(minLength: 0)
-                            if member.status == "working" || member.pendingChange != nil { ProgressView().controlSize(.mini) }
-                            Text(member.statusLabel)
-                                .font(.system(size: 10.5)).foregroundStyle(member.status == "error" ? HubTheme.Semantic.contextCritical : HubTheme.Semantic.secondaryInk)
-                                .help(member.pendingChange == nil ? "" : "Applies after this member's current step; a running tool finishes and records its result first.")
-                            if member.status == "working" {
-                                Button { model.controlTeamMember(member.id, start: false) } label: {
-                                    Image(systemName: "stop.circle").font(.system(size: 13))
-                                }.buttonStyle(.plain).foregroundStyle(.secondary)
-                                    .disabled(!model.canControlTeamMember || member.memberStoppedByUser == true)
-                                    .help("Stop this member's current run")
-                                    .accessibilityLabel("Stop \(member.name)")
-                            } else if ["done", "ready", "stopped", "interrupted", "error", "limit_reached"].contains(member.status) {
-                                Button { model.controlTeamMember(member.id, start: true) } label: {
-                                    Image(systemName: "play.circle").font(.system(size: 13))
-                                }.buttonStyle(.plain).foregroundStyle(.secondary)
-                                    .disabled(!model.canControlTeamMember || team.needsInput || member.pendingChange != nil)
-                                    .help("Start another contribution with the current Team context")
-                                    .accessibilityLabel("Start \(member.name)")
-                            }
                         }
-                        Text(member.label + (member.account.isEmpty ? "" : " · " + member.account))
-                            .font(.system(size: 10.5)).foregroundStyle(.secondary).lineLimit(2)
-                        if let pending = member.pendingChange, !pending.remove, let label = pending.label {
-                            Text("→ " + (pending.name.map { $0 == member.name ? label : $0 + " · " + label } ?? label))
-                                .font(.system(size: 10.5)).foregroundStyle(.secondary).lineLimit(1)
-                        }
-                        if !member.responsibility.isEmpty {
-                            Text(member.responsibility).font(.system(size: 11.5)).lineLimit(3)
-                        }
-                        if member.status == "error", let reason = member.failureReason, !reason.isEmpty {
-                            Text(reason).font(.system(size: 11.5)).foregroundStyle(HubTheme.Semantic.contextCritical).lineLimit(2).textSelection(.enabled)
-                        } else if !member.nextStep.isEmpty, member.status != "done" {
-                            Text(member.nextStep).font(.system(size: 11.5)).foregroundStyle(.secondary).textSelection(.enabled)
-                        }
-                        if let reason = member.waitReason, !reason.isEmpty, member.status != "done" {
-                            Text(reason).font(.system(size: 10.5)).foregroundStyle(.secondary).textSelection(.enabled)
-                        }
-                        if let usage = member.usage {
-                            Text("Context \(usage.formatted())" + (member.context.map { " / \($0.formatted())" } ?? ""))
-                                .font(.system(size: 10, design: .monospaced)).foregroundStyle(.secondary)
-                                .help("Effective Team context. Space is reserved for output and saved notes." +
-                                      (member.modelContext.map { " Model window: \($0.formatted()) tokens." } ?? ""))
-                        }
-                    }.padding(8).frame(maxWidth: .infinity, alignment: .leading)
-                        .hubCard(cornerRadius: 7, accent: model.activeAccent)
                 }
                 if team.needsInput {
                     Text("Answer in the main composer to continue.").font(.system(size: 11.5)).foregroundStyle(.secondary)

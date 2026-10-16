@@ -448,6 +448,11 @@ def project_entry(entry, fallback="legacy"):
             "memberName": str(entry.get("memberName") or "")[:100],
             "isError": entry.get("isError") is True,
             "isLive": (entry.get("role") or entry.get("kind")) == "assistant" and entry.get("recorded") is False}
+    row.update(route=str(entry.get("route") or "")[:160], memberID=str(entry.get("memberID") or "")[:128],
+               agentID=str(entry.get("agentID") or "")[:128],
+               changedFiles=[str(path)[:300] for path in (entry.get("changedFiles") or [])[:32] if isinstance(path, str)])
+    timestamp = entry.get("time")
+    if type(timestamp) in (int, float) and 0 <= timestamp < 10_000_000_000: row["time"] = timestamp
     question = entry.get("question")
     if row["role"] == "question" and isinstance(question, dict):
         from chat_questions import validate
@@ -472,7 +477,7 @@ def bound_entries(entries):
 
 
 def project_event(event):
-    """Whitelist host events. Drop catalogue, processes, and credential-bearing rows."""
+    """Whitelist presentation events; provider credentials never cross the wire."""
     if not isinstance(event, dict):
         return None
     kind = event.get("event")
@@ -492,6 +497,7 @@ def project_event(event):
                 "providerLabel": str(row.get("providerLabel") or "")[:60],
                 "accent": row.get("accent") if isinstance(row.get("accent"), str) and re.fullmatch(r"#[0-9A-Fa-f]{6}", row["accent"]) else "",
                 "approvalMode": row.get("approvalMode") if row.get("approvalMode") in {"manual", "accept_edits", "yolo"} else "manual",
+                "route": str(row.get("route") or "")[:160],
             }
             length = len(json.dumps(projected, ensure_ascii=False).encode("utf8"))
             if size + length > 32000: break
@@ -526,7 +532,8 @@ def project_event(event):
                 "entries": bound_entries(entries), "busy": bool(event.get("busy")), "status": str(event.get("status") or "")[:80]}
     if kind in {"notice", "rejected", "error"} and isinstance(event.get("message"), str):
         return {"event": kind, "chat": event.get("chat"), "message": event["message"][:500]}
-    return None
+    from chat_remote_controls import project
+    return project(event, project_entry)
 
 
 class MacBridge:
@@ -539,7 +546,7 @@ class MacBridge:
         self.auto_accept = auto_accept
         self.session = Session("mac", self.identity, session_id, self._trust)
         self.session.on_app = self._on_app
-        self.view = {"chats": [], "selected": None, "approval": None}
+        self.view = {"chats": [], "selected": None, "approval": None, "controls": {"version": 1}}
         self.pending_pairing = None
         self.hold_pairing = False
         self.selected_chat = None
@@ -585,6 +592,9 @@ class MacBridge:
             self.session.close()
 
     def publish(self, event):
+        if (self.selected_chat and event.get("chat") and event.get("chat") != self.selected_chat
+                and event.get("event") not in {"chats", "catalogue", "plugins"}):
+            return None
         if (self.selected_chat and event.get("event") in {"selected", "snapshot"}
                 and (event.get("chat") or event.get("id")) != self.selected_chat):
             return None
@@ -620,7 +630,22 @@ class MacBridge:
 
     def _apply_view(self, projected):
         kind = projected["event"]
-        if kind == "chats":
+        if kind == "control":
+            self.view["controls"][projected["panel"]] = projected["value"]
+            self.view["controls"]["version"] = 1
+        elif kind == "side_delta":
+            side = self.view["controls"].get("side")
+            if isinstance(side, dict) and side.get("id") == projected.get("side"):
+                rows = side.setdefault("entries", [])
+                identifier = projected.get("id") or "side-live"
+                row = next((row for row in rows if row.get("id") == identifier), None)
+                if row is None:
+                    row = {"id": identifier, "role": "assistant", "text": ""}; rows.append(row)
+                offset, text = projected["offset"], row.get("text", "")
+                if offset <= len(text): row["text"] = (text + projected["text"][max(0, len(text) - offset):])[:4000]
+                from chat_remote_controls import bounded
+                side["entries"] = bounded(rows[-12:], 7000)
+        elif kind == "chats":
             self.view["chats"] = projected["chats"]
         elif kind == "approval":
             self.view["approval"] = projected.get("approval")
@@ -659,8 +684,11 @@ class MacBridge:
                 self.view["selected"]["liveID"] = None
 
     def _snapshot(self):
+        # Refresh images on demand; snapshots prioritize text, control state and
+        # chat history within the fixed encrypted frame limit.
+        controls = {k: v for k, v in self.view["controls"].items() if k != "browserPreview"}
         return {"cursor": self.cursor, "chats": self.view["chats"], "approval": self.view["approval"],
-                "selected": self.view["selected"]}
+                "selected": self.view["selected"], "controls": controls}
 
     def _on_app(self, message):
         msg_id = message.get("msgId")
@@ -684,7 +712,7 @@ class MacBridge:
             else:
                 self._emit("session.snapshot", self._snapshot())
             return
-        if method not in {"chat.send", "chat.stop", "chat.approve", "chat.select", "chat.answer_question"}:
+        if method not in {"chat.send", "chat.stop", "chat.approve", "chat.select", "chat.answer_question", "chat.control"}:
             self._ack(params.get("requestId"), False, "unsupported command")
             return
         request_id = params.get("requestId")
@@ -712,6 +740,13 @@ class MacBridge:
         self._emit("session.ack", body)
 
     def _command(self, peer, method, params, request_id):
+        if method == "chat.control":
+            from chat_remote_controls import command
+            try: control = command(params, request_id)
+            except (ValueError, TypeError) as exc: raise RemoteError(str(exc)) from exc
+            if params.get("chat") != self.selected_chat: raise RemoteError("Select this chat before using its controls")
+            self._execute(control)
+            return {"requestId": request_id, "ok": True}
         if method == "chat.approve":
             return self._approve(peer, params, request_id)
         chat = params.get("chat") if method != "chat.select" else params.get("chat")
@@ -732,6 +767,10 @@ class MacBridge:
             self._execute({"command": "answer_question", "chat": chat, "question_id": identifier,
                            "answers": params.get("answers"), "dismiss": params.get("dismiss") is True})
         elif method == "chat.select":
+            if self.selected_chat != chat:
+                self.view["controls"] = {key: value for key, value in self.view["controls"].items() if key in {"version", "models", "browserEnabled"}}
+                if self.view["approval"] and self.view["approval"].get("chat") != chat:
+                    self.view["approval"] = None
             self.selected_chat = chat
             self._execute({"command": "subscribe", "client": "remote", "chats": [chat]})
         else:

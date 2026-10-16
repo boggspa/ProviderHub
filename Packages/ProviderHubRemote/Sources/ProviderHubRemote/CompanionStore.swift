@@ -10,6 +10,7 @@ public struct RemoteChat: Codable, Equatable, Identifiable {
     public var providerLabel: String?
     public var accent: String?
     public var approvalMode: String?
+    public var route: String?
     public init(id: String, title: String, status: String, busy: Bool, pendingApproval: Bool) {
         self.id = id
         self.title = title
@@ -30,6 +31,11 @@ public struct RemoteEntry: Equatable, Identifiable {
     public var isError: Bool
     public var isLive: Bool = false
     public var question: RemoteQuestion? = nil
+    public var route: String = ""
+    public var memberID: String = ""
+    public var agentID: String = ""
+    public var time: Double? = nil
+    public var changedFiles: [String] = []
 
     static func decode(_ row: [String: Any], fallback: String) -> RemoteEntry {
         let identifier = row["id"] as? String
@@ -41,6 +47,11 @@ public struct RemoteEntry: Equatable, Identifiable {
         if let question = row["question"], let data = try? JSONSerialization.data(withJSONObject: question) {
             decoded.question = try? JSONDecoder().decode(RemoteQuestion.self, from: data)
         }
+        decoded.route = row["route"] as? String ?? ""
+        decoded.memberID = row["memberID"] as? String ?? ""
+        decoded.agentID = row["agentID"] as? String ?? ""
+        decoded.time = row["time"] as? Double
+        decoded.changedFiles = row["changedFiles"] as? [String] ?? []
         return decoded
     }
 }
@@ -83,6 +94,7 @@ public struct CompanionStore: Equatable {
     public private(set) var needsSnapshot = false
     public private(set) var acks: [String: Bool] = [:]
     public private(set) var entries: [RemoteEntry] = []
+    public private(set) var controls: [String: RemoteValue] = [:]
     public var transcript: String { entries.map { "\($0.role): \($0.text)\n\n" }.joined() }
 
     public init() {}
@@ -91,7 +103,7 @@ public struct CompanionStore: Equatable {
         guard let method = message["method"] as? String,
               let params = message["params"] as? [String: Any] else { throw RemoteProtocolError.rejected }
         func decode<T: Decodable>(_ type: T.Type, _ value: Any) throws -> T {
-            try JSONDecoder().decode(type, from: JSONSerialization.data(withJSONObject: value))
+            try JSONDecoder().decode(type, from: JSONSerialization.data(withJSONObject: value, options: [.fragmentsAllowed]))
         }
         if method == "session.snapshot" {
             cursor = params["cursor"] as? Int ?? 0
@@ -99,6 +111,7 @@ public struct CompanionStore: Equatable {
             approval = try (params["approval"] as? [String: Any]).map { try decode(RemoteApproval.self, $0) }
             let selected = params["selected"] as? [String: Any]
             selectedID = selected?["id"] as? String
+            controls = try decode([String: RemoteValue].self, params["controls"] ?? [:])
             setEntries(selected?["entries"])
             if let live = selected?["live"] as? String, !live.isEmpty {
                 let id = selected?["liveID"] as? String ?? "live"
@@ -117,13 +130,38 @@ public struct CompanionStore: Equatable {
             guard let event = params["event"] as? [String: Any], let kind = event["event"] as? String else { throw RemoteProtocolError.rejected }
             cursor = next
             switch kind {
+            case "side_delta":
+                if event["chat"] as? String == selectedID,
+                   case .object(var side) = controls["side"], side["id"]?.text == event["side"] as? String {
+                    var rows = side["entries"]?.rows ?? []
+                    let id = event["id"] as? String ?? "side-live"
+                    let index = rows.firstIndex { $0["id"].text == id } ?? rows.count
+                    if index == rows.count { rows.append(.object(["id": .string(id), "role": .string("assistant"), "text": .string("")])) }
+                    var row = rows[index].object
+                    let current = row["text"]?.text ?? ""
+                    let offset = event["offset"] as? Int ?? 0
+                    if offset <= current.unicodeScalars.count, offset >= 0 {
+                        let addition = (event["text"] as? String ?? "").unicodeScalars.dropFirst(current.unicodeScalars.count - offset)
+                        row["text"] = .string(String(String.UnicodeScalarView((current + String(String.UnicodeScalarView(addition))).unicodeScalars.prefix(4000))))
+                        rows[index] = .object(row); side["entries"] = .array(Array(rows.suffix(12))); controls["side"] = .object(side)
+                    }
+                }
+            case "control":
+                let owner = event["chat"] as? String
+                if owner == nil || owner == selectedID, let panel = event["panel"] as? String {
+                    controls[panel] = try decode(RemoteValue.self, event["value"] ?? NSNull())
+                    controls["version"] = .number(1)
+                    if let notice = event["notice"] as? String, !notice.isEmpty { notices.append(notice) }
+                }
             case "chats": chats = try decode([RemoteChat].self, event["chats"] ?? [])
             case "approval":
                 var value = event["approval"] as? [String: Any]
                 value?["chat"] = event["chat"]
                 approval = try value.map { try decode(RemoteApproval.self, $0) }
             case "selected", "snapshot":
-                selectedID = (event["id"] ?? event["chat"]) as? String
+                let next = (event["id"] ?? event["chat"]) as? String
+                if next != selectedID { controls = controls.filter { ["version", "models", "browserEnabled"].contains($0.key) } }
+                selectedID = next
                 setEntries(event["entries"])
             case "delta":
                 if event["chat"] as? String == selectedID {
@@ -214,6 +252,8 @@ public struct RemoteCommand: Codable, Equatable {
     public var questionId: String?
     public var answers: [String: [String]]?
     public var dismiss: Bool?
+    public var action: String?
+    public var arguments: [String: RemoteValue]?
 
     public init(method: String, requestId: String, chat: String? = nil, text: String? = nil, approvalId: String? = nil, allow: Bool? = nil) {
         self.v = 1

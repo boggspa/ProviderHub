@@ -134,8 +134,11 @@ def create_manifest(source_dir, app_dir, swift_sources, *, revision=None, reposi
             raise ValueError("Packaged worker does not match source: " + relative)
         source_hashes["Source/" + relative] = digest
     for path in [*map(Path, swift_sources), source_dir / "build.sh", source_dir / "build_provenance.py"]:
-        relative = path.resolve().relative_to(source_dir.resolve()).as_posix()
-        source_hashes["Source/" + relative] = _sha256(path)
+        # Shared presentation sources live in Packages/ and are referenced by
+        # Source/ aliases. Record the canonical repository path and bytes, so
+        # a clean shared-source build remains verifiable against the Git tree.
+        relative = path.resolve().relative_to(source_dir.resolve().parent).as_posix()
+        source_hashes[relative] = _sha256(path)
     if (source_dir / "AppIcon.icns").is_file():
         source_hashes["Source/AppIcon.icns"] = _sha256(source_dir / "AppIcon.icns")
     identity = _source_identity(source_dir, source_hashes, revision, repository)

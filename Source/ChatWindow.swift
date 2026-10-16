@@ -366,22 +366,10 @@ private struct ChatHeader: View {
     private func memberContext(_ member: ChatTeamMember, active: Bool, named: Bool, counted: Bool, capped: Bool) -> some View {
         let accent = model.accent(for: member.route)
         let readout = member.usage.map { tokenCount($0) + (member.context.map { " / " + tokenCount($0) } ?? "") } ?? "not started"
-        return HStack(spacing: 5) {
-            if let used = member.usage, let limit = member.context, limit > 0 {
-                ChatContextRing(used: used, limit: limit, accent: accent)
-            } else {
-                Circle().stroke(accent.opacity(0.3), lineWidth: 2).frame(width: 12, height: 12)
-            }
-            if named {
-                Text(member.name)
-                    .font(.system(size: 10.5, weight: active ? .semibold : .regular))
-                    .foregroundStyle(active ? Semantic.ink : Semantic.secondaryInk)
-                    .lineLimit(1).truncationMode(.tail)
-                    .frame(maxWidth: capped ? 84 : nil, alignment: .leading)
-            }
-            if counted, let used = member.usage {
-                Text(tokenCount(used)).font(.system(size: 10.5, design: .monospaced)).foregroundStyle(Semantic.secondaryInk)
-            }
+        return ChatSharedMemberChip(name: member.name, model: member.label, used: member.usage, limit: member.context,
+            active: active, named: named, counted: counted, capped: capped,
+            accent: accent, ink: Semantic.ink, secondary: Semantic.secondaryInk) {
+                ChatProviderIcon(presentation: model.models.first(where: { $0.id == member.choice })?.presentation, size: 13)
         }
         .lineLimit(1)
         .help(member.name + " · " + readout + (active ? " · working" : "") + ". Each member has its own context window.")
