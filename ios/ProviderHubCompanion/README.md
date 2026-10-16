@@ -41,11 +41,88 @@ Mac's actual WebKit session through fresh observation refs, with an on-demand
 compressed page preview. This is not a second iOS browser or continuous remote
 video: the Mac Chat window must be attached and Browser Use enabled.
 
-This pass remains local: update both Mac host and iOS companion together to use
-the new controls. Older hosts keep basic chat working and show an update notice
-in the inspector. The existing TestFlight build does not contain these changes.
-Full history paging, file attachments, Git overview/branch operations, Blackboard
-and message reactions are not yet exposed by the remote control protocol.
+The matched Mac build 82 and iOS TestFlight build 4 contain the controls below.
+Older hosts keep basic chat working and show an update notice in the inspector.
+The extended protocol adds **New chat**, **Load earlier messages**,
+attachment uploads and **Blackboard**. Git overview/branch operations and
+message reactions are still not remote controls.
+
+### Local follow-up: live activity and run boundaries
+
+The local source now carries the selected chat's authoritative running,
+interrupting and status fields independently of the recent-chat list. The
+iOS transcript passes that running state into the same outline as macOS:
+the current turn's changed-files close-out waits for the run to end, while
+a steered user message closes the preceding turn immediately. Older completed
+turns stay visible. A reconnect snapshot preserves the active-run state and
+always rebinds the phone's chat subscription, even when its saved selection
+already matches the Mac snapshot.
+
+The live strip above the composer uses the desktop's shared activity label
+and shimmer. It shows every active member's newest contribution: Thinking,
+Replying, the running tool/action, Continuing, Waiting or Stopping. Host-side
+activity includes current work outside the phone's bounded transcript window.
+Identical labels are deduplicated, and subsequent tokens in an already
+streaming reply do not rescan the saved transcript for activity. No broader
+network/performance tuning is included. These follow-up edits are local and
+are not in Mac build 82 or TestFlight build 4.
+
+The Codex catalogue display is also reconciled against each CLI account's
+current native cards. Raw maximum and reserved runtime budget stay distinct;
+stale cached or configured larger windows cannot enlarge the current ceiling.
+No credentials, native config files or cached catalogues are rewritten.
+
+### Compose and inspect from either device
+
+The combined model picker is now shared with the desktop: provider icon rail,
+enabled model/account rows, context sizes, search and reasoning sidecar. It is
+used for the main chat, New Chat, Team members and Side Chat. On narrow phones
+reasoning moves below the list; iPad and Mac retain the sidecar. iOS uses an
+adaptive sheet so a popover beside an editor cannot clip the provider rail. Model lists
+load in pages so a large catalogue does not silently lose later providers.
+
+Team's inline Blackboard now uses the same post-card component as the Mac,
+with recent posts, attachments and a composer beneath the member roster. Tap
+a file for its original through native Quick Look; image thumbnails are
+bounded JPEG previews. Files are retrieved only by an attachment ID in the
+selected chat, with path/symlink checks, chunk limits and a revision check.
+Settings displays the connected host version, and older hosts get a visible
+compatibility notice instead of silently missing controls.
+
+The transcript's changed-files table also uses the same SwiftUI component as
+desktop. Its final-turn summary is computed on the Mac from the whole turn,
+so a 30-entry phone window no longer reduces a 31-file change to two files.
+
+- **New chat** (compose icon or Command-N) lets you choose an enabled model/account
+  and a registered Mac workspace. It starts with Manual approvals and selects
+  only on the phone; desktop focus and running chats stay independent.
+- **Load earlier messages** pages backward through the saved transcript using
+  stable entry IDs. Each request is capped at 30 records and roughly 48 KB.
+  Previously loaded pages stay visible while new messages arrive. A reconnect
+  with an unknown gap refreshes history rather than inventing continuity.
+- The composer’s **+** opens Files or Photos. The host accepts up to eight
+  attachments, 8 MiB per file and 20 MiB per message. Photos are normalized to
+  JPEG; text/code, PNG/JPEG/GIF/WebP and text-bearing PDF use the same existing
+  Mac attachment intake and model-vision checks. Other binary formats are
+  refused by that intake. Attachment-only messages are supported.
+- Uploads use 18 KB acknowledged chunks with SHA-256 verification and opaque
+  chat-bound handles. They never accept phone-supplied Mac paths. Failed sends
+  retain the local draft/files; unaccepted staging expires after 15 minutes.
+  Accepted originals are copied into private chat storage and appear in both
+  transcripts. Blackboard originals download on demand (up to 64 MiB) for native
+  Quick Look; supported images/PDFs/media can be previewed without a second
+  provider request. Thumbnail rendering does not transfer full images.
+- The inspector’s **pin** opens the chat’s **Blackboard**: view posts and
+  referenced files/links, create or edit your posts, remove items, add a link,
+  or upload and pin files. Posts and limits use the existing Mac Blackboard
+  handlers; removal asks for confirmation. Files already attached to the chat
+  also appear in its Blackboard list.
+
+These additions ship together in **Mac 0.5.18 (82)** and **iOS 0.1.3 (4)**.
+Mac build 81 lacks the extended protocol, even with iOS 0.1.2 (3). Saved pairing resumes
+automatically on launch/foreground in local iOS source; explicit Disconnect
+pauses that for the current app session. The Keychain identity, pinned Mac key
+and Mac allowlist continue to provide trust, without scanning again.
 
 ## Connect from cellular or another Wi-Fi network
 

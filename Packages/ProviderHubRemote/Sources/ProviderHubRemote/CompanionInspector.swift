@@ -12,6 +12,8 @@ struct CompanionInspector: View {
     @State private var editingTeam = false
     @State private var sideDraft = ""
     @State private var sideChoice = ""
+    @State private var sideEffort = ""
+    @State private var sidePicker = false
     @State private var address = ""
     @State private var browserInput = ""
     @State private var closeSide = false
@@ -19,6 +21,7 @@ struct CompanionInspector: View {
     @State private var sentSideDraft = ""
     @State private var expandedFiles = Set<String>()
     @State private var expandedProcesses = Set<String>()
+    @State private var blackboard = false
 
     private var side: RemoteValue { model.store.controls["side"] ?? .null }
     private var browser: RemoteValue { model.store.controls["browser"] ?? .null }
@@ -36,6 +39,10 @@ struct CompanionInspector: View {
                     .font(.system(size: tab == .agents ? 13 : 11.5, weight: tab == .agents ? .semibold : .regular))
                     .foregroundStyle(tab == .agents ? CompanionTheme.ink : CompanionTheme.secondary)
                 Spacer()
+                if model.extendedControlsAvailable {
+                    Button { blackboard = true } label: { Image(systemName: "pin").frame(width: 32, height: 32) }
+                        .buttonStyle(.plain).accessibilityLabel("Open Blackboard")
+                }
                 if tab == .agents {
                     Button(model.members.isEmpty ? "Set up" : "Edit") { editingTeam = true }.controlSize(.small).disabled(!connected)
                 } else {
@@ -63,6 +70,7 @@ struct CompanionInspector: View {
                 Text(notice).font(.caption).foregroundStyle(CompanionTheme.secondary).textSelection(.enabled).padding(12)
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(CompanionTheme.surface).foregroundStyle(CompanionTheme.ink)
         .disabled(!model.isConnected)
         .task(id: "\(model.selectedChatID ?? "")-\(tab.rawValue)") {
@@ -80,6 +88,14 @@ struct CompanionInspector: View {
         }
         .onChange(of: model.isConnected) { _, connected in if !connected { sideRequest = nil } }
         .sheet(isPresented: $editingTeam) { CompanionTeamEditor(model: model) }
+        .sheet(isPresented: $blackboard) { CompanionBlackboard(model: model) }
+        .sheet(isPresented: $sidePicker) {
+            CompanionRoutePicker(model: model, initialChoiceID: sideChoice, initialEffort: sideEffort) { row, effort in
+                sideChoice = row["id"].text; sideEffort = effort
+                if !side["id"].text.isEmpty { model.control("side_model", ["side": side["id"], "choice": row["id"], "effort": .string(effort)]) }
+                sidePicker = false
+            }
+        }
         .confirmationDialog("Close this temporary Side Chat?", isPresented: $closeSide) {
             Button("Close Side Chat", role: .destructive) { model.control("close_side", ["side": side["id"]]) }
         } message: { Text("Its temporary conversation will be discarded on the Mac.") }
@@ -114,6 +130,7 @@ struct CompanionInspector: View {
             ForEach(model.store.controls["agents"]?.rows ?? [], id: \.self) { agent in
                 DisclosureGroup("\(agent["label"].text) · \(agent["status"].text)") { entries(agent["entries"]) }
             }
+            if model.extendedControlsAvailable { CompanionBlackboardSummary(model: model) { blackboard = true } }
         }
     }
 
@@ -164,18 +181,11 @@ struct CompanionInspector: View {
             if side["id"].text.isEmpty {
                 Text("Fork a temporary discussion from this chat. It uses the same Mac workspace with read-only tools.")
                     .font(.callout).foregroundStyle(CompanionTheme.secondary)
-                Picker("Model", selection: $sideChoice) {
-                    Text("Choose a model").tag("")
-                    ForEach(model.models, id: \.self) { row in Text(row["label"].text).tag(row["id"].text) }
-                }
-                Button("Open Side Chat") { model.control("open_side", ["choice": .string(sideChoice)]) }.disabled(sideChoice.isEmpty)
+                Button(model.models.first(where: { $0["id"].text == sideChoice })?["label"].text ?? "Choose a model") { sidePicker = true }
+                Button("Open Side Chat") { model.control("open_side", ["choice": .string(sideChoice), "effort": .string(sideEffort)]) }.disabled(sideChoice.isEmpty)
             } else {
                 HStack {
-                    Menu(side["label"].text) {
-                        ForEach(model.models, id: \.self) { row in
-                            Button(row["label"].text) { model.control("side_model", ["side": side["id"], "choice": row["id"], "effort": .string("")]) }
-                        }
-                    }.disabled(side["busy"].flag)
+                    Button(side["label"].text) { sidePicker = true }.disabled(side["busy"].flag)
                     Spacer()
                     if side["busy"].flag { Button("Stop") { model.control("side_stop", ["side": side["id"]]) } }
                     Button("Close") { closeSide = true }
@@ -281,6 +291,7 @@ private struct CompanionTeamEditor: View {
     @State private var processes = "8"
     @State private var minutes = ""
     @State private var tokens = ""
+    @State private var pickingMember: Int?
 
     var body: some View {
         NavigationStack {
@@ -292,13 +303,15 @@ private struct CompanionTeamEditor: View {
                 ForEach(rows.indices, id: \.self) { index in
                     Section("Member \(index + 1)") {
                         TextField("Name", text: field(index, "name"))
-                        Picker("Model", selection: field(index, "choice")) {
-                            ForEach(model.models.filter { $0["supportsTools"].flag }, id: \.self) { row in Text(row["label"].text).tag(row["id"].text) }
-                        }
-                        Picker("Reasoning", selection: field(index, "effort")) {
-                            Text("Default").tag("")
-                            ForEach(model.models.first(where: { $0["id"] == rows[index]["choice"] })?["efforts"].rows ?? [], id: \.self) { effort in Text(effort.text.capitalized).tag(effort.text) }
-                        }
+                        Button { pickingMember = index } label: {
+                            HStack {
+                                Text("Model and reasoning")
+                                Spacer()
+                                Text((model.models.first { $0["id"] == rows[index]["choice"] })?["label"].text ?? "Choose model")
+                                Text(rows[index]["effort"].text).foregroundStyle(.secondary)
+                                Image(systemName: "chevron.right").font(.caption)
+                            }
+                        }.buttonStyle(.plain)
                         TextField("Responsibility", text: field(index, "responsibility"), axis: .vertical)
                         if rows.count > 1 { Button("Remove member", role: .destructive) { rows.remove(at: index) } }
                     }
@@ -323,6 +336,15 @@ private struct CompanionTeamEditor: View {
                         model.configureMembers(rows, enabled: enabled, execution: execution)
                         dismiss()
                     }.disabled(!valid)
+                }
+            }
+        }.sheet(isPresented: Binding(get: { pickingMember != nil }, set: { if !$0 { pickingMember = nil } })) {
+            if let index = pickingMember, rows.indices.contains(index) {
+                CompanionRoutePicker(model: model, initialChoiceID: rows[index]["choice"].text, initialEffort: rows[index]["effort"].text, toolsOnly: true) { row, effort in
+                    guard rows.indices.contains(index) else { return }
+                    var member = rows[index].object
+                    member["choice"] = row["id"]; member["effort"] = .string(effort)
+                    rows[index] = .object(member); pickingMember = nil
                 }
             }
         }.onAppear {

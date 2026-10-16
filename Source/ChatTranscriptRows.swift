@@ -537,34 +537,12 @@ struct ChatTurnChangesRow: View {
     private static let preview = 6
 
     var body: some View {
-        let changes = ChatTurnChanges.collect(entries)
-        let files = showAll ? changes.files : Array(changes.files.prefix(Self.preview))
-        let key = "changes-" + (entries.first?.id ?? "") + "-"
-        VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: textStyle.scaled(7)) {
-                ChatToolGlyph(name: "apply_patch", size: textStyle.scaled(14)).foregroundStyle(Semantic.secondaryInk)
-                Text(changes.files.count == 1 ? "1 file changed" : "\(changes.files.count) files changed")
-                    .font(textStyle.system(12, weight: .medium)).foregroundStyle(Semantic.ink)
-                Text("this turn").font(textStyle.system(11.5)).foregroundStyle(Semantic.secondaryInk)
-                Spacer(minLength: 0)
-                if changes.added + changes.removed > 0 {
-                    ChatPatchStatsLabel(stats: ChatPatchStats(added: changes.added, removed: changes.removed), size: textStyle.scaled(11))
-                }
+        ChatSharedTurnChanges(changes: ChatTurnChanges.collect(entries), scale: textStyle.scaled(1),
+            ink: Semantic.ink, secondary: Semantic.secondaryInk, hairline: Semantic.hairline,
+            fill: Semantic.cardFill, rim: Semantic.cardRim) { path in
+                Button("Reveal in Finder") { chatReveal(path, in: workspace) }
+                    .buttonStyle(.plain).font(HubTheme.Typography.detail).foregroundStyle(.secondary)
             }
-            .padding(.horizontal, 10).padding(.vertical, textStyle.scaled(7))
-            .accessibilityElement(children: .combine)
-            ForEach(files) { file in
-                Rectangle().fill(Semantic.hairline).frame(height: 1)
-                ChatTurnChangeFile(file: file, workspace: workspace, expanded: expanded(key + file.path))
-            }
-            if changes.files.count > files.count {
-                Rectangle().fill(Semantic.hairline).frame(height: 1)
-                Button("Show \(changes.files.count - files.count) more") { showAll = true }
-                    .buttonStyle(.plain).font(textStyle.system(11.5)).foregroundStyle(Semantic.secondaryInk)
-                    .padding(.horizontal, 10).padding(.vertical, textStyle.scaled(6))
-            }
-        }
-        .hubCard(cornerRadius: 8)
     }
 }
 

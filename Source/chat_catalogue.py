@@ -14,6 +14,7 @@ import hashlib
 import json
 
 from branding import resolve_presentation
+from cli_routes import native_context_limits, native_context_spec
 from codex_catalogue import choices as codex_choices
 from hub_config import (CHAT_SOURCE_LABELS, chat_extra_source, chat_sources, claude_routes, cli_account_dir,
                         connection_signature, split_chat_account)
@@ -62,16 +63,19 @@ def chat_choices(settings):
     inventory = {"models": list({spec["id"]: spec for spec in specs.values()}.values())}
     selected = list(dict.fromkeys([*claude_routes(settings).values(),
                                   *(row["id"] for row in codex_choices(settings, inventory))]))
-    rows = _rows(settings, specs, selected)
+    native = {}
+    rows = _rows(settings, specs, selected, native=native)
     for provider, sources in (settings.get("_chat_source_specs") or {}).items():
         connection = (settings.get("providers") or {}).get(provider) or {}
         extra = chat_extra_source(connection, provider)
         if extra and extra in sources:
-            rows.extend(_rows(settings, sources[extra], list(sources[extra]), source=extra, only=provider))
+            rows.extend(_rows(settings, sources[extra], list(sources[extra]), source=extra, only=provider, native=native))
     return rows
 
 
-def _rows(settings, specs, candidates, *, source=None, only=None):
+def _rows(settings, specs, candidates, *, source=None, only=None, native=None):
+    # Per-account native limits, read once per (provider, folder) per listing.
+    native = {} if native is None else native
     rows, seen = [], set()
     for alias in candidates:
         spec = specs.get(alias)
@@ -108,12 +112,20 @@ def _rows(settings, specs, candidates, *, source=None, only=None):
             efforts = []
         for account in accounts:
             identifier = account["id"] if source is None else source + ":" + account["id"]
-            _, _, _, scope = chat_connection(settings, provider, identifier)
+            _, _, directory, scope = chat_connection(settings, provider, identifier)
+            account_spec = spec
+            if mode == "cli":
+                # The gateway's frozen specs follow the active account at its
+                # start; each login shows the window its own cards allow now.
+                key = (provider, directory)
+                if key not in native:
+                    native[key] = native_context_limits(provider, config_dir=directory)
+                account_spec = native_context_spec(provider, model, spec, limits=native[key].get(model) or {})
             account_label = account["label"] + (" · " + CHAT_SOURCE_LABELS.get(mode, mode) if labelled else "")
             rows.append({"id": route + "|" + identifier, "route": route, "label": label,
                          "provider": presentation["displayProvider"], "account": identifier,
                          "accountLabel": account_label, "source": mode, "scope": scope,
-                         "efforts": efforts, "context": spec.get("runtime_context") or spec.get("context"),
+                         "efforts": efforts, "context": account_spec.get("runtime_context") or account_spec.get("context"),
                          "max_output": spec.get("max_output"), "supportsTools": spec.get("tools") is not False,
                          "supportsWebSearch": native_search_available(spec, connection, provider),
                          "vision": spec.get("vision"),

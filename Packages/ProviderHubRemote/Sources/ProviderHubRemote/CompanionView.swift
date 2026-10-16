@@ -1,8 +1,18 @@
 import SwiftUI
+import UniformTypeIdentifiers
+#if os(iOS)
+import PhotosUI
+#endif
 
 /// Commands the phone is allowed to ask the Mac to perform. The Mac owns execution.
 public protocol CompanionLink: AnyObject {
     func send(_ command: RemoteCommand)
+}
+
+public protocol CompanionTransport: CompanionLink {
+    func connect(text: String)
+    func disconnect()
+    func snapshot()
 }
 
 public final class CompanionModel: ObservableObject {
@@ -18,36 +28,66 @@ public final class CompanionModel: ObservableObject {
     }
     private var drafts: [String: String] = [:]
     private var pendingDrafts: [String: (String, String)] = [:]
+    var pendingControls: [String: CheckedContinuation<RemoteValue, Error>] = [:]
+    @Published public var attachmentDrafts: [String: [RemoteDraftAttachment]] = [:]
+    @Published public var attachmentSending = false
+    @Published public var uploadProgress = ""
+    @Published public var composeNotice = ""
+    @Published public var historyLoading = false
+    @Published public var downloadedFiles: [String: URL] = [:]
+    @Published public var fullModelCatalogue: [RemoteValue] = []
+    @Published public var attachmentThumbnails: [String: Data] = [:]
+    @Published var activityJumpID: String?
+    @Published var activityJumpToken = 0
+    var fileDownloads = Set<String>()
     public weak var link: CompanionLink?
     @Published public var pairingText = ""
-    private let connection = RemoteConnection()
+    private let connection: CompanionTransport
+    private let preferences: UserDefaults
+    private var resumeEnabled = true
     public var selectedChat: RemoteChat? { store.chats.first { $0.id == selectedChatID } }
     public var isConnected: Bool { status == "Connected" }
     public var canSend: Bool {
         isConnected && selectedChat != nil && selectedChat?.busy != true &&
-            !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+            (!draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !(attachmentDrafts[selectedChatID ?? ""] ?? []).isEmpty) && !attachmentSending &&
             !pendingDrafts.values.contains(where: { $0.0 == selectedChatID && $0.1 == draft })
     }
 
-    public init() {
+    public init(preferences: UserDefaults = .standard, transport: CompanionTransport? = nil) {
+        self.preferences = preferences
+        let native = transport == nil ? RemoteConnection() : nil
+        connection = transport ?? native!
         link = connection
-        connection.onStatus = { [weak self] status, code in
+        native?.onStatus = { [weak self] status, code in
             DispatchQueue.main.async {
                 self?.status = status; self?.confirmCode = code
                 if status.hasPrefix("Disconnected") || status.hasPrefix("Command failed") {
                     self?.pendingDrafts.removeAll()
+                    if let self {
+                        let pending = self.pendingControls; self.pendingControls.removeAll()
+                        for continuation in pending.values { continuation.resume(throwing: RemoteControlFailure.rejected("Disconnected; reconnect and inspect before retrying. Your draft is retained.")) }
+                    }
                 }
             }
         }
-        connection.onMessage = { [weak self] message in
+        native?.onMessage = { [weak self] message in
             DispatchQueue.main.async { self?.receiveRemote(message) }
         }
-        pairingText = UserDefaults.standard.string(forKey: "remote-bootstrap") ?? ""
+        pairingText = preferences.string(forKey: "remote-bootstrap") ?? ""
     }
 
     func receiveRemote(_ message: [String: Any]) {
         do {
             try store.receive(message)
+            if message["method"] as? String == "session.ack", let params = message["params"] as? [String: Any],
+               let id = params["requestId"] as? String, let continuation = pendingControls.removeValue(forKey: id) {
+                if params["ok"] as? Bool == true {
+                    do {
+                        let data = try JSONSerialization.data(withJSONObject: params["result"] ?? [:], options: [.fragmentsAllowed])
+                        continuation.resume(returning: try JSONDecoder().decode(RemoteValue.self, from: data))
+                    } catch { continuation.resume(throwing: error) }
+                } else { continuation.resume(throwing: RemoteControlFailure.rejected(params["error"] as? String ?? "The Mac rejected this action")) }
+            }
             if message["method"] as? String == "session.ack",
                let params = message["params"] as? [String: Any],
                let id = params["requestId"] as? String,
@@ -60,8 +100,10 @@ public final class CompanionModel: ObservableObject {
                 let saved = selectedChatID.flatMap { id in store.chats.contains(where: { $0.id == id }) ? id : nil }
                 let next = saved ?? store.selectedID ?? store.chats.first?.id
                 selectedChatID = next
-                if let next, store.selectedID != next { select(next) }
-                if let next, store.selectedID == next { requestControls(next) }
+                // A full snapshot restores presentation, not the server's
+                // remote subscription. Rebind even when both IDs match so
+                // controls and live activity are admitted after a reconnect.
+                if let next { select(next) }
             } else if message["method"] as? String == "session.delta",
                       let event = (message["params"] as? [String: Any])?["event"] as? [String: Any],
                       ["selected", "snapshot"].contains(event["event"] as? String ?? ""),
@@ -70,7 +112,7 @@ public final class CompanionModel: ObservableObject {
                     selectedChatID = next
                 }
                 if next == selectedChatID {
-                requestControls(next)
+                    requestControls(next)
                 }
             }
             if store.needsSnapshot { connection.snapshot() }
@@ -85,7 +127,8 @@ public final class CompanionModel: ObservableObject {
     public func connect() {
         do { _ = try RemoteBootstrap.decodePairingText(pairingText) }
         catch { status = error.localizedDescription; return }
-        UserDefaults.standard.set(pairingText, forKey: "remote-bootstrap")
+        resumeEnabled = true
+        preferences.set(pairingText, forKey: "remote-bootstrap")
         connection.connect(text: pairingText)
     }
     public func connect(scannedCode: String) {
@@ -94,7 +137,18 @@ public final class CompanionModel: ObservableObject {
         pairingText = scannedCode
         connect()
     }
-    public func disconnect() { connection.disconnect() }
+    public func disconnect() {
+        resumeEnabled = false
+        connection.disconnect()
+    }
+    /// Resume the pinned Mac endpoint, not an unsubmitted edit in the pairing
+    /// field. Keychain identity and Mac allowlist decide trust as before.
+    public func resumeSavedConnection() {
+        guard resumeEnabled, !isConnected,
+              let saved = preferences.string(forKey: "remote-bootstrap"),
+              (try? RemoteBootstrap.decodePairingText(saved)) != nil else { return }
+        connection.connect(text: saved)
+    }
     public func select(_ id: String) {
         selectedChatID = id
         link?.send(RemoteCommand(method: "chat.select", requestId: UUID().uuidString, chat: id))
@@ -112,6 +166,11 @@ public final class CompanionModel: ObservableObject {
     }
 
     public func sendDraft() {
+        if !(attachmentDrafts[selectedChatID ?? ""] ?? []).isEmpty {
+            guard canSend else { return }
+            Task { @MainActor in await sendWithAttachments() }
+            return
+        }
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard canSend, let chat = selectedChatID, !text.isEmpty,
               !pendingDrafts.values.contains(where: { $0.0 == chat && $0.1 == draft }) else { return }
@@ -147,7 +206,15 @@ public struct CompanionView: View {
     @State private var inspector = false
     @State private var inspectorTab: RemoteInspectorTab = .agents
     @State private var permissionChange: String?
+    @State private var showingPermissionConfirmation = false
     @State private var choosingModel = false
+    @State private var creatingChat = false
+    @State private var importingFiles = false
+    #if os(iOS)
+    @State private var photos: [PhotosPickerItem] = []
+    @State private var showingPhotos = false
+    #endif
+    @Environment(\.scenePhase) private var scenePhase
     @State private var viewWidth: CGFloat = 0
     @AppStorage("companionAppearance") private var appearance = "system"
     @AppStorage("companionSurface") private var surfaceStyle = "solid"
@@ -164,17 +231,26 @@ public struct CompanionView: View {
                 }
                 VStack(spacing: 0) {
                     header(showsRailButton: !wide)
+                    if model.isConnected && !model.extendedControlsAvailable {
+                        Text("Update the Mac host to enable older messages, attachments, new chats and Blackboard.")
+                            .font(.caption).foregroundStyle(.orange).padding(.horizontal, 18).padding(.bottom, 8)
+                    }
                     CompanionTheme.hairline.frame(height: 1)
                     if let chat = model.selectedChat {
                         if model.store.selectedID == chat.id {
-                            CompanionTranscript(entries: model.store.entries, chat: chat, connected: model.isConnected,
-                                models: model.models, members: model.members, fallbackRoute: String(model.configuration["choice"].text.split(separator: "|").first ?? "")) { question, answers, dismiss in
+                            CompanionTranscript(entries: model.store.visibleEntries, chat: chat, connected: model.isConnected,
+                                models: model.models, members: model.members, fallbackRoute: String(model.configuration["choice"].text.split(separator: "|").first ?? ""),
+                                hasOlder: model.store.hasOlder && model.extendedControlsAvailable, loadingOlder: model.historyLoading,
+                                loadOlder: { Task { @MainActor in await model.loadOlder() } }, turnSummaries: model.store.turnSummaries,
+                                runIsOpen: model.runIsOpen, activities: model.liveActivities, jumpEntryID: model.activityJumpID,
+                                jumpToken: model.activityJumpToken) { question, answers, dismiss in
                                 model.answerQuestion(question, chat: chat.id, answers: answers, dismiss: dismiss)
                             }.id(chat.id)
                         } else {
                             VStack(spacing: 10) { ProgressView(); Text("Opening conversation…").font(.caption).foregroundStyle(CompanionTheme.secondary) }
                                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                         }
+                        CompanionActivityStrip(model: model)
                         if let approval = model.store.approval { approvalStrip(approval) }
                         composer(chat)
                     } else { welcome }
@@ -192,6 +268,39 @@ public struct CompanionView: View {
             else { CompanionTheme.surface.ignoresSafeArea() }
         }
         .preferredColorScheme(appearance == "light" ? .light : appearance == "dark" ? .dark : nil)
+        .onChange(of: scenePhase, initial: true) { _, phase in
+            if phase == .active { model.resumeSavedConnection() }
+        }
+        .task(id: "\(model.isConnected)-\(model.store.controls["extensionVersion"]?.int ?? 0)") {
+            if model.isConnected && model.controlSurfaceAvailable { await model.refreshRemoteOptions() }
+        }
+        .sheet(isPresented: $creatingChat) { CompanionNewChat(model: model) }
+        .fileImporter(isPresented: $importingFiles, allowedContentTypes: [.image, .pdf, .text, .sourceCode, .json, .data], allowsMultipleSelection: true) { result in
+            do {
+                for url in try result.get() {
+                    let access = url.startAccessingSecurityScopedResource()
+                    defer { if access { url.stopAccessingSecurityScopedResource() } }
+                    let values = try url.resourceValues(forKeys: [.fileSizeKey])
+                    guard (values.fileSize ?? 0) <= 8 * 1024 * 1024 else { throw RemoteControlFailure.rejected("Choose files under 8 MiB") }
+                    try model.addAttachment(name: url.lastPathComponent, data: Data(contentsOf: url))
+                }
+            } catch { model.composeNotice = error.localizedDescription }
+        }
+        #if os(iOS)
+        .photosPicker(isPresented: $showingPhotos, selection: $photos, maxSelectionCount: 8, matching: .images)
+        .onChange(of: photos) { _, selected in
+            Task { @MainActor in
+                for item in selected {
+                    do {
+                        guard let data = try await item.loadTransferable(type: Data.self) else { continue }
+                        guard let image = UIImage(data: data), let jpeg = image.jpegData(compressionQuality: 0.88) else { throw RemoteControlFailure.rejected("This photo could not be decoded") }
+                        try model.addAttachment(name: "Photo-\(UUID().uuidString.prefix(8)).jpg", data: jpeg)
+                    } catch { model.composeNotice = error.localizedDescription }
+                }
+                photos = []
+            }
+        }
+        #endif
         .sheet(isPresented: $chatList) {
             NavigationStack { sidebar.navigationTitle("Chats").toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Done") { chatList = false } }
@@ -200,9 +309,6 @@ public struct CompanionView: View {
         .sheet(isPresented: $settings, onDismiss: {
             if scanAfterSettings { scanAfterSettings = false; scanning = true }
         }) { settingsSheet }
-        .sheet(isPresented: $choosingModel) {
-            CompanionRoutePicker(model: model) { row in model.configure(["choice": row["id"], "effort": .string("")]) }
-        }
         .sheet(isPresented: Binding(get: { inspector && horizontalInspectorIsSheet }, set: { inspector = $0 })) {
             NavigationStack {
                 CompanionInspector(model: model, tab: $inspectorTab)
@@ -210,7 +316,7 @@ public struct CompanionView: View {
                     .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Done") { inspector = false } } }
             }.presentationDetents([.large])
         }
-        .confirmationDialog("Change permissions for this chat?", isPresented: Binding(get: { permissionChange != nil }, set: { if !$0 { permissionChange = nil } })) {
+        .confirmationDialog("Allow tools without approval prompts?", isPresented: $showingPermissionConfirmation) {
             if let mode = permissionChange {
                 Button("Use \(permissionLabel(mode))", role: mode == "yolo" ? .destructive : nil) {
                     model.configure(["approvalMode": .string(mode)]); permissionChange = nil
@@ -238,9 +344,13 @@ public struct CompanionView: View {
                 }
                 Image(systemName: "square.stack.3d.up.fill").font(.caption).foregroundStyle(CompanionTheme.brand)
                 Text("Provider Hub").font(.subheadline.weight(.semibold))
+                if model.isConnected {
+                    Button { creatingChat = true } label: { Image(systemName: "square.and.pencil").frame(width: 40, height: 40) }
+                        .accessibilityLabel("New chat").keyboardShortcut("n", modifiers: .command)
+                }
                 Spacer(minLength: 4)
                 Circle().fill(model.isConnected ? Color.green : CompanionTheme.secondary).frame(width: 6, height: 6)
-                Text(model.isConnected ? "Mac connected" : "Offline").font(.caption2).foregroundStyle(CompanionTheme.secondary)
+                if viewWidth >= 600 { Text(model.isConnected ? "Mac connected" : "Offline").font(.caption2).foregroundStyle(CompanionTheme.secondary) }
                 if model.selectedChat != nil {
                     Button { inspector.toggle() } label: { Image(systemName: "sidebar.right").frame(width: 40, height: 40) }
                         .accessibilityLabel("Show inspector")
@@ -262,11 +372,14 @@ public struct CompanionView: View {
                             Button { choosingModel = true } label: {
                                 HStack(spacing: 5) { Text(chat.displayModel).font(.caption.weight(.medium)); Image(systemName: "chevron.down").font(.system(size: 9)) }
                             }.buttonStyle(.plain)
+                                .sheet(isPresented: $choosingModel) {
+                                    CompanionRoutePicker(model: model) { row, effort in model.configure(["choice": row["id"], "effort": .string(effort)]) }
+                                }
                                 .disabled(!model.isConnected || model.configuration["busy"].flag || !model.controlSurfaceAvailable)
                         }
                         Menu {
                             ForEach(["manual", "accept_edits", "yolo"], id: \.self) { mode in
-                                Button(permissionLabel(mode)) { permissionChange = mode }
+                                Button(permissionLabel(mode)) { choosePermission(mode) }
                             }
                         } label: {
                             Label(permissionLabel(model.configuration["approvalMode"].text.isEmpty ? chat.approvalMode ?? "manual" : model.configuration["approvalMode"].text), systemImage: "lock.shield")
@@ -311,6 +424,10 @@ public struct CompanionView: View {
     }
     private func permissionLabel(_ mode: String) -> String {
         switch mode { case "accept_edits": return "Accept Edits"; case "yolo": return "YOLO"; default: return "Manual" }
+    }
+    private func choosePermission(_ mode: String) {
+        if mode == "yolo" { permissionChange = mode; showingPermissionConfirmation = true }
+        else { model.configure(["approvalMode": .string(mode)]) }
     }
 
     private var sidebar: some View {
@@ -357,6 +474,7 @@ public struct CompanionView: View {
                     Text(model.isConnected ? "Start a chat in Provider Hub on your Mac. It will appear here." : "Continue a conversation, check on work and answer approvals from your phone.")
                         .font(.callout).foregroundStyle(CompanionTheme.secondary).multilineTextAlignment(.center)
                 }
+                if model.isConnected { Button("New chat") { creatingChat = true }.buttonStyle(.borderedProminent) }
                 if !model.isConnected { pairingControls }
                 if !model.isConnected && !["Not paired", "Disconnected"].contains(model.status) {
                     Text(model.status).font(.caption).foregroundStyle(CompanionTheme.secondary).multilineTextAlignment(.center)
@@ -418,6 +536,22 @@ public struct CompanionView: View {
 
     private func composer(_ chat: RemoteChat) -> some View {
         VStack(alignment: .leading, spacing: 8) {
+            if !model.composeNotice.isEmpty { Text(model.composeNotice).font(.caption).foregroundStyle(.red).textSelection(.enabled) }
+            if !model.uploadProgress.isEmpty { Text(model.uploadProgress).font(.caption).foregroundStyle(CompanionTheme.secondary) }
+            if let files = model.attachmentDrafts[chat.id], !files.isEmpty {
+                ScrollView(.horizontal) {
+                    HStack {
+                        ForEach(files) { file in
+                            HStack(spacing: 6) {
+                                Image(systemName: "paperclip")
+                                Text(file.name).lineLimit(1)
+                                Button { model.removeAttachment(file.id, chat: chat.id) } label: { Image(systemName: "xmark.circle.fill") }
+                                    .buttonStyle(.plain).accessibilityLabel("Remove \(file.name)").disabled(model.attachmentSending)
+                            }.font(.caption).padding(8).companionCard(cornerRadius: 8)
+                        }
+                    }
+                }
+            }
             if !model.isConnected || model.store.needsSnapshot {
                 Text(model.store.needsSnapshot ? "Refreshing after a missed update…" : model.status)
                     .font(.caption).foregroundStyle(CompanionTheme.secondary).lineLimit(2)
@@ -425,22 +559,41 @@ public struct CompanionView: View {
                 Text(notice).font(.caption).foregroundStyle(CompanionTheme.secondary).lineLimit(2)
             }
             HStack(alignment: .bottom, spacing: 10) {
+                if model.extendedControlsAvailable {
+                    Menu {
+                        Button("Attach files…") { importingFiles = true }
+                        #if os(iOS)
+                        Button { showingPhotos = true } label: { Label("Photo library", systemImage: "photo") }
+                        #endif
+                    } label: { Image(systemName: "plus").frame(width: 32, height: 40) }
+                        .disabled(model.attachmentSending).accessibilityLabel("Add attachment")
+                }
                 TextField("Message…", text: $model.draft, axis: .vertical)
                     .textFieldStyle(.plain).lineLimit(1...6).font(.body).padding(.vertical, 10)
                     .accessibilityLabel("Message to \(chat.title)")
-                Button { if chat.busy { model.stop() } else { model.sendDraft() } } label: {
-                    Image(systemName: chat.busy ? "stop.fill" : "arrow.up")
+                Button { if model.runIsOpen { model.stop() } else { model.sendDraft() } } label: {
+                    Image(systemName: model.runIsOpen ? "stop.fill" : "arrow.up")
                         .font(.system(size: 16, weight: .bold)).foregroundStyle(CompanionTheme.surface)
                         .frame(width: 36, height: 36).background(CompanionTheme.ink, in: Circle()).padding(.vertical, 4)
-                }.buttonStyle(.plain).disabled(!model.isConnected || !chat.busy && !model.canSend)
-                    .opacity(!chat.busy && !model.canSend ? 0.4 : 1)
-                    .accessibilityLabel(chat.busy ? "Stop this chat" : "Send message")
+                }.buttonStyle(.plain).disabled(!model.isConnected || !model.runIsOpen && !model.canSend)
+                    .opacity(!model.runIsOpen && !model.canSend ? 0.4 : 1)
+                    .accessibilityLabel(model.runIsOpen ? "Stop this chat" : "Send message")
             }.padding(.horizontal, 14).padding(.vertical, 4)
                 .companionCard(cornerRadius: 20, accent: chat.approvalMode == "yolo" ? .red : chat.providerAccent)
             HStack(spacing: 6) {
                 Circle().fill(chat.approvalColor).frame(width: 5, height: 5)
-                Text(chat.approvalLabel).foregroundStyle(chat.approvalColor)
-                Text(chat.busy ? "Working…" : "Ready").foregroundStyle(CompanionTheme.secondary)
+                Menu {
+                    ForEach(["manual", "accept_edits", "yolo"], id: \.self) { mode in
+                        Button { choosePermission(mode) } label: {
+                            if mode == (model.configuration["approvalMode"].text.isEmpty ? chat.approvalMode ?? "manual" : model.configuration["approvalMode"].text) {
+                                Label(permissionLabel(mode), systemImage: "checkmark")
+                            } else { Text(permissionLabel(mode)) }
+                        }
+                    }
+                } label: { HStack(spacing: 3) { Text(chat.approvalLabel); Image(systemName: "chevron.down").font(.system(size: 8)) } }
+                    .foregroundStyle(chat.approvalColor).disabled(!model.isConnected || chat.busy || !model.controlSurfaceAvailable)
+                    .accessibilityLabel("Change chat permissions")
+                Text(model.runIsOpen ? "Working…" : "Ready").foregroundStyle(CompanionTheme.secondary)
                 Spacer()
                 Text("Runs on your Mac").foregroundStyle(CompanionTheme.secondary)
             }.font(.caption2).padding(.horizontal, 5)
@@ -452,6 +605,10 @@ public struct CompanionView: View {
             Form {
                 Section("Your Mac") {
                     LabeledContent("Connection", value: model.isConnected ? "Connected" : "Offline")
+                    let host = model.store.controls["options"]?["host"] ?? .null
+                    LabeledContent("Mac host", value: host["version"].text.isEmpty ? "Older host — update required for all controls" : host["version"].text + " (" + host["build"].text + ")")
+                    LabeledContent("iOS companion", value: (Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "Development") + " (" + (Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "source") + ")")
+                    if !model.extendedControlsAvailable { Text("Update the Mac host to use older messages, attachments, New Chat and Blackboard. Pairing is already saved; an update does not require pairing again.").font(.caption).foregroundStyle(.orange) }
                     if model.isConnected { Button("Disconnect", action: model.disconnect) }
                     else { pairingControls }
                     Text("Provider keys and execution stay on your Mac. Remote actions use the chat’s existing approval mode.").font(.caption).foregroundStyle(.secondary)

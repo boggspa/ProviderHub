@@ -212,7 +212,6 @@ class StagingTests(unittest.TestCase):
             self.assertIsNone(updater.pending(self.cache, self.target, "0.5.6", "64"))
             self.assertFalse((self.cache / "pending.json").exists())
 
-
 @unittest.skipUnless(sys.platform == "darwin", "Installer uses macOS commands")
 class InstallerTests(unittest.TestCase):
     def exercise(self, live_owner=False, fail_open=False, fail_swap=False, wrong_current=False, bad_signature=False):
@@ -269,12 +268,65 @@ class InstallerTests(unittest.TestCase):
 
 @unittest.skipUnless(sys.platform == "darwin" and shutil.which("xcrun"), "Native updater tests need macOS")
 class NativeUpdaterTests(unittest.TestCase):
-    def test_restart_state_machine(self):
-        stubs = '''import AppKit
+    STUBS = '''import AppKit
 import SwiftUI
 struct WorkerError: LocalizedError { var message: String; var errorDescription: String? { message } }
 enum HubTheme { enum Semantic { static let ink = Color.primary }; enum Accent { static let brand = Color.orange } }
 '''
+
+    def compile_and_run(self, cases, timeout=20):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "Stubs.swift").write_text(self.STUBS); (root / "Cases.swift").write_text(cases)
+            binary = root / "checks"
+            result = subprocess.run(["xcrun", "swiftc", "-swift-version", "5", "-parse-as-library",
+                "-module-cache-path", str(root / "cache"), str(root / "Stubs.swift"), str(SOURCE / "HubUpdater.swift"),
+                str(root / "Cases.swift"), "-framework", "AppKit", "-framework", "SwiftUI", "-o", str(binary)],
+                capture_output=True, text=True, timeout=120)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            return subprocess.run([str(binary)], capture_output=True, text=True, timeout=timeout)
+
+    def test_default_restart_completes_graceful_shutdown_from_a_task(self):
+        # The pill calls activate() inside a Task. NSApp.terminate there made
+        # .terminateLater wait forever: the delegate's shutdown Task, which
+        # launches the installer and replies, never ran.
+        cases = r'''
+import AppKit
+final class Delegate: NSObject, NSApplicationDelegate {
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        Task { @MainActor in
+            let update = HubUpdateInfo(version: "0.5.6", build: "63", tag: "v0.5.6-build63")
+            let updater = HubUpdater(execute: { _, _ in update }, blocker: { nil })
+            await updater.check(); await updater.activate()
+            print("restart requested \(updater.restartRequested)")
+        }
+    }
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 100_000_000)
+            print("graceful shutdown replied"); fflush(stdout)
+            NSApp.reply(toApplicationShouldTerminate: true)
+        }
+        return .terminateLater
+    }
+}
+@main struct Cases {
+    static func main() {
+        DispatchQueue.global().asyncAfter(deadline: .now() + 8) { print("shutdown hung"); fflush(stdout); exit(3) }
+        MainActor.assumeIsolated {
+            NSApplication.shared.setActivationPolicy(.prohibited)
+            let delegate = Delegate(); NSApp.delegate = delegate
+            withExtendedLifetime(delegate) { NSApp.run() }
+        }
+    }
+}
+'''
+        result = self.compile_and_run(cases)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("restart requested true", result.stdout)
+        self.assertIn("graceful shutdown replied", result.stdout)
+
+    def test_restart_state_machine(self):
         cases = r'''
 import AppKit
 @main struct Cases {
@@ -332,18 +384,9 @@ import AppKit
     }
 }
 '''
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            (root / "Stubs.swift").write_text(stubs); (root / "Cases.swift").write_text(cases)
-            binary = root / "checks"
-            result = subprocess.run(["xcrun", "swiftc", "-swift-version", "5", "-parse-as-library",
-                "-module-cache-path", str(root / "cache"), str(root / "Stubs.swift"), str(SOURCE / "HubUpdater.swift"),
-                str(root / "Cases.swift"), "-framework", "AppKit", "-framework", "SwiftUI", "-o", str(binary)],
-                capture_output=True, text=True, timeout=120)
-            self.assertEqual(result.returncode, 0, result.stderr)
-            result = subprocess.run([str(binary)], capture_output=True, text=True, timeout=20)
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn("Native updater state checks passed", result.stdout)
+        result = self.compile_and_run(cases)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Native updater state checks passed", result.stdout)
 
 
 if __name__ == "__main__": unittest.main()

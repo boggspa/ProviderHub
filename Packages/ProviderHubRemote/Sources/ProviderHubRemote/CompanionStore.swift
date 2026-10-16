@@ -36,6 +36,8 @@ public struct RemoteEntry: Equatable, Identifiable {
     public var agentID: String = ""
     public var time: Double? = nil
     public var changedFiles: [String] = []
+    public var contributionID: String = ""
+    public var attachments: [RemoteAttachment] = []
 
     static func decode(_ row: [String: Any], fallback: String) -> RemoteEntry {
         let identifier = row["id"] as? String
@@ -49,9 +51,13 @@ public struct RemoteEntry: Equatable, Identifiable {
         }
         decoded.route = row["route"] as? String ?? ""
         decoded.memberID = row["memberID"] as? String ?? ""
+        decoded.contributionID = row["contributionID"] as? String ?? ""
         decoded.agentID = row["agentID"] as? String ?? ""
         decoded.time = row["time"] as? Double
         decoded.changedFiles = row["changedFiles"] as? [String] ?? []
+        if let raw = row["attachments"], let data = try? JSONSerialization.data(withJSONObject: raw) {
+            decoded.attachments = (try? JSONDecoder().decode([RemoteAttachment].self, from: data)) ?? []
+        }
         return decoded
     }
 }
@@ -95,6 +101,18 @@ public struct CompanionStore: Equatable {
     public private(set) var acks: [String: Bool] = [:]
     public private(set) var entries: [RemoteEntry] = []
     public private(set) var controls: [String: RemoteValue] = [:]
+    public private(set) var turnSummaries: [RemoteValue] = []
+    public private(set) var olderEntries: [RemoteEntry] = []
+    public private(set) var hasOlder = false
+    /// State events belong to this selected chat; recent-list summaries may
+    /// arrive later and must not close a run that is still active.
+    public private(set) var selectedBusy: Bool?
+    public private(set) var selectedInterrupting = false
+    public private(set) var selectedStatus = ""
+    public var visibleEntries: [RemoteEntry] {
+        let latest = Set(entries.map(\.id))
+        return olderEntries.filter { !latest.contains($0.id) } + entries
+    }
     public var transcript: String { entries.map { "\($0.role): \($0.text)\n\n" }.joined() }
 
     public init() {}
@@ -110,7 +128,12 @@ public struct CompanionStore: Equatable {
             chats = try decode([RemoteChat].self, params["chats"] ?? [])
             approval = try (params["approval"] as? [String: Any]).map { try decode(RemoteApproval.self, $0) }
             let selected = params["selected"] as? [String: Any]
+            if selectedID != selected?["id"] as? String { olderEntries = []; turnSummaries = [] }
             selectedID = selected?["id"] as? String
+            selectedBusy = selected?["busy"] as? Bool
+            selectedInterrupting = selected?["interrupting"] as? Bool ?? false
+            selectedStatus = selected?["status"] as? String ?? ""
+            if olderEntries.isEmpty { hasOlder = selected?["hasMore"] as? Bool ?? false }
             controls = try decode([String: RemoteValue].self, params["controls"] ?? [:])
             setEntries(selected?["entries"])
             if let live = selected?["live"] as? String, !live.isEmpty {
@@ -130,6 +153,20 @@ public struct CompanionStore: Equatable {
             guard let event = params["event"] as? [String: Any], let kind = event["event"] as? String else { throw RemoteProtocolError.rejected }
             cursor = next
             switch kind {
+            case "state":
+                if event["chat"] as? String == selectedID {
+                    selectedBusy = event["busy"] as? Bool
+                    selectedInterrupting = event["interrupting"] as? Bool ?? false
+                    selectedStatus = event["status"] as? String ?? ""
+                }
+            case "history":
+                if event["chat"] as? String == selectedID,
+                   event["before"] as? String == visibleEntries.first?.id {
+                    let incoming = (event["entries"] as? [[String: Any]] ?? []).enumerated().map { RemoteEntry.decode($0.element, fallback: "history-\($0.offset)") }
+                    let known = Set(visibleEntries.map(\.id))
+                    olderEntries = incoming.filter { !known.contains($0.id) } + olderEntries
+                    hasOlder = event["hasMore"] as? Bool ?? false
+                }
             case "side_delta":
                 if event["chat"] as? String == selectedID,
                    case .object(var side) = controls["side"], side["id"]?.text == event["side"] as? String {
@@ -150,6 +187,17 @@ public struct CompanionStore: Equatable {
                 let owner = event["chat"] as? String
                 if owner == nil || owner == selectedID, let panel = event["panel"] as? String {
                     controls[panel] = try decode(RemoteValue.self, event["value"] ?? NSNull())
+                    if panel == "activity" || panel == "configuration", let value = controls[panel] {
+                        let busy = panel == "configuration" ? value["runBusy"] : value["busy"]
+                        if case .bool(let running) = busy { selectedBusy = running }
+                        if case .bool(let interrupting) = value["interrupting"] { selectedInterrupting = interrupting }
+                        if case .string(let status) = value["status"] { selectedStatus = status }
+                    }
+                    if panel == "turnChanges", let value = controls[panel], !value["turnID"].text.isEmpty {
+                        turnSummaries.removeAll { $0["turnID"] == value["turnID"] }
+                        turnSummaries.append(value)
+                        if turnSummaries.count > 32 { turnSummaries.removeFirst(turnSummaries.count - 32) }
+                    }
                     controls["version"] = .number(1)
                     if let notice = event["notice"] as? String, !notice.isEmpty { notices.append(notice) }
                 }
@@ -160,8 +208,12 @@ public struct CompanionStore: Equatable {
                 approval = try value.map { try decode(RemoteApproval.self, $0) }
             case "selected", "snapshot":
                 let next = (event["id"] ?? event["chat"]) as? String
-                if next != selectedID { controls = controls.filter { ["version", "models", "browserEnabled"].contains($0.key) } }
+                if next != selectedID { controls = controls.filter { ["version", "extensionVersion", "models", "browserEnabled", "options"].contains($0.key) }; olderEntries = []; turnSummaries = [] }
                 selectedID = next
+                selectedBusy = event["busy"] as? Bool
+                selectedInterrupting = event["interrupting"] as? Bool ?? false
+                selectedStatus = event["status"] as? String ?? ""
+                if olderEntries.isEmpty { hasOlder = event["hasMore"] as? Bool ?? false }
                 setEntries(event["entries"])
             case "delta":
                 if event["chat"] as? String == selectedID {
@@ -202,11 +254,26 @@ public struct CompanionStore: Equatable {
     }
 
     private mutating func setEntries(_ value: Any?) {
-        entries = (value as? [[String: Any]] ?? []).enumerated().map { RemoteEntry.decode($0.element, fallback: "snapshot-\($0.offset)") }
+        let incoming = (value as? [[String: Any]] ?? []).enumerated().map { RemoteEntry.decode($0.element, fallback: "snapshot-\($0.offset)") }
+        // A fresh tail snapshot can advance while the user reads history.
+        // Retain the overlapping prefix, but never bridge an unknown gap.
+        if let first = incoming.first, let overlap = entries.firstIndex(where: { $0.id == first.id }) {
+            let known = Set(olderEntries.map(\.id))
+            olderEntries += entries.prefix(overlap).filter { !known.contains($0.id) }
+        } else if !incoming.isEmpty && !entries.isEmpty && !olderEntries.isEmpty {
+            olderEntries = []
+            hasOlder = true
+        }
+        entries = incoming
         trimEntries()
     }
     private mutating func trimEntries() {
-        if entries.count > 30 { entries.removeFirst(entries.count - 30) }
+        if entries.count > 30 {
+            let dropped = Array(entries.prefix(entries.count - 30))
+            let known = Set(olderEntries.map(\.id))
+            olderEntries += dropped.filter { !known.contains($0.id) }
+            entries.removeFirst(entries.count - 30)
+        }
         for index in entries.indices where entries[index].text.unicodeScalars.count > 8000 {
             entries[index].text = String(String.UnicodeScalarView(entries[index].text.unicodeScalars.prefix(8000)))
         }

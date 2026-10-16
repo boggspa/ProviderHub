@@ -7,11 +7,11 @@ injection are never accepted from a remote client.
 import json
 import re
 
-VERSION = 1
+VERSION = 3
 FIELDS = {
     "team": ("enabled", "status", "activeMemberID", "activeMemberIDs", "execution", "runUsage", "limitReason", "members"),
-    "member": ("id", "name", "label", "choice", "route", "effort", "responsibility", "status", "nextStep", "contributions", "usage", "context", "failureReason", "waitReason", "pendingChange", "memberStoppedByUser"),
-    "model": ("id", "route", "label", "provider", "accountLabel", "efforts", "supportsTools", "presentation"),
+    "member": ("id", "name", "label", "choice", "route", "effort", "responsibility", "status", "nextStep", "contributions", "contributionID", "usage", "context", "failureReason", "waitReason", "pendingChange", "memberStoppedByUser"),
+    "model": ("id", "route", "label", "provider", "accountLabel", "efforts", "context", "supportsTools", "presentation", "connectionPresentation"),
     "side": ("id", "label", "route", "effort", "status", "busy", "notice", "entries", "truncated"),
     "process": ("id", "pid", "command", "status", "code", "output", "started", "ended", "memberID", "route", "truncated"),
     "file": ("path", "oldPath", "status", "added", "deleted", "binary", "diff"),
@@ -24,7 +24,7 @@ def pick(value, fields):
 
 
 def presentation(value):
-    result = pick(value, ("displayProvider", "accent", "shortCode", "modelLabel"))
+    result = pick(value, ("runtimeProvider", "displayProvider", "accent", "shortCode", "modelLabel"))
     logo = pick(value.get("logo"), ("light", "dark", "template", "tint", "scale", "leadingMarkAspectRatio", "trailingMarkAspectRatio")) if isinstance(value, dict) else {}
     # Remote branding references bundled assets only, never external paths.
     if logo and all(not isinstance(logo.get(k), str) or re.fullmatch(r"provider-logos/provider-logo-[a-z0-9-]+\.png", logo[k]) for k in ("light", "dark")):
@@ -68,6 +68,31 @@ def project(event, entry_projector):
         value = [pick(row, FIELDS["model"]) for row in event.get("models", []) if isinstance(row, dict)]
         for row in value:
             if "presentation" in row: row["presentation"] = presentation(row["presentation"])
+            if "connectionPresentation" in row: row["connectionPresentation"] = presentation(row["connectionPresentation"])
+    elif kind == "remote_options":
+        return {"event": "control", "chat": None, "panel": "options", "value": {"version": VERSION, "workspaces": event.get("workspaces", []), "host": event.get("host", {})}, "notice": ""}
+    elif kind == "blackboard":
+        board = event.get("blackboard") or {}
+        panel = "blackboard"
+        # The board's post text already has a 24 KB cap. Preserve every post
+        # rather than truncating its identity or full edit body.
+        value = {"posts": [pick(row, ("id", "author", "authorName", "route", "key", "body", "category", "created", "updated", "quote")) for row in board.get("posts", [])[:48]],
+                 "attachments": [pick(row, ("id", "name", "kind", "url", "size", "authorName", "source")) for row in board.get("attachments", [])[:64]],
+                 "limits": pick(board.get("limits"), ("posts", "bodyBytes", "boardBytes", "usedBytes", "attachments"))}
+        return {"event": "control", "chat": event.get("chat"), "panel": panel, "value": value, "notice": str(event.get("notice") or "")[:500]}
+    elif kind == "remote_history":
+        return {"event": "history", "chat": event.get("chat"), "before": event.get("before"), "request": event.get("request"),
+                "entries": event.get("entries", []), "hasMore": event.get("hasMore", False)}
+    elif kind == "remote_turn_changes":
+        return {"event": "control", "chat": event.get("chat"), "panel": "turnChanges", "value": event.get("changes", {}), "notice": ""}
+    elif kind == "remote_activity":
+        # Each record is already built from the owning service's live state.
+        # No provider history, input arguments or process environment are used.
+        return {"event": "control", "chat": event.get("chat"), "panel": "activity",
+                "value": {"busy": event.get("busy") is True, "interrupting": event.get("interrupting") is True,
+                          "status": str(event.get("status") or "")[:160],
+                          "rows": [bounded(pick(row, ("id", "name", "route", "status", "entryID", "kind", "tool", "summary", "runningTool", "streaming", "reason", "stopping")), 2400)
+                                   for row in event.get("rows", [])[:8] if isinstance(row, dict)]}, "notice": ""}
     elif kind == "team":
         team = event.get("team")
         if isinstance(team, dict):
@@ -77,11 +102,18 @@ def project(event, entry_projector):
             for member in value["members"]:
                 if isinstance(member.get("pendingChange"), dict):
                     member["pendingChange"] = pick(member["pendingChange"], ("remove", "name", "label", "choice", "effort", "responsibility"))
-                for key in ("responsibility", "nextStep", "failureReason", "waitReason"):
+                for key in ("nextStep", "failureReason", "waitReason"):
                     if isinstance(member.get(key), str): member[key] = member[key][:240]
             # Reserve room for every roster identity before verbose member
             # text, so eight long responsibilities cannot hide later members.
-            value["members"] = [bounded(member, 1400) for member in value["members"]]
+            # Editable configuration must round-trip losslessly.
+            for member in value["members"]:
+                limits = {"id": 128, "name": 120, "choice": 512, "effort": 40, "responsibility": 2000}
+                exact = {key: str(member[key])[:limit] for key, limit in limits.items() if key in member and member[key] is not None}
+                display = bounded(member, 1400)
+                member.clear(); member.update(display); member.update(exact)
+            return {"event": "control", "chat": event.get("chat"), "panel": "team", "value": value,
+                    "notice": str(event.get("notice") or "")[:500]}
     elif kind in {"side", "agents"}:
         def discussion(row):
             result = pick(row, FIELDS["side"])
@@ -100,7 +132,7 @@ def project(event, entry_projector):
     elif kind == "plugins":
         panel, value = "browserEnabled", event.get("browserUse") is True
     elif kind == "remote_configuration":
-        panel, value = "configuration", pick(event, ("choice", "effort", "approvalMode", "workspace", "busy"))
+        panel, value = "configuration", pick(event, ("choice", "effort", "approvalMode", "workspace", "busy", "runBusy", "interrupting", "status"))
     elif kind == "side_delta":
         return {"event": "side_delta", "chat": event.get("chat"), "side": event.get("side"),
                 "id": event.get("id"), "text": str(event.get("text") or "")[:4000],
@@ -118,6 +150,14 @@ def project(event, entry_projector):
 
 
 COMMANDS = {
+    "remote_options": (), "remote_models": ("offset",), "remote_create": ("choice", "workspace", "effort"),
+    "remote_history": ("before",), "remote_upload_begin": ("upload", "name", "size", "sha256"),
+    "remote_attachment_read": ("attachment", "offset", "revision"),
+    "remote_attachment_thumbnail": ("attachment",),
+    "remote_upload_chunk": ("upload", "offset", "data"), "remote_upload_finish": ("upload",), "remote_upload_drop": ("upload",),
+    "remote_send": ("text", "uploads"), "remote_board_attach": ("uploads",),
+    "blackboard": (), "blackboard_post": ("key", "body", "category", "quote"),
+    "blackboard_remove": ("post",), "blackboard_attach": ("url", "title"), "blackboard_detach": ("attachment",),
     "remote_inspect": (), "inspect_git": (), "processes": (), "clear_processes": (),
     "configure": ("choice", "effort", "approvalMode", "expectedWorkspace"),
     "configure_team": ("enabled", "members", "execution"),
@@ -132,9 +172,15 @@ COMMANDS = {
 def command(params, request_id):
     action, args, chat = params.get("action"), params.get("arguments", {}), params.get("chat")
     if not isinstance(action, str) or action not in COMMANDS: raise ValueError("Unsupported control action")
-    if not isinstance(chat, str) or not re.fullmatch(r"[0-9a-f]{32}", chat): raise ValueError("Exact chat required")
+    if action not in {"remote_options", "remote_models", "remote_create"} and (not isinstance(chat, str) or not re.fullmatch(r"[0-9a-f]{32}", chat)): raise ValueError("Exact chat required")
     if not isinstance(args, dict) or set(args) - set(COMMANDS[action]): raise ValueError("Unexpected control fields")
-    if len(json.dumps(args).encode()) > 32000: raise ValueError("Control request too large")
+    byte_limit = 180000 if action in {"configure_team", "remote_send"} else 32000
+    if len(json.dumps(args, ensure_ascii=False).encode()) > byte_limit: raise ValueError("Control request too large")
+    if action == "remote_create" and (not isinstance(args.get("choice"), str) or not isinstance(args.get("workspace"), str)): raise ValueError("Choose a model and Mac workspace")
+    if action == "remote_history" and (not isinstance(args.get("before"), str) or len(args["before"]) > 128): raise ValueError("History cursor required")
+    if action in {"remote_send", "remote_board_attach"}:
+        uploads = args.get("uploads", [])
+        if not isinstance(uploads, list) or len(uploads) > 8 or any(not isinstance(u, str) or not re.fullmatch(r"[0-9a-f]{32}", u) for u in uploads): raise ValueError("Invalid attachment handles")
     if action == "configure":
         if not args or not isinstance(args.get("expectedWorkspace"), str): raise ValueError("Refresh this chat before changing its configuration")
         if "approvalMode" in args and args["approvalMode"] not in ("manual", "accept_edits", "yolo"): raise ValueError("Invalid approval mode")
@@ -146,4 +192,5 @@ def command(params, request_id):
     if action == "remote_browser":
         if args.get("tool") not in {"browser_open", "browser_navigate", "browser_list", "browser_observe", "browser_act", "browser_close", "browser_remote_preview"}: raise ValueError("Unsupported browser action")
         if not isinstance(args.get("arguments", {}), dict): raise ValueError("Invalid browser arguments")
-    return {"command": action, "id": chat, "chat": chat, "request": request_id, **args}
+    return {"command": action, "id": chat, "chat": chat, "request": request_id, **args,
+            **({"_remoteControl": True} if action.startswith("blackboard") or action == "configure_team" else {})}

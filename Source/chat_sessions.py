@@ -339,7 +339,21 @@ class ChatHost:
             self.emit({"event": "remote_configuration", "chat": chat["id"],
                        "choice": chat["route"] + "|" + chat.get("account", ""),
                        "effort": chat.get("effort", ""), "approvalMode": chat.get("approvalMode", "manual"),
-                       "workspace": chat["workspace"], "busy": service.busy})
+                       "workspace": chat["workspace"], "busy": self.active(service),
+                       "runBusy": service.busy, "interrupting": self.state(service)["interrupting"],
+                       "status": self.state(service)["status"]})
+
+    def publish_remote_activity(self, service):
+        if not self.remote or self.remote.bridge.selected_chat != (service.chat or {}).get("id"): return
+        from chat_remote_actions import activity
+        state = self.state(service)
+        event = {"event": "remote_activity", "chat": service.chat["id"], "busy": state["busy"],
+                 "interrupting": state["interrupting"], "status": state["status"], "rows": activity(service)}
+        # Streaming token deltas seldom change the activity label. Do not copy
+        # the same status frame for each token; still publish every real change.
+        if getattr(service, "_last_remote_activity", None) != event:
+            service._last_remote_activity = event
+            self.emit(event)
 
     def session_event(self, service, event):
         kind = event.get("event")
@@ -376,6 +390,15 @@ class ChatHost:
             self.emit(event)
             if kind in {"selected", "snapshot", "state"} and service.chat:
                 self.publish_remote_configuration(service)
+            if kind in {"selected", "snapshot", "state", "team", "entry", "delta"} and service.chat:
+                previous = getattr(service, "_last_remote_activity", None) or {}
+                # Once a reply has started streaming, later tokens cannot
+                # change its activity wording. Avoid rescanning saved history
+                # on every token, especially while a peer has no new row yet.
+                same_reply = kind == "delta" and any(
+                    row.get("entryID") == event.get("id") and row.get("streaming")
+                    for row in previous.get("rows", []))
+                if not same_reply: self.publish_remote_activity(service)
         if kind in {"state", "approval", "branch_state", "side", "agents"}: self.publish_summaries()
 
     def new_session(self, chat=None):
@@ -523,6 +546,9 @@ the same publication `initialize` and `select` perform, ending with `ready`.
         if self.closing: raise ValueError("Chat is closing.")
         if self.remote_command(command): return
         if self.capabilities.handle(command): return
+        from chat_remote_actions import handle as remote_action
+        handled, result = remote_action(self, command)
+        if handled: return result
         if action == "subscribe":
             client, identifiers = command.get("client", "desktop"), command.get("chats")
             if (not isinstance(client, str) or not client or len(client) > 128 or
@@ -552,11 +578,16 @@ the same publication `initialize` and `select` perform, ending with `ready`.
                 self.publish_workspaces()
                 self.capabilities.publish()
                 service.publish_inspector()
+                service.handle({"command": "blackboard", "id": identifier})
                 # Empty panels must clear a previous chat's cached state too.
                 if not service.chat.get("team"): self.emit({"event": "team", "chat": identifier, "team": None})
                 if not service.side: self.emit({"event": "side", "chat": identifier, "side": None})
                 self.publish_remote_configuration(service)
                 self.publish_processes(identifier)
+                service._last_remote_activity = None
+                self.publish_remote_activity(service)
+                from chat_remote_actions import publish_turn_changes
+                publish_turn_changes(self, service)
                 return
             tool, arguments = command.get("tool"), command.get("arguments", {})
             preview = tool == "browser_remote_preview"
@@ -696,6 +727,18 @@ the same publication `initialize` and `select` perform, ending with `ready`.
             self.publish_summaries()
             return
         old_id = service.chat["id"]
+        if action == "configure_team" and command.get("_remoteControl") is True and isinstance(command.get("members"), list):
+            # Compatibility with companion build 2/3's 240-character roster
+            # preview: an unchanged preview is not an edit to the saved role.
+            existing = {m["id"]: m for m in (service.chat.get("team") or {}).get("members", [])}
+            restored = []
+            for item in command["members"]:
+                item = dict(item)
+                prior = existing.get(item.get("id"))
+                if prior and len(prior.get("responsibility", "")) > 240 and item.get("responsibility") == prior["responsibility"][:240]:
+                    item["responsibility"] = prior["responsibility"]
+                restored.append(item)
+            command = {**command, "members": restored}
         if action in {"send", "retry", "team_resume"}: service.display_status = "Connecting…"
         if action == "stop": service.display_status = "Stopping…"
         self._replacing = (service, old_id) if action == "configure" else None
@@ -741,6 +784,7 @@ the same publication `initialize` and `select` perform, ending with `ready`.
             self.processes.shutdown()
             self.capabilities.close()
             if self.remote is not None: self.remote.stop()
+            if hasattr(self, "remote_files"): self.remote_files.close()
         deadline = time.monotonic() + timeout
         for service in services:
             for thread in (service.thread, service.restart_thread, service.branch_thread):

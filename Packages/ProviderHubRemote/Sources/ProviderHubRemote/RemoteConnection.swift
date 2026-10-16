@@ -126,7 +126,7 @@ public final class RemoteChannel {
 }
 
 /// Persistent phone identity in Keychain. Pairing text pins the Mac identity.
-public final class RemoteConnection: CompanionLink {
+public final class RemoteConnection: CompanionTransport {
     private let queue = DispatchQueue(label: "providerhub.companion")
     private var connection: NWConnection?
     private var channel: RemoteChannel?

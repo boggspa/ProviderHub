@@ -79,7 +79,7 @@ class ControlTests(unittest.TestCase):
         ]
         for event in events:
             projected = mac.publish(event)
-            self.assertLess(len(json.dumps(projected, ensure_ascii=False).encode()), 18000)
+            self.assertLess(len(json.dumps(projected, ensure_ascii=False).encode()), 80000 if event["event"] == "team" else 18000)
         snapshot = mac._snapshot()
         self.assertLess(len(json.dumps(snapshot, ensure_ascii=False).encode()), 120000)
         mac._emit("session.snapshot", snapshot)

@@ -46,9 +46,19 @@ final class HubUpdater: ObservableObject {
     /// Exercise the real state machine without downloads or terminating a test
     /// runner. Production uses the bundled helper and normal AppKit shutdown.
     init(execute: ((String, String?) async throws -> HubUpdateInfo?)? = nil,
-         restart: @escaping @MainActor () -> Void = { NSApp.terminate(nil) },
+         restart: @escaping @MainActor () -> Void = { HubUpdater.terminateOutsideTask() },
          blocker: @escaping () -> String? = { "The app is still starting." }) {
         self.execute = execute; self.restartApp = restart; self.blocker = blocker
+    }
+
+    /// Restart is reached from a Swift Task, which runs as a main-queue job.
+    /// AppKit answers `.terminateLater` by spinning a nested run loop inside
+    /// that job, so the main queue stays blocked and the delegate's shutdown
+    /// Task never starts: the app hangs and the installer is never launched.
+    /// A run-loop source is not a dispatch job, so the main actor keeps
+    /// draining while AppKit waits for the shutdown reply.
+    static func terminateOutsideTask() {
+        RunLoop.main.perform { NSApp.terminate(nil) }
     }
 
     var visible: Bool { available != nil || ready != nil || working }
