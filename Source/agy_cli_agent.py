@@ -146,6 +146,10 @@ _EFFORT_RANK = {"low": 0, "medium": 1, "high": 2}
 # pass to --model on the wire. provider_effort_rung is the agy-native rung
 # string (low/medium/high).
 _AGY_ROW_MAP: dict[str, tuple[str, str, str]] = {
+    # Gemini 4 Argon: agy 1.3.6 exposes three native reasoning rows.
+    "gemini-4-argon-low":    ("gemini-4-argon", "Gemini 4 Argon", "low"),
+    "gemini-4-argon-medium": ("gemini-4-argon", "Gemini 4 Argon", "medium"),
+    "gemini-4-argon-high":   ("gemini-4-argon", "Gemini 4 Argon", "high"),
     # Gemini 3.8 Flash: 3 rungs
     "gemini-3.8-flash-low":    ("gemini-3.8-flash", "Gemini 3.8 Flash", "low"),
     "gemini-3.8-flash-medium": ("gemini-3.8-flash", "Gemini 3.8 Flash", "medium"),
@@ -184,6 +188,9 @@ _AGY_RUNG_TO_CANONICAL: dict[str, str] = {
 # For families with fewer than 3 rungs, we map canonical ranks to the
 # nearest available rung. This is used by build_argv to pick the native row.
 _FAMILY_CANONICAL_TO_RUNG: dict[str, dict[str, str]] = {
+    "gemini-4-argon": {"none": "low", "minimal": "low", "low": "low",
+                        "medium": "medium", "high": "high",
+                        "xhigh": "high", "max": "high", "ultra": "high"},
     "gemini-3.8-flash": {"none": "low", "minimal": "low", "low": "low",
                          "medium": "medium", "high": "high",
                          "xhigh": "high", "max": "high", "ultra": "high"},
@@ -211,6 +218,7 @@ _FAMILY_CANONICAL_TO_RUNG: dict[str, dict[str, str]] = {
 
 # Effort modes that each family advertises (canonical ranks).
 _FAMILY_EFFORT_MODES: dict[str, list[str]] = {
+    "gemini-4-argon": ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"],
     "gemini-3.8-flash": ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"],
     "gemini-3.7-flash": ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"],
     "gemini-3.6-flash": ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"],
@@ -222,6 +230,7 @@ _FAMILY_EFFORT_MODES: dict[str, list[str]] = {
 
 # Default effort for each family (canonical rank).
 _FAMILY_DEFAULT_EFFORT: dict[str, str] = {
+    "gemini-4-argon": "medium",
     "gemini-3.8-flash": "medium",
     "gemini-3.7-flash": "medium",
     "gemini-3.6-flash": "medium",
@@ -233,6 +242,7 @@ _FAMILY_DEFAULT_EFFORT: dict[str, str] = {
 
 # Provider-native effort rungs exposed by each family (what agy accepts).
 _FAMILY_PROVIDER_EFFORT_MODES: dict[str, list[str]] = {
+    "gemini-4-argon": ["low", "medium", "high"],
     "gemini-3.8-flash": ["low", "medium", "high"],
     "gemini-3.7-flash": ["low", "medium", "high"],
     "gemini-3.6-flash": ["low", "medium", "high"],
@@ -336,7 +346,7 @@ def _resolve_native_row(family_id: str, effort: str | None) -> str:
     return family_id
 
 
-def _validate_model(model: Any) -> str:
+def _validate_model(model: Any, *, resolve_family=True) -> str:
     """Validate and resolve a model identifier.
     
     Accepts either a family id (e.g., "gemini-3.8-flash") or a native row id
@@ -350,7 +360,7 @@ def _validate_model(model: Any) -> str:
         raise AgyCliAgentError(f"refusing suspicious model id {model!r}")
     
     # If it's a known family id, resolve to its default native row
-    if candidate in _FAMILY_DEFAULT_EFFORT:
+    if resolve_family and candidate in _FAMILY_DEFAULT_EFFORT:
         # Map family id to default native row
         default_rung = _FAMILY_CANONICAL_TO_RUNG.get(candidate, {}).get(
             _FAMILY_DEFAULT_EFFORT.get(candidate)
@@ -661,7 +671,7 @@ def catalogue(*, capture=None, timeout=30) -> tuple[list[dict], list[str]]:
 # argv construction
 # ---------------------------------------------------------------------------
 
-def build_argv(model, *, effort=None, system=None, stream=True) -> list[str]:
+def build_argv(model, *, effort=None, system=None, stream=True, available_rows=None) -> list[str]:
     """Full argv for one print-mode turn. argv[0] is the bare binary name.
 
     No ``-p``/``--print``/``--prompt`` flag is emitted: on agy that flag takes
@@ -675,7 +685,19 @@ def build_argv(model, *, effort=None, system=None, stream=True) -> list[str]:
     """
     # Resolve the model to a native row id, using effort if provided
     native_row = _resolve_native_row(model, effort)
-    validated_model = _validate_model(native_row)
+    if model == "gemini-4-argon":
+        # The older CLI advertised the bare ID. Only select a suffixed row
+        # when this turn's inventory actually advertises it; never cache
+        # account-dependent availability across requests.
+        available = set(available_rows or ())
+        if native_row not in available:
+            candidates = [row for row in available if row.startswith("gemini-4-argon-")
+                          and row in _AGY_ROW_MAP]
+            target = _EFFORT_RANK[AGY_EFFORT_ALIASES.get(effort, "medium")]
+            native_row = (min(candidates, key=lambda row:
+                (abs(_EFFORT_RANK[_AGY_ROW_MAP[row][2]] - target), row))
+                if candidates and model not in available else model)
+    validated_model = _validate_model(native_row, resolve_family=False)
     validated_effort = _validate_effort(effort)
     if system is not None and not isinstance(system, str):
         raise AgyCliAgentError(
@@ -1325,7 +1347,13 @@ def run_turn(request, *, spawner=None, timeout=300) -> Iterator[dict]:
         # agy has no system-prompt flag, so the system text is folded into the
         # prompt here and deliberately NOT passed to build_argv.
         prompt = render_prompt(messages, system=system)
-        argv = build_argv(model, effort=effort, system=None, stream=True)
+        available_rows = None
+        if model == "gemini-4-argon":
+            inventory, _ = catalogue()
+            available_rows = [alias for row in inventory
+                              if row["id"] == model for alias in row.get("aliases", [])]
+        argv = build_argv(model, effort=effort, system=None, stream=True,
+                          available_rows=available_rows)
 
         binary = _resolve_binary()
         if not binary:
