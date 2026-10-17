@@ -410,33 +410,8 @@ struct ChatFoldHeader: View {
     @Environment(\.chatTextStyle) private var textStyle
 
     var body: some View {
-        let files = Set(entries.flatMap(\.changedFiles)).count
-        let counted = entries.compactMap { ChatPatchStats.count(chatPatchText($0)) }
-        let stats = counted.isEmpty ? nil : counted.reduce(ChatPatchStats(), +)
-        var glyphs: [String] = []
-        for entry in entries where !glyphs.contains(ChatToolDisplay.glyph(entry.tool)) { glyphs.append(ChatToolDisplay.glyph(entry.tool)) }
-        return HStack(spacing: textStyle.scaled(7)) {
-            HStack(spacing: textStyle.scaled(1)) {
-                ForEach(glyphs.prefix(3), id: \.self) { ChatToolGlyph(name: $0, size: textStyle.scaled(15)).foregroundStyle(accent) }
-            }
-            ChatShimmerText(text: live ? "Working" : "Worked", active: live, accent: accent, base: Semantic.ink)
-                .font(textStyle.system(12, weight: .medium)).fixedSize()
-            Text("· " + ChatToolDisplay.activity(entries.map(\.tool)) + (files > 0 ? " · \(files) \(files == 1 ? "file" : "files")" : ""))
-                .font(textStyle.system(11.5)).foregroundStyle(Semantic.secondaryInk).lineLimit(1)
-            if let stats { ChatPatchStatsLabel(stats: stats, size: textStyle.scaled(11)) }
-            if entries.contains(where: \.isError) {
-                Image(systemName: "exclamationmark.triangle.fill").font(textStyle.system(10)).foregroundStyle(Color(nsColor: .systemRed))
-            }
-            if !open, live, let latest = entries.last {
-                let step = ChatToolDisplay.describe(tool: latest.tool, summary: latest.summary ?? latest.text,
-                                                    live: latest.detail == "Running…")
-                Text(step.verb + (step.subject.isEmpty ? "" : " " + step.subject)).font(textStyle.system(11.5))
-                    .foregroundStyle(.tertiary).lineLimit(1).truncationMode(.middle)
-            }
-            Spacer(minLength: 0)
-            Image(systemName: "chevron.right").font(textStyle.system(8.5, weight: .semibold)).foregroundStyle(Semantic.secondaryInk)
-                .rotationEffect(.degrees(open ? 90 : 0)).opacity(hovering || open ? 1 : 0.4)
-        }
+        ChatSharedFoldHeader(summary: .collect(entries), live: live, open: open, accent: accent,
+            ink: Semantic.ink, secondary: Semantic.secondaryInk, scale: textStyle.scaled(1), hovering: hovering)
         .padding(.horizontal, 6).padding(.vertical, textStyle.scaled(4))
         .background(RoundedRectangle(cornerRadius: 7, style: .continuous).fill(hovering ? Semantic.raisedSurface : .clear))
         .padding(.horizontal, -6)

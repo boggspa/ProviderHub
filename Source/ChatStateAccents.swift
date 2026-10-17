@@ -82,40 +82,12 @@ struct ChatShimmerText: View {
     }
 }
 
-/// Added and removed line counts read from a recorded patch. Only text that
-/// reads as a patch counts, and its headers never do; anything else is nil
-/// so a row shows no numbers rather than wrong ones.
-struct ChatPatchStats: Equatable {
-    var added = 0
-    var removed = 0
-
-    static func count(_ text: String) -> ChatPatchStats? {
-        var stats = ChatPatchStats()
-        var isPatch = false
-        for line in text.split(separator: "\n", omittingEmptySubsequences: false) {
-            if line.hasPrefix("@@") || line.hasPrefix("*** ") || line.hasPrefix("+++ ") || line.hasPrefix("--- ") { isPatch = true; continue }
-            if line.hasPrefix("+") { stats.added += 1 } else if line.hasPrefix("-") { stats.removed += 1 }
-        }
-        return isPatch && stats.added + stats.removed > 0 ? stats : nil
-    }
-
-    static func + (lhs: ChatPatchStats, rhs: ChatPatchStats) -> ChatPatchStats {
-        ChatPatchStats(added: lhs.added + rhs.added, removed: lhs.removed + rhs.removed)
-    }
-}
-
 /// `+12 −3` in the Git indicator's colours and monospace, so a patch row and
 /// the header count the same way.
 struct ChatPatchStatsLabel: View {
     var stats: ChatPatchStats
     var size: CGFloat = 11
     var body: some View {
-        HStack(spacing: 4) {
-            Text("+\(stats.added)").foregroundStyle(Color(nsColor: .systemGreen))
-            Text("−\(stats.removed)").foregroundStyle(Color(nsColor: .systemRed))
-        }
-        .font(.system(size: size, weight: .medium, design: .monospaced)).fixedSize()
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(stats.added) lines added, \(stats.removed) removed")
+        ChatSharedPatchStatsLabel(stats: stats, size: size)
     }
 }
