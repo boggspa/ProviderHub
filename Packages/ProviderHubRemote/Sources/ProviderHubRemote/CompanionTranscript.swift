@@ -277,22 +277,129 @@ private struct CompanionMessageText: View {
     let text: String
     var size: CGFloat = 13
     var body: some View {
-        let blocks = text.components(separatedBy: "```")
         VStack(alignment: .leading, spacing: 8) {
-            ForEach(Array(blocks.enumerated()), id: \.offset) { index, block in
-                if index % 2 == 1 {
-                    let code = block.split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: false)
+            ForEach(Array(CompanionMarkdown.blocks(text).enumerated()), id: \.offset) { _, block in
+                switch block {
+                case .code(let language, let source):
                     VStack(alignment: .leading, spacing: 6) {
-                        if let language = code.first, !language.isEmpty { Text(language).font(.system(size: size * 0.81)).foregroundStyle(CompanionTheme.secondary) }
-                        ScrollView(.horizontal) { Text(code.count > 1 ? String(code[1]) : block).font(.system(size: size, design: .monospaced)).textSelection(.enabled) }
+                        if !language.isEmpty { Text(language).font(.system(size: size * 0.81)).foregroundStyle(CompanionTheme.secondary) }
+                        ScrollView(.horizontal) { Text(source).font(.system(size: size, design: .monospaced)).textSelection(.enabled) }
                     }.padding(12).companionCard(cornerRadius: 8)
-                } else if !block.isEmpty {
-                    ForEach(Array(block.components(separatedBy: "\n\n").enumerated()), id: \.offset) { _, paragraph in
-                        Text((try? AttributedString(markdown: paragraph, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(paragraph))
-                            .font(.system(size: size)).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
-                    }
+                case .heading(let level, let source):
+                    inline(source).font(.system(size: headingSize(level), weight: .semibold))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                case .paragraph(let source):
+                    inline(source).font(.system(size: size)).frame(maxWidth: .infinity, alignment: .leading)
+                case .table(let headers, let rows):
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        VStack(alignment: .leading, spacing: 0) {
+                            tableRow(headers, header: true)
+                            ForEach(Array(rows.enumerated()), id: \.offset) { _, row in tableRow(row, header: false) }
+                        }.fixedSize(horizontal: true, vertical: false)
+                    }.companionCard(cornerRadius: 8)
                 }
             }
         }
+    }
+
+    private func inline(_ source: String) -> some View {
+        Text((try? AttributedString(markdown: source, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(source))
+            .textSelection(.enabled)
+    }
+
+    private func headingSize(_ level: Int) -> CGFloat {
+        size * ([1: 1.55, 2: 1.38, 3: 1.24, 4: 1.14, 5: 1.07, 6: 1.0][level] ?? 1.0)
+    }
+
+    private func tableRow(_ cells: [String], header: Bool) -> some View {
+        HStack(alignment: .top, spacing: 0) {
+            ForEach(Array(cells.enumerated()), id: \.offset) { _, cell in
+                inline(cell).font(.system(size: size, weight: header ? .semibold : .regular))
+                    .frame(minWidth: 84, maxWidth: 220, alignment: .leading)
+                    .padding(.horizontal, 9).padding(.vertical, 7)
+                    .overlay(alignment: .trailing) { CompanionTheme.hairline.frame(width: 0.5) }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(header ? CompanionTheme.hairline.opacity(0.22) : Color.clear)
+        .overlay(alignment: .bottom) { CompanionTheme.hairline.frame(height: 0.5) }
+    }
+}
+
+/// Small, bounded block grammar for the companion. Inline emphasis and links
+/// use Foundation's Markdown parser; headings, tables and fenced code get
+/// native SwiftUI structure without a WebView or third-party dependency.
+private enum CompanionMarkdown {
+    enum Block {
+        case paragraph(String)
+        case heading(Int, String)
+        case table([String], [[String]])
+        case code(String, String)
+    }
+
+    static func blocks(_ source: String) -> [Block] {
+        guard source.utf8.count <= 256 * 1024 else { return [.paragraph(source)] }
+        let lines = source.components(separatedBy: "\n")
+        var result: [Block] = [], prose: [String] = [], index = 0, tableCount = 0
+        func flush() {
+            let value = prose.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+            if !value.isEmpty { result.append(.paragraph(value)) }
+            prose.removeAll(keepingCapacity: true)
+        }
+        while index < lines.count {
+            let line = lines[index]
+            if line.trimmingCharacters(in: .whitespaces).hasPrefix("```") || line.trimmingCharacters(in: .whitespaces).hasPrefix("~~~") {
+                flush()
+                let fence = line.trimmingCharacters(in: .whitespaces).prefix(3)
+                let language = String(line.trimmingCharacters(in: .whitespaces).dropFirst(3)).trimmingCharacters(in: .whitespaces)
+                index += 1
+                var code: [String] = []
+                while index < lines.count, !lines[index].trimmingCharacters(in: .whitespaces).hasPrefix(String(fence)) {
+                    code.append(lines[index]); index += 1
+                }
+                if index < lines.count { index += 1 }
+                result.append(.code(language, code.joined(separator: "\n")))
+                continue
+            }
+            if let (level, heading) = heading(line) {
+                flush(); result.append(.heading(level, heading)); index += 1; continue
+            }
+            if tableCount < 16, index + 1 < lines.count,
+               let header = cells(lines[index]), let separators = cells(lines[index + 1]),
+               header.count <= 12, header.count == separators.count, separators.allSatisfy(isDelimiter) {
+                flush(); index += 2
+                var rows: [[String]] = []
+                while index < lines.count, let row = cells(lines[index]), rows.count < 128 {
+                    rows.append(Array(row.prefix(header.count)) + Array(repeating: "", count: max(0, header.count - row.count)))
+                    index += 1
+                }
+                result.append(.table(header, rows)); tableCount += 1; continue
+            }
+            if line.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { flush() }
+            else { prose.append(line) }
+            index += 1
+        }
+        flush()
+        return result.isEmpty ? [.paragraph(source)] : result
+    }
+
+    private static func heading(_ line: String) -> (Int, String)? {
+        let count = line.prefix(while: { $0 == "#" }).count
+        guard (1...6).contains(count), line.dropFirst(count).first == " " else { return nil }
+        return (count, String(line.dropFirst(count)).trimmingCharacters(in: .whitespaces))
+    }
+
+    private static func cells(_ line: String) -> [String]? {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        guard trimmed.contains("|") else { return nil }
+        var values = trimmed.split(separator: "|", omittingEmptySubsequences: false).map { String($0).trimmingCharacters(in: .whitespaces) }
+        if trimmed.hasPrefix("|") { values.removeFirst() }
+        if trimmed.hasSuffix("|"), !values.isEmpty { values.removeLast() }
+        return values.isEmpty ? nil : values
+    }
+
+    private static func isDelimiter(_ cell: String) -> Bool {
+        let clean = cell.replacingOccurrences(of: ":", with: "")
+        return clean.count >= 3 && clean.allSatisfy { $0 == "-" }
     }
 }
