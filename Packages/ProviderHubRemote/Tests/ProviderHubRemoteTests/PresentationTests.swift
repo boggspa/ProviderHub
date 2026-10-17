@@ -58,7 +58,10 @@ final class PresentationTests: XCTestCase {
         XCTAssertEqual(store.entries.first?.id, "r5")
         let legacy = try JSONDecoder().decode(RemoteChat.self, from: Data(#"{"id":"a","title":"A","status":"ready","busy":false,"pendingApproval":false}"#.utf8))
         XCTAssertEqual(legacy.displayModel, "Assistant")
-        XCTAssertEqual(legacy.approvalLabel, "Manual")
+        XCTAssertEqual(CompanionTheme.approvalLabel(legacy.approvalMode ?? "manual"), "Manual")
+        XCTAssertNil(legacy.active)
+        let active = try JSONDecoder().decode(RemoteChat.self, from: Data(#"{"id":"a","title":"A","status":"ready","busy":false,"active":true,"pendingApproval":false}"#.utf8))
+        XCTAssertEqual(active.active, true)
     }
 
     func testBoundedUnicodeStreamDoesNotRequestSnapshotsForever() throws {

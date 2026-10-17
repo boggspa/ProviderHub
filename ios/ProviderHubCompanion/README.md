@@ -153,10 +153,25 @@ pending drafts are retained. iOS may suspend the app in the background.
 The companion uses the Mac's semantic colours, provider accents, compact
 header and rounded composer. Cards have the same darker fill and subtle
 accent hairline. System, Light/Dark and Glass/Solid choices are in Settings.
-iPhone uses a chat-list sheet; wide iPad layouts show a persistent chat rail.
+iPhone uses a chat-list sheet; wide iPad layouts show a chat rail that the
+sidebar button hides and restores, as on the Mac.
+
+The header is one row: chats and New Chat on the left, the chat's title
+between, inspector and Settings on the right. Beneath it is the Mac header's
+second half: the Team and its members, or the model with its reasoning effort
+and the working folder. Effort is chosen in the model picker. The connection
+only appears while it is missing ("Connecting" or "Offline"). In Glass, the
+transcript's opaque sheet runs from the header rule to the bottom edge, under
+the live activity lines and the composer. The composer is one line tall when
+empty, grows with its text and scrolls past about six lines. Its footer
+matches the Mac: approval mode, the chat's status (solo chats) and turn time.
+
 Text uses native Dynamic Type. Tool rows expand for detail; code blocks are
 selectable and scroll horizontally. Approvals stay beside the composer and
-always target the exact chat and action shown.
+always target the exact chat and action shown. With a hardware keyboard,
+Command-Return sends (Return starts a new line), and the Mac's other shortcuts
+apply: Command-. stops, Command-D and Command-Y deny or allow,
+Control-Command-S shows chats and Control-Command-I the inspector.
 
 ## Pair
 

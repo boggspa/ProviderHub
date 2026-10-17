@@ -70,6 +70,7 @@ extension CompanionModel {
         let result = try await performControl("remote_create", ["choice": .string(choice), "workspace": .string(workspace), "effort": .string(effort)])
         let id = result["chat"].text
         guard !id.isEmpty else { throw RemoteControlFailure.rejected("The Mac did not return a new chat") }
+        store.clearNotices()
         selectedChatID = id
         select(id)
     }
@@ -131,7 +132,7 @@ extension CompanionModel {
         // them could come back empty and widen the send to the whole Team,
         // where the original ones are refused by the Mac as stale.
         let chips: [CompanionMentionChip] = toBlackboard ? [] : mentionChips(in: text)
-        attachmentSending = true; composeNotice = ""
+        attachmentSending = true; composeNotice = ""; store.clearNotices()
         defer { attachmentSending = false; uploadProgress = "" }
         do {
             var tokens: [RemoteValue] = []

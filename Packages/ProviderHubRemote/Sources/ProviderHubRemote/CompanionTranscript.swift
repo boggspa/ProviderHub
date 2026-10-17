@@ -50,6 +50,9 @@ struct CompanionTranscript: View {
     var activities: [CompanionActivity] = []
     var jumpEntryID: String?
     var jumpToken = 0
+    /// The chat's folder and whether a Team runs it, for the empty-chat invitation.
+    var workspace = ""
+    var teamEnabled = false
     var answer: (RemoteQuestion, [String: [String]], Bool) -> Void = { _, _, _ in }
     @State private var followsLatest = true
     @State private var expanded = Set<String>()
@@ -86,6 +89,7 @@ struct CompanionTranscript: View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
+                    if entries.isEmpty && !hasOlder && !runIsOpen { invitation }
                     if hasOlder {
                         Button(action: loadOlder) {
                             HStack { if loadingOlder { ProgressView().controlSize(.small) }; Text(loadingOlder ? "Loading older messages…" : "Load earlier messages") }
@@ -136,11 +140,23 @@ struct CompanionTranscript: View {
             .overlay(alignment: .bottomTrailing) {
                 if !followsLatest {
                     Button { followsLatest = true; proxy.scrollTo("transcript-bottom", anchor: .bottom) } label: {
-                        Image(systemName: "arrow.down").padding(12).background(.regularMaterial, in: Circle())
-                    }.buttonStyle(.plain).padding(12).accessibilityLabel("Go to latest message")
+                        Label("Latest", systemImage: "arrow.down").font(.system(size: 13 * scale, weight: .medium))
+                            .padding(.horizontal, 12).padding(.vertical, 8).background(.regularMaterial, in: Capsule())
+                    }.buttonStyle(.plain).padding(12).accessibilityLabel("Go to latest activity")
                 }
             }
         }
+    }
+
+    /// A chat with no turns yet says who it will talk to, as the Mac does.
+    private var invitation: some View {
+        let folder = (workspace as NSString).lastPathComponent
+        let who = teamEnabled ? "the Team" : chat.displayModel
+        return VStack(spacing: 6) {
+            Text(folder.isEmpty ? "Message \(who)." : "Message \(who) about \(folder).").font(.system(size: textSize))
+            Text("Tools run on your Mac inside that folder and ask before changing files, unless the chat allows them.")
+                .font(.system(size: 12 * scale)).foregroundStyle(CompanionTheme.secondary)
+        }.multilineTextAlignment(.center).frame(maxWidth: 460).frame(maxWidth: .infinity).padding(.top, 60)
     }
 
     private func presentation(_ item: RemoteTranscriptItem) -> CompanionPresentation {

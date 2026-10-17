@@ -39,6 +39,9 @@ public final class CompanionModel: ObservableObject {
     @Published public var attachmentThumbnails: [String: Data] = [:]
     @Published var activityJumpID: String?
     @Published var activityJumpToken = 0
+    /// When the selected chat's open run began, for the footer's turn clock.
+    @Published public private(set) var turnStartedAt: Date?
+    private var turnChatID: String?
     var fileDownloads = Set<String>()
     public weak var link: CompanionLink?
     @Published public var pairingText = ""
@@ -48,7 +51,7 @@ public final class CompanionModel: ObservableObject {
     public var selectedChat: RemoteChat? { store.chats.first { $0.id == selectedChatID } }
     public var isConnected: Bool { status == "Connected" }
     public var canSend: Bool {
-        isConnected && selectedChat != nil && selectedChat?.busy != true &&
+        isConnected && selectedChat != nil && !runIsOpen &&
             (!draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !(attachmentDrafts[selectedChatID ?? ""] ?? []).isEmpty) && !attachmentSending &&
             !pendingDrafts.values.contains(where: { $0.0 == selectedChatID && $0.1 == draft })
     }
@@ -121,7 +124,44 @@ public final class CompanionModel: ObservableObject {
                 selectedChatID = replacement
                 requestControls(replacement)
             }
+            let delta = (message["params"] as? [String: Any])?["event"] as? [String: Any]
+            updateTurnClock(resumed: message["method"] as? String == "session.snapshot" ||
+                ["selected", "snapshot"].contains(delta?["event"] as? String ?? ""))
         } catch { status = "Invalid server event" }
+    }
+
+    /// The Mac's turn clock starts when its run opens and is not reset by a
+    /// steer. A run the phone sees open starts now; one already under way when
+    /// the phone arrives (a reconnect, another chat) counts from the message
+    /// that opened it, which is the closest the phone can know.
+    private func updateTurnClock(resumed: Bool) {
+        guard runIsOpen, let chat = selectedChatID, store.selectedID == chat else {
+            if turnStartedAt != nil { turnStartedAt = nil }
+            turnChatID = nil; return
+        }
+        guard turnStartedAt == nil || turnChatID != chat else { return }
+        turnChatID = chat
+        let opened = resumed ? store.visibleEntries.last(where: { $0.role == "user" })?.time.map(Date.init(timeIntervalSince1970:)) : nil
+        turnStartedAt = min(opened ?? Date(), Date())
+    }
+
+    /// "Connecting" or "Offline" while the Mac is out of reach; nil when it is
+    /// connected or was never paired. A live connection needs no label.
+    public var connectionPhase: String? {
+        if isConnected || status == "Not paired" { return nil }
+        return status.contains("onnecting") || status.hasPrefix("Compare code") ? "Connecting" : "Offline"
+    }
+
+    /// The selected chat's approval mode, read once: the Mac's configuration
+    /// first, the recent-list summary (which may lag it) as a fallback.
+    public var approvalMode: String {
+        let configured = selectionBound ? configuration["approvalMode"].text : ""
+        return configured.isEmpty ? selectedChat?.approvalMode ?? "manual" : configured
+    }
+    /// The run-time settings (model, effort, approval mode) can change only
+    /// between turns, as on the Mac.
+    public var configurable: Bool {
+        isConnected && controlSurfaceAvailable && selectionBound && !runIsOpen && !configuration["busy"].flag
     }
 
     public func connect() {
@@ -150,6 +190,7 @@ public final class CompanionModel: ObservableObject {
         connection.connect(text: saved)
     }
     public func select(_ id: String) {
+        if id != selectedChatID { store.clearNotices() }
         selectedChatID = id
         link?.send(RemoteCommand(method: "chat.select", requestId: UUID().uuidString, chat: id))
     }
@@ -176,6 +217,7 @@ public final class CompanionModel: ObservableObject {
               !pendingDrafts.values.contains(where: { $0.0 == chat && $0.1 == draft }) else { return }
         let id = UUID().uuidString
         pendingDrafts[id] = (chat, draft)
+        store.clearNotices(); composeNotice = ""
         var command = RemoteCommand(method: "chat.send", requestId: id, chat: chat, text: text)
         let chips = mentionChips(in: text)
         if !chips.isEmpty { command.mentions = chips }
@@ -208,7 +250,6 @@ public struct CompanionView: View {
     @State private var chatList = false
     @State private var inspector = false
     @State private var inspectorTab: RemoteInspectorTab = .agents
-    @State private var permissionChange: String?
     @State private var showingPermissionConfirmation = false
     @State private var choosingModel = false
     @State private var creatingChat = false
@@ -222,6 +263,7 @@ public struct CompanionView: View {
     @State private var viewWidth: CGFloat = 0
     @AppStorage("companionAppearance") private var appearance = "system"
     @AppStorage("companionSurface") private var surfaceStyle = "solid"
+    @AppStorage("companionRailVisible") private var railVisible = true
 
     public init(model: CompanionModel) { self.model = model }
 
@@ -229,38 +271,43 @@ public struct CompanionView: View {
         GeometryReader { geometry in
             let wide = geometry.size.width >= 800
             HStack(spacing: 0) {
-                if wide && !model.store.chats.isEmpty {
+                if wide && railVisible && !model.store.chats.isEmpty {
                     sidebar.frame(width: 250)
                     CompanionTheme.hairline.frame(width: 1)
                 }
                 VStack(spacing: 0) {
-                    header(showsRailButton: !wide)
+                    header(wide: wide)
                     if model.isConnected && !model.extendedControlsAvailable {
                         Text("Update the Mac host to enable older messages, attachments, new chats and Blackboard.")
                             .font(.caption).foregroundStyle(.orange).padding(.horizontal, 18).padding(.bottom, 8)
                     }
                     CompanionTheme.hairline.frame(height: 1)
-                    if let chat = model.selectedChat {
-                        if model.store.selectedID == chat.id {
-                            CompanionTranscript(entries: model.store.visibleEntries, chat: chat, connected: model.isConnected,
-                                models: model.models, members: model.members, fallbackRoute: String(model.configuration["choice"].text.split(separator: "|").first ?? ""),
-                                hasOlder: model.store.hasOlder && model.extendedControlsAvailable, loadingOlder: model.historyLoading,
-                                loadOlder: { Task { @MainActor in await model.loadOlder() } }, turnSummaries: model.store.turnSummaries,
-                                runIsOpen: model.runIsOpen, activities: model.liveActivities, jumpEntryID: model.activityJumpID,
-                                jumpToken: model.activityJumpToken) { question, answers, dismiss in
-                                model.answerQuestion(question, chat: chat.id, answers: answers, dismiss: dismiss)
+                    // One sheet of paper from the header rule to the bottom
+                    // edge, as on the Mac: the live strip and the composer sit
+                    // on the transcript rather than on a band under a hard edge.
+                    VStack(spacing: 0) {
+                        if let chat = model.selectedChat {
+                            if model.store.selectedID == chat.id {
+                                CompanionTranscript(entries: model.store.visibleEntries, chat: chat, connected: model.isConnected,
+                                    models: model.models, members: model.members, fallbackRoute: String(model.configuration["choice"].text.split(separator: "|").first ?? ""),
+                                    hasOlder: model.store.hasOlder && model.extendedControlsAvailable, loadingOlder: model.historyLoading,
+                                    loadOlder: { Task { @MainActor in await model.loadOlder() } }, turnSummaries: model.store.turnSummaries,
+                                    runIsOpen: model.runIsOpen, activities: model.liveActivities, jumpEntryID: model.activityJumpID,
+                                    jumpToken: model.activityJumpToken, workspace: model.configuration["workspace"].text,
+                                    teamEnabled: model.team["enabled"].flag) { question, answers, dismiss in
+                                    model.answerQuestion(question, chat: chat.id, answers: answers, dismiss: dismiss)
+                                }
+                                .id(chat.id)
+                            } else {
+                                VStack(spacing: 10) { ProgressView(); Text("Opening conversation…").font(.caption).foregroundStyle(CompanionTheme.secondary) }
+                                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                             }
-                            .background(CompanionTheme.pane(.transcript, surfaceStyle: surfaceStyle))
-                            .id(chat.id)
-                        } else {
-                            VStack(spacing: 10) { ProgressView(); Text("Opening conversation…").font(.caption).foregroundStyle(CompanionTheme.secondary) }
-                                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                                .background(CompanionTheme.pane(.transcript, surfaceStyle: surfaceStyle))
-                        }
-                        CompanionActivityStrip(model: model)
-                        if let approval = model.store.approval { approvalStrip(approval) }
-                        composer(chat)
-                    } else { welcome }
+                            CompanionActivityStrip(model: model)
+                            if let approval = model.store.approval { approvalStrip(approval) }
+                            composer(chat)
+                        } else { welcome }
+                    }
+                    .background(CompanionTheme.pane(.transcript, surfaceStyle: surfaceStyle).ignoresSafeArea(edges: .bottom))
                 }.frame(maxWidth: .infinity, maxHeight: .infinity)
                 if !horizontalInspectorIsSheet && inspector, model.selectedChat != nil {
                     CompanionTheme.hairline.frame(width: 1)
@@ -323,14 +370,10 @@ public struct CompanionView: View {
                     .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Done") { inspector = false } } }
             }.presentationDetents([.large])
         }
-        .confirmationDialog("Allow tools without approval prompts?", isPresented: $showingPermissionConfirmation) {
-            if let mode = permissionChange {
-                Button("Use \(permissionLabel(mode))", role: mode == "yolo" ? .destructive : nil) {
-                    model.configure(["approvalMode": .string(mode)]); permissionChange = nil
-                }
-            }
+        .confirmationDialog("Run tools without approval prompts?", isPresented: $showingPermissionConfirmation, titleVisibility: .visible) {
+            Button("Use YOLO", role: .destructive) { model.configure(["approvalMode": .string("yolo")]) }
         } message: {
-            Text(permissionChange == "yolo" ? "YOLO allows available tools on your Mac without approval prompts. This also applies to the Team." : "This changes the Mac’s approval policy for this chat and its Team.")
+            Text("YOLO lets tools edit files and run commands on your Mac without asking first. This also applies to the Team.")
         }
         #if os(iOS)
         .sheet(isPresented: $scanning) {
@@ -342,98 +385,100 @@ public struct CompanionView: View {
         #endif
     }
 
-    private func header(showsRailButton: Bool) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            HStack(spacing: 8) {
-                if showsRailButton && !model.store.chats.isEmpty {
-                    Button { chatList = true } label: { Image(systemName: "sidebar.left").frame(width: 40, height: 40) }
-                        .accessibilityLabel("Show chats")
+    /// One row of controls with the chat's title between them, then the
+    /// chat's model (or Team) beneath. The connection only shows when it is
+    /// missing: an open, connected app needs no label saying so.
+    private func header(wide: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 0) {
+                if !model.store.chats.isEmpty {
+                    Button { if wide { railVisible.toggle() } else { chatList = true } } label: { Image(systemName: "sidebar.left").frame(width: 40, height: 40) }
+                        .accessibilityLabel(wide && railVisible ? "Hide chats" : "Show chats")
+                        .keyboardShortcut("s", modifiers: [.command, .control])
                 }
-                Image(systemName: "square.stack.3d.up.fill").font(.caption).foregroundStyle(CompanionTheme.brand)
-                Text("Provider Hub").font(.subheadline.weight(.semibold))
                 if model.isConnected {
                     Button { creatingChat = true } label: { Image(systemName: "square.and.pencil").frame(width: 40, height: 40) }
                         .accessibilityLabel("New chat").keyboardShortcut("n", modifiers: .command)
                 }
-                Spacer(minLength: 4)
-                Circle().fill(model.isConnected ? Color.green : CompanionTheme.secondary).frame(width: 6, height: 6)
-                if viewWidth >= 600 { Text(model.isConnected ? "Mac connected" : "Offline").font(.caption2).foregroundStyle(CompanionTheme.secondary) }
+                Text(model.selectedChat?.title ?? "")
+                    .font(.headline).lineLimit(1).truncationMode(.tail)
+                    .padding(.horizontal, 6).frame(maxWidth: .infinity, alignment: .leading)
+                    .accessibilityAddTraits(.isHeader)
+                if let phase = model.connectionPhase {
+                    HStack(spacing: 5) {
+                        if phase == "Connecting" { ProgressView().controlSize(.mini) }
+                        else { Circle().fill(CompanionTheme.secondary).frame(width: 6, height: 6) }
+                        Text(phase).font(.caption2)
+                    }.foregroundStyle(CompanionTheme.secondary).padding(.horizontal, 6).fixedSize()
+                }
                 if model.selectedChat != nil {
                     Button { inspector.toggle() } label: { Image(systemName: "sidebar.right").frame(width: 40, height: 40) }
-                        .accessibilityLabel("Show inspector")
-                        .keyboardShortcut("i", modifiers: [.command, .option])
+                        .accessibilityLabel(inspector ? "Hide inspector" : "Show inspector")
+                        .keyboardShortcut("i", modifiers: [.command, .control])
                 }
                 Button { settings = true } label: { Image(systemName: "gearshape").frame(width: 40, height: 40) }
                     .accessibilityLabel("Connection and appearance settings")
             }.buttonStyle(.plain)
             if let chat = model.selectedChat {
-                VStack(alignment: .leading, spacing: 5) {
-                    Text(chat.title).font(.headline).lineLimit(1)
-                    HStack(spacing: 6) {
-                        CompanionProviderMark(presentation: CompanionBranding.presentation(route: chat.route ?? String(model.configuration["choice"].text.split(separator: "|").first ?? ""), label: chat.displayModel, models: model.models), size: 15)
-                        if model.team["enabled"].flag {
-                            Button { inspectorTab = .agents; inspector = true } label: {
-                                Text("Team · \(model.members.count) models").font(.caption.weight(.medium))
-                            }.buttonStyle(.plain)
-                        } else {
-                            Button { choosingModel = true } label: {
-                                HStack(spacing: 5) { Text(chat.displayModel).font(.caption.weight(.medium)); Image(systemName: "chevron.down").font(.system(size: 9)) }
-                            }.buttonStyle(.plain)
-                                .sheet(isPresented: $choosingModel) {
-                                    CompanionRoutePicker(model: model) { row, effort in model.configure(["choice": row["id"], "effort": .string(effort)]) }
-                                }
-                                .disabled(!model.isConnected || model.configuration["busy"].flag || !model.controlSurfaceAvailable)
-                        }
-                        Menu {
-                            ForEach(["manual", "accept_edits", "yolo"], id: \.self) { mode in
-                                Button(permissionLabel(mode)) { choosePermission(mode) }
-                            }
-                        } label: {
-                            Label(permissionLabel(model.configuration["approvalMode"].text.isEmpty ? chat.approvalMode ?? "manual" : model.configuration["approvalMode"].text), systemImage: "lock.shield")
-                                .font(.caption)
-                        }.disabled(!model.isConnected || model.configuration["busy"].flag || !model.controlSurfaceAvailable)
-                        if !model.team["enabled"].flag {
-                            Menu {
-                                Button("Default") { model.configure(["effort": .string("")]) }
-                                ForEach(model.models.first(where: { $0["id"] == model.configuration["choice"] })?["efforts"].rows ?? [], id: \.self) { effort in
-                                    Button(effort.text.capitalized) { model.configure(["effort": effort]) }
-                                }
-                            } label: {
-                                Text(model.configuration["effort"].text.isEmpty ? "Reasoning" : model.configuration["effort"].text.capitalized).font(.caption)
-                            }.disabled(!model.isConnected || model.configuration["busy"].flag || !model.controlSurfaceAvailable)
-                        }
-                        Text("· On your Mac").font(.caption).foregroundStyle(CompanionTheme.secondary)
-                    }.lineLimit(1)
-                    if model.team["enabled"].flag {
-                        ScrollView(.horizontal, showsIndicators: false) {
-                            HStack(spacing: 8) {
-                                ForEach(model.members, id: \.self) { member in
-                                    Button { inspectorTab = .agents; inspector = true } label: {
-                                        let brand = CompanionBranding.presentation(route: member["route"].text.isEmpty ? String(member["choice"].text.split(separator: "|").first ?? "") : member["route"].text, label: member["label"].text, models: model.models)
-                                        ChatSharedMemberChip(name: member["name"].text, model: member["label"].text,
-                                            used: member["usage"].optionalInt, limit: member["context"].optionalInt,
-                                            active: member["status"].text == "working", accent: brand.accent,
-                                            ink: CompanionTheme.ink, secondary: CompanionTheme.secondary) {
-                                                CompanionProviderMark(presentation: brand, size: 13)
-                                            }.padding(.vertical, 6)
-                                    }.buttonStyle(.plain)
-                                }
-                            }
+                chatControls(chat).padding(.horizontal, 8).padding(.bottom, 10)
+            }
+        }.padding(.horizontal, 10)
+    }
+
+    /// The Mac header's second half: the Team and its members while a Team
+    /// runs the chat, otherwise the model (with its reasoning effort) and the
+    /// working folder. Effort is chosen in the model picker's sidecar.
+    @ViewBuilder private func chatControls(_ chat: RemoteChat) -> some View {
+        if model.team["enabled"].flag {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 10) {
+                    Button { inspectorTab = .agents; inspector = true } label: {
+                        Label("Team · \(model.members.count)", systemImage: "person.3").font(.caption.weight(.medium))
+                    }
+                    ForEach(model.members, id: \.self) { member in
+                        Button { inspectorTab = .agents; inspector = true } label: {
+                            let brand = CompanionBranding.presentation(route: member["route"].text.isEmpty ? String(member["choice"].text.split(separator: "|").first ?? "") : member["route"].text, label: member["label"].text, models: model.models)
+                            ChatSharedMemberChip(name: member["name"].text, model: member["label"].text,
+                                used: member["usage"].optionalInt, limit: member["context"].optionalInt,
+                                active: member["status"].text == "working", accent: brand.accent,
+                                ink: CompanionTheme.ink, secondary: CompanionTheme.secondary) {
+                                    CompanionProviderMark(presentation: brand, size: 13)
+                                }.padding(.vertical, 4)
                         }
                     }
-                }.padding(.bottom, 12)
-            }
-        }.padding(.horizontal, CompanionTheme.margin)
+                }
+            }.buttonStyle(.plain)
+        } else {
+            HStack(spacing: 10) {
+                Button { choosingModel = true } label: {
+                    HStack(spacing: 5) {
+                        CompanionProviderMark(presentation: CompanionBranding.presentation(route: chat.route ?? String(model.configuration["choice"].text.split(separator: "|").first ?? ""), label: chat.displayModel, models: model.models), size: 15)
+                        Text(chat.displayModel).font(.caption.weight(.medium))
+                        let effort = model.configuration["effort"].text
+                        if !effort.isEmpty { Text("· " + ChatSharedEffort.title(effort)).font(.caption).foregroundStyle(CompanionTheme.secondary) }
+                        Image(systemName: "chevron.down").font(.system(size: 9))
+                    }
+                }.buttonStyle(.plain)
+                    .sheet(isPresented: $choosingModel) {
+                        CompanionRoutePicker(model: model) { row, effort in model.configure(["choice": row["id"], "effort": .string(effort)]) }
+                    }
+                    .disabled(!model.configurable)
+                    .accessibilityLabel("Model")
+                let folder = model.configuration["workspace"].text
+                if !folder.isEmpty {
+                    Label((folder as NSString).lastPathComponent, systemImage: "folder")
+                        .font(.caption).foregroundStyle(CompanionTheme.secondary)
+                        .accessibilityLabel("Working folder " + (folder as NSString).lastPathComponent)
+                }
+            }.lineLimit(1)
+        }
     }
 
     private var horizontalInspectorIsSheet: Bool {
         viewWidth < 1000
     }
-    private func permissionLabel(_ mode: String) -> String {
-        switch mode { case "accept_edits": return "Accept Edits"; case "yolo": return "YOLO"; default: return "Manual" }
-    }
     private func choosePermission(_ mode: String) {
-        if mode == "yolo" { permissionChange = mode; showingPermissionConfirmation = true }
+        if mode == "yolo" { showingPermissionConfirmation = true }
         else { model.configure(["approvalMode": .string(mode)]) }
     }
 
@@ -448,14 +493,14 @@ public struct CompanionView: View {
                             model.select(chat.id); chatList = false
                         } label: {
                             HStack(spacing: 10) {
-                                Image(systemName: "bubble.left").font(.caption).foregroundStyle(chat.providerAccent)
+                                CompanionProviderMark(presentation: CompanionBranding.presentation(route: chat.route ?? "", label: chat.displayModel, models: model.models), size: 14)
                                 VStack(alignment: .leading, spacing: 4) {
                                     Text(chat.title).font(.subheadline.weight(.medium)).lineLimit(1)
                                     Text(chat.displayModel).font(.caption2).foregroundStyle(CompanionTheme.secondary).lineLimit(1)
                                 }
                                 Spacer(minLength: 0)
-                                if chat.pendingApproval { Image(systemName: "hand.raised").font(.caption).foregroundStyle(chat.providerAccent) }
-                                else if chat.busy { ProgressView().controlSize(.mini).tint(chat.providerAccent) }
+                                if chat.pendingApproval { Image(systemName: "hand.raised.fill").font(.caption).foregroundStyle(CompanionTheme.secondary) }
+                                else if chat.active ?? chat.busy { ProgressView().controlSize(.mini).tint(chat.providerAccent) }
                             }.padding(.horizontal, 12).padding(.vertical, 11)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                                 .background(chat.id == model.selectedChatID ? CompanionTheme.selection : .clear, in: RoundedRectangle(cornerRadius: 8))
@@ -464,10 +509,8 @@ public struct CompanionView: View {
                                 }
                         }.buttonStyle(.plain)
                     }
-                }.padding(.horizontal, 8)
+                }.padding(.horizontal, 8).padding(.bottom, 12)
             }
-            HStack(spacing: 7) { Image(systemName: "desktopcomputer"); Text(model.isConnected ? "Connected to your Mac" : "Saved connection") }
-                .font(.caption).foregroundStyle(CompanionTheme.secondary).padding(18)
         }.background(CompanionTheme.pane(.sidebar, surfaceStyle: surfaceStyle)).foregroundStyle(CompanionTheme.ink)
     }
 
@@ -478,7 +521,7 @@ public struct CompanionView: View {
                     .foregroundStyle(CompanionTheme.secondary).padding(.top, 60)
                 VStack(spacing: 8) {
                     Text(model.isConnected ? "Your chats, here" : "Your Mac, within reach").font(.title2.weight(.semibold))
-                    Text(model.isConnected ? "Start a chat in Provider Hub on your Mac. It will appear here." : "Continue a conversation, check on work and answer approvals from your phone.")
+                    Text(model.isConnected ? "Start a chat here or on your Mac. It appears in both." : "Continue a conversation, check on work and answer approvals from your phone.")
                         .font(.callout).foregroundStyle(CompanionTheme.secondary).multilineTextAlignment(.center)
                 }
                 if model.isConnected { Button("New chat") { creatingChat = true }.buttonStyle(.borderedProminent) }
@@ -534,8 +577,9 @@ public struct CompanionView: View {
                 DisclosureGroup("Action details") { ScrollView { Text(approval.detail).font(.system(.caption2, design: .monospaced)).textSelection(.enabled) }.frame(maxHeight: 100) }
                     .font(.caption).tint(CompanionTheme.secondary)
             }
-            HStack { Spacer(); Button("Deny") { model.decide(false) }.buttonStyle(.bordered)
-                Button("Allow once") { model.decide(true) }.buttonStyle(.borderedProminent).tint(CompanionTheme.ink).foregroundStyle(CompanionTheme.surface) }
+            HStack { Spacer(); Button("Deny") { model.decide(false) }.buttonStyle(.bordered).keyboardShortcut("d", modifiers: .command)
+                Button("Allow once") { model.decide(true) }.buttonStyle(.borderedProminent).tint(CompanionTheme.ink).foregroundStyle(CompanionTheme.surface)
+                    .keyboardShortcut("y", modifiers: .command) }
                 .disabled(!model.isConnected)
         }.padding(14).companionCard(cornerRadius: CompanionTheme.panelRadius, accent: CompanionTheme.manual)
             .padding(.horizontal, 14).padding(.bottom, 8)
@@ -559,10 +603,12 @@ public struct CompanionView: View {
                     }
                 }
             }
-            if !model.isConnected || model.store.needsSnapshot {
+            // A plain reconnect is already said by the header and placeholder;
+            // anything with a reason (an error, a pairing step) keeps it here.
+            if model.store.needsSnapshot || model.connectionPhase != nil && !["Connecting…", "Disconnected. Reconnecting…"].contains(model.status) {
                 Text(model.store.needsSnapshot ? "Refreshing after a missed update…" : model.status)
                     .font(.caption).foregroundStyle(CompanionTheme.secondary).lineLimit(2)
-            } else if let notice = model.store.notices.last {
+            } else if model.isConnected, let notice = model.store.notices.last {
                 Text(notice).font(.caption).foregroundStyle(CompanionTheme.secondary).lineLimit(2)
             }
             HStack(alignment: .bottom, spacing: 10) {
@@ -575,8 +621,7 @@ public struct CompanionView: View {
                     } label: { Image(systemName: "plus").frame(width: 32, height: 40) }
                         .disabled(model.attachmentSending).accessibilityLabel("Add attachment")
                 }
-                CompanionMentionField(text: $model.draft,
-                    placeholder: model.mentionTargets.isEmpty ? "Message…" : "Message the Team, or @ a member…",
+                CompanionMentionField(text: $model.draft, placeholder: placeholder(chat),
                     enabled: model.isConnected && !model.store.needsSnapshot,
                     mentions: model.mentionTargets, menu: mentionMenu)
                     .accessibilityLabel("Message to \(chat.title)")
@@ -586,6 +631,7 @@ public struct CompanionView: View {
                         .frame(width: 36, height: 36).background(CompanionTheme.ink, in: Circle()).padding(.vertical, 4)
                 }.buttonStyle(.plain).disabled(!model.isConnected || !model.runIsOpen && !model.canSend)
                     .opacity(!model.runIsOpen && !model.canSend ? 0.4 : 1)
+                    .keyboardShortcut(model.runIsOpen ? KeyboardShortcut(".", modifiers: .command) : KeyboardShortcut(.return, modifiers: .command))
                     .accessibilityLabel(model.runIsOpen ? "Stop this chat" : "Send message")
             }.padding(.horizontal, 14).padding(.vertical, 4)
                 .overlay(alignment: .topLeading) {
@@ -593,25 +639,42 @@ public struct CompanionView: View {
                         .padding(.leading, 46)
                         .alignmentGuide(.top) { $0[.bottom] + 6 }
                 }
-                .companionCard(cornerRadius: 20, accent: chat.approvalMode == "yolo" ? .red : chat.providerAccent)
-            HStack(spacing: 6) {
-                Circle().fill(chat.approvalColor).frame(width: 5, height: 5)
-                Menu {
-                    ForEach(["manual", "accept_edits", "yolo"], id: \.self) { mode in
-                        Button { choosePermission(mode) } label: {
-                            if mode == (model.configuration["approvalMode"].text.isEmpty ? chat.approvalMode ?? "manual" : model.configuration["approvalMode"].text) {
-                                Label(permissionLabel(mode), systemImage: "checkmark")
-                            } else { Text(permissionLabel(mode)) }
-                        }
-                    }
-                } label: { HStack(spacing: 3) { Text(chat.approvalLabel); Image(systemName: "chevron.down").font(.system(size: 8)) } }
-                    .foregroundStyle(chat.approvalColor).disabled(!model.isConnected || chat.busy || !model.controlSurfaceAvailable)
-                    .accessibilityLabel("Change chat permissions")
-                Text(model.runIsOpen ? "Working…" : "Ready").foregroundStyle(CompanionTheme.secondary)
-                Spacer()
-                Text("Runs on your Mac").foregroundStyle(CompanionTheme.secondary)
-            }.font(.caption2).padding(.horizontal, 5)
+                .companionCard(cornerRadius: 20, accent: model.approvalMode == "yolo" ? .red : chat.providerAccent)
+            footer
         }.padding(.horizontal, 14).padding(.top, 8).padding(.bottom, 10)
+    }
+
+    private func placeholder(_ chat: RemoteChat) -> String {
+        if let phase = model.connectionPhase { return phase == "Connecting" ? "Connecting…" : "Offline" }
+        if model.team["enabled"].flag { return model.mentionTargets.isEmpty ? "Message the Team…" : "Message the Team, or @ a member…" }
+        return "Message " + chat.displayModel + "…"
+    }
+
+    /// The approval mode, the chat's status and the turn clock, as on the
+    /// Mac. A Team leaves what is running to the activity strip above.
+    private var footer: some View {
+        let mode = model.approvalMode
+        return HStack(spacing: 6) {
+            Circle().fill(CompanionTheme.approvalColor(mode)).frame(width: 5, height: 5)
+            Menu {
+                ForEach(["manual", "accept_edits", "yolo"], id: \.self) { option in
+                    Button { choosePermission(option) } label: {
+                        if option == mode { Label(CompanionTheme.approvalLabel(option), systemImage: "checkmark") }
+                        else { Text(CompanionTheme.approvalLabel(option)) }
+                    }
+                }
+            } label: { HStack(spacing: 3) { Text(CompanionTheme.approvalLabel(mode)); Image(systemName: "chevron.down").font(.system(size: 8)) } }
+                .foregroundStyle(CompanionTheme.approvalColor(mode)).disabled(!model.configurable)
+                .accessibilityLabel("Change chat permissions")
+            if !model.team["enabled"].flag, let chat = model.selectedChat {
+                let status = model.selectionBound && !model.store.selectedStatus.isEmpty ? model.store.selectedStatus : chat.status
+                ChatSharedShimmerText(text: status.isEmpty ? (model.runIsOpen ? "Working…" : "Ready") : status,
+                    active: model.runIsOpen && model.store.approval == nil, accent: chat.providerAccent, base: CompanionTheme.secondary)
+                    .lineLimit(1)
+            }
+            Spacer(minLength: 8)
+            CompanionTurnTime(startedAt: model.turnStartedAt)
+        }.font(.caption2).padding(.horizontal, 5)
     }
 
     private var settingsSheet: some View {

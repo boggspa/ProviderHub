@@ -133,12 +133,21 @@ struct ChatSharedModelPicker<Choice: ChatPickerChoice, Mark: View>: View {
         }.padding(.horizontal, 10).padding(.vertical, 10).frame(maxHeight: .infinity, alignment: .top)
     }
     private func effortRow(_ value: String, accent: Color) -> some View {
-        let title = value.isEmpty ? "Default" : value == "xhigh" ? "Extra high" : value.capitalized
+        let title = ChatSharedEffort.title(value)
         return Button { withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.12)) { effort = value } } label: {
             HStack(spacing: 7) {
                 Circle().fill(effort == value ? accent : Color.secondary.opacity(0.3)).frame(width: 6, height: 6)
                 Text(title).font(.system(size: 11, weight: effort == value ? .semibold : .regular)).foregroundStyle(effort == value ? Color.primary : .secondary)
             }.frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 5).contentShape(Rectangle())
         }.buttonStyle(.plain).accessibilityLabel("Reasoning: " + title).accessibilityAddTraits(effort == value ? .isSelected : [])
+    }
+}
+
+/// A reasoning effort as both shells name it: "Extra high" for xhigh,
+/// "Default" for the provider's own choice.
+enum ChatSharedEffort {
+    static func title(_ effort: String) -> String {
+        if effort.isEmpty { return "Default" }
+        return effort.lowercased() == "xhigh" ? "Extra high" : effort.prefix(1).uppercased() + effort.dropFirst()
     }
 }

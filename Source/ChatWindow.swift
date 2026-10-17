@@ -152,13 +152,6 @@ private func folderName(_ path: String) -> String {
     let name = (path as NSString).lastPathComponent
     return name.isEmpty ? shortPath(path) : name
 }
-private func effortTitle(_ effort: String) -> String {
-    switch effort.lowercased() {
-    case "xhigh": return "Extra high"
-    case "": return "Default"
-    default: return effort.prefix(1).uppercased() + effort.dropFirst()
-    }
-}
 private func tokenCount(_ value: Int) -> String {
     if value >= 1_000_000 { return String(format: "%.1fM", Double(value) / 1_000_000) }
     if value >= 1_000 { return String(format: "%.1fK", Double(value) / 1_000) }
@@ -187,11 +180,17 @@ struct ChatPane: View {
         VStack(spacing: 0) {
             ChatHeader(model: model, railVisible: railVisible, railAvailable: railAvailable, compact: compactHeader, toggleRail: toggleRail)
             Rectangle().fill(Semantic.hairline).frame(height: HubTheme.Separator.width)
-            if model.selectedID == nil { ChatWelcome(model: model).hubGlassPane(.transcript) }
-            else { ChatTranscript(model: model).hubGlassPane(.transcript) }
-            if model.selectedID != nil { ChatActivityStrip(model: model) }
-            if let approval = model.approval { ApprovalStrip(model: model, approval: approval) }
-            ChatComposer(model: model)
+            // One sheet of paper from the header rule to the window's bottom
+            // edge: the live strip and the composer sit on the transcript
+            // rather than on a band of glass under a hard edge.
+            VStack(spacing: 0) {
+                if model.selectedID == nil { ChatWelcome(model: model) }
+                else { ChatTranscript(model: model) }
+                if model.selectedID != nil { ChatActivityStrip(model: model) }
+                if let approval = model.approval { ApprovalStrip(model: model, approval: approval) }
+                ChatComposer(model: model)
+            }
+            .hubGlassPane(.transcript)
         }
     }
 }
@@ -292,7 +291,7 @@ private struct ChatHeader: View {
                     Text(route.accountLabel).font(HubTheme.Typography.detail).foregroundStyle(Semantic.secondaryInk)
                 }
                 if let effort = model.selected?.effort, !effort.isEmpty {
-                    Text("· " + effortTitle(effort)).font(HubTheme.Typography.detail).foregroundStyle(Semantic.secondaryInk)
+                    Text("· " + ChatSharedEffort.title(effort)).font(HubTheme.Typography.detail).foregroundStyle(Semantic.secondaryInk)
                 }
                 Image(systemName: "chevron.down").font(.system(size: 9)).foregroundStyle(Semantic.secondaryInk)
             }

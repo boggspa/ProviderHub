@@ -49,7 +49,14 @@ struct CompanionActivity: Identifiable, Equatable {
 }
 
 extension CompanionModel {
-    public var runIsOpen: Bool { store.selectedBusy ?? selectedChat?.busy ?? false }
+    /// The chat's own run state once the Mac has bound it to the phone;
+    /// until then (just after a tap) the recent-list summary for that chat.
+    public var runIsOpen: Bool {
+        selectionBound ? store.selectedBusy ?? selectedChat?.busy ?? false : selectedChat?.busy ?? false
+    }
+    /// Whether the Mac's per-chat state (configuration, status, run) is for
+    /// the chat selected on the phone yet.
+    var selectionBound: Bool { selectedChatID != nil && store.selectedID == selectedChatID }
     var liveActivities: [CompanionActivity] {
         let transition = store.selectedInterrupting
             ? (["Stopping…", "Interrupting for your update…"].contains(store.selectedStatus) ? store.selectedStatus : "Stopping…") : nil

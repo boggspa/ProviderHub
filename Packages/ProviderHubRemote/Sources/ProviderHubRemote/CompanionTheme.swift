@@ -46,6 +46,14 @@ enum CompanionTheme {
         return pane == .transcript ? glassTranscript : glassPane
     }
 
+    /// The approval mode's name and colour, as the Mac composer footer shows them.
+    static func approvalLabel(_ mode: String) -> String {
+        switch mode { case "accept_edits": return "Accept Edits"; case "yolo": return "YOLO"; default: return "Manual" }
+    }
+    static func approvalColor(_ mode: String) -> Color {
+        switch mode { case "accept_edits": return secondary; case "yolo": return .red; default: return manual }
+    }
+
     static func accent(_ hex: String?) -> Color {
         guard let hex, hex.count == 7, hex.hasPrefix("#"), let value = UInt32(hex.dropFirst(), radix: 16) else { return secondary }
         return Color(.sRGB, red: Double(value >> 16 & 255) / 255, green: Double(value >> 8 & 255) / 255,
@@ -78,10 +86,4 @@ extension RemoteChat {
     var displayModel: String { modelLabel.flatMap { $0.isEmpty ? nil : $0 } ?? "Assistant" }
     var displayProvider: String { providerLabel.flatMap { $0.isEmpty ? nil : $0 } ?? displayModel }
     var providerAccent: Color { CompanionTheme.accent(accent) }
-    var approvalLabel: String {
-        switch approvalMode { case "accept_edits": return "Accept Edits"; case "yolo": return "YOLO"; default: return "Manual" }
-    }
-    var approvalColor: Color {
-        switch approvalMode { case "accept_edits": return CompanionTheme.secondary; case "yolo": return .red; default: return CompanionTheme.manual }
-    }
 }
