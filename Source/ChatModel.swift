@@ -435,6 +435,9 @@ final class ChatModel: ObservableObject {
                     owner.disconnected("Chat disconnected. Reopen Chat to reconnect; saved work is kept.")
                 }
             }
+            // A listener lives in the worker that opened it; a replacement
+            // starts without one, even if the old one's exit is still queued.
+            remoteStatus = [:]
             framer = ChatLineFramer(); input = stdin; output = stdout; process = child
             try child.run()
         } catch { notice = error.localizedDescription; connected = false; process = nil; input = nil }
@@ -459,7 +462,10 @@ final class ChatModel: ObservableObject {
         write(["command": "remote_stop"])
     }
     func autoStartRemoteIfConfigured() {
-        guard !preferences.bool(forKey: "chatRemoteDisabled") else {
+        // Before ready the worker has not read a command yet; its ready event
+        // calls this again, and a second remote_start is refused as "already
+        // listening".
+        guard connected, !preferences.bool(forKey: "chatRemoteDisabled") else {
             return
         }
         let listening = remoteStatus["listening"] as? Bool ?? false
@@ -652,6 +658,8 @@ final class ChatModel: ObservableObject {
     /// in hidden chats. Accepted input has already cleared its pending record.
     func disconnected(_ message: String) {
         connected = false
+        // The remote listener ran inside the worker that just went away.
+        remoteStatus = [:]
         pendingSelection = nil; pendingSelectionRequest = nil
         for task in nativeTasks.values { task.cancel() }
         nativeTasks.removeAll()
