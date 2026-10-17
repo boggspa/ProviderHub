@@ -277,22 +277,185 @@ private struct CompanionMessageText: View {
     let text: String
     var size: CGFloat = 13
     var body: some View {
-        let blocks = text.components(separatedBy: "```")
         VStack(alignment: .leading, spacing: 8) {
-            ForEach(Array(blocks.enumerated()), id: \.offset) { index, block in
-                if index % 2 == 1 {
-                    let code = block.split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: false)
+            ForEach(Array(CompanionMarkdown.blocks(text).enumerated()), id: \.offset) { _, block in
+                switch block {
+                case .code(let language, let source):
                     VStack(alignment: .leading, spacing: 6) {
-                        if let language = code.first, !language.isEmpty { Text(language).font(.system(size: size * 0.81)).foregroundStyle(CompanionTheme.secondary) }
-                        ScrollView(.horizontal) { Text(code.count > 1 ? String(code[1]) : block).font(.system(size: size, design: .monospaced)).textSelection(.enabled) }
+                        if !language.isEmpty { Text(language).font(.system(size: size * 0.81)).foregroundStyle(CompanionTheme.secondary) }
+                        ScrollView(.horizontal) { Text(source).font(.system(size: size, design: .monospaced)).textSelection(.enabled) }
                     }.padding(12).companionCard(cornerRadius: 8)
-                } else if !block.isEmpty {
-                    ForEach(Array(block.components(separatedBy: "\n\n").enumerated()), id: \.offset) { _, paragraph in
-                        Text((try? AttributedString(markdown: paragraph, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(paragraph))
-                            .font(.system(size: size)).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
-                    }
+                case .heading(let level, let source):
+                    inline(source).font(.system(size: headingSize(level), weight: .semibold))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                case .paragraph(let source):
+                    inline(source).font(.system(size: size)).frame(maxWidth: .infinity, alignment: .leading)
+                case .table(let headers, let rows):
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        VStack(alignment: .leading, spacing: 0) {
+                            tableRow(headers, header: true)
+                            ForEach(Array(rows.enumerated()), id: \.offset) { _, row in tableRow(row, header: false) }
+                        }.fixedSize(horizontal: true, vertical: false)
+                    }.companionCard(cornerRadius: 8)
                 }
             }
         }
+    }
+
+    private func inline(_ source: String) -> some View {
+        Text((try? AttributedString(markdown: source, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(source))
+            .textSelection(.enabled)
+    }
+
+    private func headingSize(_ level: Int) -> CGFloat {
+        size * ([1: 1.55, 2: 1.38, 3: 1.24, 4: 1.14, 5: 1.07, 6: 1.0][level] ?? 1.0)
+    }
+
+    private func tableRow(_ cells: [String], header: Bool) -> some View {
+        HStack(alignment: .top, spacing: 0) {
+            ForEach(Array(cells.enumerated()), id: \.offset) { _, cell in
+                inline(cell).font(.system(size: size, weight: header ? .semibold : .regular))
+                    .frame(minWidth: 84, maxWidth: 220, alignment: .leading)
+                    .padding(.horizontal, 9).padding(.vertical, 7)
+                    .overlay(alignment: .trailing) { CompanionTheme.hairline.frame(width: 0.5) }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(header ? CompanionTheme.hairline.opacity(0.22) : Color.clear)
+        .overlay(alignment: .bottom) { CompanionTheme.hairline.frame(height: 0.5) }
+    }
+}
+
+/// Small, bounded block grammar for the companion. Inline emphasis and links
+/// use Foundation's Markdown parser; headings, tables and fenced code get
+/// native SwiftUI structure without a WebView or third-party dependency.
+/// Fences and table rows follow the desktop's ChatTableParser rules.
+enum CompanionMarkdown {
+    enum Block: Equatable {
+        case paragraph(String)
+        case heading(Int, String)
+        case table([String], [[String]])
+        case code(String, String)
+    }
+
+    static func blocks(_ source: String) -> [Block] {
+        guard source.utf8.count <= 256 * 1024 else { return [.paragraph(source)] }
+        let lines = source.components(separatedBy: "\n").map { $0.hasSuffix("\r") ? String($0.dropLast()) : $0 }
+        var result: [Block] = [], prose: [String] = [], index = 0, tableCount = 0
+        func flush() {
+            let value = prose.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+            if !value.isEmpty { result.append(.paragraph(value)) }
+            prose.removeAll(keepingCapacity: true)
+        }
+        while index < lines.count {
+            let line = lines[index]
+            // A backtick info string cannot hold backticks: ```x``` is inline code.
+            if let open = fence(line), open.marker == "~" || !open.info.contains("`") {
+                flush()
+                let indent = line.prefix(while: { $0 == " " }).count
+                let language = String(open.info.split(whereSeparator: { $0 == " " || $0 == "\t" }).first ?? "")
+                index += 1
+                var code: [String] = [], closed = false
+                while index < lines.count {
+                    let body = lines[index]
+                    index += 1
+                    // Only the opener's character, at least as many times and
+                    // with nothing after it, closes the block; anything shorter
+                    // or followed by text is part of the code.
+                    if let end = fence(body), end.marker == open.marker, end.count >= open.count, end.info.isEmpty {
+                        closed = true; break
+                    }
+                    code.append(String(body.dropFirst(min(indent, body.prefix(while: { $0 == " " }).count))))
+                }
+                // An unfinished block keeps everything after its opener except
+                // the empty line a trailing newline leaves.
+                if !closed, code.last?.isEmpty == true { code.removeLast() }
+                result.append(.code(language, code.joined(separator: "\n")))
+                continue
+            }
+            if let (level, heading) = heading(line) {
+                flush(); result.append(.heading(level, heading)); index += 1; continue
+            }
+            if tableCount < 16, index + 1 < lines.count,
+               let header = cells(lines[index]), let separators = cells(lines[index + 1]),
+               header.count <= 12, header.count == separators.count, separators.allSatisfy(isDelimiter) {
+                flush(); index += 2
+                var rows: [[String]] = []
+                // A row wider than the header ends the table, as on the desktop,
+                // so its text stays visible instead of losing the extra cells.
+                while index < lines.count, rows.count < 128, let row = cells(lines[index]), row.count <= header.count {
+                    rows.append(row + Array(repeating: "", count: header.count - row.count))
+                    index += 1
+                }
+                result.append(.table(header, rows)); tableCount += 1; continue
+            }
+            if line.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { flush() }
+            else { prose.append(line) }
+            index += 1
+        }
+        flush()
+        return result.isEmpty ? [.paragraph(source)] : result
+    }
+
+    private static func heading(_ line: String) -> (Int, String)? {
+        let count = line.prefix(while: { $0 == "#" }).count
+        guard (1...6).contains(count), line.dropFirst(count).first == " " else { return nil }
+        return (count, String(line.dropFirst(count)).trimmingCharacters(in: .whitespaces))
+    }
+
+    /// Four-space indentation is code, and quoted lines are outside this small
+    /// grammar.
+    private static func unindented(_ line: String) -> Substring? {
+        let spaces = line.prefix(while: { $0 == " " }).count
+        guard spaces <= 3, !line.hasPrefix("\t") else { return nil }
+        let value = line.dropFirst(spaces)
+        guard !value.hasPrefix(">"), !value.hasPrefix("\t") else { return nil }
+        return value
+    }
+
+    private static func fence(_ line: String) -> (marker: Character, count: Int, info: String)? {
+        guard let value = unindented(line), let first = value.first, first == "`" || first == "~" else { return nil }
+        let count = value.prefix(while: { $0 == first }).count
+        guard count >= 3 else { return nil }
+        return (first, count, value.dropFirst(count).trimmingCharacters(in: .whitespaces))
+    }
+
+    /// Unescaped pipes outside matching backtick runs split columns. An
+    /// escaped pipe is cell text, inside code spans too, so `a\|b` is one cell
+    /// reading a|b; other escapes stay for the inline renderer.
+    private static func cells(_ line: String) -> [String]? {
+        guard let value = unindented(line) else { return nil }
+        let trimmed = value.trimmingCharacters(in: .whitespaces)
+        let characters = Array(trimmed)
+        var parts: [String] = [], part = "", codeRun: Int?
+        var index = 0, pipe = false, lastWasPipe = false
+        while index < characters.count {
+            let character = characters[index]
+            if character == "\\", index + 1 < characters.count {
+                if characters[index + 1] != "|" { part.append(character) }
+                part.append(characters[index + 1]); index += 2; lastWasPipe = false
+            } else if character == "`" {
+                var end = index + 1
+                while end < characters.count, characters[end] == "`" { end += 1 }
+                let count = end - index
+                if codeRun == count { codeRun = nil } else if codeRun == nil { codeRun = count }
+                part += String(repeating: "`", count: count); index = end; lastWasPipe = false
+            } else if character == "|", codeRun == nil {
+                parts.append(part.trimmingCharacters(in: .whitespaces)); part = ""
+                pipe = true; lastWasPipe = true; index += 1
+            } else {
+                part.append(character); index += 1; lastWasPipe = false
+            }
+        }
+        guard pipe, codeRun == nil else { return nil }
+        parts.append(part.trimmingCharacters(in: .whitespaces))
+        if trimmed.hasPrefix("|") { parts.removeFirst() }
+        if lastWasPipe { parts.removeLast() }
+        return parts.isEmpty ? nil : parts
+    }
+
+    private static func isDelimiter(_ cell: String) -> Bool {
+        let clean = cell.replacingOccurrences(of: ":", with: "")
+        return clean.count >= 3 && clean.allSatisfy { $0 == "-" }
     }
 }
