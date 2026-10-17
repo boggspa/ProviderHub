@@ -7,6 +7,22 @@ import tempfile
 import unittest
 
 
+class GatewayReadyCallbackTests(unittest.TestCase):
+    """The gateway's Ready callback starts Chat, and Chat's start calls
+    startGateway. Only the transition to Ready may fire it, or each start
+    schedules the next and the worker is flooded with refreshes."""
+
+    def test_only_the_transition_to_ready_starts_chat(self):
+        bridge = (Path(__file__).with_name("MistralBridge.swift")).read_text()
+        start = bridge.split("func startGateway() async throws {", 1)[1].split("\n    func ", 1)[0]
+        self.assertNotIn("onGatewayStarted", start)
+        self.assertIn("if running { return }", start)
+        consume = bridge.split("func consumeOutput(_ data: Data) {", 1)[1].split("\n    func ", 1)[0]
+        self.assertIn("let announced = running", consume)
+        self.assertIn("if !announced { onGatewayStarted?() }", consume)
+        self.assertEqual(bridge.count("onGatewayStarted?()"), 1)
+
+
 @unittest.skipUnless(sys.platform == "darwin" and shutil.which("xcrun"), "Swift/AppKit state test needs macOS")
 class ChatModelStateTests(unittest.TestCase):
     def test_drafts_acknowledgements_approval_and_split_transport(self):
@@ -144,6 +160,24 @@ import Combine
               "disabled remote must not auto-start on ready")
         disabledModel.startRemote(host: "100.80.90.100")
         check(remotePrefs.bool(forKey: "chatRemoteDisabled") == false, "startRemote did not clear remote disabled")
+        // The listener lives in the worker. A start before ready is left to the
+        // ready event, a listening worker is not asked again, and once that
+        // worker is gone its replacement reopens remote access even though the
+        // last status this window saw said it was listening.
+        var restartCmds: [[String: Any]] = []
+        let restartModel = ChatModel(sendCommand: { restartCmds.append($0); return true }, preferences: remotePrefs)
+        func remoteStarts() -> Int { restartCmds.filter { $0["command"] as? String == "remote_start" }.count }
+        restartModel.autoStartRemoteIfConfigured()
+        check(remoteStarts() == 0, "remote access started before the worker was ready")
+        restartModel.consume(try JSONSerialization.data(withJSONObject: ["event":"ready"]) + Data([10]))
+        check(remoteStarts() == 1, "remote access did not start once on ready")
+        restartModel.consume(try JSONSerialization.data(withJSONObject: ["event":"remote", "status": ["listening": true]]) + Data([10]))
+        restartModel.autoStartRemoteIfConfigured()
+        check(remoteStarts() == 1, "a listening worker was asked to listen again")
+        restartModel.disconnected("Chat disconnected.")
+        check(restartModel.remoteStatus.isEmpty, "a gone worker's listener status survived")
+        restartModel.consume(try JSONSerialization.data(withJSONObject: ["event":"ready"]) + Data([10]))
+        check(remoteStarts() == 2, "the replacement worker did not reopen remote access")
         model.setWebSearchEnabled(true)
         try send(["event":"selected", "id":"A", "entries":[]])
         check(model.approvalMode == "manual", "old summaries must default to Manual")

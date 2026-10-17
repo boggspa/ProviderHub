@@ -329,8 +329,9 @@ private struct CompanionMessageText: View {
 /// Small, bounded block grammar for the companion. Inline emphasis and links
 /// use Foundation's Markdown parser; headings, tables and fenced code get
 /// native SwiftUI structure without a WebView or third-party dependency.
-private enum CompanionMarkdown {
-    enum Block {
+/// Fences and table rows follow the desktop's ChatTableParser rules.
+enum CompanionMarkdown {
+    enum Block: Equatable {
         case paragraph(String)
         case heading(Int, String)
         case table([String], [[String]])
@@ -339,7 +340,7 @@ private enum CompanionMarkdown {
 
     static func blocks(_ source: String) -> [Block] {
         guard source.utf8.count <= 256 * 1024 else { return [.paragraph(source)] }
-        let lines = source.components(separatedBy: "\n")
+        let lines = source.components(separatedBy: "\n").map { $0.hasSuffix("\r") ? String($0.dropLast()) : $0 }
         var result: [Block] = [], prose: [String] = [], index = 0, tableCount = 0
         func flush() {
             let value = prose.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
@@ -348,16 +349,27 @@ private enum CompanionMarkdown {
         }
         while index < lines.count {
             let line = lines[index]
-            if line.trimmingCharacters(in: .whitespaces).hasPrefix("```") || line.trimmingCharacters(in: .whitespaces).hasPrefix("~~~") {
+            // A backtick info string cannot hold backticks: ```x``` is inline code.
+            if let open = fence(line), open.marker == "~" || !open.info.contains("`") {
                 flush()
-                let fence = line.trimmingCharacters(in: .whitespaces).prefix(3)
-                let language = String(line.trimmingCharacters(in: .whitespaces).dropFirst(3)).trimmingCharacters(in: .whitespaces)
+                let indent = line.prefix(while: { $0 == " " }).count
+                let language = String(open.info.split(whereSeparator: { $0 == " " || $0 == "\t" }).first ?? "")
                 index += 1
-                var code: [String] = []
-                while index < lines.count, !lines[index].trimmingCharacters(in: .whitespaces).hasPrefix(String(fence)) {
-                    code.append(lines[index]); index += 1
+                var code: [String] = [], closed = false
+                while index < lines.count {
+                    let body = lines[index]
+                    index += 1
+                    // Only the opener's character, at least as many times and
+                    // with nothing after it, closes the block; anything shorter
+                    // or followed by text is part of the code.
+                    if let end = fence(body), end.marker == open.marker, end.count >= open.count, end.info.isEmpty {
+                        closed = true; break
+                    }
+                    code.append(String(body.dropFirst(min(indent, body.prefix(while: { $0 == " " }).count))))
                 }
-                if index < lines.count { index += 1 }
+                // An unfinished block keeps everything after its opener except
+                // the empty line a trailing newline leaves.
+                if !closed, code.last?.isEmpty == true { code.removeLast() }
                 result.append(.code(language, code.joined(separator: "\n")))
                 continue
             }
@@ -369,8 +381,10 @@ private enum CompanionMarkdown {
                header.count <= 12, header.count == separators.count, separators.allSatisfy(isDelimiter) {
                 flush(); index += 2
                 var rows: [[String]] = []
-                while index < lines.count, let row = cells(lines[index]), rows.count < 128 {
-                    rows.append(Array(row.prefix(header.count)) + Array(repeating: "", count: max(0, header.count - row.count)))
+                // A row wider than the header ends the table, as on the desktop,
+                // so its text stays visible instead of losing the extra cells.
+                while index < lines.count, rows.count < 128, let row = cells(lines[index]), row.count <= header.count {
+                    rows.append(row + Array(repeating: "", count: header.count - row.count))
                     index += 1
                 }
                 result.append(.table(header, rows)); tableCount += 1; continue
@@ -389,13 +403,55 @@ private enum CompanionMarkdown {
         return (count, String(line.dropFirst(count)).trimmingCharacters(in: .whitespaces))
     }
 
+    /// Four-space indentation is code, and quoted lines are outside this small
+    /// grammar.
+    private static func unindented(_ line: String) -> Substring? {
+        let spaces = line.prefix(while: { $0 == " " }).count
+        guard spaces <= 3, !line.hasPrefix("\t") else { return nil }
+        let value = line.dropFirst(spaces)
+        guard !value.hasPrefix(">"), !value.hasPrefix("\t") else { return nil }
+        return value
+    }
+
+    private static func fence(_ line: String) -> (marker: Character, count: Int, info: String)? {
+        guard let value = unindented(line), let first = value.first, first == "`" || first == "~" else { return nil }
+        let count = value.prefix(while: { $0 == first }).count
+        guard count >= 3 else { return nil }
+        return (first, count, value.dropFirst(count).trimmingCharacters(in: .whitespaces))
+    }
+
+    /// Unescaped pipes outside matching backtick runs split columns. An
+    /// escaped pipe is cell text, inside code spans too, so `a\|b` is one cell
+    /// reading a|b; other escapes stay for the inline renderer.
     private static func cells(_ line: String) -> [String]? {
-        let trimmed = line.trimmingCharacters(in: .whitespaces)
-        guard trimmed.contains("|") else { return nil }
-        var values = trimmed.split(separator: "|", omittingEmptySubsequences: false).map { String($0).trimmingCharacters(in: .whitespaces) }
-        if trimmed.hasPrefix("|") { values.removeFirst() }
-        if trimmed.hasSuffix("|"), !values.isEmpty { values.removeLast() }
-        return values.isEmpty ? nil : values
+        guard let value = unindented(line) else { return nil }
+        let trimmed = value.trimmingCharacters(in: .whitespaces)
+        let characters = Array(trimmed)
+        var parts: [String] = [], part = "", codeRun: Int?
+        var index = 0, pipe = false, lastWasPipe = false
+        while index < characters.count {
+            let character = characters[index]
+            if character == "\\", index + 1 < characters.count {
+                if characters[index + 1] != "|" { part.append(character) }
+                part.append(characters[index + 1]); index += 2; lastWasPipe = false
+            } else if character == "`" {
+                var end = index + 1
+                while end < characters.count, characters[end] == "`" { end += 1 }
+                let count = end - index
+                if codeRun == count { codeRun = nil } else if codeRun == nil { codeRun = count }
+                part += String(repeating: "`", count: count); index = end; lastWasPipe = false
+            } else if character == "|", codeRun == nil {
+                parts.append(part.trimmingCharacters(in: .whitespaces)); part = ""
+                pipe = true; lastWasPipe = true; index += 1
+            } else {
+                part.append(character); index += 1; lastWasPipe = false
+            }
+        }
+        guard pipe, codeRun == nil else { return nil }
+        parts.append(part.trimmingCharacters(in: .whitespaces))
+        if trimmed.hasPrefix("|") { parts.removeFirst() }
+        if lastWasPipe { parts.removeLast() }
+        return parts.isEmpty ? nil : parts
     }
 
     private static func isDelimiter(_ cell: String) -> Bool {

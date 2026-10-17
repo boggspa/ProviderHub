@@ -94,6 +94,7 @@ final class MentionUITextView: UITextView {
     var onEscape: (() -> Bool)?
     var onMove: ((Int) -> Bool)?
     var onAccept: (() -> Bool)?
+    var menuOpen: (() -> Bool)?
 
     override func draw(_ rect: CGRect) {
         super.draw(rect)
@@ -103,12 +104,22 @@ final class MentionUITextView: UITextView {
             .font: font ?? .preferredFont(forTextStyle: .body), .foregroundColor: UIColor.placeholderText])
     }
 
+    /// The text and focus systems own these keys unless the member list is
+    /// open. Only then are the list's commands offered, and with priority, so
+    /// Up/Down move the highlight rather than the caret and Tab completes the
+    /// tag rather than moving focus. Closed, editing keys behave as usual.
     override var keyCommands: [UIKeyCommand]? {
+        guard menuOpen?() == true else { return super.keyCommands }
         var commands = super.keyCommands ?? []
-        commands.append(UIKeyCommand(input: UIKeyCommand.inputUpArrow, modifierFlags: [], action: #selector(mentionUp)))
-        commands.append(UIKeyCommand(input: UIKeyCommand.inputDownArrow, modifierFlags: [], action: #selector(mentionDown)))
-        commands.append(UIKeyCommand(input: UIKeyCommand.inputEscape, modifierFlags: [], action: #selector(mentionEscape)))
-        commands.append(UIKeyCommand(input: "\t", modifierFlags: [], action: #selector(mentionTab)))
+        let menuKeys: [(String, Selector)] = [
+            (UIKeyCommand.inputUpArrow, #selector(mentionUp)), (UIKeyCommand.inputDownArrow, #selector(mentionDown)),
+            (UIKeyCommand.inputEscape, #selector(mentionEscape)), ("\t", #selector(mentionTab)),
+        ]
+        for (input, action) in menuKeys {
+            let command = UIKeyCommand(input: input, modifierFlags: [], action: action)
+            command.wantsPriorityOverSystemBehavior = true
+            commands.append(command)
+        }
         return commands
     }
     @objc private func mentionUp() { _ = onMove?(-1) }
@@ -134,6 +145,7 @@ struct MentionTextEditor: UIViewRepresentable {
         view.isScrollEnabled = true
         view.textContainerInset = UIEdgeInsets(top: 8, left: 0, bottom: 8, right: 0)
         view.delegate = context.coordinator
+        view.menuOpen = { [weak menu = self.menu] in menu?.state != nil }
         view.onMove = { [weak menu = self.menu] step in
             guard menu?.state != nil else { return false }
             menu?.move(step); return true
@@ -155,6 +167,7 @@ struct MentionTextEditor: UIViewRepresentable {
         context.coordinator.parent = self
         view.placeholder = placeholder
         view.isEditable = enabled
+        view.menuOpen = { [weak menu] in menu?.state != nil }
         view.onMove = { [weak menu] step in
             guard menu?.state != nil else { return false }
             menu?.move(step); return true
