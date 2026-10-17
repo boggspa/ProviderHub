@@ -89,6 +89,7 @@ final class BridgeModel: ObservableObject {
     /// The floating recent-chat composer (QuickComposerPanel.swift).
     let quickPanel = QuickPanelModel()
     var openChatWindow: (() -> Void)?
+    var onGatewayStarted: (() -> Void)?
     @Published var chatWindowOpen = false
     @Published var chatWorking = false
     /// ChatModel.hasActiveWork, also refreshed on a Chat surface change, so
@@ -709,6 +710,9 @@ final class BridgeModel: ObservableObject {
     }
 
     func startGateway() async throws {
+        // Chat's own start calls this, so an already-running gateway must not
+        // announce itself again: that would schedule another Chat start, which
+        // calls back here, without end.
         if running { return }
         guard gatewayProcess == nil else { throw WorkerError(message: "The gateway is still starting or stopping.") }
         guard let python else { throw WorkerError(message: "Provider Hub needs Python 3.11 or newer. Install a supported Python runtime, then reconnect.") }
@@ -756,8 +760,11 @@ final class BridgeModel: ObservableObject {
             processBuffer.removeSubrange(0..<range.upperBound)
             guard let json = try? JSONSerialization.jsonObject(with: line) as? [String: Any] else { continue }
             if json["ready"] as? Bool == true {
+                let announced = running
                 gatewayState = "Ready"
                 credentialSource = json["credential_source"] as? String ?? credentialSource
+                // Only the transition to Ready brings Chat and remote access up.
+                if !announced { onGatewayStarted?() }
             } else if let error = json["error"] as? String {
                 gatewayState = "Error"; tell(error, error: true)
             }
@@ -1488,6 +1495,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             self.applyWindowStyle()
         }
         model.openChatWindow = { [weak self] in self?.showChat() }
+        model.onGatewayStarted = { [weak self] in
+            guard let self else { return }
+            Task { @MainActor in
+                await self.chatModel.start()
+                self.chatModel.autoStartRemoteIfConfigured()
+            }
+        }
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         statusItem.button?.image = NSImage(systemSymbolName: "point.3.connected.trianglepath.dotted", accessibilityDescription: hubName)
         statusItem.button?.image?.isTemplate = true

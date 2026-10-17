@@ -435,6 +435,9 @@ final class ChatModel: ObservableObject {
                     owner.disconnected("Chat disconnected. Reopen Chat to reconnect; saved work is kept.")
                 }
             }
+            // A listener lives in the worker that opened it; a replacement
+            // starts without one, even if the old one's exit is still queued.
+            remoteStatus = [:]
             framer = ChatLineFramer(); input = stdin; output = stdout; process = child
             try child.run()
         } catch { notice = error.localizedDescription; connected = false; process = nil; input = nil }
@@ -448,8 +451,28 @@ final class ChatModel: ObservableObject {
     func refresh() { write(["command": "refresh"]) }
     func refreshPlugins() { write(["command": "plugins"]) }
     func refreshDevices() { write(["command": "remote_status"]) }
-    func startRemote(host: String) { write(["command": "remote_start", "host": host, "port": 8765]) }
-    func stopRemote() { write(["command": "remote_stop"]) }
+    func startRemote(host: String) {
+        preferences.set(false, forKey: "chatRemoteDisabled")
+        let trimmed = host.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty { preferences.set(trimmed, forKey: "chatRemoteHost") }
+        write(["command": "remote_start", "host": trimmed, "port": 8765])
+    }
+    func stopRemote() {
+        preferences.set(true, forKey: "chatRemoteDisabled")
+        write(["command": "remote_stop"])
+    }
+    func autoStartRemoteIfConfigured() {
+        // Before ready the worker has not read a command yet; its ready event
+        // calls this again, and a second remote_start is refused as "already
+        // listening".
+        guard connected, !preferences.bool(forKey: "chatRemoteDisabled") else {
+            return
+        }
+        let listening = remoteStatus["listening"] as? Bool ?? false
+        guard !listening else { return }
+        guard let host = preferences.string(forKey: "chatRemoteHost")?.trimmingCharacters(in: .whitespacesAndNewlines), !host.isEmpty else { return }
+        write(["command": "remote_start", "host": host, "port": 8765])
+    }
     func confirmDevice(identity: String, code: String, allow: Bool) {
         write(["command": "remote_confirm", "identity": identity, "code": code, "allow": allow])
     }
@@ -635,6 +658,8 @@ final class ChatModel: ObservableObject {
     /// in hidden chats. Accepted input has already cleared its pending record.
     func disconnected(_ message: String) {
         connected = false
+        // The remote listener ran inside the worker that just went away.
+        remoteStatus = [:]
         pendingSelection = nil; pendingSelectionRequest = nil
         for task in nativeTasks.values { task.cancel() }
         nativeTasks.removeAll()
@@ -694,6 +719,7 @@ final class ChatModel: ObservableObject {
                 connected = true
                 write(["command": "preferences", "webSearch": webSearchEnabled])
                 if !observedChats.isEmpty { write(["command": "subscribe", "client": "desktop", "chats": observedChats.sorted()]) }
+                autoStartRemoteIfConfigured()
             case "plugins":
                 browserUseEnabled = event["browserUse"] as? Bool ?? false
                 pluginStatus = event["plugins"] as? [[String: Any]] ?? []
