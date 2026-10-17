@@ -40,7 +40,7 @@ struct ChatWindow: View {
                     inspectorVisible: model.inspectorVisible, rail: railWidth, inspector: inspectorWidth)
                 HStack(spacing: 0) {
                     if panes.rail > 0 {
-                        ChatWorkspaceRail(model: model).frame(width: panes.rail)
+                        ChatWorkspaceRail(model: model).hubGlassPane(.sidebar).frame(width: panes.rail)
                         ChatPaneDivider(label: "Workspace rail width", width: panes.rail, direction: 1,
                             resize: { railWidth = Double(ChatPaneSizing.clamp($0, 150, 360)) },
                             reset: { railWidth = Double(ChatPaneSizing.railDefault) })
@@ -54,6 +54,7 @@ struct ChatWindow: View {
                             reset: { inspectorWidth = 0 })
                         ChatInspector(model: model, browserStore: browser,
                                       browserInPane: model.selectedID.flatMap { workspace.browserPane(for: $0) } != nil)
+                            .hubGlassPane(.inspector)
                             .frame(width: panes.inspector)
                     }
                 }
@@ -62,6 +63,7 @@ struct ChatWindow: View {
             }
         }
         .frame(minWidth: 720, minHeight: 500)
+        .environment(\.hubSurfaceStyle, windowStyle)
         .environment(\.chatTextStyle, ChatTextStyle(size: textSize,
             selection: ChatFonts.selection(fontChoice, legacyMonospaced: monospacedText), customName: customFontName,
             zoom: ChatZoom.clamp(zoom)))
@@ -185,8 +187,8 @@ struct ChatPane: View {
         VStack(spacing: 0) {
             ChatHeader(model: model, railVisible: railVisible, railAvailable: railAvailable, compact: compactHeader, toggleRail: toggleRail)
             Rectangle().fill(Semantic.hairline).frame(height: HubTheme.Separator.width)
-            if model.selectedID == nil { ChatWelcome(model: model) }
-            else { ChatTranscript(model: model) }
+            if model.selectedID == nil { ChatWelcome(model: model).hubGlassPane(.transcript) }
+            else { ChatTranscript(model: model).hubGlassPane(.transcript) }
             if model.selectedID != nil { ChatActivityStrip(model: model) }
             if let approval = model.approval { ApprovalStrip(model: model, approval: approval) }
             ChatComposer(model: model)

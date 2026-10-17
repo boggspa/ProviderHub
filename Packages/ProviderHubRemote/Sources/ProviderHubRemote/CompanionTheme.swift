@@ -23,6 +23,29 @@ enum CompanionTheme {
     static let gap: CGFloat = 12
     static let margin: CGFloat = 18
 
+    /// Which fill a pane takes. The sidebar and inspector share one; the
+    /// transcript is the only pane that becomes opaque.
+    enum Pane {
+        case sidebar
+        case inspector
+        case transcript
+    }
+
+    /// Glass-mode fills, mirroring HubTheme.Glass on the Mac. The side panes
+    /// take one step off the material — a lighter gray on dark, a deeper one
+    /// on light — and the transcript stops being glass and becomes paper:
+    /// solid #121212 on dark, its light counterpart #F4F4F6 on light.
+    static let glassPane = adaptive((0, 0, 0, 0.06), (1, 1, 1, 0.07))
+    static let glassTranscript = adaptive((244 / 255, 244 / 255, 246 / 255, 1), (18 / 255, 18 / 255, 18 / 255, 1))
+
+    /// The fill a pane takes under the current surface choice, read from the
+    /// same `companionSurface` key the settings sheet writes. Solid keeps the
+    /// flat surface the phone has always had.
+    static func pane(_ pane: Pane, surfaceStyle: String) -> Color {
+        guard surfaceStyle == "glass" else { return surface }
+        return pane == .transcript ? glassTranscript : glassPane
+    }
+
     static func accent(_ hex: String?) -> Color {
         guard let hex, hex.count == 7, hex.hasPrefix("#"), let value = UInt32(hex.dropFirst(), radix: 16) else { return secondary }
         return Color(.sRGB, red: Double(value >> 16 & 255) / 255, green: Double(value >> 8 & 255) / 255,

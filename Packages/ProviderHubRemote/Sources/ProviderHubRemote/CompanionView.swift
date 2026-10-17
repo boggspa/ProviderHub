@@ -245,10 +245,13 @@ public struct CompanionView: View {
                                 runIsOpen: model.runIsOpen, activities: model.liveActivities, jumpEntryID: model.activityJumpID,
                                 jumpToken: model.activityJumpToken) { question, answers, dismiss in
                                 model.answerQuestion(question, chat: chat.id, answers: answers, dismiss: dismiss)
-                            }.id(chat.id)
+                            }
+                            .background(CompanionTheme.pane(.transcript, surfaceStyle: surfaceStyle))
+                            .id(chat.id)
                         } else {
                             VStack(spacing: 10) { ProgressView(); Text("Opening conversation…").font(.caption).foregroundStyle(CompanionTheme.secondary) }
                                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+                                .background(CompanionTheme.pane(.transcript, surfaceStyle: surfaceStyle))
                         }
                         CompanionActivityStrip(model: model)
                         if let approval = model.store.approval { approvalStrip(approval) }
@@ -461,7 +464,7 @@ public struct CompanionView: View {
             }
             HStack(spacing: 7) { Image(systemName: "desktopcomputer"); Text(model.isConnected ? "Connected to your Mac" : "Saved connection") }
                 .font(.caption).foregroundStyle(CompanionTheme.secondary).padding(18)
-        }.background(CompanionTheme.surface).foregroundStyle(CompanionTheme.ink)
+        }.background(CompanionTheme.pane(.sidebar, surfaceStyle: surfaceStyle)).foregroundStyle(CompanionTheme.ink)
     }
 
     private var welcome: some View {
