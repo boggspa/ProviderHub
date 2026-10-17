@@ -149,19 +149,19 @@ public final class CompanionModel: ObservableObject {
     /// connected or was never paired. A live connection needs no label.
     public var connectionPhase: String? {
         if isConnected || status == "Not paired" { return nil }
-        return status.contains("onnecting") ? "Connecting" : "Offline"
+        return status.contains("onnecting") || status.hasPrefix("Compare code") ? "Connecting" : "Offline"
     }
 
     /// The selected chat's approval mode, read once: the Mac's configuration
     /// first, the recent-list summary (which may lag it) as a fallback.
     public var approvalMode: String {
-        let configured = configuration["approvalMode"].text
+        let configured = selectionBound ? configuration["approvalMode"].text : ""
         return configured.isEmpty ? selectedChat?.approvalMode ?? "manual" : configured
     }
     /// The run-time settings (model, effort, approval mode) can change only
     /// between turns, as on the Mac.
     public var configurable: Bool {
-        isConnected && controlSurfaceAvailable && !runIsOpen && !configuration["busy"].flag
+        isConnected && controlSurfaceAvailable && selectionBound && !runIsOpen && !configuration["busy"].flag
     }
 
     public func connect() {
@@ -455,7 +455,7 @@ public struct CompanionView: View {
                         CompanionProviderMark(presentation: CompanionBranding.presentation(route: chat.route ?? String(model.configuration["choice"].text.split(separator: "|").first ?? ""), label: chat.displayModel, models: model.models), size: 15)
                         Text(chat.displayModel).font(.caption.weight(.medium))
                         let effort = model.configuration["effort"].text
-                        if !effort.isEmpty { Text("· " + effortTitle(effort)).font(.caption).foregroundStyle(CompanionTheme.secondary) }
+                        if !effort.isEmpty { Text("· " + ChatSharedEffort.title(effort)).font(.caption).foregroundStyle(CompanionTheme.secondary) }
                         Image(systemName: "chevron.down").font(.system(size: 9))
                     }
                 }.buttonStyle(.plain)
@@ -472,10 +472,6 @@ public struct CompanionView: View {
                 }
             }.lineLimit(1)
         }
-    }
-
-    private func effortTitle(_ effort: String) -> String {
-        effort.lowercased() == "xhigh" ? "Extra high" : effort.prefix(1).uppercased() + effort.dropFirst()
     }
 
     private var horizontalInspectorIsSheet: Bool {
@@ -607,9 +603,9 @@ public struct CompanionView: View {
                     }
                 }
             }
-            // While it reconnects the header and placeholder already say so;
-            // a failure keeps its reason here.
-            if model.store.needsSnapshot || model.connectionPhase == "Offline" {
+            // A plain reconnect is already said by the header and placeholder;
+            // anything with a reason (an error, a pairing step) keeps it here.
+            if model.store.needsSnapshot || model.connectionPhase != nil && !["Connecting…", "Disconnected. Reconnecting…"].contains(model.status) {
                 Text(model.store.needsSnapshot ? "Refreshing after a missed update…" : model.status)
                     .font(.caption).foregroundStyle(CompanionTheme.secondary).lineLimit(2)
             } else if model.isConnected, let notice = model.store.notices.last {
@@ -670,10 +666,11 @@ public struct CompanionView: View {
             } label: { HStack(spacing: 3) { Text(CompanionTheme.approvalLabel(mode)); Image(systemName: "chevron.down").font(.system(size: 8)) } }
                 .foregroundStyle(CompanionTheme.approvalColor(mode)).disabled(!model.configurable)
                 .accessibilityLabel("Change chat permissions")
-            if !model.team["enabled"].flag {
-                let status = model.store.selectedStatus
-                Text(status.isEmpty ? (model.runIsOpen ? "Working…" : "Ready") : status)
-                    .foregroundStyle(CompanionTheme.secondary).lineLimit(1)
+            if !model.team["enabled"].flag, let chat = model.selectedChat {
+                let status = model.selectionBound && !model.store.selectedStatus.isEmpty ? model.store.selectedStatus : chat.status
+                ChatSharedShimmerText(text: status.isEmpty ? (model.runIsOpen ? "Working…" : "Ready") : status,
+                    active: model.runIsOpen && model.store.approval == nil, accent: chat.providerAccent, base: CompanionTheme.secondary)
+                    .lineLimit(1)
             }
             Spacer(minLength: 8)
             CompanionTurnTime(startedAt: model.turnStartedAt)

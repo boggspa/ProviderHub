@@ -152,13 +152,6 @@ private func folderName(_ path: String) -> String {
     let name = (path as NSString).lastPathComponent
     return name.isEmpty ? shortPath(path) : name
 }
-private func effortTitle(_ effort: String) -> String {
-    switch effort.lowercased() {
-    case "xhigh": return "Extra high"
-    case "": return "Default"
-    default: return effort.prefix(1).uppercased() + effort.dropFirst()
-    }
-}
 private func tokenCount(_ value: Int) -> String {
     if value >= 1_000_000 { return String(format: "%.1fM", Double(value) / 1_000_000) }
     if value >= 1_000 { return String(format: "%.1fK", Double(value) / 1_000) }
@@ -298,7 +291,7 @@ private struct ChatHeader: View {
                     Text(route.accountLabel).font(HubTheme.Typography.detail).foregroundStyle(Semantic.secondaryInk)
                 }
                 if let effort = model.selected?.effort, !effort.isEmpty {
-                    Text("· " + effortTitle(effort)).font(HubTheme.Typography.detail).foregroundStyle(Semantic.secondaryInk)
+                    Text("· " + ChatSharedEffort.title(effort)).font(HubTheme.Typography.detail).foregroundStyle(Semantic.secondaryInk)
                 }
                 Image(systemName: "chevron.down").font(.system(size: 9)).foregroundStyle(Semantic.secondaryInk)
             }

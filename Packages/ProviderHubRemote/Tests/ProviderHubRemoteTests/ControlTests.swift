@@ -128,6 +128,31 @@ final class ControlTests: XCTestCase {
         XCTAssertEqual(model.connectionPhase, "Connecting")
         model.status = "Disconnected"
         XCTAssertEqual(model.connectionPhase, "Offline")
+        model.status = "Compare code and approve on your Mac"
+        XCTAssertEqual(model.connectionPhase, "Connecting")
+    }
+
+    @MainActor
+    func testATappedChatUsesItsOwnSummaryUntilTheMacBindsIt() throws {
+        let model = CompanionModel()
+        model.receiveRemote(["method": "session.snapshot", "params": ["cursor": 1,
+            "chats": [["id": "a", "title": "A", "status": "Working…", "busy": true, "pendingApproval": false, "approvalMode": "yolo"],
+                      ["id": "b", "title": "B", "status": "Ready", "busy": false, "pendingApproval": false, "approvalMode": "manual"]],
+            "selected": ["id": "a", "busy": true, "entries": []],
+            "controls": ["version": 1, "configuration": ["approvalMode": "yolo", "busy": true]]]])
+        XCTAssertTrue(model.runIsOpen)
+        XCTAssertEqual(model.approvalMode, "yolo")
+        model.select("b")
+        // The Mac has not answered yet: chat a's run and YOLO must not leak into b.
+        XCTAssertFalse(model.runIsOpen)
+        XCTAssertEqual(model.approvalMode, "manual")
+        XCTAssertFalse(model.configurable)
+    }
+
+    func testEffortTitlesMatchOnBothShells() {
+        XCTAssertEqual(ChatSharedEffort.title("xhigh"), "Extra high")
+        XCTAssertEqual(ChatSharedEffort.title("high"), "High")
+        XCTAssertEqual(ChatSharedEffort.title(""), "Default")
     }
 
     func testControlCommandRoundTripKeepsExactFields() throws {

@@ -107,6 +107,17 @@ final class MentionUITextView: UITextView {
     var onAccept: (() -> Bool)?
     var menuOpen: (() -> Bool)?
 
+    /// Scroll only once the text outgrows the height SwiftUI actually gave
+    /// the view. Deciding here, against the placed bounds, keeps measurement
+    /// probes at other widths from flipping it.
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        guard bounds.width > 0 else { return }
+        let fitted = sizeThatFits(CGSize(width: bounds.width, height: .greatestFiniteMagnitude)).height
+        let overflowing = fitted > bounds.height + 1
+        if isScrollEnabled != overflowing { isScrollEnabled = overflowing }
+    }
+
     override func draw(_ rect: CGRect) {
         super.draw(rect)
         guard text.isEmpty, !placeholder.isEmpty else { return }
@@ -162,6 +173,7 @@ struct MentionTextEditor: UIViewRepresentable {
         view.font = .preferredFont(forTextStyle: .body)
         view.textColor = .label
         view.isScrollEnabled = false
+        view.contentMode = .redraw
         view.textContainerInset = UIEdgeInsets(top: 8, left: 0, bottom: 8, right: 0)
         view.delegate = context.coordinator
         view.menuOpen = { [weak menu = self.menu] in menu?.state != nil }
@@ -182,15 +194,13 @@ struct MentionTextEditor: UIViewRepresentable {
         return view
     }
 
-    /// A scrolling text view has no intrinsic height, so without this SwiftUI
-    /// hands it whatever is on offer. Measure the text at the proposed width
-    /// and scroll only once it outgrows the ceiling.
+    /// A text view has no height of its own to offer, so without this SwiftUI
+    /// hands it whatever is on offer. Measure the text at the proposed width;
+    /// the view decides about scrolling once it is placed.
     func sizeThatFits(_ proposal: ProposedViewSize, uiView: MentionUITextView, context: Context) -> CGSize? {
         let width = proposal.width ?? uiView.bounds.width
         let measured = width.isFinite ? max(width, 1) : 10_000
         let fitted = uiView.sizeThatFits(CGSize(width: measured, height: .greatestFiniteMagnitude)).height
-        let overflowing = fitted > MentionFieldHeight.maximum
-        if uiView.isScrollEnabled != overflowing { uiView.isScrollEnabled = overflowing }
         return CGSize(width: width, height: MentionFieldHeight.clamp(fitted))
     }
 
@@ -234,6 +244,7 @@ struct MentionTextEditor: UIViewRepresentable {
             parent.text = view.text
             apply(view)
             view.invalidateIntrinsicContentSize()
+            view.setNeedsLayout()
         }
 
         func textViewDidChangeSelection(_ textView: UITextView) {
