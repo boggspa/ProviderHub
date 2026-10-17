@@ -171,7 +171,7 @@ struct CompanionTranscript: View {
                 attachmentStrip(entry)
                 HStack {
                 Spacer(minLength: 56 * scale)
-                (Text("User: ").bold() + Text(entry.text)).font(.system(size: textSize)).textSelection(.enabled)
+                CompanionMentionText(text: entry.text, mentions: entry.mentions, models: models, size: textSize)
                     .padding(.horizontal, 13 * scale).padding(.vertical, 8 * scale)
                     .background(RoundedRectangle(cornerRadius: 15 * scale, style: .continuous).fill(CompanionTheme.selection))
                 }

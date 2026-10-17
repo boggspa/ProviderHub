@@ -36,6 +36,19 @@ class PresentationProjectionTests(unittest.TestCase):
         self.assertEqual(projected["entry"]["question"]["id"], question["id"])
         self.assertNotIn("private", projected["entry"]["question"])
 
+    def test_mention_chips_are_projected_and_malformed_ones_dropped(self):
+        projected = project_event({"event": "entry", "chat": "cd" * 16, "entry": {
+            "id": "u1", "kind": "user", "text": "@Sol go",
+            "thinking": "secret",
+            "mentions": [
+                {"id": "s", "name": "Sol", "route": "codex/x", "start": 0, "length": 4},
+                {"id": "bad", "name": 1, "start": "x"},
+            ],
+        }})["entry"]
+        self.assertEqual(projected["mentions"], [{"id": "s", "name": "Sol", "route": "codex/x", "start": 0, "length": 4}])
+        self.assertNotIn("thinking", projected)
+        self.assertEqual(project_event({"event": "entry", "entry": {"id": "u2", "kind": "user", "text": "hi"}})["entry"].get("mentions"), None)
+
     def test_long_stream_and_midstream_subscription_keep_bounded_offsets(self):
         bridge = MacBridge(lambda _: None, "projection")
         bridge.publish({"event":"snapshot", "chat":"ab"*16, "entries":[{
@@ -315,6 +328,7 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual([item["command"] for item in host.commands], ["send", "stop", "subscribe", "approve"])
         self.assertEqual(host.commands[0]["text"], "hello from the phone")
         self.assertEqual(host.commands[0]["request"], "req-send")
+        self.assertNotIn("mentions", host.commands[0])
         self.assertIs(host.commands[3]["allow"], True)
         self.assertEqual(host.commands[3]["id"], APPROVAL)
         self.assertTrue(phone.acks["req-approve"]["ok"])
@@ -336,6 +350,18 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(len(approvals), 1)
         self.assertIs(approvals[0]["allow"], False)
         self.assertIs(phone.acks["approve-2"]["allow"], False)
+
+    def test_phone_send_forwards_mention_chips_and_refuses_a_bad_record(self):
+        host, mac, phone = pair()
+        chips = [{"id": "s", "name": "Sol", "route": "codex/x", "start": 0, "length": 4}]
+        phone.send_text(CHAT, "@Sol go", "req-tag", mentions=chips)
+        exchange(mac, phone)
+        self.assertEqual(host.commands[0]["mentions"], chips)
+        self.assertTrue(phone.acks["req-tag"]["ok"])
+        phone.send_text(CHAT, "nope", "req-bad", mentions=[{"id": "s"}])
+        exchange(mac, phone)
+        self.assertEqual(len(host.commands), 1)
+        self.assertFalse(phone.acks["req-bad"]["ok"])
 
     def test_wrong_approval_string_allow_and_unknown_method_do_not_execute(self):
         host, mac, phone = pair()

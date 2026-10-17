@@ -241,6 +241,9 @@ public final class RemoteConnection: CompanionTransport {
                 if let value = command.arguments {
                     params["arguments"] = try JSONSerialization.jsonObject(with: JSONEncoder().encode(value))
                 }
+                if let mentions = command.mentions {
+                    params["mentions"] = mentions.map { ["id": $0.id, "name": $0.name, "route": $0.route, "start": $0.start, "length": $0.length] }
+                }
                 try self.channel?.send(method: command.method, params: params)
             } catch { self.onStatus?("Command failed: \(error)", nil) }
         }

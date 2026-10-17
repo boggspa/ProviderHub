@@ -126,13 +126,24 @@ extension CompanionModel {
         let files = attachmentDrafts[chat] ?? []
         guard !files.isEmpty else { return }
         let text = draft
+        // Resolve the chips against the roster the person addressed when they
+        // pressed Send. Uploads can outlast a Team rename; chips resolved after
+        // them could come back empty and widen the send to the whole Team,
+        // where the original ones are refused by the Mac as stale.
+        let chips: [CompanionMentionChip] = toBlackboard ? [] : mentionChips(in: text)
         attachmentSending = true; composeNotice = ""
         defer { attachmentSending = false; uploadProgress = "" }
         do {
             var tokens: [RemoteValue] = []
             for file in files { tokens.append(.string(try await upload(file, chat: chat))) }
-            _ = try await performControl(toBlackboard ? "remote_board_attach" : "remote_send",
-                toBlackboard ? ["uploads": .array(tokens)] : ["uploads": .array(tokens), "text": .string(text)], chat: chat)
+            var arguments: [String: RemoteValue] = toBlackboard ? ["uploads": .array(tokens)] : ["uploads": .array(tokens), "text": .string(text)]
+            if !chips.isEmpty {
+                arguments["mentions"] = .array(chips.map { chip in
+                    .object(["id": .string(chip.id), "name": .string(chip.name), "route": .string(chip.route),
+                             "start": .number(Double(chip.start)), "length": .number(Double(chip.length))])
+                })
+            }
+            _ = try await performControl(toBlackboard ? "remote_board_attach" : "remote_send", arguments, chat: chat)
             let sent = Set(files.map(\.id))
             attachmentDrafts[chat]?.removeAll { sent.contains($0.id) }
             if !toBlackboard, selectedChatID == chat && draft == text { draft = "" }

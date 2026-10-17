@@ -38,6 +38,7 @@ public struct RemoteEntry: Equatable, Identifiable {
     public var changedFiles: [String] = []
     public var contributionID: String = ""
     public var attachments: [RemoteAttachment] = []
+    public var mentions: [CompanionMentionChip] = []
 
     static func decode(_ row: [String: Any], fallback: String) -> RemoteEntry {
         let identifier = row["id"] as? String
@@ -57,6 +58,14 @@ public struct RemoteEntry: Equatable, Identifiable {
         decoded.changedFiles = row["changedFiles"] as? [String] ?? []
         if let raw = row["attachments"], let data = try? JSONSerialization.data(withJSONObject: raw) {
             decoded.attachments = (try? JSONDecoder().decode([RemoteAttachment].self, from: data)) ?? []
+        }
+        if let raw = row["mentions"] as? [[String: Any]] {
+            decoded.mentions = raw.compactMap { chip in
+                guard let id = chip["id"] as? String, let name = chip["name"] as? String, let route = chip["route"] as? String,
+                      let start = (chip["start"] as? NSNumber)?.intValue, let length = (chip["length"] as? NSNumber)?.intValue,
+                      !id.isEmpty, !name.isEmpty, start >= 0, length > 1 else { return nil }
+                return CompanionMentionChip(id: id, name: name, route: route, start: start, length: length)
+            }
         }
         return decoded
     }
@@ -321,6 +330,8 @@ public struct RemoteCommand: Codable, Equatable {
     public var dismiss: Bool?
     public var action: String?
     public var arguments: [String: RemoteValue]?
+    /// Composer chips for this send. Absent means the message addresses the whole Team.
+    public var mentions: [CompanionMentionChip]?
 
     public init(method: String, requestId: String, chat: String? = nil, text: String? = nil, approvalId: String? = nil, allow: Bool? = nil) {
         self.v = 1
