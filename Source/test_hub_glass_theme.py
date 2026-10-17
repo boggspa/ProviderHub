@@ -19,15 +19,18 @@ import SwiftUI
 @main struct Cases {
     @MainActor static func main() throws {
         func check(_ condition: Bool, _ message: String) { if !condition { fatalError(message) } }
-        // A dynamic NSColor answers for the appearance the app is wearing, so
-        // the checks walk the same two appearances the Light/Dark setting uses.
+        // A dynamic NSColor answers for the current drawing appearance, which
+        // a process with no run loop does not move when NSApp.appearance
+        // changes. Resolve each read inside the appearance it asks about, the
+        // same two appearances the Light/Dark setting uses.
         _ = NSApplication.shared
         func components(_ color: Color, _ appearance: NSAppearance) -> (CGFloat, CGFloat, CGFloat, CGFloat) {
-            NSApp.appearance = appearance
-            let resolved = NSColor(color)
-            let rgb = resolved.usingColorSpace(.sRGB) ?? resolved
             var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
-            rgb.getRed(&r, green: &g, blue: &b, alpha: &a)
+            appearance.performAsCurrentDrawingAppearance {
+                let resolved = NSColor(color)
+                let rgb = resolved.usingColorSpace(.sRGB) ?? resolved
+                rgb.getRed(&r, green: &g, blue: &b, alpha: &a)
+            }
             return (r, g, b, a)
         }
         let dark = NSAppearance(named: .darkAqua)!
@@ -40,7 +43,8 @@ import SwiftUI
             let channels = [resolved.0, resolved.1, resolved.2]
             let expected = [red, green, blue]
             for (index, channel) in channels.enumerated() {
-                check(abs(channel - expected[index] / 255.0) < 0.004, label + " channel " + String(index) + " moved")
+                check(abs(channel - expected[index] / 255.0) < 0.004,
+                      label + " channel " + String(index) + " moved to " + String(Double(channel * 255)))
             }
             check(abs(resolved.3 - 1.0) < 0.001, label + " is not opaque")
         }
@@ -99,6 +103,18 @@ class GlassPresentationWiringTests(unittest.TestCase):
         glass = (SOURCE / "HubGlass.swift").read_text()
         self.assertIn("HubTheme.WindowStyle.Mode.glass", glass)
         self.assertIn("HubTheme.Glass.transcript", glass)
+
+    def test_switching_surface_keeps_each_pane_in_place(self):
+        """Glass/Solid changes a pane's fill, never its structural identity.
+
+        An if/else around the content gives each style its own subtree, so a
+        toggle would rebuild the transcript and drop its scroll position, open
+        folds and loaded history."""
+        glass = (SOURCE / "HubGlass.swift").read_text()
+        modifier = glass.split("struct HubGlassPaneModifier", 1)[1].split("\n}\n", 1)[0]
+        self.assertIn("content.background(fill)", modifier)
+        self.assertNotIn("else { content }", modifier)
+        self.assertIn("return .clear", modifier)
 
     def test_ios_companion_mirrors_the_same_fills(self):
         theme = (COMPANION / "CompanionTheme.swift").read_text()
