@@ -45,12 +45,16 @@ private struct HubGlassPaneModifier: ViewModifier {
     let pane: HubGlassPane
     @Environment(\.hubSurfaceStyle) private var style
 
+    /// One structural path for both styles: only the fill changes, so toggling
+    /// Glass/Solid keeps the pane's identity and the state it owns (scroll
+    /// position, open folds, loaded history) instead of rebuilding it.
     func body(content: Content) -> some View {
-        if style == .glass { content.background(fill) } else { content }
+        content.background(fill)
     }
 
     private var fill: Color {
-        pane == .transcript ? HubTheme.Glass.transcript : HubTheme.Glass.pane
+        guard style == .glass else { return .clear }
+        return pane == .transcript ? HubTheme.Glass.transcript : HubTheme.Glass.pane
     }
 }
 
