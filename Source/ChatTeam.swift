@@ -1,5 +1,62 @@
 import SwiftUI
 
+private struct ChatTeamPreset: Codable, Identifiable {
+    struct Member: Codable {
+        var name: String
+        var choice: String
+        var effort: String
+        var responsibility: String
+    }
+    struct RunSettings: Codable {
+        var mode: String
+        var minutes: Int?
+        var tokens: Int?
+        var contextTokens: Int
+        var processes: Int
+    }
+    var id: String
+    var name: String
+    var members: [Member]
+    var execution: RunSettings
+}
+
+@MainActor
+private final class ChatTeamPresetStore: ObservableObject {
+    @Published private(set) var presets: [ChatTeamPreset]
+    private let defaults = UserDefaults.standard
+    private let key = "providerHub.teamPresets.v1"
+
+    init() {
+        if let data = defaults.data(forKey: key),
+           let saved = try? JSONDecoder().decode([ChatTeamPreset].self, from: data) {
+            presets = saved
+        } else {
+            presets = []
+        }
+    }
+
+    func save(name: String, members: [TeamDraft], execution: ChatTeamExecution) {
+        let cleanName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanName.isEmpty, members.count <= ChatTeamSnapshot.maxMembers else { return }
+        let preset = ChatTeamPreset(id: UUID().uuidString, name: String(cleanName.prefix(60)),
+            members: members.map { .init(name: $0.name, choice: $0.choice, effort: $0.effort, responsibility: $0.responsibility) },
+            execution: .init(mode: execution.mode, minutes: execution.minutes, tokens: execution.tokens,
+                             contextTokens: execution.contextTokens, processes: execution.processes))
+        presets.append(preset)
+        persist()
+    }
+
+    func remove(_ preset: ChatTeamPreset) {
+        presets.removeAll { $0.id == preset.id }
+        persist()
+    }
+
+    private func persist() {
+        guard let data = try? JSONEncoder().encode(presets) else { return }
+        defaults.set(data, forKey: key)
+    }
+}
+
 /// Small roster controls in the existing inspector; members speak in the main
 /// transcript and share its composer. There is no separate orchestration view.
 struct ChatTeamControls: View {
@@ -102,6 +159,9 @@ private struct ChatTeamEditor: View {
     @State private var tokens = ""
     @State private var contextTokens = "200000"
     @State private var processSlots = 8
+    @StateObject private var presetStore = ChatTeamPresetStore()
+    @State private var savingPreset = false
+    @State private var presetName = ""
     private var execution: ChatTeamExecution? {
         let minuteText = minutes.trimmingCharacters(in: .whitespacesAndNewlines)
         let tokenText = tokens.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -166,6 +226,24 @@ private struct ChatTeamEditor: View {
             }.frame(maxHeight: 410)
             HStack {
                 Button("Add member") { add() }.disabled(drafts.count >= ChatTeamSnapshot.maxMembers || model.models.allSatisfy { !$0.supportsTools })
+                Menu("Team Presets") {
+                    Button("Save current as preset…") {
+                        presetName = ""
+                        savingPreset = true
+                    }.disabled(!valid)
+                    if !presetStore.presets.isEmpty {
+                        Divider()
+                        ForEach(presetStore.presets) { preset in
+                            Button(preset.name) { apply(preset) }
+                        }
+                        Divider()
+                        Menu("Delete preset") {
+                            ForEach(presetStore.presets) { preset in
+                                Button(preset.name, role: .destructive) { presetStore.remove(preset) }
+                            }
+                        }
+                    }
+                }.disabled(model.busy)
                 Spacer()
                 Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
                 Button("Save Team") {
@@ -173,6 +251,15 @@ private struct ChatTeamEditor: View {
                 }.keyboardShortcut(.defaultAction).disabled(!valid || !model.canEditTeam)
             }
         }.padding(20).frame(width: 480)
+        .alert("Save Team Preset", isPresented: $savingPreset) {
+            TextField("Preset name", text: $presetName)
+            Button("Save") {
+                if let execution { presetStore.save(name: presetName, members: drafts, execution: execution) }
+            }.disabled(presetName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Save this roster and its run settings for quick reuse.")
+        }
         .onAppear {
             if let team = model.team {
                 enabled = team.enabled
@@ -198,6 +285,18 @@ private struct ChatTeamEditor: View {
         drafts.append(TeamDraft(id: UUID().uuidString, name: "Member \(drafts.count + 1)",
                                 choice: choice.id, effort: choice.efforts.contains(currentEffort) ? currentEffort : "", responsibility: ""))
     }
+    private func apply(_ preset: ChatTeamPreset) {
+        drafts = preset.members.map { member in
+            TeamDraft(id: UUID().uuidString, name: member.name, choice: member.choice,
+                      effort: member.effort, responsibility: member.responsibility)
+        }
+        mode = preset.execution.mode
+        minutes = preset.execution.minutes.map(String.init) ?? ""
+        tokens = preset.execution.tokens.map(String.init) ?? ""
+        contextTokens = String(preset.execution.contextTokens)
+        processSlots = preset.execution.processes
+    }
+
     private var runSettings: some View {
         DisclosureGroup("Run settings · " + (mode == "task" ? "Task" : "One contribution") +
                         (execution?.minutes.map { " · \($0) min" } ?? "")) {
