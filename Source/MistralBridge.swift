@@ -710,10 +710,10 @@ final class BridgeModel: ObservableObject {
     }
 
     func startGateway() async throws {
-        if running {
-            onGatewayStarted?()
-            return
-        }
+        // Chat's own start calls this, so an already-running gateway must not
+        // announce itself again: that would schedule another Chat start, which
+        // calls back here, without end.
+        if running { return }
         guard gatewayProcess == nil else { throw WorkerError(message: "The gateway is still starting or stopping.") }
         guard let python else { throw WorkerError(message: "Provider Hub needs Python 3.11 or newer. Install a supported Python runtime, then reconnect.") }
         Self.scrubWorkerCaches(helper: helper.path)
@@ -760,9 +760,11 @@ final class BridgeModel: ObservableObject {
             processBuffer.removeSubrange(0..<range.upperBound)
             guard let json = try? JSONSerialization.jsonObject(with: line) as? [String: Any] else { continue }
             if json["ready"] as? Bool == true {
+                let announced = running
                 gatewayState = "Ready"
                 credentialSource = json["credential_source"] as? String ?? credentialSource
-                onGatewayStarted?()
+                // Only the transition to Ready brings Chat and remote access up.
+                if !announced { onGatewayStarted?() }
             } else if let error = json["error"] as? String {
                 gatewayState = "Error"; tell(error, error: true)
             }

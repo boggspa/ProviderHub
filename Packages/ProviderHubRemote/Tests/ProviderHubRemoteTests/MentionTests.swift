@@ -51,6 +51,68 @@ final class MentionTests: XCTestCase {
         XCTAssertEqual(tinted, ["@Sol"])
     }
 
+    /// Uploads await the Mac several times, long enough for the Team to change.
+    /// The send must carry the chips resolved when Send was pressed, so a
+    /// rename makes the Mac refuse a stale tag instead of the phone dropping
+    /// it and widening the message to the whole Team.
+    @MainActor
+    func testAttachmentSendKeepsTheChipsAddressedBeforeUploading() async throws {
+        final class Transport: CompanionTransport {
+            var sent: [RemoteCommand] = []
+            func connect(text: String) {}
+            func disconnect() {}
+            func snapshot() {}
+            func send(_ command: RemoteCommand) { sent.append(command) }
+        }
+        let suite = "companion-mention-upload-test-" + UUID().uuidString
+        let preferences = UserDefaults(suiteName: suite)!
+        defer { preferences.removePersistentDomain(forName: suite) }
+        let transport = Transport()
+        let model = CompanionModel(preferences: preferences, transport: transport)
+        model.status = "Connected"
+        func team(_ first: String) -> [String: Any] {
+            ["enabled": true, "members": [["id": "s", "name": first, "route": "codex/sol"],
+                                          ["id": "k", "name": "Kimi", "route": "kimi/k2"]]]
+        }
+        model.receiveRemote(["method": "session.snapshot", "params": ["cursor": 1, "chats": [],
+            "selected": ["id": "a", "entries": []], "controls": ["version": 1, "extensionVersion": 4, "team": team("Sol")]]])
+        XCTAssertEqual(model.selectedChatID, "a")
+        model.draft = "@Sol inspect the attachment"
+        XCTAssertEqual(model.mentionChips(in: model.draft).map(\.id), ["s"])
+        try model.addAttachment(name: "notes.txt", data: Data("hello".utf8))
+        let sending = Task { @MainActor in await model.sendWithAttachments() }
+
+        var answered: Set<String> = []
+        func answer(_ action: String, _ result: [String: Any]) async throws -> RemoteCommand {
+            var found: RemoteCommand?
+            for _ in 0..<1000 where found == nil {
+                found = transport.sent.first { $0.action == action && !answered.contains($0.requestId) }
+                if found == nil { await Task.yield() }
+            }
+            let command = try XCTUnwrap(found, "The phone never sent " + action)
+            answered.insert(command.requestId)
+            model.receiveRemote(["method": "session.ack", "params": ["requestId": command.requestId, "ok": true, "result": result]])
+            return command
+        }
+
+        _ = try await answer("remote_upload_begin", ["offset": 0])
+        // Sol is renamed on the Mac while the attachment is still uploading.
+        model.receiveRemote(["method": "session.delta", "params": ["cursor": 2,
+            "event": ["event": "control", "chat": "a", "panel": "team", "value": team("Sun")]]])
+        XCTAssertTrue(model.mentionChips(in: model.draft).isEmpty, "the rename did not reach the roster")
+        _ = try await answer("remote_upload_chunk", ["offset": 5])
+        _ = try await answer("remote_upload_finish", [:])
+        let send = try await answer("remote_send", [:])
+        await sending.value
+
+        let chips = send.arguments?["mentions"]?.rows ?? []
+        XCTAssertEqual(chips.map { $0["id"].text }, ["s"])
+        XCTAssertEqual(chips.map { $0["name"].text }, ["Sol"])
+        XCTAssertEqual(chips.first?["start"].int, 0)
+        XCTAssertEqual(chips.first?["length"].int, 4)
+        XCTAssertEqual(model.composeNotice, "")
+    }
+
     private func targets(_ raw: Any) -> [CompanionMentionTarget] {
         (raw as! [[String: Any]]).map {
             CompanionMentionTarget(id: $0["id"] as! String, name: $0["name"] as! String, route: $0["route"] as! String,
