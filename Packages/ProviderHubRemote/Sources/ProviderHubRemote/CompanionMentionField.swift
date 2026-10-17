@@ -110,9 +110,17 @@ final class MentionUITextView: UITextView {
     override func draw(_ rect: CGRect) {
         super.draw(rect)
         guard text.isEmpty, !placeholder.isEmpty else { return }
-        let origin = CGPoint(x: textContainerInset.left + textContainer.lineFragmentPadding, y: textContainerInset.top)
-        (placeholder as NSString).draw(at: origin, withAttributes: [
-            .font: font ?? .preferredFont(forTextStyle: .body), .foregroundColor: UIColor.placeholderText])
+        // One line, truncated: a long model name must end in an ellipsis
+        // rather than run under the send button.
+        let font = font ?? .preferredFont(forTextStyle: .body)
+        let padding = textContainer.lineFragmentPadding
+        let line = CGRect(x: textContainerInset.left + padding, y: textContainerInset.top,
+                          width: max(0, bounds.width - textContainerInset.left - textContainerInset.right - padding * 2),
+                          height: font.lineHeight)
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.lineBreakMode = .byTruncatingTail
+        (placeholder as NSString).draw(in: line, withAttributes: [
+            .font: font, .foregroundColor: UIColor.placeholderText, .paragraphStyle: paragraph])
     }
 
     /// The text and focus systems own these keys unless the member list is
