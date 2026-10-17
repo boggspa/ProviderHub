@@ -176,7 +176,11 @@ def handle(host, command):
         inputs = files.inputs(chat, command.get("uploads", []))
         text = command.get("text", "")
         if not isinstance(text, str) or (not text.strip() and not inputs) or len(text) > 100000: raise ValueError("Message or attachment required")
-        host.handle({"command": "send", "id": chat, "chat": chat, "text": text, "attachments": inputs, "request": command.get("request")})
+        payload = {"command": "send", "id": chat, "chat": chat, "text": text, "attachments": inputs, "request": command.get("request")}
+        if "mentions" in command:
+            from chat_remote import mention_chips
+            payload["mentions"] = mention_chips(command.get("mentions"))
+        host.handle(payload)
         # The normal prepare_update path has copied/validated every original.
         for token in command.get("uploads", []): files.drop(chat, token)
         return True, {}

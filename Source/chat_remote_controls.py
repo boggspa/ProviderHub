@@ -155,7 +155,7 @@ COMMANDS = {
     "remote_attachment_read": ("attachment", "offset", "revision"),
     "remote_attachment_thumbnail": ("attachment",),
     "remote_upload_chunk": ("upload", "offset", "data"), "remote_upload_finish": ("upload",), "remote_upload_drop": ("upload",),
-    "remote_send": ("text", "uploads"), "remote_board_attach": ("uploads",),
+    "remote_send": ("text", "uploads", "mentions"), "remote_board_attach": ("uploads",),
     "blackboard": (), "blackboard_post": ("key", "body", "category", "quote"),
     "blackboard_remove": ("post",), "blackboard_attach": ("url", "title"), "blackboard_detach": ("attachment",),
     "remote_inspect": (), "inspect_git": (), "processes": (), "clear_processes": (),

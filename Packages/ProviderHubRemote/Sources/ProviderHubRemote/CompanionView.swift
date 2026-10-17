@@ -176,7 +176,10 @@ public final class CompanionModel: ObservableObject {
               !pendingDrafts.values.contains(where: { $0.0 == chat && $0.1 == draft }) else { return }
         let id = UUID().uuidString
         pendingDrafts[id] = (chat, draft)
-        link?.send(RemoteCommand(method: "chat.send", requestId: id, chat: chat, text: text))
+        var command = RemoteCommand(method: "chat.send", requestId: id, chat: chat, text: text)
+        let chips = mentionChips(in: text)
+        if !chips.isEmpty { command.mentions = chips }
+        link?.send(command)
     }
 
     public func stop() {
@@ -210,6 +213,7 @@ public struct CompanionView: View {
     @State private var choosingModel = false
     @State private var creatingChat = false
     @State private var importingFiles = false
+    @StateObject private var mentionMenu = CompanionMentionMenu()
     #if os(iOS)
     @State private var photos: [PhotosPickerItem] = []
     @State private var showingPhotos = false
@@ -571,8 +575,10 @@ public struct CompanionView: View {
                     } label: { Image(systemName: "plus").frame(width: 32, height: 40) }
                         .disabled(model.attachmentSending).accessibilityLabel("Add attachment")
                 }
-                TextField("Message…", text: $model.draft, axis: .vertical)
-                    .textFieldStyle(.plain).lineLimit(1...6).font(.body).padding(.vertical, 10)
+                CompanionMentionField(text: $model.draft,
+                    placeholder: model.mentionTargets.isEmpty ? "Message…" : "Message the Team, or @ a member…",
+                    enabled: model.isConnected && !model.store.needsSnapshot,
+                    mentions: model.mentionTargets, menu: mentionMenu)
                     .accessibilityLabel("Message to \(chat.title)")
                 Button { if model.runIsOpen { model.stop() } else { model.sendDraft() } } label: {
                     Image(systemName: model.runIsOpen ? "stop.fill" : "arrow.up")
@@ -582,6 +588,11 @@ public struct CompanionView: View {
                     .opacity(!model.runIsOpen && !model.canSend ? 0.4 : 1)
                     .accessibilityLabel(model.runIsOpen ? "Stop this chat" : "Send message")
             }.padding(.horizontal, 14).padding(.vertical, 4)
+                .overlay(alignment: .topLeading) {
+                    CompanionMentionList(menu: mentionMenu, models: model.models, accent: chat.providerAccent)
+                        .padding(.leading, 46)
+                        .alignmentGuide(.top) { $0[.bottom] + 6 }
+                }
                 .companionCard(cornerRadius: 20, accent: chat.approvalMode == "yolo" ? .red : chat.providerAccent)
             HStack(spacing: 6) {
                 Circle().fill(chat.approvalColor).frame(width: 5, height: 5)

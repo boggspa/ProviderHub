@@ -437,6 +437,48 @@ class Session:
             self.on_app(message)
 
 
+def _integral(value):
+    if type(value) is int:
+        return value
+    if type(value) is float and value.is_integer():
+        return int(value)
+    return None
+
+
+def mention_chips(raw):
+    """Chips the composer drew. A bad record is refused before the host sees it."""
+    if not isinstance(raw, list) or len(raw) > 72:
+        raise ValueError("invalid mentions")
+    chips = []
+    for chip in raw:
+        if not isinstance(chip, dict):
+            raise ValueError("invalid mentions")
+        identifier, name, route = chip.get("id"), chip.get("name"), chip.get("route")
+        start, length = _integral(chip.get("start")), _integral(chip.get("length"))
+        if (not isinstance(identifier, str) or not identifier or len(identifier) > 128
+                or not isinstance(name, str) or not name or len(name) > 120
+                or not isinstance(route, str) or len(route) > 160
+                or start is None or length is None or start < 0 or start > MAX_TEXT * 2
+                or length < 2 or length > 121):
+            raise ValueError("invalid mentions")
+        chips.append({"id": identifier, "name": name, "route": route, "start": start, "length": length})
+    return chips
+
+
+def project_mentions(entry):
+    """Keep well-formed chips on the phone transcript and drop the rest."""
+    raw = entry.get("mentions") or []
+    if not isinstance(raw, list):
+        return []
+    kept = []
+    for chip in raw[:72]:
+        try:
+            kept.extend(mention_chips([chip]))
+        except ValueError:
+            continue
+    return kept
+
+
 def project_entry(entry, fallback="legacy"):
     """Visible transcript data only; omit provider reasoning and private metadata."""
     row = {"id": str(entry.get("id") or fallback)[:128],
@@ -456,6 +498,8 @@ def project_entry(entry, fallback="legacy"):
                     "kind": str(attachment.get("kind") or "file")[:20], "size": max(0, attachment.get("size", 0)) if type(attachment.get("size", 0)) is int else 0}
                    for attachment in (entry.get("attachments") or [])[:8] if isinstance(attachment, dict) and attachment.get("id") and attachment.get("name")]
     if attachments: row["attachments"] = attachments
+    mentions = project_mentions(entry)
+    if mentions: row["mentions"] = mentions
     timestamp = entry.get("time")
     if type(timestamp) in (int, float) and 0 <= timestamp < 10_000_000_000: row["time"] = timestamp
     question = entry.get("question")
@@ -557,7 +601,7 @@ class MacBridge:
         self.auto_accept = auto_accept
         self.session = Session("mac", self.identity, session_id, self._trust)
         self.session.on_app = self._on_app
-        self.view = {"chats": [], "selected": None, "approval": None, "controls": {"version": 1, "extensionVersion": 3}}
+        self.view = {"chats": [], "selected": None, "approval": None, "controls": {"version": 1, "extensionVersion": 4}}
         self.pending_pairing = None
         self.hold_pairing = False
         self.selected_chat = None
@@ -788,7 +832,13 @@ class MacBridge:
             text = params.get("text")
             if not isinstance(text, str) or not text.strip() or len(text) > MAX_TEXT:
                 raise RemoteError("message required")
-            self._execute({"command": "send", "chat": chat, "id": chat, "text": text, "request": request_id})
+            command = {"command": "send", "chat": chat, "id": chat, "text": text, "request": request_id}
+            if "mentions" in params:
+                try:
+                    command["mentions"] = mention_chips(params.get("mentions"))
+                except ValueError as exc:
+                    raise RemoteError(str(exc)) from exc
+            self._execute(command)
         elif method == "chat.stop":
             self._execute({"command": "stop", "chat": chat, "id": chat})
         elif method == "chat.answer_question":
@@ -880,8 +930,11 @@ class PhoneClient:
     def resume(self):
         self._send("session.resume", {"afterCursor": self.cursor})
 
-    def send_text(self, chat, text, request_id):
-        self._send("chat.send", {"chat": chat, "text": text, "requestId": request_id})
+    def send_text(self, chat, text, request_id, mentions=None):
+        params = {"chat": chat, "text": text, "requestId": request_id}
+        if mentions is not None:
+            params["mentions"] = mentions
+        self._send("chat.send", params)
 
     def stop(self, chat, request_id):
         self._send("chat.stop", {"chat": chat, "requestId": request_id})
