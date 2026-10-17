@@ -129,13 +129,14 @@ struct CompactShell: View {
                 SettingsPage(model: model)
             } else {
                 HStack(spacing: 0) {
-                    railView.frame(width: railOpen ? 176 : 52)
+                    railView.hubGlassPane(.sidebar).frame(width: railOpen ? 176 : 52)
                     mainPane.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                    sidePane.frame(width: 224)
+                    sidePane.hubGlassPane(.inspector).frame(width: 224)
                 }
             }
         }
         .font(.system(size: 11.5))
+        .environment(\.hubSurfaceStyle, windowStyle)
         .background {
             if windowStyle == .glass {
                 // The same 75% scrim Chat lays over its glass, so the two

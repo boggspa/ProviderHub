@@ -22,6 +22,7 @@ struct CompanionInspector: View {
     @State private var expandedFiles = Set<String>()
     @State private var expandedProcesses = Set<String>()
     @State private var blackboard = false
+    @AppStorage("companionSurface") private var surfaceStyle = "solid"
 
     private var side: RemoteValue { model.store.controls["side"] ?? .null }
     private var browser: RemoteValue { model.store.controls["browser"] ?? .null }
@@ -71,7 +72,7 @@ struct CompanionInspector: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background(CompanionTheme.surface).foregroundStyle(CompanionTheme.ink)
+        .background(CompanionTheme.pane(.inspector, surfaceStyle: surfaceStyle)).foregroundStyle(CompanionTheme.ink)
         .disabled(!model.isConnected)
         .task(id: "\(model.selectedChatID ?? "")-\(tab.rawValue)") {
             model.refreshInspector(tab)

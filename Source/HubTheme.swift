@@ -70,6 +70,21 @@ enum HubTheme {
         }
     }
 
+    /// Pane fills that exist only in Glass mode, where the desktop shows through
+    /// the window and nothing separates a pane from its neighbour. Solid mode
+    /// paints an opaque window background already, so it keeps none of these.
+    enum Glass {
+        /// The sidebar and the inspector take one step off the glass: a lighter
+        /// gray on dark, a deeper one on light, so the panes frame the centre.
+        static let pane = Semantic.dynamic(light: NSColor.black.withAlphaComponent(0.06),
+                                           dark: NSColor.white.withAlphaComponent(0.07))
+        /// The transcript stops being glass and becomes paper: solid #121212 on
+        /// dark, its light counterpart #F4F4F6 on light. Text keeps its
+        /// contrast either way because both are opaque.
+        static let transcript = Semantic.dynamic(light: NSColor(red: 244 / 255, green: 244 / 255, blue: 246 / 255, alpha: 1),
+                                                 dark: NSColor(red: 18 / 255, green: 18 / 255, blue: 18 / 255, alpha: 1))
+    }
+
     /// Colours that resolve per appearance. Each is a dynamic NSColor, so a
     /// SwiftUI view that uses it re-renders when the appearance changes
     /// without any state of its own. The dark values are today's constants;

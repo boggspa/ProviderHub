@@ -1,0 +1,117 @@
+"""Verify the Glass-mode pane and transcript presentation on both platforms."""
+from pathlib import Path
+import platform
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+
+
+SOURCE = Path(__file__).parent
+COMPANION = SOURCE.parent / "Packages" / "ProviderHubRemote" / "Sources" / "ProviderHubRemote"
+
+
+CASES = r'''
+import AppKit
+import SwiftUI
+
+@main struct Cases {
+    @MainActor static func main() throws {
+        func check(_ condition: Bool, _ message: String) { if !condition { fatalError(message) } }
+        // A dynamic NSColor answers for the appearance the app is wearing, so
+        // the checks walk the same two appearances the Light/Dark setting uses.
+        _ = NSApplication.shared
+        func components(_ color: Color, _ appearance: NSAppearance) -> (CGFloat, CGFloat, CGFloat, CGFloat) {
+            NSApp.appearance = appearance
+            let resolved = NSColor(color)
+            let rgb = resolved.usingColorSpace(.sRGB) ?? resolved
+            var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+            rgb.getRed(&r, green: &g, blue: &b, alpha: &a)
+            return (r, g, b, a)
+        }
+        let dark = NSAppearance(named: .darkAqua)!
+        let light = NSAppearance(named: .aqua)!
+
+        // The transcript is paper, not glass: opaque #121212 on dark and its
+        // light counterpart #F4F4F6 on light.
+        func checkRGB(_ label: String, _ resolved: (CGFloat, CGFloat, CGFloat, CGFloat),
+                      _ red: CGFloat, _ green: CGFloat, _ blue: CGFloat) {
+            let channels = [resolved.0, resolved.1, resolved.2]
+            let expected = [red, green, blue]
+            for (index, channel) in channels.enumerated() {
+                check(abs(channel - expected[index] / 255.0) < 0.004, label + " channel " + String(index) + " moved")
+            }
+            check(abs(resolved.3 - 1.0) < 0.001, label + " is not opaque")
+        }
+        checkRGB("Dark transcript", components(HubTheme.Glass.transcript, dark), 18, 18, 18)
+        checkRGB("Light transcript", components(HubTheme.Glass.transcript, light), 244, 244, 246)
+
+        // The side panes take one step off the glass and keep their translucency.
+        let darkPane = components(HubTheme.Glass.pane, dark)
+        let lightPane = components(HubTheme.Glass.pane, light)
+        check(abs(darkPane.3 - 0.07) < 0.004, "Dark pane wash moved")
+        check(abs(lightPane.3 - 0.06) < 0.004, "Light pane wash moved")
+        // White lifts the dark glass; black deepens the light glass.
+        for channel in [darkPane.0, darkPane.1, darkPane.2] { check(channel > 0.99, "Dark pane is not a white lift") }
+        for channel in [lightPane.0, lightPane.1, lightPane.2] { check(channel < 0.01, "Light pane is not a black deepen") }
+
+        // Solid mode keeps the plain window surface and paints no pane fill.
+        check(HubTheme.WindowStyle.Mode.allCases.count == 2, "Window style cases changed")
+        check(HubTheme.WindowStyle.Mode(rawValue: "glass") == .glass, "Glass style lost")
+        print("Glass theme pane and transcript checks passed")
+    }
+}
+'''
+
+
+@unittest.skipUnless(sys.platform == "darwin" and shutil.which("xcrun"), "Native theme tests need macOS")
+class GlassThemeTests(unittest.TestCase):
+    def test_glass_pane_and_transcript_fills_resolve_per_appearance(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "Cases.swift").write_text(CASES)
+            binary = root / "glass-theme-tests"
+            compiled = subprocess.run(["xcrun", "swiftc", "-swift-version", "5", "-parse-as-library",
+                "-target", platform.machine() + "-apple-macosx14.0", "-module-cache-path", str(root / "cache"),
+                str(SOURCE / "HubTheme.swift"), str(SOURCE / "HubGlass.swift"), str(root / "Cases.swift"),
+                "-framework", "AppKit", "-framework", "SwiftUI", "-o", str(binary)],
+                capture_output=True, text=True, timeout=120)
+            self.assertEqual(compiled.returncode, 0, compiled.stderr)
+            ran = subprocess.run([str(binary)], capture_output=True, text=True, timeout=30)
+            self.assertEqual(ran.returncode, 0, ran.stderr)
+            self.assertIn("Glass theme pane and transcript checks passed", ran.stdout)
+
+
+class GlassPresentationWiringTests(unittest.TestCase):
+    """Both shells read the pane fills from the one place that defines them."""
+
+    def test_chat_and_hub_windows_paint_the_panes_from_the_surface_style(self):
+        chat = (SOURCE / "ChatWindow.swift").read_text()
+        self.assertIn('.environment(\\.hubSurfaceStyle, windowStyle)', chat)
+        self.assertIn("ChatWorkspaceRail(model: model).hubGlassPane(.sidebar)", chat)
+        self.assertIn(".hubGlassPane(.inspector)", chat)
+        self.assertIn("ChatTranscript(model: model).hubGlassPane(.transcript)", chat)
+        shell = (SOURCE / "CompactShell.swift").read_text()
+        self.assertIn('.environment(\\.hubSurfaceStyle, windowStyle)', shell)
+        self.assertIn("railView.hubGlassPane(.sidebar)", shell)
+        self.assertIn("sidePane.hubGlassPane(.inspector)", shell)
+        glass = (SOURCE / "HubGlass.swift").read_text()
+        self.assertIn("HubTheme.WindowStyle.Mode.glass", glass)
+        self.assertIn("HubTheme.Glass.transcript", glass)
+
+    def test_ios_companion_mirrors_the_same_fills(self):
+        theme = (COMPANION / "CompanionTheme.swift").read_text()
+        self.assertIn("static func pane(_ pane: Pane, surfaceStyle: String) -> Color", theme)
+        self.assertIn("18 / 255", theme)
+        self.assertIn("244 / 255", theme)
+        view = (COMPANION / "CompanionView.swift").read_text()
+        self.assertIn("CompanionTheme.pane(.sidebar, surfaceStyle: surfaceStyle)", view)
+        self.assertIn("CompanionTheme.pane(.transcript, surfaceStyle: surfaceStyle)", view)
+        inspector = (COMPANION / "CompanionInspector.swift").read_text()
+        self.assertIn('@AppStorage("companionSurface") private var surfaceStyle = "solid"', inspector)
+        self.assertIn("CompanionTheme.pane(.inspector, surfaceStyle: surfaceStyle)", inspector)
+
+
+if __name__ == "__main__":
+    unittest.main()
