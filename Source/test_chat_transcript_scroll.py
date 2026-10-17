@@ -107,4 +107,38 @@ class TranscriptScrollTests(unittest.TestCase):
             self.assertIn("TRANSCRIPT_SCROLL_PRIORITY_OK", ran.stdout)
 
 
+class TranscriptStackTests(unittest.TestCase):
+    """A lazy transcript stack only estimates rows it has not drawn. When a
+    Team section above the viewport shrinks or leaves the paged tail, the
+    viewport lands past the rows it drew and stays blank until the reader
+    scrolls; a follow aimed at the estimated end also stops short of it."""
+
+    ROOT = Path(__file__).resolve().parent.parent
+
+    def section(self, path, start, end):
+        text = (self.ROOT / path).read_text()
+        return text.split(start, 1)[1].split(end, 1)[0]
+
+    def test_mac_transcript_is_an_eager_paged_stack(self):
+        transcript = self.section("Source/ChatWindow.swift", "struct ChatTranscript: View", "private struct ErrorRow")
+        self.assertFalse("LazyVStack" in transcript, "the Chat transcript went lazy again")
+        self.assertIn("return VStack(alignment: .leading, spacing: 0)", transcript)
+        self.assertIn("visibleTail(segments, limit: visibleSegmentLimit", transcript)
+        # Paged-in history goes again once the reader is back at the latest.
+        self.assertIn(".onChange(of: follow.followsLatest) { _, follows in if follows { visibleSegmentLimit = 100 } }", transcript)
+
+    def test_companion_transcript_is_an_eager_paged_stack_that_follows_by_intent(self):
+        transcript = self.section("Packages/ProviderHubRemote/Sources/ProviderHubRemote/CompanionTranscript.swift",
+                                  "struct CompanionTranscript: View", "/// A chat with no turns yet")
+        self.assertFalse("LazyVStack" in transcript, "the companion transcript went lazy again")
+        self.assertIn("VStack(alignment: .leading, spacing: 0)", transcript)
+        self.assertIn("ChatTranscriptSegment.visibleTail(segments, limit: visibleSegmentLimit", transcript)
+        # One outline per update; rows never rebuild it.
+        self.assertEqual(transcript.count("outline(live: live)"), 1)
+        # In an eager stack the end spacer appears once and never disappears,
+        # so following cannot be inferred from it; the viewport is observed.
+        self.assertFalse(".onDisappear { followsLatest = false }" in transcript, "following is inferred from the end spacer again")
+        self.assertIn(".background(CompanionScrollProbe { placed($0, proxy: proxy) })", transcript)
+
+
 if __name__ == "__main__": unittest.main()

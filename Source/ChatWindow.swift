@@ -498,9 +498,12 @@ struct ChatTranscript: View {
     var body: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                content.background(ChatTranscriptScrollObserver(follow: follow))
+                content(proxy).background(ChatTranscriptScrollObserver(follow: follow))
             }
             .onChange(of: model.transcriptVersion) { _, _ in scrollToEnd(proxy) }
+            // Back at the latest activity, history paged in for reading goes
+            // again, so the eager stack stays one page tall while it streams.
+            .onChange(of: follow.followsLatest) { _, follows in if follows { visibleSegmentLimit = 100 } }
             .onChange(of: model.jumpRequest) { _, request in
                 if let request { jump(to: request.id, proxy: proxy) }
             }
@@ -524,7 +527,7 @@ struct ChatTranscript: View {
         }
     }
 
-    private var content: some View {
+    private func content(_ proxy: ScrollViewProxy) -> some View {
         let liveEntryIDs = model.streamingEntryIDs()
         // While a turn runs its close-out waits; it appears once the turn ends.
         let segments = ChatTranscriptSegment<ChatEntry>.outline(model.entries, open: model.busy) {
@@ -547,16 +550,25 @@ struct ChatTranscript: View {
         if model.team?.enabled != true, model.busy, let speaker = segments.last(where: \.isSpeaker) {
             liveSpeakers.insert(speaker.id)
         }
-        return LazyVStack(alignment: .leading, spacing: 0) {
+        let visible = ChatTranscriptSegment<ChatEntry>.visibleTail(segments, limit: visibleSegmentLimit, liveEntryIDs: liveEntryIDs)
+        // Eager, not lazy: a lazy stack only estimates the height of rows it
+        // has not drawn, so when a Team member's section above the viewport
+        // shrinks or leaves the tail, the viewport can land past the rows it
+        // drew and show nothing until a scroll makes it measure again, and a
+        // follow aimed at the estimated end stops short of it. The tail is
+        // paged, so every row it holds is measured exactly.
+        return VStack(alignment: .leading, spacing: 0) {
             if model.entries.isEmpty { ChatInvitation(model: model) }
             if segments.count > visibleSegmentLimit {
                 Button("Load earlier messages") {
                     follow.pause()
                     visibleSegmentLimit += 100
+                    // Rows arrive above the one being read; keep it in place.
+                    if let first = visible.first?.id { DispatchQueue.main.async { proxy.scrollTo(first, anchor: .top) } }
                 }
                 .frame(maxWidth: .infinity).padding(.bottom, 16)
             }
-            ForEach(ChatTranscriptSegment<ChatEntry>.visibleTail(segments, limit: visibleSegmentLimit, liveEntryIDs: liveEntryIDs)) { segment in
+            ForEach(visible) { segment in
                 Group {
                     switch segment.content {
                     case .speaker(let entry):
