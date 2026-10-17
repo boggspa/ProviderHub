@@ -87,6 +87,11 @@ struct ChatDevicesSettings: View {
                     do { try await Task.sleep(nanoseconds: 1_000_000_000) } catch { return }
                 }
             }
+            .onAppear {
+                if address.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, let tailscale = tailscaleAddress {
+                    address = tailscale
+                }
+            }
     }
     private func copyBootstrap() {
         guard let text = pairingText else { return }

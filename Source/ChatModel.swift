@@ -448,8 +448,25 @@ final class ChatModel: ObservableObject {
     func refresh() { write(["command": "refresh"]) }
     func refreshPlugins() { write(["command": "plugins"]) }
     func refreshDevices() { write(["command": "remote_status"]) }
-    func startRemote(host: String) { write(["command": "remote_start", "host": host, "port": 8765]) }
-    func stopRemote() { write(["command": "remote_stop"]) }
+    func startRemote(host: String) {
+        preferences.set(false, forKey: "chatRemoteDisabled")
+        let trimmed = host.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty { preferences.set(trimmed, forKey: "chatRemoteHost") }
+        write(["command": "remote_start", "host": trimmed, "port": 8765])
+    }
+    func stopRemote() {
+        preferences.set(true, forKey: "chatRemoteDisabled")
+        write(["command": "remote_stop"])
+    }
+    func autoStartRemoteIfConfigured() {
+        guard !preferences.bool(forKey: "chatRemoteDisabled") else {
+            return
+        }
+        let listening = remoteStatus["listening"] as? Bool ?? false
+        guard !listening else { return }
+        guard let host = preferences.string(forKey: "chatRemoteHost")?.trimmingCharacters(in: .whitespacesAndNewlines), !host.isEmpty else { return }
+        write(["command": "remote_start", "host": host, "port": 8765])
+    }
     func confirmDevice(identity: String, code: String, allow: Bool) {
         write(["command": "remote_confirm", "identity": identity, "code": code, "allow": allow])
     }
@@ -694,6 +711,7 @@ final class ChatModel: ObservableObject {
                 connected = true
                 write(["command": "preferences", "webSearch": webSearchEnabled])
                 if !observedChats.isEmpty { write(["command": "subscribe", "client": "desktop", "chats": observedChats.sorted()]) }
+                autoStartRemoteIfConfigured()
             case "plugins":
                 browserUseEnabled = event["browserUse"] as? Bool ?? false
                 pluginStatus = event["plugins"] as? [[String: Any]] ?? []

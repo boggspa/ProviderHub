@@ -89,6 +89,7 @@ final class BridgeModel: ObservableObject {
     /// The floating recent-chat composer (QuickComposerPanel.swift).
     let quickPanel = QuickPanelModel()
     var openChatWindow: (() -> Void)?
+    var onGatewayStarted: (() -> Void)?
     @Published var chatWindowOpen = false
     @Published var chatWorking = false
     /// ChatModel.hasActiveWork, also refreshed on a Chat surface change, so
@@ -709,7 +710,10 @@ final class BridgeModel: ObservableObject {
     }
 
     func startGateway() async throws {
-        if running { return }
+        if running {
+            onGatewayStarted?()
+            return
+        }
         guard gatewayProcess == nil else { throw WorkerError(message: "The gateway is still starting or stopping.") }
         guard let python else { throw WorkerError(message: "Provider Hub needs Python 3.11 or newer. Install a supported Python runtime, then reconnect.") }
         Self.scrubWorkerCaches(helper: helper.path)
@@ -758,6 +762,7 @@ final class BridgeModel: ObservableObject {
             if json["ready"] as? Bool == true {
                 gatewayState = "Ready"
                 credentialSource = json["credential_source"] as? String ?? credentialSource
+                onGatewayStarted?()
             } else if let error = json["error"] as? String {
                 gatewayState = "Error"; tell(error, error: true)
             }
@@ -1488,6 +1493,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             self.applyWindowStyle()
         }
         model.openChatWindow = { [weak self] in self?.showChat() }
+        model.onGatewayStarted = { [weak self] in
+            guard let self else { return }
+            Task { @MainActor in
+                await self.chatModel.start()
+                self.chatModel.autoStartRemoteIfConfigured()
+            }
+        }
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         statusItem.button?.image = NSImage(systemSymbolName: "point.3.connected.trianglepath.dotted", accessibilityDescription: hubName)
         statusItem.button?.image?.isTemplate = true

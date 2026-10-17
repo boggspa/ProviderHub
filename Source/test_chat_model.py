@@ -126,6 +126,24 @@ import Combine
         check(!reopened.webSearchEnabled, "disabled search did not survive reopening")
         reopened.consume(try JSONSerialization.data(withJSONObject: ["event":"ready"]) + Data([10]))
         check(commands.last?["webSearch"] as? Bool == false, "reconnection did not restore saved search setting")
+        let remotePrefsID = "ProviderHub.ChatRemoteTests." + UUID().uuidString
+        let remotePrefs = UserDefaults(suiteName: remotePrefsID)!
+        defer { remotePrefs.removePersistentDomain(forName: remotePrefsID) }
+        var remoteCmds: [[String: Any]] = []
+        remotePrefs.set("100.80.90.100", forKey: "chatRemoteHost")
+        let remoteModel = ChatModel(sendCommand: { remoteCmds.append($0); return true }, preferences: remotePrefs)
+        remoteModel.consume(try JSONSerialization.data(withJSONObject: ["event":"ready"]) + Data([10]))
+        check(remoteCmds.contains { $0["command"] as? String == "remote_start" && $0["host"] as? String == "100.80.90.100" },
+              "remote access not auto-enabled on gateway ready with configured host")
+        remoteModel.stopRemote()
+        check(remotePrefs.bool(forKey: "chatRemoteDisabled") == true, "stopRemote did not mark remote disabled")
+        var disabledCmds: [[String: Any]] = []
+        let disabledModel = ChatModel(sendCommand: { disabledCmds.append($0); return true }, preferences: remotePrefs)
+        disabledModel.consume(try JSONSerialization.data(withJSONObject: ["event":"ready"]) + Data([10]))
+        check(!disabledCmds.contains { $0["command"] as? String == "remote_start" },
+              "disabled remote must not auto-start on ready")
+        disabledModel.startRemote(host: "100.80.90.100")
+        check(remotePrefs.bool(forKey: "chatRemoteDisabled") == false, "startRemote did not clear remote disabled")
         model.setWebSearchEnabled(true)
         try send(["event":"selected", "id":"A", "entries":[]])
         check(model.approvalMode == "manual", "old summaries must default to Manual")
