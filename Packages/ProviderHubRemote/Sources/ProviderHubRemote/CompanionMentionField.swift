@@ -15,9 +15,20 @@ struct CompanionMentionField: View {
     @ObservedObject var menu: CompanionMentionMenu
 
     var body: some View {
+        // No flexible frame here: a `.frame(maxHeight:)` takes the whole
+        // proposed height whenever its child is smaller, which is what grew
+        // the empty composer to its ceiling. The editor sizes itself.
         MentionTextEditor(text: $text, placeholder: placeholder, enabled: enabled, mentions: mentions, menu: menu)
-            .frame(minHeight: 36, maxHeight: 140)
     }
+}
+
+/// The composer hugs its text, one line when empty, and scrolls past the
+/// ceiling, as the vertical `TextField` it replaced did.
+enum MentionFieldHeight {
+    static let minimum: CGFloat = 36
+    static let maximum: CGFloat = 140
+
+    static func clamp(_ fitted: CGFloat) -> CGFloat { min(max(fitted.rounded(.up), minimum), maximum) }
 }
 
 enum MentionPaint {
@@ -142,7 +153,7 @@ struct MentionTextEditor: UIViewRepresentable {
         view.backgroundColor = .clear
         view.font = .preferredFont(forTextStyle: .body)
         view.textColor = .label
-        view.isScrollEnabled = true
+        view.isScrollEnabled = false
         view.textContainerInset = UIEdgeInsets(top: 8, left: 0, bottom: 8, right: 0)
         view.delegate = context.coordinator
         view.menuOpen = { [weak menu = self.menu] in menu?.state != nil }
@@ -161,6 +172,18 @@ struct MentionTextEditor: UIViewRepresentable {
         context.coordinator.view = view
         menu.choose = { [weak coord = context.coordinator] target in coord?.accept(target, in: coord?.view) }
         return view
+    }
+
+    /// A scrolling text view has no intrinsic height, so without this SwiftUI
+    /// hands it whatever is on offer. Measure the text at the proposed width
+    /// and scroll only once it outgrows the ceiling.
+    func sizeThatFits(_ proposal: ProposedViewSize, uiView: MentionUITextView, context: Context) -> CGSize? {
+        let width = proposal.width ?? uiView.bounds.width
+        let measured = width.isFinite ? max(width, 1) : 10_000
+        let fitted = uiView.sizeThatFits(CGSize(width: measured, height: .greatestFiniteMagnitude)).height
+        let overflowing = fitted > MentionFieldHeight.maximum
+        if uiView.isScrollEnabled != overflowing { uiView.isScrollEnabled = overflowing }
+        return CGSize(width: width, height: MentionFieldHeight.clamp(fitted))
     }
 
     func updateUIView(_ view: MentionUITextView, context: Context) {
@@ -202,6 +225,7 @@ struct MentionTextEditor: UIViewRepresentable {
             guard !applying, let view = textView as? MentionUITextView else { return }
             parent.text = view.text
             apply(view)
+            view.invalidateIntrinsicContentSize()
         }
 
         func textViewDidChangeSelection(_ textView: UITextView) {
@@ -281,6 +305,17 @@ struct MentionTextEditor: NSViewRepresentable {
         context.coordinator.view = view
         menu.choose = { [weak coord = context.coordinator] target in coord?.accept(target) }
         return scroll
+    }
+
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView scroll: NSScrollView, context: Context) -> CGSize? {
+        guard let width = proposal.width, width.isFinite, width > 0,
+              let view = scroll.documentView as? MentionNSTextView, let storage = view.textStorage else { return nil }
+        let padding = (view.textContainer?.lineFragmentPadding ?? 0) * 2
+        let font = view.font ?? .systemFont(ofSize: 15)
+        let text = storage.length == 0 ? NSAttributedString(string: " ", attributes: [.font: font]) : storage
+        let bounds = text.boundingRect(with: NSSize(width: max(1, width - padding), height: .greatestFiniteMagnitude),
+                                       options: [.usesLineFragmentOrigin, .usesFontLeading])
+        return CGSize(width: width, height: MentionFieldHeight.clamp(bounds.height + view.textContainerInset.height * 2))
     }
 
     func updateNSView(_ scroll: NSScrollView, context: Context) {

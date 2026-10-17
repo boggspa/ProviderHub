@@ -187,11 +187,17 @@ struct ChatPane: View {
         VStack(spacing: 0) {
             ChatHeader(model: model, railVisible: railVisible, railAvailable: railAvailable, compact: compactHeader, toggleRail: toggleRail)
             Rectangle().fill(Semantic.hairline).frame(height: HubTheme.Separator.width)
-            if model.selectedID == nil { ChatWelcome(model: model).hubGlassPane(.transcript) }
-            else { ChatTranscript(model: model).hubGlassPane(.transcript) }
-            if model.selectedID != nil { ChatActivityStrip(model: model) }
-            if let approval = model.approval { ApprovalStrip(model: model, approval: approval) }
-            ChatComposer(model: model)
+            // One sheet of paper from the header rule to the window's bottom
+            // edge: the live strip and the composer sit on the transcript
+            // rather than on a band of glass under a hard edge.
+            VStack(spacing: 0) {
+                if model.selectedID == nil { ChatWelcome(model: model) }
+                else { ChatTranscript(model: model) }
+                if model.selectedID != nil { ChatActivityStrip(model: model) }
+                if let approval = model.approval { ApprovalStrip(model: model, approval: approval) }
+                ChatComposer(model: model)
+            }
+            .hubGlassPane(.transcript)
         }
     }
 }

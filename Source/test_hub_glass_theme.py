@@ -95,7 +95,12 @@ class GlassPresentationWiringTests(unittest.TestCase):
         self.assertIn('.environment(\\.hubSurfaceStyle, windowStyle)', chat)
         self.assertIn("ChatWorkspaceRail(model: model).hubGlassPane(.sidebar)", chat)
         self.assertIn(".hubGlassPane(.inspector)", chat)
-        self.assertIn("ChatTranscript(model: model).hubGlassPane(.transcript)", chat)
+        # The transcript's paper runs under the live strip and the composer to
+        # the window's bottom edge; no hard edge above the composer.
+        pane = chat.split("struct ChatPane: View", 1)[1].split("// MARK: - Header", 1)[0]
+        self.assertLess(pane.index("ChatTranscript(model: model)"), pane.index("ChatComposer(model: model)"))
+        self.assertLess(pane.index("ChatComposer(model: model)"), pane.index(".hubGlassPane(.transcript)"))
+        self.assertEqual(pane.count(".hubGlassPane(.transcript)"), 1)
         shell = (SOURCE / "CompactShell.swift").read_text()
         self.assertIn('.environment(\\.hubSurfaceStyle, windowStyle)', shell)
         self.assertIn("railView.hubGlassPane(.sidebar)", shell)
@@ -123,10 +128,26 @@ class GlassPresentationWiringTests(unittest.TestCase):
         self.assertIn("244 / 255", theme)
         view = (COMPANION / "CompanionView.swift").read_text()
         self.assertIn("CompanionTheme.pane(.sidebar, surfaceStyle: surfaceStyle)", view)
-        self.assertIn("CompanionTheme.pane(.transcript, surfaceStyle: surfaceStyle)", view)
+        self.assertIn("CompanionTheme.pane(.transcript, surfaceStyle: surfaceStyle).ignoresSafeArea(edges: .bottom)", view)
+        self.assertEqual(view.count("CompanionTheme.pane(.transcript"), 1)
+        self.assertLess(view.index("composer(chat)"), view.index("CompanionTheme.pane(.transcript"))
         inspector = (COMPANION / "CompanionInspector.swift").read_text()
         self.assertIn('@AppStorage("companionSurface") private var surfaceStyle = "solid"', inspector)
         self.assertIn("CompanionTheme.pane(.inspector, surfaceStyle: surfaceStyle)", inspector)
+
+
+class CompanionComposerHeightTests(unittest.TestCase):
+    """The iOS composer is one line tall when empty, as on the Mac."""
+
+    def test_mention_editor_sizes_to_its_text(self):
+        field = (COMPANION / "CompanionMentionField.swift").read_text()
+        body = field.split("struct CompanionMentionField: View", 1)[1].split("\n}\n", 1)[0]
+        body = "\n".join(line for line in body.splitlines() if not line.strip().startswith("//"))
+        # A flexible frame takes the whole proposed height whenever its child
+        # is smaller; that is what grew the empty composer to its ceiling.
+        self.assertNotIn(".frame(", body)
+        self.assertIn("func sizeThatFits(_ proposal: ProposedViewSize, uiView: MentionUITextView", field)
+        self.assertIn("MentionFieldHeight.clamp(fitted)", field)
 
 
 if __name__ == "__main__":

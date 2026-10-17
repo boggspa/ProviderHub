@@ -11,6 +11,8 @@ public struct RemoteChat: Codable, Equatable, Identifiable {
     public var accent: String?
     public var approvalMode: String?
     public var route: String?
+    /// Busy in the Mac rail's sense: the run, a steer, a branch or a side chat.
+    public var active: Bool?
     public init(id: String, title: String, status: String, busy: Bool, pendingApproval: Bool) {
         self.id = id
         self.title = title
@@ -208,7 +210,7 @@ public struct CompanionStore: Equatable {
                         if turnSummaries.count > 32 { turnSummaries.removeFirst(turnSummaries.count - 32) }
                     }
                     controls["version"] = .number(1)
-                    if let notice = event["notice"] as? String, !notice.isEmpty { notices.append(notice) }
+                    if let notice = event["notice"] as? String, !notice.isEmpty { note(notice) }
                 }
             case "chats": chats = try decode([RemoteChat].self, event["chats"] ?? [])
             case "approval":
@@ -254,12 +256,21 @@ public struct CompanionStore: Equatable {
                     trimEntries()
                 }
             default:
-                if let text = event["message"] as? String { notices.append(text) }
+                if let text = event["message"] as? String { note(text) }
             }
         } else if method == "session.ack", let id = params["requestId"] as? String {
             acks[id] = params["ok"] as? Bool ?? false
-            if let error = params["error"] as? String { notices.append(error) }
+            if let error = params["error"] as? String { note(error) }
         }
+    }
+
+    /// Notices belong to what the person is doing now, as the Mac's do: a
+    /// new send or another chat clears them, so one old error does not sit
+    /// above every composer for the rest of the session.
+    public mutating func clearNotices() { notices = [] }
+    private mutating func note(_ text: String) {
+        notices.append(text)
+        if notices.count > 20 { notices.removeFirst(notices.count - 20) }
     }
 
     private mutating func setEntries(_ value: Any?) {
@@ -307,7 +318,7 @@ public struct CompanionStore: Equatable {
             cursor = delta.cursor
             if let chats = delta.chats { self.chats = chats }
             if delta.event == "approval" { approval = delta.approval }
-            if let message = delta.message { notices.append(message) }
+            if let message = delta.message { note(message) }
         case "session.ack":
             if let requestId, let ok { acks[requestId] = ok }
         default:

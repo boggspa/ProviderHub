@@ -82,6 +82,54 @@ final class ControlTests: XCTestCase {
         XCTAssertEqual(store.notices.last, "Connected")
     }
 
+    func testNoticesStayBoundedAndClearForTheNextAction() throws {
+        var store = CompanionStore()
+        for cursor in 1...25 {
+            try store.receive(["method": "session.delta", "params": ["cursor": cursor, "event": ["event": "control", "panel": "browserEnabled", "value": true, "notice": "n\(cursor)"]]])
+        }
+        XCTAssertEqual(store.notices.count, 20)
+        XCTAssertEqual(store.notices.first, "n6")
+        XCTAssertEqual(store.notices.last, "n25")
+        store.clearNotices()
+        XCTAssertTrue(store.notices.isEmpty)
+    }
+
+    @MainActor
+    func testTurnClockResumesFromTheOpeningMessageAndRestartsLive() throws {
+        let model = CompanionModel()
+        model.receiveRemote(["method": "session.snapshot", "params": ["cursor": 1, "chats": [], "selected": ["id": "a", "busy": true, "entries": [
+            ["id": "u1", "role": "user", "text": "Go", "time": 1000.0], ["id": "a1", "role": "assistant", "text": "On it", "time": 1005.0]]]]])
+        XCTAssertEqual(model.turnStartedAt, Date(timeIntervalSince1970: 1000))
+        // A steer adds a user message without restarting the Mac's clock.
+        model.receiveRemote(["method": "session.delta", "params": ["cursor": 2, "event": ["event": "entry", "chat": "a",
+            "entry": ["id": "u2", "role": "user", "text": "Also this", "time": 1010.0]]]])
+        XCTAssertEqual(model.turnStartedAt, Date(timeIntervalSince1970: 1000))
+        model.receiveRemote(["method": "session.delta", "params": ["cursor": 3, "event": ["event": "state", "chat": "a", "busy": false, "status": "Ready"]]])
+        XCTAssertNil(model.turnStartedAt)
+        let before = Date()
+        model.receiveRemote(["method": "session.delta", "params": ["cursor": 4, "event": ["event": "state", "chat": "a", "busy": true, "status": "Thinking…"]]])
+        XCTAssertGreaterThanOrEqual(model.turnStartedAt ?? .distantPast, before)
+        XCTAssertEqual(CompanionTurnTime.timecode(65), "01:05")
+        XCTAssertEqual(CompanionTurnTime.timecode(3725), "01:02:05")
+    }
+
+    @MainActor
+    func testHeaderAndFooterReadOneApprovalModeAndOnlyAMissingConnection() throws {
+        let model = CompanionModel()
+        model.receiveRemote(["method": "session.snapshot", "params": ["cursor": 1,
+            "chats": [["id": "a", "title": "A", "status": "Ready", "busy": false, "pendingApproval": false, "approvalMode": "manual"]],
+            "selected": ["id": "a", "entries": []], "controls": ["version": 1, "configuration": ["approvalMode": "yolo"]]]])
+        XCTAssertEqual(model.approvalMode, "yolo")
+        model.status = "Connected"
+        XCTAssertNil(model.connectionPhase)
+        model.status = "Not paired"
+        XCTAssertNil(model.connectionPhase)
+        model.status = "Disconnected. Reconnecting…"
+        XCTAssertEqual(model.connectionPhase, "Connecting")
+        model.status = "Disconnected"
+        XCTAssertEqual(model.connectionPhase, "Offline")
+    }
+
     func testControlCommandRoundTripKeepsExactFields() throws {
         var command = RemoteCommand(method: "chat.control", requestId: "r", chat: "a")
         command.action = "configure_team"
