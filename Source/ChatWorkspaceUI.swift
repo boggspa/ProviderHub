@@ -102,18 +102,35 @@ final class ChatWorkspaceController: ObservableObject {
     func split(_ zone: ChatPaneDropZone, pane: UUID, assignment: ChatPaneAssignment? = nil) {
         guard canSplit(zone, pane: pane) else { notice = "Enlarge the window or close a pane to make room."; return }
         notice = ""
-        let added = UUID()
-        if zone == .left || zone == .right { layout.splitRight(pane, newPaneID: added, assignment: assignment) }
-        else { layout.splitBelow(pane, newPaneID: added, assignment: assignment) }
-        if zone == .left || zone == .top {
-            func swap(_ node: ChatWorkspaceNode) -> ChatWorkspaceNode {
-                guard case .split(var split) = node else { return node }
-                if case .leaf(let child) = split.second, child.id == added { let first = split.first; split.first = split.second; split.second = first }
-                else { split.first = swap(split.first); split.second = swap(split.second) }
-                return .split(split)
-            }
-            layout.root = swap(layout.root)
+        let edge: ChatWorkspaceEdge
+        switch zone { case .left: edge = .left; case .top: edge = .top; case .bottom: edge = .bottom; case .right, .center: edge = .right }
+        layout.split(pane, edge: edge, assignment: assignment)
+    }
+    /// The sidebar's Open in Split View: beside the focused pane, on the edge
+    /// asked for when it has room and on the other axis otherwise. A chat
+    /// already on screen is focused where it is, and an empty focused pane
+    /// takes the chat rather than gaining an empty neighbour.
+    func open(chat: String, edge: ChatWorkspaceEdge, model: ChatModel) {
+        guard model.chats.contains(where: { $0.id == chat }) else { return }
+        if let existing = layout.pane(showing: chat) { focusedOnly = false; focus(existing, model: model); return }
+        if focusedOnly { focusedOnly = false }
+        let pane = layout.focusedPaneID
+        if case .some(nil) = layout.assignment(for: pane) {
+            layout.assignChat(paneID: pane, chatID: chat)
+            focus(pane, model: model); model.observe(chats: chatIDs); return
         }
+        let asked: ChatPaneDropZone = edge == .bottom || edge == .top ? .bottom : .right
+        guard let zone = [asked, asked == .right ? .bottom : .right].first(where: { canSplit($0, pane: pane) }) else {
+            notice = "Enlarge the window or close a pane to make room."; return
+        }
+        split(zone, pane: pane, assignment: .chat(id: chat))
+        focus(layout.focusedPaneID, model: model)
+        model.observe(chats: chatIDs)
+    }
+    /// Move focus to the next or previous pane in reading order.
+    func focusAdjacent(_ step: Int, model: ChatModel) {
+        guard layout.panes.count > 1 else { return }
+        focus(layout.adjacentPane(step), model: model)
     }
     func drop(chat: String, pane: UUID, zone: ChatPaneDropZone, model: ChatModel) {
         guard model.chats.contains(where: { $0.id == chat }) else { return }
@@ -132,6 +149,7 @@ final class ChatWorkspaceController: ObservableObject {
 }
 
 struct ChatWorkspaceContent: View {
+    private typealias Semantic = HubTheme.Semantic
     @ObservedObject var model: ChatModel
     @ObservedObject var workspace: ChatWorkspaceController
     @ObservedObject var browser: ChatBrowserStore
@@ -163,17 +181,7 @@ struct ChatWorkspaceContent: View {
 
     @ViewBuilder private func leaf(_ id: UUID, _ assignment: ChatPaneAssignment?) -> some View {
         VStack(spacing: 0) {
-            if workspace.layout.panes.count > 1 || workspace.focusedOnly {
-                HStack(spacing: 8) {
-                    Text(paneTitle(assignment)).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
-                    Spacer(minLength: 4)
-                    Button { workspace.focus(id, model: model); workspace.focusedOnly.toggle() } label: { Image(systemName: workspace.focusedOnly ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right") }
-                        .buttonStyle(.plain).help("Focus / restore pane")
-                    Button { workspace.close(id, model: model) } label: { Image(systemName: "xmark") }
-                        .buttonStyle(.plain).help("Close pane")
-                }.padding(.horizontal, 12).frame(height: 26).contentShape(Rectangle())
-                    .onTapGesture { workspace.focus(id, model: model) }
-            }
+            if workspace.layout.panes.count > 1 || workspace.focusedOnly { paneHeader(id, assignment) }
             switch assignment {
             case .chat(let chat):
                 GeometryReader { size in
@@ -189,6 +197,58 @@ struct ChatWorkspaceContent: View {
             }
         }.frame(maxWidth: .infinity, maxHeight: .infinity)
     }
+    /// Each pane names what it shows, with a menu of what can be done to the
+    /// pane itself; the focused pane's name is in full ink, the others recede.
+    private func paneHeader(_ id: UUID, _ assignment: ChatPaneAssignment?) -> some View {
+        let focused = id == workspace.layout.focusedPaneID
+        let chat: ChatSummary? = { if case .chat(let chat) = assignment { return model.chats.first { $0.id == chat } }; return nil }()
+        let route = chat.flatMap { chat in model.models.first { $0.route == chat.route && $0.account == chat.account } }
+        return HStack(spacing: 6) {
+            Menu {
+                Button("Split Right") { workspace.focus(id, model: model); workspace.split(.right, pane: id); model.setPaneFocus(nil) }
+                    .disabled(!workspace.canSplit(.right, pane: id))
+                Button("Split Below") { workspace.focus(id, model: model); workspace.split(.bottom, pane: id); model.setPaneFocus(nil) }
+                    .disabled(!workspace.canSplit(.bottom, pane: id))
+                Divider()
+                Button(workspace.focusedOnly ? "Show All Panes" : "Maximize Pane") {
+                    workspace.focus(id, model: model); workspace.focusedOnly.toggle()
+                }
+                Button("Close Pane") { workspace.close(id, model: model) }
+            } label: {
+                HStack(spacing: 6) {
+                    if assignment != nil {
+                        if case .browser = assignment { Image(systemName: "globe").font(.system(size: 11)) }
+                        else { ChatProviderIcon(presentation: route?.presentation, size: 13) }
+                    }
+                    Text(paneTitle(assignment)).font(.system(size: 12, weight: .semibold)).lineLimit(1).truncationMode(.tail)
+                    Image(systemName: "chevron.down").font(.system(size: 8, weight: .semibold)).foregroundStyle(Semantic.secondaryInk)
+                }
+                .foregroundStyle(focused ? Semantic.ink : Semantic.secondaryInk)
+            }
+            // A plain button-style menu keeps the label as drawn, so the
+            // unfocused pane's name can recede; a borderless one restyles it.
+            .menuStyle(.button).buttonStyle(.plain).menuIndicator(.hidden).fixedSize()
+            .accessibilityLabel("Pane: " + paneTitle(assignment))
+            .help("Pane actions")
+            if let chat, model.isActive(chat.id) {
+                ProgressView().controlSize(.mini).tint(route?.accent ?? Semantic.secondaryInk).accessibilityLabel("Working")
+            }
+            Spacer(minLength: 4)
+            Button { workspace.focus(id, model: model); workspace.focusedOnly.toggle() } label: {
+                Image(systemName: workspace.focusedOnly ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
+                    .font(.system(size: 11)).frame(width: 22, height: 22).contentShape(Rectangle())
+            }.buttonStyle(.plain).foregroundStyle(Semantic.secondaryInk)
+                .help(workspace.focusedOnly ? "Show all panes (⌃⌥⌘F)" : "Maximize pane (⌃⌥⌘F)")
+                .accessibilityLabel(workspace.focusedOnly ? "Show all panes" : "Maximize pane")
+            Button { workspace.close(id, model: model) } label: {
+                Image(systemName: "xmark").font(.system(size: 11)).frame(width: 22, height: 22).contentShape(Rectangle())
+            }.buttonStyle(.plain).foregroundStyle(Semantic.secondaryInk)
+                .help("Close pane (⌥⌘W)").accessibilityLabel("Close pane")
+        }
+        .padding(.leading, 12).padding(.trailing, 8).frame(height: 32).contentShape(Rectangle())
+        .onTapGesture { workspace.focus(id, model: model) }
+    }
+
     private func paneTitle(_ assignment: ChatPaneAssignment?) -> String {
         switch assignment {
         case .chat(let id): return model.chats.first { $0.id == id }?.title ?? "Chat"
@@ -227,6 +287,8 @@ struct ChatWorkspaceContent: View {
             case "below": workspace.split(.bottom, pane: workspace.layout.focusedPaneID); model.setPaneFocus(nil)
             case "close": workspace.close(workspace.layout.focusedPaneID, model: model)
             case "focus": workspace.focusedOnly.toggle()
+            case "next": workspace.focusAdjacent(1, model: model)
+            case "previous": workspace.focusAdjacent(-1, model: model)
             default: break
             }
         }
@@ -234,7 +296,7 @@ struct ChatWorkspaceContent: View {
             switch command {
             case "right": return workspace.canSplit(.right, pane: workspace.layout.focusedPaneID)
             case "below": return workspace.canSplit(.bottom, pane: workspace.layout.focusedPaneID)
-            case "close", "focus": return workspace.layout.panes.count > 1
+            case "close", "focus", "next", "previous": return workspace.layout.panes.count > 1
             default: return false
             }
         }

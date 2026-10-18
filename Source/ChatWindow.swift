@@ -41,6 +41,9 @@ struct ChatWindow: View {
                 HStack(spacing: 0) {
                     if panes.rail > 0 {
                         ChatWorkspaceRail(model: model).hubGlassPane(.sidebar).frame(width: panes.rail)
+                            .environment(\.chatPaneOpener, ChatPaneOpener(openChats: workspace.chatIDs, split: workspace.layout.panes.count > 1) { chat, below in
+                                workspace.open(chat: chat, edge: below ? .bottom : .right, model: model)
+                            })
                         ChatPaneDivider(label: "Workspace rail width", width: panes.rail, direction: 1,
                             resize: { railWidth = Double(ChatPaneSizing.clamp($0, 150, 360)) },
                             reset: { railWidth = Double(ChatPaneSizing.railDefault) })

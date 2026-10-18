@@ -47,12 +47,32 @@ struct ChatRailGroups {
     var recents: [ChatSummary]
 }
 
+/// What the Chat window's panes offer the sidebar, as Claude Desktop's does:
+/// which chats are on screen and a way to open one beside the focused pane.
+/// Outside the Chat window it offers nothing and the sidebar shows no pane items.
+struct ChatPaneOpener {
+    var openChats: Set<String> = []
+    var split = false
+    /// Opens a chat beside the focused pane: below it when the flag is set.
+    var open: ((_ chat: String, _ below: Bool) -> Void)?
+    func beside(_ chat: String) { open?(chat, false) }
+    func below(_ chat: String) { open?(chat, true) }
+}
+private struct ChatPaneOpenerKey: EnvironmentKey { static let defaultValue = ChatPaneOpener() }
+extension EnvironmentValues {
+    var chatPaneOpener: ChatPaneOpener {
+        get { self[ChatPaneOpenerKey.self] }
+        set { self[ChatPaneOpenerKey.self] = newValue }
+    }
+}
+
 struct ChatWorkspaceRail: View {
     @ObservedObject var model: ChatModel
     @State private var collapsed: Set<String> = []
     @State private var renaming: String?
     @State private var renameText = ""
     @State private var pendingDelete: ChatSummary?
+    @Environment(\.chatPaneOpener) private var paneOpener
     private typealias Semantic = HubTheme.Semantic
 
     private static let recentsKey = "chat-rail-recents"
@@ -212,6 +232,10 @@ struct ChatWorkspaceRail: View {
                         .foregroundStyle(Semantic.secondaryInk).accessibilityLabel("Needs approval")
                 } else if model.isActive(chat.id) {
                     ProgressView().controlSize(.mini).tint(route?.accent ?? Semantic.secondaryInk).accessibilityLabel("Working")
+                } else if paneOpener.split, paneOpener.openChats.contains(chat.id) {
+                    // On screen in one of the window's panes, as Claude Desktop marks it.
+                    Circle().fill(Semantic.secondaryInk).frame(width: 5, height: 5).padding(.trailing, 2)
+                        .help("Open in a pane").accessibilityLabel("Open in a pane")
                 }
             }
         }
@@ -236,6 +260,13 @@ struct ChatWorkspaceRail: View {
             return provider
         }
         .contextMenu {
+            if paneOpener.open != nil {
+                Menu("Open in") {
+                    Button("Split View") { paneOpener.beside(chat.id) }
+                    Button("Split View Below") { paneOpener.below(chat.id) }
+                }.disabled(!model.connected)
+                Divider()
+            }
             Button("Rename") { renameText = chat.title; renaming = chat.id }.disabled(model.isActive(chat.id))
             Button("Delete…") { pendingDelete = chat }.disabled(model.isActive(chat.id))
         }

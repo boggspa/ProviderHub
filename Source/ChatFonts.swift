@@ -146,7 +146,9 @@ final class ChatPaneCommands: NSObject, NSMenuItemValidation {
             ("New Pane Right", "right", "d", NSEvent.ModifierFlags([.command, .option])),
             ("New Pane Below", "below", "d", NSEvent.ModifierFlags([.command, .option, .shift])),
             ("Close Pane", "close", "w", NSEvent.ModifierFlags([.command, .option])),
-            ("Focus / Restore Pane", "focus", "f", NSEvent.ModifierFlags([.command, .option, .control]))
+            ("Focus / Restore Pane", "focus", "f", NSEvent.ModifierFlags([.command, .option, .control])),
+            ("Next Pane", "next", "]", NSEvent.ModifierFlags([.command, .option])),
+            ("Previous Pane", "previous", "[", NSEvent.ModifierFlags([.command, .option]))
         ] {
             let item = NSMenuItem(title: title, action: #selector(invoke(_:)), keyEquivalent: key)
             item.keyEquivalentModifierMask = modifiers; item.target = self; item.representedObject = command

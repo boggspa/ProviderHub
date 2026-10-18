@@ -100,6 +100,7 @@ public final class ChatNativeWorkspaceController: NSViewController {
             host.host.rootView = content(pane.id, pane.assignment)
             host.focus = { onFocus(pane.id) }; host.drop = { zone, chat in onDrop(pane.id, zone, chat) }
             host.surface.focused = layout.panes.count > 1 && pane.id == focused
+            host.surface.card = layout.panes.count > 1 && !focusedOnly
         }
         func shape(_ node: ChatWorkspaceNode) -> String {
             switch node {
@@ -173,19 +174,39 @@ private final class ChatLeafController: NSViewController {
         }
         addChild(host); host.view.translatesAutoresizingMaskIntoConstraints = false; view.addSubview(host.view)
         NSLayoutConstraint.activate([host.view.leadingAnchor.constraint(equalTo:view.leadingAnchor),host.view.trailingAnchor.constraint(equalTo:view.trailingAnchor),host.view.topAnchor.constraint(equalTo:view.topAnchor),host.view.bottomAnchor.constraint(equalTo:view.bottomAnchor)])
+        surface.raiseOverlay()
     }
+}
+
+/// Draws the focus ring and drop preview above the pane's content, whose own
+/// layers (the transcript's scroll view and glass) would otherwise cover a
+/// sublayer of the pane. It never takes a click or a drag.
+@MainActor
+private final class ChatPaneOverlay: NSView {
+    override var isFlipped: Bool { true }
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
 }
 
 @MainActor
 private final class ChatDropSurface: NSView {
     override var isFlipped: Bool { true }
     private let previewLayer = CALayer()
+    private let overlay = ChatPaneOverlay()
     var drop: (ChatPaneDropZone,String) -> Void = { _,_ in }
     var focused = false { didSet { updatePreview() } }
+    /// Side by side, each pane is a rounded card, as in Claude Desktop, and
+    /// the focused card is ringed in the accent colour.
+    var card = false {
+        didSet {
+            guard card != oldValue else { return }
+            layer?.cornerRadius = card ? Self.radius : 0; layer?.masksToBounds = card; updatePreview()
+        }
+    }
+    static let radius: CGFloat = 10
     var zone: ChatPaneDropZone? { didSet { updatePreview() } }
     override init(frame: NSRect) {
         super.init(frame:frame); wantsLayer = true
-        previewLayer.zPosition = 1000; layer?.addSublayer(previewLayer)
+        overlay.wantsLayer = true; overlay.layer?.addSublayer(previewLayer); addSubview(overlay)
         registerForDraggedTypes([NSPasteboard.PasteboardType(UTType.chatPaneChatID.identifier)])
     }
     convenience init() { self.init(frame:.zero) }
@@ -213,10 +234,13 @@ private final class ChatDropSurface: NSView {
         }
         return true
     }
-    override func layout() { super.layout();updatePreview() }
+    /// Keep the overlay above content added after it.
+    func raiseOverlay() { addSubview(overlay, positioned: .above, relativeTo: nil) }
+    override func layout() { super.layout(); overlay.frame = bounds; updatePreview() }
     private func updatePreview() {
         CATransaction.begin();CATransaction.setDisableActions(true)
-        previewLayer.frame = zone.map { ChatPaneDropGeometry.preview($0,bounds:bounds) } ?? bounds.insetBy(dx:2,dy:2)
+        previewLayer.frame = zone.map { ChatPaneDropGeometry.preview($0,bounds:bounds) } ?? bounds.insetBy(dx:card ? 0.75 : 2,dy:card ? 0.75 : 2)
+        previewLayer.cornerRadius = card ? Self.radius - 0.75 : 0
         previewLayer.backgroundColor = zone == nil ? nil : NSColor.systemBlue.withAlphaComponent(0.3).cgColor
         previewLayer.borderWidth = focused && zone == nil ? 1.5 : 0
         previewLayer.borderColor = NSColor.controlAccentColor.cgColor

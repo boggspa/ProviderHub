@@ -61,6 +61,29 @@ import Foundation
         var overdeep = ChatWorkspaceLayout.initial(chatID:"a")
         for _ in 0..<34 { overdeep.splitRight(overdeep.focusedPaneID) }
         precondition((try? ChatWorkspaceLayout.load(from:overdeep.save())) == nil,"malformed persistence depth rejected")
+        // Open in Split View: the new pane lands on the edge asked for.
+        var edges = ChatWorkspaceLayout.initial(chatID: "a")
+        let anchor = edges.focusedPaneID
+        edges.split(anchor, edge: .left, assignment: .chat(id: "left"))
+        precondition(edges.panes.map(\.assignment) == [.chat(id: "left"), .chat(id: "a")], "left split leads")
+        precondition(edges.focusedPaneID == edges.pane(showing: "left"), "focus moves to the opened pane")
+        edges.split(anchor, edge: .top, assignment: .chat(id: "top"))
+        precondition(edges.panes.map(\.assignment) == [.chat(id: "left"), .chat(id: "top"), .chat(id: "a")], "top split leads")
+        edges.split(anchor, edge: .bottom, assignment: .chat(id: "bottom"))
+        precondition(edges.panes.map(\.assignment).last == .chat(id: "bottom"), "bottom split follows")
+        precondition(edges.pane(showing: "a") == anchor && edges.pane(showing: "missing") == nil)
+        // Next and previous pane wrap in reading order.
+        edges.focus(paneID: anchor)
+        let order = edges.panes.map(\.id)
+        precondition(edges.adjacentPane(1) == order[3] && edges.adjacentPane(-1) == order[1])
+        edges.focus(paneID: order[3])
+        precondition(edges.adjacentPane(1) == order[0], "next wraps to the first pane")
+        edges.focus(paneID: order[0])
+        precondition(edges.adjacentPane(-1) == order[3], "previous wraps to the last pane")
+        var solo = ChatWorkspaceLayout.initial(chatID: "solo")
+        precondition(solo.adjacentPane(1) == solo.focusedPaneID, "one pane has no neighbour")
+        solo.split(solo.focusedPaneID, edge: .right)
+        precondition((try? ChatWorkspaceLayout.load(from: edges.save())) == edges, "edge splits persist")
         print("multiview cases passed")
     }
 }
@@ -95,6 +118,32 @@ class MultiviewTests(unittest.TestCase):
             result = subprocess.run([str(binary)], capture_output=True, text=True, timeout=30)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertIn("multiview cases passed", result.stdout)
+
+class MultiviewAffordanceTests(unittest.TestCase):
+    """Claude Desktop's split view, reachable without dragging: the sidebar
+    opens a chat beside the focused pane and marks the chats on screen."""
+
+    def test_sidebar_opens_chats_in_split_view_and_marks_open_ones(self):
+        source = Path(__file__).parent
+        rail = (source / "ChatWorkspaces.swift").read_text()
+        self.assertIn('Menu("Open in")', rail)
+        self.assertIn('Button("Split View") { paneOpener.beside(chat.id) }', rail)
+        self.assertIn('Button("Split View Below") { paneOpener.below(chat.id) }', rail)
+        self.assertIn("paneOpener.split, paneOpener.openChats.contains(chat.id)", rail)
+        window = (source / "ChatWindow.swift").read_text()
+        self.assertIn("workspace.open(chat: chat, edge: below ? .bottom : .right, model: model)", window)
+
+    def test_panes_carry_a_header_menu_and_keyboard_navigation(self):
+        source = Path(__file__).parent
+        ui = (source / "ChatWorkspaceUI.swift").read_text()
+        header = ui.split("private func paneHeader", 1)[1].split("private func paneTitle", 1)[0]
+        for action in ('"Split Right"', '"Split Below"', '"Maximize Pane"', '"Close Pane"'):
+            self.assertIn(action, header)
+        menu = (source / "ChatFonts.swift").read_text()
+        self.assertIn('("Next Pane", "next", "]"', menu)
+        self.assertIn('("Previous Pane", "previous", "["', menu)
+        self.assertIn('case "next": workspace.focusAdjacent(1, model: model)', ui)
+
 
 RENDERER = r'''
 import AppKit
