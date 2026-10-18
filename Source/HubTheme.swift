@@ -102,6 +102,12 @@ enum HubTheme {
                                       dark: NSColor.black.withAlphaComponent(0.12))
         /// A restrained brand fallback for containers without a provider.
         static let cardRim = accentOnSurface.opacity(0.20)
+        /// An opaque writing surface, lifted above the surrounding window.
+        static let composerFill = dynamic(light: .white,
+                                          dark: NSColor(red: 37 / 255, green: 38 / 255, blue: 41 / 255, alpha: 1))
+        /// A neutral edge that stays consistent when the selected model changes.
+        static let composerRim = dynamic(light: NSColor.black.withAlphaComponent(0.12),
+                                         dark: NSColor.white.withAlphaComponent(0.14))
         /// A selected navigation row or an active control background.
         static let selection = dynamic(light: NSColor.black.withAlphaComponent(0.09),
                                        dark: NSColor.white.withAlphaComponent(0.09))

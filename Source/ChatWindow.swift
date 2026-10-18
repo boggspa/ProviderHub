@@ -821,6 +821,7 @@ private struct ApprovalStrip: View {
 // MARK: - Composer
 
 private struct ChatComposer: View {
+    @Environment(\.displayScale) private var displayScale
     @ObservedObject var model: ChatModel
     @State private var height: CGFloat = 22
     @StateObject private var mentionMenu = ChatMentionMenu()
@@ -854,7 +855,7 @@ private struct ChatComposer: View {
                 }
             }
             .padding(.leading, 14).padding(.trailing, 7).padding(.vertical, 7)
-            .hubCard(cornerRadius: HubTheme.Radius.panel, accent: yolo ? Semantic.approvalYolo : model.activeAccent)
+            .background(composerSurface)
             .overlay(alignment: .topLeading) {
                 ChatMentionList(menu: mentionMenu, model: model).padding(.leading, 6).alignmentGuide(.top) { $0[.bottom] + 6 }
             }
@@ -875,6 +876,14 @@ private struct ChatComposer: View {
         } message: {
             Text("YOLO edits files and runs commands in \(folderName(yoloWorkspace ?? "")) without asking first. This is asked once per folder.")
         }
+    }
+
+    private var composerSurface: some View {
+        let shape = RoundedRectangle(cornerRadius: HubTheme.Radius.panel, style: .continuous)
+        return shape.fill(Semantic.composerFill)
+            .overlay(shape.strokeBorder(
+                yolo ? Semantic.approvalYolo.opacity(0.38) : Semantic.composerRim,
+                lineWidth: 1 / max(displayScale, 1)))
     }
 
     private var editable: Bool { model.connected && model.selectedID != nil }
