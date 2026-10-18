@@ -1,4 +1,5 @@
 """Background shell processes: ownership, bounded output, Stop and cleanup."""
+from contextlib import ExitStack
 import os
 from pathlib import Path
 import re
@@ -209,6 +210,118 @@ class ProcessRegistryTests(unittest.TestCase):
 
     def process(self, identifier, chat="chat-a"):
         return next(item for item in self.registry._chats[chat]["processes"] if item.id == identifier)
+
+    def assert_reader_failure(self, patches, message, *, thread=False, command="exec sleep 30"):
+        real_killpg, signals = os.killpg, []
+        def signal_group(pgid, number):
+            process = self.process("p1")
+            if process.pid == pgid:
+                signals.append((number, process.popen.returncode, process.reaped,
+                                self.registry._condition._is_owned()))
+            return real_killpg(pgid, number)
+        with mock.patch.object(chat_processes, "MAX_RUNNING", 1), \
+                mock.patch.object(chat_processes, "MAX_RUNNING_PER_CHAT", 1), \
+                mock.patch.object(chat_processes, "FIRST_LOOK", .01), \
+                mock.patch.object(chat_processes.os, "killpg", side_effect=signal_group):
+            with ExitStack() as stack:
+                for patch in patches:
+                    stack.enter_context(patch)
+                if thread:
+                    with self.assertRaisesRegex(ValueError, message):
+                        self.start(command)
+                else:
+                    self.start(command)
+                process = self.process("p1")
+                self.assertTrue(wait_for(lambda: not process.alive), "reader failure stranded its running slot")
+                if process.thread is not None:
+                    process.thread.join(5)
+                    self.assertFalse(process.thread.is_alive())
+            row = self.rows()["p1"]
+            self.assertEqual(row["status"], "exited")
+            self.assertIsNotNone(row["ended"])
+            self.assertIsNotNone(process.popen.returncode)
+            self.assertEqual(row["code"], process.popen.returncode)
+            self.assertIsNone(process.kill_at)
+            self.assertTrue(process.popen.stdout.closed)
+            self.assertTrue(process.reaped)
+            self.assertTrue(wait_for(lambda: gone(process.pid)), "reader failure left its child alive")
+            self.assertEqual(signals, [(9, None, False, True)], "group signal did not precede reaping under the lock")
+            process.signal(15)
+            self.assertEqual(signals, [(9, None, False, True)], "a reaped group was signalled again")
+            self.assertIn(message, row["output"])
+            self.assertTrue(self.registry._report(process, "Started background process")[1])
+            self.assertEqual(self.registry.running(), 0)
+            self.assertIn("chat-a", self.changes)
+            if thread:
+                self.assertIsNone(process.thread, "shutdown would join an unstarted reader")
+            # The terminal row stays visible without consuming the only slot.
+            self.start("exec sleep 30")
+            self.assertEqual(self.registry.running(), 1)
+            replacement = self.process("p2")
+            self.registry.shutdown(timeout=1)
+            self.assertTrue(wait_for(lambda: gone(replacement.pid)))
+            self.assertEqual(self.registry.running(), 0)
+        return process
+
+    def test_nonblocking_setup_failure_reaps_the_child_and_reuses_the_slot(self):
+        self.assert_reader_failure([
+            mock.patch.object(chat_processes.os, "set_blocking", side_effect=OSError("nonblocking setup failed"))
+        ], "nonblocking setup failed")
+
+    def test_selector_construction_failure_reaps_the_child_and_reuses_the_slot(self):
+        self.assert_reader_failure([
+            mock.patch.object(chat_processes, "_ProcessSelector", side_effect=OSError("selector allocation failed"))
+        ], "selector allocation failed")
+
+    def test_selector_registration_failure_reaps_the_child_and_reuses_the_slot(self):
+        selector = chat_processes._ProcessSelector()
+        self.addCleanup(selector.close)
+        self.assert_reader_failure([
+            mock.patch.object(chat_processes, "_ProcessSelector", return_value=selector),
+            mock.patch.object(selector, "register", side_effect=OSError("selector registration failed"))
+        ], "selector registration failed")
+
+    def test_thread_construction_failure_reaps_the_child_and_reuses_the_slot(self):
+        self.assert_reader_failure([
+            mock.patch.object(chat_processes.threading, "Thread", side_effect=RuntimeError("thread construction failed"))
+        ], "thread construction failed", thread=True)
+
+    def test_thread_start_failure_reaps_the_child_and_reuses_the_slot(self):
+        self.assert_reader_failure([
+            mock.patch.object(chat_processes.threading.Thread, "start", side_effect=RuntimeError("thread start failed"))
+        ], "thread start failed", thread=True)
+
+    def test_selector_close_failure_still_closes_stdout_and_finalizes(self):
+        selector = chat_processes._ProcessSelector()
+        real_close = selector.close
+        self.addCleanup(real_close)
+        def close():
+            real_close()
+            raise OSError("selector close failed")
+        process = self.assert_reader_failure([
+            mock.patch.object(chat_processes, "_ProcessSelector", return_value=selector),
+            mock.patch.object(selector, "close", side_effect=close)
+        ], "selector close failed", command="exit 0")
+        self.assertEqual(process.code, 0, "reader failure replaced the actual child exit code")
+
+    def test_stdout_close_failure_still_reaps_and_finalizes(self):
+        real_popen = chat_processes.subprocess.Popen
+        class Output:
+            def __init__(self, stream): self.stream = stream
+            def fileno(self): return self.stream.fileno()
+            @property
+            def closed(self): return self.stream.closed
+            def close(self):
+                self.stream.close()
+                raise OSError("stdout close failed")
+        def popen(*args, **kwargs):
+            process = real_popen(*args, **kwargs)
+            process.stdout = Output(process.stdout)
+            return process
+        process = self.assert_reader_failure([
+            mock.patch.object(chat_processes.subprocess, "Popen", side_effect=popen)
+        ], "stdout close failed", command="exit 0")
+        self.assertEqual(process.code, 0, "reader failure replaced the actual child exit code")
 
     def test_group_is_never_signalled_after_its_leader_is_reaped(self):
         real, calls = os.killpg, []
