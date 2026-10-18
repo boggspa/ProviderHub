@@ -107,6 +107,22 @@ class ProcessRegistryTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "already has 3"):
                 self.start("sleep 30", second)
 
+    def test_expanded_team_allows_two_processes_per_member(self):
+        members = [{"id": f"m{i}", "name": f"Member {i}", "status": "working"} for i in range(8)]
+        self.chat.chat["team"] = {"enabled": True, "execution": {"processes": 16}, "members": members}
+        owners = [Conversation(f"member-{i}", role="team", member=member, parent=self.chat)
+                  for i, member in enumerate(members)]
+        with mock.patch.object(chat_processes, "FIRST_LOOK", .01):
+            for _ in range(2):
+                for owner in owners:
+                    self.start("exec sleep 30", owner)
+            rows = list(self.rows().values())
+            self.assertEqual(len(rows), 16)
+            for member in members:
+                self.assertEqual(sum(row["memberID"] == member["id"] for row in rows), 2)
+            with self.assertRaisesRegex(ValueError, "already has 16"):
+                self.start("exec sleep 30", owners[0])
+
     def test_quick_failure_is_an_error_with_its_exit_code(self):
         text, error = self.start("echo oops >&2; exit 3")
         self.assertTrue(error)
@@ -155,17 +171,17 @@ class ProcessRegistryTests(unittest.TestCase):
         other = Conversation("chat-b")
         self.assertEqual(scope(member), ("chat-a", {"owner": "Sol", "route": "ollama/a", "account": "", "memberID": "m1"}))
         self.assertEqual(scope(helper), ("chat-a", {"owner": "Helper · Opus", "route": "ollama/a", "account": "", "memberID": None}))
-        with mock.patch.object(chat_processes, "FIRST_LOOK", 0.01), mock.patch.object(chat_processes, "MAX_RUNNING", 9):
-            for owner in (parent, member, helper, member, parent, member, helper, member):
+        with mock.patch.object(chat_processes, "FIRST_LOOK", 0.01), mock.patch.object(chat_processes, "MAX_RUNNING", 17):
+            for owner in (parent, member, helper, member) * 4:
                 self.start("sleep 30", owner)
             rows = self.rows()
-            self.assertEqual(sorted(rows), [f"p{i}" for i in range(1, 9)])
+            self.assertEqual(set(rows), {f"p{i}" for i in range(1, 17)})
             self.assertEqual([rows[key]["owner"] for key in ("p1", "p2", "p3")], ["Model A", "Sol", "Helper · Opus"])
-            with self.assertRaisesRegex(ValueError, "already has 8"):
+            with self.assertRaisesRegex(ValueError, "already has 16"):
                 self.start("sleep 30")
             self.start("sleep 30", other)
             self.assertEqual(list(self.rows("chat-b")), ["p1"])
-            with self.assertRaisesRegex(ValueError, "9 background processes are already running"):
+            with self.assertRaisesRegex(ValueError, "17 background processes are already running"):
                 self.start("sleep 30", other)
         with self.assertRaisesRegex(ValueError, "No background process 'p2'"):
             self.registry.stop(other, "p2", other.cancel)

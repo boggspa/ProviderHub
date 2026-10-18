@@ -347,8 +347,10 @@ while other members can continue model work and reads.
 Team members cannot recursively delegate or add members.
 
 Background processes retain member attribution in the shared Processes tab.
-The Team's running-process ceiling is configurable from one to eight (default
-five), within the worker-wide maximum of eight. Extra launches preserve a first
+The Team's running-process ceiling is configurable from one to sixteen (default
+eight), within the host-wide maximum of 128 across all chats. Existing Teams keep
+their saved allowance until you change **Background processes** in the Team editor.
+Extra launches preserve a first
 slot for active peers where capacity permits. Each member has its own output
 cursor, so one member reading a process cannot consume another's unread output.
 Process completion wakes registered waits. Stopping Team leaves background

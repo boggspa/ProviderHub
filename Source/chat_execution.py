@@ -11,6 +11,8 @@ import hashlib
 import time
 
 
+MAX_PROCESSES = 16
+
 DEFAULTS = {"mode": "task", "contextTokens": 200000, "processes": 8,
             "minutes": None, "tokens": None}
 
@@ -38,7 +40,7 @@ def settings(value=None, *, legacy=False):
     result.update(value)
     if result["mode"] not in {"task", "contribution"}:
         raise ValueError("Choose Task or One contribution for Team execution.")
-    for key, low, high in (("contextTokens", 16000, 2000000), ("processes", 1, 8),
+    for key, low, high in (("contextTokens", 16000, 2000000), ("processes", 1, MAX_PROCESSES),
                            ("minutes", 1, 10080), ("tokens", 1, 2000000000)):
         item = result[key]
         if key in {"minutes", "tokens"} and item is None:

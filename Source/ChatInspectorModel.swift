@@ -213,6 +213,8 @@ struct ChatTeamPendingChange: Decodable {
     }
 }
 struct ChatTeamExecution: Decodable {
+    /// The runtime's MAX_PROCESSES (chat_execution.py).
+    static let maxProcesses = 16
     var mode: String = "task"
     var contextTokens: Int = 200_000
     var processes: Int = 8
@@ -220,7 +222,7 @@ struct ChatTeamExecution: Decodable {
     var tokens: Int?
     var isValid: Bool {
         ["task", "contribution"].contains(mode) && (16_000...2_000_000).contains(contextTokens) &&
-        (1...8).contains(processes) && (minutes.map { (1...10_080).contains($0) } ?? true) &&
+        (1...Self.maxProcesses).contains(processes) && (minutes.map { (1...10_080).contains($0) } ?? true) &&
         (tokens.map { (1...2_000_000_000).contains($0) } ?? true)
     }
     var wire: [String: Any] {

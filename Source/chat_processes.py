@@ -20,8 +20,12 @@ import threading
 import time
 import weakref
 
-MAX_RUNNING = 64
-MAX_RUNNING_PER_CHAT = 8
+from chat_execution import MAX_PROCESSES
+
+# Host-wide room for eight chats at the per-chat ceiling. Team settings keep
+# their explicit limit, including the default of eight unless the user raises it.
+MAX_RUNNING = 128
+MAX_RUNNING_PER_CHAT = MAX_PROCESSES
 MAX_FINISHED_PER_CHAT = 10
 TAIL_BYTES = 64_000
 SNAPSHOT_CHARS = 4_000
