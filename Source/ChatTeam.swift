@@ -322,8 +322,8 @@ private struct ChatTeamEditor: View {
                         Text(value.formatted() + " tokens").tag(String(value))
                     }
                 }.help("Uses the smaller of this ceiling and the model’s window; space is reserved for output and notes.")
-                Stepper("Background processes: \(processSlots)", value: $processSlots, in: 1...8)
-                    .help("Shared across this Team. Extra launches reserve capacity for active peers; 64 processes maximum across all chats.")
+                Stepper("Background processes: \(processSlots)", value: $processSlots, in: 1...ChatTeamExecution.maxProcesses)
+                    .help("Shared across this Team. Extra launches reserve capacity for active peers; 128 processes maximum across all chats.")
                 Text("A new message or Resume starts a fresh run allowance; updates to active work keep it. Limits are checked between requests and actions, so work already running can go over. A token limit pauses if usage is unavailable. Spending limits are unavailable because providers do not report reliable charges.")
                     .font(.system(size: 10.5)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 if execution == nil {

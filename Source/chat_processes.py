@@ -20,8 +20,15 @@ import threading
 import time
 import weakref
 
-MAX_RUNNING = 64
-MAX_RUNNING_PER_CHAT = 8
+from chat_execution import MAX_PROCESSES
+
+# Like subprocess, poll/select need no extra descriptor for one output pipe.
+_ProcessSelector = getattr(selectors, "PollSelector", selectors.SelectSelector)
+
+# Host-wide room for eight chats at the per-chat ceiling. Team settings keep
+# their explicit limit, including the default of eight unless the user raises it.
+MAX_RUNNING = 128
+MAX_RUNNING_PER_CHAT = MAX_PROCESSES
 MAX_FINISHED_PER_CHAT = 10
 TAIL_BYTES = 64_000
 SNAPSHOT_CHARS = 4_000
@@ -115,6 +122,7 @@ class BackgroundProcess:
         self.workspace, self.command, self.popen, self.pid = workspace, command, popen, popen.pid
         self.started, self.ended = time.time(), None
         self.status, self.code, self.stopped_by = "running", None, None
+        self.failure = None
         self.tail, self.total, self.seen = bytearray(), 0, {}
         self.kill_at, self.forgotten, self.thread, self.reaped = None, False, None, False
 
@@ -176,6 +184,7 @@ class ProcessRegistry:
         team = (root.chat or {}).get("team") or {}
         from chat_execution import policy
         maximum = policy(team)["processes"] if team.get("enabled") else MAX_RUNNING_PER_CHAT
+        launch_error = None
         with self._condition:
             if self.closing:
                 raise ValueError("Chat is closing.")
@@ -201,8 +210,20 @@ class ProcessRegistry:
             record["next"] += 1
             process = BackgroundProcess(chat, record["next"], owner, workspace, command, popen)
             record["processes"].append(process)
-            process.thread = threading.Thread(target=self._pump, args=(process,), daemon=True, name="chat-process-" + process.id)
-            process.thread.start()
+            try:
+                process.thread = threading.Thread(target=self._pump, args=(process,), daemon=True, name="chat-process-" + process.id)
+                process.thread.start()
+            except Exception as exc:
+                # shutdown() must never try to join a thread that did not start.
+                process.thread = None
+                launch_error = exc
+        if launch_error is not None:
+            failure = f"Could not start background process reader: {launch_error}"
+            self._finish(process, failure=failure)
+            try:
+                self._changed(process)
+            finally:
+                raise ValueError(failure) from launch_error
         self._changed(process)
         self._wait(process, FIRST_LOOK, cancel)
         return self._report(process, "Started background process", reader=service.chat["id"])
@@ -323,7 +344,8 @@ class ProcessRegistry:
                 if process.status == "stopped":
                     state += STOPPED_BY.get(process.stopped_by, "")
                 state += f" after {_duration((process.ended or time.time()) - process.started)}"
-            alive, failed = process.alive, process.status == "exited" and process.code != 0
+            alive = process.alive
+            failed = process.failure is not None or (process.status == "exited" and process.code != 0)
             lines = [f"{prefix} {process.id} (pid {process.pid}) {state}.", f"Command: {process.command}"]
         text = data.decode("utf-8", errors="replace")
         if lost:
@@ -339,12 +361,13 @@ class ProcessRegistry:
 
     def _pump(self, process):
         stream = process.popen.stdout
-        fd = stream.fileno()
-        os.set_blocking(fd, False)
-        selector = selectors.DefaultSelector()
-        selector.register(fd, selectors.EVENT_READ)
+        selector, failure = None, None
         eof, drain_until = False, None
         try:
+            fd = stream.fileno()
+            os.set_blocking(fd, False)
+            selector = _ProcessSelector()
+            selector.register(fd, selectors.EVENT_READ)
             while True:
                 if eof:
                     time.sleep(0.1)
@@ -379,17 +402,39 @@ class ProcessRegistry:
                             drain_until = time.monotonic() + DRAIN
                 if drain_until is not None and (eof or time.monotonic() >= drain_until):
                     break
+        except Exception as exc:
+            failure = f"Background process reader failed: {exc}"
         finally:
-            selector.close()
-            stream.close()
-            with self._condition:
-                if drain_until is None:
-                    # The reader failed before the leader exited.
-                    process.signal(signal.SIGKILL)
-                # Reaping releases the group id: no signal may follow it.
-                process.reaped = True
+            try:
+                if selector is not None:
+                    selector.close()
+            except Exception as exc:
+                failure = failure or f"Could not close background process reader: {exc}"
+            finally:
+                self._finish(process, kill=drain_until is None, failure=failure)
+                self._changed(process)
+
+    def _finish(self, process, *, kill=True, failure=None):
+        # Both reader failures and failed thread launches own a live group.
+        # Hold its slot until wait() reaps the leader, and prevent every later
+        # signal before dropping the lock to close the pipe and wait.
+        with self._condition:
+            if kill:
+                process.signal(signal.SIGKILL)
+            process.reaped = True
+        try:
+            process.popen.stdout.close()
+        except Exception as exc:
+            failure = failure or f"Could not close background process output: {exc}"
+        finally:
             code = process.popen.wait()
             with self._condition:
+                process.failure = failure
+                if failure:
+                    data = ("\n" + failure + "\n").encode("utf-8", errors="replace")
+                    process.tail.extend(data)
+                    process.total += len(data)
+                    del process.tail[:-TAIL_BYTES]
                 process.code, process.ended, process.kill_at = code, time.time(), None
                 process.status = "stopped" if process.stopped_by else "exited"
                 record = None if process.forgotten else self._chats.get(process.chat)
@@ -398,4 +443,3 @@ class ProcessRegistry:
                     for old in finished[:max(0, len(finished) - MAX_FINISHED_PER_CHAT)]:
                         record["processes"].remove(old)
                 self._condition.notify_all()
-            self._changed(process)

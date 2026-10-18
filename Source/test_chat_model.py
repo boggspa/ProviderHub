@@ -419,10 +419,14 @@ import Combine
         // Team configuration uses correlated replies and the owning chat.
         model.draft = "Team task"
         let memberSpec: [String: Any] = ["name":"Builder", "choice":"ollama/test|", "effort":"high", "responsibility":"Build"]
-        let execution = ChatTeamExecution(mode: "task", contextTokens: 64000, processes: 6, minutes: 45, tokens: nil)
+        check(ChatTeamExecution().processes == 8, "default Team process allowance changed")
+        check(ChatTeamExecution(processes: 16).isValid && !ChatTeamExecution(processes: 17).isValid,
+              "native Team process range differs from the worker")
+        let execution = ChatTeamExecution(mode: "task", contextTokens: 64000, processes: 16, minutes: 45, tokens: nil)
         model.configureTeam(enabled: true, members: [memberSpec], execution: execution)
         let executionWire = commands.last?["execution"] as! [String: Any]
-        check(executionWire["mode"] as? String == "task" && executionWire["minutes"] as? Int == 45 && executionWire["tokens"] is NSNull,
+        check(executionWire["mode"] as? String == "task" && executionWire["processes"] as? Int == 16 &&
+              executionWire["minutes"] as? Int == 45 && executionWire["tokens"] is NSNull,
               "run settings lost explicit limits or clearing a limit")
         let teamRequest = commands.last?["request"] as! String
         check(!model.canSend && !model.canConfigureTeam, "Team configuration must settle before another send")

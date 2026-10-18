@@ -431,12 +431,22 @@ needs the same approval as any shell command; reading or stopping the chat's
 own processes does not. Each process runs in its own process group, so Stop
 sends SIGTERM to everything it started and SIGKILL three seconds later; when
 the command itself exits, anything it left in its group is ended too. A chat
-can have eight running at once by default, with sixty-four across all chats.
-Saved Team settings retain their configured process count. Teams can choose
-one to eight slots in their run settings; extra launches reserve capacity for
+can have sixteen running at once, with 128 across all chats.
+Teams default to eight slots and can choose one to sixteen in **Team → Edit →
+Run settings → Background processes**. Saved Team settings retain their configured
+process count; extra launches reserve capacity for
 active peers. Each member has an independent output cursor. Output is kept as a
 bounded tail in memory with no separate log file; output a tool call reports
 to the model is saved with the transcript like any other tool result.
+
+The ceiling counts running and stopping background process groups. The ten
+retained finished rows do not occupy running slots. Background commands keep
+using the Mac's CPU and memory while a chat moves on; more slots permit more
+commands to overlap, and actual build throughput depends on those resources.
+Model requests have their own sixteen-request budget. Foreground shells and
+patches still take the chosen checkout's write gate, including any attached
+workspace roots; raising the background ceiling does not loosen that ownership.
+
 Stopping a turn does not
 stop its background processes: stop them in the inspector, or they end when
 their chat is deleted or Chat quits. Read-only Side Chats and lanes cannot

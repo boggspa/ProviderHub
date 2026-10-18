@@ -264,7 +264,7 @@ class ContinuityTests(unittest.TestCase):
         self.assertEqual(member["progress"]["latest_request"], "Continue verification")
 
     def test_invalid_limits_are_rejected_before_configuration_changes(self):
-        for item in ({"mode": "forever"}, {"tokens": True}, {"minutes": 0}, {"processes": 9}, {"contextTokens": -1}, {"dollars": 10}):
+        for item in ({"mode": "forever"}, {"tokens": True}, {"minutes": 0}, {"processes": 17}, {"contextTokens": -1}, {"dollars": 10}):
             with self.subTest(item=item), self.assertRaises(ValueError):
                 chat_execution.settings(item)
 
