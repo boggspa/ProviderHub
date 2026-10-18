@@ -1,4 +1,7 @@
 import SwiftUI
+#if os(iOS)
+import UIKit
+#endif
 
 /// Adapts the bounded wire entries to the exact outline used by macOS.
 struct RemoteTranscriptItem: ChatTranscriptItem {
@@ -57,28 +60,33 @@ struct CompanionTranscript: View {
     @State private var followsLatest = true
     @State private var expanded = Set<String>()
     @State private var foldChoice: [String: Bool] = [:]
+    /// The tail of the outline on screen, paged like the Mac's.
+    @State private var visibleSegmentLimit = CompanionTranscript.page
+    /// The first row on screen when older messages were asked of the Mac.
+    @State private var olderAnchor: String?
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @ScaledMetric(relativeTo: .body) private var textSize: CGFloat = 13
 
+    private static let page = 100
+    private static let bottomID = "transcript-bottom"
     private var scale: CGFloat { textSize / 13 }
     private var items: [RemoteTranscriptItem] { entries.map(RemoteTranscriptItem.init) }
-    private var outline: [ChatTranscriptSegment<RemoteTranscriptItem>] {
-        let live = liveEntryIDs
-        return ChatTranscriptSegment.outline(items, open: runIsOpen, isLive: { live.contains($0.id) })
+    private func outline(live: Set<String>) -> [ChatTranscriptSegment<RemoteTranscriptItem>] {
+        ChatTranscriptSegment.outline(items, open: runIsOpen, isLive: { live.contains($0.id) })
     }
     private var liveEntryIDs: Set<String> {
         CompanionTranscriptState.liveEntryIDs(entries: entries, runIsOpen: runIsOpen, activities: activities)
     }
-    private var liveSpeakerIDs: Set<String> {
+    private static func liveSpeakerIDs(_ outline: [ChatTranscriptSegment<RemoteTranscriptItem>], live: Set<String>) -> Set<String> {
         var result = Set<String>()
         var speaker: String?
         for segment in outline {
             switch segment.content {
             case .speaker: speaker = segment.id
             case .entry(let item):
-                if liveEntryIDs.contains(item.id), let speaker { result.insert(speaker) }
+                if live.contains(item.id), let speaker { result.insert(speaker) }
             case .fold(let items):
-                if items.contains(where: { liveEntryIDs.contains($0.id) }), let speaker { result.insert(speaker) }
+                if items.contains(where: { live.contains($0.id) }), let speaker { result.insert(speaker) }
             case .changes: speaker = nil
             }
         }
@@ -86,65 +94,116 @@ struct CompanionTranscript: View {
     }
 
     var body: some View {
-        ScrollViewReader { proxy in
+        // One outline per update: every row reads these instead of rebuilding them.
+        let live = liveEntryIDs
+        let segments = outline(live: live)
+        let visible = ChatTranscriptSegment.visibleTail(segments, limit: visibleSegmentLimit, liveEntryIDs: live)
+        let liveSpeakers = Self.liveSpeakerIDs(segments, live: live)
+        return ScrollViewReader { proxy in
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 0) {
+                // Eager, not lazy: a lazy stack only estimates rows it has not
+                // drawn, so when a section above the viewport shrinks or leaves,
+                // the viewport can land past the rows it drew and stay blank
+                // until a scroll, and it jumps as estimates correct while
+                // scrolling. The tail is paged, so every row it holds is exact.
+                VStack(alignment: .leading, spacing: 0) {
                     if entries.isEmpty && !hasOlder && !runIsOpen { invitation }
-                    if hasOlder {
-                        Button(action: loadOlder) {
+                    if hasOlder || segments.count > visibleSegmentLimit {
+                        Button { showEarlier(segments: segments.count, firstVisible: visible.first?.id, proxy: proxy) } label: {
                             HStack { if loadingOlder { ProgressView().controlSize(.small) }; Text(loadingOlder ? "Loading older messages…" : "Load earlier messages") }
                         }.buttonStyle(.plain).font(.system(size: 12 * scale)).frame(maxWidth: .infinity).padding(.bottom, 16).disabled(loadingOlder)
                     }
-                    ForEach(outline) { segment in
+                    ForEach(visible) { segment in
                         Group {
                             switch segment.content {
-                            case .speaker(let item): speaker(item, live: liveSpeakerIDs.contains(segment.id))
-                            case .entry(let item): row(item)
-                            case .fold(let items): fold(items)
+                            case .speaker(let item): speaker(item, live: liveSpeakers.contains(segment.id))
+                            case .entry(let item): row(item, live: live)
+                            case .fold(let items): fold(items, live: live)
                             case .changes(let items): changes(items)
                             }
                         }.padding(.top, gap(segment.spacing)).id(segment.id)
                     }
-                    if runIsOpen && activities.isEmpty && liveEntryIDs.isEmpty {
+                    if runIsOpen && activities.isEmpty && live.isEmpty {
                         HStack(spacing: 8) {
                             ProgressView().controlSize(.small).tint(chat.providerAccent)
                             Text("Thinking…").font(.system(size: textSize)).foregroundStyle(CompanionTheme.secondary)
                         }.padding(.top, 6 * scale)
                     }
-                    Color.clear.frame(height: 36 * scale).id("transcript-bottom")
-                        .onAppear { followsLatest = true }.onDisappear { followsLatest = false }
+                    Color.clear.frame(height: 36 * scale).id(Self.bottomID)
                 }
                 .frame(maxWidth: 760 * scale).frame(maxWidth: .infinity)
                 .padding(.horizontal, 20).padding(.top, 16).padding(.bottom, 4)
+                .background(CompanionScrollProbe { placed($0, proxy: proxy) })
             }
-            .onAppear { proxy.scrollTo("transcript-bottom", anchor: .bottom) }
+            .onAppear { proxy.scrollTo(Self.bottomID, anchor: .bottom) }
             .onChange(of: entries) { old, new in
                 if let first = old.first, new.first?.id != first.id, new.contains(where: { $0.id == first.id }) {
-                    followsLatest = false; proxy.scrollTo(first.id, anchor: .top)
-                } else if followsLatest { proxy.scrollTo("transcript-bottom", anchor: .bottom) }
+                    // Older rows from the Mac arrive above the page the reader
+                    // already holds; keep all of it and the row they were on.
+                    followsLatest = false
+                    visibleSegmentLimit = max(visibleSegmentLimit, outline(live: liveEntryIDs).count)
+                    let anchor = olderAnchor ?? first.id
+                    olderAnchor = nil
+                    DispatchQueue.main.async { proxy.scrollTo(anchor, anchor: .top) }
+                } else if followsLatest { proxy.scrollTo(Self.bottomID, anchor: .bottom) }
+            }
+            .onChange(of: followsLatest) { _, follows in
+                // Back at the latest activity, history paged in for reading goes again.
+                guard follows, visibleSegmentLimit > Self.page else { return }
+                visibleSegmentLimit = Self.page
+                DispatchQueue.main.async { proxy.scrollTo(Self.bottomID, anchor: .bottom) }
             }
             .onChange(of: jumpToken) { _, _ in
                 guard let jumpEntryID else { return }
-                let target = outline.first { segment in
+                let segments = outline(live: liveEntryIDs)
+                guard let index = segments.firstIndex(where: { segment in
                     switch segment.content {
                     case .entry(let item): return item.id == jumpEntryID
                     case .fold(let items), .changes(let items): return items.contains { $0.id == jumpEntryID }
                     case .speaker: return false
                     }
-                }
-                if let target {
-                    if case .fold = target.content { foldChoice[target.id] = true }
-                    followsLatest = false; proxy.scrollTo(target.id, anchor: .center)
-                }
+                }) else { return }
+                let target = segments[index].id
+                if case .fold = segments[index].content { foldChoice[target] = true }
+                followsLatest = false
+                if segments.count - index > visibleSegmentLimit { visibleSegmentLimit = segments.count - index + 20 }
+                // After the page and fold have laid out.
+                DispatchQueue.main.async { proxy.scrollTo(target, anchor: .center) }
             }
             .overlay(alignment: .bottomTrailing) {
                 if !followsLatest {
-                    Button { followsLatest = true; proxy.scrollTo("transcript-bottom", anchor: .bottom) } label: {
+                    Button { followsLatest = true; proxy.scrollTo(Self.bottomID, anchor: .bottom) } label: {
                         Label("Latest", systemImage: "arrow.down").font(.system(size: 13 * scale, weight: .medium))
                             .padding(.horizontal, 12).padding(.vertical, 8).background(.regularMaterial, in: Capsule())
                     }.buttonStyle(.plain).padding(12).accessibilityLabel("Go to latest activity")
                 }
             }
+        }
+    }
+
+    /// Following is the reader's choice, as on the Mac: reaching the end
+    /// resumes it and scrolling away pauses it, while rows growing or
+    /// leaving under a following viewport only bring the end back into view.
+    private func placed(_ placement: CompanionScrollPlacement, proxy: ScrollViewProxy) {
+        if placement.distanceFromEnd <= 36 * scale + 6 {
+            if !followsLatest { followsLatest = true }
+        } else if placement.interacting || placement.scrolled {
+            if followsLatest { followsLatest = false }
+        } else if placement.resized, followsLatest {
+            proxy.scrollTo(Self.bottomID, anchor: .bottom)
+        }
+    }
+
+    /// Page in rows the phone already holds before asking the Mac for more,
+    /// keeping the row being read where it is.
+    private func showEarlier(segments: Int, firstVisible: String?, proxy: ScrollViewProxy) {
+        followsLatest = false
+        if segments > visibleSegmentLimit {
+            visibleSegmentLimit += Self.page
+            if let firstVisible { DispatchQueue.main.async { proxy.scrollTo(firstVisible, anchor: .top) } }
+        } else {
+            olderAnchor = firstVisible
+            loadOlder()
         }
     }
 
@@ -174,7 +233,7 @@ struct CompanionTranscript: View {
                 CompanionProviderMark(presentation: brand, size: 15 * scale)
             }
     }
-    @ViewBuilder private func row(_ item: RemoteTranscriptItem) -> some View {
+    @ViewBuilder private func row(_ item: RemoteTranscriptItem, live: Set<String>) -> some View {
         let entry = item.entry
         let brand = presentation(item)
         switch entry.role {
@@ -195,21 +254,21 @@ struct CompanionTranscript: View {
         case "assistant":
             let reply = ChatReplySources.split(entry.text)
             VStack(alignment: .leading, spacing: 8 * scale) {
-                if ChatReplySources.isBlank(reply.body), liveEntryIDs.contains(item.id) {
+                if ChatReplySources.isBlank(reply.body), live.contains(item.id) {
                     ChatSharedShimmerText(text: "Thinking…", active: runIsOpen, accent: brand.accent, base: CompanionTheme.secondary)
                         .font(.system(size: textSize))
-                } else { CompanionMessageText(text: reply.body, size: textSize) }
+                } else { CompanionMessageText(text: reply.body, size: textSize).equatable() }
                 if !reply.links.isEmpty {
                     HStack { ForEach(reply.links) { link in if let url = URL(string: link.url) { Link(link.title, destination: url).font(.system(size: 11 * scale)) } } }
                 }
             }.frame(maxWidth: .infinity, alignment: .leading)
-        case "tool": tool(item, brand: brand)
+        case "tool": tool(item, brand: brand, live: live)
         default:
             Text(entry.text).font(.system(size: 11.5 * scale)).foregroundStyle(entry.isError ? .red : CompanionTheme.secondary).textSelection(.enabled)
         }
     }
-    private func tool(_ item: RemoteTranscriptItem, brand: CompanionPresentation) -> some View {
-        let live = liveEntryIDs.contains(item.id) && item.detail == "Running…"
+    private func tool(_ item: RemoteTranscriptItem, brand: CompanionPresentation, live liveIDs: Set<String>) -> some View {
+        let live = liveIDs.contains(item.id) && item.detail == "Running…"
         let display = ChatToolDisplay.describe(tool: item.tool, summary: item.summary ?? item.text, live: live)
         return VStack(alignment: .leading, spacing: 6 * scale) {
             Button { withAnimation(.easeInOut(duration: 0.15)) { toggle(item.id) } } label: {
@@ -258,10 +317,10 @@ struct CompanionTranscript: View {
         switch spacing { case .none: return 0; case .speaker: return 26 * scale; case .header, .item: return 6 * scale }
     }
     private func toggle(_ id: String) { if expanded.contains(id) { expanded.remove(id) } else { expanded.insert(id) } }
-    private func fold(_ items: [RemoteTranscriptItem]) -> some View {
+    private func fold(_ items: [RemoteTranscriptItem], live liveIDs: Set<String>) -> some View {
         let id = ChatTranscriptSegment<RemoteTranscriptItem>.foldID(items)
         let open = foldChoice[id] ?? items.contains { expanded.contains($0.id) }
-        let live = items.contains { liveEntryIDs.contains($0.id) }
+        let live = items.contains { liveIDs.contains($0.id) }
         let summary = ChatToolFoldSummary.collect(items)
         return VStack(alignment: .leading, spacing: 4 * scale) {
             Button {
@@ -278,7 +337,7 @@ struct CompanionTranscript: View {
                 .accessibilityValue(open ? "Expanded" : "Collapsed")
             if open {
                 VStack(alignment: .leading, spacing: 2 * scale) {
-                    ForEach(items, id: \.id) { row($0).id($0.id) }
+                    ForEach(items, id: \.id) { row($0, live: liveIDs).id($0.id) }
                 }.padding(.leading, 18 * scale)
                     .overlay(alignment: .leading) {
                         CompanionTheme.hairline.frame(width: 1).padding(.leading, 7 * scale).padding(.vertical, 2)
@@ -289,7 +348,9 @@ struct CompanionTranscript: View {
 }
 
 /// Native selectable text on iOS, with the desktop's reading size and code cards.
-private struct CompanionMessageText: View {
+/// Equatable on its inputs, so a streaming update re-parses only the reply
+/// that changed rather than every reply on the page.
+private struct CompanionMessageText: View, Equatable {
     let text: String
     var size: CGFloat = 13
     var body: some View {
@@ -475,3 +536,87 @@ enum CompanionMarkdown {
         return clean.count >= 3 && clean.allSatisfy { $0 == "-" }
     }
 }
+
+/// Where the transcript's viewport sits, and what moved it since the last report.
+struct CompanionScrollPlacement: Equatable {
+    /// How far the content runs below the viewport's bottom edge.
+    var distanceFromEnd: CGFloat
+    /// The viewport moved over unchanged content: a scroll, not growth.
+    var scrolled: Bool
+    /// The content or the viewport changed size.
+    var resized: Bool
+    /// A finger is on the content, or it is still gliding from one.
+    var interacting: Bool
+}
+
+#if os(iOS)
+/// Observes the transcript's own UIScrollView. SwiftUI reports no scroll
+/// position before iOS 18, and preferences from inside the scroll view do not
+/// reach it on current releases, so the viewport is read where it lives. The
+/// probe never takes touches and adds no scroll view of its own.
+struct CompanionScrollProbe: UIViewRepresentable {
+    let report: (CompanionScrollPlacement) -> Void
+    func makeUIView(context: Context) -> Probe { Probe() }
+    func updateUIView(_ view: Probe, context: Context) { view.report = report; view.attach() }
+    static func dismantleUIView(_ view: Probe, coordinator: ()) { view.detach() }
+
+    final class Probe: UIView {
+        var report: (CompanionScrollPlacement) -> Void = { _ in }
+        private weak var scroll: UIScrollView?
+        private var observations: [NSKeyValueObservation] = []
+        private var last: (offset: CGFloat, content: CGFloat, viewport: CGFloat)?
+        private var queued = false
+
+        override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? { nil }
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            if window == nil { detach() } else { attach() }
+        }
+
+        func attach() {
+            guard window != nil else { return }
+            var view = superview
+            while let current = view, !(current is UIScrollView) { view = current.superview }
+            guard let found = view as? UIScrollView, found !== scroll else { return }
+            detach(); scroll = found
+            let changed: (UIScrollView) -> Void = { [weak self] _ in self?.queue() }
+            observations = [found.observe(\.contentOffset) { scroll, _ in changed(scroll) },
+                            found.observe(\.contentSize) { scroll, _ in changed(scroll) },
+                            found.observe(\.bounds) { scroll, _ in changed(scroll) }]
+            queue()
+        }
+
+        func detach() { observations.removeAll(); scroll = nil; last = nil }
+
+        /// Offsets change inside UIKit and SwiftUI layout; report once, after it.
+        private func queue() {
+            guard !queued else { return }
+            queued = true
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.queued = false
+                self.measure()
+            }
+        }
+
+        private func measure() {
+            guard let scroll else { return }
+            let offset = scroll.contentOffset.y, content = scroll.contentSize.height, viewport = scroll.bounds.height
+            let distance = content + scroll.adjustedContentInset.bottom - (offset + viewport)
+            let previous = last
+            last = (offset, content, viewport)
+            let resized = previous.map { abs($0.content - content) > 0.5 || abs($0.viewport - viewport) > 0.5 } ?? true
+            let scrolled = !resized && previous.map { abs($0.offset - offset) > 0.5 } ?? false
+            report(CompanionScrollPlacement(distanceFromEnd: distance, scrolled: scrolled, resized: resized,
+                                            interacting: scroll.isTracking || scroll.isDragging || scroll.isDecelerating))
+        }
+    }
+}
+#else
+/// The package also builds for macOS tests, where the Mac app's own
+/// transcript follows its viewport; nothing is observed here.
+struct CompanionScrollProbe: View {
+    let report: (CompanionScrollPlacement) -> Void
+    var body: some View { Color.clear }
+}
+#endif
