@@ -2,6 +2,8 @@
 from concurrent.futures import ThreadPoolExecutor
 import os
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -22,6 +24,44 @@ class CapacityTests(unittest.TestCase):
                 chat_execution.settings({"processes": invalid})
 
     @fixtures.NEEDS_WAITID
+    def test_full_capacity_with_256_file_descriptors(self):
+        import resource
+        before = resource.getrlimit(resource.RLIMIT_NOFILE)
+        if before[1] != resource.RLIM_INFINITY and before[1] < 256:
+            self.skipTest("hard file-descriptor limit is below 256")
+        # Limit a fresh interpreter, never the test runner or neighboring tests.
+        # Reserve ordinary transport/file headroom in addition to the live pipes.
+        program = """
+from contextlib import ExitStack
+import os
+import resource
+import sys
+import unittest
+from test_chat_capacity import CapacityTests
+
+try:
+    resource.setrlimit(resource.RLIMIT_NOFILE, (256, 256))
+except (OSError, ValueError) as exc:
+    print(f"Cannot set a 256-descriptor soft limit: {exc}", file=sys.stderr)
+    sys.exit(77)
+with ExitStack() as opened:
+    for _ in range(32):
+        opened.enter_context(open(os.devnull, "rb"))
+    suite = unittest.TestSuite([
+        CapacityTests("test_concurrent_launches_enforce_128_global_and_sixteen_per_chat")
+    ])
+    result = unittest.TextTestRunner(verbosity=2).run(suite)
+    sys.exit(0 if result.wasSuccessful() else 1)
+"""
+        result = subprocess.run([sys.executable, "-c", program],
+                                cwd=Path(__file__).resolve().parent,
+                                capture_output=True, text=True, timeout=60)
+        self.assertEqual(resource.getrlimit(resource.RLIMIT_NOFILE), before)
+        if result.returncode == 77:
+            self.skipTest(result.stderr.strip())
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    @fixtures.NEEDS_WAITID
     def test_concurrent_launches_enforce_128_global_and_sixteen_per_chat(self):
         with tempfile.TemporaryDirectory() as directory:
             registry = ProcessRegistry()
@@ -30,14 +70,14 @@ class CapacityTests(unittest.TestCase):
             accepted, rejected, pids = [], [], []
             def launch(owner):
                 try:
-                    registry.start(owner, workspace, "exec sleep 30", dict(os.environ), owner.cancel)
+                    registry.start(owner, workspace, "echo ready; exec sleep 30", dict(os.environ), owner.cancel)
                     return True
                 except ValueError as exc:
                     return str(exc)
             try:
                 with patch.object(chat_processes, "FIRST_LOOK", 0):
-                    # Ten chats race for the same global budget. All use real
-                    # isolated process groups, but no shell/vendor workloads.
+                    # Ten chats race for the same global budget using real
+                    # isolated process groups that report readiness, then sleep.
                     with ThreadPoolExecutor(max_workers=16) as executor:
                         outcomes = list(executor.map(launch, [owner for owner in owners for _ in range(16)]))
                     accepted = [value for value in outcomes if value is True]
@@ -45,6 +85,10 @@ class CapacityTests(unittest.TestCase):
                     self.assertEqual(len(accepted), 128)
                     self.assertEqual(len(rejected), 32)
                     self.assertTrue(all("128 background processes" in error for error in rejected), rejected)
+                    self.assertTrue(fixtures.wait_for(lambda: all(
+                        "ready" in row["output"]
+                        for owner in owners for row in registry.snapshot(owner.chat["id"])
+                    )), "not every admitted process could read its output")
                     rows = {owner.chat["id"]: registry.snapshot(owner.chat["id"]) for owner in owners}
                     pids = [row["pid"] for values in rows.values() for row in values]
                     self.assertEqual(len(set(pids)), 128)
