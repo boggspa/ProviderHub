@@ -93,6 +93,15 @@ public struct ChatWorkspaceLayout: Codable, Equatable {
         return walk(root)
     }
     public func contains(paneID: UUID) -> Bool { panes.contains { $0.id == paneID } }
+    /// The pane showing a chat, so a chat is focused where it is rather than shown twice.
+    public func pane(showing chatID: String) -> UUID? { panes.first { $0.assignment == .chat(id: chatID) }?.id }
+    /// The pane `step` places after the focused one in reading order, wrapping
+    /// at either end, for moving focus between panes from the keyboard.
+    public func adjacentPane(_ step: Int) -> UUID {
+        let ids = panes.map(\.id)
+        guard let index = ids.firstIndex(of: focusedPaneID) else { return focusedPaneID }
+        return ids[((index + step) % ids.count + ids.count) % ids.count]
+    }
     public mutating func focus(paneID: UUID) { if contains(paneID: paneID) { focusedPaneID = paneID } }
     public mutating func assignChat(paneID: UUID, chatID: String) { assign(paneID: paneID, value: .chat(id: chatID)) }
     public mutating func assignBrowser(paneID: UUID, surface: String) { assign(paneID: paneID, value: .browser(surface: surface)) }
@@ -104,6 +113,18 @@ public struct ChatWorkspaceLayout: Codable, Equatable {
     }
     public mutating func splitRight(_ paneID: UUID, newPaneID: UUID = UUID(), assignment: ChatPaneAssignment? = nil) { split(paneID, axis: .horizontal, newPaneID: newPaneID, assignment: assignment) }
     public mutating func splitBelow(_ paneID: UUID, newPaneID: UUID = UUID(), assignment: ChatPaneAssignment? = nil) { split(paneID, axis: .vertical, newPaneID: newPaneID, assignment: assignment) }
+    /// Split a leaf so the new pane lands on `edge` of it; focus moves to it.
+    public mutating func split(_ paneID: UUID, edge: ChatWorkspaceEdge, newPaneID: UUID = UUID(), assignment: ChatPaneAssignment? = nil) {
+        split(paneID, axis: edge == .left || edge == .right ? .horizontal : .vertical, newPaneID: newPaneID, assignment: assignment)
+        guard edge == .left || edge == .top else { return }
+        func lead(_ node: ChatWorkspaceNode) -> ChatWorkspaceNode {
+            guard case .split(var split) = node else { return node }
+            if case .leaf(let child) = split.second, child.id == newPaneID { swap(&split.first, &split.second) }
+            else { split.first = lead(split.first); split.second = lead(split.second) }
+            return .split(split)
+        }
+        root = lead(root)
+    }
     private mutating func split(_ paneID: UUID, axis: ChatWorkspaceAxis, newPaneID: UUID, assignment: ChatPaneAssignment?) {
         func walk(_ n: ChatWorkspaceNode) -> ChatWorkspaceNode {
             switch n {

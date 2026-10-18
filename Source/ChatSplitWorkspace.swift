@@ -1,6 +1,7 @@
 import AppKit
 import SwiftUI
 import UniformTypeIdentifiers
+import WebKit
 
 extension UTType {
     static let chatPaneChatID = UTType(exportedAs: "com.mistralbridge.providerhub.chat-id")
@@ -41,15 +42,16 @@ public struct ChatSplitWorkspace<Leaf: View>: NSViewControllerRepresentable {
     let onFocus: (UUID) -> Void
     let onDropChat: (UUID, ChatPaneDropZone, String) -> Void
     let focusedOnly: Bool
+    let keyboardFocusRequest: (pane: UUID, token: UUID)?
 
     public init(layout: Binding<ChatWorkspaceLayout>, focusedPaneID: Binding<UUID?>,
                 leafContent: @escaping (UUID, ChatPaneAssignment?) -> Leaf,
                 onFocus: @escaping (UUID) -> Void,
                 onDropChat: @escaping (UUID, ChatPaneDropZone, String) -> Void,
-                focusedOnly: Bool = false) {
+                focusedOnly: Bool = false, keyboardFocusRequest: (pane: UUID, token: UUID)? = nil) {
         _layout = layout; _focusedPaneID = focusedPaneID
         self.leafContent = leafContent; self.onFocus = onFocus; self.onDropChat = onDropChat
-        self.focusedOnly = focusedOnly
+        self.focusedOnly = focusedOnly; self.keyboardFocusRequest = keyboardFocusRequest
     }
     public func makeNSViewController(context: Context) -> ChatNativeWorkspaceController {
         let controller = ChatNativeWorkspaceController(); update(controller); return controller
@@ -58,7 +60,7 @@ public struct ChatSplitWorkspace<Leaf: View>: NSViewControllerRepresentable {
     private func update(_ controller: ChatNativeWorkspaceController) {
         controller.update(layout: layout, focused: focusedPaneID, focusedOnly: focusedOnly,
             content: { AnyView(leafContent($0, $1)) }, onFocus: onFocus, onDrop: onDropChat,
-            onResize: { id, ratio in layout.setRatio(splitID: id, ratio: ratio) })
+            onResize: { id, ratio in layout.setRatio(splitID: id, ratio: ratio) }, keyboardFocusRequest: keyboardFocusRequest)
     }
 }
 
@@ -69,6 +71,8 @@ public final class ChatNativeWorkspaceController: NSViewController {
     private var signature = ""
     private var mounted: NSViewController?
     private var monitor: Any?
+    private var focusedPaneID: UUID?
+    private var lastKeyboardFocusRequest: UUID?
     public override func loadView() { view = NSView(); view.wantsLayer = true }
     deinit { if let monitor { NSEvent.removeMonitor(monitor) } }
 
@@ -80,8 +84,10 @@ public final class ChatNativeWorkspaceController: NSViewController {
                 content: (UUID, ChatPaneAssignment?) -> AnyView,
                 onFocus: @escaping (UUID) -> Void,
                 onDrop: @escaping (UUID, ChatPaneDropZone, String) -> Void,
-                onResize: @escaping (UUID, Double) -> Void) {
+                onResize: @escaping (UUID, Double) -> Void,
+                keyboardFocusRequest: (pane: UUID, token: UUID)? = nil) {
         _ = view
+        focusedPaneID = focused ?? layout.focusedPaneID
         if monitor == nil {
             monitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] event in
                 guard let self, let window = self.view.window, event.window === window else { return event }
@@ -100,6 +106,7 @@ public final class ChatNativeWorkspaceController: NSViewController {
             host.host.rootView = content(pane.id, pane.assignment)
             host.focus = { onFocus(pane.id) }; host.drop = { zone, chat in onDrop(pane.id, zone, chat) }
             host.surface.focused = layout.panes.count > 1 && pane.id == focused
+            host.surface.card = layout.panes.count > 1 && !focusedOnly
         }
         func shape(_ node: ChatWorkspaceNode) -> String {
             switch node {
@@ -144,7 +151,37 @@ public final class ChatNativeWorkspaceController: NSViewController {
             }
         }
         refresh(layout.root)
+        if let request = keyboardFocusRequest, request.token != lastKeyboardFocusRequest {
+            lastKeyboardFocusRequest = request.token
+            // Materialize the destination before the deferred handoff, including
+            // when maximized mode has just reparented a different leaf.
+            view.layoutSubtreeIfNeeded()
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.lastKeyboardFocusRequest == request.token,
+                      self.focusedPaneID == request.pane, let host = self.hosts[request.pane],
+                      let window = self.view.window, host.view.window === window else { return }
+                host.view.layoutSubtreeIfNeeded()
+                let target = self.keyboardTarget(in: host.view) ?? host.surface
+                if !window.makeFirstResponder(target) { window.makeFirstResponder(host.surface) }
+            }
+        }
     }
+
+    private func keyboardTarget(in root: NSView) -> NSView? {
+        func find(_ view: NSView, matching predicate: (NSView) -> Bool) -> NSView? {
+            guard !view.isHiddenOrHasHiddenAncestor else { return nil }
+            if predicate(view) { return view }
+            for child in view.subviews { if let found = find(child, matching: predicate) { return found } }
+            return nil
+        }
+        // The composer is marked explicitly so selectable transcript text and
+        // other controls cannot receive a chat's keyboard-navigation request.
+        if let composer = find(root, matching: {
+            $0.identifier?.rawValue == "ProviderHubChatComposer" && ($0 as? NSTextView)?.isEditable == true
+        }) { return composer }
+        return find(root, matching: { $0 is WKWebView && $0.acceptsFirstResponder })
+    }
+
     private func minimum(_ node: ChatWorkspaceNode) -> CGSize {
         switch node {
         case .leaf: return CGSize(width: 420, height: 300)
@@ -173,19 +210,41 @@ private final class ChatLeafController: NSViewController {
         }
         addChild(host); host.view.translatesAutoresizingMaskIntoConstraints = false; view.addSubview(host.view)
         NSLayoutConstraint.activate([host.view.leadingAnchor.constraint(equalTo:view.leadingAnchor),host.view.trailingAnchor.constraint(equalTo:view.trailingAnchor),host.view.topAnchor.constraint(equalTo:view.topAnchor),host.view.bottomAnchor.constraint(equalTo:view.bottomAnchor)])
+        surface.raiseOverlay()
     }
+}
+
+/// Draws the focus ring and drop preview above the pane's content, whose own
+/// layers (the transcript's scroll view and glass) would otherwise cover a
+/// sublayer of the pane. It never takes a click or a drag.
+@MainActor
+private final class ChatPaneOverlay: NSView {
+    override var isFlipped: Bool { true }
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
 }
 
 @MainActor
 private final class ChatDropSurface: NSView {
     override var isFlipped: Bool { true }
+    // Empty panes still take keyboard focus away from the previous composer.
+    override var acceptsFirstResponder: Bool { true }
     private let previewLayer = CALayer()
+    private let overlay = ChatPaneOverlay()
     var drop: (ChatPaneDropZone,String) -> Void = { _,_ in }
     var focused = false { didSet { updatePreview() } }
+    /// Side by side, each pane is a rounded card, as in Claude Desktop, and
+    /// the focused card is ringed in the accent colour.
+    var card = false {
+        didSet {
+            guard card != oldValue else { return }
+            layer?.cornerRadius = card ? Self.radius : 0; layer?.masksToBounds = card; updatePreview()
+        }
+    }
+    static let radius: CGFloat = 10
     var zone: ChatPaneDropZone? { didSet { updatePreview() } }
     override init(frame: NSRect) {
         super.init(frame:frame); wantsLayer = true
-        previewLayer.zPosition = 1000; layer?.addSublayer(previewLayer)
+        overlay.wantsLayer = true; overlay.layer?.addSublayer(previewLayer); addSubview(overlay)
         registerForDraggedTypes([NSPasteboard.PasteboardType(UTType.chatPaneChatID.identifier)])
     }
     convenience init() { self.init(frame:.zero) }
@@ -213,10 +272,13 @@ private final class ChatDropSurface: NSView {
         }
         return true
     }
-    override func layout() { super.layout();updatePreview() }
+    /// Keep the overlay above content added after it.
+    func raiseOverlay() { addSubview(overlay, positioned: .above, relativeTo: nil) }
+    override func layout() { super.layout(); overlay.frame = bounds; updatePreview() }
     private func updatePreview() {
         CATransaction.begin();CATransaction.setDisableActions(true)
-        previewLayer.frame = zone.map { ChatPaneDropGeometry.preview($0,bounds:bounds) } ?? bounds.insetBy(dx:2,dy:2)
+        previewLayer.frame = zone.map { ChatPaneDropGeometry.preview($0,bounds:bounds) } ?? bounds.insetBy(dx:card ? 0.75 : 2,dy:card ? 0.75 : 2)
+        previewLayer.cornerRadius = card ? Self.radius - 0.75 : 0
         previewLayer.backgroundColor = zone == nil ? nil : NSColor.systemBlue.withAlphaComponent(0.3).cgColor
         previewLayer.borderWidth = focused && zone == nil ? 1.5 : 0
         previewLayer.borderColor = NSColor.controlAccentColor.cgColor
