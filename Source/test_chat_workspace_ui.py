@@ -64,6 +64,23 @@ struct ChatSummary { var id:String }
   check(closed.layout.panes[0].assignment == nil,"close leaves empty pane")
   closed.reconcile(model)
   check(closed.layout.panes[0].assignment == nil,"background publish preserves closed empty pane")
+  let navigation = ChatWorkspaceController()
+  navigation.layout = .initial(chatID:"a")
+  let firstPane = navigation.layout.focusedPaneID
+  navigation.layout.splitRight(firstPane,assignment:.chat(id:"b"))
+  let secondPane = navigation.layout.focusedPaneID
+  navigation.focus(firstPane,model:model)
+  check(navigation.keyboardFocusRequest == nil,"ordinary focus does not request a caret move")
+  navigation.focusAdjacent(1,model:model)
+  check(navigation.layout.focusedPaneID == secondPane && model.focused == "b","next selects the destination chat")
+  check(navigation.keyboardFocusRequest?.pane == secondPane,"next requests destination keyboard focus")
+  let previousToken = navigation.keyboardFocusRequest?.token
+  navigation.focus(firstPane,model:model)
+  navigation.focusAdjacent(1,model:model)
+  check(navigation.keyboardFocusRequest?.token != previousToken,"repeat destination emits a fresh keyboard request")
+  navigation.focusAdjacent(-1,model:model)
+  check(navigation.layout.focusedPaneID == firstPane && navigation.keyboardFocusRequest?.pane == firstPane,
+        "previous selects and requests the previous pane")
   exit(failed == 0 ? 0 : 1)
  }
 }

@@ -217,6 +217,7 @@ struct ComposerTextView: NSViewRepresentable {
         view.textContainer?.widthTracksTextView = true
         view.textContainer?.containerSize = NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude)
         view.setAccessibilityLabel("Message")
+        view.identifier = NSUserInterfaceItemIdentifier("ProviderHubChatComposer")
         scroll.documentView = view
         let coordinator = context.coordinator
         mentionMenu?.choose = { [weak view, weak coordinator] target in

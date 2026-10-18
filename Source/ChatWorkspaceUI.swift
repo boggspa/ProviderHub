@@ -7,6 +7,8 @@ final class ChatWorkspaceController: ObservableObject {
         didSet { if let data = try? layout.save() { UserDefaults.standard.set(data, forKey: Self.defaultsKey) } }
     }
     @Published var focusedOnly = false
+    /// An explicit keyboard command; ordinary focus and streamed updates never move the caret.
+    @Published var keyboardFocusRequest: (pane: UUID, token: UUID)?
     @Published var notice = ""
     var area = CGSize.zero
     private var restored = false
@@ -130,7 +132,9 @@ final class ChatWorkspaceController: ObservableObject {
     /// Move focus to the next or previous pane in reading order.
     func focusAdjacent(_ step: Int, model: ChatModel) {
         guard layout.panes.count > 1 else { return }
-        focus(layout.adjacentPane(step), model: model)
+        let pane = layout.adjacentPane(step)
+        focus(pane, model: model)
+        keyboardFocusRequest = (pane, UUID())
     }
     func drop(chat: String, pane: UUID, zone: ChatPaneDropZone, model: ChatModel) {
         guard model.chats.contains(where: { $0.id == chat }) else { return }
@@ -165,7 +169,7 @@ struct ChatWorkspaceContent: View {
                     leafContent: { id, assignment in leaf(id, assignment) },
                     onFocus: { workspace.focus($0, model: model) },
                     onDropChat: { pane, zone, chat in workspace.drop(chat: chat, pane: pane, zone: zone, model: model) },
-                    focusedOnly: workspace.focusedOnly)
+                    focusedOnly: workspace.focusedOnly, keyboardFocusRequest: workspace.keyboardFocusRequest)
                 if !workspace.notice.isEmpty {
                     Text(workspace.notice).font(.caption).foregroundStyle(.secondary).padding(5)
                 }
@@ -227,7 +231,7 @@ struct ChatWorkspaceContent: View {
             }
             // A plain button-style menu keeps the label as drawn, so the
             // unfocused pane's name can recede; a borderless one restyles it.
-            .menuStyle(.button).buttonStyle(.plain).menuIndicator(.hidden).fixedSize()
+            .menuStyle(.button).buttonStyle(.plain).menuIndicator(.hidden).fixedSize(horizontal: false, vertical: true)
             .accessibilityLabel("Pane: " + paneTitle(assignment))
             .help("Pane actions")
             if let chat, model.isActive(chat.id) {
