@@ -14,13 +14,19 @@ jobs:
   python-tests:
     name: Python test suite
     runs-on: macos-15
+    env:
+      # Match the standalone interpreter used to verify the release; setup-uv's
+      # version request otherwise permits the runner's system Framework Python.
+      UV_PYTHON_PREFERENCE: only-managed
     steps:
       - uses: actions/checkout@v5
       - uses: astral-sh/setup-uv@v7
         with:
-          python-version: "3.13"
+          python-version: "3.13.13"
       - name: Sync environment
         run: uv sync --group dev
+      - name: Report Python runtime
+        run: uv run python -c 'import sys; print(sys.version); print(sys.base_prefix)'
       - name: unittest discover (Source)
         run: uv run python -m unittest discover -s Source -p 'test_*.py'
       # AGENTS.md documents pytest as the primary runner, so gate it too
