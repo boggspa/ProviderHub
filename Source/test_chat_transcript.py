@@ -756,11 +756,11 @@ import Foundation
             self.assertIn(marker, ran.stdout)
 
     def test_parser_streaming_copy_budgets_and_column_layout(self):
-        self.run_native(["ChatFonts.swift", "ChatMentions.swift", "ChatSelectableText.swift", "ChatTranscriptText.swift"], CASES,
+        self.run_native(["ChatFonts.swift", "ChatHues.swift", "ChatMentions.swift", "ChatSelectableText.swift", "ChatTranscriptText.swift"], CASES,
                         "Transcript parser, streaming, copy and layout checks passed", stubs=STUBS)
 
     def test_selectable_bubble_height_matches_rendered_width(self):
-        self.run_native(["ChatFonts.swift", "ChatMentions.swift", "ChatSelectableText.swift", "ChatTranscriptText.swift"], BUBBLE_CASES,
+        self.run_native(["ChatFonts.swift", "ChatHues.swift", "ChatMentions.swift", "ChatSelectableText.swift", "ChatTranscriptText.swift"], BUBBLE_CASES,
                         "Selectable bubble sizing and native hosting checks passed", stubs=STUBS)
 
     def test_outline_tool_phrasing_sources_notices_and_glyphs(self):

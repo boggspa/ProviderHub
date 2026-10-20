@@ -9,8 +9,10 @@ struct ChatSettingsMenu: View {
     @AppStorage("chatFontChoice") private var fontChoice = ""
     @AppStorage("chatCustomFontName") private var customFontName = ""
     @AppStorage("chatTextSize") private var textSize = 13.0
+    @Environment(\.chatHues) private var hues
     @State private var showPlugins = false
     @State private var showDevices = false
+    @State private var showColours = false
     var body: some View {
         Menu {
             Toggle("Allow web search", isOn: Binding(get: { model.webSearchEnabled }, set: { model.setWebSearchEnabled($0) }))
@@ -27,6 +29,10 @@ struct ChatSettingsMenu: View {
                     Button { appearance = mode; HubTheme.Appearance.apply() } label: {
                         if appearance == mode { Label(mode.title, systemImage: "checkmark") } else { Text(mode.title) }
                     }
+                }
+                Divider()
+                Button { showColours = true } label: {
+                    if hues.isDefault { Text("Custom Colours…") } else { Label("Custom Colours…", systemImage: "checkmark") }
                 }
             }
             Menu("Window") {
@@ -65,6 +71,7 @@ struct ChatSettingsMenu: View {
         }.menuStyle(.borderlessButton).fixedSize().accessibilityLabel("Chat settings")
             .sheet(isPresented: $showPlugins) { ChatCapabilitiesSettings(model: model) }
             .sheet(isPresented: $showDevices) { ChatDevicesSettings(model: model) }
+            .sheet(isPresented: $showColours) { ChatHueSettings() }
     }
     private var selectedFont: String { ChatFonts.selection(fontChoice, legacyMonospaced: monospaced) }
     private var customFontTitle: String {

@@ -70,6 +70,7 @@ struct ChatWindow: View {
         .environment(\.chatTextStyle, ChatTextStyle(size: textSize,
             selection: ChatFonts.selection(fontChoice, legacyMonospaced: monospacedText), customName: customFontName,
             zoom: ChatZoom.clamp(zoom)))
+        .chatHues()
         .background {
             if windowStyle == .glass { VibrancyBackground().overlay(Semantic.glassScrim).ignoresSafeArea() }
             else { Color(nsColor: .windowBackgroundColor).ignoresSafeArea() }
@@ -822,6 +823,7 @@ private struct ApprovalStrip: View {
 
 private struct ChatComposer: View {
     @Environment(\.displayScale) private var displayScale
+    @Environment(\.chatHues) private var hues
     @ObservedObject var model: ChatModel
     @State private var height: CGFloat = 22
     @StateObject private var mentionMenu = ChatMentionMenu()
@@ -880,7 +882,7 @@ private struct ChatComposer: View {
 
     private var composerSurface: some View {
         let shape = RoundedRectangle(cornerRadius: HubTheme.Radius.panel, style: .continuous)
-        return shape.fill(Semantic.composerFill)
+        return shape.fill(hues.composerFill ?? Semantic.composerFill)
             .overlay(shape.strokeBorder(
                 yolo ? Semantic.approvalYolo.opacity(0.38) : Semantic.composerRim,
                 lineWidth: 1 / max(displayScale, 1)))

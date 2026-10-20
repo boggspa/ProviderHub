@@ -44,6 +44,7 @@ extension EnvironmentValues {
 private struct HubGlassPaneModifier: ViewModifier {
     let pane: HubGlassPane
     @Environment(\.hubSurfaceStyle) private var style
+    @Environment(\.chatHues) private var hues
 
     /// One structural path for both styles: only the fill changes, so toggling
     /// Glass/Solid keeps the pane's identity and the state it owns (scroll
@@ -53,6 +54,9 @@ private struct HubGlassPaneModifier: ViewModifier {
     }
 
     private var fill: Color {
+        // A chosen transcript colour is opaque in both styles: in Glass it
+        // replaces the paper, and the side panes stay glass.
+        if pane == .transcript, let custom = hues.transcriptFill { return custom }
         guard style == .glass else { return .clear }
         return pane == .transcript ? HubTheme.Glass.transcript : HubTheme.Glass.pane
     }

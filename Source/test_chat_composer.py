@@ -285,7 +285,7 @@ class ComposerTests(unittest.TestCase):
 
     def run_cases(self, cases, expected, workspace=False):
         source = Path(__file__).parent
-        files = ["ChatFonts.swift", "ChatMentions.swift", "ChatSelectableText.swift", "ChatTranscriptText.swift", "ChatComposerText.swift"]
+        files = ["ChatFonts.swift", "ChatHues.swift", "ChatMentions.swift", "ChatSelectableText.swift", "ChatTranscriptText.swift", "ChatComposerText.swift"]
         if workspace:
             files += ["ChatWorkspaceLayout.swift", "ChatSplitWorkspace.swift"]
         with tempfile.TemporaryDirectory() as directory:
