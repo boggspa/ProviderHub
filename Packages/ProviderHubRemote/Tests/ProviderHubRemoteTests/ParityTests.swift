@@ -61,9 +61,11 @@ final class ParityTests: XCTestCase {
         model.draft = "Read source"
         var chunks: [Data] = []
         var actions: [String] = []
+        var sent: [String: RemoteValue] = [:]
         link.handle = { command in
             guard let action = command.action else { return }
             actions.append(action)
+            if action == "remote_send" { sent = command.arguments ?? [:] }
             var result: [String: Any] = [:]
             if action == "remote_upload_begin" { result["offset"] = 0 }
             if action == "remote_upload_chunk" {
@@ -79,6 +81,15 @@ final class ParityTests: XCTestCase {
         XCTAssertEqual(chunks.reduce(Data(), +), bytes)
         XCTAssertEqual(actions.last, "remote_send")
         XCTAssertTrue(model.attachmentDrafts["a"]?.isEmpty ?? false)
+        XCTAssertEqual(model.draft, "")
+        XCTAssertNil(sent["steer"], "between turns files go as an ordinary send")
+
+        // An update with files during a run asks the Mac to steer with them.
+        try model.addAttachment(name: "late.png", data: Data("late".utf8))
+        model.draft = "Use this instead"
+        await model.sendWithAttachments(steer: true)
+        XCTAssertEqual(sent["steer"], .bool(true))
+        XCTAssertEqual(sent["text"], .string("Use this instead"))
         XCTAssertEqual(model.draft, "")
 
         try model.addAttachment(name: "keep.txt", data: Data("keep".utf8))

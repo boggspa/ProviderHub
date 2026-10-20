@@ -641,7 +641,8 @@ public struct CompanionView: View {
                     // Send steers the turn with it and Stop stays one tap away.
                     Button { model.stop() } label: {
                         Image(systemName: "stop.fill").font(.system(size: 12, weight: .bold)).foregroundStyle(CompanionTheme.ink)
-                            .frame(width: 30, height: 30).background(CompanionTheme.selection, in: Circle()).padding(.vertical, 7)
+                            .frame(width: 30, height: 30).background(CompanionTheme.selection, in: Circle())
+                            .frame(width: 44, height: 44).contentShape(Rectangle())
                     }.buttonStyle(.plain).disabled(!model.isConnected)
                         .keyboardShortcut(".", modifiers: .command).accessibilityLabel("Stop this chat")
                     Button { model.sendDraft() } label: {
