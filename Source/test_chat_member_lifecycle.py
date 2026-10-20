@@ -90,6 +90,22 @@ class MemberLifecycleTests(unittest.TestCase):
                 self.assertEqual(len(self.transports[0].requests), 1)
                 self.assertIn("after 1 attempt", self.warnings(parent)[0]["text"])
 
+    def test_pre_execution_cli_rejection_retries_but_unconfirmed_native_action_does_not(self):
+        rejected = ModelRequestError("AntiGravity CLI route failed: agy native request was stopped before execution "
+                                     "but needs a structured host reply: native tool parameters must be an object.",
+                                     status=400, code="invalid_cli_tool_call")
+        parent = self.service([[rejected, rejected, response("Recovered")], [response("Peer done")]])
+        self.configure(parent); self.send(parent); self.finish(parent)
+        self.assertEqual(len(self.transports[0].requests), 3)
+        self.assertTrue(all(request == self.transports[0].requests[0] for request in self.transports[0].requests))
+        self.assertEqual(self.warnings(parent), [])
+        unconfirmed = ModelRequestError("AntiGravity CLI route failed: agy did not confirm the captured native action "
+                                        "was blocked; no host action was dispatched.", status=400, code="invalid_request_error")
+        parent = self.service([[unconfirmed, response("Must not retry")], [response("Peer done")]])
+        self.configure(parent); self.send(parent); self.finish(parent)
+        self.assertEqual(len(self.transports[0].requests), 1)
+        self.assertIn("after 1 attempt", self.warnings(parent)[0]["text"])
+
     def test_rate_limits_overload_and_cli_exit_retry(self):
         parent = self.service([[ModelRequestError("Try later", status=429, code="rate_limit_error"),
             ModelRequestError("Busy", status=503), ModelRequestError("the claude CLI exited with code 1", code="api_error"),
