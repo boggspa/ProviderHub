@@ -38,8 +38,13 @@ struct ChatBlackboardSection: View {
                         .buttonStyle(.link).font(.system(size: 11.5))
                 }
                 if !snapshot.attachments.isEmpty {
-                    Text("Attachments").font(.system(size: 11.5, weight: .medium)).foregroundStyle(.secondary).padding(.top, 2)
+                    // The count says how many sit past the visible columns.
+                    Text("Attachments · \(snapshot.attachments.count)").font(.system(size: 11.5, weight: .medium)).foregroundStyle(.secondary).padding(.top, 2)
                     ChatBlackboardAttachments(model: model, chat: chat, snapshot: snapshot, compact: true)
+                    if snapshot.attachments.count > ChatSharedBlackboardTileLayout.limit {
+                        Button("Show all \(snapshot.attachments.count) attachments") { ChatBlackboardWindows.shared.show(model: model, chat: chat) }
+                            .buttonStyle(.link).font(.system(size: 11.5))
+                    }
                 }
             } else if state.notice.isEmpty {
                 ProgressView().controlSize(.small)
@@ -231,7 +236,9 @@ struct ChatBlackboardComposer: View {
     }
 }
 
-/// Board files and links: a compact strip in the inspector, a grid in the window.
+/// Board files and links: up to two scrolling rows in the inspector, a grid in
+/// the window. Links and every file kind share one tile size, so they share
+/// the rows too.
 struct ChatBlackboardAttachments: View {
     @ObservedObject var model: ChatModel
     var chat: String
@@ -239,12 +246,8 @@ struct ChatBlackboardAttachments: View {
     var compact: Bool
     var body: some View {
         if compact {
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(alignment: .top, spacing: 8) {
-                    ForEach(snapshot.attachments.prefix(24)) { file in
-                        ChatBlackboardTile(model: model, chat: chat, file: file, directory: snapshot.thumbnails, compact: true)
-                    }
-                }.padding(.vertical, 2)
+            ChatSharedBlackboardTiles(items: snapshot.attachments, id: \.id) { file in
+                ChatBlackboardTile(model: model, chat: chat, file: file, directory: snapshot.thumbnails, compact: true)
             }
         } else {
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: 12, alignment: .top)], alignment: .leading, spacing: 12) {

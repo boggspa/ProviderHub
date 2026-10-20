@@ -164,8 +164,10 @@ class ChatMemoryTests(unittest.TestCase):
         payload = self.service.payload(choice)
         self.assertLess(len(self.chat["messages"]), 61)
         self.assertIn("Use unittest", payload["messages"][0]["content"][0]["text"])
-        uses = {b["id"] for m in payload["messages"] for b in m["content"] if b["type"] == "tool_use"}
-        results = {b["tool_use_id"] for m in payload["messages"] for b in m["content"] if b["type"] == "tool_result"}
+        # The trimming notice compaction leaves is plain text content.
+        blocks = [b for m in payload["messages"] if isinstance(m["content"], list) for b in m["content"]]
+        uses = {b["id"] for b in blocks if b["type"] == "tool_use"}
+        results = {b["tool_use_id"] for b in blocks if b["type"] == "tool_result"}
         self.assertEqual(uses, results)
         self.assertEqual(invoke(self.chat, "search_history", query="unittest")["matches"][0]["id"], self.source["id"])
 

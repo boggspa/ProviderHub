@@ -1053,6 +1053,10 @@ def relay_cli_turn(events, emit, *, model, input_tokens=0) -> dict:
                     error_status = 400
                 elif event.get("http_status") == 400:
                     error_status = 400
+                if event.get("code") == "invalid_cli_tool_call":
+                    # Raised only before any host call is released, so a
+                    # client may request the same round again.
+                    error_code = event["code"]
                 break
             if kind == "message_stop":
                 stop_reason = _stop_reason(event.get("stop_reason"))

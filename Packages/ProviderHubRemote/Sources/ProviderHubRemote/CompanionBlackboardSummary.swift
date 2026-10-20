@@ -25,6 +25,14 @@ struct CompanionBlackboardSummary: View {
     @State private var posting = false
     @State private var notice = ""
     private var board: RemoteValue { model.store.controls["blackboard"] ?? .null }
+    /// Files open from the Mac, so they need a chat; links need a web address.
+    private var attachments: [RemoteValue] {
+        board["attachments"].rows.filter { Self.link($0) != nil || ($0["url"].text.isEmpty && model.selectedChatID != nil) }
+    }
+    private static func link(_ file: RemoteValue) -> URL? {
+        guard !file["url"].text.isEmpty, let url = URL(string: file["url"].text), ["http", "https"].contains(url.scheme ?? "") else { return nil }
+        return url
+    }
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             Divider()
@@ -38,14 +46,13 @@ struct CompanionBlackboardSummary: View {
                 .font(.system(size: 10.5)).foregroundStyle(.secondary)
             ForEach(Array(board["posts"].rows.sorted { $0["updated"].text > $1["updated"].text }.prefix(8)), id: \.self) { post in CompanionPostCard(model: model, post: post) }
             if board["posts"].rows.count > 8 { Button("Show all \(board["posts"].rows.count) posts", action: expand).font(.system(size: 10.5)) }
-            Text("Attachments").font(.system(size: 10.5)).foregroundStyle(.secondary)
-            ScrollView(.horizontal) {
-                HStack(alignment: .top, spacing: 8) {
-                    ForEach(board["attachments"].rows, id: \.self) { file in
-                        if file["url"].text.isEmpty, let chat = model.selectedChatID { CompanionFileTile(model: model, file: file, chat: chat) }
-                        else if let url = URL(string: file["url"].text), ["http", "https"].contains(url.scheme ?? "") { Link(file["name"].text.isEmpty ? "Link" : file["name"].text, destination: url).font(.caption) }
-                    }
+            if !attachments.isEmpty {
+                Text("Attachments · \(attachments.count)").font(.system(size: 10.5)).foregroundStyle(.secondary)
+                ChatSharedBlackboardTiles(items: attachments, id: \.self) { file in
+                    if let url = Self.link(file) { CompanionLinkTile(file: file, url: url) }
+                    else if let chat = model.selectedChatID { CompanionFileTile(model: model, file: file, chat: chat) }
                 }
+                if attachments.count > ChatSharedBlackboardTileLayout.limit { Button("Show all \(attachments.count) attachments", action: expand).font(.system(size: 10.5)) }
             }
             HStack {
                 TextField("Pin a fact, decision or risk for the Team…", text: $bodyText, axis: .vertical).textFieldStyle(.roundedBorder).font(.system(size: 11.5))
@@ -69,5 +76,25 @@ struct CompanionBlackboardSummary: View {
             }.buttonStyle(.plain).font(.system(size: 11))
             if !notice.isEmpty { Text(notice).font(.caption).foregroundStyle(.red) }
         }.task(id: model.selectedChatID) { model.control("blackboard") }
+    }
+}
+
+/// A link in the inspector's tile rows, the same size as CompanionFileTile.
+private struct CompanionLinkTile: View {
+    var file: RemoteValue
+    var url: URL
+    private var name: String { file["name"].text.isEmpty ? url.host ?? "Link" : file["name"].text }
+    var body: some View {
+        Link(destination: url) {
+            VStack(alignment: .leading, spacing: 3) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 5).fill(CompanionTheme.raised)
+                    Image(systemName: "link").foregroundStyle(CompanionTheme.secondary)
+                }.frame(width: 108, height: 64).clipShape(RoundedRectangle(cornerRadius: 5))
+                Text(name).font(.system(size: 10.5)).foregroundStyle(CompanionTheme.ink).lineLimit(1).truncationMode(.middle)
+                Text([file["authorName"].text, url.host ?? ""].filter { !$0.isEmpty }.joined(separator: " · "))
+                    .font(.system(size: 9.5)).foregroundStyle(CompanionTheme.secondary).lineLimit(1)
+            }.frame(width: 108).contentShape(Rectangle())
+        }.buttonStyle(.plain).accessibilityLabel("Open link " + name)
     }
 }

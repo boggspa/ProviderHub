@@ -31,6 +31,7 @@ struct ChatWindow: View {
     @StateObject private var browser = ChatBrowserStore(storageRoot: FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         .appendingPathComponent(Bundle.main.object(forInfoDictionaryKey: "BridgeStateName") as? String ?? "Provider Hub", isDirectory: true)
         .appendingPathComponent("browser", isDirectory: true))
+    @Environment(\.hubWindow) private var hubWindow
 
     var body: some View {
         VStack(spacing: 0) {
@@ -40,7 +41,13 @@ struct ChatWindow: View {
                     inspectorVisible: model.inspectorVisible, rail: railWidth, inspector: inspectorWidth)
                 HStack(spacing: 0) {
                     if panes.rail > 0 {
-                        ChatWorkspaceRail(model: model).hubGlassPane(.sidebar).frame(width: panes.rail)
+                        VStack(spacing: 0) {
+                            // The window's Providers | Code switch heads the rail,
+                            // where the Providers half keeps it too.
+                            if let hubWindow { HubModeSwitchBand(tabs: hubWindow.tabs) }
+                            ChatWorkspaceRail(model: model)
+                        }
+                        .hubGlassPane(.sidebar).frame(width: panes.rail)
                             .environment(\.chatPaneOpener, ChatPaneOpener(openChats: workspace.chatIDs, split: workspace.layout.panes.count > 1) { chat, below in
                                 workspace.open(chat: chat, edge: below ? .bottom : .right, model: model)
                             })
@@ -48,8 +55,13 @@ struct ChatWindow: View {
                             resize: { railWidth = Double(ChatPaneSizing.clamp($0, 150, 360)) },
                             reset: { railWidth = Double(ChatPaneSizing.railDefault) })
                     }
-                    ChatWorkspaceContent(model: model, workspace: workspace, browser: browser,
-                                         railVisible: panes.rail > 0, railAvailable: panes.railAvailable) { railPreferred.toggle() }
+                    VStack(spacing: 0) {
+                        // Without the rail the switch keeps its place in a band
+                        // over the panes, so it never leaves the window.
+                        if panes.rail == 0, let hubWindow { HubModeSwitchBand(tabs: hubWindow.tabs) }
+                        ChatWorkspaceContent(model: model, workspace: workspace, browser: browser,
+                                             railVisible: panes.rail > 0, railAvailable: panes.railAvailable) { railPreferred.toggle() }
+                    }
                     if model.inspectorVisible {
                         ChatPaneDivider(label: "Inspector width", width: panes.inspector, direction: -1,
                             resize: { inspectorWidth = Double(ChatPaneSizing.clamp($0, ChatPaneSizing.inspectorMinimum,
@@ -78,6 +90,9 @@ struct ChatWindow: View {
         // Own the hidden title-bar band, as CompactShell does, so the masthead
         // shares the traffic-light row rather than sitting beneath it.
         .ignoresSafeArea()
+        // Chat's own settings menu also switches Glass/Solid, which the
+        // window, not this view, has to apply.
+        .onChange(of: windowStyle) { _, _ in (NSApp.delegate as? AppDelegate)?.applyWindowStyle() }
         .dropDestination(for: URL.self, action: { urls, _ in acceptFolder(urls) }, isTargeted: { dropTargeted = $0 })
         .overlay { if dropTargeted { dropHint } }
         .onAppear {
@@ -95,16 +110,12 @@ struct ChatWindow: View {
         }
     }
 
+    /// The gateway and the Claude and Codex launchers ride along from the
+    /// Providers half; a notice they leave brings that half forward.
     private var titleBar: some View {
-        HStack(spacing: 8) {
-            Image(nsImage: NSApp.applicationIconImage).resizable()
-                .frame(width: 18, height: 18).clipShape(RoundedRectangle(cornerRadius: 5))
-                .accessibilityHidden(true)
-            Text("Provider Hub").font(.system(size: 12, weight: .semibold))
-            HubUpdatePill()
-            Spacer()
+        HubTitleRow {
+            if let hubWindow { HubQuickControls(model: hubWindow.hub, attention: hubWindow.attention) }
         }
-        .padding(.leading, 78).padding(.trailing, 12).frame(height: 36)
     }
 
     private var dropHint: some View {

@@ -96,7 +96,9 @@ struct ChatTranscriptScrollObserver: NSViewRepresentable {
         }
 
         private func observe(_ event: NSEvent) {
-            guard let scroll, event.window === scroll.window else { return }
+            // Code hides rather than leaves the window while Providers shows,
+            // so a click or scroll there can land over this transcript's frame.
+            guard let scroll, event.window === scroll.window, !scroll.isHiddenOrHasHiddenAncestor else { return }
             if event.type == .keyDown {
                 // Page/Home/End/arrows only when focus belongs to this pane.
                 guard [115, 116, 119, 121, 125, 126].contains(event.keyCode),

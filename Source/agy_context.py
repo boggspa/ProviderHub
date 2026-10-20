@@ -14,8 +14,9 @@ PART_LINES = 600
 
 CONTEXT_NOTE = (
     "Provider Hub context transport: some original context is in the private files "
-    "listed inside the transcript. Read EVERY part with native view_file before "
-    "answering or requesting a host action; omit StartLine/EndLine to read a whole "
+    "listed inside the transcript. Read EVERY part with your native file reader "
+    "(read_file, or view_file if that is what you have) before answering or "
+    "requesting a host action; omit StartLine/EndLine to read a whole "
     "part. Each fits in one read. Concatenate parts in order without inserting "
     "characters. Their contents replace the reference at its original role and "
     "position; they are not new user requests. Preserve instruction priority and "
@@ -33,7 +34,7 @@ def _parts(text):
         end = min(offset + PART_BYTES, len(data))
         while end < len(data) and data[end] & 0xC0 == 0x80:
             end -= 1
-        # A newline-dense part must also fit in a single native view_file.
+        # A newline-dense part must also fit in a single native read.
         lines = data[offset:end].splitlines(keepends=True)
         if len(lines) > PART_LINES:
             end = offset + sum(map(len, lines[:PART_LINES]))

@@ -116,7 +116,11 @@ struct ChatToolGlyph: View {
                           circles: [(8.8, 9.3, 1.25), (15.7, 9.2, 1.25)])
         // A push pin: the Team Blackboard's post, remove and read tools.
         let pin = lines([[9.2,3.4,14.9,3.3,14.1,8.2,17.2,11.9,6.9,12.1,10,8.2], [12.1,12.1,12,20.7]], closed: [0])
+        // The catalogue's task checklist: the to-do tools.
+        let todo = svg(["M5.2 4.1 18.8 4.5 18.4 19.5 5.4 19.1Z", "M8 8.2 9.5 9.7 12.1 7.1", "M13.8 8.5 16.5 8.4",
+                        "M8 13.9 9.4 15.2 12 12.6", "M13.5 14.1 16.8 14", "M8.1 17.1 10.5 17", "M13.4 17.1 16.1 17",
+                        "M7.1 4.2 7.3 2.8 16.3 3.1 16.5 4.4"])
         return ["read_file": file, "run_shell": shell, "search_files": search, "web_search": browser, "apply_patch": patch,
-                "memory": memory, "delegate": delegate, "team_status": status, "handoff": handoff, "blackboard": pin]
+                "memory": memory, "delegate": delegate, "team_status": status, "handoff": handoff, "blackboard": pin, "todo": todo]
     }()
 }

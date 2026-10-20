@@ -320,6 +320,61 @@ import Combine
         check(((leading.attribute(.paragraphStyle, at: 0, effectiveRange: nil) as? NSParagraphStyle)?.firstLineHeadIndent ?? 0) > 0,
               "A leading tag's chip would be clipped")
 
+        // Colour codes: the colour on the code and kerned room after it,
+        // with the text, a selection's copy and Copy Message exactly as
+        // written. Code blocks show none, and inline code only a code that
+        // is all it holds; a link or a code inside a word shows none.
+        let swatchSource = "Use #121212 or `#f4f4f6` and **#ff6600**; not `color: #00ff00`, a#123456 or [#0000ff](https://example.com)"
+        let swatchText = ChatMarkdownBlocks.format(swatchSource)
+        let swatched = ChatSelectableText.attributed(swatchText, font: base, color: .systemRed)
+        let swatchString = swatched.string as NSString
+        func swatch(_ code: String, in text: NSAttributedString = swatched) -> NSNumber? {
+            text.attribute(.chatHexSwatch, at: (text.string as NSString).range(of: code).location, effectiveRange: nil) as? NSNumber
+        }
+        func kern(_ code: String) -> Double {
+            (swatched.attribute(.kern, at: NSMaxRange(swatchString.range(of: code)) - 1, effectiveRange: nil) as? NSNumber)?.doubleValue ?? 0
+        }
+        check(swatched.string == String(swatchText.characters), "Swatches changed the text")
+        check(swatch("#121212")?.uint32Value == 0x121212 && swatch("#f4f4f6")?.uint32Value == 0xF4F4F6 && swatch("#ff6600") != nil,
+              "A colour code has no swatch")
+        check(swatch("#00ff00") == nil && swatch("#123456") == nil && swatch("#0000ff") == nil, "A swatch on longer code, a word or a link")
+        check(kern("#121212") == ChatHexSwatch.advance(base.pointSize), "No room after a code")
+        let codeFont = swatched.attribute(.font, at: swatchString.range(of: "#f4f4f6").location, effectiveRange: nil) as! NSFont
+        check(abs(kern("#f4f4f6") - (ChatLayoutManager.chipPadding(codeFont) + codeFont.pointSize * 0.08 + ChatHexSwatch.advance(codeFont.pointSize))) < 0.01,
+              "A code chip's room lost its padding")
+        let unswatched = ChatSelectableText.attributed(swatchText, font: base, color: .systemRed, swatches: false)
+        check(swatch("#121212", in: unswatched) == nil && unswatched.string == swatched.string, "A code block drew swatches")
+        let messageText = ChatSelectableText.attributed(ChatMentions.marked("@Sol make it #FF6600", mentions: [
+            ChatMention(id: "s", name: "Sol", route: "r", start: 0, length: 4)], accent: { _ in .purple }), font: base, color: .systemRed)
+        check(swatch("#FF6600", in: messageText)?.uint32Value == 0xFF6600 && messageText.string == "@Sol make it #FF6600",
+              "A user message's code has no swatch")
+        let swatchView = ChatSelectableText.makeTextView()
+        swatchView.frame = NSRect(x: 0, y: 0, width: 300, height: 120)
+        swatchView.textStorage?.setAttributedString(swatched)
+        swatchView.message = swatchSource
+        swatchView.selectAll(nil)
+        let selection = NSPasteboard(name: NSPasteboard.Name("chat-swatch-tests." + UUID().uuidString))
+        defer { selection.releaseGlobally() }
+        // The types ⌘C writes: rich text and plain.
+        check(swatchView.writeSelection(to: selection, types: swatchView.writablePasteboardTypes)
+              && selection.string(forType: .string) == String(swatchText.characters),
+              "Copying a selection changed the text: \(String(describing: selection.string(forType: .string)))")
+        swatchView.pasteboard = selection
+        swatchView.copyMessage(nil)
+        check(selection.string(forType: .string) == swatchSource, "Copy Message changed the text")
+        // The swatch is drawn: pixels of #ff6600, which the red ink never is.
+        swatchView.setSelectedRange(NSRange(location: 0, length: 0))
+        let swatchRep = swatchView.bitmapImageRepForCachingDisplay(in: swatchView.bounds)!
+        swatchView.cacheDisplay(in: swatchView.bounds, to: swatchRep)
+        var orange = 0
+        for y in 0..<swatchRep.pixelsHigh { for x in 0..<swatchRep.pixelsWide {
+            guard let pixel = swatchRep.colorAt(x: x, y: y)?.usingColorSpace(.sRGB) else { continue }
+            if abs(pixel.redComponent - 1) < 0.06 && abs(pixel.greenComponent - 0.4) < 0.06 && pixel.blueComponent < 0.06 { orange += 1 }
+        } }
+        let side = Int(ChatHexSwatch.side(base.pointSize))
+        // Inside its rim and rounded corners, at the bitmap's 1x scale.
+        check(orange >= (side - 4) * (side - 4) && orange <= side * side, "The #ff6600 swatch was not drawn once: \(orange) pixels")
+
         let started = Date()
         for _ in 0..<50 { _ = ChatTableParser.parse(tooManyRows, streaming: true) }
         print("50 bounded table parses: \(Date().timeIntervalSince(started))s")
@@ -609,6 +664,15 @@ struct Item: ChatTranscriptItem {
               == ChatToolDisplay(verb: "Pinned to the Blackboard", subject: "schema (risk)", code: true), "Blackboard post phrasing")
         check(ChatToolDisplay.describe(tool: "blackboard_remove", summary: "Removed schema", live: true).verb == "Removing a Blackboard post", "Live Blackboard removal")
         check(ChatToolDisplay.activity(["blackboard_post", "blackboard_post", "blackboard_read"]) == "2 pins, 1 board read", "Blackboard fold activity")
+        // A to-do row reads as progress and the item in hand; its result draws as a checklist.
+        check(ChatToolDisplay.describe(tool: "todo_write", summary: "To-dos: 2/5 done\nWrite the parser")
+              == ChatToolDisplay(verb: "Updated to-dos", subject: "2/5 done", context: "Write the parser"), "To-do row phrasing")
+        check(ChatToolDisplay.describe(tool: "todo_write", summary: "Update shared to-dos", live: true).verb == "Updating shared to-dos", "Live shared to-do row")
+        check(ChatToolDisplay.glyph("todo_write") == "todo" && ChatToolDisplay.glyph("todo_read") == "todo", "To-do glyph")
+        let checklist = ChatTodoChecklist.parse("Saved your to-dos (1/2 completed).\n- [completed] a: Read (twice)\n- [in_progress by Sol] b: Write")
+        check(checklist?.map(\.status) == [.completed, .inProgress] && checklist?.first?.content == "Read (twice)"
+              && checklist?.last?.owner == "Sol", "To-do checklist parse")
+        check(ChatTodoChecklist.parse("[]") == nil, "Raw text drew as a checklist")
         check(ChatToolDisplay.describe(tool: "blackboard_attach", summary: "Added notes.txt, example.com/spec")
               == ChatToolDisplay(verb: "Added to the Blackboard", subject: "notes.txt, example.com/spec"), "Blackboard attach phrasing")
 
@@ -666,7 +730,7 @@ struct Item: ChatTranscriptItem {
         // Every glyph a row can ask for exists, and the path parser reads the
         // catalogue's curve syntax, including relative curves.
         for name in ["run_shell", "apply_patch", "read_file", "search_files", "web_search", "search_history", "record_decision",
-                     "delegate", "team_status", "blackboard_post", "blackboard_read", nil] {
+                     "delegate", "team_status", "blackboard_post", "blackboard_read", "todo_write", "todo_read", nil] {
             check(ChatToolGlyph.has(ChatToolDisplay.glyph(name)), "Missing glyph for \(name ?? "nil")")
         }
         check(ChatToolGlyph.has("handoff"), "Missing handoff glyph")
@@ -756,11 +820,11 @@ import Foundation
             self.assertIn(marker, ran.stdout)
 
     def test_parser_streaming_copy_budgets_and_column_layout(self):
-        self.run_native(["ChatFonts.swift", "ChatHues.swift", "ChatMentions.swift", "ChatSelectableText.swift", "ChatTranscriptText.swift"], CASES,
+        self.run_native(["ChatFonts.swift", "ChatHues.swift", "ChatMentions.swift", "ChatSharedHexColor.swift", "ChatSelectableText.swift", "ChatTranscriptText.swift"], CASES,
                         "Transcript parser, streaming, copy and layout checks passed", stubs=STUBS)
 
     def test_selectable_bubble_height_matches_rendered_width(self):
-        self.run_native(["ChatFonts.swift", "ChatHues.swift", "ChatMentions.swift", "ChatSelectableText.swift", "ChatTranscriptText.swift"], BUBBLE_CASES,
+        self.run_native(["ChatFonts.swift", "ChatHues.swift", "ChatMentions.swift", "ChatSharedHexColor.swift", "ChatSelectableText.swift", "ChatTranscriptText.swift"], BUBBLE_CASES,
                         "Selectable bubble sizing and native hosting checks passed", stubs=STUBS)
 
     def test_outline_tool_phrasing_sources_notices_and_glyphs(self):

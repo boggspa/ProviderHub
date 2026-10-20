@@ -32,8 +32,9 @@ Supported translation paths are:
 
 - Exact offered host tool names, with agy's display metadata removed.
 - Native `run_command` to offered `exec_command`, `Bash`, or `run_shell_command`.
-- Native `view_file` to offered `Read`, `read_file`, or a quoted read command;
-  explicit line ranges are preserved.
+- Native `view_file` or `read_file` (agy's reader under either name) to offered
+  `Read`, `read_file`, or a quoted read command; explicit line ranges are
+  preserved.
 - Native directory listing to offered `list_directory` or a quoted list command.
 - A structured host reply wrapped in native `send_message` to `user`.
 - A confirmed unknown-tool rejection for a host tool name, which proves agy
@@ -141,3 +142,32 @@ the catalogue label cannot change this panel. A native sidebar fix requires
 renderer support for resolving the full model ID against the catalogue;
 Provider Hub's current profile/gateway integration has no label override for
 that formatter. Preserve the routing IDs and `behavesAs` capability metadata.
+
+## Renamed native reader (2026-10-20)
+
+Team members on `antigravity/gemini-3.8-flash` stopped ten times with `agy
+native request was stopped before execution but needs a structured host reply:
+native tool parameters must be an object`. agy's own conversation store
+(`~/.gemini/antigravity-cli/conversations/*.db`, read only) shows the cause.
+Through 19 October its file reader was `view_file` with `AbsolutePath`; from
+20 October the same agy 1.4.2 binary offered `read_file` with `Path`,
+`StartLine`, `EndLine` and `ByteOffset`, so the tool set is served remotely.
+The hook only allowed `view_file` with `AbsolutePath`, so it refused every read
+of a private context part and told the model to use `view_file`. agy answered
+that call with `unknown tool: "view_file"`, and its stream reported no
+arguments for it, although the stored call carried a `Path`. Twenty-four agy
+conversations from 20 October end on that call; the route's one correction
+only ran the same sequence again in a second process.
+
+The hook and adapter now accept either reader name and either path key, and
+require every path key present to name the same private file. Captured
+`read_file` requests reach Lean Chat's `read_file` with its own `path`, never
+agy's keys. A missing argument object is never read as an empty one.
+
+agy answers an unknown tool itself and its loop continues in the same process,
+so an untranslatable unknown-tool rejection no longer ends the turn. After two
+such rejections in one CLI turn the route's correction applies. Resumed turns
+now report the same status and code as cold turns. The gateway passes on
+`invalid_cli_tool_call`, which Team members retry within their existing five
+attempts. Failures that may have executed, such as an unconfirmed native
+action, are still not retried.

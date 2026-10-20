@@ -190,6 +190,8 @@ private struct ChatAgentsPane: View {
                         ChatTeamControls(model: model)
                         if let chat = model.selectedID {
                             Divider().padding(.horizontal, 14)
+                            ChatTodosSection(model: model)
+                            Divider().padding(.horizontal, 14)
                             ChatBlackboardSection(model: model, chat: chat)
                         }
                         if !model.agents.isEmpty { Text("Earlier delegated tasks").font(.system(size: 11.5, weight: .medium)).foregroundStyle(.secondary).padding(8) }

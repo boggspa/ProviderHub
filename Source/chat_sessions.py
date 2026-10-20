@@ -582,6 +582,7 @@ the same publication `initialize` and `select` perform, ending with `ready`.
                 # Empty panels must clear a previous chat's cached state too.
                 if not service.chat.get("team"): self.emit({"event": "team", "chat": identifier, "team": None})
                 if not service.side: self.emit({"event": "side", "chat": identifier, "side": None})
+                if not service.chat.get("todos"): self.emit({"event": "todos", "chat": identifier, "todos": None})
                 self.publish_remote_configuration(service)
                 self.publish_processes(identifier)
                 service._last_remote_activity = None
