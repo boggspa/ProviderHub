@@ -117,6 +117,7 @@ struct CompactShell: View {
     @State private var noticeHovered = false
     @State private var tabBeforeSettings: ShellTab = .provider("mistral")
     @Namespace private var rail
+    @Environment(\.hubWindow) private var hubWindow
 
     var apiProviders: [ProviderDefinition] { model.providerDefinitions.filter { !subscriptionProviders.contains($0.id) } }
     var cliProviders: [ProviderDefinition] { model.providerDefinitions.filter { subscriptionProviders.contains($0.id) } }
@@ -125,6 +126,9 @@ struct CompactShell: View {
     var body: some View {
         VStack(spacing: 0) {
             titleBar
+            // The switch's place in both halves of the window: under the
+            // title row, at the left. The rail is too narrow to hold it.
+            if let hubWindow { HubModeSwitchBand(tabs: hubWindow.tabs) }
             if tab == .settings {
                 SettingsPage(model: model)
             } else {
@@ -140,7 +144,7 @@ struct CompactShell: View {
         .background {
             if windowStyle == .glass {
                 // The same 75% scrim Chat lays over its glass, so the two
-                // windows read as one surface; the chroma wash stays beneath.
+                // halves read as one surface; the chroma wash stays beneath.
                 VibrancyBackground().overlay(HubTheme.Semantic.glassScrim).background(chromaWash)
             } else {
                 Color(nsColor: .windowBackgroundColor)
@@ -170,21 +174,9 @@ struct CompactShell: View {
     // MARK: title bar
 
     private var titleBar: some View {
-        HStack(spacing: 8) {
-            Image(nsImage: NSApp.applicationIconImage).resizable().frame(width: 18, height: 18).clipShape(RoundedRectangle(cornerRadius: 5))
-            Text("Provider Hub").font(.system(size: 12, weight: .semibold))
-            HubUpdatePill()
-            Spacer()
-            Circle().fill(model.running ? Chroma.ok : Color.secondary.opacity(0.5)).frame(width: 7, height: 7)
-                .shadow(color: model.running ? Chroma.ok.opacity(0.5) : .clear, radius: 3)
-            Text("127.0.0.1:\(String(model.savedSettings.port))").font(.system(size: 10.5, design: .monospaced)).foregroundStyle(.secondary)
-            Button(model.running ? "Stop" : "Start") { Task { await model.toggleGateway() } }
-                .buttonStyle(.bordered).controlSize(.mini).disabled(model.busy)
-            launchCluster.padding(.leading, 10)
-            Button { model.openChat() } label: {
-                Image(systemName: "bubble.left.and.text.bubble.right").font(.system(size: 12))
-            }.buttonStyle(.plain).help("Chat with a model in Provider Hub")
-                .accessibilityLabel("Open Provider Hub Chat")
+        HubTitleRow {
+            HubGatewayControl(model: model, showsAddress: true)
+            HubLaunchCluster(model: model).padding(.leading, 10)
             if model.changed {
                 Button { Task { await model.saveFromUI() } } label: { Text("Save").foregroundStyle(HubTheme.Control.ink) }
                     .buttonStyle(.borderedProminent).controlSize(.mini).tint(HubTheme.Accent.brand)
@@ -203,42 +195,6 @@ struct CompactShell: View {
             }.buttonStyle(.plain).help(tab == .settings ? "Back" : "Settings").padding(.leading, 4)
             if model.busy { ProgressView().controlSize(.mini) }
         }
-        .padding(.leading, 78).padding(.trailing, 12).frame(height: 36)
-    }
-
-    /// "Launch" plus the two app marks, each with its own LED: green while
-    /// the app runs on the hub profile, amber when it runs on another one,
-    /// grey when closed. One click launches (or shows) the app with the
-    /// current catalogue, same as the app tab's button.
-    private var launchCluster: some View {
-        HStack(spacing: 4) {
-            Text("Launch").font(.system(size: 10.5)).foregroundStyle(.secondary).padding(.trailing, 2)
-            launchMark(.claude)
-            launchMark(.codex)
-        }
-    }
-
-    private func launchMark(_ which: ShellTab) -> some View {
-        let isClaude = which == .claude
-        let presentation = model.providerDefinitions.first { $0.id == (isClaude ? "claude" : "codex") }?.presentation
-        let running = isClaude ? model.claudeRunning : model.codexRunning
-        let live = running && (isClaude ? model.profileActive : model.codexProfileActive)
-        let led: Color = live ? Chroma.ok : (running ? Chroma.warn : Color.secondary.opacity(0.5))
-        let blocked = model.busy || (isClaude ? !model.claudeInstalled : (model.codexAppPath == nil || model.settings.codex_model == nil))
-        return Button { Task { if isClaude { await model.launchClaude() } else { await model.launchCodex() } } } label: {
-            ZStack(alignment: .bottomTrailing) {
-                Group {
-                    if let presentation { ProviderMark(presentation: presentation, size: 16) }
-                    else { Image(systemName: "app.dashed").font(.system(size: 12)) }
-                }.frame(width: 22, height: 22)
-                Circle().fill(led).frame(width: 6, height: 6).overlay(Circle().stroke(Semantic.surface, lineWidth: 1))
-                    .shadow(color: live ? Chroma.ok.opacity(0.6) : .clear, radius: 2).offset(x: 1, y: 1)
-            }
-            .background(RoundedRectangle(cornerRadius: 6).fill(Semantic.raisedSurface))
-            .contentShape(RoundedRectangle(cornerRadius: 6))
-            .opacity(blocked ? 0.45 : 1)
-        }.buttonStyle(.plain).disabled(blocked)
-            .help((isClaude ? "Claude Desktop" : "Codex / ChatGPT") + (live ? " · running on the hub profile" : (running ? " · running on another profile" : " · closed")))
     }
 
     // MARK: rail
