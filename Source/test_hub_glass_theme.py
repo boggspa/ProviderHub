@@ -93,7 +93,9 @@ class GlassPresentationWiringTests(unittest.TestCase):
     def test_chat_and_hub_windows_paint_the_panes_from_the_surface_style(self):
         chat = (SOURCE / "ChatWindow.swift").read_text()
         self.assertIn('.environment(\\.hubSurfaceStyle, windowStyle)', chat)
-        self.assertIn("ChatWorkspaceRail(model: model).hubGlassPane(.sidebar)", chat)
+        # The rail column (the window switch above the saved chats) takes the
+        # sidebar fill as one pane.
+        self.assertRegex(chat, r"ChatWorkspaceRail\(model: model\)\s*\}\s*\.hubGlassPane\(\.sidebar\)")
         self.assertIn(".hubGlassPane(.inspector)", chat)
         # The transcript's paper runs under the live strip and the composer to
         # the window's bottom edge; no hard edge above the composer.

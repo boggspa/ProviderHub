@@ -88,8 +88,8 @@ final class BridgeModel: ObservableObject {
     var codexAccentInput: Pipe?
     /// The floating recent-chat composer (QuickComposerPanel.swift).
     let quickPanel = QuickPanelModel()
-    var openChatWindow: (() -> Void)?
     var onGatewayStarted: (() -> Void)?
+    /// Chat is open in the window's Code half (AppDelegate.chatOpen).
     @Published var chatWindowOpen = false
     @Published var chatWorking = false
     /// ChatModel.hasActiveWork, also refreshed on a Chat surface change, so
@@ -158,7 +158,6 @@ final class BridgeModel: ObservableObject {
 
     var running: Bool { gatewayState == "Ready" }
     var changed: Bool { settings != savedSettings }
-    func openChat() { openChatWindow?() }
 
     func omitSystem(for slot: String) -> Binding<Bool> {
         Binding(
@@ -789,7 +788,10 @@ final class BridgeModel: ObservableObject {
         busy = true; defer { busy = false }
         do {
             if running {
-                if anyOwnedHarnessRunning || activeRequests > 0 { throw WorkerError(message: "Close the desktop sessions using this gateway before stopping it.") }
+                // Chat shares the window that carries this button, so an open
+                // Chat cannot be closed first; only a working one blocks.
+                if chatBusy { throw WorkerError(message: "Stop the Chat turn before stopping the gateway.") }
+                if desktopOwnedHarnessRunning || activeRequests > 0 { throw WorkerError(message: "Close the desktop sessions using this gateway before stopping it.") }
                 await stopGateway()
                 tell("Gateway stopped. Your model mappings are saved for the next launch.")
             } else { try await save(); try await startGateway(); tell("Gateway ready. You can test a model or launch a desktop session.") }
@@ -1455,10 +1457,20 @@ struct BridgeWindow: View {
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDelegate {
     var model: BridgeModel!
     var statusItem: NSStatusItem!
+    /// The one window. Providers (the Hub) and Code (Chat) are its halves.
     var window: NSWindow!
-    var chatWindow: NSWindow?
+    var content: HubWindowContent!
+    var tabs: HubWindowTabs!
     var chatModel: ChatModel!
     var readyToQuit = false
+    /// From showing the window until it closes; minimising keeps it open.
+    var windowOpen = false
+    /// Chat counts as open, for the gateway's keep-alive rules, from the first
+    /// time Code shows until the window closes, as the Chat window did while
+    /// it stayed open behind the Hub.
+    var chatOpen = false { didSet { model.chatWindowOpen = chatOpen } }
+    var tabMenuItems: [HubWindowTab: NSMenuItem] = [:]
+    static let frameName = "ProviderHubWindow"
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -1476,7 +1488,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         }
         editItem.submenu = editMenu; mainMenu.addItem(editItem)
         let viewItem = NSMenuItem()
-        viewItem.submenu = ChatZoomCommands.shared.menu(); mainMenu.addItem(viewItem)
+        let viewMenu = ChatZoomCommands.shared.menu()
+        // ⌘1 and ⌘2 do what the switch at the top of the sidebar does.
+        for (index, tab) in HubWindowTab.allCases.enumerated() {
+            let item = NSMenuItem(title: tab.title, action: #selector(chooseTab(_:)), keyEquivalent: String(index + 1))
+            item.target = self; item.representedObject = tab.rawValue
+            viewMenu.insertItem(item, at: index); tabMenuItems[tab] = item
+        }
+        viewMenu.insertItem(.separator(), at: HubWindowTab.allCases.count)
+        viewItem.submenu = viewMenu; mainMenu.addItem(viewItem)
         NSApp.mainMenu = mainMenu
         model = BridgeModel()
         chatModel = ChatModel(bridge: model)
@@ -1494,7 +1514,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             self.model.chatHasActiveWork = self.chatModel.hasActiveWork
             self.applyWindowStyle()
         }
-        model.openChatWindow = { [weak self] in self?.showChat() }
         model.onGatewayStarted = { [weak self] in
             guard let self else { return }
             Task { @MainActor in
@@ -1507,14 +1526,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         statusItem.button?.image?.isTemplate = true
         statusItem.button?.toolTip = hubName
         let menu = NSMenu(); menu.delegate = self; statusItem.menu = menu
-        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1200, height: 820), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
-        window.title = hubName
+        // Both halves draw their own title row in the hidden title bar's band.
+        window = HubWindow(contentRect: NSRect(x: 0, y: 0, width: 940, height: 700),
+                           styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+                           backing: .buffered, defer: false)
+        window.title = hubName; window.titleVisibility = .hidden
         window.titlebarAppearsTransparent = true
         window.isReleasedWhenClosed = false
         window.delegate = self
+        content = HubWindowContent()
+        window.contentView = content
+        tabs = HubWindowTabs()
+        tabs.onSelect = { [weak self] tab in
+            guard let self else { return }
+            self.applyTab()
+            if tab == .code { self.openChat() }
+        }
         applyDesign()
-        window.center()
-        showWindow()
+        // One remembered frame. The first launch after the merge takes the
+        // Chat window's, the only one saved before.
+        if !window.setFrameUsingName(Self.frameName), !window.setFrameUsingName("ProviderHubChat") { window.center() }
+        window.setFrameAutosaveName(Self.frameName)
+        growToMinimum()
+        present()
         HubUpdater.shared.start(python: model.python, worker: model.helper.deletingLastPathComponent(), root: model.root) { [weak self] in
             guard let self else { return "Provider Hub is closing." }
             return self.updateRestartBlocker()
@@ -1531,32 +1565,65 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
 
     /// "compact" is the compact shell (CompactShell.swift); "classic" is the
     /// original pages. Both drive the same model, so switching mid-edit keeps
-    /// unsaved changes. The choice persists in UserDefaults.
+    /// unsaved changes. The choice persists in UserDefaults. Only the
+    /// Providers half is rebuilt; Code is untouched.
     var design: String { UserDefaults.standard.string(forKey: "hubDesign") ?? "compact" }
     func applyDesign() {
         if design == "classic" {
-            window.styleMask.remove(.fullSizeContentView)
-            window.titleVisibility = .visible
-            window.contentView = NSHostingView(rootView: BridgeWindow(model: model))
-            window.minSize = NSSize(width: 870, height: 680)
-            window.setContentSize(NSSize(width: 1200, height: 820))
+            content.install(ClassicHubFrame(model: model, tabs: tabs), for: .providers)
         } else {
-            window.styleMask.insert(.fullSizeContentView)
-            window.titleVisibility = .hidden
-            window.contentView = NSHostingView(rootView: CompactShell(model: model))
-            window.minSize = NSSize(width: 760, height: 500)
-            window.setContentSize(NSSize(width: 840, height: 560))
+            content.install(CompactShell(model: model).environment(\.hubWindow, windowContext), for: .providers)
         }
+        applyTab()
+    }
+
+    /// What either half needs from the window: the switch, the hub model for
+    /// its title-row controls, and the way back to the Providers half.
+    var windowContext: HubWindowContext {
+        HubWindowContext(tabs: tabs, hub: model, attention: { [weak self] in self?.showWindow() })
+    }
+
+    /// Show the selected half. Code is built the first time it is needed and
+    /// kept from then on, like the Chat window it replaces.
+    func applyTab() {
+        let tab = tabs.current
+        if tab == .code, !content.has(.code) {
+            content.install(ChatWindow(model: chatModel).environment(\.hubWindow, windowContext), for: .code)
+        }
+        content.show(tab)
+        // The zoom and pane commands act on Chat's text, so only while it shows.
+        ChatZoomCommands.shared.window = tab == .code ? window : nil
+        for (item, menuItem) in tabMenuItems { menuItem.state = item == tab ? .on : .off }
+        window.minSize = minimumSize
+        growToMinimum()
         applyWindowStyle()
     }
-    /// Both Hub windows follow one surface preference without rebuilding state.
+
+    /// Each half's own minimum, including the band that holds the switch:
+    /// Code's narrow layout hides its rail, the compact hub needs a little
+    /// more width, and the classic pages keep their larger frame.
+    var minimumSize: NSSize {
+        if tabs.current == .code { return NSSize(width: 720, height: 536) }
+        return design == "classic" ? NSSize(width: 870, height: 752) : NSSize(width: 760, height: 536)
+    }
+
+    /// A switch to a half with a larger minimum grows the window from its
+    /// top-left corner, which keeps the switch where it was.
+    func growToMinimum() {
+        var frame = window.frame
+        guard frame.width < window.minSize.width || frame.height < window.minSize.height else { return }
+        let top = frame.maxY
+        frame.size = NSSize(width: max(frame.width, window.minSize.width), height: max(frame.height, window.minSize.height))
+        frame.origin.y = top - frame.height
+        window.setFrame(frame, display: true)
+    }
+
+    /// One surface preference for both halves; the classic pages stay opaque.
     func applyWindowStyle() {
-        let glass = design != "classic" && HubTheme.WindowStyle.mode == .glass
+        guard let window, let tabs else { return }
+        let glass = HubTheme.WindowStyle.mode == .glass && !(tabs.current == .providers && design == "classic")
         window.isOpaque = !glass
         window.backgroundColor = glass ? .clear : .windowBackgroundColor
-        let chatGlass = HubTheme.WindowStyle.mode == .glass
-        chatWindow?.isOpaque = !chatGlass
-        chatWindow?.backgroundColor = chatGlass ? .clear : .windowBackgroundColor
     }
     @objc func chooseCompact() { UserDefaults.standard.set("compact", forKey: "hubDesign"); applyDesign() }
     @objc func chooseClassic() { UserDefaults.standard.set("classic", forKey: "hubDesign"); applyDesign() }
@@ -1574,45 +1641,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         HubTheme.Appearance.apply()
     }
 
-    @objc func showWindow() {
-        // The app lives in the menu bar (LSUIElement). While its window is
-        // open it joins the Dock with the real icon; closing the window
-        // returns it to the menu bar only. windowWillClose does the reverse.
+    /// Bring the window forward on whichever half it shows. The app lives in
+    /// the menu bar (LSUIElement); while its window is open it joins the Dock
+    /// with the real icon, and windowWillClose returns it to the menu bar.
+    func present() {
         NSApp.setActivationPolicy(.regular)
         window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
+        windowOpen = true
+        if tabs.current == .code { openChat() }
     }
+    /// Models & Settings, and wherever a hub notice has to be seen: the
+    /// Providers half, which shows it.
+    @objc func showWindow() { tabs.select(.providers); present() }
+    /// Chat with Model: the Code half. Asking again while Chat is already
+    /// open reconnects it, as reopening the Chat window always did.
     @objc func showChat() {
-        if chatWindow == nil {
-            let chat = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 940, height: 700),
-                                styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
-                                backing: .buffered, defer: false)
-            chat.title = "Chat · Provider Hub"; chat.titleVisibility = .hidden
-            chat.titlebarAppearsTransparent = true; chat.isOpaque = false; chat.backgroundColor = .clear
-            chat.isReleasedWhenClosed = false; chat.delegate = self
-            chat.minSize = NSSize(width: 720, height: 500)
-            chat.contentView = NSHostingView(rootView: ChatWindow(model: chatModel))
-            chat.setFrameAutosaveName("ProviderHubChat"); chat.center(); chatWindow = chat
-            ChatZoomCommands.shared.window = chat
-            applyWindowStyle()
-        }
-        model.chatWindowOpen = true
-        NSApp.setActivationPolicy(.regular)
-        chatWindow?.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
+        let reconnect = chatOpen
+        tabs.select(.code); present()
+        if reconnect { Task { await chatModel.start() } }
+    }
+    @objc func chooseTab(_ sender: NSMenuItem) {
+        guard let tab = (sender.representedObject as? String).flatMap(HubWindowTab.init(rawValue:)) else { return }
+        tabs.select(tab); present()
+    }
+    /// Code's first showing in an open window brings Chat and the gateway up,
+    /// as opening the Chat window did. Later switches leave both alone, so a
+    /// gateway stopped from either half stays stopped.
+    func openChat() {
+        guard windowOpen, !chatOpen else { return }
+        chatOpen = true
         Task { await chatModel.start() }
     }
     func windowWillClose(_ notification: Notification) {
-        let closing = notification.object as? NSWindow
-        if closing === chatWindow { model.chatWindowOpen = false }
-        if (closing === window && chatWindow?.isVisible != true) || (closing === chatWindow && !window.isVisible) {
-            NSApp.setActivationPolicy(.accessory)
-        }
+        guard notification.object as? NSWindow === window else { return }
+        windowOpen = false; chatOpen = false
+        NSApp.setActivationPolicy(.accessory)
     }
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
-        if !hasVisibleWindows { showWindow() }
+        if !hasVisibleWindows { present() }
         return true
     }
-    @objc func launchClaude() { Task { await model.launchClaude(); if model.noticeIsError || model.noticeIsWarning { showWindow() } } }
-    @objc func launchCodex() { Task { await model.launchCodex(); if model.noticeIsError || model.noticeIsWarning { showWindow() } } }
+    @objc func launchClaude() { model.perform({ await self.model.launchClaude() }, attention: { [weak self] in self?.showWindow() }) }
+    @objc func launchCodex() { model.perform({ await self.model.launchCodex() }, attention: { [weak self] in self?.showWindow() }) }
     @objc func toggleGateway() { Task { await model.toggleGateway() } }
     @objc func openVibe() { model.openVibe() }
     @objc func quit() { NSApp.terminate(nil) }

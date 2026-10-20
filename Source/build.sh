@@ -15,7 +15,7 @@ SWIFT_SOURCES=(
   "$SOURCE_DIR/DevinAgentsView.swift" "$SOURCE_DIR/CodexHarness.swift"
   "$SOURCE_DIR/HubTheme.swift" "$SOURCE_DIR/HubGlass.swift" "$SOURCE_DIR/HubUpdater.swift" "$SOURCE_DIR/QuickComposerPanel.swift" "$SOURCE_DIR/CompactShell.swift"
   "$SOURCE_DIR/ChatModel.swift" "$SOURCE_DIR/ChatMentions.swift" "$SOURCE_DIR/ChatInspectorModel.swift" "$SOURCE_DIR/ChatInspector.swift" "$SOURCE_DIR/ChatTeam.swift" "$SOURCE_DIR/ChatTodos.swift" "$SOURCE_DIR/ChatBlackboardModel.swift" "$SOURCE_DIR/ChatBlackboard.swift" "$SOURCE_DIR/ChatBlackboardThumbnails.swift" "$SOURCE_DIR/ChatBlackboardWindow.swift" "$SOURCE_DIR/ChatBranches.swift" "$SOURCE_DIR/ChatFonts.swift" "$SOURCE_DIR/ChatSettings.swift" "$SOURCE_DIR/ChatTurnTime.swift" "$SOURCE_DIR/ChatStateAccents.swift" "$SOURCE_DIR/ChatWorkspaces.swift" "$SOURCE_DIR/ChatModelPicker.swift" "$SOURCE_DIR/ChatAttachments.swift" "$SOURCE_DIR/ChatToolGlyph.swift" "$SOURCE_DIR/ChatSelectableText.swift" "$SOURCE_DIR/ChatTranscriptText.swift" "$SOURCE_DIR/ChatTranscriptLayout.swift" "$SOURCE_DIR/ChatTranscriptRows.swift" "$SOURCE_DIR/ChatActivityStrip.swift" "$SOURCE_DIR/ChatComposerText.swift" "$SOURCE_DIR/ChatWindow.swift"
-  "$SOURCE_DIR/MistralBridge.swift"
+  "$SOURCE_DIR/MistralBridge.swift" "$SOURCE_DIR/HubWindow.swift"
   "$SOURCE_DIR/ChatPaneSizing.swift" "$SOURCE_DIR/ChatPaneDivider.swift"
   "$SOURCE_DIR/ChatGitOverview.swift" "$SOURCE_DIR/ChatTeamControls.swift" "$SOURCE_DIR/HubTokenUsage.swift"
   "$SOURCE_DIR/ChatWorkspaceLayout.swift" "$SOURCE_DIR/ChatSplitWorkspace.swift" "$SOURCE_DIR/ChatWorkspaceUI.swift"
