@@ -128,6 +128,7 @@ struct CompanionInspector: View {
                 Text("Add up to eight named models. The same Team runs on your Mac and appears in this inspector.")
                     .font(.callout).foregroundStyle(CompanionTheme.secondary)
             }
+            if let todos = CompanionTodoLists(model.store.controls["todos"]) { CompanionTodos(model: model, lists: todos) }
             ForEach(model.store.controls["agents"]?.rows ?? [], id: \.self) { agent in
                 DisclosureGroup("\(agent["label"].text) · \(agent["status"].text)") { entries(agent["entries"]) }
             }

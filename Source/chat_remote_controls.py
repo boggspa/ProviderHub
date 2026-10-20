@@ -80,6 +80,25 @@ def project(event, entry_projector):
                  "attachments": [pick(row, ("id", "name", "kind", "url", "size", "authorName", "source")) for row in board.get("attachments", [])[:64]],
                  "limits": pick(board.get("limits"), ("posts", "bodyBytes", "boardBytes", "usedBytes", "attachments"))}
         return {"event": "control", "chat": event.get("chat"), "panel": panel, "value": value, "notice": str(event.get("notice") or "")[:500]}
+    elif kind == "todos":
+        todos = event.get("todos")
+        value = None
+        if isinstance(todos, dict):
+            lanes = [row for row in todos.get("lanes", [])[:8] if isinstance(row, dict)]
+            shared = todos.get("shared") if isinstance(todos.get("shared"), dict) else None
+            # Each list gets its own share of the frame, so one long list cannot
+            # hide the lanes after it. Progress counts come from the host.
+            share = 20000 // max(1, len(lanes) + (1 if shared else 0))
+            def listed(row, keys):
+                result = pick(row, keys)
+                result["items"] = [pick(item, ("id", "content", "status", "ownerName"))
+                                   for item in row.get("items", [])[:24] if isinstance(item, dict)]
+                return bounded(result, share)
+            value = {"team": todos.get("team") is True,
+                     "lanes": [listed(row, ("id", "name", "route", "choice", "done", "total", "updated")) for row in lanes],
+                     "shared": listed(shared, ("id", "name", "done", "total", "updated", "revision")) if shared else None}
+        return {"event": "control", "chat": event.get("chat"), "panel": "todos", "value": value,
+                "notice": str(event.get("notice") or "")[:500]}
     elif kind == "remote_history":
         return {"event": "history", "chat": event.get("chat"), "before": event.get("before"), "request": event.get("request"),
                 "entries": event.get("entries", []), "hasMore": event.get("hasMore", False)}

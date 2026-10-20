@@ -294,6 +294,32 @@ thumbnail code on them. It checks the bounds, frame count and size, waveform
 amplitude, PDF ink, graceful failure on truncated and corrupt files, cache
 hits in memory and on disk, and that no render ran on the main thread.
 
+## To-dos
+
+Each member keeps its own to-do list with `todo_write`, modelled on Claude
+Code's TodoWrite: every call sends the whole list, items are `pending`,
+`in_progress` or `completed`, and a list holds at most one item in progress
+(24 items, 200 characters each). `todo_write` with `list: "shared"` writes the
+Team's shared list instead. Marking a shared item in progress claims it for
+that member; each member can hold one claim, and a claim stays with its member
+until the item's status changes. A shared write replaces the list for
+everyone, so the host refuses one made from a copy older than the latest
+revision and returns the current list to start from. `todo_read` shows one
+member's list or every list. A solo chat has one list and only `todo_write`.
+
+Lists are saved on the chat keyed by member ID, in the same snapshot and
+Team checkpoint log as the Blackboard. A member's own list, and the shared
+list, ride the same reference projection as the notebook: with every request
+on most API routes, and on routes that keep a stable prefix (the CLIs among
+them) again only when a list changes, after a model switch or after compaction. A replacement model for a member therefore starts
+from the list its predecessor left. Peers' lists are not projected. Turning
+Team on gives a solo chat's list to the first member; turning it off returns
+that member's list to the chat. The Team tab shows each member's list with its
+progress, and the shared list, between the member rows and the Blackboard.
+The phone shows the same lists in its Team tab.
+`test_chat_todos.py` covers validation, claims, stale shared writes,
+persistence, resume after a model switch and every route type.
+
 ## Reactions
 
 Members and you can leave one emoji on a message, iMessage tapback style. A

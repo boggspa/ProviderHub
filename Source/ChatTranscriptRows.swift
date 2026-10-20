@@ -360,7 +360,10 @@ struct ToolRow: View {
         let command = display.command
         VStack(alignment: .leading, spacing: textStyle.scaled(6)) {
             if let attachments = entry.attachments, !attachments.isEmpty { ChatAttachmentStrip(attachments: attachments) }
-            if !detail.isEmpty || command != nil {
+            if entry.tool == "todo_write", let items = ChatTodoChecklist.parse(detail) {
+                ChatSharedTodoChecklist(items: items, scale: textStyle.scaled(1), accent: accent, ink: Semantic.ink, secondary: Semantic.secondaryInk)
+                    .padding(10).frame(maxWidth: .infinity, alignment: .leading).hubCard(cornerRadius: 8)
+            } else if !detail.isEmpty || command != nil {
                 VStack(alignment: .leading, spacing: 0) {
                     if let command {
                         Text("$ " + command).font(textStyle.system(11.5, design: .monospaced)).foregroundStyle(Semantic.secondaryInk)

@@ -55,7 +55,11 @@ enum MentionPaint {
         return [.font: semibold, .foregroundColor: adaptive(light, dark), .backgroundColor: adaptiveFill(hex)]
     }
 
-    static func paint(_ storage: NSTextStorage, members: [CompanionMentionTarget], font: Font) {
+    /// Restyles the draft: member tags, and on iOS room after each colour
+    /// code for the swatch the text view lays there. Attributes only, so the
+    /// draft sends exactly as typed. Returns the codes given room.
+    @discardableResult
+    static func paint(_ storage: NSTextStorage, members: [CompanionMentionTarget], font: Font) -> [ChatHexColor] {
         let whole = NSRange(location: 0, length: storage.length)
         let base = plain(font)
         storage.beginEditing()
@@ -66,7 +70,17 @@ enum MentionPaint {
             let hex = match.target.accentHex.isEmpty ? "#888888" : match.target.accentHex
             storage.addAttributes(chip(hex, font: font), range: CompanionMentions.display(match.range, in: string))
         }
+        #if os(iOS)
+        let colors = ChatHexColor.find(in: storage.string, skippingFences: true)
+        for color in colors {
+            let last = string.rangeOfComposedCharacterSequence(at: NSMaxRange(color.range) - 1)
+            storage.addAttribute(.kern, value: ChatHexSwatch.advance(font.pointSize), range: last)
+        }
+        #else
+        let colors: [ChatHexColor] = []
+        #endif
         storage.endEditing()
+        return colors
     }
 
     private static func adaptive(_ light: (CGFloat, CGFloat, CGFloat), _ dark: (CGFloat, CGFloat, CGFloat)) -> Color {
@@ -106,6 +120,20 @@ final class MentionUITextView: UITextView {
     var onMove: ((Int) -> Bool)?
     var onAccept: (() -> Bool)?
     var menuOpen: (() -> Bool)?
+    /// The colour codes the last paint made room after, with the text they
+    /// were found in; a swatch is laid in each room while the text matches.
+    var swatches: (text: String, colors: [ChatHexColor]) = ("", []) {
+        didSet { if oldValue.text != swatches.text || oldValue.colors != swatches.colors { setNeedsLayout() } }
+    }
+    private var swatchLayers: [CALayer] = []
+
+    override init(frame: CGRect, textContainer: NSTextContainer?) {
+        super.init(frame: frame, textContainer: textContainer)
+        // A swatch's rim is drawn for one appearance.
+        registerForTraitChanges([UITraitUserInterfaceStyle.self]) { (view: MentionUITextView, _: UITraitCollection) in view.setNeedsLayout() }
+    }
+
+    required init?(coder: NSCoder) { super.init(coder: coder) }
 
     /// Scroll only once the text outgrows the height SwiftUI actually gave
     /// the view. Deciding here, against the placed bounds, keeps measurement
@@ -116,6 +144,42 @@ final class MentionUITextView: UITextView {
         let fitted = sizeThatFits(CGSize(width: bounds.width, height: .greatestFiniteMagnitude)).height
         let overflowing = fitted > bounds.height + 1
         if isScrollEnabled != overflowing { isScrollEnabled = overflowing }
+        placeSwatches()
+    }
+
+    /// Each swatch goes after its code's own width, measured in the plain
+    /// font, so it lands in the kerned room whatever the line's rect includes.
+    /// The text input geometry answers without dropping TextKit 2.
+    private func placeSwatches() {
+        let colors = swatches.text == text ? swatches.colors : []
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        defer { CATransaction.commit() }
+        while swatchLayers.count > colors.count { swatchLayers.removeLast().removeFromSuperlayer() }
+        guard !colors.isEmpty, let font else { return }
+        let size = font.pointSize, string = text as NSString
+        let dark = traitCollection.userInterfaceStyle == .dark
+        for (index, color) in colors.enumerated() {
+            if index == swatchLayers.count {
+                let swatch = CALayer()
+                layer.addSublayer(swatch)
+                swatchLayers.append(swatch)
+            }
+            let swatch = swatchLayers[index]
+            guard NSMaxRange(color.range) <= string.length, let start = position(from: beginningOfDocument, offset: color.range.location),
+                  let end = position(from: start, offset: color.range.length), let range = textRange(from: start, to: end) else {
+                swatch.isHidden = true; continue
+            }
+            let line = firstRect(for: range)
+            guard !line.isNull, !line.isInfinite else { swatch.isHidden = true; continue }
+            let image = ChatHexSwatch.image(color, size: size, dark: dark)
+            let width = string.substring(with: color.range).size(withAttributes: [.font: font]).width
+            let foot = line.minY + font.ascender + ChatHexSwatch.drop(size)
+            swatch.contents = image.cgImage
+            swatch.contentsScale = image.scale
+            swatch.frame = CGRect(x: line.minX + width, y: foot - image.size.height, width: image.size.width, height: image.size.height)
+            swatch.isHidden = false
+        }
     }
 
     override func draw(_ rect: CGRect) {
@@ -231,7 +295,8 @@ struct MentionTextEditor: UIViewRepresentable {
             }
             if let font = view.font, view.markedTextRange == nil {
                 let selected = view.selectedRange
-                MentionPaint.paint(view.textStorage, members: parent.mentions, font: font)
+                let colors = MentionPaint.paint(view.textStorage, members: parent.mentions, font: font)
+                view.swatches = (view.text, colors)
                 view.selectedRange = selected
             }
             view.setNeedsDisplay()

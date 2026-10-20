@@ -496,7 +496,7 @@ struct ChatTranscriptCode: View {
 
     private func lines(_ size: CGFloat) -> some View {
         ChatSelectableText(text: AttributedString(code.body), font: .monospacedSystemFont(ofSize: size * 0.92, weight: .regular),
-                           color: HubTheme.Semantic.nsInk, message: message)
+                           color: HubTheme.Semantic.nsInk, message: message, swatches: false)
             .fixedSize()
             .padding(.horizontal, textStyle.scaled(12))
             .padding(.top, textStyle.scaled(code.language.isEmpty ? 9 : 3)).padding(.bottom, textStyle.scaled(9))
@@ -611,8 +611,9 @@ struct ChatTranscriptTable: View {
                 let row = index / columns, column = index % columns
                 let cell = table.cells[row][column]
                 let alignment = table.source.alignments[column]
-                Text(cell.formatted).font(Font(nativeFont)).fontWeight(row == 0 ? .semibold : .regular)
-                    .foregroundStyle(HubTheme.Semantic.ink).textSelection(.enabled)
+                ChatSharedHexText(text: cell.formatted, size: nativeFont.pointSize)
+                    .font(Font(nativeFont)).fontWeight(row == 0 ? .semibold : .regular)
+                    .foregroundStyle(HubTheme.Semantic.ink)
                     .multilineTextAlignment(alignment.text).fixedSize(horizontal: false, vertical: true)
                     .padding(.horizontal, 10).padding(.vertical, 8)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: alignment.frame)

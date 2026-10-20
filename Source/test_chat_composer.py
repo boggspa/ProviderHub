@@ -133,6 +133,35 @@ struct Composer: View {
         draft.enabled = false; settle()
         check(menu.state == nil, "the @ list stayed open over a disabled composer")
 
+        // A colour code gets its swatch as it is typed, from attributes alone:
+        // the draft and the send keep every character as typed. Fenced code
+        // and a code running on into a word show none.
+        draft.enabled = true; draft.text = ""; settle()
+        window.makeFirstResponder(text)
+        func swatch(_ code: String) -> NSNumber? {
+            let at = (text.string as NSString).range(of: code).location
+            return at == NSNotFound ? nil : text.textStorage?.attribute(.chatHexSwatch, at: at, effectiveRange: nil) as? NSNumber
+        }
+        func kern(_ at: Int) -> Double { (text.textStorage?.attribute(.kern, at: at, effectiveRange: nil) as? NSNumber)?.doubleValue ?? 0 }
+        text.insertText("Make the rim #12121", replacementRange: none); settle()
+        check(swatch("#12121") == nil, "a five-digit code has a swatch")
+        text.insertText("2", replacementRange: none); settle()
+        check(swatch("#121212")?.uint32Value == 0x121212, "a typed code has no swatch")
+        check(kern(text.string.utf16.count - 1) == ChatHexSwatch.advance(text.font!.pointSize), "no room was kerned after the code")
+        text.insertText("x", replacementRange: none); settle()
+        check(swatch("#121212") == nil && kern(text.string.utf16.count - 2) == 0, "a code running into a word kept its swatch")
+        text.deleteBackward(nil); settle()
+        check(swatch("#121212") != nil, "deleting back to the code did not restore its swatch")
+        text.insertText(", the fill #F4F4F6.\n```\n#00ff00\n```", replacementRange: none); settle()
+        let typed = "Make the rim #121212, the fill #F4F4F6.\n```\n#00ff00\n```"
+        let comma = (text.string as NSString).range(of: ",").location
+        check(kern(comma) == 0 && text.textStorage?.attribute(.chatHexSwatch, at: comma, effectiveRange: nil) == nil,
+              "text typed after a code took its room")
+        check(swatch("#F4F4F6")?.uint32Value == 0xF4F4F6 && swatch("#00ff00") == nil, "fenced code took a swatch, or prose lost one")
+        check(draft.text == typed && text.string == typed, "swatches changed the draft: \(draft.text.debugDescription)")
+        text.keyDown(with: commandReturn); settle()
+        check(draft.sent.last == typed, "the send differs from what was typed: \(String(describing: draft.sent.last))")
+
         if !failures.isEmpty {
             FileHandle.standardError.write(Data(failures.joined(separator: "\n").utf8))
             exit(1)
@@ -285,7 +314,8 @@ class ComposerTests(unittest.TestCase):
 
     def run_cases(self, cases, expected, workspace=False):
         source = Path(__file__).parent
-        files = ["ChatFonts.swift", "ChatMentions.swift", "ChatSelectableText.swift", "ChatTranscriptText.swift", "ChatComposerText.swift"]
+        files = ["ChatFonts.swift", "ChatMentions.swift", "ChatSharedHexColor.swift", "ChatSelectableText.swift", "ChatTranscriptText.swift",
+                 "ChatComposerText.swift"]
         if workspace:
             files += ["ChatWorkspaceLayout.swift", "ChatSplitWorkspace.swift"]
         with tempfile.TemporaryDirectory() as directory:
