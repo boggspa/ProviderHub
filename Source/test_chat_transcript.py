@@ -609,6 +609,15 @@ struct Item: ChatTranscriptItem {
               == ChatToolDisplay(verb: "Pinned to the Blackboard", subject: "schema (risk)", code: true), "Blackboard post phrasing")
         check(ChatToolDisplay.describe(tool: "blackboard_remove", summary: "Removed schema", live: true).verb == "Removing a Blackboard post", "Live Blackboard removal")
         check(ChatToolDisplay.activity(["blackboard_post", "blackboard_post", "blackboard_read"]) == "2 pins, 1 board read", "Blackboard fold activity")
+        // A to-do row reads as progress and the item in hand; its result draws as a checklist.
+        check(ChatToolDisplay.describe(tool: "todo_write", summary: "To-dos: 2/5 done\nWrite the parser")
+              == ChatToolDisplay(verb: "Updated to-dos", subject: "2/5 done", context: "Write the parser"), "To-do row phrasing")
+        check(ChatToolDisplay.describe(tool: "todo_write", summary: "Update shared to-dos", live: true).verb == "Updating shared to-dos", "Live shared to-do row")
+        check(ChatToolDisplay.glyph("todo_write") == "todo" && ChatToolDisplay.glyph("todo_read") == "todo", "To-do glyph")
+        let checklist = ChatTodoChecklist.parse("Saved your to-dos (1/2 completed).\n- [completed] a: Read (twice)\n- [in_progress by Sol] b: Write")
+        check(checklist?.map(\.status) == [.completed, .inProgress] && checklist?.first?.content == "Read (twice)"
+              && checklist?.last?.owner == "Sol", "To-do checklist parse")
+        check(ChatTodoChecklist.parse("[]") == nil, "Raw text drew as a checklist")
         check(ChatToolDisplay.describe(tool: "blackboard_attach", summary: "Added notes.txt, example.com/spec")
               == ChatToolDisplay(verb: "Added to the Blackboard", subject: "notes.txt, example.com/spec"), "Blackboard attach phrasing")
 
@@ -666,7 +675,7 @@ struct Item: ChatTranscriptItem {
         // Every glyph a row can ask for exists, and the path parser reads the
         // catalogue's curve syntax, including relative curves.
         for name in ["run_shell", "apply_patch", "read_file", "search_files", "web_search", "search_history", "record_decision",
-                     "delegate", "team_status", "blackboard_post", "blackboard_read", nil] {
+                     "delegate", "team_status", "blackboard_post", "blackboard_read", "todo_write", "todo_read", nil] {
             check(ChatToolGlyph.has(ChatToolDisplay.glyph(name)), "Missing glyph for \(name ?? "nil")")
         }
         check(ChatToolGlyph.has("handoff"), "Missing handoff glyph")

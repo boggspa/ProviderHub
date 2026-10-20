@@ -337,3 +337,98 @@ struct ChatSharedProcessRow<Mark: View, Status: View, Detail: View>: View {
         }
     }
 }
+
+/// A to-do checklist, in both inspectors and in a to-do tool's transcript row:
+/// finished items quiet and struck through, the one in progress in the
+/// lane's accent.
+struct ChatSharedTodoChecklist: View {
+    var items: [ChatTodoItem]
+    var scale: CGFloat = 1
+    var accent: Color
+    var ink: Color = .primary
+    var secondary: Color = .secondary
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4 * scale) {
+            ForEach(items) { item in
+                HStack(alignment: .firstTextBaseline, spacing: 6 * scale) {
+                    Image(systemName: Self.symbol(item.status)).font(.system(size: 10.5 * scale))
+                        .foregroundStyle(item.status == .inProgress ? accent : secondary).frame(width: 13 * scale)
+                    Text(item.content)
+                        .font(.system(size: 11.5 * scale, weight: item.status == .inProgress ? .medium : .regular))
+                        .strikethrough(item.status == .completed, color: secondary)
+                        .foregroundStyle(item.status == .completed ? secondary : ink)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 0)
+                    if !item.owner.isEmpty {
+                        Text(item.owner).font(.system(size: 10 * scale)).foregroundStyle(secondary).lineLimit(1)
+                    }
+                }
+                .accessibilityElement(children: .combine).accessibilityLabel(Self.label(item))
+            }
+        }
+    }
+    static func symbol(_ status: ChatTodoItem.Status) -> String {
+        switch status {
+        case .completed: return "checkmark.circle.fill"
+        case .inProgress: return "circle.lefthalf.filled"
+        case .pending: return "circle"
+        }
+    }
+    static func label(_ item: ChatTodoItem) -> String {
+        let state: String
+        switch item.status { case .completed: state = "Done"; case .inProgress: state = "In progress"; case .pending: state = "To do" }
+        return state + ": " + item.content + (item.owner.isEmpty ? "" : ", " + item.owner)
+    }
+}
+
+/// One lane's to-do list: who keeps it, its progress and its checklist. A long
+/// list opens at the last finished item, so the one in progress is in view,
+/// and expands in place. Counts come from the caller: a phone's list may be
+/// shortened in transit while the Mac's counts stay exact.
+struct ChatSharedTodoLane<Mark: View>: View {
+    var title: String
+    var items: [ChatTodoItem]
+    var done: Int
+    var total: Int
+    var limit = 6
+    var accent: Color
+    var ink: Color = .primary
+    var secondary: Color = .secondary
+    var fill: Color
+    @ViewBuilder var mark: () -> Mark
+    @State private var expanded = false
+    private var shown: [ChatTodoItem] {
+        guard !expanded, items.count > limit else { return items }
+        let next = items.firstIndex { $0.status != .completed } ?? items.count
+        let start = min(max(0, next - 1), items.count - limit)
+        return Array(items[start..<start + limit])
+    }
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                mark()
+                Text(title).font(.system(size: 12, weight: .medium)).foregroundStyle(ink).lineLimit(1)
+                Spacer(minLength: 4)
+                Text("\(done)/\(total)").font(.system(size: 10.5, design: .monospaced)).foregroundStyle(secondary)
+                    .accessibilityLabel("\(done) of \(total) done")
+            }
+            GeometryReader { geometry in
+                Capsule().fill(secondary.opacity(0.18))
+                    .overlay(alignment: .leading) {
+                        Capsule().fill(accent).frame(width: total > 0 ? geometry.size.width * CGFloat(done) / CGFloat(total) : 0)
+                    }
+            }.frame(height: 3).accessibilityHidden(true)
+            if items.isEmpty {
+                Text("No to-dos yet.").font(.system(size: 11.5)).foregroundStyle(secondary)
+            } else {
+                ChatSharedTodoChecklist(items: shown, accent: accent, ink: ink, secondary: secondary)
+                if items.count > limit {
+                    Button(expanded ? "Show less" : "Show all \(items.count)") { expanded.toggle() }
+                        .buttonStyle(.plain).font(.system(size: 10.5)).foregroundStyle(secondary)
+                }
+            }
+        }.padding(8).frame(maxWidth: .infinity, alignment: .leading)
+            .background(RoundedRectangle(cornerRadius: 7, style: .continuous).fill(fill))
+            .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous).strokeBorder(accent.opacity(0.22), lineWidth: 0.5))
+    }
+}

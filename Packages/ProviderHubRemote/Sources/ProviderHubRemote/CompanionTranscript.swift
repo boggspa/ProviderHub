@@ -287,8 +287,13 @@ struct CompanionTranscript: View {
                 }.contentShape(Rectangle())
             }.buttonStyle(.plain)
             if expanded.contains(item.id) {
-                ScrollView(.horizontal) { ChatSharedPatchText(text: item.detail ?? item.text, size: 11.5 * scale, ink: CompanionTheme.ink, secondaryInk: CompanionTheme.secondary) }
-                    .padding(10).companionCard(cornerRadius: 8, accent: brand.accent)
+                if item.tool == "todo_write", let todos = ChatTodoChecklist.parse(item.detail ?? "") {
+                    ChatSharedTodoChecklist(items: todos, scale: scale, accent: brand.accent, ink: CompanionTheme.ink, secondary: CompanionTheme.secondary)
+                        .padding(10).frame(maxWidth: .infinity, alignment: .leading).companionCard(cornerRadius: 8, accent: brand.accent)
+                } else {
+                    ScrollView(.horizontal) { ChatSharedPatchText(text: item.detail ?? item.text, size: 11.5 * scale, ink: CompanionTheme.ink, secondaryInk: CompanionTheme.secondary) }
+                        .padding(10).companionCard(cornerRadius: 8, accent: brand.accent)
+                }
             }
         }
     }

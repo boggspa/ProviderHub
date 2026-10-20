@@ -462,6 +462,15 @@ struct ChatToolDisplay: Equatable {
         case "blackboard_read": return ChatToolDisplay(verb: verb("Read the Blackboard", "Reading the Blackboard"))
         case "blackboard_attach":
             return ChatToolDisplay(verb: verb("Added to the Blackboard", "Adding to the Blackboard"), subject: after("Added") ?? "")
+        case "todo_write":
+            // "To-dos: 2/5 done" or "Shared to-dos: …", then the item now in progress.
+            let lines = summary.split(separator: "\n", maxSplits: 1).map(String.init)
+            let shared = summary.hasPrefix("Shared to-dos") || summary == "Update shared to-dos"
+            let progress = lines.first.flatMap { line in ["To-dos:", "Shared to-dos:"].first(where: line.hasPrefix).map {
+                String(line.dropFirst($0.count)).trimmingCharacters(in: .whitespaces) } } ?? ""
+            return ChatToolDisplay(verb: shared ? verb("Updated shared to-dos", "Updating shared to-dos") : verb("Updated to-dos", "Updating to-dos"),
+                                   subject: progress, context: lines.count > 1 ? lines[1] : "")
+        case "todo_read": return ChatToolDisplay(verb: verb("Read to-dos", "Reading to-dos"))
         case "delegate":
             return ChatToolDisplay(verb: verb("Delegated", "Delegating"), subject: after("Delegate:") ?? summary)
         case "team_status":
@@ -487,6 +496,7 @@ struct ChatToolDisplay: Equatable {
         case "web_search": return "web_search"
         case "search_history", "read_history", "record_decision", "forget_decision": return "memory"
         case "blackboard_post", "blackboard_remove", "blackboard_read", "blackboard_attach": return "blackboard"
+        case "todo_write", "todo_read": return "todo"
         case "delegate": return "delegate"
         case "team_status": return "team_status"
         default: return "read_file"
@@ -502,7 +512,8 @@ struct ChatToolDisplay: Equatable {
             "search_history": ("recall", "recalls"), "read_history": ("recall", "recalls"),
             "record_decision": ("note", "notes"), "forget_decision": ("note", "notes"), "team_status": ("outcome", "outcomes"),
             "blackboard_post": ("pin", "pins"), "blackboard_remove": ("pin", "pins"), "blackboard_read": ("board read", "board reads"),
-            "blackboard_attach": ("board file", "board files")]
+            "blackboard_attach": ("board file", "board files"),
+            "todo_write": ("to-do update", "to-do updates"), "todo_read": ("to-do read", "to-do reads")]
         var order: [String] = [], counts: [String: Int] = [:], plural: [String: String] = [:]
         for tool in tools {
             let noun = nouns[tool ?? ""] ?? ("step", "steps")
@@ -510,6 +521,34 @@ struct ChatToolDisplay: Equatable {
             counts[noun.0, default: 0] += 1
         }
         return order.map { "\(counts[$0]!) " + (counts[$0]! == 1 ? $0 : plural[$0]!) }.joined(separator: ", ")
+    }
+}
+
+/// One to-do as the to-do tools and both inspectors show it.
+struct ChatTodoItem: Equatable, Identifiable {
+    enum Status: String { case pending, inProgress = "in_progress", completed }
+    var id: String
+    var content: String
+    var status: Status
+    /// Who claimed or finished a shared item; empty in a lane's own list.
+    var owner = ""
+}
+
+/// The checklist a to-do tool result carries. The host writes one line per
+/// item, "- [status] id: content", or "- [status by Owner] …" in the shared
+/// list; the row draws those lines as a checklist instead of raw text.
+enum ChatTodoChecklist {
+    static func parse(_ text: String) -> [ChatTodoItem]? {
+        let pattern = #/^- \[(pending|in_progress|completed)(?: by (.+?))?\] ([A-Za-z0-9][A-Za-z0-9_.-]*): (.+)$/#
+        let items = text.split(separator: "\n").compactMap { line -> ChatTodoItem? in
+            guard let match = String(line).wholeMatch(of: pattern), let status = ChatTodoItem.Status(rawValue: String(match.1)) else { return nil }
+            return ChatTodoItem(id: String(match.3), content: String(match.4), status: status, owner: match.2.map(String.init) ?? "")
+        }
+        return items.isEmpty ? nil : items
+    }
+
+    static func progress(_ items: [ChatTodoItem]) -> (done: Int, total: Int) {
+        (items.filter { $0.status == .completed }.count, items.count)
     }
 }
 

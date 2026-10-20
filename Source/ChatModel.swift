@@ -146,6 +146,8 @@ private struct ChatSessionState {
     var team: ChatTeamSnapshot?
     var teamNotice = ""
     var teamRequest: String?
+    var todos: ChatTodoSnapshot?
+    var todosNotice = ""
     var inspectedAgentID: String?
     var sideChat: ChatSide?
     var sideDraft = ""
@@ -286,6 +288,8 @@ final class ChatModel: ObservableObject {
     var team: ChatTeamSnapshot? { get { value(\.team) } set { update(\.team, newValue) } }
     var teamNotice: String { get { value(\.teamNotice) } set { update(\.teamNotice, newValue) } }
     var teamRequest: String? { get { value(\.teamRequest) } set { update(\.teamRequest, newValue, background: true) } }
+    var todos: ChatTodoSnapshot? { get { value(\.todos) } set { update(\.todos, newValue) } }
+    var todosNotice: String { get { value(\.todosNotice) } set { update(\.todosNotice, newValue) } }
     var inspectedAgentID: String? { get { value(\.inspectedAgentID) } set { update(\.inspectedAgentID, newValue) } }
     var sideChat: ChatSide? { get { value(\.sideChat) } set { update(\.sideChat, newValue, background: true) } }
     var sideDraft: String { get { value(\.sideDraft) } set { update(\.sideDraft, newValue) } }
