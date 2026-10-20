@@ -429,6 +429,7 @@ struct ChatTranscriptText: View {
     var message: String?
     @StateObject private var presentation: ChatTextPresentation
     @Environment(\.chatTextStyle) private var textStyle
+    @Environment(\.chatHues) private var hues
 
     init(text: String, streaming: Bool, message: String? = nil) {
         self.text = text; self.streaming = streaming; self.message = message
@@ -440,7 +441,7 @@ struct ChatTranscriptText: View {
             ForEach(presentation.blocks) { block in
                 switch block.content {
                 case .text(let content):
-                    ChatSelectableText(text: content, font: textStyle.nsFont, color: HubTheme.Semantic.nsInk, message: message)
+                    ChatSelectableText(text: content, font: textStyle.nsFont, color: hues.textColor ?? HubTheme.Semantic.nsInk, message: message)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 case .table(let table): ChatTranscriptTable(table: table)
                 case .code(let code): ChatTranscriptCode(code: code, message: message)
@@ -459,6 +460,7 @@ struct ChatTranscriptCode: View {
     let code: ChatMarkdownCode
     var message: String?
     @Environment(\.chatTextStyle) private var textStyle
+    @Environment(\.chatHues) private var hues
     @State private var hovering = false
     @State private var copied = false
 
@@ -496,7 +498,7 @@ struct ChatTranscriptCode: View {
 
     private func lines(_ size: CGFloat) -> some View {
         ChatSelectableText(text: AttributedString(code.body), font: .monospacedSystemFont(ofSize: size * 0.92, weight: .regular),
-                           color: HubTheme.Semantic.nsInk, message: message, swatches: false)
+                           color: hues.textColor ?? HubTheme.Semantic.nsInk, message: message, swatches: false)
             .fixedSize()
             .padding(.horizontal, textStyle.scaled(12))
             .padding(.top, textStyle.scaled(code.language.isEmpty ? 9 : 3)).padding(.bottom, textStyle.scaled(9))
@@ -580,6 +582,7 @@ struct ChatTableLayout: Layout {
 struct ChatTranscriptTable: View {
     let table: ChatRenderedTable
     @Environment(\.chatTextStyle) private var textStyle
+    @Environment(\.chatHues) private var hues
     private var columns: Int { table.source.header.count }
 
     var body: some View {
@@ -613,7 +616,7 @@ struct ChatTranscriptTable: View {
                 let alignment = table.source.alignments[column]
                 ChatSharedHexText(text: cell.formatted, size: nativeFont.pointSize)
                     .font(Font(nativeFont)).fontWeight(row == 0 ? .semibold : .regular)
-                    .foregroundStyle(HubTheme.Semantic.ink)
+                    .foregroundStyle(hues.textInk ?? HubTheme.Semantic.ink)
                     .multilineTextAlignment(alignment.text).fixedSize(horizontal: false, vertical: true)
                     .padding(.horizontal, 10).padding(.vertical, 8)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: alignment.frame)

@@ -314,7 +314,7 @@ class ComposerTests(unittest.TestCase):
 
     def run_cases(self, cases, expected, workspace=False):
         source = Path(__file__).parent
-        files = ["ChatFonts.swift", "ChatMentions.swift", "ChatSharedHexColor.swift", "ChatSelectableText.swift", "ChatTranscriptText.swift",
+        files = ["ChatFonts.swift", "ChatHues.swift", "ChatMentions.swift", "ChatSharedHexColor.swift", "ChatSelectableText.swift", "ChatTranscriptText.swift",
                  "ChatComposerText.swift"]
         if workspace:
             files += ["ChatWorkspaceLayout.swift", "ChatSplitWorkspace.swift"]

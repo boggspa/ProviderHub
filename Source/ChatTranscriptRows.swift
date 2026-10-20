@@ -153,6 +153,7 @@ struct UserRow: View {
     /// The user's reaction toggle; nil shows reactions without one.
     var onReact: ((String, Bool) -> Void)? = nil
     @Environment(\.chatTextStyle) private var textStyle
+    @Environment(\.chatHues) private var hues
 
     /// The bubble's text: the speaker label in bold, then the message with its
     /// mention tags. A message with only attachments still carries the label.
@@ -173,10 +174,10 @@ struct UserRow: View {
             VStack(alignment: .leading, spacing: textStyle.scaled(6)) {
                 if let attachments = entry.attachments, !attachments.isEmpty { ChatAttachmentStrip(attachments: attachments) }
                 ChatSelectableText(text: Self.labelled(entry, title: title, accent: accent),
-                                   font: textStyle.nsFont, color: Semantic.nsInk, message: entry.text.isEmpty ? nil : entry.text)
+                                   font: textStyle.nsFont, color: hues.textColor ?? Semantic.nsInk, message: entry.text.isEmpty ? nil : entry.text)
             }
             .padding(.horizontal, textStyle.scaled(13)).padding(.vertical, textStyle.scaled(8))
-            .background(RoundedRectangle(cornerRadius: textStyle.scaled(15), style: .continuous).fill(Semantic.selection))
+            .background(RoundedRectangle(cornerRadius: textStyle.scaled(15), style: .continuous).fill(hues.bubbleFill ?? Semantic.selection))
             if let reactions = entry.reactions, !reactions.isEmpty {
                 // Tapbacks hang off the bubble's bottom trailing corner.
                 ChatReactionsRow(reactions: reactions, onReact: onReact)

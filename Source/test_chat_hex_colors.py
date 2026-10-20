@@ -72,7 +72,7 @@ class HexColorSourceTests(unittest.TestCase):
         self.assertIn("ChatLayoutManager.markSwatches(storage, colors)", composer)
         transcript = self.read(SOURCE / "ChatTranscriptText.swift")
         # Fenced code is source, not a colour to show.
-        self.assertIn("color: HubTheme.Semantic.nsInk, message: message, swatches: false)", transcript)
+        self.assertIn("message: message, swatches: false)", transcript)
         self.assertIn("ChatSharedHexText(text: cell.formatted, size: nativeFont.pointSize)", transcript)
         for path in [SOURCE / "ChatSelectableText.swift", SOURCE / "ChatComposerText.swift",
                      COMPANION / "ChatSharedHexColor.swift", COMPANION / "CompanionMentionField.swift"]:

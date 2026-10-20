@@ -60,6 +60,13 @@ import SwiftUI
         for channel in [darkPane.0, darkPane.1, darkPane.2] { check(channel > 0.99, "Dark pane is not a white lift") }
         for channel in [lightPane.0, lightPane.1, lightPane.2] { check(channel < 0.01, "Light pane is not a black deepen") }
 
+        // A chosen transcript colour replaces the paper opaquely; it never
+        // turns the transcript back into see-through glass.
+        let chosen = ChatHues(transcript: ChatHue(hue: 215, intensity: 0.7))
+        for appearance in [dark, light] {
+            check(abs(components(chosen.transcriptFill!, appearance).3 - 1.0) < 0.001, "Custom transcript is not opaque")
+        }
+
         // Solid mode keeps the plain window surface and paints no pane fill.
         check(HubTheme.WindowStyle.Mode.allCases.count == 2, "Window style cases changed")
         check(HubTheme.WindowStyle.Mode(rawValue: "glass") == .glass, "Glass style lost")
@@ -78,7 +85,7 @@ class GlassThemeTests(unittest.TestCase):
             binary = root / "glass-theme-tests"
             compiled = subprocess.run(["xcrun", "swiftc", "-swift-version", "5", "-parse-as-library",
                 "-target", platform.machine() + "-apple-macosx14.0", "-module-cache-path", str(root / "cache"),
-                str(SOURCE / "HubTheme.swift"), str(SOURCE / "HubGlass.swift"), str(root / "Cases.swift"),
+                str(SOURCE / "HubTheme.swift"), str(SOURCE / "HubGlass.swift"), str(SOURCE / "ChatHues.swift"), str(root / "Cases.swift"),
                 "-framework", "AppKit", "-framework", "SwiftUI", "-o", str(binary)],
                 capture_output=True, text=True, timeout=120)
             self.assertEqual(compiled.returncode, 0, compiled.stderr)
@@ -110,6 +117,10 @@ class GlassPresentationWiringTests(unittest.TestCase):
         glass = (SOURCE / "HubGlass.swift").read_text()
         self.assertIn("HubTheme.WindowStyle.Mode.glass", glass)
         self.assertIn("HubTheme.Glass.transcript", glass)
+        # A custom transcript colour takes the paper's place in both styles.
+        modifier = glass.split("struct HubGlassPaneModifier", 1)[1].split("\n}\n", 1)[0]
+        self.assertLess(modifier.index("if pane == .transcript, let custom = hues.transcriptFill { return custom }"),
+                        modifier.index("guard style == .glass else { return .clear }"))
 
     def test_switching_surface_keeps_each_pane_in_place(self):
         """Glass/Solid changes a pane's fill, never its structural identity.
