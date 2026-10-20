@@ -135,6 +135,7 @@ struct CompanionTranscript: View {
                 .padding(.horizontal, 20).padding(.top, 16).padding(.bottom, 4)
                 .background(CompanionScrollProbe { placed($0, proxy: proxy) })
             }
+            .modifier(CompanionKeyboardDismissal())
             .onAppear { proxy.scrollTo(Self.bottomID, anchor: .bottom) }
             .onChange(of: entries) { old, new in
                 if let first = old.first, new.first?.id != first.id, new.contains(where: { $0.id == first.id }) {
@@ -534,6 +535,21 @@ enum CompanionMarkdown {
     private static func isDelimiter(_ cell: String) -> Bool {
         let clean = cell.replacingOccurrences(of: ":", with: "")
         return clean.count >= 3 && clean.allSatisfy { $0 == "-" }
+    }
+}
+
+/// Reading the thread puts the keyboard away: dragging it down, as in
+/// Messages, or tapping it. Taps still reach the rows' own controls.
+struct CompanionKeyboardDismissal: ViewModifier {
+    func body(content: Content) -> some View {
+        #if os(iOS)
+        content.scrollDismissesKeyboard(.interactively)
+            .simultaneousGesture(TapGesture().onEnded {
+                UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+            })
+        #else
+        content
+        #endif
     }
 }
 

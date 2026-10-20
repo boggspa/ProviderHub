@@ -172,11 +172,13 @@ def handle(host, command):
         files.drop(chat, token)
         return True, {}
     if action == "remote_send":
-        if host.active(service): raise ValueError("Wait for this chat and Side Chat to stop before sending")
+        # An update with files steers the running turn, as on the Mac.
+        steer = command.get("steer") is True and service.busy
+        if host.active(service) and not steer: raise ValueError("Wait for this chat and Side Chat to stop before sending")
         inputs = files.inputs(chat, command.get("uploads", []))
         text = command.get("text", "")
         if not isinstance(text, str) or (not text.strip() and not inputs) or len(text) > 100000: raise ValueError("Message or attachment required")
-        payload = {"command": "send", "id": chat, "chat": chat, "text": text, "attachments": inputs, "request": command.get("request")}
+        payload = {"command": "steer" if steer else "send", "id": chat, "chat": chat, "text": text, "attachments": inputs, "request": command.get("request")}
         if "mentions" in command:
             from chat_remote import mention_chips
             payload["mentions"] = mention_chips(command.get("mentions"))

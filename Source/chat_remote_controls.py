@@ -155,7 +155,7 @@ COMMANDS = {
     "remote_attachment_read": ("attachment", "offset", "revision"),
     "remote_attachment_thumbnail": ("attachment",),
     "remote_upload_chunk": ("upload", "offset", "data"), "remote_upload_finish": ("upload",), "remote_upload_drop": ("upload",),
-    "remote_send": ("text", "uploads", "mentions"), "remote_board_attach": ("uploads",),
+    "remote_send": ("text", "uploads", "mentions", "steer"), "remote_board_attach": ("uploads",),
     "blackboard": (), "blackboard_post": ("key", "body", "category", "quote"),
     "blackboard_remove": ("post",), "blackboard_attach": ("url", "title"), "blackboard_detach": ("attachment",),
     "remote_inspect": (), "inspect_git": (), "processes": (), "clear_processes": (),
@@ -181,6 +181,7 @@ def command(params, request_id):
     if action in {"remote_send", "remote_board_attach"}:
         uploads = args.get("uploads", [])
         if not isinstance(uploads, list) or len(uploads) > 8 or any(not isinstance(u, str) or not re.fullmatch(r"[0-9a-f]{32}", u) for u in uploads): raise ValueError("Invalid attachment handles")
+        if "steer" in args and not isinstance(args["steer"], bool): raise ValueError("Steer must be true or false")
     if action == "configure":
         if not args or not isinstance(args.get("expectedWorkspace"), str): raise ValueError("Refresh this chat before changing its configuration")
         if "approvalMode" in args and args["approvalMode"] not in ("manual", "accept_edits", "yolo"): raise ValueError("Invalid approval mode")
