@@ -601,7 +601,8 @@ class MacBridge:
         self.auto_accept = auto_accept
         self.session = Session("mac", self.identity, session_id, self._trust)
         self.session.on_app = self._on_app
-        self.view = {"chats": [], "selected": None, "approval": None, "controls": {"version": 1, "extensionVersion": 4}}
+        # Extension 5: the phone may steer a running turn with chat.steer.
+        self.view = {"chats": [], "selected": None, "approval": None, "controls": {"version": 1, "extensionVersion": 5}}
         self.pending_pairing = None
         self.hold_pairing = False
         self.selected_chat = None
@@ -778,7 +779,7 @@ class MacBridge:
             else:
                 self._emit("session.snapshot", self._snapshot())
             return
-        if method not in {"chat.send", "chat.stop", "chat.approve", "chat.select", "chat.answer_question", "chat.control"}:
+        if method not in {"chat.send", "chat.steer", "chat.stop", "chat.approve", "chat.select", "chat.answer_question", "chat.control"}:
             self._ack(params.get("requestId"), False, "unsupported command")
             return
         request_id = params.get("requestId")
@@ -828,11 +829,13 @@ class MacBridge:
             chat = params.get("chat")
         if not isinstance(chat, str) or not CHAT_ID.fullmatch(chat):
             raise RemoteError("chat id required")
-        if method == "chat.send":
+        if method in {"chat.send", "chat.steer"}:
             text = params.get("text")
             if not isinstance(text, str) or not text.strip() or len(text) > MAX_TEXT:
                 raise RemoteError("message required")
-            command = {"command": "send", "chat": chat, "id": chat, "text": text, "request": request_id}
+            # A steer is the Mac composer's update: it interrupts the running
+            # turn with this message, or is an ordinary send if it has ended.
+            command = {"command": "steer" if method == "chat.steer" else "send", "chat": chat, "id": chat, "text": text, "request": request_id}
             if "mentions" in params:
                 try:
                     command["mentions"] = mention_chips(params.get("mentions"))
@@ -935,6 +938,12 @@ class PhoneClient:
         if mentions is not None:
             params["mentions"] = mentions
         self._send("chat.send", params)
+
+    def steer_text(self, chat, text, request_id, mentions=None):
+        params = {"chat": chat, "text": text, "requestId": request_id}
+        if mentions is not None:
+            params["mentions"] = mentions
+        self._send("chat.steer", params)
 
     def stop(self, chat, request_id):
         self._send("chat.stop", {"chat": chat, "requestId": request_id})

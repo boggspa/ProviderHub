@@ -214,6 +214,31 @@ class RemoteParityTests(unittest.TestCase):
         self.assertEqual(self.control("remote_send", {"text": "Inspect this", "uploads": [token]}, request="send-once"), reply)
         self.assertEqual(sum(e["kind"] == "user" for e in service.chat["entries"]), 1)
 
+    def test_update_with_files_steers_a_running_turn_and_nothing_else_does(self):
+        self.select(self.desktop)
+        service = self.host.sessions[self.desktop]
+        forwarded = []
+        original = self.host.handle
+        # The worker copies each original before the upload is dropped; record
+        # the bytes as it would see them.
+        self.host.handle = lambda payload: forwarded.append(
+            {**payload, "bytes": [Path(item["path"]).read_bytes() for item in payload["attachments"]]})
+        service._working = True
+        try:
+            first = self.upload(b"Late screenshot")
+            refused = self.control("remote_send", {"text": "Not between turns", "uploads": [first]})
+            malformed = self.control("remote_send", {"text": "Use this", "uploads": [first], "steer": "yes"})
+            steered = self.control("remote_send", {"text": "Use this instead", "uploads": [first], "steer": True})
+        finally:
+            service._working = False
+            self.host.handle = original
+        self.assertFalse(refused["ok"])
+        self.assertFalse(malformed["ok"])
+        self.assertTrue(steered["ok"], steered)
+        self.assertEqual([payload["command"] for payload in forwarded], ["steer"])
+        self.assertEqual(forwarded[0]["text"], "Use this instead")
+        self.assertEqual(forwarded[0]["bytes"], [b"Late screenshot"])
+
     def test_blackboard_posts_and_uploaded_files_live_on_same_mac_chat(self):
         self.select(self.desktop)
         self.assertTrue(self.control("blackboard_post", {"key": "phone-note", "body": "Remember the constraint", "category": "fact"})["ok"])

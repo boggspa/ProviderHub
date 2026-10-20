@@ -22,6 +22,50 @@ final class ControlTests: XCTestCase {
         model.receiveRemote(["method": "session.snapshot", "params": ["cursor": 1, "chats": [], "controls": ["version": 1, "extensionVersion": 3]]])
         XCTAssertTrue(model.extendedControlsAvailable)
     }
+    /// A draft typed during a run steers it, as the Mac's composer does;
+    /// a host that predates steering keeps the old send-between-turns rule.
+    @MainActor
+    func testDraftDuringRunSteersOnHostsThatAcceptUpdates() throws {
+        final class Transport: CompanionTransport {
+            var sent: [RemoteCommand] = []
+            func connect(text: String) {}
+            func disconnect() {}
+            func snapshot() {}
+            func send(_ command: RemoteCommand) { sent.append(command) }
+        }
+        let suite = "companion-steer-test-" + UUID().uuidString
+        let preferences = UserDefaults(suiteName: suite)!
+        defer { preferences.removePersistentDomain(forName: suite) }
+        let transport = Transport()
+        let model = CompanionModel(preferences: preferences, transport: transport)
+        model.status = "Connected"
+        func snapshot(extension version: Int, busy: Bool, interrupting: Bool = false) {
+            model.receiveRemote(["method": "session.snapshot", "params": ["cursor": 1,
+                "chats": [["id": "a", "title": "Notes", "status": busy ? "Working" : "Ready", "busy": busy, "pendingApproval": false]],
+                "selected": ["id": "a", "entries": [], "busy": busy, "interrupting": interrupting],
+                "controls": ["version": 1, "extensionVersion": version]]])
+        }
+        snapshot(extension: 4, busy: true)
+        model.draft = "Use the other file"
+        XCTAssertTrue(model.runIsOpen)
+        XCTAssertFalse(model.canSteer, "a host without extension 5 cannot take an update")
+        XCTAssertFalse(model.canSend)
+        snapshot(extension: 5, busy: true, interrupting: true)
+        XCTAssertFalse(model.canSteer, "the previous update is still interrupting the turn")
+        snapshot(extension: 5, busy: true)
+        XCTAssertTrue(model.canSteer)
+        model.sendDraft()
+        let steer = try XCTUnwrap(transport.sent.last)
+        XCTAssertEqual(steer.method, "chat.steer")
+        XCTAssertEqual(steer.text, "Use the other file")
+        XCTAssertFalse(model.canSteer, "the same update is already on its way")
+        model.receiveRemote(["method": "session.ack", "params": ["requestId": steer.requestId, "ok": true]])
+        XCTAssertEqual(model.draft, "", "an accepted update leaves the composer")
+        snapshot(extension: 5, busy: false)
+        model.draft = "Next question"
+        model.sendDraft()
+        XCTAssertEqual(transport.sent.last?.method, "chat.send", "between turns a draft is an ordinary send")
+    }
     func testPickerUsesConnectionBrandAndModelBrandIndependently() {
         let value: RemoteValue = .object(["id": .string("ollama/qwen|work"), "route": .string("ollama/qwen"), "label": .string("Qwen"),
             "accountLabel": .string("Work"), "context": .number(128000), "efforts": .array([.string("high"), .string("xhigh")]),

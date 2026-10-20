@@ -50,10 +50,20 @@ public final class CompanionModel: ObservableObject {
     private var resumeEnabled = true
     public var selectedChat: RemoteChat? { store.chats.first { $0.id == selectedChatID } }
     public var isConnected: Bool { status == "Connected" }
-    public var canSend: Bool {
-        isConnected && selectedChat != nil && !runIsOpen &&
-            (!draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !(attachmentDrafts[selectedChatID ?? ""] ?? []).isEmpty) && !attachmentSending &&
-            !pendingDrafts.values.contains(where: { $0.0 == selectedChatID && $0.1 == draft })
+    public var canSend: Bool { isConnected && selectedChat != nil && !runIsOpen && draftReady }
+    /// A draft typed during a run is an update that steers it, as the Mac's
+    /// composer sends it. Hosts before extension 5 take sends between turns only.
+    public var steeringAvailable: Bool { (store.controls["extensionVersion"]?.int ?? 0) >= 5 }
+    public var canSteer: Bool {
+        isConnected && selectedChat != nil && runIsOpen && steeringAvailable && selectionBound && !store.selectedInterrupting && draftReady
+    }
+    /// Text or files in the composer.
+    public var hasDraft: Bool {
+        !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !(attachmentDrafts[selectedChatID ?? ""] ?? []).isEmpty
+    }
+    /// Something to send that is not already on its way to the Mac.
+    private var draftReady: Bool {
+        hasDraft && !attachmentSending && !pendingDrafts.values.contains(where: { $0.0 == selectedChatID && $0.1 == draft })
     }
 
     public init(preferences: UserDefaults = .standard, transport: CompanionTransport? = nil) {
@@ -206,19 +216,20 @@ public final class CompanionModel: ObservableObject {
         if selectedChatID == nil { selectedChatID = store.chats.first?.id }
     }
 
+    /// Sends between turns; during a run, steers it with the draft instead.
     public func sendDraft() {
+        let steer = runIsOpen
+        guard steer ? canSteer : canSend else { return }
         if !(attachmentDrafts[selectedChatID ?? ""] ?? []).isEmpty {
-            guard canSend else { return }
-            Task { @MainActor in await sendWithAttachments() }
+            Task { @MainActor in await sendWithAttachments(steer: steer) }
             return
         }
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard canSend, let chat = selectedChatID, !text.isEmpty,
-              !pendingDrafts.values.contains(where: { $0.0 == chat && $0.1 == draft }) else { return }
+        guard let chat = selectedChatID, !text.isEmpty else { return }
         let id = UUID().uuidString
         pendingDrafts[id] = (chat, draft)
         store.clearNotices(); composeNotice = ""
-        var command = RemoteCommand(method: "chat.send", requestId: id, chat: chat, text: text)
+        var command = RemoteCommand(method: steer ? "chat.steer" : "chat.send", requestId: id, chat: chat, text: text)
         let chips = mentionChips(in: text)
         if !chips.isEmpty { command.mentions = chips }
         link?.send(command)
@@ -625,14 +636,32 @@ public struct CompanionView: View {
                     enabled: model.isConnected && !model.store.needsSnapshot,
                     mentions: model.mentionTargets, menu: mentionMenu)
                     .accessibilityLabel("Message to \(chat.title)")
-                Button { if model.runIsOpen { model.stop() } else { model.sendDraft() } } label: {
-                    Image(systemName: model.runIsOpen ? "stop.fill" : "arrow.up")
-                        .font(.system(size: 16, weight: .bold)).foregroundStyle(CompanionTheme.surface)
-                        .frame(width: 36, height: 36).background(CompanionTheme.ink, in: Circle()).padding(.vertical, 4)
-                }.buttonStyle(.plain).disabled(!model.isConnected || !model.runIsOpen && !model.canSend)
-                    .opacity(!model.runIsOpen && !model.canSend ? 0.4 : 1)
-                    .keyboardShortcut(model.runIsOpen ? KeyboardShortcut(".", modifiers: .command) : KeyboardShortcut(.return, modifiers: .command))
-                    .accessibilityLabel(model.runIsOpen ? "Stop this chat" : "Send message")
+                if model.runIsOpen && model.steeringAvailable && model.hasDraft {
+                    // Typing during a run makes an update, as on the Mac:
+                    // Send steers the turn with it and Stop stays one tap away.
+                    Button { model.stop() } label: {
+                        Image(systemName: "stop.fill").font(.system(size: 12, weight: .bold)).foregroundStyle(CompanionTheme.ink)
+                            .frame(width: 30, height: 30).background(CompanionTheme.selection, in: Circle())
+                            .frame(width: 44, height: 44).contentShape(Rectangle())
+                    }.buttonStyle(.plain).disabled(!model.isConnected)
+                        .keyboardShortcut(".", modifiers: .command).accessibilityLabel("Stop this chat")
+                    Button { model.sendDraft() } label: {
+                        Image(systemName: "arrow.up")
+                            .font(.system(size: 16, weight: .bold)).foregroundStyle(CompanionTheme.surface)
+                            .frame(width: 36, height: 36).background(CompanionTheme.ink, in: Circle()).padding(.vertical, 4)
+                    }.buttonStyle(.plain).disabled(!model.canSteer).opacity(model.canSteer ? 1 : 0.4)
+                        .keyboardShortcut(.return, modifiers: .command)
+                        .accessibilityLabel("Send update").accessibilityHint("Interrupts the running turn with this message")
+                } else {
+                    Button { if model.runIsOpen { model.stop() } else { model.sendDraft() } } label: {
+                        Image(systemName: model.runIsOpen ? "stop.fill" : "arrow.up")
+                            .font(.system(size: 16, weight: .bold)).foregroundStyle(CompanionTheme.surface)
+                            .frame(width: 36, height: 36).background(CompanionTheme.ink, in: Circle()).padding(.vertical, 4)
+                    }.buttonStyle(.plain).disabled(!model.isConnected || !model.runIsOpen && !model.canSend)
+                        .opacity(!model.runIsOpen && !model.canSend ? 0.4 : 1)
+                        .keyboardShortcut(model.runIsOpen ? KeyboardShortcut(".", modifiers: .command) : KeyboardShortcut(.return, modifiers: .command))
+                        .accessibilityLabel(model.runIsOpen ? "Stop this chat" : "Send message")
+                }
             }.padding(.horizontal, 14).padding(.vertical, 4)
                 .overlay(alignment: .topLeading) {
                     CompanionMentionList(menu: mentionMenu, models: model.models, accent: chat.providerAccent)

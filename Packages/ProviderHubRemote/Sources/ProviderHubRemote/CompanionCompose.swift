@@ -122,7 +122,7 @@ extension CompanionModel {
     }
 
     @MainActor
-    public func sendWithAttachments(toBlackboard: Bool = false) async {
+    public func sendWithAttachments(toBlackboard: Bool = false, steer: Bool = false) async {
         guard !attachmentSending, let chat = selectedChatID else { return }
         let files = attachmentDrafts[chat] ?? []
         guard !files.isEmpty else { return }
@@ -138,6 +138,7 @@ extension CompanionModel {
             var tokens: [RemoteValue] = []
             for file in files { tokens.append(.string(try await upload(file, chat: chat))) }
             var arguments: [String: RemoteValue] = toBlackboard ? ["uploads": .array(tokens)] : ["uploads": .array(tokens), "text": .string(text)]
+            if steer && !toBlackboard { arguments["steer"] = .bool(true) }
             if !chips.isEmpty {
                 arguments["mentions"] = .array(chips.map { chip in
                     .object(["id": .string(chip.id), "name": .string(chip.name), "route": .string(chip.route),

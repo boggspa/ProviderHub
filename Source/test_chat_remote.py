@@ -363,6 +363,21 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(len(host.commands), 1)
         self.assertFalse(phone.acks["req-bad"]["ok"])
 
+    def test_phone_update_steers_the_running_turn_like_the_mac_composer(self):
+        host, mac, phone = pair()
+        self.assertEqual(mac.view["controls"]["extensionVersion"], 5)
+        chips = [{"id": "s", "name": "Sol", "route": "codex/x", "start": 0, "length": 4}]
+        phone.steer_text(CHAT, "@Sol use the other file", "req-steer", mentions=chips)
+        phone.steer_text(CHAT, "   ", "req-blank")
+        exchange(mac, phone)
+        self.assertEqual(len(host.commands), 1)
+        self.assertEqual(host.commands[0]["command"], "steer")
+        self.assertEqual(host.commands[0]["text"], "@Sol use the other file")
+        self.assertEqual(host.commands[0]["request"], "req-steer")
+        self.assertEqual(host.commands[0]["mentions"], chips)
+        self.assertTrue(phone.acks["req-steer"]["ok"])
+        self.assertFalse(phone.acks["req-blank"]["ok"])
+
     def test_wrong_approval_string_allow_and_unknown_method_do_not_execute(self):
         host, mac, phone = pair()
         mac.publish({"event": "approval", "chat": CHAT, "approval": {"id": APPROVAL, "summary": "tool"}})
