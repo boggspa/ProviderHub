@@ -361,8 +361,7 @@ struct CompanionMentionText: View {
     var size: CGFloat
 
     var body: some View {
-        Text(CompanionMentions.labelled(title: "You", text: text, mentions: mentions, accent: accent, size: size))
-            .textSelection(.enabled)
+        ChatSharedHexText(text: CompanionMentions.labelled(title: "You", text: text, mentions: mentions, accent: accent, size: size), size: size)
     }
 
     private func accent(_ route: String) -> Color {

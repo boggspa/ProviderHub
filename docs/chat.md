@@ -258,6 +258,18 @@ Markdown. The composer stays plain text, except that in a Team an `@Name` tag
 is tinted in the accent of the member it will reach; see
 [addressing members](chat-team.md#addressing-members).
 
+A colour code written as `#RRGGBB` shows a small swatch of its colour just
+after it, in the composer as you type, in your messages and in replies, on the
+Mac and on the iPhone, as Codex Desktop does. The code must stand alone: at the
+start of a line or after a space, and not running on into a letter or digit, so
+`page#abcdef`, `(#ff0000)` and `#ff0000ff` stay plain. `#RGB` and `#RRGGBBAA`
+are left alone, since `#123` and `#bad` are issue numbers and tags far more often
+than colours, and so is a code after "issue" or "PR" or an all-digit code on a
+line that mentions a PR. Inline code shows a swatch only when the code is all
+it holds; fenced code blocks and links show none. A rim around each swatch keeps
+a colour matching the background visible. The swatch is drawn beside the text,
+not added to it: what you send, select and copy is exactly what was written.
+
 Markdown pipe tables get a small native layout. A header followed by a valid
 `---` delimiter row becomes a table with wrapped cells and the requested column alignment.
 Wide tables scroll horizontally within the transcript. Right-click a table
