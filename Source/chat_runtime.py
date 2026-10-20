@@ -84,6 +84,11 @@ class ModelRequestError(ValueError):
 def retryable_request(exc):
     status, code = getattr(exc, "status", None), str(getattr(exc, "code", "") or "").lower()
     text = str(exc).lower()
+    if code == "invalid_cli_tool_call":
+        # A CLI route reports this only when it rejected a reply before any of
+        # its host calls was released - the signal its own correction re-runs
+        # on - so the round can be asked again although the gateway sent 400.
+        return True
     if (status is not None and 400 <= status < 500 and status not in {408, 429}
             or code in {"invalid_request_error", "authentication_error", "permission_error", "not_found_error", "-32600", "-32602"}
             or any(word in text for word in ("authentication", "unauthorized", "forbidden", "invalid api key",

@@ -86,8 +86,9 @@ BINARY_NAMES = ("agy", "antigravity")
 # agy exposes no system-prompt flag, so the harness system text is rendered
 # into the stdin prompt instead of being passed on the command line.
 SYSTEM_PROMPT_TRANSPORT = "prompt"
-# Headless JSON accepts text only, but view_file can decode explicitly scoped
-# image attachments. Keep that native operation limited to our own copies.
+# Headless JSON accepts text only, but the native file reader can decode
+# explicitly scoped image attachments. Keep that native operation limited to
+# our own copies.
 IMAGE_TRANSPORT = "scoped_image_files"
 VERIFIED_IMAGE_MODELS = frozenset({"gemini-3.1-pro", "gemini-3.1-pro-low", "gemini-3.1-pro-high"})
 
@@ -809,9 +810,11 @@ try:
     name, args = call["name"], call.get("args", {})
     images = json.loads((root / "images.json").read_text())
     context = json.loads((root / "context.json").read_text())
-    path = args.get("AbsolutePath") if isinstance(args, dict) else None
-    private_read = (name == "view_file" and isinstance(path, str)
-                    and str(Path(path).resolve()) in images + context)
+    # agy has spelled the reader's path both ways; every spelling present
+    # must name the same private file.
+    paths = [args[key] for key in ("AbsolutePath", "Path") if key in args] if isinstance(args, dict) else []
+    private_read = (name in ("view_file", "read_file") and bool(paths) and paths.count(paths[0]) == len(paths)
+                    and isinstance(paths[0], str) and str(Path(paths[0]).resolve()) in images + context)
     pending = {}
     if context and not private_read:
         checkpoint = root / "context-pending.json"
@@ -819,7 +822,8 @@ try:
     if pending:
         receipt("context-wait-", payload)
         print(json.dumps({"decision": "deny", "reason":
-            "Provider Hub is still loading context. Read these private files with native view_file "
+            "Provider Hub is still loading context. Read these private files with your native file reader "
+            "(read_file, or view_file if that is what you have) "
             "before finish or any host request (omit StartLine/EndLine to read the entire part): "
             + json.dumps(pending) + ". Then continue from the real host results; no host action has run."}))
     elif name == "finish" or private_read:
@@ -854,20 +858,58 @@ def _install_host_hook(workspace, image_paths, context_paths=()):
     return root
 
 
+# agy's native file reader. Until 19 Oct 2026 it was view_file with
+# AbsolutePath/StartLine/EndLine. From 20 Oct the same agy 1.4.2 binary offered
+# read_file with Path/StartLine/EndLine/ByteOffset instead, so the tool set is
+# served remotely and either spelling can arrive; view_file is then unknown.
+_NATIVE_READERS = frozenset({"view_file", "read_file"})
+_NATIVE_PATH_KEYS = ("AbsolutePath", "Path")
+# agy answers an unknown tool itself and its loop carries on, so that many
+# refusals per CLI turn are left to the model before the route's correction.
+_UNKNOWN_TOOL_REPLIES = 2
+
+
+def _native_parameters(value):
+    """A native call's arguments as an object; ToolCallError when unusable.
+
+    A missing value is never read as "no arguments". On 20 Oct 2026 agy
+    streamed an unknown view_file call without the Path it carried.
+    """
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except (ValueError, RecursionError):
+            raise ToolCallError("native tool arguments are not valid JSON") from None
+    if value is None:
+        raise ToolCallError("agy did not report the native tool's arguments")
+    if not isinstance(value, dict):
+        raise ToolCallError("native tool parameters must be an object")
+    return value
+
+
+def _native_read_path(name, parameters):
+    """The one file a native read names, or None."""
+    if name not in _NATIVE_READERS or not isinstance(parameters, dict):
+        return None
+    paths = [parameters[key] for key in _NATIVE_PATH_KEYS if key in parameters]
+    if not paths or not isinstance(paths[0], str) or not paths[0] or paths.count(paths[0]) != len(paths):
+        return None
+    return paths[0]
+
+
 def _host_reply_for_native(name, parameters, tools, tool_choice=None):
     """Translate a captured request using only the tools this host offered.
 
     Unmapped operations get the route's one format-correction attempt. Never
     guess an external tool name, or treat an already-executed event as a call.
     """
-    if not isinstance(parameters, dict):
-        raise ToolCallError("native tool parameters must be an object")
-    parameters = dict(parameters)
+    parameters = dict(_native_parameters(parameters))
     offered = {tool["name"]: tool for tool in tools}
     properties = (offered.get(name, {}).get("input_schema") or {}).get("properties", {})
     for key in ("toolAction", "toolSummary"):
         if key not in properties:
             parameters.pop(key, None)
+    read_path = _native_read_path(name, parameters)
     if name == "send_message" and parameters.get("Recipient") == "user":
         # agy sometimes sends the entire host envelope as a message to its
         # nonexistent local 'user' agent. This is output, never a host message.
@@ -876,17 +918,21 @@ def _host_reply_for_native(name, parameters, tools, tool_choice=None):
             raise ToolCallError("native message did not contain a host reply")
     else:
         target, arguments = name, parameters
-        if name not in offered:
-            command = None
-            cwd = None
+        # agy's read_file shares its name with Lean Chat's read_file but not its
+        # schema; a Path the host never declared marks agy's own reader.
+        if name not in offered or read_path is not None and not any(key in properties for key in _NATIVE_PATH_KEYS):
+            # An unmapped native read must not fall back to that same-named host tool.
+            target = command = cwd = None
             if name == "run_command" and isinstance(parameters.get("CommandLine"), str):
                 command = parameters["CommandLine"]
                 cwd = parameters.get("Cwd")
-            elif name == "view_file" and isinstance(parameters.get("AbsolutePath"), str):
-                path = parameters["AbsolutePath"]
+            elif read_path is not None:
+                path = read_path
                 start, end = parameters.get("StartLine"), parameters.get("EndLine")
+                offset = parameters.get("ByteOffset", 0)
                 if start is not None and (type(start) is not int or start < 1) \
-                        or end is not None and (type(end) is not int or end < (start or 1)):
+                        or end is not None and (type(end) is not int or end < (start or 1)) \
+                        or type(offset) is not int or offset < 0:
                     raise ToolCallError("native file range is invalid")
                 if "Read" in offered:
                     target, arguments = "Read", {"file_path": path}
@@ -936,6 +982,34 @@ def _host_reply_for_native(name, parameters, tools, tool_choice=None):
     return reply
 
 
+def _unknown_tool(step, name):
+    """agy refused a tool it does not have, before dispatching it."""
+    info = step.get("tool_info") or {}
+    error = info.get("error") or {}
+    detail = error.get("message", "") if isinstance(error, dict) else ""
+    return isinstance(name, str) and str(step.get("state") or "").upper() in {"ERROR", "INVALID"} \
+        and isinstance(detail, str) and detail.startswith(f'unknown tool: "{name}"')
+
+
+def _leave_to_agy(step, state, name, reason):
+    """Let agy's own answer to an unknown tool stand; nothing ran.
+
+    agy tells the model the tool does not exist and asks for its next step in
+    the same process. Ending the turn there instead stopped Team members ten
+    times on 20 Oct 2026, when models fell back to the renamed view_file. A
+    model that keeps calling missing tools still gets the route's correction.
+    """
+    state.unknown_replies += 1
+    state.pending_native.discard(step.get("step_index"))
+    if state.structured:
+        state.saw_tool_step = bool(state.pending_native)
+    if state.unknown_replies > _UNKNOWN_TOOL_REPLIES:
+        state.failure = (f"agy kept requesting native tools it does not have (last: {name[:100]!r}, {reason}); "
+                         "each was refused before execution and no host action was dispatched.")
+        state.failure_status = 400
+        state.failure_code = "invalid_cli_tool_call"
+
+
 def _capture_native_handoff(step, state):
     """Require a pre-execution receipt (or an unknown-tool rejection)."""
     state.saw_tool_step = True
@@ -956,6 +1030,7 @@ def _capture_native_handoff(step, state):
                 or receipt.get("stepIdx") != index or call.get("name") != name:
             raise AgyCliAgentError("agy native handoff receipt did not match the streamed request")
         if phase in {"ACTIVE", "PENDING", "RUNNING"}:
+            state.pending_native.add(index)
             return
         if phase != "ERROR" or not isinstance(detail, str) \
                 or not detail.startswith("tool call denied by pre-tool hook: Provider Hub captured this request"):
@@ -966,17 +1041,20 @@ def _capture_native_handoff(step, state):
     else:
         # Host tool names used as agy calls are rejected before dispatch. This
         # exact failure is safe to translate even when no hook could be called.
-        unknown = isinstance(name, str) and phase in {"ERROR", "INVALID"} \
-            and isinstance(detail, str) and detail.startswith(f'unknown tool: "{name}"')
-        if not unknown:
+        if not _unknown_tool(step, name):
             if state.hook_root is not None and phase in {"ACTIVE", "PENDING", "RUNNING"} \
                     and isinstance(name, str) and name and type(index) is int and index >= 0 \
                     and isinstance(step.get("conversation_id"), str) and step["conversation_id"]:
+                state.pending_native.add(index)
                 return
             state.failure = "agy attempted a native tool without a captured host handoff; no host action was dispatched."
             state.failure_status = 400
             return
-        parameters = info.get("parameters")
+        try:
+            state.handoff_reply = _host_reply_for_native(name, info.get("parameters"), state.tools, state.tool_choice)
+        except (ToolCallError, ValueError, TypeError) as exc:
+            _leave_to_agy(step, state, name, exc)
+        return
     try:
         state.handoff_reply = _host_reply_for_native(name, parameters, state.tools, state.tool_choice)
     except (ToolCallError, ValueError, TypeError) as exc:
@@ -1035,6 +1113,8 @@ class _TurnState:
         self.handoff_reply = None
         self.tools = []
         self.tool_choice = None
+        self.pending_native = set()
+        self.unknown_replies = 0
 
     def fallback_text(self) -> str:
         return self.result_text or ""
@@ -1112,32 +1192,34 @@ def _translate(payload: Any, state: _TurnState) -> list[dict]:
                         and isinstance(parameters.get("text"), str)):
                     state.rejected_finish_text = parameters["text"]
                 return []
-            parameters = info.get("parameters") or {}
-            path = parameters.get("AbsolutePath") if isinstance(parameters, dict) else None
-            resolved = str(Path(path).resolve()) if isinstance(path, str) else None
-            if name == "view_file" and resolved in state.context_reads.lines:
+            try:
+                parameters = _native_parameters(info.get("parameters"))
+            except ToolCallError:
+                parameters = {}
+            path = _native_read_path(name, parameters)
+            try:
+                resolved = str(Path(path).resolve()) if path is not None else None
+            except (OSError, ValueError):
+                resolved = None
+            if resolved in state.context_reads.lines:
                 status = str(step.get("state") or "").upper()
-                if status == "ERROR":
+                if _unknown_tool(step, name):
+                    _leave_to_agy(step, state, name, "a private context read")
+                elif status == "ERROR":
                     state.failure = "agy could not read its private context part."
                     state.failure_code = "incomplete_cli_context"
                 elif status == "DONE":
                     state.context_reads.record(resolved, parameters)
                 return []
-            if state.structured and state.hook_root is not None:
-                parameters = info.get("parameters") or {}
-                path = parameters.get("AbsolutePath")
-                image_read = name == "view_file" and isinstance(path, str) \
-                    and str(Path(path).resolve()) in state.image_paths
-                if not image_read:
-                    _capture_native_handoff(step, state)
-                    return []
+            image_read = resolved is not None and resolved in state.image_paths
+            if state.structured and state.hook_root is not None and not image_read:
+                _capture_native_handoff(step, state)
+                return []
             if state.image_paths:
-                info = step.get("tool_info") or {}
-                parameters = info.get("parameters") or {}
-                name = info.get("name") or step.get("tool_name")
-                path = parameters.get("AbsolutePath")
-                if name != "view_file" or not isinstance(path, str) \
-                        or str(Path(path).resolve()) not in state.image_paths:
+                if _unknown_tool(step, name):
+                    _leave_to_agy(step, state, name, "an image read")
+                    return []
+                if not image_read:
                     state.failure = "agy attempted a native action outside the supplied image attachments; use host tools."
                     state.failure_status = 400
                     return []
@@ -1145,7 +1227,7 @@ def _translate(payload: Any, state: _TurnState) -> list[dict]:
                     state.failure = "agy could not read the scoped image attachment."
                     return []
                 if str(step.get("state") or "").upper() == "DONE":
-                    index = state.image_paths.index(str(Path(path).resolve())) + 1
+                    index = state.image_paths.index(resolved) + 1
                     return [{"type": "thinking_delta", "text": f"Inspected attached image {index}.\n"}]
                 return []
             if state.structured:
@@ -1245,6 +1327,12 @@ def _translate(payload: Any, state: _TurnState) -> list[dict]:
 
     # "init" and anything unrecognized: informational, never route output.
     return []
+
+
+def _failure_event(state):
+    return {"type": "error", "message": state.failure,
+            **({"http_status": state.failure_status} if state.failure_status else {}),
+            **({"code": state.failure_code} if state.failure_code else {})}
 
 
 def _write_prompt(session, prompt: str) -> None:
@@ -1385,7 +1473,8 @@ def _single_turn(request, *, spawner=None, timeout=300, retained=None) -> Iterat
             # --add-dir establishes a scoped workspace read grant. No global
             # settings or approval-bypass flags are changed. All host actions
             # still use the host tool protocol.
-            suffix += "\n\nImage attachment transport: use native view_file only to decode " \
+            suffix += "\n\nImage attachment transport: use your native file reader (read_file, or " \
+                      "view_file if that is what you have) only to decode " \
                       "the exact image copies listed below. Together with any listed private " \
                       "context parts, these are the only native file-read exceptions. " \
                       "Use the host tool protocol for every computer or workspace action.\n"
@@ -1449,9 +1538,7 @@ def _single_turn(request, *, spawner=None, timeout=300, retained=None) -> Iterat
                     yield {"type": "message_stop", "stop_reason": "end_turn"}
                     return
                 if state.failure:
-                    yield {"type": "error", "message": state.failure,
-                           **({"http_status": state.failure_status} if state.failure_status else {}),
-                           **({"code": state.failure_code} if state.failure_code else {})}
+                    yield _failure_event(state)
                     return
                 if state.terminal:
                     returncode = getattr(session, "returncode", None)
@@ -1478,7 +1565,7 @@ def _single_turn(request, *, spawner=None, timeout=300, retained=None) -> Iterat
             return
         returncode = getattr(session, "returncode", None)
         if state.failure:
-            yield {"type": "error", "message": state.failure}
+            yield _failure_event(state)
             return
         if isinstance(returncode, int) and returncode != 0:
             detail = f"the agy CLI exited with code {returncode}"
@@ -1585,7 +1672,9 @@ def _followup(request, live, messages, *, timeout):
             yield {"type": "message_stop", "stop_reason": "end_turn"}
             return
         if state.failure:
-            yield {"type": "error", "message": state.failure}
+            # Same status and code as a cold turn, so a resumed turn gets the
+            # same correction and retry decisions.
+            yield _failure_event(state)
             return
         if state.terminal:
             if getattr(state, "conversation_id", None) != getattr(old, "conversation_id", None):
