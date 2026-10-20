@@ -75,4 +75,17 @@ final class PresentationTests: XCTestCase {
         try store.receive(delta(2, ["event":"entry", "chat":"a", "entry":["id":"a1", "role":"assistant", "text":text]]))
         XCTAssertFalse(store.entries.first?.isLive ?? true)
     }
+
+    /// Inspector Blackboard tiles fill two rows column by column; a lone or odd
+    /// last file makes a short column, never an empty row.
+    func testBlackboardTilesFillTwoRowsColumnByColumn() {
+        typealias Layout = ChatSharedBlackboardTileLayout
+        XCTAssertTrue(Layout.columns([Int]()).isEmpty)
+        XCTAssertEqual(Layout.columns([1]).map(Array.init), [[1]])
+        XCTAssertEqual(Layout.columns([1, 2]).map(Array.init), [[1, 2]])
+        XCTAssertEqual(Layout.columns(Array(1...5)).map(Array.init), [[1, 2], [3, 4], [5]])
+        let full = Layout.columns(Array(0..<Layout.limit))
+        XCTAssertEqual(full.count, Layout.limit / Layout.rows)
+        XCTAssertEqual(full.map(\.startIndex), Array(stride(from: 0, to: Layout.limit, by: Layout.rows)), "column identities must be unique")
+    }
 }

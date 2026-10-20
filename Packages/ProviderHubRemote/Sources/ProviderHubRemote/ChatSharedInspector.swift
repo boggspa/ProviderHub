@@ -110,6 +110,40 @@ struct ChatSharedBlackboardPost<Mark: View>: View {
     }
 }
 
+/// Blackboard files and links in the Mac and iPhone inspectors. They stay on
+/// one row while every tile fits; past that they fill two rows column by
+/// column and scroll sideways, so twice as many show before scrolling and a
+/// lone file never leaves an empty second row. Tiles keep their own size.
+struct ChatSharedBlackboardTiles<Item, ID: Hashable, Tile: View>: View {
+    var items: [Item]
+    var id: KeyPath<Item, ID>
+    var spacing: CGFloat = 8
+    @ViewBuilder var tile: (Item) -> Tile
+    var body: some View {
+        let shown = Array(items.prefix(ChatSharedBlackboardTileLayout.limit))
+        ViewThatFits(in: .horizontal) {
+            HStack(alignment: .top, spacing: spacing) { ForEach(shown, id: id) { tile($0) } }.padding(.vertical, 2)
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(alignment: .top, spacing: spacing) {
+                    ForEach(ChatSharedBlackboardTileLayout.columns(shown), id: \.startIndex) { column in
+                        VStack(alignment: .leading, spacing: spacing) { ForEach(column, id: id) { tile($0) } }
+                    }
+                }.padding(.vertical, 2)
+            }
+        }
+    }
+}
+
+enum ChatSharedBlackboardTileLayout {
+    /// Tiles an inspector lists before "Show all": sixteen columns of two.
+    static let limit = 32
+    static let rows = 2
+    /// Top to bottom, then left to right.
+    static func columns<Item>(_ items: [Item]) -> [ArraySlice<Item>] {
+        stride(from: 0, to: items.count, by: rows).map { items[$0..<min($0 + rows, items.count)] }
+    }
+}
+
 /// Canonical patch renderer for Mac and iOS. Selection copies plain diff text.
 struct ChatSharedPatchText: View {
     var text: String
