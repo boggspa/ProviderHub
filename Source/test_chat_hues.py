@@ -1,6 +1,7 @@
 """Custom Chat colours: storage, derivation, contrast, the picker and wiring."""
 from pathlib import Path
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -160,29 +161,59 @@ import SwiftUI
         }
         func near(_ a: [Double], _ b: [Double]) -> Bool { zip(a, b).allSatisfy { abs($0 - $1) < 0.004 } }
 
-        // The picker measures against what the window paints today.
-        let darkGlass = ChatHueSettings.base(dark: true, glass: true)
-        let lightGlass = ChatHueSettings.base(dark: false, glass: true)
-        check(near(rgb(darkGlass.transcript), [18.0 / 255, 18.0 / 255, 18.0 / 255]), "Dark Glass paper")
-        check(near(rgb(lightGlass.transcript), [244.0 / 255, 244.0 / 255, 246.0 / 255]), "Light Glass paper")
-        let darkSolid = ChatHueSettings.base(dark: true, glass: false)
-        check(darkSolid.transcript.alphaComponent == 1 && !near(rgb(darkSolid.transcript), rgb(darkGlass.transcript)),
-              "Solid measures against the window, not the paper")
-        check(ChatContrast.luminance(darkGlass.text) > 0.7 && ChatContrast.luminance(lightGlass.text) < 0.05, "today's ink")
-        check(darkGlass.bubble.alphaComponent < 0.2, "today's bubble is a translucent lift")
+        // Pinned references. The contrast verdict rests on these fixed values,
+        // never on a colour the OS resolves: Solid's system window colour
+        // differs between macOS 15 (#323232 / #ECECEC) and 26 (#1E1E1E /
+        // #FFFFFF), and measuring it made the same choice pass on one and
+        // warn on the other. Moving one of these is a decision, not drift.
+        func pinned(_ label: String, _ color: NSColor, _ expected: [Double], alpha: Double = 1) {
+            let srgb = color.usingColorSpace(.sRGB)!
+            check(near(rgb(srgb), expected) && abs(Double(srgb.alphaComponent) - alpha) < 0.004,
+                  label + " moved to \(rgb(srgb)) alpha \(srgb.alphaComponent)")
+        }
+        // The same answer whatever the app's own appearance is at the time.
+        for appearance in [NSAppearance(named: .aqua), NSAppearance(named: .darkAqua), nil] {
+            NSApp.appearance = appearance
+            let glassLight = ChatHueSettings.base(dark: false, glass: true), glassDark = ChatHueSettings.base(dark: true, glass: true)
+            let solidLight = ChatHueSettings.base(dark: false, glass: false), solidDark = ChatHueSettings.base(dark: true, glass: false)
+            pinned("Light Glass paper", glassLight.transcript, [244.0 / 255, 244.0 / 255, 246.0 / 255])
+            pinned("Dark Glass paper", glassDark.transcript, [18.0 / 255, 18.0 / 255, 18.0 / 255])
+            pinned("Light Solid window", solidLight.transcript, [236.0 / 255, 236.0 / 255, 236.0 / 255])
+            pinned("Dark Solid window", solidDark.transcript, [50.0 / 255, 50.0 / 255, 50.0 / 255])
+            for base in [glassLight, solidLight] {
+                pinned("Light ink", base.text, [0.11, 0.11, 0.11])
+                pinned("Light bubble", base.bubble, [0, 0, 0], alpha: 0.09)
+                pinned("Light composer", base.composer, [1, 1, 1])
+            }
+            for base in [glassDark, solidDark] {
+                pinned("Dark ink", base.text, [0.93, 0.93, 0.93])
+                pinned("Dark bubble", base.bubble, [1, 1, 1], alpha: 0.09)
+                pinned("Dark composer", base.composer, [37.0 / 255, 38.0 / 255, 41.0 / 255])
+            }
+        }
+        NSApp.appearance = nil
 
         for glass in [true, false] {
             let base = { (dark: Bool) in ChatHueSettings.base(dark: dark, glass: glass) }
             check(ChatHues().contrastIssues(base: base).isEmpty, "Default never warns")
-            // Every swatch is safe on every surface with today's text.
+            // Every swatch clears 4.5:1 with a tenth to spare, on every surface,
+            // in both appearances, against today's text, bubble and background.
             for preset in ChatHue.presets {
                 for surface in ChatHueSurface.allCases {
                     var hues = ChatHues(); hues[surface] = preset.hue
                     let issues = hues.contrastIssues(base: base)
                     check(issues.isEmpty, "\(preset.name) on \(surface) warns: \(issues.map(\.message))")
+                    for dark in [false, true] {
+                        let colours = hues.resolved(dark: dark, base: base(dark))
+                        let worst = min(ChatContrast.ratio(colours.text, colours.transcript), ChatContrast.ratio(colours.text, colours.bubble))
+                        check(worst >= ChatContrast.minimum * 1.1, "\(preset.name) on \(surface) is \(worst):1 in "
+                              + (dark ? "Dark " : "Light ") + (glass ? "Glass" : "Solid"))
+                    }
                 }
             }
         }
+        let darkGlass = ChatHueSettings.base(dark: true, glass: true)
+        let darkSolid = ChatHueSettings.base(dark: true, glass: false)
 
         // A chosen background replaces the paper in Glass and the window in
         // Solid, so both styles measure the colour itself.
@@ -344,6 +375,18 @@ class ChatHueWiringTests(unittest.TestCase):
         self.assertIn('Button("Reset") { store("", surface) }', picker)
         self.assertIn("hues.contrastIssues { Self.base(dark: $0, glass: glass) }", picker)
         self.assertNotIn("tints the glass", picker)
+
+    def test_contrast_never_reads_a_system_colour(self):
+        """Only the previews may show this Mac's window colour; the verdict uses fixed tokens."""
+        picker = (SOURCE / "ChatHueSettings.swift").read_text()
+        base = picker.split("static func base(dark: Bool, glass: Bool, onThisMac: Bool = false)", 1)[1].split("\n    }\n", 1)[0]
+        self.assertIn("onThisMac ? srgb(.windowBackgroundColor) : dark ? solidWindow.dark : solidWindow.light", base)
+        code = "\n".join(line for line in base.splitlines() if not line.strip().startswith("//"))
+        # AppKit's system colours (.labelColor, .windowBackgroundColor, ...) resolve per OS release.
+        self.assertEqual(re.findall(r"\.[a-z][A-Za-z]*Color\b", code), [".windowBackgroundColor"])
+        self.assertEqual(picker.count("onThisMac: true"), 4)
+        contrast = picker.split("@ViewBuilder private var contrast: some View {", 1)[1].split("\n    }\n", 1)[0]
+        self.assertNotIn("onThisMac", contrast)
         # Drawn in the hub's own style: swatches and colour tracks, not the stock well.
         self.assertNotIn("ColorPicker(", picker)
         self.assertIn("ChatHue.presets", picker)

@@ -21,8 +21,8 @@ struct ChatHueSettings: View {
     private var glass: Bool { windowStyle == .glass }
 
     var body: some View {
-        let light = hues.resolved(dark: false, base: Self.base(dark: false, glass: glass))
-        let dark = hues.resolved(dark: true, base: Self.base(dark: true, glass: glass))
+        let light = hues.resolved(dark: false, base: Self.base(dark: false, glass: glass, onThisMac: true))
+        let dark = hues.resolved(dark: true, base: Self.base(dark: true, glass: glass, onThisMac: true))
         VStack(alignment: .leading, spacing: 14) {
             header
             HStack(spacing: 10) {
@@ -80,7 +80,7 @@ struct ChatHueSettings: View {
     private func editor(light: ChatHues.Resolved, dark: ChatHues.Resolved) -> some View {
         let choice = hues[surface]
         let shown = choice ?? Self.start
-        let base = (light: Self.base(dark: false, glass: glass), dark: Self.base(dark: true, glass: glass))
+        let base = (light: Self.base(dark: false, glass: glass, onThisMac: true), dark: Self.base(dark: true, glass: glass, onThisMac: true))
         let fallback = (light: ChatHues().resolved(dark: false, base: base.light),
                         dark: ChatHues().resolved(dark: true, base: base.dark))
         return VStack(alignment: .leading, spacing: 10) {
@@ -171,14 +171,25 @@ struct ChatHueSettings: View {
         }
     }
 
-    /// Today's colours in one appearance, as the Chat window paints them for
-    /// the current window style: Glass's paper or the Solid window behind the
-    /// transcript. A chosen background replaces either, so it is measured as is.
-    static func base(dark: Bool, glass: Bool) -> ChatHueBase {
+    /// Solid shows the system's windowBackgroundColor behind the transcript,
+    /// and macOS has moved it: #323232 / #ECECEC on macOS 15, #1E1E1E /
+    /// #FFFFFF on macOS 26. Contrast is measured against fixed values rather
+    /// than whatever this Mac resolves, taking the lighter Dark and the darker
+    /// Light of the two, so a pair that passes here passes on either release.
+    static let solidWindow = (light: NSColor(srgbRed: 236 / 255, green: 236 / 255, blue: 236 / 255, alpha: 1),
+                              dark: NSColor(srgbRed: 50 / 255, green: 50 / 255, blue: 50 / 255, alpha: 1))
+
+    /// Today's colours in one appearance, from the app's own fixed tokens:
+    /// Glass's paper or the Solid window reference behind the transcript. A
+    /// chosen background replaces either, so it is measured as is. The
+    /// previews pass `onThisMac` to show the Solid window this Mac paints;
+    /// the contrast check never does, so its verdict is the same everywhere.
+    static func base(dark: Bool, glass: Bool, onThisMac: Bool = false) -> ChatHueBase {
         var base = ChatHueBase(transcript: .black, text: .white, bubble: .clear, composer: .black)
         NSAppearance(named: dark ? .darkAqua : .aqua)?.performAsCurrentDrawingAppearance {
             func srgb(_ color: NSColor) -> NSColor { color.usingColorSpace(.sRGB) ?? color }
-            base = ChatHueBase(transcript: srgb(glass ? NSColor(HubTheme.Glass.transcript) : .windowBackgroundColor),
+            let solid = onThisMac ? srgb(.windowBackgroundColor) : dark ? solidWindow.dark : solidWindow.light
+            base = ChatHueBase(transcript: glass ? srgb(NSColor(HubTheme.Glass.transcript)) : solid,
                                text: srgb(Semantic.nsInk),
                                bubble: srgb(NSColor(Semantic.selection)),
                                composer: srgb(NSColor(Semantic.composerFill)))

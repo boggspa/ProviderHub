@@ -62,8 +62,9 @@ struct ChatHue: Equatable, Hashable {
         return NSColor(srgbRed: r, green: g, blue: b, alpha: alpha)
     }
 
-    /// Starting points for the picker's swatches. Each keeps today's text
-    /// at 4.5:1 on every surface in both appearances (test_chat_hues).
+    /// Starting points for the picker's swatches. Each clears 4.5:1 with a
+    /// tenth to spare on every surface, in both appearances and window
+    /// styles (test_chat_hues).
     static let presets: [(name: String, hue: ChatHue)] = [
         ("Slate", ChatHue(hue: 215, intensity: 0.3)), ("Ocean", ChatHue(hue: 205, intensity: 0.7)),
         ("Teal", ChatHue(hue: 175, intensity: 0.6)), ("Sage", ChatHue(hue: 135, intensity: 0.45)),
@@ -110,11 +111,13 @@ enum ChatHueSurface: String, CaseIterable, Identifiable {
     /// The HSB brightness the surface sits at in each appearance, near its
     /// default's, and the saturation a full intensity reaches there. Light
     /// surfaces take less saturation than dark ones: a pale wash shows a hue
-    /// at a fraction of the chroma a deep tint needs.
+    /// at a fraction of the chroma a deep tint needs. Text on Dark stays
+    /// pastel: saturated blues, reds and violets give up most of their
+    /// luminance, which light text cannot spare.
     func tone(dark: Bool) -> (brightness: Double, saturation: Double) {
         switch self {
         case .transcript: dark ? (0.11, 0.60) : (0.965, 0.12)
-        case .text: dark ? (0.94, 0.85) : (0.26, 0.85)
+        case .text: dark ? (0.97, 0.60) : (0.26, 0.85)
         case .composer: dark ? (0.19, 0.50) : (1.0, 0.08)
         case .bubble: dark ? (0.28, 0.65) : (0.90, 0.30)
         }
