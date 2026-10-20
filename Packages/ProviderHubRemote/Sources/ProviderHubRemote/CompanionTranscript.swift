@@ -364,10 +364,10 @@ private struct CompanionMessageText: View, Equatable {
                         ScrollView(.horizontal) { Text(source).font(.system(size: size, design: .monospaced)).textSelection(.enabled) }
                     }.padding(12).companionCard(cornerRadius: 8)
                 case .heading(let level, let source):
-                    inline(source).font(.system(size: headingSize(level), weight: .semibold))
+                    inline(source, size: headingSize(level)).font(.system(size: headingSize(level), weight: .semibold))
                         .frame(maxWidth: .infinity, alignment: .leading)
                 case .paragraph(let source):
-                    inline(source).font(.system(size: size)).frame(maxWidth: .infinity, alignment: .leading)
+                    inline(source, size: size).font(.system(size: size)).frame(maxWidth: .infinity, alignment: .leading)
                 case .table(let headers, let rows):
                     ScrollView(.horizontal, showsIndicators: false) {
                         VStack(alignment: .leading, spacing: 0) {
@@ -380,9 +380,11 @@ private struct CompanionMessageText: View, Equatable {
         }
     }
 
-    private func inline(_ source: String) -> some View {
-        Text((try? AttributedString(markdown: source, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(source))
-            .textSelection(.enabled)
+    /// Selectable, with a swatch after each colour code; fenced code above
+    /// stays plain.
+    private func inline(_ source: String, size: CGFloat) -> some View {
+        ChatSharedHexText(text: (try? AttributedString(markdown: source, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)))
+            ?? AttributedString(source), size: size)
     }
 
     private func headingSize(_ level: Int) -> CGFloat {
@@ -392,7 +394,7 @@ private struct CompanionMessageText: View, Equatable {
     private func tableRow(_ cells: [String], header: Bool) -> some View {
         HStack(alignment: .top, spacing: 0) {
             ForEach(Array(cells.enumerated()), id: \.offset) { _, cell in
-                inline(cell).font(.system(size: size, weight: header ? .semibold : .regular))
+                inline(cell, size: size).font(.system(size: size, weight: header ? .semibold : .regular))
                     .frame(minWidth: 84, maxWidth: 220, alignment: .leading)
                     .padding(.horizontal, 9).padding(.vertical, 7)
                     .overlay(alignment: .trailing) { CompanionTheme.hairline.frame(width: 0.5) }

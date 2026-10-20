@@ -102,6 +102,8 @@ struct ChatSelectableText: NSViewRepresentable {
     var color: NSColor
     /// The whole entry for **Copy Message**; nil leaves the item out.
     var message: String?
+    /// A swatch after each `#RRGGBB` colour code; code blocks show none.
+    var swatches = true
     @Environment(\.chatBlackboardPin) private var blackboardPin
     @Environment(\.chatReact) private var react
     @Environment(\.chatWorkspace) private var workspace
@@ -146,7 +148,7 @@ struct ChatSelectableText: NSViewRepresentable {
     /// Owns a private TextKit 1 stack for measuring, so sizing never touches
     /// the displayed view's layout or selection.
     final class Coordinator {
-        private var source: (text: AttributedString, font: NSFont, color: NSColor)?
+        private var source: (text: AttributedString, font: NSFont, color: NSColor, swatches: Bool)?
         private var converted = NSAttributedString()
         /// A rule runs across the column, so its block takes the full width.
         private var fillsWidth = false
@@ -162,9 +164,10 @@ struct ChatSelectableText: NSViewRepresentable {
         }
 
         func attributed(for view: ChatSelectableText) -> NSAttributedString {
-            if let source, source.text == view.text, source.font == view.font, source.color === view.color { return converted }
-            source = (view.text, view.font, view.color)
-            converted = ChatSelectableText.attributed(view.text, font: view.font, color: view.color)
+            if let source, source.text == view.text, source.font == view.font, source.color === view.color,
+               source.swatches == view.swatches { return converted }
+            source = (view.text, view.font, view.color, view.swatches)
+            converted = ChatSelectableText.attributed(view.text, font: view.font, color: view.color, swatches: view.swatches)
             fillsWidth = false
             converted.enumerateAttribute(.chatRule, in: NSRange(location: 0, length: converted.length)) { value, _, stop in
                 if value != nil { fillsWidth = true; stop.pointee = true }
@@ -200,8 +203,9 @@ struct ChatSelectableText: NSViewRepresentable {
     /// Inline Markdown as real fonts and attributes: strong, emphasis, code
     /// chips, strikethrough and links; block styles become heading fonts,
     /// hanging list indents, quotes and rules. Unparsed text keeps the base
-    /// font and colour.
-    static func attributed(_ text: AttributedString, font: NSFont, color: NSColor) -> NSAttributedString {
+    /// font and colour. Colour codes get swatches, drawn beside the text
+    /// rather than added to it, so selection and copy return what was written.
+    static func attributed(_ text: AttributedString, font: NSFont, color: NSColor, swatches: Bool = true) -> NSAttributedString {
         let result = NSMutableAttributedString()
         let size = font.pointSize
         let chip = NSColor(HubTheme.Semantic.selection)
@@ -251,6 +255,7 @@ struct ChatSelectableText: NSViewRepresentable {
         let string = result.string as NSString
         let whole = NSRange(location: 0, length: result.length)
         ChatLayoutManager.padChips(result)
+        if swatches { ChatLayoutManager.markSwatches(result, ChatHexColor.find(in: text)) }
 
         var location = 0
         while location < string.length {
@@ -376,6 +381,8 @@ extension NSAttributedString.Key {
     static let chatQuoteBar = NSAttributedString.Key("ProviderHub.chatQuoteBar")
     /// Colour of a thematic break drawn across its line.
     static let chatRule = NSAttributedString.Key("ProviderHub.chatRule")
+    /// A colour code, as 0xRRGGBB; its swatch is drawn after the code.
+    static let chatHexSwatch = NSAttributedString.Key("ProviderHub.chatHexSwatch")
     /// Carries a block style to the paragraph pass; removed before display.
     fileprivate static let chatBlockStyle = NSAttributedString.Key("ProviderHub.chatBlockStyle")
 }
@@ -408,7 +415,8 @@ enum ChatMentionStyle {
 
 /// TextKit 1 layout that draws the transcript's block decorations behind
 /// the text: rounded code chips (one per line fragment when a chip wraps),
-/// a blockquote's bar and a rule's hairline. Layout itself is the stock
+/// a blockquote's bar and a rule's hairline; and a colour code's swatch in
+/// front of it, in room kerned after the code. Layout itself is the stock
 /// typesetter, so the measuring stack and the view agree on every height.
 final class ChatLayoutManager: NSLayoutManager {
     static func chipPadding(_ font: NSFont) -> CGFloat { font.pointSize * 0.22 }
@@ -427,6 +435,45 @@ final class ChatLayoutManager: NSLayoutManager {
             if range.location > 0, ![9, 10].contains(string.character(at: range.location - 1)) {
                 text.addAttribute(.kern, value: kern, range: string.rangeOfComposedCharacterSequence(at: range.location - 1))
             }
+        }
+    }
+
+    /// Room after each colour code for its swatch, on top of any chip padding.
+    static func markSwatches(_ text: NSMutableAttributedString, _ colors: [ChatHexColor]) {
+        let string = text.string as NSString
+        for color in colors where color.range.length > 0 && NSMaxRange(color.range) <= text.length {
+            guard let font = text.attribute(.font, at: color.range.location, effectiveRange: nil) as? NSFont else { continue }
+            let last = string.rangeOfComposedCharacterSequence(at: NSMaxRange(color.range) - 1)
+            let kern = (text.attribute(.kern, at: last.location, effectiveRange: nil) as? NSNumber)?.doubleValue ?? 0
+            text.addAttribute(.chatHexSwatch, value: NSNumber(value: color.rgb), range: color.range)
+            text.addAttribute(.kern, value: kern + ChatHexSwatch.advance(font.pointSize), range: last)
+        }
+    }
+
+    /// Swatches draw over the selection, like the glyphs beside them.
+    override func drawGlyphs(forGlyphRange glyphsToShow: NSRange, at origin: NSPoint) {
+        super.drawGlyphs(forGlyphRange: glyphsToShow, at: origin)
+        guard let storage = textStorage, storage.length > 0, let context = NSGraphicsContext.current?.cgContext else { return }
+        let characters = characterRange(forGlyphRange: glyphsToShow, actualGlyphRange: nil)
+        let all = NSRange(location: 0, length: storage.length)
+        let dark = NSAppearance.currentDrawing().bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        storage.enumerateAttribute(.chatHexSwatch, in: characters) { value, range, _ in
+            guard let rgb = value as? NSNumber else { return }
+            var code = range
+            _ = storage.attribute(.chatHexSwatch, at: range.location, longestEffectiveRange: &code, in: all)
+            // Once, with the code's last character, wherever the redraw is cut.
+            let last = NSMaxRange(code) - 1
+            guard NSLocationInRange(last, characters), let font = storage.attribute(.font, at: last, effectiveRange: nil) as? NSFont else { return }
+            let glyph = glyphIndexForCharacter(at: last)
+            guard glyph < numberOfGlyphs else { return }
+            let fragment = lineFragmentRect(forGlyphAt: glyph, effectiveRange: nil)
+            let at = location(forGlyphAt: glyph)
+            var end = fragment.minX + at.x + font.advancement(forCGGlyph: cgGlyph(at: glyph)).width
+            if storage.attribute(.chatCodeChip, at: last, effectiveRange: nil) != nil { end += Self.chipPadding(font) }
+            let size = font.pointSize, side = ChatHexSwatch.side(size)
+            let foot = fragment.minY + at.y + ChatHexSwatch.drop(size)
+            let square = CGRect(x: origin.x + end + ChatHexSwatch.lead(size), y: origin.y + foot - side, width: side, height: side)
+            ChatHexSwatch.draw(ChatHexColor(range: code, rgb: rgb.uint32Value), in: square, dark: dark, context: context)
         }
     }
 

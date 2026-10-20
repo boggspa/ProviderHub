@@ -124,17 +124,20 @@ struct ComposerTextView: NSViewRepresentable {
         }
 
         /// Tints each tag the worker would route, the way the transcript will
-        /// draw it. Only earlier tags are cleared; the rest of the text is
+        /// draw it, and gives each colour code its swatch. Attributes only:
+        /// the draft, and so the send, stays exactly what was typed. Only
+        /// earlier tags and swatches are cleared; the rest of the text is
         /// never restyled, so a long draft stays cheap to edit.
         func paint(_ view: NSTextView) {
             guard let storage = view.textStorage, let font, !view.hasMarkedText() else { return }
             let whole = NSRange(location: 0, length: storage.length)
             var stale: [NSRange] = []
-            for key in [NSAttributedString.Key.chatCodeChip, .kern] {
+            for key in [NSAttributedString.Key.chatCodeChip, .kern, .chatHexSwatch] {
                 storage.enumerateAttribute(key, in: whole) { value, range, _ in if value != nil { stale.append(range) } }
             }
             let matches = ChatMentions.resolve(view.string, members: parent.mentions)
-            guard !stale.isEmpty || !matches.isEmpty else { return }
+            let colors = ChatHexColor.find(in: view.string, skippingFences: true)
+            guard !stale.isEmpty || !matches.isEmpty || !colors.isEmpty else { return }
             let string = view.string as NSString
             storage.beginEditing()
             for range in stale { storage.setAttributes(plain, range: range) }
@@ -143,6 +146,7 @@ struct ComposerTextView: NSViewRepresentable {
                                       range: ChatMentions.display(match.range, in: string))
             }
             ChatLayoutManager.padChips(storage)
+            ChatLayoutManager.markSwatches(storage, colors)
             storage.endEditing()
         }
 
