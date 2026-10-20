@@ -15,6 +15,7 @@ import weakref
 
 import chat_execution
 import chat_team_mentions
+import chat_todos
 from chat_history import portable_history
 from chat_tools import _tool
 
@@ -450,6 +451,7 @@ def configure(parent, command):
         vision=parent.choice(primary["choice"]).get("vision") is not False,
         reason="The user turned Team off. Resume the main conversation from the visible record.")
     candidate["status"] = "ready"
+    chat_todos.carry(candidate, previous)
     parent.chat = candidate
     try: parent.save()
     except Exception:
@@ -833,6 +835,7 @@ def load_journal(store, chat):
                     or record.get("member") is not None and (not isinstance(record["member"], str) or record["member"] not in previous)
                     or not isinstance(record.get("messages"), list) or not isinstance(record.get("decisions"), list)
                     or not isinstance(record.get("blackboard", {}), dict)
+                    or not isinstance(record.get("todos", {}), dict)
                     or not isinstance(record.get("updated"), str) or not isinstance(entries, list)
                     or any(not isinstance(e, dict) or not isinstance(e.get("id"), str) for e in entries)):
                 raise ValueError("Invalid Team checkpoint contents; the saved source has been preserved.")
@@ -844,6 +847,7 @@ def load_journal(store, chat):
                 else: by_id[item["id"]] = len(chat["entries"]); chat["entries"].append(item)
             chat.update(teamJournalSequence=seq, decisions=record["decisions"], updated=record["updated"], status="working")
             if "blackboard" in record: chat["blackboard"] = record["blackboard"]
+            if "todos" in record: chat["todos"] = record["todos"]
 
 
 def checkpoint(parent, member=None, dirty=None):
@@ -875,6 +879,7 @@ def _checkpoint(parent, member=None, dirty=None):
               "member": member["id"] if member else None, "messages": member.get("messages", []) if member else [],
               "entries": entries, "decisions": chat.get("decisions", []), "updated": chat["updated"]}
     if "blackboard" in chat: record["blackboard"] = chat["blackboard"]
+    if "todos" in chat: record["todos"] = chat["todos"]
     raw = json.dumps(record, ensure_ascii=False).encode() + b"\n"
     path = journal_path(parent.store, chat["id"])
     fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
@@ -1437,6 +1442,8 @@ def configure_live(parent, command):
             if member["status"] == "working":
                 (_signal if member.get("pendingChange") else _unsignal)(parent, member)
         for item in notes: parent.emit({"event": "entry", "chat": chat["id"], "entry": item})
+        # The inspector's lanes follow the roster.
+        if chat.get("todos"): chat_todos.publish(parent)
         parent.team_wake.set()
 
 

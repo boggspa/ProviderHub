@@ -9,6 +9,32 @@ enum ChatInspectorTab: String, CaseIterable, Identifiable {
     var icon: String { switch self { case .changes: "filemenu.and.selection"; case .agents: "person.2"; case .side: "bubble.left.and.bubble.right"; case .processes: "terminal"; case .browser: "globe" } }
 }
 
+/// Each lane's to-do list as the worker saved it (chat_todos.py): the chat's
+/// own list when solo, every member's in roster order and the shared list in
+/// a Team. Counts are the worker's, over the whole list.
+struct ChatTodoSnapshot: Decodable, Equatable {
+    struct Item: Decodable, Equatable {
+        var id: String
+        var content: String
+        var status: String
+        var ownerName: String?
+    }
+    struct Lane: Decodable, Equatable, Identifiable {
+        var id: String
+        var name: String
+        var route: String?
+        var choice: String?
+        var items: [Item]
+        var done: Int
+        var total: Int
+    }
+    var team: Bool
+    var lanes: [Lane]
+    var shared: Lane?
+    var all: [Lane] { lanes + (shared.map { [$0] } ?? []) }
+    var isEmpty: Bool { all.allSatisfy { $0.items.isEmpty } }
+}
+
 struct ChatChange: Decodable, Identifiable {
     var path: String
     var oldPath: String?
@@ -600,6 +626,10 @@ struct ChatTeamSnapshot: Decodable {
             if let notice = event["notice"] as? String { processesNotice = notice }
         case "blackboard":
             blackboard.consume(chat: chat, event: event) { try? payload(ChatBlackboardSnapshot.self, "blackboard") }
+        case "todos":
+            let snapshot = decoded(event["todos"], as: ChatTodoSnapshot.self)
+            if snapshot != todos { todos = snapshot }
+            todosNotice = event["notice"] as? String ?? ""
         default: break
         }
     }

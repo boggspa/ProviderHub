@@ -38,6 +38,7 @@ import chat_context
 import chat_processes
 import chat_reactions
 import chat_team
+import chat_todos
 import chat_questions
 from chat_git import git_status
 from chat_git_overview import handle as handle_git_overview
@@ -478,6 +479,8 @@ class ChatService:
         self.team_run_id = None
         self.team_wake = threading.Event()
         self.process_registry = None
+        # The shared Team to-do revision this member's context last showed.
+        self.todo_seen = 0
 
     @property
     def busy(self):
@@ -521,6 +524,7 @@ class ChatService:
             from chat_agents import publish_side
             publish_side(self)
         if self.role == "parent" and self.chat and self.chat.get("team"): chat_team.publish(self)
+        if self.role == "parent" and self.chat and self.chat.get("todos"): chat_todos.publish(self)
 
     def refresh(self):
         self.models = self.transport.catalogue()
@@ -902,10 +906,10 @@ class ChatService:
         elif self.role == "parent" and tools:
             from chat_agents import delegate_definition
             tools.append(delegate_definition(self.models))
-            tools.extend(chat_memory.TOOL_DEFINITIONS)
+            tools.extend([*chat_memory.TOOL_DEFINITIONS, *chat_todos.SOLO_TOOLS])
         elif self.role == "team" and tools:
             tools.extend([*chat_memory.TOOL_DEFINITIONS, chat_team.STATUS_TOOL, *chat_blackboard.TOOL_DEFINITIONS,
-                          *chat_reactions.TOOL_DEFINITIONS])
+                          *chat_reactions.TOOL_DEFINITIONS, *chat_todos.TEAM_TOOLS])
         if choice["supportsTools"]:
             tools.extend(chat_questions.TOOL_DEFINITIONS)
         context = choice.get("context")
@@ -942,6 +946,7 @@ class ChatService:
             payload["system"] += "\nThis is a read-only parallel helper lane. The local tools are limited to read_file and search_files. Do not edit files, run commands or delegate. Report findings to the parent."
         if self.role in {"parent", "team"} and tools:
             payload["system"] += "\n" + chat_memory.GUIDANCE
+            payload["system"] += "\n" + (chat_todos.TEAM_GUIDANCE if self.role == "team" else chat_todos.GUIDANCE)
         if self.role == "team":
             payload["system"] += "\n" + chat_team.GUIDANCE + "\nYour member name: " + self.team_member["name"]
             if tools: payload["system"] += "\n" + chat_blackboard.GUIDANCE + "\n" + chat_reactions.GUIDANCE
@@ -959,6 +964,9 @@ class ChatService:
             board = chat_blackboard.digest_message(memory_chat) if self.role == "team" else None
             progress = chat_execution.progress(self.team_member) if self.role == "team" else None
             request_note = chat_team.request_reference(memory_chat, self.team_member) if self.role == "team" else None
+            todos = (chat_todos.reference(memory_chat, self.team_member["id"] if self.role == "team" else chat_todos.MAIN,
+                                          team=self.role == "team") if self.role in {"parent", "team"} else None)
+            self.todo_seen = chat_todos.revision(memory_chat)
             if progress:
                 memory = {"role": "user", "content": [*progress["content"], *(memory["content"] if memory else [])]}
         if memory and isinstance(context, int) and context > 0 and estimated_tokens({"messages": [memory]}) > context // 4:
@@ -969,6 +977,9 @@ class ChatService:
             # Keep the exact source locator even when the bounded notebook and
             # progress projection is replaced by its small-context fallback.
             memory = {"role": "user", "content": [*request_note["content"], *(memory["content"] if memory else [])]}
+        if todos:
+            # Bounded lists survive the fallback too: they are how a lane resumes.
+            memory = {"role": "user", "content": [*(memory["content"] if memory else []), *todos["content"]]}
         if board and isinstance(context, int) and context > 0 and estimated_tokens({"messages": [board]}) > context // 8:
             board = {"role": "user", "content": [{"type": "text", "text":
                 "[Team Blackboard digest omitted because this model's context is small. Posts remain saved; use blackboard_read.]"}]}
@@ -1196,6 +1207,10 @@ class ChatService:
                                 if self.role != "team":
                                     raise ValueError("Reactions are available only to Team members.")
                                 description = chat_reactions.describe(name, arguments)
+                            elif name in chat_todos.TOOLS:
+                                if self.role not in {"parent", "team"}:
+                                    raise ValueError("To-do tools are available only in the main conversation.")
+                                description = chat_todos.describe(name, arguments)
                             elif name in chat_questions.TOOLS:
                                 chat_questions.validate(name, arguments)
                                 description = {"summary": "Ask for user input", "requires_approval": False}
@@ -1226,6 +1241,8 @@ class ChatService:
                                     result = chat_blackboard.execute(self, name, arguments)
                                 elif name in chat_reactions.TOOLS:
                                     result = chat_reactions.execute(self, name, arguments)
+                                elif name in chat_todos.TOOLS:
+                                    result = chat_todos.execute(self, name, arguments)
                                 elif name in chat_questions.TOOLS:
                                     result = chat_questions.execute(self, name, arguments)
                                 elif self.capabilities and self.capabilities.handles(name):

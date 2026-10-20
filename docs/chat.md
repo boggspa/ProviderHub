@@ -532,6 +532,10 @@ provider request or cross-chat memory store is involved.
 Team chats also have a Blackboard of short pinned posts and reference files,
 shown in the Team tab; like notes, its posts are model-written (or yours) reference
 material, not verified facts or permission. See [Team in Chat](chat-team.md#blackboard).
+The model keeps a to-do list for multi-step work with `todo_write`, shown in
+the Team tab with its progress and saved with the chat. A model you switch to
+starts from it. In a Team each member has its own list, plus a shared one; see
+[Team in Chat](chat-team.md#to-dos).
 
 If the notebook would consume more than a quarter of a model's context, Chat
 omits it for that request with a notice to the model; the notes stay saved and
