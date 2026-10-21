@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import tempfile
 import threading
+import time
 import unittest
 from unittest.mock import patch
 
@@ -100,6 +101,14 @@ class GatewayRefreshTests(unittest.TestCase):
         return {"catalogue_fingerprint": prepared.catalogue_fingerprint,
                 "codex_catalogue_digest": prepared.codex_catalogue_digest}
 
+    def wait_for_cleanup(self):
+        # Receiving the final response byte does not wait for the server's
+        # accounting/finally block. Assert totals after it releases admission.
+        deadline = time.monotonic() + 5
+        while self.runtime.status()["active"]:
+            self.assertLess(time.monotonic(), deadline, "Request cleanup did not settle")
+            time.sleep(.01)
+
     def test_refresh_during_request_preserves_old_request_and_routes_new_requests(self):
         result = []
         payload = {"model": "claude-opus-5", "max_tokens": 64, "messages": [{"role": "user", "content": "hello"}]}
@@ -125,6 +134,7 @@ class GatewayRefreshTests(unittest.TestCase):
         self.assertFalse(worker.is_alive())
         self.assertEqual(result[0][0], 200, result)
         self.assertEqual(result[0][1]["content"][0]["text"], "old")
+        self.wait_for_cleanup()
         self.assertEqual(self.runtime.status()["completed"], 2)
         self.assertEqual(self.runtime.status()["active"], 0)
 
@@ -172,6 +182,7 @@ class GatewayRefreshTests(unittest.TestCase):
         self.assertEqual(result[0][0], 200)
         self.assertIn('"text": "old"', result[0][1])
         self.assertIn("message_stop", result[0][1])
+        self.wait_for_cleanup()
         self.assertEqual(self.runtime.completed, 1)
 
     def test_refresh_requires_auth_and_matching_prepared_snapshot(self):
