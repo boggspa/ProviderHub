@@ -364,7 +364,7 @@ private struct CompanionTeamEditor: View {
     private var valid: Bool {
         !rows.isEmpty && rows.allSatisfy { !$0["name"].text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !$0["choice"].text.isEmpty } &&
         Set(rows.map { $0["name"].text.lowercased().trimmingCharacters(in: .whitespacesAndNewlines) }).count == rows.count &&
-        (16000...2000000).contains(Int(context) ?? 0) && (1...8).contains(Int(processes) ?? 0) &&
+        (16000...2000000).contains(Int(context) ?? 0) && (1...16).contains(Int(processes) ?? 0) &&
         (minutes.isEmpty || (1...10080).contains(Int(minutes) ?? 0)) && (tokens.isEmpty || (1...2000000000).contains(Int(tokens) ?? 0))
     }
     private func field(_ index: Int, _ key: String) -> Binding<String> {
