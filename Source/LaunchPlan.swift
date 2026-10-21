@@ -119,6 +119,15 @@ extension LaunchHost {
     var changeKind: ChangeKind { classifyChange(settings, from: savedSettings) }
     var chatBusy: Bool { chatWorking || chatHasActiveWork }
 
+    /// Starting a service must not inherit Save's activity restrictions. While
+    /// sessions are active, serve the saved endpoint and leave edits pending.
+    func startGatewayForUse(save: () async throws -> Void) async throws {
+        guard !running else { return }
+        refreshDesktopState()
+        if !(chatBusy || activeRequests > 0 || claudeLive || codexLive) { try await save() }
+        try await startGateway()
+    }
+
     /// No surface is keeping the gateway alive and nothing is in flight.
     func mayStopGateway() -> Bool {
         !(claudeLive || codexLive || chatWindowOpen || chatBusy) && activeRequests == 0

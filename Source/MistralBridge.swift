@@ -615,7 +615,7 @@ final class BridgeModel: ObservableObject {
         if activeRequests > 0 || claudeLive || codexLive {
             // While one desktop session is live, only changes scoped to the
             // idle harness's selection are writable; the launch flow offers a
-            // gateway restart when the new selection needs a fresh snapshot.
+            // live gateway refresh when the new selection needs a fresh snapshot.
             switch kind {
             case .prefs:
                 try await writeSettings()
@@ -800,7 +800,11 @@ final class BridgeModel: ObservableObject {
                 if desktopOwnedHarnessRunning || activeRequests > 0 { throw WorkerError(message: "Close the desktop sessions using this gateway before stopping it.") }
                 await stopGateway()
                 tell("Gateway stopped. Your model mappings are saved for the next launch.")
-            } else { try await save(); try await startGateway(); tell("Gateway ready. You can test a model or launch a desktop session.") }
+            } else {
+                try await startGatewayForUse { try await save() }
+                tell(changed ? "Gateway ready with saved settings. Your edits remain pending for the next desktop launch."
+                             : "Gateway ready. You can test a model or launch a desktop session.")
+            }
         } catch { tell(error.localizedDescription, error: true) }
     }
 

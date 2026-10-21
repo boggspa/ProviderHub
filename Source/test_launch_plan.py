@@ -154,6 +154,22 @@ func check(_ yes: Bool, _ text: String) {
         let wrongError = await wrong.launch(.codex)
         check(wrongError?.contains("did not load") == true && wrong.running, "wrong refresh activated")
 
+        // Explicit Start Gateway uses saved settings under every form of
+        // activity, rather than entering the generic Save blocker.
+        for activity in 0..<4 {
+            let h = ScriptedHost(); h.running = false
+            h.settings.codex_model = "mistral/pending"
+            h.chatWorking = activity == 0; h.chatHasActiveWork = activity == 1
+            h.inFlight = activity == 2 ? 1 : 0; h.activeRequests = h.inFlight
+            h.codexLive = activity == 3
+            var saved = false
+            try await h.startGatewayForUse { saved = true; throw LaunchRefusal(message: "Save blocked") }
+            check(h.running && !saved && h.disk.codex_model != "mistral/pending" && h.settings.codex_model == "mistral/pending", "busy gateway start")
+        }
+        let startIdle = ScriptedHost(); startIdle.running = false; startIdle.settings.port += 1
+        try await startIdle.startGatewayForUse { try await startIdle.writeSettings() }
+        check(startIdle.running && startIdle.port == startIdle.settings.port, "idle start did not save")
+
         // Auto-stop still consults live request counts and holds operation busy.
         let idle = ScriptedHost(); idle.inFlight = 1
         _ = try await idle.finishClosedSession(autoStop: true) { check(idle.busy, "restore did not hold busy") }
