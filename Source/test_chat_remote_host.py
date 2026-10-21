@@ -76,7 +76,7 @@ class RemoteHostTests(unittest.TestCase):
                 phone.select(first, "select-1"); flush()
                 receive_until(lambda: "select-1" in phone.acks)
                 self.assertEqual(host.view_id, second, "Phone selection stole desktop focus")
-                self.assertEqual(host.subscriptions["remote"], {first})
+                self.assertEqual(list(host.subscriptions.values()), [{first}])
                 phone._send("chat.control", {"requestId": "inspect-1", "chat": first, "action": "remote_inspect", "arguments": {}}); flush()
                 receive_until(lambda: "inspect-1" in phone.acks)
                 self.assertTrue(phone.acks["inspect-1"]["ok"])

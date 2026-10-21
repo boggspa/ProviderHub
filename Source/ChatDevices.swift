@@ -9,6 +9,9 @@ struct ChatDevicesSettings: View {
     @AppStorage("chatRemoteHost") private var address = ""
     private var listening: Bool { model.remoteStatus["listening"] as? Bool ?? false }
     private var pending: [String: Any]? { model.remoteStatus["pendingPairing"] as? [String: Any] }
+    private var pendingPairings: [[String: Any]] {
+        model.remoteStatus["pendingPairings"] as? [[String: Any]] ?? pending.map { [$0] } ?? []
+    }
     private var devices: [[String: Any]] { model.remoteStatus["devices"] as? [[String: Any]] ?? [] }
     @State private var pairingImage: CGImage?
     private var pairingText: String? {
@@ -25,7 +28,7 @@ struct ChatDevicesSettings: View {
                         Button("Use Tailscale · \(tailscale)") { address = tailscale }
                     }
                     HStack {
-                        Text(model.remoteStatus["connected"] as? Bool == true ? "Phone connected" : listening ? "Waiting for a device" : "Off")
+                        Text(connectionStatus)
                             .font(.caption).foregroundStyle(.secondary)
                         Spacer()
                         Button(listening ? "Turn off" : "Enable") {
@@ -33,7 +36,7 @@ struct ChatDevicesSettings: View {
                             else { model.startRemote(host: address.trimmingCharacters(in: .whitespacesAndNewlines)) }
                         }.disabled(!model.connected || !listening && address.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                     }
-                    Text("Your paired device can manage chats, Team members, permissions and the inspector. Keep Provider Hub running on this Mac. For access over cellular or another Wi-Fi network, connect both devices to the same Tailscale tailnet and use this Mac’s Tailscale IP. Allow TCP port 8765 in your tailnet policy.")
+                    Text("Pair your iPhone and iPad separately; each device keeps its own connection and selected chat. Keep Provider Hub running on this Mac. For access over cellular or another Wi-Fi network, connect the devices to the same Tailscale tailnet and use this Mac’s Tailscale IP. Allow TCP port 8765 in your tailnet policy.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 if listening {
@@ -52,13 +55,17 @@ struct ChatDevicesSettings: View {
                                     .font(.caption).foregroundStyle(.secondary)
                             }
                         }
-                        if let pending, let identity = pending["identity"] as? String, let code = pending["confirmCode"] as? String {
-                            Text(code).font(.system(.title2, design: .monospaced))
-                            HStack {
-                                Button("Codes match · Pair") { model.confirmDevice(identity: identity, code: code, allow: true) }
-                                Button("Reject") { model.confirmDevice(identity: identity, code: code, allow: false) }
+                        ForEach(Array(pendingPairings.enumerated()), id: \.offset) { _, pairing in
+                            if let identity = pairing["identity"] as? String, let code = pairing["confirmCode"] as? String {
+                                Text(code).font(.system(.title2, design: .monospaced))
+                                HStack {
+                                    Button("Codes match · Pair") { model.confirmDevice(identity: identity, code: code, allow: true) }
+                                    Button("Reject") { model.confirmDevice(identity: identity, code: code, allow: false) }
+                                }
                             }
                         }
+                        Text("Removed devices can pair again after you confirm a fresh matching code. Compatible app versions can pair without matching release numbers.")
+                            .font(.caption).foregroundStyle(.secondary)
                     }
                 }
                 if !devices.isEmpty {
@@ -66,7 +73,11 @@ struct ChatDevicesSettings: View {
                         ForEach(Array(devices.enumerated()), id: \.offset) { _, device in
                             if device["revoked"] as? Bool != true, let identity = device["identity"] as? String {
                                 HStack {
-                                    Text(device["label"] as? String ?? "iPhone")
+                                    VStack(alignment: .leading) {
+                                        Text(device["label"] as? String ?? "Device")
+                                        Text(String(identity.prefix(8)) + " · " + (device["connected"] as? Bool == true ? "Connected" : "Offline"))
+                                            .font(.caption).foregroundStyle(.secondary)
+                                    }
                                     Spacer()
                                     Button("Remove") { model.revokeDevice(identity: identity) }
                                 }
@@ -92,6 +103,10 @@ struct ChatDevicesSettings: View {
                     address = tailscale
                 }
             }
+    }
+    private var connectionStatus: String {
+        let count = model.remoteStatus["connectedCount"] as? Int ?? (model.remoteStatus["connected"] as? Bool == true ? 1 : 0)
+        return count > 0 ? "\(count) \(count == 1 ? "device" : "devices") connected" : listening ? "Waiting for a device" : "Off"
     }
     private func copyBootstrap() {
         guard let text = pairingText else { return }

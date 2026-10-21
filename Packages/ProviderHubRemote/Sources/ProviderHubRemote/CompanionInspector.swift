@@ -326,6 +326,9 @@ private struct CompanionTeamEditor: View {
                     TextField("Minutes (optional)", text: $minutes)
                     TextField("Token limit (optional)", text: $tokens)
                 }
+                if let validationMessage {
+                    Section { Text(validationMessage).foregroundStyle(.red) }
+                }
             }
             .navigationTitle("Edit Team")
             .toolbar {
@@ -337,7 +340,7 @@ private struct CompanionTeamEditor: View {
                             "tokens": Double(tokens).map { .number($0) } ?? .null])
                         model.configureMembers(rows, enabled: enabled, execution: execution)
                         dismiss()
-                    }.disabled(!valid)
+                    }.disabled(validationMessage != nil)
                 }
             }
         }.sheet(isPresented: Binding(get: { pickingMember != nil }, set: { if !$0 { pickingMember = nil } })) {
@@ -361,11 +364,8 @@ private struct CompanionTeamEditor: View {
             if execution["tokens"].int > 0 { tokens = String(execution["tokens"].int) }
         }
     }
-    private var valid: Bool {
-        !rows.isEmpty && rows.allSatisfy { !$0["name"].text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !$0["choice"].text.isEmpty } &&
-        Set(rows.map { $0["name"].text.lowercased().trimmingCharacters(in: .whitespacesAndNewlines) }).count == rows.count &&
-        (16000...2000000).contains(Int(context) ?? 0) && (1...16).contains(Int(processes) ?? 0) &&
-        (minutes.isEmpty || (1...10080).contains(Int(minutes) ?? 0)) && (tokens.isEmpty || (1...2000000000).contains(Int(tokens) ?? 0))
+    private var validationMessage: String? {
+        CompanionTeamValidation.message(rows: rows, context: context, processes: processes, minutes: minutes, tokens: tokens)
     }
     private func field(_ index: Int, _ key: String) -> Binding<String> {
         Binding(get: { rows.indices.contains(index) ? rows[index][key].text : "" }, set: { value in

@@ -231,7 +231,7 @@ class ChatHost:
             if self.dispatch is None or self.dispatch_event is None: raise ValueError("Remote access needs the serial Chat worker")
             if self.remote is None:
                 from chat_remote import RemoteServer
-                self.remote = RemoteServer(self.handle, self.store.root / "remote.json", dispatch=self.dispatch)
+                self.remote = RemoteServer(self.handle, self.store.root / "remote.json", dispatch=self.dispatch, detach=self.detach_client)
             self.remote.start(host=command.get("host"), port=command.get("port", 8765))
             self.remote_host = command.get("host")
             self._last_summaries = None
@@ -322,7 +322,7 @@ class ChatHost:
         if service is not None: service.team_wake.set()
         # Output tails go only to the chat on screen; others get the rows.
         with self._output:
-            remote_selected = self.remote is not None and self.remote.bridge.selected_chat == chat
+            remote_selected = self.remote is not None and chat in self.remote.selections.values()
             event = {"event": "processes", "chat": chat, "processes": self.processes.snapshot(chat, output=chat == self.view_id or remote_selected)}
             if notice: event["notice"] = notice
             self.emit(event)
@@ -344,7 +344,7 @@ class ChatHost:
                        "status": self.state(service)["status"]})
 
     def publish_remote_activity(self, service):
-        if not self.remote or self.remote.bridge.selected_chat != (service.chat or {}).get("id"): return
+        if not self.remote or (service.chat or {}).get("id") not in self.remote.selections.values(): return
         from chat_remote_actions import activity
         state = self.state(service)
         event = {"event": "remote_activity", "chat": service.chat["id"], "busy": state["busy"],
@@ -748,10 +748,10 @@ the same publication `initialize` and `select` perform, ending with `ready`.
             if service.chat["id"] != old_id:
                 self.sessions.pop(old_id, None)
                 self.sessions[service.chat["id"]] = service
-                if self.remote is not None and self.remote.bridge.selected_chat == old_id:
+                if self.remote is not None and old_id in self.remote.selections.values():
                     replacement = service.chat["id"]
-                    self.remote.bridge.selected_chat = replacement
-                    self.subscriptions["remote"] = {replacement}
+                    for client, selected in self.remote.replace_chat(old_id, replacement).items():
+                        self.subscriptions[client] = {selected}
                     self.publish_remote_configuration(service)
                     service.publish()
             self.publish_summaries()

@@ -103,8 +103,11 @@ Open **Settings → Devices**, enter the Mac's explicit LAN or Tailscale IP,
 and choose Enable. Listening is off by default and never restored automatically
 at app launch. Scan the QR code with the iOS companion (or copy pairing text),
 compare the code on both devices and confirm on the Mac. Turn off remote access or remove the
-device to revoke its connection. The first version supports one phone at a
-time on the private network. The scanner asks for camera access only when
+device to revoke its connection. Up to eight devices can connect on the private
+network, each with its own selected chat. Removing one does not disconnect the
+others. A removed device can pair again after a fresh matching-code approval;
+compatible Mac and iOS releases do not need matching app version numbers.
+The scanner asks for camera access only when
 opened; pasted pairing text remains available when camera access is unavailable.
 
 The transport and Swift companion live in `Source/chat_remote.py`,

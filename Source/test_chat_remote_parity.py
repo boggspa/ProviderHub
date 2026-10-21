@@ -42,7 +42,7 @@ class RemoteParityTests(unittest.TestCase):
         service = self.host.sessions[self.desktop]
         # Exercise the real host path without a listening socket fixture.
         from types import SimpleNamespace
-        self.host.remote = SimpleNamespace(bridge=self.mac)
+        self.host.remote = SimpleNamespace(selections={"remote": self.desktop})
         service._last_remote_activity = None
         self.host.publish_remote_activity(service)
         first = sum(e.get("event") == "remote_activity" for e in self.events)
