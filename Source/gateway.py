@@ -135,9 +135,9 @@ class Runtime:
         saved = load_settings(root)
         planned, _ = apply_plan(saved, cached_catalogue(saved, root), root)
         self.settings, self.catalogue = attach_model_specs(planned, root)
-        # Runtime deliberately snapshots model planning metadata at startup.
+        # Runtime snapshots model planning metadata at startup or refresh.
         # Activation checks this fingerprint after launch preparation so a
-        # newly refreshed selected route cannot be served by an older snapshot.
+        # newly prepared selected route cannot be served by an older snapshot.
         self.catalogue_fingerprint = catalogue_fingerprint(
             self.settings, root, model_specs=self.settings["_model_specs"])
         self.token = gateway_token(root)
@@ -175,6 +175,31 @@ class Runtime:
         self.provider_counts = {provider_id: {"completed": 0, "failed": 0, "input_tokens": 0, "output_tokens": 0,
             "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0, "total_input_tokens": 0,
             "estimated_input_tokens": 0} for provider_id in PROVIDERS}
+
+    def request_snapshot(self):
+        with self.lock:
+            return RequestRuntime(self)
+
+    def refresh_routes(self, expected=None):
+        """Install prepared routing for new requests; existing requests keep it."""
+        saved = load_settings(self.root)
+        planned, _ = apply_plan(saved, cached_catalogue(saved, self.root), self.root)
+        settings, catalogue = attach_model_specs(planned, self.root)
+        fingerprint = catalogue_fingerprint(settings, self.root, model_specs=settings["_model_specs"])
+        digest = catalogue_digest(settings, catalogue)
+        actual = {"catalogue_fingerprint": fingerprint, "codex_catalogue_digest": digest}
+        if any(actual[key] != value for key, value in (expected or {}).items()):
+            raise BridgeError("The prepared selection changed. Try launching again.")
+        with self.lock:
+            if self.stopping.is_set():
+                raise BridgeError("The gateway is stopping. Try launching again.")
+            if settings["port"] != self.settings["port"]:
+                raise BridgeError("Keep the running gateway's port until its connected sessions close.")
+            self.settings, self.catalogue = settings, catalogue
+            self.catalogue_fingerprint, self.codex_catalogue_digest = fingerprint, digest
+            self.credential_cache = {}
+            self._credential_settings = self._cli_account_settings = None
+        return self.status()
 
     def resolve_route(self, requested):
         if not isinstance(requested, str):
@@ -655,13 +680,48 @@ def _client_gone(handler):
         return True
 
 
+class RequestRuntime(Runtime):
+    """Pin routing per HTTP request while sharing service state and accounting.
+
+    Runtime methods bind to this view, so planning and delayed stream cleanup
+    see the same settings. Mutable counters, locks, throttles and connections
+    remain owned by the serving Runtime, including while a refresh happens.
+    """
+    _local = frozenset({"_owner", "settings", "catalogue", "catalogue_fingerprint", "codex_catalogue_digest",
+                        "credential_cache", "_credential_settings", "_cli_account_settings"})
+
+    def __init__(self, owner):
+        object.__setattr__(self, "_owner", owner)
+        for name in self._local - {"_owner"}:
+            object.__setattr__(self, name, getattr(owner, name, None))
+
+    def __getattr__(self, name):
+        return getattr(self._owner, name)
+
+    def __setattr__(self, name, value):
+        if name in self._local:
+            object.__setattr__(self, name, value)
+        else:
+            setattr(self._owner, name, value)
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version = "ProviderHub/" + BUILD_IDENTITY["version"]
 
     @property
     def runtime(self):
-        return self.server.runtime
+        if getattr(self, "_request_runtime", None) is None:
+            self._request_runtime = self.server.runtime.request_snapshot()
+        return self._request_runtime
+
+    def handle_one_request(self):
+        # HTTP keep-alive may carry another turn after a routing refresh.
+        self._request_runtime = None
+        try:
+            return super().handle_one_request()
+        finally:
+            self._request_runtime = None
 
     def setup(self):
         super().setup()
@@ -864,6 +924,22 @@ class Handler(BaseHTTPRequestHandler):
             return
         self.json_response(200, session.to_dict())
 
+    def _handle_refresh(self):
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+            if not 0 < length <= 4096 or self.headers.get("Transfer-Encoding"):
+                raise ValueError("Send the prepared catalogue fingerprint or digest.")
+            request = json.loads(self.rfile.read(length))
+            keys = {"catalogue_fingerprint", "codex_catalogue_digest"}
+            if (not isinstance(request, dict) or not request or not set(request) <= keys
+                    or any(not isinstance(value, str) or not value for value in request.values())):
+                raise ValueError("Send the prepared catalogue fingerprint or digest.")
+            status = self.server.runtime.refresh_routes(request)
+        except (ValueError, BridgeError) as exc:
+            self.error(400, str(exc))
+            return
+        self.json_response(200, status)
+
     def _handle_shutdown(self):
         """An explicit, authenticated stop. No client process owns this lifetime.
 
@@ -942,6 +1018,8 @@ they exit or restart, so none of them can interrupt another's requests.
         if not self.allowed():
             return
         path = urllib.parse.urlsplit(self.path).path
+        if path == "/_bridge/refresh":
+            return self._handle_refresh()
         if path == "/_bridge/shutdown":
             return self._handle_shutdown()
         if path == "/v1/responses/compact":
