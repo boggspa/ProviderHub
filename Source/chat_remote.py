@@ -29,6 +29,7 @@ before confirming an unknown phone. Trusted reconnects authenticate signatures.
 from __future__ import annotations
 
 import base64
+import copy
 import hashlib
 import json
 import os
@@ -184,16 +185,17 @@ def _obj(value):
 
 
 class DeviceRegistry:
-    """Paired phone identities. Revocation is immediate and one-way."""
+    """Paired device identities; revoked identities need explicit reapproval."""
 
     def __init__(self):
         self._devices = {}
 
-    def pair(self, identity_b64: str, label="iPhone"):
+    def pair(self, identity_b64: str, label="iPhone", *, reauthorize=False):
         row = self._devices.get(identity_b64, {"label": label, "revoked": False})
-        if row["revoked"]:
+        if row["revoked"] and not reauthorize:
             raise RemoteError("device revoked")
         row["label"] = label
+        row["revoked"] = False
         self._devices[identity_b64] = row
 
     def revoke(self, identity_b64: str):
@@ -613,6 +615,8 @@ class MacBridge:
         self._decisions = {}
         self._msg = 0
         self._peer_msg = 0
+        self.client_id = "remote"
+        self.device_name = "iPhone / iPad"
 
     @property
     def established(self):
@@ -636,6 +640,10 @@ class MacBridge:
         if isinstance(frame, dict) and frame.get("t") == "clientHello":
             self._peer_msg = 0
             self.pending_pairing = None
+        if isinstance(frame, dict) and frame.get("t") == "clientAuth":
+            label = frame.get("deviceName")
+            if isinstance(label, str) and label.strip():
+                self.device_name = label.strip()[:60]
         peer = self.peer
         if peer and self.registry.revoked(peer):
             self.session.close()
@@ -669,6 +677,12 @@ class MacBridge:
     def _trust(self, peer_raw, code):
         identity = b64e(peer_raw)
         if self.registry.revoked(identity):
+            # Removal stops all access immediately. A fresh signed handshake
+            # may request reapproval, including from an older companion that
+            # still holds its device-only Keychain identity.
+            if self.hold_pairing:
+                self.pending_pairing = {"identity": identity, "confirmCode": code}
+                return None
             return False
         if self.registry.trusted(identity):
             return True
@@ -820,7 +834,7 @@ class MacBridge:
                 self.selected_chat = created
                 self.view["controls"] = {key: value for key, value in self.view["controls"].items() if key in {"version", "extensionVersion", "models", "browserEnabled", "options"}}
                 self.view["approval"] = None
-                self._execute({"command": "subscribe", "client": "remote", "chats": [created]})
+                self._execute({"command": "subscribe", "client": self.client_id, "chats": [created]})
             return {"requestId": request_id, "ok": True, "result": result}
         if method == "chat.approve":
             return self._approve(peer, params, request_id)
@@ -855,7 +869,7 @@ class MacBridge:
                 if self.view["approval"] and self.view["approval"].get("chat") != chat:
                     self.view["approval"] = None
             self.selected_chat = chat
-            self._execute({"command": "subscribe", "client": "remote", "chats": [chat]})
+            self._execute({"command": "subscribe", "client": self.client_id, "chats": [chat]})
         else:
             raise RemoteError("unsupported command")
         return {"requestId": request_id, "ok": True}
@@ -1077,14 +1091,18 @@ class RemoteServer:
     """Explicit private TCP listener; newline-delimited TaskWraith E2EE frames.
 
     dispatch must enqueue a callable on the desktop's serial command queue.
-    One phone at a time. The listener never owns provider credentials.
+    Each device has its own encrypted channel, selection and event cursor.
+    The listener never owns provider credentials.
     """
 
-    def __init__(self, execute, state_path, session_id="providerhub-phone", *, dispatch):
+    def __init__(self, execute, state_path, session_id="providerhub-phone", *, dispatch, detach=None):
         self.path = Path(state_path)
         self.dispatch = dispatch
+        self.detach = detach
         self.lock = threading.RLock()
-        self.listener = self.connection = None
+        self.listener = None
+        self.connections = {}
+        self._bridges = ()
         self.port = None
         self.error = None
         if self.path.is_symlink():
@@ -1138,7 +1156,7 @@ class RemoteServer:
             listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             try:
                 listener.bind((host, port))
-                listener.listen(2)
+                listener.listen(8)
                 listener.settimeout(0.5)
             except Exception:
                 listener.close()
@@ -1156,41 +1174,67 @@ class RemoteServer:
 
     def status(self):
         with self.lock:
+            connected = {bridge.peer for bridge in self.connections.values() if bridge.established}
+            pending = [bridge.pending_pairing for bridge in self.connections.values() if bridge.pending_pairing]
             return {"listening": self.listener is not None, "port": self.port,
-                    "connected": self.bridge.established,
-                    "pendingPairing": self.bridge.pending_pairing, "error": self.error,
-                    "devices": [{"identity": identity, **row} for identity, row in self.bridge.registry._devices.items()]}
+                    "connected": bool(connected), "connectedCount": len(connected),
+                    "pendingPairing": pending[0] if pending else None, "pendingPairings": pending, "error": self.error,
+                    "devices": [{"identity": identity, **row, "connected": identity in connected}
+                                for identity, row in self.bridge.registry._devices.items()]}
 
-    def _flush(self):
-        frames = self.bridge.take()
-        if self.connection:
-            payload = b"".join(encode_line(frame) for frame in frames)
-            if payload:
-                self.connection.sendall(payload)
+    @property
+    def selections(self):
+        # Host event producers read this while holding chat/output locks.
+        # Read an immutable membership snapshot without taking a network lock;
+        # selections themselves change only on the serial command owner.
+        return {bridge.client_id: bridge.selected_chat for bridge in self._bridges if bridge.selected_chat}
+
+    def replace_chat(self, old, new):
+        with self.lock:
+            for bridge in self.connections.values():
+                if bridge.selected_chat == old:
+                    bridge.selected_chat = new
+            return self.selections
+
+    def _flush(self, connection, bridge):
+        payload = b"".join(encode_line(frame) for frame in bridge.take())
+        if payload:
+            connection.sendall(payload)
 
     def _receive(self, connection, frame):
         with self.lock:
-            if connection is not self.connection:
+            bridge = self.connections.get(connection)
+            if bridge is None:
                 return
             try:
-                self.bridge.feed(frame)
-                self._flush()
+                bridge.feed(frame)
+                if bridge.established:
+                    # A reconnect replaces only the same authenticated device.
+                    # Untrusted sockets can never evict another device.
+                    for prior, other in list(self.connections.items()):
+                        if prior is not connection and other.peer == bridge.peer:
+                            self._disconnect(prior)
+                self._flush(connection, bridge)
             except Exception as exc:
                 self.error = str(exc)[:300]
-                self._disconnect()
+                self._disconnect(connection)
 
-    def _disconnect(self):
-        connection, self.connection = self.connection, None
-        if connection:
-            try:
-                connection.shutdown(socket.SHUT_RDWR)
-            except OSError:
-                pass
-            connection.close()
-        self.bridge.session.close()
-        self.bridge.session.peer_raw = None
-        self.bridge.session.outbox.clear()
-        self.bridge.pending_pairing = None
+    def _disconnect(self, connection):
+        bridge = self.connections.pop(connection, None)
+        if bridge is None:
+            return
+        self._bridges = tuple(self.connections.values())
+        try:
+            connection.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        connection.close()
+        bridge.session.close()
+        bridge.session.peer_raw = None
+        bridge.session.outbox.clear()
+        bridge.pending_pairing = None
+        if self.detach is not None:
+            self.detach(bridge.client_id)
 
     def _listen(self, listener):
         while self.listener is listener:
@@ -1201,10 +1245,18 @@ class RemoteServer:
             except OSError:
                 return
             with self.lock:
-                if self.connection is not None:
+                if len(self.connections) >= 8:
                     conn.close()
                     continue
-                self.connection = conn
+                bridge = MacBridge(self.bridge.execute, self.bridge.session.session_id, identity=self.bridge.identity)
+                bridge.registry = self.bridge.registry
+                bridge._requests = self.bridge._requests
+                bridge._decisions = self.bridge._decisions
+                bridge.hold_pairing = True
+                bridge.client_id = "remote:" + os.urandom(16).hex()
+                bridge.view = copy.deepcopy(self.bridge.view)
+                self.connections[conn] = bridge
+                self._bridges = tuple(self.connections.values())
                 conn.settimeout(2)
                 self.error = None
             threading.Thread(target=self._reader, args=(conn,), daemon=True).start()
@@ -1232,47 +1284,57 @@ class RemoteServer:
             # Stop/revocation already cleared this socket on the serial owner.
             # Do not enqueue a late callback after that owner has shut down.
             with self.lock:
-                notify_closed = self.connection is connection and self.listener is not None
+                notify_closed = connection in self.connections and self.listener is not None
             def closed():
                 with self.lock:
-                    if self.connection is connection:
-                        self._disconnect()
+                    self._disconnect(connection)
             if notify_closed: self.dispatch(closed)
 
     def publish(self, event):
         with self.lock:
             self.bridge.publish(event)
-            try:
-                self._flush()
-            except OSError:
-                self._disconnect()
+            for connection, bridge in list(self.connections.items()):
+                try:
+                    bridge.publish(event)
+                    self._flush(connection, bridge)
+                except OSError:
+                    self._disconnect(connection)
 
     def confirm_pairing(self, identity, code, allow):
         with self.lock:
-            pending = self.bridge.pending_pairing
-            if not pending or pending != {"identity": identity, "confirmCode": code}:
+            match = next(((conn, bridge) for conn, bridge in self.connections.items()
+                          if bridge.pending_pairing == {"identity": identity, "confirmCode": code}), None)
+            if match is None:
                 raise RemoteError("pairing no longer pending")
+            connection, bridge = match
             if allow is not True:
-                self._disconnect()
+                self._disconnect(connection)
                 return
-            self.bridge.registry.pair(identity)
-            self._save()
-            frame = self.bridge.session.pending_auth
-            self.bridge.session.awaiting_auth = True
-            self.bridge.pending_pairing = None
-            self.bridge.session._client_auth(frame)
-            self._flush()
+            self.bridge.registry.pair(identity, bridge.device_name, reauthorize=True)
+            try:
+                self._save()
+            except Exception:
+                self.bridge.registry.revoke(identity)
+                self._disconnect(connection)
+                raise
+            frame = bridge.session.pending_auth
+            bridge.session.awaiting_auth = True
+            bridge.pending_pairing = None
+            bridge.session._client_auth(frame)
+            self._flush(connection, bridge)
 
     def revoke(self, identity):
         with self.lock:
             self.bridge.revoke(identity)
             self._save()
-            if self.bridge.peer == identity:
-                self._disconnect()
+            for connection, bridge in list(self.connections.items()):
+                if bridge.peer == identity or (bridge.pending_pairing or {}).get("identity") == identity:
+                    self._disconnect(connection)
 
     def stop(self):
         with self.lock:
             listener, self.listener = self.listener, None
             if listener:
                 listener.close()
-            self._disconnect()
+            for connection in list(self.connections):
+                self._disconnect(connection)

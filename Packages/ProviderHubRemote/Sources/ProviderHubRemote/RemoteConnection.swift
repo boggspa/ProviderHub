@@ -2,6 +2,9 @@ import CryptoKit
 import Foundation
 import Network
 import Security
+#if canImport(UIKit)
+import UIKit
+#endif
 
 public struct RemoteBootstrap: Codable {
     public var host: String
@@ -51,6 +54,7 @@ public enum RemotePairingError: LocalizedError {
 public final class RemoteChannel {
     let bootstrap: RemoteBootstrap
     let identity: Curve25519.Signing.PrivateKey
+    let deviceName: String
     let ephemeral = Curve25519.KeyAgreement.PrivateKey()
     let nonce = Data((0..<16).map { _ in UInt8.random(in: 0...255) })
     var transcript: Data?
@@ -62,9 +66,10 @@ public final class RemoteChannel {
     public private(set) var confirmCode: String?
     public var emit: (([String: Any]) throws -> Void)?
     public var onMessage: (([String: Any]) throws -> Void)?
-    public init(bootstrap: RemoteBootstrap, identity: Curve25519.Signing.PrivateKey) {
+    public init(bootstrap: RemoteBootstrap, identity: Curve25519.Signing.PrivateKey, deviceName: String = "iPhone / iPad") {
         self.bootstrap = bootstrap
         self.identity = identity
+        self.deviceName = String(deviceName.prefix(60))
     }
     public func start() throws {
         try emit?(["t": "clientHello", "protocol": RemoteE2EE.protocolName,
@@ -94,7 +99,7 @@ public final class RemoteChannel {
                 iphoneIdentityPubKeyB64: identity.publicKey.rawRepresentation.base64EncodedString())
             transcript = digest
             confirmCode = RemoteE2EE.confirmCode(digest)
-            try emit?(["t": "clientAuth", "sessionId": bootstrap.sessionId,
+            try emit?(["t": "clientAuth", "sessionId": bootstrap.sessionId, "deviceName": deviceName,
                        "iphoneIdentityPubKey": identity.publicKey.rawRepresentation.base64EncodedString(),
                        "confirmCode": confirmCode!, "transcriptSig": try identity.signature(for: digest).base64EncodedString()])
         case "serverAuth":
@@ -164,7 +169,12 @@ public final class RemoteConnection: CompanionTransport {
         generation = UUID()
         let current = generation
         buffer.removeAll()
-        let channel = RemoteChannel(bootstrap: bootstrap, identity: identity)
+        #if canImport(UIKit)
+        let deviceName = UIDevice.current.model
+        #else
+        let deviceName = "Mac companion"
+        #endif
+        let channel = RemoteChannel(bootstrap: bootstrap, identity: identity, deviceName: deviceName)
         self.channel = channel
         let tcp = NWProtocolTCP.Options()
         tcp.connectionTimeout = 15

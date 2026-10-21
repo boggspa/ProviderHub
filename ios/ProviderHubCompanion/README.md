@@ -247,7 +247,15 @@ also needs its own metadata and review. Neither is needed for internal testing.
 
 ## Scope
 
-This first version permits one active phone. No cloud relay, push notifications,
+The Mac accepts up to eight simultaneous device connections. Pair each iPhone
+or iPad separately; each has its own encrypted session, selected chat and event
+cursor. Disconnecting or removing one device leaves the others connected.
+Removing a device immediately blocks its access; it may pair again only after
+you approve a fresh matching code on the Mac. This also works with an older
+companion retaining its Keychain identity. Compatible app releases use the same
+pairing protocol and do not need matching app version or build numbers.
+
+No cloud relay, push notifications,
 background execution or Bonjour discovery is included. QR generation/decoding
 is verified with Core Image and Vision; live physical-camera scanning still
 requires an on-device check. The camera stops when the scanner closes or the

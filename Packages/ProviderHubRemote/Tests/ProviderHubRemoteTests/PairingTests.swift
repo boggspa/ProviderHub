@@ -108,6 +108,19 @@ final class PairingTests: XCTestCase {
         }
     }
 
+    func testPairingUsesStableProtocolIdentityAcrossAppReleaseVersions() throws {
+        for macVersion in ["0.5.1", "0.5.26", "1.0.0"] {
+            var object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(payload().utf8)) as? [String: Any])
+            object["appVersion"] = macVersion
+            object["build"] = "different-from-this-companion"
+            object["capabilities"] = ["future-control"]
+            let text = String(decoding: try JSONSerialization.data(withJSONObject: object), as: UTF8.self)
+            let decoded = try RemoteBootstrap.decodePairingText(text)
+            XCTAssertEqual(decoded.sessionId, "providerhub-phone")
+            XCTAssertEqual(decoded.macIdentityPubKey, Data(repeating: 7, count: 32).base64EncodedString())
+        }
+    }
+
     func testMalformedAndUnrelatedQRDataAreRejected() throws {
         for text in ["", "https://example.com", "providerhub://pair?token=unexpected", "{}", String(repeating: "x", count: 4097)] {
             XCTAssertThrowsError(try RemoteBootstrap.decodePairingText(text))
