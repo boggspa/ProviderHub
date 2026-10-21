@@ -1262,6 +1262,7 @@ class RemoteServer:
             threading.Thread(target=self._reader, args=(conn,), daemon=True).start()
 
     def _reader(self, connection):
+        failure = None
         try:
             buffer = b""
             while True:
@@ -1279,7 +1280,7 @@ class RemoteServer:
                     frame = json.loads(line)
                     self.dispatch(lambda frame=frame: self._receive(connection, frame))
         except (OSError, ValueError, RemoteError) as exc:
-            self.error = str(exc)[:300]
+            failure = str(exc)[:300]
         finally:
             # Stop/revocation already cleared this socket on the serial owner.
             # Do not enqueue a late callback after that owner has shut down.
@@ -1287,6 +1288,13 @@ class RemoteServer:
                 notify_closed = connection in self.connections and self.listener is not None
             def closed():
                 with self.lock:
+                    # A deliberate stop, revocation or reconnect may close the
+                    # descriptor while recv is running. Its late EBADF belongs
+                    # to that retired socket, not to the current connection.
+                    if connection not in self.connections:
+                        return
+                    if failure:
+                        self.error = failure
                     self._disconnect(connection)
             if notify_closed: self.dispatch(closed)
 

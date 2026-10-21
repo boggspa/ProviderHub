@@ -1,5 +1,6 @@
 """Independent authenticated devices against the real serial ChatHost."""
 from concurrent.futures import Future
+import errno
 import json
 from pathlib import Path
 import queue
@@ -9,7 +10,7 @@ import threading
 import time
 import unittest
 
-from chat_remote import PhoneClient, encode_line
+from chat_remote import MacBridge, PhoneClient, encode_line
 from chat_runtime import ChatStore
 from chat_sessions import ChatHost
 from test_chat_runtime import FakeTransport, response
@@ -255,6 +256,38 @@ class RemoteDeviceTests(unittest.TestCase):
         producer.join(2)
         self.assertTrue(completed, "Chat/output-lock holders must not wait on the network lock")
         self.assertEqual(list(result[0].values()), [self.chats[0]])
+
+    def test_closed_socket_reader_cannot_overwrite_healthy_pairing_status(self):
+        device = Device(self)
+        device.pair()
+        class RetiredSocket:
+            def recv(self, size):
+                raise OSError(errno.EBADF, "Bad file descriptor")
+        # This models recv completing after reconnect/revocation has retired
+        # that socket. A healthy device remains on the same server.
+        self.server._reader(RetiredSocket())
+        self.dispatch(lambda: None)
+        self.assertIsNone(self.server.status()["error"])
+        self.assertEqual(self.server.status()["connectedCount"], 1)
+        device.select(self.chats[0])
+
+    def test_live_socket_reader_failure_is_still_reported_and_disconnected(self):
+        class FailingSocket:
+            closed = False
+            def recv(self, size):
+                raise OSError(errno.ECONNRESET, "Connection reset by peer")
+            def shutdown(self, how):
+                pass
+            def close(self):
+                self.closed = True
+        connection = FailingSocket()
+        def attach():
+            self.server.connections[connection] = MacBridge(lambda _: None, "providerhub-phone")
+        self.dispatch(attach)
+        self.server._reader(connection)
+        self.wait_for(lambda: connection not in self.server.connections)
+        self.assertIn("Connection reset by peer", self.server.status()["error"])
+        self.assertTrue(connection.closed)
 
 
 if __name__ == "__main__":
