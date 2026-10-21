@@ -615,7 +615,7 @@ final class BridgeModel: ObservableObject {
         if activeRequests > 0 || claudeLive || codexLive {
             // While one desktop session is live, only changes scoped to the
             // idle harness's selection are writable; the launch flow offers a
-            // gateway restart when the new selection needs a fresh snapshot.
+            // live gateway refresh when the new selection needs a fresh snapshot.
             switch kind {
             case .prefs:
                 try await writeSettings()
@@ -675,15 +675,21 @@ final class BridgeModel: ObservableObject {
                              digest: status["codex_catalogue_digest"] as? String)
     }
 
-    func confirmGatewayRestart(peersConnected: Bool, otherHarness: String) -> Bool {
-        let alert = NSAlert()
-        alert.messageText = "Restart the gateway for this launch?"
-        alert.informativeText = peersConnected
-            ? "The gateway is running with an earlier model selection, and \(otherHarness) or Chat may be connected to it. Restarting briefly interrupts them; they reconnect automatically."
-            : "The gateway is running with an earlier model selection. Restarting it loads your latest selection."
-        alert.addButton(withTitle: "Cancel")
-        alert.addButton(withTitle: "Restart Gateway")
-        return alert.runModal() == .alertSecondButtonReturn
+    func refreshGateway(_ surface: LaunchSurface, expected: String) async throws -> GatewayStatus? {
+        var request = try authorizedRequest(path: "/_bridge/refresh")
+        request.httpMethod = "POST"
+        request.timeoutInterval = 30
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let key = surface == .claude ? "catalogue_fingerprint" : "codex_catalogue_digest"
+        request.httpBody = try JSONSerialization.data(withJSONObject: [key: expected])
+        let (data, response) = try await URLSession.shared.data(for: request)
+        let value = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        guard (response as? HTTPURLResponse)?.statusCode == 200, let value else {
+            let error = value?["error"] as? [String: Any]
+            throw WorkerError(message: error?["message"] as? String ?? "The gateway could not refresh its selection. Try launching again.")
+        }
+        return GatewayStatus(active: value["active"] as? Int, fingerprint: value["catalogue_fingerprint"] as? String,
+                             digest: value["codex_catalogue_digest"] as? String)
     }
 
     func refreshDesktopState() {
@@ -794,7 +800,11 @@ final class BridgeModel: ObservableObject {
                 if desktopOwnedHarnessRunning || activeRequests > 0 { throw WorkerError(message: "Close the desktop sessions using this gateway before stopping it.") }
                 await stopGateway()
                 tell("Gateway stopped. Your model mappings are saved for the next launch.")
-            } else { try await save(); try await startGateway(); tell("Gateway ready. You can test a model or launch a desktop session.") }
+            } else {
+                try await startGatewayForUse { try await save() }
+                tell(changed ? "Gateway ready with saved settings. Your edits remain pending for the next desktop launch."
+                             : "Gateway ready. You can test a model or launch a desktop session.")
+            }
         } catch { tell(error.localizedDescription, error: true) }
     }
 

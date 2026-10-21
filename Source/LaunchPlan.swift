@@ -1,9 +1,9 @@
 // The Hub's launch orchestration for the shared gateway: which pending
 // settings may be written while peers are served, when the gateway must be
-// restarted, and when an idle gateway may stop. Claude Desktop, Codex /
+// refreshed, and when an idle gateway may stop. Claude Desktop, Codex /
 // ChatGPT Desktop and Chat share one gateway, so a launch must not refuse
-// an adjacent app merely because a peer is busy, must never restart or
-// stop the gateway under in-flight work, and must never rewrite a live
+// an adjacent app merely because a peer is busy, must never stop the gateway
+// under in-flight work, and must never rewrite a live
 // app's profile.
 //
 // This file holds the production code paths themselves. BridgeModel conforms
@@ -25,8 +25,8 @@ enum ChangeKind: String, Equatable {
     /// Both selections.
     case mixed
     /// The port or a provider connection. The running gateway listens on the
-    /// saved port, Chat reads connections live, and both desktop snapshots
-    /// sign every connection, so these are written only to a stopped gateway.
+    /// saved port; a launch defers a port edit while the listener is running.
+    /// Provider connection changes can be loaded by a routing refresh.
     case shared
 }
 
@@ -112,34 +112,25 @@ protocol LaunchHost: AnyObject {
     func gatewayStatus() async throws -> GatewayStatus?
     func startGateway() async throws
     func stopGateway() async
-    func confirmGatewayRestart(peersConnected: Bool, otherHarness: String) -> Bool
+    func refreshGateway(_ surface: LaunchSurface, expected: String) async throws -> GatewayStatus?
 }
 
 extension LaunchHost {
     var changeKind: ChangeKind { classifyChange(settings, from: savedSettings) }
     var chatBusy: Bool { chatWorking || chatHasActiveWork }
 
+    /// Starting a service must not inherit Save's activity restrictions. While
+    /// sessions are active, serve the saved endpoint and leave edits pending.
+    func startGatewayForUse(save: () async throws -> Void) async throws {
+        guard !running else { return }
+        refreshDesktopState()
+        if !(chatBusy || activeRequests > 0 || claudeLive || codexLive) { try await save() }
+        try await startGateway()
+    }
+
     /// No surface is keeping the gateway alive and nothing is in flight.
     func mayStopGateway() -> Bool {
         !(claudeLive || codexLive || chatWindowOpen || chatBusy) && activeRequests == 0
-    }
-
-    /// A refusal naming what keeps the gateway from reloading, or nil.
-    func reloadBlocker(_ goal: String) -> String? {
-        if activeRequests > 0 {
-            let noun = activeRequests == 1 ? "request" : "requests"
-            return "The gateway has \(activeRequests) \(noun) in flight. Wait for \(activeRequests == 1 ? "it" : "them") to finish, then launch again so the gateway can load \(goal)."
-        }
-        if chatBusy { return "Chat is working. Stop the Chat turn, then launch again so the gateway can load \(goal)." }
-        return nil
-    }
-
-    /// Re-read the gateway's in-flight count rather than trusting the poll.
-    func refreshActiveRequests() async throws {
-        guard let active = try await gatewayStatus()?.active else {
-            throw LaunchRefusal(message: "Could not verify that the gateway is idle.")
-        }
-        activeRequests = active
     }
 
     /// A live app's profile is never rewritten from under it.
@@ -151,37 +142,31 @@ extension LaunchHost {
             return "Quit Claude before changing its model or provider settings."
         case .mixed where claudeLive || codexLive:
             return "Quit the desktop sessions using this gateway before changing both apps' model settings."
-        case .shared where claudeLive || codexLive:
-            return "Quit the desktop sessions using this gateway before changing its port or provider connections."
         default:
             return nil
         }
     }
 
     /// Save pending settings, prepare `surface`, and leave the gateway serving
-    /// the prepared snapshot. Peers keep being served unless a reload is
-    /// needed and confirmed while nothing is in flight. When the launch fails
+    /// the prepared snapshot. Live refresh preserves each in-flight request.
+    /// A pending port change stays pending while the existing listener runs.
+    /// When the launch fails
     /// before the gateway reloads, the saved settings are rolled back and the
     /// edits stay pending, so a refused or cancelled launch changes nothing.
     func prepareGatewayForLaunch(_ surface: LaunchSurface,
                                  prepare: () async throws -> [String: Any]) async throws -> [String: Any] {
         await waitForCatalogueRefresh()
         refreshDesktopState()
+        let previous = savedSettings, draft = settings
+        let deferredPort = running && settings.port != savedSettings.port ? settings.port : nil
+        if deferredPort != nil { settings.port = savedSettings.port }
+        defer { if let deferredPort { settings.port = deferredPort } }
         let kind = changeKind
         if let refusal = liveProfileRefusal(kind) { throw LaunchRefusal(message: refusal) }
-        let previous = savedSettings, draft = settings
-        var writing = false, wrote = false, reloaded = false, stoppedForShared = false
+        var writing = false, wrote = false, reloaded = false
         do {
-            if kind == .shared && running {
-                // The saved port is the Hub's endpoint, so it may only change
-                // once the old server is gone.
-                try await refreshActiveRequests()
-                if let blocker = reloadBlocker("the new provider settings") { throw LaunchRefusal(message: blocker) }
-                await stopGateway()
-                stoppedForShared = true
-            }
             // Selection changes are safe to write while peers are served: the
-            // running gateway serves the snapshot it loaded at startup, and
+            // running requests keep the snapshot they started with, and
             // the live app (refused above) is never the one being changed.
             if kind != .unchanged { writing = true; try await writeSettings(); wrote = true }
             let prepared = try await prepare()
@@ -199,51 +184,32 @@ extension LaunchHost {
                 do { try await writeSettings(); settings = draft }
                 catch _ { settings = pending; reverted = false; keptNew = wrote }
             }
-            // A shared change stopped the old gateway before writing. Bring a
-            // gateway back for the peers on whatever is saved now, unless the
-            // disk may disagree with the Hub's saved endpoint.
-            var gatewayDown = false
-            if stoppedForShared && !running {
-                if reverted || keptNew { _ = try? await startGateway() }
-                gatewayDown = !running
-            }
             var message = error.localizedDescription
             if keptNew {
-                message += stoppedForShared && running ? " The new settings stay saved, and the gateway has loaded them."
-                                                       : " The new settings stay saved but are not loaded yet."
+                message += " The new settings stay saved but are not loaded yet."
             } else if !reverted {
                 message += " Provider Hub could not confirm which settings are saved."
             } else if writing {
                 message += " Your settings changes were not saved; they are still pending."
             }
-            if gatewayDown { message += " The gateway is stopped; choose Start gateway to start it again." }
             if message == error.localizedDescription { throw error }
             throw LaunchRefusal(message: message)
         }
     }
 
-    /// Restart the running gateway only when it serves a different snapshot
-    /// than `expected`, nothing is in flight, and the user confirms. The
-    /// in-flight check is repeated after the confirmation, which is modal.
+    /// Refresh only when preparation changed the serving snapshot. Activity
+    /// does not block launches: the gateway pins routing per request.
     func ensureGatewaySnapshot(_ surface: LaunchSurface, expected: String?, reloaded: inout Bool) async throws {
         guard running, let expected else { return }
         let status = try await gatewayStatus()
         if let active = status?.active { activeRequests = active }
         if let status, surface.serving(status) == expected { return }
-        let goal = "\(surface.label)'s selection"
-        if let blocker = reloadBlocker(goal) { throw LaunchRefusal(message: blocker) }
-        let peers = claudeLive || codexLive || chatWindowOpen || chatBusy
-        guard confirmGatewayRestart(peersConnected: peers, otherHarness: surface.otherLabel) else {
-            throw LaunchRefusal(message: "Launch cancelled. The gateway keeps its earlier selection until it is restarted.")
-        }
-        try await refreshActiveRequests()
-        if let blocker = reloadBlocker(goal) { throw LaunchRefusal(message: blocker) }
-        await stopGateway()
-        try await startGateway()
+        let refreshed = try await refreshGateway(surface, expected: expected)
         reloaded = true
-        guard let restarted = try await gatewayStatus(), surface.serving(restarted) == expected else {
-            throw LaunchRefusal(message: "The restarted gateway did not load the prepared selection. Reconnect and try again.")
+        guard let refreshed, surface.serving(refreshed) == expected else {
+            throw LaunchRefusal(message: "The gateway did not load the prepared selection. Try launching again.")
         }
+        if let active = refreshed.active { activeRequests = active }
     }
 
     /// Stop the gateway when nothing uses it, checking the live in-flight

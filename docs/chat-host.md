@@ -197,6 +197,20 @@ window, is unchanged.
 
 ## Updates and version changes
 
+Desktop launches refresh changed model routing with authenticated
+`POST /_bridge/refresh`, passing the prepared catalogue fingerprint or Codex
+digest. The gateway validates the complete replacement before atomically
+installing it. Each HTTP request pins its routing snapshot, including over
+streaming and retry cleanup; new requests use the refreshed selection. The
+listener, provider admission limits, response ownership, replay keys and
+usage counters remain shared. Chat activity and in-flight requests do not
+block this refresh or require a restart confirmation.
+
+A pending port edit remains pending while a gateway is already listening, so
+launching another app keeps the endpoint used by existing sessions. It can be
+saved after the gateway is stopped, or used at the next fresh start. Editing
+the model profile of an already-open target desktop app remains guarded.
+
 - The Host imports the worker's lazily imported modules at startup, so a
   bundle replaced underneath a running Host does not mix code versions on
   a later lazy import.
