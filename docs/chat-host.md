@@ -65,6 +65,12 @@ the reference implementation of connect-or-launch.
 The Host and the stdio worker (`chat_runtime.py`) are mutually exclusive on a
 state root: both hold `chats/.lock`.
 
+The stdio worker also serves `host.sock` for peer messaging and local enrollment.
+Its `StdioPeerSocket` shares the existing serial command owner and does not own
+the UI or worker lifetime. It refuses desktop attachments and control shutdown
+commands. Closing the stdio pipe still shuts down that worker. See
+[peer mailboxes](peer-messaging.md) for enrollment and adapter setup.
+
 ## Framing
 
 JSON objects, one per line (`\n`), UTF-8, in both directions: the same commands
@@ -112,10 +118,16 @@ runs are not silently ended to match a newly opened UI.
   therefore never steers another's selection or browser surface. Subscriptions
   are keyed by attachment and dropped when it detaches. The phone keeps its
   own separate `remote` subscription and pairing boundary.
-- **control**: status and lifetime only. It accepts any integer protocol, so an
+- **control**: status, lifetime and explicit local peer enrollment. It accepts any integer protocol, so an
   updated app can retire an older Host. It may send `host_status`, `detach`
-  and `shutdown`; anything else is answered with `host_error`. It receives no
-  chat events.
+  and `shutdown`, plus `peer_enroll`, `peer_enroll_chat` and `peer_revoke`;
+  anything else is answered with `host_error`. It receives no chat events.
+  The stdio worker permits status, detach and peer enrollment only.
+- **peer**: one enrolled logical thread, authenticated with its own endpoint
+  token instead of the Host credential. Protocol must equal 1. It may send
+  only `peer_call` and `detach`, never replaces the desktop attachment, and
+  receives no chat events. Sender identity comes from the bound principal.
+  Its hello adds `thread_id` and `token`; its `client` label is not identity.
 
 ## Host commands
 
@@ -130,6 +142,10 @@ are answered to the asking attachment as
 | `shutdown` | Explicit stop: Stop every run, end background processes, close attachments with `host_detached` / `shutdown`, remove the socket and credential, release the lock. `{"ifIdle": true}` refuses while any chat, approval, question or process is active. |
 | `gateway_status` | desktop only: replies `{"event": "gateway", "state": "ready"|"stopped", "pid", "active"}`. |
 | `gateway_start` | desktop only: ensures a gateway is serving, then refreshes the model catalogue. |
+| `peer_enroll` | Explicit local enrollment of an external endpoint, returning its public thread and one secret token only to the requesting attachment. Fields: `app`, `native_thread_id`, `workspace`, optional `label`, `model`, `provider`. External identities are marked enrolled, never native-verified. |
+| `peer_enroll_chat` | Enables peer tools for the existing top-level Hub `chat` UUID, bound to its current workspace. |
+| `peer_revoke` | Revokes a `thread_id`, its credentials and existing live principals. |
+| `peer_call` | Peer role only: `{name, arguments, request}` invokes the scoped mailbox API. Responds privately with `{event:"peer_result",request,result}` or `host_error`. |
 
 There is deliberately no gateway stop through the Chat Host. Stopping or
 restarting the gateway is the hub's decision (`gateway_service.stop`).
