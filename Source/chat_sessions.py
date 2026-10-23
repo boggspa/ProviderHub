@@ -85,7 +85,11 @@ class SessionStore:
     def delete(self, identifier):
         self.host.store.delete(identifier)
         with self.host._metadata:
-            self.host.headers.pop(identifier, None)
+            header = self.host.headers.pop(identifier, None)
+        if header and header.get("workspace"):
+            endpoint = self.host.peers.broker.find_internal(identifier, header["workspace"])
+            if endpoint is not None:
+                self.host.peers.broker.revoke(endpoint["thread_id"])
 
     def headers(self):
         with self.host._metadata:

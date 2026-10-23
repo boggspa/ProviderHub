@@ -55,6 +55,8 @@ or interruption is created. An enrolled Hub model receives guidance to poll
 at useful work boundaries, and its reads are normal persisted tool results.
 Helpers, Team members, Side Chat and editing lanes do not inherit the parent's
 endpoint. Only top-level Hub chats are supported in this first version.
+Deleting a Hub chat revokes its endpoint without reading its transcript; saved
+mail receipts remain subject to normal retention.
 
 `online` means recent authenticated adapter activity, not that an agent is
 thinking. The MCP adapter heartbeats every 30 seconds; leases expire after
@@ -80,7 +82,8 @@ uv run --python 3.13 python Source/peer_mcp.py enroll-chat EXISTING_HUB_CHAT_UUI
 
 The native UUID is the saved chat's `id` (and its JSONL filename under
 `<state>/chats`). Enrollment does not start or resume that chat. Its next model
-request can advertise the mailbox tools.
+request can advertise the mailbox tools. Enrollment and revocation are recorded
+as visible notices in that chat, with the current enrollment saved in metadata.
 
 Enroll one external conversation and retain its token in a new private file:
 

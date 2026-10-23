@@ -499,6 +499,11 @@ class HostProcessTests(unittest.TestCase):
         desktop, events = self.attach()
         chat_id = self.chat(events)["id"]
         own = admin(self.root, {"command": "peer_enroll_chat", "chat": chat_id})["thread"]
+        notice = desktop.until(lambda row: row.get("event") == "entry" and
+                               row.get("entry", {}).get("text", "").startswith("Peer messaging enabled"), timeout=5)
+        self.assertEqual(notice["entry"]["kind"], "notice")
+        saved = chat_host.ChatStore(self.root, lock=False).load(chat_id)
+        self.assertTrue(saved["peerEnrollment"]["enabled"])
         enrolled = admin(self.root, {"command": "peer_enroll", "app": "claude_desktop", "native_thread_id": "review-chat",
                                      "workspace": str(self.workspace), "label": "Reviewer", "model": "claude/fable"})
         peer = PeerClient(self.root, {"thread_id": enrolled["thread"]["thread_id"], "token": enrolled["token"]}, heartbeat=False)
@@ -557,6 +562,30 @@ class HostProcessTests(unittest.TestCase):
         self.assertEqual(identity["identity_assurance"], "enrolled")
         self.assertTrue(replies[3]["result"]["isError"])
         self.assertEqual(self.gateway.requests, [])
+
+    def test_stdio_chat_survives_peer_socket_path_limit(self):
+        root = self.root / ("long-state-" + "x" * 95)
+        root.mkdir(mode=0o700)
+        self.gateway = ScriptedGateway(root)
+        self.gateway.reply("Chat works without its optional socket.")
+        environment = dict(os.environ, MISTRAL_BRIDGE_STATE_DIR=str(root), HOME=str(self.workspace))
+        worker = subprocess.Popen([sys.executable, "-B", str(SOURCE / "chat_runtime.py")],
+                                  stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self.log, env=environment)
+        self.clients.append(worker)
+        def until(predicate):
+            while line := worker.stdout.readline():
+                event = json.loads(line)
+                if predicate(event):
+                    return event
+            raise AssertionError("The stdio worker ended early")
+        self.assertIn("Peer socket unavailable", until(lambda row: row.get("event") == "notice")["message"])
+        chat = until(lambda row: row.get("event") == "selected" and row.get("id"))["id"]
+        until(lambda row: row.get("event") == "ready")
+        worker.stdin.write(json.dumps({"command": "send", "chat": chat, "text": "Hi"}).encode() + b"\n")
+        worker.stdin.flush()
+        until(lambda row: row.get("event") == "entry" and row.get("entry", {}).get("text") == "Chat works without its optional socket.")
+        worker.stdin.close()
+        self.assertEqual(worker.wait(15), 0)
 
     def test_peer_mail_survives_restart_and_bad_token_cannot_attach(self):
         from peer_mcp import PeerClient, admin

@@ -29,6 +29,7 @@ from urllib.parse import urlsplit
 
 from bridge_core import gateway_token, load_settings, private_directory, state_root
 from chat_tools import ChatToolRunner, TOOL_DEFINITIONS
+from chat_peers import NAMES as PEER_TOOLS
 from chat_attachments import prepare_attachments, prepare_tool_content, bound_image_history
 from chat_history import portable_history
 import chat_blackboard
@@ -1229,7 +1230,7 @@ class ChatService:
                             elif name in chat_questions.TOOLS:
                                 chat_questions.validate(name, arguments)
                                 description = {"summary": "Ask for user input", "requires_approval": False}
-                            elif isinstance(name, str) and name.startswith("hub_"):
+                            elif name in PEER_TOOLS:
                                 if self.peers is None:
                                     raise ValueError("Peer messaging is unavailable for this chat.")
                                 description = self.peers.describe(self, name, arguments)
@@ -1264,7 +1265,7 @@ class ChatService:
                                     result = chat_todos.execute(self, name, arguments)
                                 elif name in chat_questions.TOOLS:
                                     result = chat_questions.execute(self, name, arguments)
-                                elif isinstance(name, str) and name.startswith("hub_"):
+                                elif name in PEER_TOOLS:
                                     result = self.peers.execute(self, name, arguments)
                                 elif self.capabilities and self.capabilities.handles(name):
                                     result = self.capabilities.execute(self, name, arguments)
@@ -1492,11 +1493,17 @@ def main():
     try:
         root = state_root()
         service = ChatHost(ChatStore(root), GatewayClient(root), emit, dispatch=owner.dispatch, dispatch_event=owner.dispatch_event)
-        peer_socket = StdioPeerSocket(root, service, owner)
-        peer_socket.start()
+        candidate = StdioPeerSocket(root, service, owner)
+        try:
+            candidate.start()
+            peer_socket = candidate
+        except (OSError, ValueError) as exc:
+            candidate.close()
+            emit({"event": "notice", "message": "Peer socket unavailable; Chat remains available: " + str(exc)})
         service.initialize()
         threading.Thread(target=read_commands, daemon=True, name="chat-stdin").start()
-        owner.run(service, intercept=peer_socket.intercept, refuse=peer_socket.refuse)
+        owner.run(service, intercept=peer_socket.intercept if peer_socket else None,
+                  refuse=peer_socket.refuse if peer_socket else None)
     except Exception as exc:
         emit({"event": "error", "message": str(exc)})
     finally:

@@ -40,7 +40,7 @@ import time
 import uuid
 
 from bridge_core import BridgeError, private_directory, state_root
-from chat_runtime import MAX_NATIVE_RESULT, ChatStore, CommandOwner, GatewayClient
+from chat_runtime import MAX_NATIVE_RESULT, ChatStore, CommandOwner, GatewayClient, entry
 from chat_sessions import ChatHost
 import gateway_service
 
@@ -513,13 +513,22 @@ attachment's welcome snapshot are the record, not a replay of these events.
                 if set(command) - {"command", "request", "chat"}:
                     raise HostError("Unsupported chat enrollment fields.")
                 identifier = command.get("chat")
-                service = self.service.sessions.get(identifier)
-                chat = service.chat if service else self.service.store.load(identifier)
-                result = {"thread": self.service.peers.enroll(chat, restore=True)}
+                service = self.service.session(identifier)
+                with service._mutex:
+                    endpoint = self.service.peers.enroll(service.chat, restore=True)
+                    try:
+                        self._peer_chat_notice(endpoint, True)
+                    except Exception:
+                        broker.revoke(endpoint["thread_id"])
+                        raise
+                    result = {"thread": endpoint}
             else:
                 if set(command) - {"command", "request", "thread_id"}:
                     raise HostError("Unsupported revocation fields.")
+                endpoint = broker.thread(command.get("thread_id"))
                 broker.revoke(command.get("thread_id"))
+                if endpoint:
+                    self._peer_chat_notice(endpoint, False)
                 result = {"revoked": True}
             origin.send(frame({"event": "peer_result", "request": command.get("request"), "result": result}))
             return True
@@ -545,6 +554,20 @@ attachment's welcome snapshot are the record, not a replay of these events.
         elif action == "native_result":
             command["_attachment"] = origin.id
         return False
+
+    def _peer_chat_notice(self, endpoint, enabled):
+        if endpoint["app"] != "provider_hub" or endpoint["native_thread_id"] not in self.service.headers:
+            return
+        service = self.service.session(endpoint["native_thread_id"])
+        with service._mutex:
+            record = {"thread_id": endpoint["thread_id"], "workspace": endpoint["workspace"], "enabled": enabled}
+            if service.chat.get("peerEnrollment") == record:
+                return
+            service.chat["peerEnrollment"] = record
+            text = ("Peer messaging enabled for this chat. Enrolled peers in " + endpoint["workspace"] +
+                    " may exchange attributed reference messages. Delivery requires polling; no agent is woken.") if enabled else "Peer messaging revoked for this chat."
+            service.add(entry("notice", text, service.chat.get("route", "")))
+            service.save()
 
     def refuse(self, command, error, origin):
         action = command.get("command") if isinstance(command, dict) else None

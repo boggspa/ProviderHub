@@ -679,10 +679,12 @@ class ConcurrentChatTests(unittest.TestCase):
 
     def test_delete_damaged_unloaded_chat_does_not_decode_its_transcript(self):
         a, b = self.create("a"), self.create("b")
+        endpoint = self.host.peers.enroll(self.store.load(a))
         with self.store.path(a).open("a") as stream: stream.write("invalid JSON\n")
         with patch.object(self.store, "load", side_effect=AssertionError("Delete loaded history")):
             self.host.handle({"command": "delete", "chat": a})
         self.assertFalse(self.store.path(a).exists())
+        self.assertEqual(self.host.peers.broker.thread(endpoint["thread_id"])["status"], "revoked")
         self.assertEqual(self.host.view_id, b)
 
     def test_auxiliary_rejections_settle_the_matching_request(self):

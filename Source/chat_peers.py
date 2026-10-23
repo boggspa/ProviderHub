@@ -6,6 +6,8 @@ starts a turn, releases a workspace claim, or inherits a parent's identity.
 from __future__ import annotations
 
 import json
+import sqlite3
+import unicodedata
 
 from peer_broker import PeerBroker
 
@@ -46,9 +48,14 @@ class ChatPeers:
         self.broker = PeerBroker(directory)
 
     def enroll(self, chat, *, restore=False):
+        # Native titles have a character limit; the broker bounds display
+        # labels by UTF-8 bytes. Preserve identity while normalizing display.
+        label = "".join(" " if unicodedata.category(char) in {"Cc", "Cs"} else char
+                        for char in chat.get("title", ""))
+        label = label.encode("utf-8")[:200].decode("utf-8", "ignore")
         return self.broker.ensure_internal(
             native_thread_id=chat["id"], workspace=chat["workspace"],
-            label=chat.get("title", ""), model=chat.get("route", ""),
+            label=label, model=chat.get("route", ""),
             provider=chat.get("route", "").split("/", 1)[0], restore=restore)
 
     def endpoint(self, service):
@@ -59,9 +66,16 @@ class ChatPeers:
         return endpoint if endpoint and endpoint["status"] != "revoked" else None
 
     def definitions(self, service):
-        if self.endpoint(service) is None:
+        try:
+            if self.endpoint(service) is None:
+                return []
+        except (ValueError, OSError, RuntimeError, sqlite3.Error) as exc:
+            # Optional discovery must not stop an otherwise usable chat.
+            notice = "Peer messaging unavailable: " + str(exc)
+            if getattr(service, "_peer_notice", None) != notice:
+                service._peer_notice = notice
+                service.emit({"event": "notice", "chat": service.chat["id"] if service.chat else None, "message": notice})
             return []
-        self.broker.dispatch(self.principal(service), "hub_self", {})
         return TOOL_DEFINITIONS
 
     def principal(self, service):

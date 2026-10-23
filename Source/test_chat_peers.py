@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
 from chat_peers import ChatPeers, NAMES
 from chat_runtime import ChatService, ChatStore
@@ -67,6 +68,28 @@ class ChatPeerTests(unittest.TestCase):
         self.assertFalse(NAMES & {tool["name"] for tool in payload["tools"]})
         self.assertEqual(self.peers.enroll(service.chat, restore=True)["thread_id"], endpoint["thread_id"])
         self.assertTrue(self.peers.definitions(service))
+
+    def test_valid_unicode_titles_are_safe_display_labels(self):
+        service, _ = self.service()
+        for title in ("é" * 101, "😀" * 64, "Reviewer\nwith\ttabs"):
+            with self.subTest(title=title):
+                service.chat["title"] = title
+                endpoint = self.peers.enroll(service.chat)
+                self.assertLessEqual(len(endpoint["label"].encode("utf-8")), 200)
+                self.assertNotIn("\n", endpoint["label"])
+                self.assertNotIn("\t", endpoint["label"])
+                self.assertTrue(NAMES & {tool["name"] for tool in service.payload(service.choice())["tools"]})
+                self.assertFalse(self.peers.execute(service, "hub_self", {})["is_error"])
+
+    def test_optional_broker_failure_does_not_abort_model_payload(self):
+        service, _ = self.service()
+        with mock.patch.object(self.peers.broker, "find_internal", side_effect=OSError("Broker unavailable")):
+            with mock.patch.object(service, "emit") as emit:
+                for _ in range(2):
+                    payload = service.payload(service.choice())
+                    self.assertFalse(NAMES & {tool["name"] for tool in payload["tools"]})
+                self.assertEqual(emit.call_count, 1)
+                self.assertEqual(emit.call_args.args[0]["event"], "notice")
 
     def test_real_model_tool_result_keeps_peer_data_and_current_provenance(self):
         call = {"role": "assistant", "content": [{"type": "tool_use", "id": "read-peers", "name": "hub_read_messages", "input": {}}], "stop_reason": "tool_use"}
