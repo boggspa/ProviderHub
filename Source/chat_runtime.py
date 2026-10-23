@@ -449,6 +449,7 @@ class ChatService:
         self.role = role
         self.preferences = {"webSearch": True}
         self.capabilities = None
+        self.peers = None
         self.question_inbox = []
         self.child_factory = child_factory or (lambda: GatewayClient(transport.root))
         self.child = None
@@ -905,6 +906,8 @@ class ChatService:
         tools = list(TOOL_DEFINITIONS) if choice["supportsTools"] else []
         if tools and self.capabilities:
             tools.extend(self.capabilities.definitions(self))
+        peer_tools = self.peers.definitions(self) if tools and self.peers else []
+        tools.extend(peer_tools)
         if self.role in {"side", "lane"}:
             tools = [tool for tool in tools if tool["name"] in {"read_file", "search_files"}]
         elif self.role == "parent" and tools:
@@ -935,6 +938,9 @@ class ChatService:
                    "_provider_hub_connection": chat["scope"], "_provider_hub_host_retries": self.role == "team"}
         payload["_provider_hub_conversation"] = ((self.team_parent.chat["id"] + ":")
                                                if self.role == "team" else "") + chat["id"]
+        if peer_tools:
+            from chat_peers import GUIDANCE
+            payload["system"] += GUIDANCE
         if attached:
             payload["system"] += ("\nAttached folders: " + ", ".join(attached) +
                                   ". They share this chat's file tools and approvals. Absolute paths may target "
@@ -1223,6 +1229,10 @@ class ChatService:
                             elif name in chat_questions.TOOLS:
                                 chat_questions.validate(name, arguments)
                                 description = {"summary": "Ask for user input", "requires_approval": False}
+                            elif isinstance(name, str) and name.startswith("hub_"):
+                                if self.peers is None:
+                                    raise ValueError("Peer messaging is unavailable for this chat.")
+                                description = self.peers.describe(self, name, arguments)
                             elif self.role in {"side", "lane"} and name not in {"read_file", "search_files"}:
                                 raise ValueError("This read-only conversation only has read_file and search_files.")
                             elif self.capabilities and self.capabilities.handles(name):
@@ -1254,6 +1264,8 @@ class ChatService:
                                     result = chat_todos.execute(self, name, arguments)
                                 elif name in chat_questions.TOOLS:
                                     result = chat_questions.execute(self, name, arguments)
+                                elif isinstance(name, str) and name.startswith("hub_"):
+                                    result = self.peers.execute(self, name, arguments)
                                 elif self.capabilities and self.capabilities.handles(name):
                                     result = self.capabilities.execute(self, name, arguments)
                                 else:
@@ -1463,11 +1475,13 @@ instead of the chat's own rejection path.
 
 def main():
     from chat_sessions import ChatHost
+    from chat_host import StdioPeerSocket
     mutex = threading.Lock()
     def emit(event):
         with mutex:
             print(json.dumps(event, ensure_ascii=False), flush=True)
     service = None
+    peer_socket = None
     owner = CommandOwner()
     def read_commands():
         try:
@@ -1478,13 +1492,17 @@ def main():
     try:
         root = state_root()
         service = ChatHost(ChatStore(root), GatewayClient(root), emit, dispatch=owner.dispatch, dispatch_event=owner.dispatch_event)
+        peer_socket = StdioPeerSocket(root, service, owner)
+        peer_socket.start()
         service.initialize()
         threading.Thread(target=read_commands, daemon=True, name="chat-stdin").start()
-        owner.run(service)
+        owner.run(service, intercept=peer_socket.intercept, refuse=peer_socket.refuse)
     except Exception as exc:
         emit({"event": "error", "message": str(exc)})
     finally:
         owner.closing.set()
+        if peer_socket:
+            peer_socket.close()
         if service:
             service.shutdown()
 

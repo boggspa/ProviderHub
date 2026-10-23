@@ -54,9 +54,10 @@ CLIENT_QUEUE_FRAMES = 20_000
 CLOSE_GRACE = 2.0
 SOCKET_PATH_LIMIT = 103  # macOS sun_path holds 104 bytes, including the terminator.
 EXIT_RUNNING = 3
-ROLES = {"desktop", "control"}
-HOST_COMMANDS = {"host_status", "detach", "shutdown", "gateway_status", "gateway_start"}
-CONTROL_COMMANDS = {"host_status", "detach", "shutdown"}
+ROLES = {"desktop", "control", "peer"}
+PEER_ADMIN_COMMANDS = {"peer_enroll", "peer_enroll_chat", "peer_revoke"}
+HOST_COMMANDS = {"host_status", "detach", "shutdown", "gateway_status", "gateway_start"} | PEER_ADMIN_COMMANDS
+CONTROL_COMMANDS = {"host_status", "detach", "shutdown"} | PEER_ADMIN_COMMANDS
 # Modules the worker imports lazily. Loading them at start keeps a running Host
 # on the code it started with if its app bundle is replaced underneath it.
 RUNTIME_MODULES = ("chat_agents", "chat_inspector", "chat_remote", "cli_images", "claude_context")
@@ -385,28 +386,38 @@ attachment's welcome snapshot are the record, not a replay of these events.
         role, client = hello.get("role", "desktop"), hello.get("client", "")
         if role not in ROLES or not isinstance(client, str) or len(client) > 128 or type(hello.get("protocol")) is not int:
             raise HostError("The hello is not valid.", {"reason": "invalid_hello"})
-        credential = hello.get("credential")
-        if not isinstance(credential, str) or not hmac.compare_digest(credential.encode("utf-8", "replace"), self.credential.encode()):
-            raise HostError("The Chat Host credential did not match.", {"reason": "credential"})
+        principal = None
+        if role == "peer":
+            if hello["protocol"] != PROTOCOL or self.service is None:
+                raise HostError("Peer protocol unavailable.", {"reason": "protocol"})
+            try:
+                principal = self.service.peers.broker.attach(hello.get("thread_id"), hello.get("token"))
+            except (ValueError, TypeError, PermissionError):
+                raise HostError("The peer endpoint credential did not match.", {"reason": "credential"}) from None
+        else:
+            credential = hello.get("credential")
+            if not isinstance(credential, str) or not hmac.compare_digest(credential.encode("utf-8", "replace"), self.credential.encode()):
+                raise HostError("The Chat Host credential did not match.", {"reason": "credential"})
         # A control connection may read status or ask for shutdown across
         # versions: that is how an updated app retires an older Host.
         if role == "desktop" and hello["protocol"] != PROTOCOL:
             raise HostError(f"This Chat Host speaks protocol {PROTOCOL}; the client asked for {hello['protocol']}.",
                             {"reason": "protocol"})
         connection.settimeout(None)
-        return role, client
+        return role, client, principal
 
     def _attach(self, connection):
         attachment = None
         stream = connection.makefile("rb")
         try:
             try:
-                role, client = self._hello(connection, stream)
+                role, client, principal = self._hello(connection, stream)
             except HostError as exc:
                 return self._refuse(connection, exc.reply.get("reason", "invalid_hello"), str(exc))
             except (OSError, ValueError):
                 return self._refuse(connection, "invalid_hello", "Send a complete hello first.")
             candidate = Attachment(connection, role, client, limit_bytes=self.queue_bytes, limit_frames=self.queue_frames)
+            candidate.peer_principal = principal
             previous = None
             with self._lock:
                 if not self.closing:
@@ -458,6 +469,9 @@ attachment's welcome snapshot are the record, not a replay of these events.
             if self.attachments.pop(attachment.id, None) is None: return
             if self.desktop is attachment: self.desktop = None
             if attachment.reason == "overflow": self.overflows += 1
+        if attachment.role == "peer" and self.service is not None:
+            try: self.service.peers.broker.disconnect(attachment.peer_principal)
+            except (ValueError, RuntimeError, OSError): pass  # The Host may already be shut down.
         if attachment.role != "desktop" or self.service is None: return
         self.service.capabilities.native.surface_lost(attachment.id)
         if not self.closing:
@@ -469,12 +483,46 @@ attachment's welcome snapshot are the record, not a replay of these events.
         command.pop("_attachment", None)
         if origin is None: return False
         action = command.get("command")
+        if origin.role == "peer":
+            # Complete allowlist: peer traffic cannot enter UI commands, read
+            # other transcripts, start a turn, or present itself as the user.
+            if origin.closed:
+                return True
+            if action == "detach":
+                origin.close("detached", frame({"event": "host_detached", "reason": "detached"}))
+                return True
+            if action != "peer_call" or set(command) - {"command", "request", "name", "arguments"}:
+                raise HostError("Peer connections accept only peer_call and detach.")
+            result = self.service.peers.broker.dispatch(origin.peer_principal, command.get("name"), command.get("arguments", {}))
+            origin.send(frame({"event": "peer_result", "request": command.get("request"), "result": result}))
+            return True
         if origin.closed and action in {"select", "subscribe", "detach", "host_status", "gateway_status"}:
             # Accepted input still runs; a departed client's view requests do
             # not, so it cannot steer the window that replaced it.
             return True
         if origin.role == "control" and action not in CONTROL_COMMANDS:
             raise HostError("A control connection may only read status, detach or shut the Host down.")
+        if action in PEER_ADMIN_COMMANDS:
+            broker = self.service.peers.broker
+            if action == "peer_enroll":
+                allowed = {"command", "request", "app", "native_thread_id", "workspace", "label", "model", "provider"}
+                if set(command) - allowed:
+                    raise HostError("Unsupported peer enrollment fields.")
+                result = broker.enroll(**{key: value for key, value in command.items() if key not in {"command", "request"}})
+            elif action == "peer_enroll_chat":
+                if set(command) - {"command", "request", "chat"}:
+                    raise HostError("Unsupported chat enrollment fields.")
+                identifier = command.get("chat")
+                service = self.service.sessions.get(identifier)
+                chat = service.chat if service else self.service.store.load(identifier)
+                result = {"thread": self.service.peers.enroll(chat, restore=True)}
+            else:
+                if set(command) - {"command", "request", "thread_id"}:
+                    raise HostError("Unsupported revocation fields.")
+                broker.revoke(command.get("thread_id"))
+                result = {"revoked": True}
+            origin.send(frame({"event": "peer_result", "request": command.get("request"), "result": result}))
+            return True
         if action == "detach":
             origin.close("detached", frame({"event": "host_detached", "reason": "detached"}))
             return True
@@ -500,8 +548,9 @@ attachment's welcome snapshot are the record, not a replay of these events.
 
     def refuse(self, command, error, origin):
         action = command.get("command") if isinstance(command, dict) else None
-        if origin is None or origin.role != "control" and action not in HOST_COMMANDS: return False
-        origin.send(frame({"event": "host_error", "command": action, "message": str(error)}))
+        if origin is None or origin.role not in {"control", "peer"} and action not in HOST_COMMANDS: return False
+        origin.send(frame({"event": "host_error", "command": action,
+                           "request": command.get("request") if isinstance(command, dict) else None, "message": str(error)}))
         return True
 
     def activity(self):
@@ -603,6 +652,58 @@ attachment's welcome snapshot are the record, not a replay of these events.
                 if read_credential(self.paths) == self.credential: self.paths.credential.unlink()
             except (OSError, ValueError):
                 pass
+
+
+class StdioPeerSocket(PersistentHost):
+    """Peer/admin access for the shipping stdio UI, without replacing its owner.
+
+    ChatStore's flock already excludes another stdio or persistent Chat Host.
+    The pipe still owns lifecycle and UI. This socket cannot attach a desktop
+    or shut down the worker. All commands use that pipe's serial owner.
+    """
+    def __init__(self, root, service, owner):
+        super().__init__(root)
+        self.service, self.owner = service, owner
+        self.accept_thread = None
+        self.host_lock = None
+
+    def start(self):
+        self.paths.prepare()
+        self.host_lock = acquire_lock(self.paths)
+        if self.host_lock is None:
+            raise HostError("A Chat Host already owns this state directory.")
+        self.credential = write_credential(self.paths)
+        self._bind()
+        self.accept_thread = threading.Thread(target=self._accept, daemon=True, name="chat-peer-accept")
+        self.accept_thread.start()
+
+    def _hello(self, connection, stream):
+        role, client, principal = super()._hello(connection, stream)
+        if role == "desktop":
+            raise HostError("This Chat worker's UI is owned by its stdio pipe; only peers and local enrollment may attach.", {"reason": "peer_only"})
+        return role, client, principal
+
+    def intercept(self, command, origin):
+        if origin is not None and origin.role == "control" and command.get("command") not in PEER_ADMIN_COMMANDS | {"host_status", "detach"}:
+            raise HostError("The stdio worker's lifetime belongs to its UI; this connection permits only peer enrollment and status.")
+        return super().intercept(command, origin)
+
+    def close(self):
+        with self._lock:
+            self.closing = True
+            attachments = list(self.attachments.values())
+        if self.listener is not None:
+            self.listener.close()
+        if self.accept_thread is not None:
+            self.accept_thread.join(1)
+        for attachment in attachments:
+            attachment.close("shutdown", frame({"event": "host_detached", "reason": "shutdown"}))
+        for attachment in attachments:
+            attachment.join(CLOSE_GRACE + 1)
+        self._remove_runtime_files()
+        if self.host_lock is not None:
+            os.close(self.host_lock)
+            self.host_lock = None
 
 
 # Clients ------------------------------------------------------------------------
