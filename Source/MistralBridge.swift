@@ -1143,13 +1143,27 @@ final class BridgeModel: ObservableObject {
     }
 
     func openVibe() {
-        guard let executable = Self.findVibe() else { tell("Mistral Vibe was not found. Install Vibe, then reconnect.", error: true); return }
-        let shell = "'" + executable.replacingOccurrences(of: "'", with: "'\\''") + "'"
-        let quoted = shell.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
-        let source = "tell application \"Terminal\"\nactivate\ndo script \"\(quoted)\"\nend tell"
-        var error: NSDictionary?
-        NSAppleScript(source: source)?.executeAndReturnError(&error)
-        if error != nil { tell("Terminal could not open Vibe. Start Vibe normally, then reconnect.", error: true) }
+        let connection = settings.providers["mistral"]
+        let folder = connection?.cli_accounts?.first { $0.id == connection?.cli_account }?.config_dir
+        openVibeAccount(folder: folder, setup: false)
+    }
+
+    private func openVibeAccount(folder: String?, setup: Bool) {
+        Task {
+            do {
+                guard let executable = Self.findVibe() else { throw WorkerError(message: "Mistral Vibe was not found. Install Vibe, then try again.") }
+                var script = shellQuote(executable) + (setup ? " --setup" : "")
+                if let folder {
+                    let prepared = try await command("prepare-vibe-account", provider: "mistral",
+                                                     input: try JSONSerialization.data(withJSONObject: ["config_dir": folder, "setup": setup]))
+                    guard let home = prepared["config_dir"] as? String, let key = prepared["key_name"] as? String else {
+                        throw WorkerError(message: "The Vibe account folder could not be prepared.")
+                    }
+                    script = "export VIBE_HOME=\(shellQuote(home)) && unset MISTRAL_API_KEY \(shellQuote(key)) && cd \"$VIBE_HOME\" && " + script
+                }
+                openCliAccountTerminal(script)
+            } catch { tell(error.localizedDescription, error: true) }
+        }
     }
 
     // MARK: extra API keys
@@ -1266,7 +1280,9 @@ final class BridgeModel: ObservableObject {
         panel.canCreateDirectories = true; panel.showsHiddenFiles = true
         panel.allowsMultipleSelection = false
         panel.directoryURL = FileManager.default.homeDirectoryForCurrentUser
-        panel.message = provider == "claude"
+        panel.message = provider == "mistral"
+            ? "Choose or create a folder for this Mistral Vibe account, e.g. ~/.vibe-work. Use an empty folder for a new, separate login."
+            : provider == "claude"
             ? "Choose or create a folder for this Claude account, e.g. ~/.claude-work. Claude Code keeps that account's login there."
             : "Choose or create a folder for this Codex account, e.g. ~/.codex-lite. Codex keeps that account's login there."
         panel.prompt = "Use Folder"
@@ -1298,6 +1314,10 @@ final class BridgeModel: ObservableObject {
     /// account's folder. The CLI owns the whole OAuth flow and the login it
     /// leaves behind; nothing passes through the hub.
     func signInCliAccount(_ provider: String, folder: String?) {
+        if provider == "mistral" {
+            openVibeAccount(folder: folder, setup: true)
+            return
+        }
         func quote(_ value: String) -> String { "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'" }
         let variable = provider == "claude" ? "CLAUDE_CONFIG_DIR" : "CODEX_HOME"
         // Codex turns read the login from auth.json (see codex_cli_agent's
@@ -1305,6 +1325,12 @@ final class BridgeModel: ObservableObject {
         let login = provider == "claude" ? "claude auth login && claude auth status"
             : "codex login -c " + quote("cli_auth_credentials_store=\"file\"") + " && codex login status"
         let script = folder.map { "export \(variable)=\(quote($0)) && mkdir -p \"$\(variable)\" && " + login } ?? login
+        openCliAccountTerminal(script)
+    }
+
+    private func shellQuote(_ value: String) -> String { "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'" }
+
+    private func openCliAccountTerminal(_ script: String) {
         let escaped = script.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
         let source = "tell application \"Terminal\"\nactivate\ndo script \"\(escaped)\"\nend tell"
         var error: NSDictionary?

@@ -1,5 +1,6 @@
 """Extra CLI accounts: each is a config folder the CLI itself signed in to."""
 import os
+import json
 import tempfile
 import threading
 import unittest
@@ -7,18 +8,19 @@ from pathlib import Path
 from unittest import mock
 
 import claude_cli_agent
+import bridge_core
 import cli_routes
 import codex_cli_agent
 import gateway
 from bridge_core import SLOTS
 from cli_routes import CliRouteError, plan_turn
-from hub_config import cli_account_dir, normalize
+from hub_config import cli_account_dir, connection_signature, normalize
 
 WORK = "/Users/someone/.claude-work"
 
 
 def settings(provider="claude", accounts=None, active=None):
-    connection = {"credential_mode": "cli"}
+    connection = {"credential_mode": "vibe" if provider == "mistral" else "cli"}
     if accounts is not None:
         connection["cli_accounts"] = accounts
     if active is not None:
@@ -76,6 +78,130 @@ class PlanTests(unittest.TestCase):
     def test_other_cli_providers_refuse_a_config_dir(self):
         with self.assertRaises(CliRouteError):
             plan_turn("grok", "grok-5", self.payload, {}, wanted_output=64, config_dir=WORK)
+
+
+class VibeAccountTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.default = self.root / "default"
+        self.work = self.root / "work"
+        self.default.mkdir()
+        self.work.mkdir()
+        self.env = mock.patch.dict(os.environ, {"VIBE_HOME": str(self.default), "MISTRAL_API_KEY": "default-environment-key"})
+        self.env.start()
+        self.addCleanup(self.env.stop)
+        keychain = mock.patch.object(bridge_core, "keychain_read", return_value="default-keychain-key")
+        self.keychain = keychain.start()
+        self.addCleanup(keychain.stop)
+
+    def chosen(self, folder=None):
+        return settings("mistral", [{"id": "work", "label": "Work", "config_dir": str(folder or self.work)}], "work")
+
+    def test_settings_keep_vibe_mode_and_default_login(self):
+        selected = self.chosen()
+        self.assertEqual(selected["providers"]["mistral"]["credential_mode"], "vibe")
+        self.assertEqual(cli_account_dir(selected, "mistral"), str(self.work))
+        self.assertEqual(bridge_core.credentials(settings("mistral")), ("default-environment-key", "Vibe environment"))
+
+    def test_selected_home_reads_its_own_config_and_env(self):
+        (self.work / "config.toml").write_text('active_model = "work-model"\n[[models]]\nname = "work-model"\nprovider = "mistral"\n')
+        (self.work / ".env").write_text('MISTRAL_API_KEY="work-key"\n')
+        self.assertEqual(bridge_core.vibe_settings(str(self.work))["active_model"], "work-model")
+        self.assertEqual(bridge_core.credentials(self.chosen()), ("work-key", "Vibe .env · Work"))
+        self.keychain.assert_not_called()
+
+    def test_empty_home_cannot_fall_back_to_default_credentials(self):
+        with self.assertRaises(bridge_core.BridgeError):
+            bridge_core.credentials(self.chosen())
+        self.keychain.assert_not_called()
+        state = bridge_core.vibe_auth_state(str(self.work))
+        self.assertEqual(state["state"], "missing")
+        self.assertNotIn("default-environment-key", json.dumps(state))
+
+    def test_new_home_has_a_distinct_native_keychain_account(self):
+        prepared = bridge_core.prepare_vibe_account(str(self.work))
+        other = bridge_core.prepare_vibe_account(str(self.root / "other"))
+        self.assertNotEqual(prepared["key_name"], other["key_name"])
+        self.assertNotEqual(prepared["key_name"], "MISTRAL_API_KEY")
+        self.assertEqual(bridge_core.prepare_vibe_account(str(self.work)), prepared)
+        self.assertEqual(bridge_core.vibe_settings(str(self.work))["key_name"], prepared["key_name"])
+        with mock.patch.dict(os.environ, {prepared["key_name"]: "wrong-inherited-key"}):
+            self.keychain.return_value = "work-keychain-key"
+            self.assertEqual(bridge_core.credentials(self.chosen()), ("work-keychain-key", "Vibe Keychain · Work"))
+        self.keychain.assert_called_once_with("ai.mistral.vibe", prepared["key_name"])
+
+    def test_setup_preserves_config_and_refuses_shared_keychain_names(self):
+        config = self.work / "config.toml"
+        original = '# Keep my theme\ntheme = "dracula"\n'
+        config.write_text(original)
+        bridge_core.prepare_vibe_account(str(self.work))
+        self.assertTrue(config.read_text().startswith(original))
+        shared = '[[providers]]\nname = "mistral"\napi_key_env_var = "MISTRAL_API_KEY"\n'
+        config.write_text(shared)
+        with self.assertRaisesRegex(bridge_core.BridgeError, "shared Keychain"):
+            bridge_core.prepare_vibe_account(str(self.work))
+        self.assertEqual(config.read_text(), shared)
+        with self.assertRaisesRegex(bridge_core.BridgeError, "Default row"):
+            bridge_core.prepare_vibe_account(str(self.default))
+        with self.assertRaises(bridge_core.BridgeError):
+            bridge_core.prepare_vibe_account("relative")
+
+    def test_custom_default_keychain_name_is_also_shared(self):
+        config = '[[providers]]\nname = "mistral"\napi_key_env_var = "CUSTOM_DEFAULT_KEY"\n'
+        (self.default / "config.toml").write_text(config)
+        (self.work / "config.toml").write_text(config)
+        with self.assertRaises(bridge_core.BridgeError):
+            bridge_core.credentials(self.chosen())
+        self.keychain.assert_not_called()
+
+    def test_opening_an_imported_home_does_not_rewrite_it(self):
+        original = '# Keep the imported login\ntheme = "dracula"\n'
+        config = self.work / "config.toml"
+        config.write_text(original)
+        with self.assertRaisesRegex(bridge_core.BridgeError, "shared Keychain"):
+            bridge_core.prepare_vibe_account(str(self.work), setup=False)
+        self.assertEqual(config.read_text(), original)
+        self.assertEqual(list(self.work.iterdir()), [config])
+
+    def test_probes_report_each_home_without_keys_or_cli_adapter(self):
+        (self.work / ".env").write_text("MISTRAL_API_KEY=work-secret\n")
+        with mock.patch.object(cli_routes, "adapter_for", side_effect=AssertionError("Vibe uses its saved key")):
+            states = cli_routes.account_states(self.chosen(), "mistral")
+        self.assertEqual([(s["id"], s["state"], s["active"]) for s in states],
+                         [(None, "authenticated", False), ("work", "authenticated", True)])
+        self.assertNotIn("work-secret", json.dumps(states))
+        self.assertNotIn("default-environment-key", json.dumps(states))
+
+    def test_account_selection_and_folder_change_invalidate_cached_credentials(self):
+        connection = self.chosen()["providers"]["mistral"]
+        signature = connection_signature("mistral", connection)
+        self.assertNotEqual(signature, connection_signature("mistral", settings("mistral")["providers"]["mistral"]))
+        moved = self.chosen(self.root / "moved")["providers"]["mistral"]
+        self.assertNotEqual(signature, connection_signature("mistral", moved))
+        connection["cli_accounts"][0]["label"] = "Renamed"
+        self.assertEqual(signature, connection_signature("mistral", connection))
+
+    def test_running_gateway_switches_keys_on_the_next_request(self):
+        (self.work / ".env").write_text("MISTRAL_API_KEY=work-key\n")
+        runtime = gateway.Runtime.__new__(gateway.Runtime)
+        runtime.root, runtime.lock = self.root, threading.Lock()
+        runtime.settings, runtime.key, runtime.credential_cache = settings("mistral"), None, {}
+        path = self.root / "settings.json"
+
+        def save(value):
+            bridge_core.atomic_json(path, value)
+
+        save(runtime.settings)
+        self.assertEqual(runtime.provider_key("mistral"), "default-environment-key")
+        save(self.chosen())
+        self.assertEqual(runtime.provider_key("mistral"), "work-key")
+        save(settings("mistral"))
+        self.assertEqual(runtime.provider_key("mistral"), "default-environment-key")
+        save(self.chosen(self.root / "missing"))
+        with self.assertRaises(bridge_core.BridgeError):
+            runtime.provider_key("mistral")
 
 
 class AccountStatesTests(unittest.TestCase):

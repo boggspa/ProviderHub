@@ -26,7 +26,7 @@ import urllib.request
 
 import cli_routes
 from bridge_core import (BridgeError, CATALOGUE_DETAIL_KEYS, ClaudeProfile, MAX_REQUEST_BODY, atomic_json, attach_model_specs, bootstrap_metadata, cached_catalogue, chat_source_specs, credentials, discover_provider, gateway_token,
-                         inspect_state, key_account_states, load_settings, model_labels, private_directory, private_token, read_json, ssl_context, state_root, validate_settings)
+                         inspect_state, key_account_states, load_settings, model_labels, prepare_vibe_account, private_directory, private_token, read_json, ssl_context, state_root, validate_settings)
 from catalogue_lifecycle import (CataloguePreparationError, catalogue_fingerprint,
                                  prepare_launch, refresh_all, require_prepared,
                                  runtime_fingerprint_error,
@@ -277,6 +277,10 @@ class Runtime:
             for field in ("credential_revision", "key_account", "key_accounts"):
                 connection.pop(field, None)
                 if field in current: connection[field] = copy.deepcopy(current[field])
+            if provider_id == "mistral" and connection["credential_mode"] == "vibe":
+                for field in ("cli_account", "cli_accounts"):
+                    connection.pop(field, None)
+                    if field in current: connection[field] = copy.deepcopy(current[field])
         with self.lock:
             self._credential_settings = (stamp, live)
         return live
@@ -1717,7 +1721,7 @@ def catalogue_command_result(settings, root, lifecycle):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=["inspect", "validate", "save", "save-key-metadata", "save-key-accounts", "discover", "refresh-all", "prepare-launch", "activate", "restore", "serve", "codex-status", "codex-projects", "codex-prepare", "codex-activate", "codex-restore", "codex-accent", "cli-accounts", "key-accounts"])
+    parser.add_argument("command", choices=["inspect", "validate", "save", "save-key-metadata", "save-key-accounts", "discover", "refresh-all", "prepare-launch", "activate", "restore", "serve", "codex-status", "codex-projects", "codex-prepare", "codex-activate", "codex-restore", "codex-accent", "cli-accounts", "prepare-vibe-account", "key-accounts"])
     parser.add_argument("--provider", choices=list(PROVIDERS), default="mistral")
     parser.add_argument("--parent-pipe", action="store_true")
     parser.add_argument("--detach", action="store_true", help="serve: run as a detached service, stopped only on request")
@@ -1809,6 +1813,9 @@ def main():
                   "friendly_names": model_labels(settings, inventory.get("models", [])), "models": inventory.get("models", []),
                   "catalog_summary": {k: v for k, v in inventory.items() if k not in CATALOGUE_DETAIL_KEYS},
                   "provider_definitions": provider_presentations(settings), "codex_models": codex_choices(settings, inventory)}
+    elif args.command == "prepare-vibe-account":
+        request = json.load(sys.stdin)
+        result = prepare_vibe_account(request.get("config_dir"), setup=request.get("setup", True))
     elif args.command == "cli-accounts":
         # The pane's current (possibly unsaved) settings arrive on stdin, so a
         # just-added account can be checked before it is saved.

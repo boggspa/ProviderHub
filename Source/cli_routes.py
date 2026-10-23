@@ -283,14 +283,18 @@ def account_states(settings: dict, provider_id: str, *, timeout: int = 40) -> li
     """
     if provider_id not in CLI_ACCOUNT_PROVIDERS:
         raise CliRouteError(f"The {provider_id} CLI route does not support extra accounts.")
-    adapter = adapter_for(provider_id)
+    if provider_id == "mistral":
+        from bridge_core import vibe_auth_state
+        auth_state = vibe_auth_state
+    else:
+        auth_state = adapter_for(provider_id).auth_state
     connection = (settings.get("providers") or {}).get(provider_id) or {}
     active = connection.get("cli_account")
     accounts = [{"id": None, "label": "Default", "config_dir": None}] + list(connection.get("cli_accounts") or ())
 
     def probe(account):
         try:
-            state = adapter.auth_state(**({"config_dir": account["config_dir"]} if account["config_dir"] else {})) or {}
+            state = auth_state(**({"config_dir": account["config_dir"]} if account["config_dir"] else {})) or {}
         except Exception as exc:  # a probe must never take the pane down
             state = {"state": "unknown", "detail": f"auth probe failed: {exc}"}
         return {"id": account["id"], "label": account["label"], "config_dir": account["config_dir"],
