@@ -48,6 +48,10 @@ from protocol import compact_conversation, estimated_tokens
 MAX_ROUNDS = 24
 MAX_TEXT = 100_000
 REQUEST_BACKOFF = (2, 5, 10, 20)  # Five attempts total, including the first.
+# Claude Code's own CLAUDE_CODE_MAX_OUTPUT_TOKENS default. A Claude CLI route's
+# budget becomes that variable for the child, which aborts an over-long reply
+# outright instead of truncating it.
+CLAUDE_CLI_OUTPUT = 32000
 CHAT_ID = re.compile(r"[0-9a-f]{32}\Z")
 APPROVAL_MODES = {"manual", "accept_edits", "yolo"}
 SYSTEM = """You are an assistant in Provider Hub Chat, a small local coding harness.
@@ -95,7 +99,7 @@ def retryable_request(exc):
             or any(word in text for word in ("authentication", "unauthorized", "forbidden", "invalid api key",
                 "invalid request", "invalid_request", "permission denied", "not logged in", "login required",
                 "credit balance", "insufficient_quota", "quota exceeded", "context length", "prompt is too long",
-                "model not found", "not installed", "no such file"))):
+                "model not found", "not installed", "no such file", "output token maximum"))):
         return False
     hint = getattr(exc, "retryable", None)
     if hint is not None: return hint
@@ -913,7 +917,12 @@ class ChatService:
         if choice["supportsTools"]:
             tools.extend(chat_questions.TOOL_DEFINITIONS)
         context = choice.get("context")
-        output = min(choice.get("max_output") or 4096, 8192)
+        if choice.get("source") == "cli" and choice.get("route", "").split("/", 1)[0] == "claude":
+            # Claude CLI rows carry no published output ceiling, and the
+            # general 4096 fallback failed any longer file write or thinking pass.
+            output = min(choice.get("max_output") or CLAUDE_CLI_OUTPUT, CLAUDE_CLI_OUTPUT)
+        else:
+            output = min(choice.get("max_output") or 4096, 8192)
         if isinstance(context, int) and context > 0:
             output = min(output, max(1, context // 4))
         permission = {"manual": "Manual: patches and shell commands need the user's Allow once.",
