@@ -213,9 +213,20 @@ def smoke_test(runtime: Path, worker_dir: Path | None) -> None:
         raise SystemExit("prepare_runtime: the stdlib landmark os.py is missing")
 
     check = (
-        "import sys, os, ssl, _socket, encodings, sysconfig;"
+        "import sys, os, ssl, _socket, encodings, sysconfig, sqlite3;"
         "import cryptography.fernet;"
         "assert sys.version_info[:2] == (3, 13), sys.version_info;"
+        # Mailboxes require working SQLite transactions, including recovery
+        # from an uncommitted operation, not just an importable extension.
+        "database = sqlite3.connect(':memory:');"
+        "database.execute('CREATE TABLE smoke (value TEXT NOT NULL)');"
+        "database.execute('INSERT INTO smoke VALUES (?)', ('committed',));"
+        "database.commit();"
+        "assert database.execute('SELECT value FROM smoke').fetchone() == ('committed',);"
+        "database.execute('INSERT INTO smoke VALUES (?)', ('rolled-back',));"
+        "database.rollback();"
+        "assert database.execute('SELECT value FROM smoke').fetchall() == [('committed',)];"
+        "database.close();"
         # The property that matters is relocatability, not the absence of a
         # '/Users/' substring: the bundle is built inside the maintainer's home
         # directory, so every correctly-derived path legitimately contains it.
@@ -281,7 +292,7 @@ def main() -> int:
     print("[prepare_runtime] leak gate passed: no personal /Users path in the runtime")
 
     smoke_test(runtime, args.worker_dir.resolve() if args.worker_dir else None)
-    print("[prepare_runtime] smoke gate passed: interpreter, cryptography and gateway ok")
+    print("[prepare_runtime] smoke gate passed: interpreter, SQLite transactions, cryptography and gateway ok")
     return 0
 
 
