@@ -14,7 +14,7 @@ fileprivate let cliAuthProviders: Set<String> = ["codex", "claude", "muse", "gro
 let keyAccountProviders: Set<String> = ["mistral", "kimi", "mimo", "deepseek", "cerebras", "gemini", "grok", "qwen-token-plan", "minimax", "openrouter", "claude", "codex", "muse", "devin"]
 /// CLI providers that can hold several logins side by side, one config folder
 /// each. Mirrors `hub_config.CLI_ACCOUNT_PROVIDERS`.
-fileprivate let cliAccountProviders: Set<String> = ["codex", "claude"]
+fileprivate let cliAccountProviders: Set<String> = ["codex", "claude", "mistral"]
 /// Providers with both an API-key source and an installed-CLI source, which
 /// Chat can list side by side. Mirrors `hub_config.CHAT_SOURCE_PROVIDERS`.
 fileprivate let chatSourceProviders: Set<String> = ["codex", "claude", "muse", "grok"]
@@ -124,6 +124,7 @@ struct ProviderPage: View {
                                 Spacer()
                                 Button("Open Vibe") { model.openVibe() }
                             }
+                            CliAccountsSection(model: model, provider: provider.id)
                         } else if connection.credential_mode == "cli" {
                             Text("Local-only experiment. Runs this provider’s own installed CLI and lets it keep the subscription login it already has: the hub never reads, copies, or refreshes a credential, because these tokens rotate and a second holder revokes the first. Tools are answered by your desktop app and never executed by the CLI itself. Sign in through the CLI itself, then save.").font(.caption).foregroundStyle(.secondary)
                             if cliAccountProviders.contains(provider.id) {
@@ -355,7 +356,8 @@ struct CliAccountsSection: View {
     @ObservedObject var model: BridgeModel
     var provider: String
     var accounts: [CliAccount] { model.settings.providers[provider]?.cli_accounts ?? [] }
-    var defaultFolder: String { provider == "claude" ? "~/.claude" : "~/.codex" }
+    var defaultFolder: String { provider == "mistral" ? "VIBE_HOME or ~/.vibe" : (provider == "claude" ? "~/.claude" : "~/.codex") }
+    var homeVariable: String { provider == "mistral" ? "VIBE_HOME" : (provider == "claude" ? "CLAUDE_CONFIG_DIR" : "CODEX_HOME") }
 
     func state(_ id: String?) -> CliAccountState? {
         model.cliAccountStates[provider]?.first { $0.id == id }
@@ -379,7 +381,9 @@ struct CliAccountsSection: View {
                 if model.cliAccountsChecking.contains(provider) { ProgressView().controlSize(.small) }
                 Spacer()
             }
-            Text("Each extra account is a folder its CLI signs in to (\(provider == "claude" ? "CLAUDE_CONFIG_DIR" : "CODEX_HOME")). Sign in opens Terminal on the CLI’s own browser login; the login stays in that folder and the hub only stores the path. Save to switch - the next turn uses the new account without restarting anything.")
+            Text(provider == "mistral"
+                 ? "Each extra account uses its own VIBE_HOME folder. Sign in opens Vibe’s setup in Terminal; new folders get a separate Keychain login. The hub stores the folder path and reads Vibe’s saved API key. Check sign-in checks for a saved credential; access is verified on use. Save to use the account on the next request."
+                 : "Each extra account is a folder its CLI signs in to (\(homeVariable)). Sign in opens Terminal on the CLI’s own browser login; the login stays in that folder and the hub only stores the path. Save to switch - the next turn uses the new account without restarting anything.")
                 .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
         }
     }

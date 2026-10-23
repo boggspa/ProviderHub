@@ -95,8 +95,8 @@ def atomic_json(path: Path, value: dict) -> None:
             os.unlink(temp)
 
 
-def vibe_settings() -> dict:
-    root = Path(os.environ.get("VIBE_HOME", str(Path.home() / ".vibe")))
+def vibe_settings(config_dir: str | None = None) -> dict:
+    root = Path(config_dir or os.environ.get("VIBE_HOME", str(Path.home() / ".vibe")))
     raw = {}
     path = root / "config.toml"
     if path.exists():
@@ -153,10 +153,20 @@ def keychain_read(service: str, account: str) -> str | None:
     return result.stdout.decode().strip() if result.returncode == 0 else None
 
 
-def vibe_credentials() -> tuple[str, str]:
-    info = vibe_settings()
+def _vibe_shared_key_names() -> set[str]:
+    names = {"MISTRAL_API_KEY"}
+    try:
+        names.add(vibe_settings()["key_name"])
+    except BridgeError:
+        pass
+    return names
+
+
+def vibe_credentials(config_dir: str | None = None) -> tuple[str, str]:
+    info = vibe_settings(config_dir) if config_dir else vibe_settings()
     name = info["key_name"]
-    if os.environ.get(name):
+    # An explicitly selected account must not inherit the app's default key.
+    if not config_dir and os.environ.get(name):
         return os.environ[name], "Vibe environment"
     env_file = Path(info["vibe_home"]) / ".env"
     if env_file.is_file():
@@ -173,11 +183,63 @@ def vibe_credentials() -> tuple[str, str]:
                     break
         if key:
             return key, "Vibe .env"
-    for service in ("ai.mistral.vibe", "vibe"):
-        key = keychain_read(service, name)
-        if key:
-            return key, "Vibe Keychain"
+    # Vibe keys Keychain items by api_key_env_var, not VIBE_HOME. Only a
+    # profile's explicit, distinct key name is safe to read for an extra home.
+    if not config_dir or name not in _vibe_shared_key_names():
+        for service in ("ai.mistral.vibe", "vibe"):
+            key = keychain_read(service, name)
+            if key:
+                return key, "Vibe Keychain"
     raise BridgeError("No Vibe credential was found. Sign in through Vibe, then click Reconnect.")
+
+
+def prepare_vibe_account(config_dir: str, *, setup: bool = True) -> dict:
+    """Give a new Vibe home its own native Keychain account before setup.
+
+    Preserve existing settings. An imported home with a provider section must
+    already select a distinct key name; changing its provider configuration
+    behind Vibe's back would risk changing its endpoint or other credentials.
+    """
+    if type(setup) is not bool:
+        raise BridgeError("The Vibe setup option must be true or false.")
+    if not isinstance(config_dir, str) or not os.path.isabs(config_dir) or any(c in config_dir for c in ("\0", "\n")):
+        raise BridgeError("Choose an absolute config folder for the Vibe account.")
+    root = Path(config_dir).resolve()
+    default_root = Path(os.environ.get("VIBE_HOME", str(Path.home() / ".vibe"))).resolve()
+    if root == default_root:
+        raise BridgeError("Use the Default row to sign in to the default Vibe folder.")
+    if setup:
+        root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        path = root / "config.toml"
+        try:
+            text = path.read_text() if path.exists() else ""
+            raw = tomllib.loads(text)
+        except (ValueError, OSError) as exc:
+            raise BridgeError("Vibe config.toml could not be read.") from exc
+        if "providers" not in raw:
+            suffix = hashlib.sha256(str(root).encode()).hexdigest()[:20].upper()
+            addition = ('\n[[providers]]\nname = "mistral"\nbackend = "mistral"\napi_base = "https://api.mistral.ai/v1"\n'
+                        f'api_key_env_var = "MISTRAL_API_KEY_HUB_{suffix}"\n')
+            # Never truncate or serialize away an existing Vibe configuration.
+            descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+            with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+                stream.write(addition)
+    info = vibe_settings(str(root))
+    if not isinstance(info["key_name"], str) or not info["key_name"].isascii() or not info["key_name"].isidentifier():
+        raise BridgeError("The Vibe provider's api_key_env_var must be a valid environment variable name.")
+    if info["key_name"] in _vibe_shared_key_names():
+        raise BridgeError("This Vibe folder uses the shared Keychain login. Choose an empty folder for a new account, "
+                          "or give its Mistral provider a unique api_key_env_var in config.toml before opening Vibe.")
+    return {"config_dir": str(root), "key_name": info["key_name"]}
+
+
+def vibe_auth_state(config_dir: str | None = None) -> dict:
+    """Report local credential availability without returning or logging a key."""
+    try:
+        _, source = vibe_credentials(config_dir) if config_dir else vibe_credentials()
+        return {"state": "authenticated", "detail": f"{source} credential available; access is checked on use."}
+    except BridgeError as exc:
+        return {"state": "missing", "detail": str(exc)}
 
 
 def credentials(settings: dict, provider_id="mistral") -> tuple[str, str]:
@@ -199,7 +261,12 @@ def credentials(settings: dict, provider_id="mistral") -> tuple[str, str]:
                       if account.get("id") == active), None)
         return "", f"{provider_display_name(settings, provider_id)} CLI login" + (f" · {label}" if label else "")
     if provider_id == "mistral" and mode == "vibe":
-        return vibe_credentials()
+        folder = cli_account_dir(settings, provider_id)
+        key, source = vibe_credentials(folder) if folder else vibe_credentials()
+        active = connection.get("cli_account")
+        label = next((account["label"] for account in connection.get("cli_accounts") or ()
+                      if account["id"] == active), None)
+        return key, source + (f" · {label}" if label else "")
     if mode == "environment":
         name = provider.get("credential_env")
         if name and os.environ.get(name):
@@ -320,12 +387,15 @@ def cached_catalogue(settings, root=None):
         path = root / "catalogues" / (provider_id + ".json")
         inventory = read_json(path)
         imported_legacy = False
-        if not inventory and provider_id == "mistral" and settings["providers"][provider_id]["credential_mode"] == "vibe" and settings["providers"][provider_id].get("credential_revision", 0) == 0:
+        if (not inventory and provider_id == "mistral"
+                and settings["providers"][provider_id]["credential_mode"] == "vibe"
+                and settings["providers"][provider_id].get("credential_revision", 0) == 0
+                and cli_account_dir(settings, provider_id) is None):
             legacy = read_json(root / "catalog.json")
             if legacy.get("schema_version") == 2:
                 if legacy.get("raw"):
                     try:
-                        vibe = vibe_settings()
+                        vibe = vibe_settings(cli_account_dir(settings, "mistral"))
                     except BridgeError:
                         vibe = {}
                     bare_settings = {"mappings": {slot: split_route(route)[1] for slot, route in settings["mappings"].items() if split_route(route)[0] == "mistral"}}
@@ -428,7 +498,7 @@ def model_labels(settings: dict, entries=(), vibe=None):
         return {identifier: entry["display_name"] for entry in entries for identifier in entry["aliases"]}
     if vibe is None:
         try:
-            vibe = vibe_settings()
+            vibe = vibe_settings(cli_account_dir(settings, "mistral"))
         except BridgeError:
             vibe = {}
     identifiers = set(claude_routes(settings).values()) | {entry["id"] for entry in entries} | set(vibe.get("configured_models", []))
@@ -698,7 +768,7 @@ def inspect_state(root: Path) -> dict:
               "claude_running": claude_running(), "recovery_needed": (root / "profile-transaction.json").exists(),
               "profile_active": ClaudeProfile(root).active()}
     try:
-        result["vibe"] = vibe_settings()
+        result["vibe"] = vibe_settings(cli_account_dir(settings, "mistral"))
     except BridgeError as exc:
         result["vibe_error"] = str(exc)
     states = {}

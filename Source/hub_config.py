@@ -69,8 +69,9 @@ def cli_auth_available(provider_id: str) -> bool:
 #: CLAUDE_CONFIG_DIR (and keys its Keychain item by that folder), Codex reads
 #: CODEX_HOME. Each extra account is only a folder path the user signed in to
 #: with the CLI itself; the hub stores the path, never a token, and the CLI
-#: keeps refreshing its own login there.
-CLI_ACCOUNT_PROVIDERS = frozenset({"claude", "codex"})
+#: keeps refreshing its own login there. Vibe uses VIBE_HOME; its saved API
+#: credential is resolved by bridge_core rather than a CLI turn adapter.
+CLI_ACCOUNT_PROVIDERS = frozenset({"claude", "codex", "mistral"})
 MAX_CLI_ACCOUNTS = 8
 _CLI_ACCOUNT_ID = re.compile(r"[a-z0-9][a-z0-9-]{0,31}\Z")
 
@@ -361,6 +362,10 @@ def connection_signature(provider_id: str, connection: dict) -> str:
     parts = [provider_id, normalized, mode, revision]
     if connection.get("key_account") is not None:
         parts.append(connection["key_account"])
+    # Vibe supplies an API credential, so its selected home must invalidate
+    # both model discovery and the running gateway's credential cache.
+    if provider_id == "mistral" and mode == "vibe" and connection.get("cli_account") is not None:
+        parts.append([connection["cli_account"], cli_account_dir({"providers": {provider_id: connection}}, provider_id)])
     value = json.dumps(parts, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(value).hexdigest()[:20]
 

@@ -18,6 +18,19 @@ Additional provider accounts and desktop integration paths still need live quali
 
 **Documentation**
 
+Mistral's **Vibe saved API key** source supports named secondary accounts in
+Providers, alongside the default `VIBE_HOME` / `~/.vibe` login. Add a folder,
+use **Sign in…** to run `vibe --setup`, choose the active account, and save.
+The next gateway request uses that account without restarting the gateway.
+New folders receive a distinct native Vibe `api_key_env_var`, keeping their
+Keychain logins separate. Existing folders can use their own `.env`; to sign
+in again through the Hub, an existing provider configuration must use a key
+name distinct from the default login. The Hub stores paths and labels in
+settings, and reads Vibe's saved key only to make Mistral API requests.
+**Check sign-in** reports local credential availability; access is verified on
+use. Removing an account from the Hub leaves its folder and login intact.
+See [Vibe configuration](https://github.com/mistralai/mistral-vibe#configuration).
+
 | Guide | Contents |
 | --- | --- |
 | [Quick start](QUICK-START.md) | Installation, provider setup, and launching either desktop client |
