@@ -154,6 +154,11 @@ holds the plaintext endpoint token. Authentication isolates enrolled adapter
 capabilities, not hostile processes already running as the same OS user with
 access to the user's files and administrative Host credential.
 
+If mailbox storage cannot be opened, including corruption or a newer schema,
+Chat starts with peer messaging disabled and shows a notice. The database is
+preserved for recovery; enrollment and peer authentication remain unavailable
+until storage is repaired and the worker restarts. Ordinary chats keep working.
+
 Bodies are limited to 16 KiB of UTF-8, reads to 50 messages and pending mail to
 256 messages per recipient. Messages expire after seven days; terminal rows
 are retained for a further seven days past expiry. Limits and strict argument

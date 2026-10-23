@@ -86,7 +86,7 @@ class SessionStore:
         self.host.store.delete(identifier)
         with self.host._metadata:
             header = self.host.headers.pop(identifier, None)
-        if header and header.get("workspace"):
+        if header and header.get("workspace") and self.host.peers.available:
             endpoint = self.host.peers.broker.find_internal(identifier, header["workspace"])
             if endpoint is not None:
                 self.host.peers.broker.revoke(endpoint["thread_id"])
@@ -434,6 +434,8 @@ class ChatHost:
             self._initializing = False
         with self._output: self.emit({"event": "ready"})
         self.capabilities.publish()
+        if self.peers.notice:
+            self.emit({"event": "notice", "message": self.peers.notice})
 
     def welcome(self):
         """Republish current state for a newly attached client; nothing changes.
@@ -454,6 +456,8 @@ the same publication `initialize` and `select` perform, ending with `ready`.
             with self._output: self.emit({"event": "selected", "id": None, "entries": [], "usage": None})
         self.capabilities.publish()
         self.publish_remote()
+        if self.peers.notice:
+            self.emit({"event": "notice", "message": self.peers.notice})
         with self._output: self.emit({"event": "ready"})
 
     def detach_client(self, client):

@@ -534,6 +534,27 @@ class HostProcessTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             peer.call("hub_self", {})
 
+    def test_corrupt_peer_database_does_not_prevent_host_chat(self):
+        from peer_mcp import admin
+        directory = self.root / "chats" / "peers"
+        directory.mkdir(parents=True, mode=0o700)
+        database = directory / "peers.sqlite3"
+        damaged = b"preserve this corrupt mailbox for recovery"
+        database.write_bytes(damaged)
+        database.chmod(0o600)
+        self.gateway = ScriptedGateway(self.root)
+        self.gateway.reply("Ordinary Chat remains available.")
+        self.start()
+        desktop, events = self.attach()
+        self.assertTrue(any(row.get("event") == "notice" and "Peer messaging unavailable" in row.get("message", "") for row in events))
+        chat_id = self.chat(events)["id"]
+        with self.assertRaisesRegex(ValueError, "unavailable"):
+            admin(self.root, {"command": "peer_enroll_chat", "chat": chat_id})
+        desktop.send({"command": "send", "chat": chat_id, "text": "Hi"})
+        desktop.until(lambda row: row.get("event") == "entry" and row.get("entry", {}).get("text") == "Ordinary Chat remains available.", timeout=20)
+        self.assertFalse(any(tool["name"].startswith("hub_") for tool in self.gateway.requests[0]["tools"]))
+        self.assertEqual(database.read_bytes(), damaged)
+
     def test_thread_bound_mcp_process_exposes_only_peer_tools(self):
         from peer_mcp import admin, write_endpoint
         self.gateway = ScriptedGateway(self.root)

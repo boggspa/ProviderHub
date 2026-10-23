@@ -45,7 +45,22 @@ GUIDANCE = ("\nThis chat is enrolled in Provider Hub peer messaging. Use hub_sel
 
 class ChatPeers:
     def __init__(self, directory):
-        self.broker = PeerBroker(directory)
+        self._broker = None
+        self.notice = ""
+        try:
+            self._broker = PeerBroker(directory)
+        except (ValueError, OSError, RuntimeError, sqlite3.Error) as exc:
+            self.notice = "Peer messaging unavailable: " + str(exc)
+
+    @property
+    def available(self):
+        return self._broker is not None
+
+    @property
+    def broker(self):
+        if self._broker is None:
+            raise ValueError(self.notice or "Peer messaging unavailable.")
+        return self._broker
 
     def enroll(self, chat, *, restore=False):
         # Native titles have a character limit; the broker bounds display
@@ -59,7 +74,7 @@ class ChatPeers:
             provider=chat.get("route", "").split("/", 1)[0], restore=restore)
 
     def endpoint(self, service):
-        if service.role != "parent" or not service.chat:
+        if not self.available or service.role != "parent" or not service.chat:
             return None
         chat = service.chat
         endpoint = self.broker.find_internal(chat["id"], chat["workspace"])
@@ -100,4 +115,5 @@ class ChatPeers:
                 "is_error": False, "summary": "Peer messaging: " + name.removeprefix("hub_"), "changed_files": []}
 
     def close(self):
-        self.broker.close()
+        if self._broker is not None:
+            self._broker.close()

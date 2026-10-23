@@ -1,5 +1,6 @@
 """Opt-in and model-context boundaries of the Hub peer adapter."""
 import json
+import sqlite3
 from pathlib import Path
 import tempfile
 import unittest
@@ -90,6 +91,33 @@ class ChatPeerTests(unittest.TestCase):
                     self.assertFalse(NAMES & {tool["name"] for tool in payload["tools"]})
                 self.assertEqual(emit.call_count, 1)
                 self.assertEqual(emit.call_args.args[0]["event"], "notice")
+
+    def test_unavailable_broker_is_disabled_and_preserves_its_database(self):
+        service, _ = self.service()
+        for kind in ("corrupt", "newer"):
+            with self.subTest(kind=kind):
+                directory = self.root / kind
+                directory.mkdir(mode=0o700)
+                database = directory / "peers.sqlite3"
+                if kind == "corrupt":
+                    database.write_bytes(b"not a SQLite database")
+                else:
+                    connection = sqlite3.connect(database)
+                    connection.execute("PRAGMA user_version=999")
+                    connection.close()
+                database.chmod(0o600)
+                before = database.read_bytes()
+                peers = ChatPeers(directory)
+                self.addCleanup(peers.close)
+                self.assertFalse(peers.available)
+                self.assertIn("Peer messaging unavailable", peers.notice)
+                service.peers = peers
+                self.assertFalse(NAMES & {tool["name"] for tool in service.payload(service.choice())["tools"]})
+                with self.assertRaisesRegex(ValueError, "unavailable"):
+                    peers.enroll(service.chat)
+                with self.assertRaises(ValueError):
+                    peers.execute(service, "hub_self", {})
+                self.assertEqual(database.read_bytes(), before)
 
     def test_real_model_tool_result_keeps_peer_data_and_current_provenance(self):
         call = {"role": "assistant", "content": [{"type": "tool_use", "id": "read-peers", "name": "hub_read_messages", "input": {}}], "stop_reason": "tool_use"}
