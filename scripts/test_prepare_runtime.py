@@ -8,10 +8,16 @@ Run with: uv run python scripts/test_prepare_runtime.py
 """
 from __future__ import annotations
 
+from contextlib import redirect_stdout
+import io
+import sqlite3
+import subprocess
 import sys
+import sysconfig
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -87,7 +93,7 @@ class PrunePatternTests(unittest.TestCase):
 
     def test_required_subtrees_do_not_match(self):
         for rel in ("bin", "lib", "lib/python3.13", "lib/python3.13/encodings",
-                    "lib/python3.13/lib-dynload", "lib/python3.13/unittest",
+                    "lib/python3.13/lib-dynload", "lib/python3.13/unittest", "lib/python3.13/sqlite3",
                     "lib/python3.13/site-packages",
                     "lib/python3.13/site-packages/cryptography",
                     "lib/python3.13/site-packages/cryptography-50.0.0.dist-info",
@@ -105,6 +111,7 @@ class PrunePatternTests(unittest.TestCase):
     def test_required_binaries_are_kept(self):
         for rel in ("lib/python3.13/lib-dynload/_ssl.cpython-313-darwin.so",
                     "lib/python3.13/lib-dynload/_socket.cpython-313-darwin.so",
+                    "lib/python3.13/lib-dynload/_sqlite3.cpython-313-darwin.so",
                     "lib/python3.13/site-packages/_cffi_backend.cpython-313-darwin.so",
                     "lib/python3.13/site-packages/cryptography/hazmat/bindings/_rust.abi3.so"):
             with self.subTest(rel=rel):
@@ -133,6 +140,8 @@ class PruneEndToEndTests(unittest.TestCase):
             keep = ["bin/python3.13", "lib/python3.13/os.py",
                     "lib/python3.13/encodings/utf_8.py",
                     "lib/python3.13/lib-dynload/_ssl.cpython-313-darwin.so",
+                    "lib/python3.13/lib-dynload/_sqlite3.cpython-313-darwin.so",
+                    "lib/python3.13/sqlite3/__init__.py",
                     "lib/python3.13/unittest/case.py",
                     "lib/python3.13/site-packages/_cffi_backend.cpython-313-darwin.so",
                     "lib/python3.13/site-packages/cryptography/fernet.py",
@@ -165,6 +174,60 @@ class PruneEndToEndTests(unittest.TestCase):
                             "the bin/python3 symlink findPython() relies on was lost")
             self.assertEqual(sorted(p.name for p in (root / "bin").iterdir()),
                              ["python3", "python3.13"])
+
+
+class SQLiteSmokeTests(unittest.TestCase):
+    """Execute the release smoke program with real SQLite, without a bundle."""
+
+    def run_smoke(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "bin").mkdir()
+            (root / "bin" / "python3").touch()
+            (root / "lib" / "python3.13").mkdir(parents=True)
+            (root / "lib" / "python3.13" / "os.py").touch()
+
+            def execute(command, **options):
+                output = io.StringIO()
+                # Relocation is a separate gate; exercise the exact SQLite
+                # smoke sent to the bundled interpreter using this test's one.
+                with mock.patch.object(sys, "argv", ["-c", str(root)]), \
+                     mock.patch.object(sys, "prefix", str(root)), \
+                     mock.patch.object(sysconfig, "get_paths", return_value={"stdlib": str(root / "lib")}), \
+                     redirect_stdout(output):
+                    try:
+                        exec(command[3], {})
+                    except Exception as exc:
+                        return subprocess.CompletedProcess(command, 1, output.getvalue(), repr(exc))
+                return subprocess.CompletedProcess(command, 0, output.getvalue(), "")
+
+            with mock.patch.object(pr.subprocess, "run", side_effect=execute):
+                pr.smoke_test(root, None)
+
+    def test_sqlite_can_create_commit_read_and_rollback(self):
+        with mock.patch.object(sqlite3, "connect", wraps=sqlite3.connect) as connect:
+            self.run_smoke()
+        self.assertTrue(connect.called, "the smoke gate never exercised SQLite")
+
+    def test_missing_sqlite_extension_fails_the_smoke_gate(self):
+        with mock.patch.dict(sys.modules, {"sqlite3": None}):
+            with self.assertRaisesRegex(SystemExit, "failed its smoke test"):
+                self.run_smoke()
+
+    def test_broken_sqlite_transactions_fail_the_smoke_gate(self):
+        connect = sqlite3.connect
+        for operation in ("commit", "rollback"):
+            with self.subTest(operation=operation):
+                broken = type("BrokenTransaction", (sqlite3.Connection,), {operation: lambda self: None})
+
+                def open_database(*args, **kwargs):
+                    database = connect(*args, factory=broken, **kwargs)
+                    self.addCleanup(database.close)
+                    return database
+
+                with mock.patch.object(sqlite3, "connect", side_effect=open_database):
+                    with self.assertRaisesRegex(SystemExit, "failed its smoke test"):
+                        self.run_smoke()
 
 
 if __name__ == "__main__":

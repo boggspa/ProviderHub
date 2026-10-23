@@ -70,6 +70,9 @@ class ConcurrentChatTests(unittest.TestCase):
                           "members": [{"name": "Member", "choice": self.host.models[0]["id"], "effort": "", "responsibility": "Inspect"}]})
         def transcripts(events):
             return sorted((event["event"], event["chat"]) for event in events if "entries" in event)
+        # A restart releases process-owned resources, including the mailbox
+        # broker's lifetime lock, before the replacement Host opens them.
+        self.host.shutdown()
         events, client = [], FakeTransport([])
         client.root = self.root
         restarted = ChatHost(self.store, client, events.append, child_factory=lambda: client)
@@ -676,10 +679,12 @@ class ConcurrentChatTests(unittest.TestCase):
 
     def test_delete_damaged_unloaded_chat_does_not_decode_its_transcript(self):
         a, b = self.create("a"), self.create("b")
+        endpoint = self.host.peers.enroll(self.store.load(a))
         with self.store.path(a).open("a") as stream: stream.write("invalid JSON\n")
         with patch.object(self.store, "load", side_effect=AssertionError("Delete loaded history")):
             self.host.handle({"command": "delete", "chat": a})
         self.assertFalse(self.store.path(a).exists())
+        self.assertEqual(self.host.peers.broker.thread(endpoint["thread_id"])["status"], "revoked")
         self.assertEqual(self.host.view_id, b)
 
     def test_auxiliary_rejections_settle_the_matching_request(self):
@@ -695,6 +700,7 @@ class ConcurrentChatTests(unittest.TestCase):
 
     def test_startup_recovers_all_interrupted_chats_without_provider_replay(self):
         a, b = self.create("a"), self.create("b")
+        self.host.shutdown()
         for identifier in (a, b):
             chat = self.store.load(identifier); chat["status"] = "working"; self.store.save(chat)
         client = FakeTransport([]); client.root = self.root

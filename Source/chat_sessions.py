@@ -85,7 +85,11 @@ class SessionStore:
     def delete(self, identifier):
         self.host.store.delete(identifier)
         with self.host._metadata:
-            self.host.headers.pop(identifier, None)
+            header = self.host.headers.pop(identifier, None)
+        if header and header.get("workspace") and self.host.peers.available:
+            endpoint = self.host.peers.broker.find_internal(identifier, header["workspace"])
+            if endpoint is not None:
+                self.host.peers.broker.revoke(endpoint["thread_id"])
 
     def headers(self):
         with self.host._metadata:
@@ -196,6 +200,8 @@ class ChatHost:
         self.session_store = SessionStore(self)
         from chat_capabilities import ChatCapabilities
         self.capabilities = ChatCapabilities(store.root, self.emit)
+        from chat_peers import ChatPeers
+        self.peers = ChatPeers(store.root / "peers")
 
     def emit(self, event):
         self._emit(event)
@@ -409,6 +415,7 @@ class ChatHost:
         service.chat, service.models, service.preferences, service.sides = chat, self.models, self.preferences, self.sides
         service.process_registry = self.processes
         service.capabilities = self.capabilities
+        service.peers = self.peers
         return service
 
     def initialize(self):
@@ -427,6 +434,8 @@ class ChatHost:
             self._initializing = False
         with self._output: self.emit({"event": "ready"})
         self.capabilities.publish()
+        if self.peers.notice:
+            self.emit({"event": "notice", "message": self.peers.notice})
 
     def welcome(self):
         """Republish current state for a newly attached client; nothing changes.
@@ -447,6 +456,8 @@ the same publication `initialize` and `select` perform, ending with `ready`.
             with self._output: self.emit({"event": "selected", "id": None, "entries": [], "usage": None})
         self.capabilities.publish()
         self.publish_remote()
+        if self.peers.notice:
+            self.emit({"event": "notice", "message": self.peers.notice})
         with self._output: self.emit({"event": "ready"})
 
     def detach_client(self, client):
@@ -791,3 +802,4 @@ the same publication `initialize` and `select` perform, ending with `ready`.
             for thread in (service.thread, service.restart_thread, service.branch_thread):
                 if thread and thread is not threading.current_thread():
                     thread.join(max(0, deadline - time.monotonic()))
+        self.peers.close()

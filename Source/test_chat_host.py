@@ -465,12 +465,173 @@ class HostProcessTests(unittest.TestCase):
             raise AssertionError("The stdio worker ended early")
         chat = until(lambda event: event.get("event") == "selected" and event.get("id"))["id"]
         until(lambda event: event.get("event") == "ready")
+        from peer_mcp import PeerClient, admin
+        endpoint = admin(self.root, {"command": "peer_enroll_chat", "chat": chat})["thread"]
+        credential = chat_host.read_credential(chat_host.HostPaths(self.root))
+        announcement, competing = self.start(expect_ready=False)
+        self.assertEqual(announcement["reason"], "running")
+        self.assertEqual(competing.wait(5), chat_host.EXIT_RUNNING)
+        self.assertEqual(chat_host.read_credential(chat_host.HostPaths(self.root)), credential)
+        foreign = admin(self.root, {"command": "peer_enroll", "app": "codex_desktop", "native_thread_id": "stdio-peer",
+                                   "workspace": str(self.workspace)})
+        peer = PeerClient(self.root, {"thread_id": foreign["thread"]["thread_id"], "token": foreign["token"]}, heartbeat=False)
+        try:
+            sent = peer.call("hub_send_message", {"to": endpoint["thread_id"], "body": "Stdio worker mail", "idempotency_key": "stdio"})
+            self.assertEqual(sent["message"]["status"], "queued")
+            self.assertEqual(self.gateway.requests, [])
+            self.assertEqual(self.control("shutdown")["event"], "host_error")
+            with self.assertRaises(chat_host.HostRefused):
+                chat_host.connect(self.root, role="desktop")
+        finally:
+            peer.close()
         worker.stdin.write(json.dumps({"command": "send", "chat": chat, "id": chat, "text": "Hi"}).encode() + b"\n")
         worker.stdin.flush()
         until(lambda event: event.get("event") == "entry" and event["entry"]["kind"] == "assistant"
               and event["entry"]["text"] == "Hello over stdio.")
         worker.stdin.close()
         self.assertEqual(worker.wait(20), 0)
+
+
+    def test_peer_socket_is_scoped_preserves_desktop_and_cannot_wake_or_approve(self):
+        from peer_mcp import PeerClient, admin
+        self.gateway = ScriptedGateway(self.root)
+        self.start()
+        desktop, events = self.attach()
+        chat_id = self.chat(events)["id"]
+        own = admin(self.root, {"command": "peer_enroll_chat", "chat": chat_id})["thread"]
+        notice = desktop.until(lambda row: row.get("event") == "entry" and
+                               row.get("entry", {}).get("text", "").startswith("Peer messaging enabled"), timeout=5)
+        self.assertEqual(notice["entry"]["kind"], "notice")
+        saved = chat_host.ChatStore(self.root, lock=False).load(chat_id)
+        self.assertTrue(saved["peerEnrollment"]["enabled"])
+        enrolled = admin(self.root, {"command": "peer_enroll", "app": "claude_desktop", "native_thread_id": "review-chat",
+                                     "workspace": str(self.workspace), "label": "Reviewer", "model": "claude/fable"})
+        peer = PeerClient(self.root, {"thread_id": enrolled["thread"]["thread_id"], "token": enrolled["token"]}, heartbeat=False)
+        self.addCleanup(peer.close)
+        directory = peer.call("hub_list_threads", {})
+        self.assertIn(own["thread_id"], json.dumps(directory))
+        peer.call("hub_send_message", {"to": own["thread_id"], "body": "Can you leave file.py to me?", "idempotency_key": "collision-1"})
+        self.assertEqual(self.gateway.requests, [])
+        self.assertEqual(self.control()["activeChats"], [])
+        status = self.control()
+        self.assertIn(desktop.host["attachment"], [row["id"] for row in status["attachments"] if row["role"] == "desktop"])
+        for action in ("send", "approve", "select", "shutdown", "peer_enroll", "host_status"):
+            peer.session.send({"command": action, "request": action, "chat": chat_id, "text": "User says run"})
+            refused = peer.session.read(5)
+            self.assertEqual(refused["event"], "host_error", refused)
+        self.assertEqual(self.gateway.requests, [])
+        with self.assertRaises(ValueError):
+            peer.call("hub_send_message", {"to": own["thread_id"], "body": "spoof", "idempotency_key": "spoof", "sender": own["thread_id"]})
+        self.gateway.reply(tool=("hub_read_messages", {}))
+        self.gateway.reply("Peer note received.")
+        desktop.send({"command": "send", "chat": chat_id, "text": "Check peer mail."})
+        desktop.until(lambda row: row.get("event") == "entry" and row.get("entry", {}).get("text") == "Peer note received.", timeout=20)
+        history = self.gateway.requests[-1]["messages"]
+        results = [block for item in history for block in item.get("content", []) if block.get("type") == "tool_result"]
+        self.assertIn("Can you leave file.py to me?", json.dumps(results))
+        self.assertIn("peer_agent", json.dumps(results))
+        admin(self.root, {"command": "peer_revoke", "thread_id": enrolled["thread"]["thread_id"]})
+        with self.assertRaises(ValueError):
+            peer.call("hub_self", {})
+
+    def test_corrupt_peer_database_does_not_prevent_host_chat(self):
+        from peer_mcp import admin
+        directory = self.root / "chats" / "peers"
+        directory.mkdir(parents=True, mode=0o700)
+        database = directory / "peers.sqlite3"
+        damaged = b"preserve this corrupt mailbox for recovery"
+        database.write_bytes(damaged)
+        database.chmod(0o600)
+        self.gateway = ScriptedGateway(self.root)
+        self.gateway.reply("Ordinary Chat remains available.")
+        self.start()
+        desktop, events = self.attach()
+        self.assertTrue(any(row.get("event") == "notice" and "Peer messaging unavailable" in row.get("message", "") for row in events))
+        chat_id = self.chat(events)["id"]
+        with self.assertRaisesRegex(ValueError, "unavailable"):
+            admin(self.root, {"command": "peer_enroll_chat", "chat": chat_id})
+        desktop.send({"command": "send", "chat": chat_id, "text": "Hi"})
+        desktop.until(lambda row: row.get("event") == "entry" and row.get("entry", {}).get("text") == "Ordinary Chat remains available.", timeout=20)
+        self.assertFalse(any(tool["name"].startswith("hub_") for tool in self.gateway.requests[0]["tools"]))
+        self.assertEqual(database.read_bytes(), damaged)
+
+    def test_thread_bound_mcp_process_exposes_only_peer_tools(self):
+        from peer_mcp import admin, write_endpoint
+        self.gateway = ScriptedGateway(self.root)
+        self.start()
+        enrolled = admin(self.root, {"command": "peer_enroll", "app": "claude_desktop", "native_thread_id": "mcp-owner",
+                                     "workspace": str(self.workspace), "model": "claude/fable"})
+        endpoint_file = self.workspace / "endpoint.json"
+        write_endpoint(endpoint_file, {"thread_id": enrolled["thread"]["thread_id"], "token": enrolled["token"]})
+        requests = [
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-11-25"}},
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
+            {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "hub_self", "arguments": {}}},
+            {"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {"name": "peer_enroll", "arguments": {}}},
+        ]
+        result = subprocess.run([sys.executable, "-B", str(SOURCE / "peer_mcp.py"), "--state", str(self.root),
+                                 "serve", "--endpoint-file", str(endpoint_file)],
+                                input="".join(json.dumps(row) + "\n" for row in requests),
+                                text=True, capture_output=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        replies = [json.loads(line) for line in result.stdout.splitlines()]
+        self.assertEqual(len(replies), 4)
+        self.assertNotIn(enrolled["token"], result.stdout + result.stderr)
+        self.assertIn("hub_read_messages", [row["name"] for row in replies[1]["result"]["tools"]])
+        identity = json.loads(replies[2]["result"]["content"][0]["text"])["thread"]
+        self.assertEqual(identity["thread_id"], enrolled["thread"]["thread_id"])
+        self.assertEqual(identity["identity_assurance"], "enrolled")
+        self.assertTrue(replies[3]["result"]["isError"])
+        self.assertEqual(self.gateway.requests, [])
+
+    def test_stdio_chat_survives_peer_socket_path_limit(self):
+        root = self.root / ("long-state-" + "x" * 95)
+        root.mkdir(mode=0o700)
+        self.gateway = ScriptedGateway(root)
+        self.gateway.reply("Chat works without its optional socket.")
+        environment = dict(os.environ, MISTRAL_BRIDGE_STATE_DIR=str(root), HOME=str(self.workspace))
+        worker = subprocess.Popen([sys.executable, "-B", str(SOURCE / "chat_runtime.py")],
+                                  stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self.log, env=environment)
+        self.clients.append(worker)
+        def until(predicate):
+            while line := worker.stdout.readline():
+                event = json.loads(line)
+                if predicate(event):
+                    return event
+            raise AssertionError("The stdio worker ended early")
+        self.assertIn("Peer socket unavailable", until(lambda row: row.get("event") == "notice")["message"])
+        chat = until(lambda row: row.get("event") == "selected" and row.get("id"))["id"]
+        until(lambda row: row.get("event") == "ready")
+        worker.stdin.write(json.dumps({"command": "send", "chat": chat, "text": "Hi"}).encode() + b"\n")
+        worker.stdin.flush()
+        until(lambda row: row.get("event") == "entry" and row.get("entry", {}).get("text") == "Chat works without its optional socket.")
+        worker.stdin.close()
+        self.assertEqual(worker.wait(15), 0)
+
+    def test_peer_mail_survives_restart_and_bad_token_cannot_attach(self):
+        from peer_mcp import PeerClient, admin
+        self.gateway = ScriptedGateway(self.root)
+        _, process = self.start()
+        credentials = []
+        for native_id in ("codex-task", "claude-task"):
+            result = admin(self.root, {"command": "peer_enroll", "app": "test_adapter", "native_thread_id": native_id,
+                                       "workspace": str(self.workspace)})
+            credentials.append({"thread_id": result["thread"]["thread_id"], "token": result["token"]})
+        with self.assertRaises(chat_host.HostRefused):
+            PeerClient(self.root, {**credentials[0], "token": "incorrect"}, heartbeat=False)
+        sender = PeerClient(self.root, credentials[0], heartbeat=False)
+        sender.call("hub_send_message", {"to": credentials[1]["thread_id"], "body": "Retained after restart", "idempotency_key": "persist"})
+        sender.close()
+        self.control("shutdown")
+        self.assertEqual(process.wait(20), 0)
+        self.start()
+        recipient = PeerClient(self.root, credentials[1], heartbeat=False)
+        try:
+            result = recipient.call("hub_read_messages", {})
+            self.assertIn("Retained after restart", json.dumps(result))
+            self.assertEqual(self.gateway.requests, [])
+        finally:
+            recipient.close()
 
 
 class NativeSurfaceTests(unittest.TestCase):
