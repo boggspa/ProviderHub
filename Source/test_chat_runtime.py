@@ -86,6 +86,23 @@ class ChatRuntimeTests(unittest.TestCase):
         self.assertIsNotNone(service.approval)
         return service.approval["id"]
 
+    def test_claude_cli_output_budget_matches_the_cli_default(self):
+        service, _ = self.service([])
+        service.chat["messages"] = [{"role": "user", "content": [{"type": "text", "text": "Write the file"}]}]
+        base = service.choice()
+        for overrides, expected in (
+                # No published ceiling: the CLI's own default, not the 4096 fallback.
+                ({"source": "cli", "route": "claude/opus", "max_output": None, "context": 1000000}, 32000),
+                ({"source": "cli", "route": "claude/opus", "max_output": 128000, "context": 1000000}, 32000),
+                ({"source": "cli", "route": "claude/opus", "max_output": 1024, "context": 1000000}, 1024),
+                ({"source": "cli", "route": "claude/opus", "max_output": None, "context": 16000}, 4000),
+                # Other routes keep the general budget.
+                ({"source": "keychain", "route": "claude/opus", "max_output": None, "context": 1000000}, 4096),
+                ({"source": "cli", "route": "codex/gpt-6", "max_output": None, "context": 1000000}, 4096),
+                ({"max_output": 64000}, 8192)):
+            with self.subTest(**overrides):
+                self.assertEqual(service.payload({**base, **overrides})["max_tokens"], expected)
+
     def test_streaming_reply_saved_with_opaque_reasoning(self):
         reply = response()
         reply["content"].insert(0, {"type": "thinking", "thinking": "private reasoning", "signature": "opaque-signature"})
@@ -493,6 +510,16 @@ class MessagesStreamTests(unittest.TestCase):
                 self.stream([{"type": "error", "error": {"type": code, "message": "Provider message"}}])
             self.assertEqual(caught.exception.code, code)
             self.assertEqual(retryable_request(caught.exception), retries)
+
+    def test_cli_output_limit_error_is_not_retried(self):
+        # The same budget fails the same way on every attempt.
+        message = ("Claude (Anthropic API) CLI route failed: claude reported success: API Error: Claude's response "
+                   "exceeded the 4096 output token maximum. To configure this behavior, set the "
+                   "CLAUDE_CODE_MAX_OUTPUT_TOKENS environment variable.")
+        with self.assertRaises(ModelRequestError) as caught:
+            self.stream([{"type": "error", "error": {"type": "api_error", "message": message}}])
+        self.assertEqual(caught.exception.code, "api_error")
+        self.assertFalse(retryable_request(caught.exception))
 
     def test_http_error_preserves_status_and_handles_non_json_body(self):
         for status, body in ((429, b'{"error":{"type":"rate_limit_error","message":"Slow down"}}'), (502, b"Upstream unavailable")):
