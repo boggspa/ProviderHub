@@ -45,6 +45,7 @@ See [Vibe configuration](https://github.com/mistralai/mistral-vibe#configuration
 | [Chat in Provider Hub](docs/chat.md) | Lightweight native chat, local file/shell tools, approvals, and saved conversations |
 | [Peer mailboxes](docs/peer-messaging.md) | Opt-in thread discovery, attributed messages, MCP adapter, and delivery limits |
 | [AntiGravity tool handoff](docs/antigravity-host-handoff.md) | Native tool requests and desktop dispatch |
+| [Separate Antigravity accounts](docs/antigravity-accounts.md) | Isolated account homes, sign-in and Keychain fallback |
 | [Repository doctrine](AGENTS.md) | Shared-checkout ownership, testing, and commit rules |
 | [Contributing](CONTRIBUTING.md) | Development setup, tests, scratch files, and pull-request rules |
 | [Security policy](SECURITY.md) | Private vulnerability reporting, threat model, and release signing |

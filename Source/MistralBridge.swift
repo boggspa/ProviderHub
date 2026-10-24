@@ -1282,6 +1282,8 @@ final class BridgeModel: ObservableObject {
         panel.directoryURL = FileManager.default.homeDirectoryForCurrentUser
         panel.message = provider == "mistral"
             ? "Choose or create a folder for this Mistral Vibe account, e.g. ~/.vibe-work. Use an empty folder for a new, separate login."
+            : provider == "antigravity"
+            ? "Choose or create a separate home for this Antigravity account, e.g. ~/.antigravity-work. Use an empty folder; the CLI will create .gemini inside it."
             : provider == "claude"
             ? "Choose or create a folder for this Claude account, e.g. ~/.claude-work. Claude Code keeps that account's login there."
             : "Choose or create a folder for this Codex account, e.g. ~/.codex-lite. Codex keeps that account's login there."
@@ -1314,6 +1316,19 @@ final class BridgeModel: ObservableObject {
     /// account's folder. The CLI owns the whole OAuth flow and the login it
     /// leaves behind; nothing passes through the hub.
     func signInCliAccount(_ provider: String, folder: String?) {
+        if provider == "antigravity" {
+            Task {
+                do {
+                    let input = try JSONSerialization.data(withJSONObject: folder.map { ["config_dir": $0] } ?? [:])
+                    let prepared = try await command("prepare-antigravity-account", provider: provider, input: input)
+                    guard let script = prepared["script"] as? String else {
+                        throw WorkerError(message: "Antigravity sign-in could not be prepared.")
+                    }
+                    openCliAccountTerminal(script)
+                } catch { tell(error.localizedDescription, error: true) }
+            }
+            return
+        }
         if provider == "mistral" {
             openVibeAccount(folder: folder, setup: true)
             return

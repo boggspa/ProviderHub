@@ -40,6 +40,7 @@ for module in peer_broker peer_mcp chat_peers chat_context chat_questions chat_r
 done
 # Optional capabilities use the same worker; their external executables are
 # configured separately and are never downloaded during build or launch.
+cp "$SOURCE_DIR/agy_accounts.py" "$APP_DIR/Contents/Resources/worker/"
 cp "$SOURCE_DIR/plugin-dependencies.lock.json" "$APP_DIR/Contents/Resources/worker/"
 # The launch-decision policy is now canonical in Swift
 # (Source/LaunchPlan.swift). There is no Python policy to ship.

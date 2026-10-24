@@ -524,7 +524,8 @@ def plan_turn(provider_id: str, upstream_model: str, payload: dict, spec: dict,
         request["images"] = images
     if config_dir:
         # The active CLI account's config folder; the adapter points its CLI
-        # there (CLAUDE_CONFIG_DIR / CODEX_HOME). Absent means the default login.
+        # there (CLAUDE_CONFIG_DIR / CODEX_HOME / Antigravity HOME).
+        # Absent means the default login.
         if provider_id not in CLI_ACCOUNT_PROVIDERS:
             raise CliRouteError(f"The {provider_id} CLI route does not support extra accounts.")
         request["config_dir"] = config_dir
