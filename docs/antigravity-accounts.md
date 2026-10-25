@@ -18,10 +18,12 @@ only the account label and folder path.
    and **Save**; new requests and model discovery use that home. Existing
    turns finish on the account they started with.
 
-**Check sign-in** reports `unknown` because agy does not offer a read-only
-authentication-status command. Provider Hub does not inspect saved tokens
-to infer an email or claim authentication succeeded. Refreshing the models
-uses the selected account's own `agy models` command.
+**Check sign-in** runs the selected account's own `agy models` command.
+A successful nonempty catalogue shows a positive model-access check; an
+explicit request to sign in shows missing, while network errors or empty
+responses remain unknown. This does not submit a model turn or inspect saved
+tokens. Verify the account email in the CLI itself. Model pickers refresh on
+opening so newly saved account rows appear without restarting Chat.
 
 For Antigravity, the selected folder is an entire subprocess `HOME`, not an
 existing `.gemini` folder. Extra accounts also receive private XDG config,

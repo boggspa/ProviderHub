@@ -578,6 +578,7 @@ private struct ProviderShellPane: View {
                     }
                 case "vibe":
                     HStack { Text(model.vibeAlias.isEmpty ? "Start Vibe and sign in, then reconnect." : "Vibe model: " + model.vibeAlias).foregroundStyle(.secondary); Spacer(); Button("Open Vibe") { model.openVibe() }.controlSize(.small) }
+                    CliAccountsSection(model: model, provider: provider.id).controlSize(.small)
                 case "cli":
                     if cliAccountProviders.contains(provider.id) { CliAccountsSection(model: model, provider: provider.id).controlSize(.small) }
                     else { Text("Sign in through the \(provider.presentation.displayProvider) CLI itself, then save.").foregroundStyle(.secondary) }

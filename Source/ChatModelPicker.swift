@@ -19,7 +19,7 @@ struct ChatModelPicker: View {
                 } else { Image(systemName: "sparkle").font(.system(size: size - 2)).foregroundStyle(.secondary) }
             }
             .frame(width: 520, height: 388)
-            .onAppear { ownerID = model.selectedID }
+            .onAppear { ownerID = model.selectedID; model.refresh() }
             .onExitCommand(perform: dismiss)
     }
     private func commit(_ id: String, _ effort: String) {

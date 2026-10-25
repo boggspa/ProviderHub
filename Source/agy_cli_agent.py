@@ -2,10 +2,10 @@
 
 Route 2 — CLI-as-transport. The agy CLI owns its Google OAuth login end to end.
 This module NEVER reads, copies, or refreshes a credential file, and never
-touches the Keychain. agy exposes no non-interactive auth verb at all
-(``agy auth status`` exits 2 with ``unexpected argument "auth"``), so
-``auth_state()`` reports ``"unknown"`` and spawns nothing rather than inventing
-a probe.
+touches the Keychain. agy exposes no non-interactive auth-status verb, so
+``auth_state()`` verifies access using the official ``agy models`` command.
+A successful nonempty model list confirms access without reading credentials
+or submitting a model turn; it does not attest to the account email.
 
 The desktop harness owns the tool loop. Structured turns accept either agy's
 schema response or a native request intercepted by a temporary PreToolUse
@@ -297,12 +297,6 @@ def _fixed_effort_hint(model: str, requested: str | None, thinking) -> str:
             "The provider's fixed thinking mode remains enabled; treat this as guidance "
             "within that mode. Keep the user's requested answer format and length.")
 
-
-_NO_AUTH_VERB_DETAIL = (
-    "agy exposes no non-interactive auth status verb; the CLI owns its Google "
-    "login, so sign-in state cannot be probed read-only and is reported as "
-    "unknown. A turn fails with the CLI's own message if it is not signed in."
-)
 
 # ---------------------------------------------------------------------------
 # Validation
@@ -637,20 +631,31 @@ def discover(*, capture=None) -> dict:
 
 
 def auth_state(*, capture=None, config_dir=None) -> dict:
-    """Always ``"unknown"``: agy has no read-only auth verb to ask.
+    """Verify model access through agy itself without requesting inference.
 
-    ``capture`` is accepted for API symmetry with the other CLI routes and is
-    deliberately never used — running ``agy auth status`` only produces
-    ``Error: unexpected argument "auth"`` (exit 2), and treating that as
-    "missing" would report a working Google login as signed out. Nothing here
-    reads a credential file or the Keychain.
+    Only a successful, parseable catalogue is positive evidence. Network and
+    protocol failures remain unknown; an explicit sign-in request is missing.
+    The provider owns tokens and the CLI remains the place to verify email.
     """
-    account_environment(config_dir)
+    env = account_environment(config_dir)
     binary = _resolve_binary()
     if not binary:
         return {"state": "missing",
                 "detail": "the agy CLI is not installed or not on PATH"}
-    return {"state": "unknown", "detail": _NO_AUTH_VERB_DETAIL}
+    try:
+        rc, out, err = _invoke(capture, [binary, "models"], timeout=30, env=env or None)
+    except Exception:
+        return {"state": "unknown", "detail": "Model access could not be checked. Retry, or verify sign-in in the agy CLI."}
+    rows = _parse_models(out) if rc == 0 else []
+    if rows:
+        return {"state": "authenticated",
+                "detail": "Model access verified by agy models. Verify the account email in the CLI."}
+    diagnostic = (out + "\n" + err).lower()
+    if rc != 0 and any(text in diagnostic for text in (
+            "please sign in to view available models", "you are not logged into antigravity",
+            "launch the cli without arguments to sign in")):
+        return {"state": "missing", "detail": "Sign in through the agy CLI for this account folder."}
+    return {"state": "unknown", "detail": "No model access was verified. Retry, or check this account in the agy CLI."}
 
 
 def catalogue(*, capture=None, timeout=30, config_dir=None) -> tuple[list[dict], list[str]]:
