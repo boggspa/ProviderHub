@@ -100,8 +100,8 @@ cat > "$APP_DIR/Contents/Info.plist" <<'PLIST'
   <key>CFBundleIdentifier</key><string>com.mistralbridge.providerhub</string>
   <key>CFBundleExecutable</key><string>MistralBridge</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>0.5.29</string>
-  <key>CFBundleVersion</key><string>93</string>
+  <key>CFBundleShortVersionString</key><string>0.5.30</string>
+  <key>CFBundleVersion</key><string>94</string>
   <key>BridgeStateName</key><string>Provider Hub Preview</string>
   <key>BridgeProfileID</key><string>14c58c94-d7e8-4a15-96b8-81668956e474</string>
   <key>BridgeDefaultPort</key><integer>11438</integer>

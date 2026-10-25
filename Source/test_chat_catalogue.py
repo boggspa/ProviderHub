@@ -252,6 +252,69 @@ class ChatCatalogueTests(unittest.TestCase):
         self.assertEqual(keychain_account(selected["providers"]["mistral"], "mistral"), "MISTRAL_API_KEY.work")
         self.assertEqual(self.settings["providers"]["mistral"]["key_account"], "work")
 
+    def test_vibe_picker_lists_both_homes_and_selects_their_own_saved_credentials(self):
+        from bridge_core import credentials
+        route = "mistral/mistral-large-latest"
+        self.settings["_model_specs"] = {route: {"id": route, "provider_id": "mistral",
+            "model_id": "mistral-large-latest", "context": 200000, "tools": True}}
+        self.settings["mappings"] = {slot[0]: route for slot in SLOTS}
+        self.settings["codex_catalogue"] = [route]
+        self.settings["providers"]["mistral"].update(credential_mode="vibe", cli_account="work",
+            cli_accounts=[{"id": "work", "label": "Work", "config_dir": "/accounts/vibe-work"}],
+            key_account="unrelated-key", key_accounts=[{"id": "unrelated-key", "label": "API"}])
+        before = copy.deepcopy(self.settings)
+        rows = chat_choices(self.settings)
+        self.assertEqual([(r["account"], r["accountLabel"]) for r in rows], [("work", "Work"), ("", "Default")])
+        self.assertEqual(len({r["scope"] for r in rows}), 2)
+        with patch("bridge_core.vibe_credentials", side_effect=lambda folder=None: (
+                "work-key" if folder else "default-key", "Vibe test")) as read:
+            for row, expected in zip(rows, ("work-key", "default-key")):
+                selected, connection, folder, scope = chat_connection(self.settings, "mistral", row["account"], row["scope"])
+                self.assertEqual(credentials(selected, "mistral")[0], expected)
+                self.assertEqual(folder, "/accounts/vibe-work" if row["account"] else None)
+                self.assertEqual(connection["key_account"], "unrelated-key")
+        self.assertEqual(self.settings, before)
+        self.settings["providers"]["mistral"]["cli_accounts"][0]["config_dir"] = "/accounts/replaced"
+        with self.assertRaisesRegex(ValueError, "connection changed"):
+            chat_connection(self.settings, "mistral", "work", rows[0]["scope"])
+        with self.assertRaisesRegex(ValueError, "no longer configured"):
+            chat_connection(self.settings, "mistral", "removed")
+
+    def test_antigravity_accounts_added_after_gateway_start_reach_picker_and_turns(self):
+        import http.client
+        import json
+        import test_gateway_hub as fixtures
+        from bridge_core import atomic_json, load_settings
+        harness = fixtures.GatewayHubHTTPTests()
+        harness.setUp()
+        try:
+            route = harness.start_gateway("antigravity", "gemini-3.8-flash", {"context": 1000000})
+
+            def listed():
+                connection = http.client.HTTPConnection("127.0.0.1", harness.gateway.server_port, timeout=5)
+                connection.request("GET", "/_bridge/chat/models", headers={"Authorization": "Bearer " + harness.runtime.token})
+                response = connection.getresponse()
+                self.assertEqual(response.status, 200)
+                rows = json.loads(response.read())["models"]
+                connection.close()
+                return [r for r in rows if r["route"] == route]
+
+            self.assertEqual([r["account"] for r in listed()], [""])
+            saved = load_settings(harness.root)
+            saved["providers"]["antigravity"]["cli_accounts"] = [
+                {"id": "work", "label": "Work", "config_dir": str(harness.root / "agy-work")}]
+            atomic_json(harness.root / "settings.json", saved)
+            rows = listed()
+            self.assertEqual([r["accountLabel"] for r in rows], ["Default", "Work"])
+            payload = {"model": route, "messages": [{"role": "user", "content": "Hello"}], "max_tokens": 32,
+                       "_provider_hub_surface": "chat", "_provider_hub_account": "work",
+                       "_provider_hub_connection": rows[1]["scope"]}
+            plan = harness.runtime.plan(payload)
+            self.assertEqual(plan["body"]["config_dir"], str((harness.root / "agy-work").resolve()))
+            self.assertNotIn("cli_accounts", harness.runtime.settings["providers"]["antigravity"])
+        finally:
+            harness.tearDown()
+
     def test_connection_revision_account_removal_and_mode_changes_require_fresh_chat(self):
         _, _, _, scope = chat_connection(self.settings, "claude", "work")
         self.settings["providers"]["claude"]["credential_revision"] += 1

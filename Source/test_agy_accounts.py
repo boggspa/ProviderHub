@@ -106,12 +106,49 @@ class AdapterAccountTests(unittest.TestCase):
         self.assertEqual([event["type"] for event in events], ["error"])
         spawn.assert_not_called()
 
-    def test_auth_status_stays_unknown_without_starting_login_or_reading_credentials(self):
+    def test_auth_check_verifies_models_in_the_selected_home_without_inference(self):
+        seen = {}
+
+        def capture(argv, **kwargs):
+            seen.update(argv=argv, **kwargs)
+            return 0, "gemini-3.8-flash-medium\tGemini Flash\n", ""
+
+        with patch.object(adapter, "_resolve_binary", return_value="/native/agy"):
+            state = adapter.auth_state(capture=capture, config_dir="/tmp/agy-work")
+        self.assertEqual(state["state"], "authenticated")
+        self.assertEqual(seen["argv"], ["/native/agy", "models"])
+        self.assertEqual(seen["env"]["HOME"], str(Path("/tmp/agy-work").resolve()))
+        self.assertEqual(seen["timeout"], 30)
+        self.assertIn("Verify the account email", state["detail"])
+
+    def test_auth_check_only_marks_explicit_sign_in_requests_missing(self):
+        cases = [(1, "", "Please sign in to view available models.", "missing"),
+                 (1, "", "Network unavailable", "unknown"),
+                 (1, "gemini-3.8-flash\tGemini Flash", "request failed", "unknown"),
+                 (0, "Fetching available models...", "", "unknown")]
+        with patch.object(adapter, "_resolve_binary", return_value="/native/agy"):
+            for rc, out, err, expected in cases:
+                with self.subTest(rc=rc, out=out, err=err):
+                    state = adapter.auth_state(capture=lambda *a, **kw: (rc, out, err))
+                    self.assertEqual(state["state"], expected)
+            with patch.object(adapter, "_invoke", side_effect=TimeoutError("private diagnostic")):
+                state = adapter.auth_state()
+                self.assertEqual(state["state"], "unknown")
+                self.assertNotIn("private diagnostic", state["detail"])
+
+    def test_account_states_checks_default_and_secondary_without_mixing_results(self):
+        settings = {"providers": {"antigravity": {"cli_accounts": [
+            {"id": "work", "label": "Work", "config_dir": "/tmp/agy-work"}]}}}
+
+        def capture(argv, **kwargs):
+            return (0, "gemini-3.8-flash\tGemini Flash", "") if kwargs.get("env") else (
+                1, "", "Please sign in to view available models.")
+
         with patch.object(adapter, "_resolve_binary", return_value="/native/agy"), \
-                patch.object(adapter, "_default_capture") as capture:
-            state = adapter.auth_state(config_dir="/tmp/agy-work")
-        self.assertEqual(state["state"], "unknown")
-        capture.assert_not_called()
+                patch.object(adapter, "_default_capture", side_effect=capture):
+            rows = cli_routes.account_states(settings, "antigravity")
+        self.assertEqual([(row["id"], row["state"]) for row in rows],
+                         [(None, "missing"), ("work", "authenticated")])
 
     def test_route_discovery_and_turn_planning_forward_the_selected_home(self):
         with patch.object(adapter, "auth_state", return_value={"state": "unknown"}) as auth, \

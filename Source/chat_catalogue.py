@@ -25,6 +25,10 @@ def native_search_available(spec, connection, provider):
     return spec.get("web_search") is True and (connection.get("credential_mode") == "cli" or provider == "openrouter")
 
 
+def _folder_accounts(provider, mode):
+    return mode == "cli" or (provider == "mistral" and mode == "vibe")
+
+
 def chat_connection(settings, provider, account="", expected_scope=None):
     source, account = split_chat_account(account)
     connections = settings.get("providers") or {}
@@ -37,14 +41,15 @@ def chat_connection(settings, provider, account="", expected_scope=None):
                              "Choose a model/account for a new chat.")
         connection["credential_mode"] = source
     mode = connection.get("credential_mode")
-    field = "cli_account" if mode == "cli" else "key_account"
-    rows = connection.get("cli_accounts" if mode == "cli" else "key_accounts") or []
-    if account and (mode not in {"cli", "keychain"} or
+    folder_accounts = _folder_accounts(provider, mode)
+    field = "cli_account" if folder_accounts else "key_account"
+    rows = connection.get("cli_accounts" if folder_accounts else "key_accounts") or []
+    if account and (not (folder_accounts or mode == "keychain") or
                     account not in {row["id"] for row in rows}):
         raise ValueError("This account is no longer configured. Choose a model/account for a new chat.")
     connection[field] = account or None
     selected = {**settings, "providers": {**connections, provider: connection}}
-    directory = cli_account_dir(selected, provider) if mode == "cli" else None
+    directory = cli_account_dir(selected, provider) if folder_accounts else None
     identity = [connection_signature(provider, connection), mode, account, directory]
     scope = hashlib.sha256(json.dumps(identity, separators=(",", ":")).encode()).hexdigest()[:32]
     if expected_scope is not None and expected_scope != scope:
@@ -95,10 +100,11 @@ def _rows(settings, specs, candidates, *, source=None, only=None, native=None):
         if source is not None:
             connection = {**connection, "credential_mode": source}
         mode = connection.get("credential_mode")
-        field = "cli_account" if mode == "cli" else "key_account"
+        folder_accounts = _folder_accounts(provider, mode)
+        field = "cli_account" if folder_accounts else "key_account"
         accounts = [{"id": "", "label": "Default"}]
-        if mode in {"cli", "keychain"}:
-            accounts += connection.get("cli_accounts" if mode == "cli" else "key_accounts") or []
+        if folder_accounts or mode == "keychain":
+            accounts += connection.get("cli_accounts" if folder_accounts else "key_accounts") or []
         accounts.sort(key=lambda a: a["id"] != (connection.get(field) or ""))
         model = spec.get("model_id") or route.split("/", 1)[-1]
         overrides = settings.get("branding_overrides") or {}

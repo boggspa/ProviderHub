@@ -8,7 +8,10 @@ The header selects a model/account, reasoning level, and workspace folder.
 The compact picker follows TaskWraith's provider rail, model list, and reasoning
 sidecar. It lists the union of models enabled in the launcher's Claude and
 Codex catalogues, deduplicated by route; it does not introduce another catalogue
-to maintain. Opening it refreshes the saved launcher selection.
+to maintain. Opening it refreshes saved model and account choices, including
+Antigravity's isolated CLI homes and Mistral Vibe's saved-key homes. Each model
+has a separate row for each configured account. Vibe account selection reads
+only that home's saved credential; choosing Default uses the default Vibe home.
 Reasoning choices come from that model's actual ladder. Model and account
 choices do not alter either desktop client's configuration. Switch model or
 account while idle to continue in the same chat. A marker shows the switch;
