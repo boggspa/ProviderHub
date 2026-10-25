@@ -63,6 +63,7 @@ from cli_images import write_images
 from agy_context import MAX_PROMPT_BYTES, ContextReads, package_prompt
 from codex_session_pool import SessionPool, digest, history_blocks
 from cli_conversation import Receipt, completed_delta, scope as conversation_scope
+from agy_accounts import account_environment
 
 try:  # Repo-native effort ladder; degrade to a local copy if unavailable.
     from effort_map import map_effort as _map_effort
@@ -426,7 +427,7 @@ def _assert_safe(argv: Iterable[str]) -> list[str]:
 # Capture plumbing (discover / catalogue)
 # ---------------------------------------------------------------------------
 
-def _default_capture(argv, *, timeout=30, stdin=None):
+def _default_capture(argv, *, timeout=30, stdin=None, env=None):
     """One-shot bounded subprocess using a minimal environment."""
     try:
         completed = subprocess.run(
@@ -435,7 +436,7 @@ def _default_capture(argv, *, timeout=30, stdin=None):
             text=True,
             timeout=float(timeout),
             input=stdin,
-            env=minimal_env(),
+            env=minimal_env(env),
         )
     except subprocess.TimeoutExpired as exc:
         raise CliSessionError(
@@ -468,7 +469,7 @@ def _coerce_result(result: Any) -> tuple[int | None, str, str]:
             str(getattr(result, "stderr", "") or ""))
 
 
-def _invoke(capture, argv, *, timeout=30, stdin=None) -> tuple[int | None, str, str]:
+def _invoke(capture, argv, *, timeout=30, stdin=None, env=None) -> tuple[int | None, str, str]:
     """Call an injected capture, adapting to whichever kwargs it accepts."""
     runner = capture or _default_capture
     materialized = [str(item) for item in argv]
@@ -484,6 +485,8 @@ def _invoke(capture, argv, *, timeout=30, stdin=None) -> tuple[int | None, str, 
         declared = set(signature.parameters)
         if accepts_var_kw or "timeout" in declared:
             kwargs["timeout"] = timeout
+        if env is not None and (accepts_var_kw or "env" in declared):
+            kwargs["env"] = env
         if stdin is not None:
             for name in ("stdin", "input", "prompt"):
                 if accepts_var_kw or name in declared:
@@ -491,6 +494,8 @@ def _invoke(capture, argv, *, timeout=30, stdin=None) -> tuple[int | None, str, 
                     break
     except (TypeError, ValueError):
         kwargs = {"timeout": timeout}
+        if env is not None:
+            kwargs["env"] = env
         if stdin is not None:
             kwargs["stdin"] = stdin
     return _coerce_result(runner(materialized, **kwargs))
@@ -631,7 +636,7 @@ def discover(*, capture=None) -> dict:
     return {"installed": True, "binary": binary, "version": version}
 
 
-def auth_state(*, capture=None) -> dict:
+def auth_state(*, capture=None, config_dir=None) -> dict:
     """Always ``"unknown"``: agy has no read-only auth verb to ask.
 
     ``capture`` is accepted for API symmetry with the other CLI routes and is
@@ -640,6 +645,7 @@ def auth_state(*, capture=None) -> dict:
     "missing" would report a working Google login as signed out. Nothing here
     reads a credential file or the Keychain.
     """
+    account_environment(config_dir)
     binary = _resolve_binary()
     if not binary:
         return {"state": "missing",
@@ -647,14 +653,15 @@ def auth_state(*, capture=None) -> dict:
     return {"state": "unknown", "detail": _NO_AUTH_VERB_DETAIL}
 
 
-def catalogue(*, capture=None, timeout=30) -> tuple[list[dict], list[str]]:
+def catalogue(*, capture=None, timeout=30, config_dir=None) -> tuple[list[dict], list[str]]:
     """Discover models from `agy models`, folding effort rungs into ladders."""
+    env = account_environment(config_dir)
     binary = _resolve_binary()
     if not binary:
         return [], [f"{PROVIDER_NAME} is not installed; no models could be "
                     f"listed."]
     try:
-        rc, out, err = _invoke(capture, [binary, "models"], timeout=timeout)
+        rc, out, err = _invoke(capture, [binary, "models"], timeout=timeout, env=env or None)
     except Exception as exc:
         return [], [f"agy models failed: {exc}"]
     if rc not in (0, None):
@@ -1419,6 +1426,7 @@ def _single_turn(request, *, spawner=None, timeout=300, retained=None) -> Iterat
     try:
         if not isinstance(request, dict):
             raise AgyCliAgentError("request must be an object")
+        account_env = account_environment(request.get("config_dir"))
         # Validate without prematurely resolving a family to its default
         # effort row; build_argv resolves the family and effort together.
         model = request.get("model")
@@ -1444,7 +1452,7 @@ def _single_turn(request, *, spawner=None, timeout=300, retained=None) -> Iterat
         prompt = render_prompt(messages, system=system)
         available_rows = None
         if model == "gemini-4-argon":
-            inventory, _ = catalogue()
+            inventory, _ = catalogue(**({"config_dir": request["config_dir"]} if request.get("config_dir") else {}))
             available_rows = [alias for row in inventory
                               if row["id"] == model for alias in row.get("aliases", [])]
         argv = build_argv(model, effort=effort, system=None, stream=True,
@@ -1499,7 +1507,7 @@ def _single_turn(request, *, spawner=None, timeout=300, retained=None) -> Iterat
         state.stderr_handle = tempfile.TemporaryFile(mode="w+", encoding="utf-8")
         session = StdioSession(
             argv,
-            env=minimal_env(),
+            env=minimal_env(account_env),
             cwd=workspace_path,
             timeout=float(timeout),
             spawner=spawner,
@@ -1716,6 +1724,11 @@ def _usage_delta(live):
 
 
 def run_turn(request, *, spawner=None, timeout=300, pool=None):
+    try:
+        account_env = account_environment(request.get("config_dir")) if isinstance(request, dict) else {}
+    except ValueError as exc:
+        yield {"type": "error", "message": str(exc)}
+        return
     scope = conversation_scope(request) if isinstance(request, dict) else None
     if not scope or not isinstance(request.get("history"), list) or (spawner is not None and pool is None):
         yield from _single_turn(request, spawner=spawner, timeout=timeout)
@@ -1729,7 +1742,7 @@ def run_turn(request, *, spawner=None, timeout=300, pool=None):
         yield from _single_turn(request, spawner=spawner, timeout=timeout)
         return
     owner = pool or _CONVERSATIONS
-    key = digest({"binary": (binary, info.st_mtime_ns, info.st_size), "request": {
+    key = digest({"binary": (binary, info.st_mtime_ns, info.st_size), "account": account_env, "request": {
         k: request.get(k) for k in ("conversation", "connection", "model", "effort", "thinking", "system", "tools",
                                    "tool_choice", "host_tool_schema", "max_tokens")}})
     history = request["history"]

@@ -1721,7 +1721,7 @@ def catalogue_command_result(settings, root, lifecycle):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=["inspect", "validate", "save", "save-key-metadata", "save-key-accounts", "discover", "refresh-all", "prepare-launch", "activate", "restore", "serve", "codex-status", "codex-projects", "codex-prepare", "codex-activate", "codex-restore", "codex-accent", "cli-accounts", "prepare-vibe-account", "key-accounts"])
+    parser.add_argument("command", choices=["inspect", "validate", "save", "save-key-metadata", "save-key-accounts", "discover", "refresh-all", "prepare-launch", "activate", "restore", "serve", "codex-status", "codex-projects", "codex-prepare", "codex-activate", "codex-restore", "codex-accent", "cli-accounts", "prepare-vibe-account", "prepare-antigravity-account", "key-accounts"])
     parser.add_argument("--provider", choices=list(PROVIDERS), default="mistral")
     parser.add_argument("--parent-pipe", action="store_true")
     parser.add_argument("--detach", action="store_true", help="serve: run as a detached service, stopped only on request")
@@ -1816,6 +1816,9 @@ def main():
     elif args.command == "prepare-vibe-account":
         request = json.load(sys.stdin)
         result = prepare_vibe_account(request.get("config_dir"), setup=request.get("setup", True))
+    elif args.command == "prepare-antigravity-account":
+        from agy_accounts import prepare_login
+        result = prepare_login(json.load(sys.stdin).get("config_dir"))
     elif args.command == "cli-accounts":
         # The pane's current (possibly unsaved) settings arrive on stdin, so a
         # just-added account can be checked before it is saved.

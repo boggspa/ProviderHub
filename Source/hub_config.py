@@ -71,7 +71,8 @@ def cli_auth_available(provider_id: str) -> bool:
 #: with the CLI itself; the hub stores the path, never a token, and the CLI
 #: keeps refreshing its own login there. Vibe uses VIBE_HOME; its saved API
 #: credential is resolved by bridge_core rather than a CLI turn adapter.
-CLI_ACCOUNT_PROVIDERS = frozenset({"claude", "codex", "mistral"})
+#: Antigravity uses an isolated subprocess HOME and its own ~/.gemini tree.
+CLI_ACCOUNT_PROVIDERS = frozenset({"claude", "codex", "mistral", "antigravity"})
 MAX_CLI_ACCOUNTS = 8
 _CLI_ACCOUNT_ID = re.compile(r"[a-z0-9][a-z0-9-]{0,31}\Z")
 
@@ -101,6 +102,11 @@ def _cli_accounts(provider_id: str, value) -> list[dict]:
         if not os.path.isabs(folder):
             raise ValueError("A CLI account's config folder must be an absolute path.")
         folder = os.path.normpath(folder)
+        if provider_id == "antigravity":
+            from agy_accounts import account_home
+            folder = str(account_home(folder))
+            if any(os.path.commonpath((folder, existing)) in (folder, existing) for existing in folders):
+                raise ValueError("Antigravity account homes must be separate, non-overlapping folders.")
         if account_id in ids or folder in folders:
             raise ValueError("Each CLI account needs its own id and its own config folder.")
         ids.add(account_id)

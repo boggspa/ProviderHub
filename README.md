@@ -1,6 +1,6 @@
 # Provider Hub
 
-**Version 0.5.28 (build 92).** Licensed Apache-2.0 — see [LICENSE](LICENSE),
+**Version 0.5.29 (build 93).** Licensed Apache-2.0 — see [LICENSE](LICENSE),
 with attributions in [NOTICE](NOTICE).
 
 A native macOS menu bar app that connects Claude Desktop and the Codex coding workspace to eleven model API connections: Mistral, Kimi Code, MiMo Token Plan, Ollama, DeepSeek, Cerebras, Muse, Grok, Qwen Token Plan, OpenRouter, and the Gemini API. Claude uses the local Messages endpoint. Codex uses Responses: Grok, Ollama, and OpenRouter retain native Responses transports, while the other eight use the local Messages bridge and their provider adapters.
@@ -45,6 +45,7 @@ See [Vibe configuration](https://github.com/mistralai/mistral-vibe#configuration
 | [Chat in Provider Hub](docs/chat.md) | Lightweight native chat, local file/shell tools, approvals, and saved conversations |
 | [Peer mailboxes](docs/peer-messaging.md) | Opt-in thread discovery, attributed messages, MCP adapter, and delivery limits |
 | [AntiGravity tool handoff](docs/antigravity-host-handoff.md) | Native tool requests and desktop dispatch |
+| [Separate Antigravity accounts](docs/antigravity-accounts.md) | Isolated account homes, sign-in and Keychain fallback |
 | [Repository doctrine](AGENTS.md) | Shared-checkout ownership, testing, and commit rules |
 | [Contributing](CONTRIBUTING.md) | Development setup, tests, scratch files, and pull-request rules |
 | [Security policy](SECURITY.md) | Private vulnerability reporting, threat model, and release signing |
