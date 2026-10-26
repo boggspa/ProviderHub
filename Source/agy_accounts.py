@@ -2,7 +2,14 @@
 
 Unlike Gemini CLI's GEMINI_CLI_HOME, agy resolves ~/.gemini from HOME.
 An extra account therefore owns an entire subprocess home, including XDG
-state and macOS's home-relative Keychain lookup. The default login is untouched.
+state. The default login is untouched.
+
+macOS resolves the default Keychain from HOME as well, and an account home has
+none, so every agy start that saved its token there raised "Keychain Not
+Found" and then waited five seconds before agy fell back to its own file
+storage. An account home therefore carries agy's remote-session marker, which
+its keyring check reads to choose that file storage at once. The token stays
+in the account home's private ``antigravity-oauth-token`` file, as before.
 """
 from __future__ import annotations
 
@@ -11,6 +18,11 @@ from pathlib import Path
 import shlex
 
 from cli_session import minimal_env, resolve_binary
+
+#: agy skips the OS keyring in remote sessions (SSH_TTY, SSH_CLIENT or
+#: SSH_CONNECTION) and logs "Using file-based token storage because SSH
+#: session detected". Verified on agy 1.4.7. Only account homes carry it.
+FILE_STORAGE_MARKER = {"SSH_CLIENT": "127.0.0.1 0 0"}
 
 
 def account_home(config_dir: str) -> Path:
@@ -52,6 +64,7 @@ def account_environment(config_dir: str | None = None) -> dict[str, str]:
         "XDG_RUNTIME_DIR": str(root / ".run"),
         # The shared installed executable is resolved before HOME changes.
         "AGY_CLI_DISABLE_AUTO_UPDATE": "1",
+        **FILE_STORAGE_MARKER,
     }
 
 

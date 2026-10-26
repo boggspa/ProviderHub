@@ -76,6 +76,9 @@ struct ChatWindow: View {
                 .animation(reduceMotion ? nil : .easeInOut(duration: 0.18), value: railPreferred)
                 .animation(reduceMotion ? nil : .easeInOut(duration: 0.18), value: model.inspectorVisible)
             }
+            // A launch or gateway notice from the title row shows here, so
+            // starting Claude or Codex mid-thread never switches to Providers.
+            .overlay(alignment: .top) { if let hubWindow { HubNoticeOverlay(model: hubWindow.hub) } }
         }
         .frame(minWidth: 720, minHeight: 500)
         .environment(\.hubSurfaceStyle, windowStyle)
@@ -111,7 +114,7 @@ struct ChatWindow: View {
     }
 
     /// The gateway and the Claude and Codex launchers ride along from the
-    /// Providers half; a notice they leave brings that half forward.
+    /// Providers half; a notice they leave shows over Code's own content.
     private var titleBar: some View {
         HubTitleRow {
             if let hubWindow { HubQuickControls(model: hubWindow.hub, attention: hubWindow.attention) }

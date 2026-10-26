@@ -57,10 +57,18 @@ class OneWindowRoutingTests(unittest.TestCase):
         # ⌘1 and ⌘2 in the View menu do what the switch does.
         self.assertIn("#selector(chooseTab(_:)), keyEquivalent: String(index + 1)", self.delegate)
         self.assertIn("tabs.select(tab); present()", between(self.delegate, "@objc func chooseTab(", "\n    }\n"))
-        # A hub notice raised from the menu bar or Code brings Providers forward.
-        self.assertIn("attention: { [weak self] in self?.showWindow() })", between(self.delegate, "@objc func launchClaude()", "\n"))
-        self.assertIn("attention: { [weak self] in self?.showWindow() })", between(self.delegate, "@objc func launchCodex()", "\n"))
-        self.assertIn("HubWindowContext(tabs: tabs, hub: model, attention: { [weak self] in self?.showWindow() })", self.delegate)
+        # A launch or gateway notice never switches an open window's half or
+        # brings it over the app just launched; a closed window reopens as left.
+        self.assertIn("attention: { [weak self] in self?.noticeAttention() })", between(self.delegate, "@objc func launchClaude()", "\n"))
+        self.assertIn("attention: { [weak self] in self?.noticeAttention() })", between(self.delegate, "@objc func launchCodex()", "\n"))
+        self.assertIn("HubWindowContext(tabs: tabs, hub: model, attention: { [weak self] in self?.noticeAttention() })", self.delegate)
+        attention = between(self.delegate, "func noticeAttention() {", "\n    }\n")
+        self.assertIn("guard !windowOpen else { return }", attention)
+        self.assertIn("present()", attention)
+        self.assertNotIn("tabs.select", attention)
+        # Code shows the hub's notice itself, over its own content.
+        self.assertIn("HubNoticeOverlay(model: hubWindow.hub)", read("ChatWindow.swift"))
+        self.assertIn("HubNoticeBanner(model: model)", read("CompactShell.swift"))
 
     def test_window_keeps_its_dock_frame_style_and_size_rules(self):
         present = between(self.delegate, "func present() {", "\n    }\n")

@@ -1631,7 +1631,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     /// What either half needs from the window: the switch, the hub model for
     /// its title-row controls, and the way back to the Providers half.
     var windowContext: HubWindowContext {
-        HubWindowContext(tabs: tabs, hub: model, attention: { [weak self] in self?.showWindow() })
+        HubWindowContext(tabs: tabs, hub: model, attention: { [weak self] in self?.noticeAttention() })
     }
 
     /// Show the selected half. Code is built the first time it is needed and
@@ -1701,9 +1701,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         windowOpen = true
         if tabs.current == .code { openChat() }
     }
-    /// Models & Settings, and wherever a hub notice has to be seen: the
-    /// Providers half, which shows it.
+    /// Models & Settings: the Providers half.
     @objc func showWindow() { tabs.select(.providers); present() }
+    /// Where a launch or gateway notice is seen. Both halves show hub notices,
+    /// so an open window keeps its half and is not brought forward over the
+    /// app a launch just opened; a closed window reopens where it was left.
+    func noticeAttention() {
+        guard !windowOpen else { return }
+        present()
+    }
     /// Chat with Model: the Code half. Asking again while Chat is already
     /// open reconnects it, as reopening the Chat window always did.
     @objc func showChat() {
@@ -1732,8 +1738,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         if !hasVisibleWindows { present() }
         return true
     }
-    @objc func launchClaude() { model.perform({ await self.model.launchClaude() }, attention: { [weak self] in self?.showWindow() }) }
-    @objc func launchCodex() { model.perform({ await self.model.launchCodex() }, attention: { [weak self] in self?.showWindow() }) }
+    @objc func launchClaude() { model.perform({ await self.model.launchClaude() }, attention: { [weak self] in self?.noticeAttention() }) }
+    @objc func launchCodex() { model.perform({ await self.model.launchCodex() }, attention: { [weak self] in self?.noticeAttention() }) }
     @objc func toggleGateway() { Task { await model.toggleGateway() } }
     @objc func openVibe() { model.openVibe() }
     @objc func quit() { NSApp.terminate(nil) }
