@@ -144,7 +144,9 @@ def _static_catalogue(provider_id: str) -> tuple[list[dict], list[str], str] | N
         ]
         return models, [
             "Kimi model availability depends on membership.",
-            "K3 context is 262144 or 1048576 depending on membership, so no single context is claimed.",
+            "K3 and K3.1 Pro context is 262144 or 1048576 depending on membership, so no single context is claimed.",
+            "K3.1 Pro Highspeed requires Pro / Allegretto or above and uses about twice the quota of K3.1 Pro.",
+            "K3.1 Pro models require thinking enabled; start a new session when switching to this family.",
             "Models are documented, not inference-tested by discovery.",
         ], _KIMI_DOCS
     if provider_id == "mimo":

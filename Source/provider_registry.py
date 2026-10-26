@@ -336,7 +336,36 @@ _KIMI_DOCS = "https://www.kimi.com/code/docs/en/kimi-code/models.html"
 # effort rank nor a thinking-off request selects anything on this route.
 # Its catalogue ladder below is a placeholder slider position, not a control.
 _KIMI_FIXED_THINKING_MODELS = frozenset({"kimi-for-coding-highspeed"})
+_KIMI_MANDATORY_THINKING_MODELS = frozenset({"k3.1-pro", "k3.1-pro-highspeed"})
 _KIMI_MODELS = [
+    {
+        "id": "k3.1-pro",
+        "display_name": "K3.1 Pro",
+        # Plus / Moderato: 256K; Pro / Allegretto and above: 1M.
+        "context": None,
+        "context_options": [262144, 1048576],
+        "tools": True,
+        "vision": True,
+        "reasoning": True,
+        "reasoning_mandatory": True,
+        "effort_modes": ["low", "high", "max"],
+        "default_effort": "high",
+        "fast_mode": False,
+    },
+    {
+        "id": "k3.1-pro-highspeed",
+        "display_name": "K3.1 Pro Highspeed",
+        # Available only on Pro / Allegretto and above, with 1M context.
+        "context": 1048576,
+        "tools": True,
+        "vision": True,
+        "reasoning": True,
+        "reasoning_mandatory": True,
+        "effort_modes": ["low", "high", "max"],
+        "default_effort": "high",
+        "fast_mode": False,
+        "speed_tier": "highspeed",
+    },
     {
         "id": "k3",
         "display_name": "K3",

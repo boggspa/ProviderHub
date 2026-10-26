@@ -23,7 +23,7 @@ CLAUDE_FAST_BETA = "fast-mode-2026-02-01"
 # A fast route selected by ID or provider, with no second speed tier to choose.
 # The values are catalogue metadata, not request parameters.
 FIXED_SPEED_TIERS = {
-    "kimi": {"kimi-for-coding-highspeed": "highspeed"},
+    "kimi": {"kimi-for-coding-highspeed": "highspeed", "k3.1-pro-highspeed": "highspeed"},
     "antigravity": {
         "gemini-3.6-flash": "flash", "gemini-3.7-flash": "flash",
         "gemini-3.8-flash": "flash",

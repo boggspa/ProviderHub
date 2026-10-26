@@ -10,6 +10,7 @@ from provider_registry import (
     ProviderError,
     _FUNCTION_NAME,
     _KIMI_FIXED_THINKING_MODELS,
+    _KIMI_MANDATORY_THINKING_MODELS,
     _LOCAL_CREDENTIAL_FIELDS,
     _MODEL_ID,
     _MUSE_EFFORT_RANKS,
@@ -294,6 +295,14 @@ def _normalize_native_controls(
         return compatibility
 
     if provider_id == "kimi":
+        if upstream_model in _KIMI_MANDATORY_THINKING_MODELS:
+            if requested == "none" or thinking_type == "disabled":
+                raise ProviderError("Kimi K3.1 Pro requires thinking enabled; choose low, high or max effort.")
+            _write_thinking_type(body, "enabled", descriptor["name"])
+            if requested is None:
+                # Make the documented default explicit for clients omitting
+                # both controls; do not silently select K2.8 without thinking.
+                _write_output_effort(body, "high")
         if upstream_model in _KIMI_FIXED_THINKING_MODELS:
             # Thinking is fixed on with no effort ladder, so there is no
             # higher, lower, or off state for a desktop control to select.

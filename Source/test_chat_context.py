@@ -25,6 +25,42 @@ def waiting(history, identifier="call-1"):
 
 
 class ContextTests(unittest.TestCase):
+    def test_parallel_tool_batch_and_results_stay_whole_on_kimi_messages(self):
+        from providers import prepare_request
+        projector = ContextProjection()
+        raw = [reference("Read both files")]
+        first = projector.apply(raw, reference("Initial board"), key="kimi")
+        assistant = {"role": "assistant", "content": [
+            {"type": "thinking", "thinking": "Read both", "signature": "preserve-verbatim"},
+            {"type": "text", "text": "Checking both records"},
+            {"type": "tool_use", "id": "blackboard_read:4", "name": "blackboard_read", "input": {}},
+            {"type": "tool_use", "id": "read_file:5", "name": "read_file", "input": {"path": "a"}}]}
+        results = {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "blackboard_read:4", "content": "board result"},
+            {"type": "tool_result", "tool_use_id": "read_file:5", "is_error": True, "content": "file unavailable"}]}
+        raw.extend([assistant, results])
+        before = copy.deepcopy(raw)
+        projected = projector.apply(raw, reference("Updated board"), key="kimi")
+        self.assertEqual(projected[:len(first)], first)
+        self.assertEqual(raw, before)
+        for model in ("kimi-for-coding", "k3", "k3.1-pro", "k3.1-pro-highspeed"):
+            body = prepare_request("kimi", {}, "test-key", {"messages": projected, "max_tokens": 128},
+                                   model, {"effort_modes": ["low", "high", "max"]})["body"]
+            messages = body["messages"]
+            call_index = next(i for i, row in enumerate(messages) if row["role"] == "assistant")
+            self.assertEqual(messages[call_index], assistant)
+            answered = messages[call_index + 1]
+            self.assertEqual(answered["role"], "user")
+            self.assertEqual([b["tool_use_id"] for b in answered["content"]],
+                             ["blackboard_read:4", "read_file:5"])
+            self.assertTrue(answered["content"][1]["is_error"])
+            self.assertEqual(answered["content"][0]["content"], "board result")
+        # A reset/compaction path obeys the same contract, and never duplicates
+        # tool results or snapshots when called again without new input.
+        reset = ContextProjection().apply(raw, reference("Updated board"), key="kimi")
+        self.assertEqual([m["role"] for m in reset], ["user", "assistant", "user"])
+        self.assertEqual(projector.apply(raw, reference("Updated board"), key="kimi"), projected)
+
     def test_reference_changes_resume_and_do_not_mutate_saved_history(self):
         projector = ContextProjection()
         raw = [reference("user request")]

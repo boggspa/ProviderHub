@@ -108,6 +108,7 @@ class FastModelTests(unittest.TestCase):
     def test_fixed_fast_routes_are_metadata_not_switchable_tiers(self):
         config = defaults(SLOTS, "mistral-test")
         for provider, model in (("kimi", "kimi-for-coding-highspeed"),
+                                ("kimi", "k3.1-pro-highspeed"),
                                 ("antigravity", "gemini-3.6-flash"),
                                 ("antigravity", "gemini-3.7-flash"),
                                 ("antigravity", "gemini-3.8-flash"),

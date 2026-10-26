@@ -113,7 +113,16 @@ class ContextProjection:
                 return deepcopy(self.projected)
             continues = False
         suffix = base[self.count:] if continues else base
-        fresh = [{"role": role, "content": [deepcopy(block)]} for role, block in suffix]
+        # Prefix matching ignores grouping, but the wire must retain complete
+        # assistant/result turns. Splitting parallel tool_use blocks produces
+        # another assistant before the first call's result on strict APIs.
+        # Group contiguous roles without rewriting the consumed prefix.
+        fresh = []
+        for role, block in suffix:
+            if fresh and fresh[-1]["role"] == role:
+                fresh[-1]["content"].append(deepcopy(block))
+            else:
+                fresh.append({"role": role, "content": [deepcopy(block)]})
         if fingerprint != self.reference or not continues:
             parts = reference.get("content", []) if reference else []
             text = "\n\n".join(part["text"] for part in parts if part.get("type") == "text")
