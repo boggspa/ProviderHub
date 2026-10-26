@@ -40,8 +40,8 @@ final class HubWindowTabs: ObservableObject {
 }
 
 /// Present when a view is one half of the combined window: the switch's state,
-/// the hub model behind the title-row controls, and how to bring the Providers
-/// half forward when a hub action leaves a notice that only it shows.
+/// the hub model behind the title-row controls, and what a hub action's error
+/// or warning does: reopen a closed window, never switch an open one's half.
 struct HubWindowContext {
     let tabs: HubWindowTabs
     let hub: BridgeModel
@@ -149,14 +149,62 @@ struct HubTitleRow<Trailing: View>: View {
 }
 
 extension BridgeModel {
-    /// Run a hub action from somewhere its notice cannot show (the menu bar,
-    /// the Code half); an error or warning calls `attention`, which brings
-    /// the Providers half forward to show it.
+    /// Run a hub action from the menu bar or either half's title row; an error
+    /// or warning calls `attention`. Both halves show hub notices, so an open
+    /// window keeps its half and the app a launch just opened keeps focus.
     func perform(_ action: @escaping @MainActor () async -> Void, attention: (@MainActor () -> Void)?) {
         Task { @MainActor in
             await action()
             if !notice.isEmpty, noticeIsError || noticeIsWarning { attention?() }
         }
+    }
+}
+
+/// The hub's floating status card, in whichever half is showing. A launch
+/// started from Code reports here instead of switching to Providers. It
+/// dismisses itself after ten seconds; hovering holds it open until the
+/// pointer leaves, and the close button still works at any time.
+struct HubNoticeBanner: View {
+    @ObservedObject var model: BridgeModel
+    @State private var hovered = false
+
+    var body: some View {
+        let tone = model.noticeIsError ? Chroma.bad : (model.noticeIsWarning ? Chroma.warn : Chroma.ok)
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: model.noticeIsError ? "exclamationmark.circle.fill" : (model.noticeIsWarning ? "exclamationmark.triangle.fill" : "checkmark.circle.fill"))
+                .font(.system(size: 12)).foregroundStyle(tone)
+            Text(model.notice).font(.system(size: 11)).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
+            Button { model.notice = "" } label: { Image(systemName: "xmark").font(.system(size: 9, weight: .semibold)) }
+                .buttonStyle(.plain).foregroundStyle(.secondary).accessibilityLabel("Dismiss notice")
+        }
+        .padding(.horizontal, 10).padding(.vertical, 8)
+        .hubCard(cornerRadius: 9, accent: tone)
+        .background(RoundedRectangle(cornerRadius: 9).fill(Semantic.surface))
+        .shadow(color: .black.opacity(0.22), radius: 8, y: 4)
+        .padding(.horizontal, 10).padding(.top, 6)
+        .onHover { hovered = $0 }
+        .task(id: "\(model.notice)|\(hovered)") {
+            guard !hovered else { return }
+            try? await Task.sleep(for: .seconds(10))
+            guard !Task.isCancelled else { return }
+            model.notice = ""
+        }
+    }
+}
+
+/// The banner for a half that does not otherwise observe the hub, such as
+/// Code: it watches the notice itself and floats over that half's content.
+struct HubNoticeOverlay: View {
+    @ObservedObject var model: BridgeModel
+    var body: some View {
+        ZStack(alignment: .top) {
+            if !model.notice.isEmpty {
+                HubNoticeBanner(model: model).frame(maxWidth: 720)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .animation(.spring(duration: 0.3, bounce: 0.1), value: model.notice.isEmpty)
     }
 }
 

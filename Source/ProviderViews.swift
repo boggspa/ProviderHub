@@ -382,7 +382,7 @@ struct CliAccountsSection: View {
                 Spacer()
             }
             Text(provider == "antigravity"
-                 ? "Each extra account uses a separate home folder for its Antigravity login, settings and history. Sign in opens the official CLI in Terminal. If macOS reports Keychain Not Found, choose Cancel. Check sign-in verifies model access through the CLI; verify the account email in the CLI itself. Save to select the account for new requests."
+                 ? "Each extra account uses a separate home folder for its Antigravity login, settings and history; the CLI keeps that login in a private file there, not in Keychain. Sign in opens the official CLI in Terminal: open its Google link and paste the code back. Check sign-in verifies model access through the CLI; verify the account email in the CLI itself. Save to select the account for new requests."
                  : provider == "mistral"
                  ? "Each extra account uses its own VIBE_HOME folder. Sign in opens Vibe’s setup in Terminal; new folders get a separate Keychain login. The hub stores the folder path and reads Vibe’s saved API key. Check sign-in checks for a saved credential; access is verified on use. Save to use the account on the next request."
                  : "Each extra account is a folder its CLI signs in to (\(homeVariable)). Sign in opens Terminal on the CLI’s own browser login; the login stays in that folder and the hub only stores the path. Save to switch - the next turn uses the new account without restarting anything.")

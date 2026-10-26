@@ -9,11 +9,15 @@ only the account label and folder path.
 1. In Antigravity's provider settings, choose **Add account…** and select or
    create the new home folder.
 2. Use **Sign in…** on that account row. Terminal opens the official CLI;
-   choose the intended Google account and complete its browser/code flow.
-3. If macOS reports **Keychain Not Found**, choose **Cancel**, never **Reset To
-   Defaults**. The new home has no default macOS Keychain. On agy 1.4.7,
-   cancelling the storage prompt lets the CLI save its login in that home's
-   private `antigravity-oauth-token` file. Complete the CLI's onboarding.
+   open the Google link it prints, choose the intended account, and paste the
+   code back into Terminal.
+3. The CLI saves that login in the home's private `antigravity-oauth-token`
+   file. An account home has no default macOS Keychain, so Provider Hub runs
+   agy there with its remote-session marker (`SSH_CLIENT`), which makes agy
+   choose its own file storage directly. Without it, every sign-in, check and
+   turn raised **Keychain Not Found** and waited five seconds before agy fell
+   back to the same file. If an older build shows that prompt, choose
+   **Cancel**, never **Reset To Defaults**. Complete the CLI's onboarding.
 4. Verify the account email in the CLI. Select that account in Provider Hub
    and **Save**; new requests and model discovery use that home. Existing
    turns finish on the account they started with.

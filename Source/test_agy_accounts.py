@@ -64,6 +64,9 @@ class AccountHomeTests(unittest.TestCase):
             self.assertEqual(words[-1], "/native/agy")
             self.assertIn("HOME=" + root, words)
             self.assertIn("XDG_CONFIG_HOME=" + root + "/.config", words)
+            # Sign-in stores the login in the home's own file, never a Keychain
+            # that the redirected HOME does not have.
+            self.assertIn("SSH_CLIENT=127.0.0.1 0 0", words)
             self.assertNotIn("must-not-leak", prepared["script"])
             self.assertNotIn("AGY_ACCOUNT=", prepared["script"])
             self.assertEqual(Path(root).stat().st_mode & 0o777, 0o700)
@@ -99,6 +102,8 @@ class AdapterAccountTests(unittest.TestCase):
                 self.assertEqual(env["HOME"], str(Path(home).resolve()) if home else str(Path.home()))
                 self.assertEqual(env["XDG_CONFIG_HOME"], str(Path(home).resolve() / ".config") if home else "/default-config")
                 self.assertNotIn("GEMINI_API_KEY", env)
+                # Only an account home skips the Keychain; the default login keeps it.
+                self.assertEqual(env.get("SSH_CLIENT"), "127.0.0.1 0 0" if home else None)
 
     def test_invalid_account_cannot_fall_back_to_the_default_login(self):
         with patch.object(adapter, "StdioSession") as spawn:
