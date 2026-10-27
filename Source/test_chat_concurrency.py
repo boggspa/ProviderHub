@@ -73,6 +73,24 @@ class ConcurrentChatTests(unittest.TestCase):
         self.assertFalse(any(event.get("event") == "transcript_search" and event.get("request") == "old" for event in self.events))
         self.assertEqual(self.host.view_id, current)
 
+    def test_search_limit_includes_title_matches(self):
+        older, current = self.create("older"), self.create("current")
+        old_service = self.host.session(older)
+        with old_service._mutex:
+            old_service.chat["title"] = "Needle archive"
+            old_service.chat["entries"].append({"id": "old", "text": "needle in old entry"})
+            old_service.save()
+        current_service = self.host.session(current)
+        with current_service._mutex:
+            current_service.chat["entries"].extend({"id": f"entry-{i}", "text": "needle"} for i in range(199))
+            current_service.save()
+        self.events.clear()
+        self.host.handle({"command": "search_transcripts", "query": "needle", "request": "limit"})
+        self.wait(lambda: any(event.get("event") == "transcript_search" for event in self.events))
+        result = next(event for event in self.events if event.get("event") == "transcript_search")
+        self.assertEqual(len(result["results"]), 200)
+        self.assertTrue(result["limited"])
+
     def test_browser_approval_revocation_and_native_roundtrip(self):
         from test_chat_agents import call
         identifier = self.create()

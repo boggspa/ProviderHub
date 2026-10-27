@@ -689,6 +689,7 @@ the same publication `initialize` and `select` perform, ending with `ready`.
                         continue
                     if needle in (header.get("title") or "").casefold():
                         results.append({"chat": identifier, "entry": "", "title": header.get("title") or "Untitled", "excerpt": "Title match"})
+                        if len(results) >= 200: break
                     for entry in entries:
                         for field in ("text", "summary", "detail", "memberName"):
                             value = entry.get(field)
