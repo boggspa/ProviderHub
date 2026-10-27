@@ -891,27 +891,7 @@ the same publication `initialize` and `select` perform, ending with `ready`.
             with service._mutex:
                 previous = copy.deepcopy(service.chat.get("teamTasks"))
                 try:
-                    team = service.chat.get("team") or {}
-                    members = {member["id"] for member in team.get("members", [])}
-                    owner = command.get("owner", "")
-                    if not team.get("enabled") or not isinstance(owner, str) or owner and owner not in members:
-                        raise ValueError("Choose a current Team member.")
-                    task_id = command.get("task")
-                    if task_id is None:
-                        title = chat_todos._clean(command.get("title"), "A task's title")
-                        rows = chat_todos.tasks(service.chat)
-                        if len(rows) >= 100: raise ValueError("The Team task list is full.")
-                        if any(row["title"].casefold() == title.casefold() and row["status"] != "completed" for row in rows):
-                            raise ValueError("That task already exists. Open its chip to reassign it.")
-                        import uuid
-                        service.chat["teamTasks"] = [*rows, {"id": uuid.uuid4().hex, "title": title, "owner": owner, "status": "pending"}]
-                    else:
-                        row = next((row for row in chat_todos.tasks(service.chat) if row["id"] == task_id), None)
-                        if row is None or command.get("expectedOwner") != row.get("owner", ""):
-                            raise ValueError("This task changed. Try again with the latest assignment.")
-                        status = command.get("status", row["status"])
-                        if status not in chat_todos.TASK_STATUSES: raise ValueError("Choose a valid task status.")
-                        row.update(owner=owner, status=status)
+                    chat_todos.user_task(service.chat, command)
                     service.save()
                 except Exception as exc:
                     if previous is None: service.chat.pop("teamTasks", None)
