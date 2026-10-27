@@ -29,6 +29,8 @@ class ConcurrentChatTests(unittest.TestCase):
         self.host.handle({"command": "team_task_user", "chat": identifier, "task": task, "owner": first, "expectedOwner": second})
         saved = self.store.load(identifier)["teamTasks"][0]
         self.assertEqual((saved["owner"], saved["status"]), (first, "blocked"))
+        self.assertEqual([step["owner"] for step in saved["history"]], [first, second])
+        self.assertEqual(saved["setBy"]["id"], "user")
         with patch.object(service, "save", side_effect=OSError("disk full")), self.assertRaisesRegex(OSError, "disk full"):
             self.host.handle({"command": "team_task_user", "chat": identifier, "task": task, "owner": second, "expectedOwner": first})
         self.assertEqual(service.chat["teamTasks"][0]["owner"], first)

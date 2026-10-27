@@ -301,15 +301,35 @@ The compact Team row shows the members; compact To-dos shows progress by lane;
 and compact Blackboard shows the newest post. Blackboard attachments and its
 full-board button remain available.
 
-Each member card also has **Task** chips for shared ownership. Add a task to a
-member, open a chip to change its status or assignment, or drag it onto another
-member. Tasks can be pending, in progress, blocked, paused or completed; one
-member may own several. Unassigned tasks remain visible and can be claimed.
-Members use `team_tasks_read` to inspect assignments and `team_task_update` to
-create or claim a task and update their own task's status. User reassignment
-wins over a stale member update, and a task whose member leaves the roster
-becomes unassigned. Task assignments are saved with the chat and projected as
-reference data to Team members. They are separate from the lists below.
+Each member card also has **Task** chips for shared ownership. A chip is a
+rounded rectangle showing the task, its status in plain words and a pin count.
+Members set status; the chip's rim carries it, red for blocked or paused and
+green for completed, with pending and in progress neutral. Tasks can be
+pending, in progress, blocked, paused or completed; one member may own
+several. Unassigned tasks remain visible and can be claimed.
+
+Drag a chip onto another member's card to reassign it, or onto Unassigned; the
+card highlights while a drop will land. The chip's context menu also assigns,
+and overrides the status for a task a stopped seat never closed. Opening a
+chip shows who set its status and when, its **pinned context**, and the seats
+it has passed through.
+
+Pins link a task to context that already exists: a to-do, a Blackboard post
+or file, or a transcript entry. A pin stores the reference and the label it
+had when pinned, at most 12 per task. The user pins from the chip's popover;
+members pass `pin` (or `unpin`) to `team_task_update`, and may pin to a task
+they do not hold without claiming it. A member may remove its own pins, or
+another member's on a task it holds; only the user removes the user's.
+Reassigning a task records the seat it left and that seat's newest transcript
+entry, so the popover links straight to the predecessor's work.
+
+Members use `team_tasks_read` to inspect assignments, pins and hand-overs, and
+`team_task_update` to create or claim a task, update their own task's status,
+and pin context. User reassignment wins over a stale member update, and a task
+whose member leaves the roster becomes unassigned. Task assignments are saved
+with the chat and projected as reference data to Team members; a member is
+shown the pins and hand-overs of its own tasks, and only a pin count for
+others'. They are separate from the lists below.
 
 Each member keeps its own to-do list with `todo_write`, modelled on Claude
 Code's TodoWrite: every call sends the whole list, items are `pending`,

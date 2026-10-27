@@ -82,6 +82,81 @@ class TodoListTests(unittest.TestCase):
             todos.execute(sol, "team_task_update", {"task_id": task["id"], "status": "completed"})
         self.assertEqual(self.chat["teamTasks"][0]["status"], "blocked")
 
+    def context(self):
+        todos.write(self.chat, SOL["id"], todos.items([item("parser", "in_progress")]), now=NOW)
+        self.chat["blackboard"] = {"attachments": [{"id": "f1", "name": "Shaders.metal", "kind": "file"}], "posts": [
+            {"id": "p1", "author": LUNA["id"], "authorName": "Luna", "key": "decision.v48", "body": "Delta is expected",
+             "category": "decision", "created": NOW, "updated": NOW}]}
+        self.chat["entries"] = [{"id": "e1", "kind": "assistant", "text": "Found the race in the loader",
+                                 "memberID": SOL["id"], "memberName": "Sol"},
+                                {"id": "e2", "kind": "assistant", "text": "Luna's reply", "memberID": LUNA["id"]}]
+
+    def test_task_pins_link_existing_context_and_record_who_set_status(self):
+        self.context()
+        task = todos.task_update(self.chat, member=SOL, title="Fix loader", pin={"kind": "entry", "ref": "e1"}, now=NOW)
+        self.assertEqual((task["setBy"], task["updated"]), (SOL, NOW))
+        self.assertEqual(task["pins"][0]["label"], "Sol: Found the race in the loader")
+        # A peer may pin context to a task it does not hold, without claiming it.
+        todos.task_update(self.chat, member=LUNA, task_id=task["id"], pin={"kind": "post", "ref": "p1"})
+        todos.task_update(self.chat, member=LUNA, task_id=task["id"], pin={"kind": "todo", "ref": SOL["id"] + ":parser"})
+        todos.task_update(self.chat, member=SOL, task_id=task["id"], pin={"kind": "file", "ref": "f1"})
+        self.assertEqual(task["owner"], SOL["id"])
+        self.assertEqual([pin["label"] for pin in task["pins"][1:]], ["decision.v48 — Delta is expected", "Do parser", "Shaders.metal"])
+        for bad, message in (({"kind": "post", "ref": "p1"}, "already pinned"), ({"kind": "post", "ref": "gone"}, "No Blackboard post"),
+                             ({"kind": "entry", "ref": "nope"}, "No visible transcript entry"),
+                             ({"kind": "todo", "ref": "shared:parser"}, "No to-do"), ({"kind": "link", "ref": "x"}, "pin kind")):
+            with self.subTest(bad=bad), self.assertRaisesRegex(ValueError, message):
+                todos.task_update(self.chat, member=SOL, task_id=task["id"], pin=bad)
+        self.assertEqual(len(task["pins"]), 4)
+        with self.assertRaisesRegex(ValueError, "already assigned"):
+            todos.task_update(self.chat, member=LUNA, task_id=task["id"], status="completed", pin={"kind": "entry", "ref": "e2"})
+        self.assertEqual(len(task["pins"]), 4)
+        # The owner may tidy a peer's pin; a peer may not remove the owner's.
+        with self.assertRaisesRegex(ValueError, "Only the user"):
+            todos.task_update(self.chat, member=LUNA, task_id=task["id"], unpin=task["pins"][0]["id"])
+        todos.task_update(self.chat, member=SOL, task_id=task["id"], unpin=task["pins"][1]["id"])
+        self.assertEqual([pin["kind"] for pin in task["pins"]], ["entry", "todo", "file"])
+        todos.task_update(self.chat, member=SOL, task_id=task["id"], status="blocked", now="later")
+        self.assertEqual((task["status"], task["setBy"], task["updated"]), ("blocked", SOL, "later"))
+        self.assertEqual(todos.tasks(self.chat), [task])
+
+    def test_user_reassignment_records_hand_over_for_the_next_seat(self):
+        self.context()
+        task = todos.task_update(self.chat, member=SOL, title="Fix loader", pin={"kind": "entry", "ref": "e1"}, now=NOW)
+        todos.user_task(self.chat, {"task": task["id"], "owner": LUNA["id"], "expectedOwner": SOL["id"]}, now="t2")
+        self.assertEqual(task["owner"], LUNA["id"])
+        self.assertEqual(task["history"], [{"owner": SOL["id"], "name": "Sol", "at": "t2", "by": todos.USER, "entry": "e1"}])
+        # Reassignment alone keeps the status's author; an override records the user.
+        self.assertEqual(task["setBy"], SOL)
+        todos.user_task(self.chat, {"task": task["id"], "owner": LUNA["id"], "expectedOwner": LUNA["id"], "status": "completed"})
+        self.assertEqual((task["status"], task["setBy"], len(task["history"])), ("completed", todos.USER, 1))
+        todos.user_task(self.chat, {"task": task["id"], "owner": LUNA["id"], "expectedOwner": LUNA["id"], "unpin": task["pins"][0]["id"]})
+        self.assertEqual(task["pins"], [])
+        with self.assertRaisesRegex(ValueError, "No Blackboard file"):
+            todos.user_task(self.chat, {"task": task["id"], "owner": LUNA["id"], "expectedOwner": LUNA["id"],
+                                        "pin": {"kind": "file", "ref": "gone"}, "status": "pending"})
+        self.assertEqual(task["status"], "completed")
+        todos.user_task(self.chat, {"task": task["id"], "owner": LUNA["id"], "expectedOwner": LUNA["id"], "pin": {"kind": "post", "ref": "p1"}})
+        self.assertEqual(task["pins"][0]["by"], todos.USER)
+        # The new seat is shown its task's pins and hand-over; peers see only a count.
+        luna = todos.reference(self.chat, LUNA["id"], team=True)["content"][0]["text"]
+        sol = todos.reference(self.chat, SOL["id"], team=True)["content"][0]["text"]
+        self.assertIn("pinned post p1", luna)
+        self.assertIn("previously held by Sol; its last transcript entry is e1", luna)
+        self.assertIn("(1 pinned; team_tasks_read lists them)", sol)
+        self.assertNotIn("previously held", sol)
+
+    def test_saved_tasks_without_pins_still_load_and_malformed_pins_do_not(self):
+        self.chat["teamTasks"] = [{"id": "t1", "title": "Old", "owner": "", "status": "pending"}]
+        self.assertEqual(len(todos.tasks(self.chat)), 1)
+        for bad in ({"pins": [{"id": "x", "kind": "url", "ref": "r", "label": "l", "by": SOL, "at": NOW}]},
+                    {"pins": "nope"}, {"setBy": {"id": "", "name": "x"}},
+                    {"history": [{"owner": "a", "name": "A", "at": NOW, "by": SOL, "extra": 1}]}):
+            with self.subTest(bad=bad):
+                self.chat["teamTasks"] = [{"id": "t1", "title": "Old", "owner": "", "status": "pending", **bad}]
+                with self.assertRaisesRegex(ValueError, "Invalid saved Team task"):
+                    todos.tasks(self.chat)
+
     def test_items_are_validated_and_content_is_one_line(self):
         rows = todos.items([item("a.1"), {"id": "B_2", "content": "  Write\n the   parser ", "status": "completed"}])
         self.assertEqual(rows[1], {"id": "B_2", "content": "Write the parser", "status": "completed"})

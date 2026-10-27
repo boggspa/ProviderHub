@@ -1205,6 +1205,12 @@ import Combine
         try paneEvent(["event":"snapshot", "chat":"A", "entries":[], "busy":false])
         try paneEvent(["event":"team_tasks", "chat":"A", "tasks":[["id":"t1", "title":"Inspect", "owner":"member", "status":"blocked"]]])
         check(paneA.teamTasks.first?.status == "blocked" && paneB.teamTasks.isEmpty, "Team task snapshot crossed pane ownership")
+        try paneEvent(["event":"team_tasks", "chat":"A", "tasks":[["id":"t1", "title":"Inspect", "owner":"member", "status":"blocked",
+            "setBy":["id":"member", "name":"Sol"], "updated":"2026-10-27T20:00:00+00:00",
+            "pins":[["id":"p1", "kind":"entry", "ref":"e1", "label":"Sol: found it", "by":["id":"user", "name":"You"], "at":"2026-10-27T20:00:00+00:00"]],
+            "history":[["owner":"old", "name":"Kimi", "at":"2026-10-27T19:00:00+00:00", "by":["id":"user", "name":"You"], "entry":"e0"]]]]])
+        check(paneA.teamTasks.first?.setBy?.name == "Sol" && paneA.teamTasks.first?.pinList.first?.ref == "e1"
+              && paneA.teamTasks.first?.handovers.first?.entry == "e0", "Team task pins and hand-overs did not decode")
         paneA.draft = "From A"; paneB.draft = "From B"
         paneA.send()
         check(paneCommands.last?["chat"] as? String == "A" && paneA.busy && !paneB.busy, "Pane send crossed ownership")

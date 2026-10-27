@@ -36,10 +36,26 @@ struct ChatTodoSnapshot: Decodable, Equatable {
 }
 
 struct ChatTeamTask: Decodable, Identifiable, Equatable {
+    struct Actor: Decodable, Equatable { var id: String; var name: String }
+    /// A link to context that already exists in the chat (chat_todos.py):
+    /// a to-do (`lane:item`), a Blackboard post or file, or a transcript entry.
+    struct Pin: Decodable, Equatable, Identifiable {
+        var id: String; var kind: String; var ref: String; var label: String; var by: Actor; var at: String
+    }
+    /// A seat the task left, and that seat's newest transcript row.
+    struct Handover: Decodable, Equatable {
+        var owner: String; var name: String; var at: String; var by: Actor; var entry: String?
+    }
     var id: String
     var title: String
     var owner: String
     var status: String
+    var setBy: Actor?
+    var updated: String?
+    var pins: [Pin]?
+    var history: [Handover]?
+    var pinList: [Pin] { pins ?? [] }
+    var handovers: [Handover] { history ?? [] }
 }
 
 struct ChatChange: Decodable, Identifiable {
