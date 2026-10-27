@@ -39,6 +39,45 @@ class TodoListTests(unittest.TestCase):
         self.chat = {"id": "c" * 32, "route": "ollama/test", "account": "",
                      "team": {"enabled": True, "members": [{**SOL, "route": "r1"}, {**LUNA, "route": "r2"}]}}
 
+    def test_team_tasks_allow_multiple_claims_and_protect_ownership(self):
+        first = todos.task_update(self.chat, member=SOL, title="Inspect parser")
+        with self.assertRaisesRegex(ValueError, "already exists"):
+            todos.task_update(self.chat, member=LUNA, title="inspect parser")
+        second = todos.task_update(self.chat, member=SOL, title="Review tests", status="blocked")
+        self.assertEqual([row["owner"] for row in todos.tasks(self.chat)], [SOL["id"], SOL["id"]])
+        self.assertEqual(second["status"], "blocked")
+        with self.assertRaisesRegex(ValueError, "already assigned"):
+            todos.task_update(self.chat, member=LUNA, task_id=first["id"], status="completed")
+        first["owner"] = LUNA["id"]
+        with self.assertRaisesRegex(ValueError, "already assigned"):
+            todos.task_update(self.chat, member=SOL, task_id=first["id"], status="completed")
+        todos.task_update(self.chat, member=LUNA, task_id=first["id"], status="paused")
+        self.assertEqual(first["status"], "paused")
+        reference = json.dumps(todos.reference(self.chat, SOL["id"], team=True))
+        self.assertIn("Inspect parser", reference)
+        self.assertIn("Luna", reference)
+        previous = copy.deepcopy(self.chat)
+        self.chat["team"]["members"] = [SOL]
+        todos.carry(self.chat, previous)
+        self.assertEqual(first["owner"], LUNA["id"])
+        self.assertEqual(todos.tasks(self.chat)[0]["owner"], "")
+
+    def test_team_task_tools_publish_and_allow_only_owner_updates(self):
+        events, saves = [], []
+        owner = SimpleNamespace(chat=self.chat, _mutex=threading.RLock(), emit=events.append, save=lambda: saves.append(True))
+        sol = SimpleNamespace(role="team", team_parent=owner, team_member=SOL)
+        luna = SimpleNamespace(role="team", team_parent=owner, team_member=LUNA)
+        todos.execute(sol, "team_task_update", {"title": "Review API"})
+        task = self.chat["teamTasks"][0]
+        self.assertEqual(events[-1]["tasks"][0]["owner"], SOL["id"])
+        self.assertEqual(len(saves), 1)
+        self.assertIn("Review API", todos.execute(luna, "team_tasks_read", {})["content"][0]["text"])
+        with self.assertRaisesRegex(ValueError, "already assigned"):
+            todos.execute(luna, "team_task_update", {"task_id": task["id"], "status": "paused"})
+        todos.execute(sol, "team_task_update", {"task_id": task["id"], "status": "blocked"})
+        self.assertEqual(task["status"], "blocked")
+        self.assertEqual(len(saves), 2)
+
     def test_items_are_validated_and_content_is_one_line(self):
         rows = todos.items([item("a.1"), {"id": "B_2", "content": "  Write\n the   parser ", "status": "completed"}])
         self.assertEqual(rows[1], {"id": "B_2", "content": "Write the parser", "status": "completed"})

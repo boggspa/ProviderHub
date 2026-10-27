@@ -59,15 +59,24 @@ struct ChatPaneOpener {
     func below(_ chat: String) { open?(chat, true) }
 }
 private struct ChatPaneOpenerKey: EnvironmentKey { static let defaultValue = ChatPaneOpener() }
+private struct ChatSearchRequestKey: EnvironmentKey { static let defaultValue: UUID? = nil }
 extension EnvironmentValues {
     var chatPaneOpener: ChatPaneOpener {
         get { self[ChatPaneOpenerKey.self] }
         set { self[ChatPaneOpenerKey.self] = newValue }
     }
+    var chatSearchRequest: UUID? {
+        get { self[ChatSearchRequestKey.self] }
+        set { self[ChatSearchRequestKey.self] = newValue }
+    }
 }
 
 struct ChatWorkspaceRail: View {
     @ObservedObject var model: ChatModel
+    @Environment(\.chatSearchRequest) private var searchRequest
+    @State private var searching = false
+    @State private var searchText = ""
+    @FocusState private var searchFocused: Bool
     @State private var collapsed: Set<String> = []
     @State private var renaming: String?
     @State private var renameText = ""
@@ -83,8 +92,29 @@ struct ChatWorkspaceRail: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
+            if searching {
+                HStack {
+                    Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+                    TextField("Search all threads", text: $searchText).textFieldStyle(.plain).focused($searchFocused)
+                    Button { searching = false; searchText = ""; searchFocused = false } label: { Image(systemName: "xmark") }
+                        .buttonStyle(.plain).help("Close search")
+                }.padding(10).onExitCommand { searching = false; searchText = ""; searchFocused = false }
+            }
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 2) {
+                    if searching && !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        if model.searchPending { ProgressView().controlSize(.small).padding(10) }
+                        else if model.searchResults.isEmpty { Text("No matches").font(.system(size: 11)).foregroundStyle(.secondary).padding(10) }
+                        ForEach(model.searchResults) { result in
+                            Button { model.openSearchResult(result) } label: {
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text(result.title).font(.system(size: 12, weight: .medium)).lineLimit(1)
+                                    Text(result.excerpt).font(.system(size: 10.5)).foregroundStyle(.secondary).lineLimit(3)
+                                }.frame(maxWidth: .infinity, alignment: .leading).padding(7).contentShape(Rectangle())
+                            }.buttonStyle(.plain)
+                        }
+                        if model.searchLimited { Text("First 200 matches shown").font(.system(size: 10)).foregroundStyle(.secondary).padding(8) }
+                    } else {
                     // A chat appears in both its workspace and Recents. Give
                     // each placement its own lazy-stack identity; commands
                     // continue to use the original ChatSummary.id.
@@ -125,9 +155,17 @@ struct ChatWorkspaceRail: View {
                         Text(model.connected ? "Choose a folder to begin." : "Connecting…")
                             .font(HubTheme.Typography.detail).foregroundStyle(Semantic.secondaryInk).padding(8)
                     }
+                    }
                 }.padding(.horizontal, 6).padding(.bottom, 8)
             }
             HStack { ChatSettingsMenu(model: model); Spacer() }.padding(.horizontal, 14).padding(.vertical, 12)
+        }
+        .onAppear { if searchRequest != nil { searching = true; searchFocused = true } }
+        .onChange(of: searchRequest) { _, request in if request != nil { searching = true; searchFocused = true } }
+        .task(id: searchText) {
+            try? await Task.sleep(for: .milliseconds(250))
+            guard !Task.isCancelled else { return }
+            model.searchTranscripts(searchText)
         }
         .onChange(of: model.selectedID) { _, _ in
             if let path = model.selected?.workspace { collapsed.remove(ChatWorkspaceGroup.identity(path)) }

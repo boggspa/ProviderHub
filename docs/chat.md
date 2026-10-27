@@ -59,6 +59,12 @@ Each running chat shows a small spinner; a hand marks a chat waiting for
 approval, including chats in another folder.
 In a narrow window, the saved-chats button opens the same list in a popover.
 
+Press **⌘F** to search the selected pane's transcript, including messages
+outside the currently visible page. The arrows move between matching entries.
+**⌘⇧F** opens sidebar search across saved and live chat titles and transcript
+entries; choose a result to open its chat and jump to the entry. Sidebar search
+shows at most 200 matches.
+
 You can switch chats or start a new one while other chats run. Each chat keeps
 its own model or Team, workspace, draft, attachments, elapsed time, and pending
 approval. Stop and updates affect the chat you are viewing. Different projects

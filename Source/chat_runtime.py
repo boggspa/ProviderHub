@@ -531,6 +531,7 @@ class ChatService:
             publish_side(self)
         if self.role == "parent" and self.chat and self.chat.get("team"): chat_team.publish(self)
         if self.role == "parent" and self.chat and self.chat.get("todos"): chat_todos.publish(self)
+        if self.role == "parent" and self.chat and self.chat.get("team"): chat_todos.publish_tasks(self)
 
     def refresh(self):
         self.models = self.transport.catalogue()

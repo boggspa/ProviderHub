@@ -296,6 +296,21 @@ hits in memory and on disk, and that no render ran on the main thread.
 
 ## To-dos
 
+Team, To-dos and Blackboard each have a disclosure control in the inspector.
+The compact Team row shows the members; compact To-dos shows progress by lane;
+and compact Blackboard shows the newest post. Blackboard attachments and its
+full-board button remain available.
+
+Each member card also has **Task** chips for shared ownership. Add a task to a
+member, open a chip to change its status or assignment, or drag it onto another
+member. Tasks can be pending, in progress, blocked, paused or completed; one
+member may own several. Unassigned tasks remain visible and can be claimed.
+Members use `team_tasks_read` to inspect assignments and `team_task_update` to
+create or claim a task and update their own task's status. User reassignment
+wins over a stale member update, and a task whose member leaves the roster
+becomes unassigned. Task assignments are saved with the chat and projected as
+reference data to Team members. They are separate from the lists below.
+
 Each member keeps its own to-do list with `todo_write`, modelled on Claude
 Code's TodoWrite: every call sends the whole list, items are `pending`,
 `in_progress` or `completed`, and a list holds at most one item in progress

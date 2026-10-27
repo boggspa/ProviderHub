@@ -28,6 +28,7 @@ struct ChatWindow: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var dropTargeted = false
     @State private var editingTeam = false
+    @State private var railSearchRequest: UUID?
     @StateObject private var workspace = ChatWorkspaceController()
     @StateObject private var browser = ChatBrowserStore(storageRoot: FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         .appendingPathComponent(Bundle.main.object(forInfoDictionaryKey: "BridgeStateName") as? String ?? "Provider Hub", isDirectory: true)
@@ -83,6 +84,11 @@ struct ChatWindow: View {
             .overlay(alignment: .top) { if let hubWindow { HubNoticeOverlay(model: hubWindow.hub) } }
         }
         .frame(minWidth: 720, minHeight: 500)
+        .environment(\.chatSearchRequest, railSearchRequest)
+        .background {
+            Button("Search all threads") { railPreferred = true; railSearchRequest = UUID() }
+                .keyboardShortcut("f", modifiers: [.command, .shift]).frame(width: 0, height: 0).opacity(0)
+        }
         .environment(\.hubSurfaceStyle, windowStyle)
         .environment(\.chatTextStyle, ChatTextStyle(size: textSize,
             selection: ChatFonts.selection(fontChoice, legacyMonospaced: monospacedText), customName: customFontName,
@@ -232,6 +238,7 @@ private struct ChatHeader: View {
     var toggleRail: () -> Void
     @State private var showingModels = false
     @State private var showingChats = false
+    @Environment(\.chatSearchRequest) private var searchRequest
     private var workspaceOnSecondRow: Bool { compact || model.team?.enabled == true }
 
     var body: some View {
@@ -292,9 +299,12 @@ private struct ChatHeader: View {
         .accessibilityLabel(railVisible ? "Hide saved chats" : "Show saved chats")
         .help(railVisible ? "Hide saved chats (⌃⌘S)" : "Show saved chats (⌃⌘S)")
         .popover(isPresented: $showingChats, arrowEdge: .bottom) {
-            ChatWorkspaceRail(model: model).frame(width: 260, height: 420)
+            ChatWorkspaceRail(model: model.rootModel).frame(width: 260, height: 420)
         }
         .onChange(of: model.selectedID) { _, _ in showingChats = false }
+        .onChange(of: searchRequest) { _, request in
+            if request != nil && !railAvailable && model.hasPaneFocus { showingChats = true }
+        }
     }
 
     private var newChatButton: some View {
@@ -512,6 +522,10 @@ private struct ChatInvitation: View {
 @MainActor
 struct ChatTranscript: View {
     @ObservedObject var model: ChatModel
+    @State private var searching = false
+    @State private var searchText = ""
+    @State private var searchIndex = 0
+    @FocusState private var searchFocused: Bool
     @State private var expanded: Set<String> = []
     /// Explicit open/closed choices per fold; a fold without one stays closed
     /// unless it holds a row the user expanded.
@@ -521,9 +535,38 @@ struct ChatTranscript: View {
     @StateObject private var follow = ChatTranscriptFollow()
     @State private var visibleSegmentLimit = 100
     private let bottomID = "chat-transcript-bottom"
+    private var searchMatches: [ChatEntry] {
+        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return [] }
+        return model.entries.filter { entry in
+            [entry.text, entry.summary ?? "", entry.detail ?? "", entry.memberName ?? ""]
+                .contains { $0.localizedCaseInsensitiveContains(query) }
+        }
+    }
 
     var body: some View {
         ScrollViewReader { proxy in
+            VStack(spacing: 0) {
+            if searching {
+                HStack(spacing: 8) {
+                    Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+                    TextField("Find in transcript", text: $searchText).textFieldStyle(.plain)
+                        .focused($searchFocused).onSubmit { searchMove(1, proxy: proxy) }
+                    Text(searchMatches.isEmpty ? "0 results" : "\(min(searchIndex + 1, searchMatches.count)) of \(searchMatches.count)")
+                        .font(.system(size: 11)).foregroundStyle(.secondary)
+                    Button { searchMove(-1, proxy: proxy) } label: { Image(systemName: "chevron.up") }
+                        .disabled(searchMatches.isEmpty).help("Previous match")
+                    Button { searchMove(1, proxy: proxy) } label: { Image(systemName: "chevron.down") }
+                        .disabled(searchMatches.isEmpty).help("Next match")
+                    Button { searching = false; searchFocused = false } label: { Image(systemName: "xmark") }
+                        .help("Close transcript search")
+                }.buttonStyle(.plain).padding(10)
+                .onExitCommand { searching = false; searchFocused = false }
+                .onChange(of: searchText) { _, _ in
+                    searchIndex = 0
+                    if let first = searchMatches.first { jump(to: first.id, proxy: proxy) }
+                }
+            }
             ScrollView {
                 content(proxy).background(ChatTranscriptScrollObserver(follow: follow))
             }
@@ -538,7 +581,11 @@ struct ChatTranscript: View {
                 visibleSegmentLimit = 100; follow.resume()
                 scrollToEnd(proxy)
             }
-            .onAppear { scrollToEnd(proxy) }
+            .onAppear {
+                if let request = model.jumpRequest {
+                    DispatchQueue.main.async { jump(to: request.id, proxy: proxy) }
+                } else { scrollToEnd(proxy) }
+            }
             .onDisappear { follow.cancel() }
             .overlay(alignment: .bottomTrailing) {
                 if !follow.followsLatest {
@@ -551,7 +598,20 @@ struct ChatTranscript: View {
                     }.buttonStyle(.plain).padding(12).accessibilityLabel("Go to latest activity")
                 }
             }
+            }
+            .background {
+                Button("Find in transcript") { searching = true; searchFocused = true }
+                    .keyboardShortcut(model.hasPaneFocus ? KeyboardShortcut("f", modifiers: .command) : nil)
+                    .frame(width: 0, height: 0).opacity(0)
+            }
         }
+    }
+
+    private func searchMove(_ amount: Int, proxy: ScrollViewProxy) {
+        let matches = searchMatches
+        guard !matches.isEmpty else { return }
+        searchIndex = (searchIndex + amount + matches.count) % matches.count
+        jump(to: matches[searchIndex].id, proxy: proxy)
     }
 
     private func content(_ proxy: ScrollViewProxy) -> some View {
@@ -649,12 +709,14 @@ struct ChatTranscript: View {
             switch segment.content {
             case .entry(let entry): return entry.id == entryID
             case .fold(let entries): return entries.contains { $0.id == entryID }
+            case .changes(let entries): return entries.contains { $0.id == entryID }
             default: return false
             }
         }) else { return }
         let target = segments[index].id
         var inFold = false
         follow.pause()
+        expanded.insert(entryID)
         if case .fold = segments[index].content { foldChoice[target] = true; inFold = true }
         if segments.count - index > visibleSegmentLimit { visibleSegmentLimit = segments.count - index + 20 }
         func scroll(to id: String) {

@@ -35,6 +35,13 @@ struct ChatTodoSnapshot: Decodable, Equatable {
     var isEmpty: Bool { all.allSatisfy { $0.items.isEmpty } }
 }
 
+struct ChatTeamTask: Decodable, Identifiable, Equatable {
+    var id: String
+    var title: String
+    var owner: String
+    var status: String
+}
+
 struct ChatChange: Decodable, Identifiable {
     var path: String
     var oldPath: String?
@@ -630,6 +637,9 @@ struct ChatTeamSnapshot: Decodable {
             let snapshot = decoded(event["todos"], as: ChatTodoSnapshot.self)
             if snapshot != todos { todos = snapshot }
             todosNotice = event["notice"] as? String ?? ""
+        case "team_tasks":
+            teamTasks = decoded(event["tasks"], as: [ChatTeamTask].self) ?? []
+            teamTasksNotice = event["notice"] as? String ?? ""
         default: break
         }
     }

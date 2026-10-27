@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import unittest
 
-from cli_tool_call import (CLOSE_SENTINEL, MAX_CALLS_PER_TURN, OPEN_SENTINEL,
+from cli_tool_call import (CLOSE_SENTINEL, HOST_EXECUTION_NOTE, MAX_CALLS_PER_TURN, OPEN_SENTINEL,
                            ToolCallError, ToolCallParser, normalize_tools, render_tool_anchor,
                            render_tool_manifest)
 
@@ -45,6 +45,12 @@ class NormalizeToolsTest(unittest.TestCase):
 
 
 class ManifestTest(unittest.TestCase):
+    def test_nested_permission_context_does_not_describe_host_tools(self):
+        self.assertIn("environment_context", HOST_EXECUTION_NOTE)
+        self.assertIn("even when they appear later", HOST_EXECUTION_NOTE)
+        self.assertIn("actual tool results govern host operations", HOST_EXECUTION_NOTE)
+        self.assertIn("respect any restrictions", HOST_EXECUTION_NOTE)
+
     def test_manifest_carries_convention_rules_and_schemas(self):
         text = render_tool_manifest([WEATHER, SHELL])
         self.assertIn(OPEN_SENTINEL, text)

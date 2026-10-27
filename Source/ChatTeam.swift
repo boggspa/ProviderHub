@@ -61,15 +61,22 @@ private final class ChatTeamPresetStore: ObservableObject {
 /// transcript and share its composer. There is no separate orchestration view.
 struct ChatTeamControls: View {
     @ObservedObject var model: ChatModel
+    @State private var expanded = true
+    @State private var newTaskFor: String?
+    @State private var taskTitle = ""
     var openEditor: () -> Void
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
-                Text("Team").font(.system(size: 13, weight: .semibold))
+                Button { expanded.toggle() } label: {
+                    Label("Team", systemImage: expanded ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 13, weight: .semibold))
+                }.buttonStyle(.plain).accessibilityValue(expanded ? "Expanded" : "Collapsed")
                 Spacer()
                 Button(model.team == nil ? "Set up" : "Edit") { openEditor() }
                     .controlSize(.small).disabled(!model.canEditTeam)
             }
+            if expanded {
             Text(model.team?.taskMode == false
                  ? "One contribution each. Members can continue when more work is needed."
                  : "Up to \(ChatTeamSnapshot.maxMembers) members working independently on the same task.")
@@ -77,6 +84,7 @@ struct ChatTeamControls: View {
             if let team = model.team {
                 if !team.enabled { Text("Team is off").font(.system(size: 11.5)).foregroundStyle(.secondary) }
                 ForEach(team.members) { member in
+                    VStack(alignment: .leading, spacing: 0) {
                     ChatSharedMemberRow(name: member.name, model: member.label + (member.account.isEmpty ? "" : " · " + member.account),
                         status: member.status, responsibility: member.responsibility, nextStep: member.nextStep,
                         failure: member.failureReason ?? "", waitReason: member.waitReason ?? "",
@@ -88,6 +96,47 @@ struct ChatTeamControls: View {
                         control: { model.controlTeamMember(member.id, start: $0) }) {
                             ChatProviderIcon(presentation: model.models.first { $0.id == member.choice }?.presentation)
                         }
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 5) {
+                            ForEach(model.teamTasks.filter { $0.owner == member.id }) { task in
+                                ChatTeamTaskChip(task: task, model: model, members: team.members)
+                            }
+                            Button { taskTitle = ""; newTaskFor = member.id } label: {
+                                Label("Task", systemImage: "plus").font(.system(size: 10.5))
+                            }.buttonStyle(.plain).padding(.horizontal, 7).padding(.vertical, 4)
+                                .background(HubTheme.Semantic.cardFill, in: Capsule())
+                                .disabled(!model.connected || !team.enabled)
+                                .popover(isPresented: Binding(get: { newTaskFor == member.id }, set: { if !$0 { newTaskFor = nil } })) {
+                                    VStack(alignment: .leading, spacing: 8) {
+                                        Text("Assign task to \(member.name)").font(.headline)
+                                        TextField("Task", text: $taskTitle).onSubmit { addTask(member.id) }
+                                        Button("Add task") { addTask(member.id) }
+                                            .disabled(taskTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                                    }.padding(14).frame(width: 280)
+                                }
+                        }.padding(.horizontal, 8).padding(.bottom, 8)
+                    }.background(HubTheme.Semantic.cardFill)
+                    }.clipShape(RoundedRectangle(cornerRadius: 7))
+                    .dropDestination(for: String.self) { values, _ in
+                        guard let value = values.first, let chat = model.stateChatID,
+                              value.hasPrefix(chat + ":"),
+                              let task = model.teamTasks.first(where: { $0.id == String(value.dropFirst(chat.count + 1)) }) else { return false }
+                        assign(task, to: member.id)
+                        return true
+                    }
+                }
+                if model.teamTasks.contains(where: { $0.owner.isEmpty }) {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 5) {
+                            Text("Unassigned").font(.system(size: 10.5)).foregroundStyle(.secondary)
+                            ForEach(model.teamTasks.filter { $0.owner.isEmpty }) { task in
+                                ChatTeamTaskChip(task: task, model: model, members: team.members)
+                            }
+                        }
+                    }
+                }
+                if !model.teamTasksNotice.isEmpty {
+                    Text(model.teamTasksNotice).font(.system(size: 11)).foregroundStyle(.secondary).textSelection(.enabled)
                 }
                 if team.needsInput {
                     Text("Answer in the main composer to continue.").font(.system(size: 11.5)).foregroundStyle(.secondary)
@@ -119,7 +168,28 @@ struct ChatTeamControls: View {
                 Text(model.teamNotice).font(.system(size: 11.5)).foregroundStyle(.secondary).textSelection(.enabled)
             }
             if model.teamRequest != nil { ProgressView().controlSize(.small) }
+            } else if let team = model.team {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 12) {
+                        ForEach(team.members) { member in
+                            HStack(spacing: 4) {
+                                ChatProviderIcon(presentation: model.models.first { $0.id == member.choice }?.presentation, size: 12)
+                                Text(member.name).font(.system(size: 11, weight: .medium))
+                            }.help("\(member.name) · \(member.status)")
+                        }
+                    }.padding(9)
+                }.background(HubTheme.Semantic.cardFill, in: RoundedRectangle(cornerRadius: 8))
+            }
         }.padding(14)
+    }
+    private func addTask(_ owner: String) {
+        let title = taskTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !title.isEmpty else { return }
+        model.inspectorCommand(["command": "team_task_user", "owner": owner, "title": title])
+        newTaskFor = nil; taskTitle = ""
+    }
+    private func assign(_ task: ChatTeamTask, to owner: String) {
+        model.inspectorCommand(["command": "team_task_user", "task": task.id, "owner": owner, "expectedOwner": task.owner])
     }
     private func runReadout(_ team: ChatTeamSnapshot, tokens: Int, now: Date) -> String {
         var parts = ["Run"]
@@ -130,6 +200,47 @@ struct ChatTeamControls: View {
         parts.append(tokens.formatted() + (team.execution?.tokens.map { " of \($0.formatted())" } ?? "") + " reported tokens" +
                      (team.runUsage?.usageComplete == false ? " (partial)" : ""))
         return parts.joined(separator: " · ")
+    }
+}
+
+private struct ChatTeamTaskChip: View {
+    var task: ChatTeamTask
+    @ObservedObject var model: ChatModel
+    var members: [ChatTeamMember]
+    @State private var showing = false
+    private var label: String { task.status.replacingOccurrences(of: "_", with: " ").capitalized }
+    var body: some View {
+        Button { showing.toggle() } label: {
+            HStack(spacing: 4) {
+                Image(systemName: task.status == "completed" ? "checkmark.circle.fill" :
+                      task.status == "blocked" ? "exclamationmark.circle" : task.status == "paused" ? "pause.circle" : "circle")
+                Text(task.title).lineLimit(1)
+            }.font(.system(size: 10.5)).padding(.horizontal, 8).padding(.vertical, 4)
+                .background(HubTheme.Semantic.accentOnSurface.opacity(0.14), in: Capsule())
+        }.buttonStyle(.plain).help("\(label) · drag to reassign")
+        .draggable((model.stateChatID ?? "") + ":" + task.id)
+        .popover(isPresented: $showing) {
+            VStack(alignment: .leading, spacing: 8) {
+                Text(task.title).font(.headline).textSelection(.enabled)
+                Text("Status: \(label)").font(.caption).foregroundStyle(.secondary)
+                ForEach(["pending", "in_progress", "blocked", "paused", "completed"], id: \.self) { status in
+                    Button(status.replacingOccurrences(of: "_", with: " ").capitalized) {
+                        update(owner: task.owner, status: status); showing = false
+                    }.disabled(status == task.status)
+                }
+                Divider()
+                Menu("Assign to") {
+                    ForEach(members) { member in
+                        Button(member.name) { update(owner: member.id, status: task.status); showing = false }
+                    }
+                    Button("Unassigned") { update(owner: "", status: task.status); showing = false }
+                }
+            }.padding(14).frame(width: 260, alignment: .leading)
+        }
+    }
+    private func update(owner: String, status: String) {
+        model.inspectorCommand(["command": "team_task_user", "task": task.id, "owner": owner,
+                                "expectedOwner": task.owner, "status": status])
     }
 }
 

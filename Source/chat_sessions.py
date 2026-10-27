@@ -186,6 +186,7 @@ class ChatHost:
         self.client_factory = child_factory or (lambda: GatewayClient(transport.root))
         self.runner_type, self.max_active = runner, max_active
         self._metadata = threading.RLock()
+        self._search_generation = 0
         self._output = threading.RLock()
         self._remote_browser_lock = threading.RLock()
         self._remote_browser_pending = set()
@@ -662,6 +663,48 @@ the same publication `initialize` and `select` perform, ending with `ready`.
             else: self.stop_all()
             return
         if self.closing: raise ValueError("Chat is closing.")
+        if action == "search_transcripts":
+            query, request = command.get("query"), command.get("request")
+            if not isinstance(query, str) or len(query) > 256 or not isinstance(request, str) or not request or len(request) > 128:
+                raise ValueError("Provide a search query and request ID.")
+            self._search_generation += 1
+            generation = self._search_generation
+            if not query.strip(): return
+            needle = query.strip().casefold()
+            headers = self.session_store.headers()
+            def search():
+                results = []
+                for header in headers:
+                    if self.closing or generation != self._search_generation: return
+                    identifier = header["id"]
+                    service = self.sessions.get(identifier)
+                    try:
+                        if service is not None:
+                            with service._mutex:
+                                entries = [{key: row.get(key) for key in ("id", "text", "summary", "detail", "memberName")}
+                                           for row in service.chat["entries"] if isinstance(row, dict)]
+                        else:
+                            entries = self.store.load(identifier)["entries"]
+                    except (OSError, ValueError, KeyError):
+                        continue
+                    if needle in (header.get("title") or "").casefold():
+                        results.append({"chat": identifier, "entry": "", "title": header.get("title") or "Untitled", "excerpt": "Title match"})
+                    for entry in entries:
+                        for field in ("text", "summary", "detail", "memberName"):
+                            value = entry.get(field)
+                            if not isinstance(value, str): continue
+                            index = value.casefold().find(needle)
+                            if index >= 0:
+                                excerpt = " ".join(value[max(0, index - 50):index + len(query) + 120].split())
+                                results.append({"chat": identifier, "entry": entry.get("id", ""), "title": header.get("title") or "Untitled", "excerpt": excerpt})
+                                break
+                        if len(results) >= 200: break
+                    if len(results) >= 200: break
+                with self._output:
+                    if generation == self._search_generation:
+                        self.emit({"event": "transcript_search", "request": request, "results": results, "limited": len(results) >= 200})
+            threading.Thread(target=search, name="transcript-search", daemon=True).start()
+            return
         if self.remote_command(command): return
         if self.capabilities.handle(command): return
         from chat_remote_actions import handle as remote_action
@@ -842,6 +885,36 @@ the same publication `initialize` and `select` perform, ending with `ready`.
                 self.emit({"event": "selected", "id": None, "entries": [], "busy": False, "approval": None})
             return
         service = self.session(identifier)
+        if action == "team_task_user":
+            import chat_todos
+            with service._mutex:
+                try:
+                    team = service.chat.get("team") or {}
+                    members = {member["id"] for member in team.get("members", [])}
+                    owner = command.get("owner", "")
+                    if not team.get("enabled") or not isinstance(owner, str) or owner and owner not in members:
+                        raise ValueError("Choose a current Team member.")
+                    task_id = command.get("task")
+                    if task_id is None:
+                        title = chat_todos._clean(command.get("title"), "A task's title")
+                        rows = chat_todos.tasks(service.chat)
+                        if len(rows) >= 100: raise ValueError("The Team task list is full.")
+                        if any(row["title"].casefold() == title.casefold() and row["status"] != "completed" for row in rows):
+                            raise ValueError("That task already exists. Open its chip to reassign it.")
+                        import uuid
+                        service.chat["teamTasks"] = [*rows, {"id": uuid.uuid4().hex, "title": title, "owner": owner, "status": "pending"}]
+                    else:
+                        row = next((row for row in chat_todos.tasks(service.chat) if row["id"] == task_id), None)
+                        if row is None or command.get("expectedOwner") != row.get("owner", ""):
+                            raise ValueError("This task changed. Try again with the latest assignment.")
+                        status = command.get("status", row["status"])
+                        if status not in chat_todos.TASK_STATUSES: raise ValueError("Choose a valid task status.")
+                        row.update(owner=owner, status=status)
+                    service.save()
+                    chat_todos.publish_tasks(service)
+                except ValueError as exc:
+                    chat_todos.publish_tasks(service, str(exc))
+            return
         if action in {"send", "retry"} and service.busy:
             raise ValueError("This chat is already running. Use an update to interrupt it.")
         if action in {"send", "retry", "steer", "team_resume", "team_member_start", "answer_question"} and not service.busy:
