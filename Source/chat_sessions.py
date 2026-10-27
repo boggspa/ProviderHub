@@ -21,6 +21,7 @@ from chat_workspaces import ChatWorkspaces
 
 MAX_ACTIVE_CHATS = 16
 MAX_ACTIVE_REQUESTS = 16
+MAX_REMOTE_EVENTS = 256
 # Model requests share the gateway's 16-slot admission budget. Waiting for
 # user input or local work does not occupy a provider-request slot.
 HEADER_KEYS = ("id", "title", "updated", "route", "account", "workspace", "effort", "approvalMode", "scope", "status")
@@ -175,7 +176,13 @@ class ChatHost:
         self.dispatch_event = dispatch_event
         self.remote = None
         self.remote_host = None
-        self.remote_overflow = False
+        self._remote_delivery_lock = threading.Lock()
+        self._remote_events = []
+        self._remote_resync = False
+        self._remote_scheduled = False
+        self._remote_generation = 0
+        self._remote_retry = None
+        self._remote_refresh_thread = None
         self.client_factory = child_factory or (lambda: GatewayClient(transport.root))
         self.runner_type, self.max_active = runner, max_active
         self._metadata = threading.RLock()
@@ -207,23 +214,119 @@ class ChatHost:
 
     def emit(self, event):
         self._emit(event)
-        if self.remote is not None and event.get("event") != "remote":
-            # Never take a network lock while a chat/output lock is held. All
-            # remote state and commands are reconciled on the main queue.
-            saved = copy.deepcopy(event)
-            def publish():
-                if self.remote is None: return
-                if self.remote_overflow:
-                    self.remote_overflow = False
-                    self.remote.stop()
-                    self.publish_remote("Remote updates fell behind. Reconnect to refresh the device.")
-                    return
-                try: self.remote.publish(saved)
-                except Exception as exc:
-                    self.remote.stop()
-                    self.publish_remote("Remote access stopped: " + str(exc)[:300])
-            if self.dispatch_event is not None and not self.dispatch_event(publish):
-                self.remote_overflow = True
+        if self.dispatch_event is None or self.remote is None or self.remote.listener is None or event.get("event") == "remote":
+            return
+        # A refresh runs on the serial owner and updates the bridge views before
+        # sending their snapshots. Other producer threads still queue normally.
+        if self._remote_refresh_thread == threading.get_ident():
+            self.remote.publish(event)
+            return
+        # One scheduled callback covers the whole bounded batch. Never take a
+        # network lock while a producer holds a chat/output lock.
+        with self._remote_delivery_lock:
+            if self._remote_refresh_thread is not None:
+                # The snapshot may already include this producer's update.
+                # Refresh again instead of replaying an older entry over it.
+                self._remote_events.clear()
+                self._remote_resync = True
+            elif not self._remote_resync:
+                if len(self._remote_events) >= MAX_REMOTE_EVENTS:
+                    self._remote_events.clear()
+                    self._remote_resync = True
+                else:
+                    self._remote_events.append(copy.deepcopy(event))
+            if self._remote_scheduled:
+                return
+            self._remote_scheduled = True
+            generation = self._remote_generation
+        self._schedule_remote_delivery(generation)
+
+    def _cancel_remote_delivery(self):
+        with self._remote_delivery_lock:
+            self._remote_generation += 1
+            self._remote_events.clear()
+            self._remote_resync = self._remote_scheduled = False
+            retry, self._remote_retry = self._remote_retry, None
+        if retry is not None:
+            retry.cancel()
+
+    def _schedule_remote_delivery(self, generation, *, delay=0):
+        with self._remote_delivery_lock:
+            if generation != self._remote_generation or not self._remote_scheduled:
+                return
+            if self.closing or self.remote is None or self.remote.listener is None:
+                return
+            if delay:
+                retry = threading.Timer(delay, lambda: self._schedule_remote_delivery(generation))
+                retry.daemon = True
+                self._remote_retry = retry
+                retry.start()
+                return
+        callback = lambda: self._deliver_remote_events(generation)
+        if self.dispatch_event is not None and self.dispatch_event(callback):
+            return
+        with self._remote_delivery_lock:
+            if generation != self._remote_generation:
+                return
+            self._remote_events.clear()
+            self._remote_resync = True
+        # A busy queue can become idle without another token arriving. Retry
+        # independently until delivery resumes or explicit stop cancels the lease.
+        self._schedule_remote_delivery(generation, delay=.1)
+
+    def _deliver_remote_events(self, generation):
+        with self._remote_delivery_lock:
+            if generation != self._remote_generation:
+                return
+            events, self._remote_events = self._remote_events, []
+            resync, self._remote_resync = self._remote_resync, False
+        failed = False
+        try:
+            if self.closing or self.remote is None or self.remote.listener is None:
+                return
+            if resync:
+                self.remote.resync(self._refresh_remote_state)
+                self.publish_remote()
+            else:
+                for event in events:
+                    self.remote.publish(event)
+        except Exception as exc:
+            failed = True
+            with self._remote_delivery_lock:
+                self._remote_events.clear()
+                self._remote_resync = True
+            self.publish_remote("Remote updates are catching up; retrying automatically: " + str(exc)[:300])
+        finally:
+            with self._remote_delivery_lock:
+                pending = bool(self._remote_events or self._remote_resync)
+                if not pending:
+                    self._remote_scheduled = False
+            if pending:
+                self._schedule_remote_delivery(generation, delay=.25 if failed else 0)
+
+    def _refresh_remote_state(self):
+        with self._remote_delivery_lock:
+            self._remote_refresh_thread = threading.get_ident()
+            self._remote_events.clear()
+        try:
+            self._last_summaries = None
+            self.publish_summaries()
+            self.publish_workspaces()
+            self.capabilities.publish()
+            for client, chat in self.remote.selections.items():
+                if chat not in self.headers:
+                    self.subscriptions.pop(client, None)
+                    continue
+                self.handle({"command": "subscribe", "client": client, "chats": [chat]})
+                service = self.sessions[chat]
+                with service._mutex:
+                    self.emit({"event": "approval", "chat": chat, "approval": copy.deepcopy(service.approval)})
+                self.publish_processes(chat)
+                service._last_remote_activity = None
+                self.publish_remote_activity(service)
+        finally:
+            with self._remote_delivery_lock:
+                self._remote_refresh_thread = None
 
     def publish_remote(self, notice=""):
         status = self.remote.status() if self.remote is not None else {"listening": False, "connected": False}
@@ -241,10 +344,12 @@ class ChatHost:
                 from chat_remote import RemoteServer
                 self.remote = RemoteServer(self.handle, self.store.root / "remote.json", dispatch=self.dispatch, detach=self.detach_client)
             self.remote.start(host=command.get("host"), port=command.get("port", 8765))
+            self._cancel_remote_delivery()
             self.remote_host = command.get("host")
             self._last_summaries = None
             self.publish_summaries()
         elif action == "remote_stop" and self.remote is not None:
+            self._cancel_remote_delivery()
             self.remote.stop()
             self.subscriptions.pop("remote", None)
         elif action == "remote_confirm":
@@ -817,6 +922,7 @@ the same publication `initialize` and `select` perform, ending with `ready`.
             # because a later shutdown call returns early.
             self.processes.shutdown()
             self.capabilities.close()
+            self._cancel_remote_delivery()
             if self.remote is not None: self.remote.stop()
             if hasattr(self, "remote_files"): self.remote_files.close()
         deadline = time.monotonic() + timeout

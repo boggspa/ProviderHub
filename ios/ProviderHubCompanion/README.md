@@ -124,6 +124,20 @@ automatically on launch/foreground in local iOS source; explicit Disconnect
 pauses that for the current app session. The Keychain identity, pinned Mac key
 and Mac allowlist continue to provide trust, without scanning again.
 
+### Remote delivery recovery in Mac build 99
+
+Mac 0.5.35 (99) keeps remote access listening through event backpressure and
+transient delivery failures. Updates share one bounded delivery batch; an
+overrun rebuilds each connected device's selected transcript, controls, current
+approval and activity from authoritative Mac state and sends a fresh encrypted
+snapshot. Busy command queues retry automatically even when no further updates
+arrive. Updates during a refresh request another snapshot so stale deltas cannot
+overwrite newer state. Each device retains its own selection, identity and
+command receipts. A failed device transport can reconnect without interrupting
+other devices or closing the listener. Explicitly disabling remote access or
+shutting down the Mac app cancels pending recovery. Existing iOS builds use the
+same snapshot protocol and do not need an update for this Mac-side fix.
+
 ## Connect from cellular or another Wi-Fi network
 
 1. Install Tailscale on the Mac and iPhone, sign both into the same tailnet,
