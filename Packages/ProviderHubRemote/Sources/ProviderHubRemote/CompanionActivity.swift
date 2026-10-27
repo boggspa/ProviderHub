@@ -69,25 +69,45 @@ extension CompanionModel {
 
 struct CompanionActivityStrip: View {
     @ObservedObject var model: CompanionModel
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @ScaledMetric(relativeTo: .body) private var scale: CGFloat = 1
+    @State private var expanded = false
     var body: some View {
         let rows = model.liveActivities
         if !rows.isEmpty {
             VStack(alignment: .leading, spacing: 3 * scale) {
-                ForEach(rows) { row in
-                    let brand = CompanionBranding.presentation(route: row.route, label: row.name, models: model.models)
-                    Button { model.jumpToActivity(row.entryID) } label: {
-                        ChatSharedActivityLabel(name: row.name, verb: row.description.verb, subject: row.description.subject,
-                            code: row.description.code, live: row.description.live, accent: brand.accent,
-                            ink: CompanionTheme.ink, secondary: CompanionTheme.secondary, scale: scale) {
-                                CompanionProviderMark(presentation: brand, size: 13 * scale)
-                            }
-                    }.buttonStyle(.plain).disabled(row.entryID.isEmpty)
-                        .accessibilityLabel(row.name + " " + row.description.verb + (row.description.subject.isEmpty ? "" : " " + row.description.subject))
+                if rows.count > 1 {
+                    ChatSharedActivitySummary(
+                        buckets: ChatActivityBuckets.group(rows.map {
+                            ChatActivityBuckets.Row(id: $0.id, name: $0.name, route: $0.route, verb: $0.description.verb, live: $0.description.live)
+                        }),
+                        expanded: expanded, ink: CompanionTheme.ink, secondary: CompanionTheme.secondary, scale: scale,
+                        accent: { CompanionBranding.presentation(route: $0.route, label: $0.name, models: model.models).accent },
+                        onToggle: toggleExpanded
+                    ) { person in
+                        CompanionProviderMark(presentation: CompanionBranding.presentation(route: person.route, label: person.name, models: model.models), size: 13 * scale)
+                    }
+                }
+                if rows.count == 1 || expanded {
+                    ForEach(rows) { row in
+                        let brand = CompanionBranding.presentation(route: row.route, label: row.name, models: model.models)
+                        Button { model.jumpToActivity(row.entryID) } label: {
+                            ChatSharedActivityLabel(name: row.name, verb: row.description.verb, subject: row.description.subject,
+                                code: row.description.code, live: row.description.live, accent: brand.accent,
+                                ink: CompanionTheme.ink, secondary: CompanionTheme.secondary, scale: scale) {
+                                    CompanionProviderMark(presentation: brand, size: 13 * scale)
+                                }
+                        }.buttonStyle(.plain).disabled(row.entryID.isEmpty)
+                            .accessibilityLabel(row.name + " " + row.description.verb + (row.description.subject.isEmpty ? "" : " " + row.description.subject))
+                    }
                 }
             }.padding(.horizontal, 20).padding(.vertical, 6 * scale)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .accessibilityElement(children: .contain).accessibilityLabel("Live activity")
         }
+    }
+
+    private func toggleExpanded() {
+        if reduceMotion { expanded.toggle() } else { withAnimation(.easeInOut(duration: 0.16)) { expanded.toggle() } }
     }
 }

@@ -1,6 +1,6 @@
 # Team in Chat
 
-Team lets up to eight model/account choices contribute to one Chat transcript,
+Team lets up to twelve model/account choices contribute to one Chat transcript,
 including the current chat model.
 Open **Team** in the inspector, choose **Set up**, and pick names, models,
 reasoning efforts and optional responsibilities. The first member takes the
@@ -61,7 +61,7 @@ new read/search findings count as progress, as do edits. This bounded comparison
 does not judge the meaning of prose or detect every unproductive workflow.
 
 Parallel execution is the default for existing and new Teams, with the same
-eight-member cap. Model requests, file/search reads and transcript recall can
+twelve-member cap. Model requests, file/search reads and transcript recall can
 overlap. Patches and shell commands take a cancellable FIFO gate for the chosen
 workspace, including their approval wait. Workspace gates are shared with other
 Chat turns in the same worker using that folder. Reads may observe another
@@ -486,7 +486,7 @@ working. Every member retains its own `status`, `contributionID`, `usage` and
 latest row in its live contribution, even when another member appends a row.
 
 `test_chat_team.py` exercises real ChatService scheduling against scripted
-providers: all eight members, long continuation, fairness, private reasoning and
+providers: a full roster, long continuation, fairness, private reasoning and
 account isolation, shared recall, serialized approvals/edits, Stop/steer,
 failures, context checkpoints and crash recovery. `test_chat_model.py` runs the
 actual Swift model to check correlated configuration, cross-chat isolation,

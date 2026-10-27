@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 from chat_remote_files import RemoteFiles
+from chat_team import MAX_MEMBERS
 
 GLOBAL = {"remote_options", "remote_models", "remote_create"}
 ACTIONS = GLOBAL | {"remote_history", "remote_upload_begin", "remote_upload_chunk", "remote_upload_finish",
@@ -77,7 +78,7 @@ def turn_changes(entries):
     output = []; budget = 32000
     for row in list(rows.values())[:256]:
         row["path"] = row["path"][:1024]
-        row["members"] = [str(m)[:120] for m in row["members"][:8]]
+        row["members"] = [str(m)[:120] for m in row["members"][:MAX_MEMBERS]]
         if len(json.dumps(row, ensure_ascii=False).encode()) > budget: row["diff"] = ""
         size = len(json.dumps(row, ensure_ascii=False).encode())
         if size > budget: break

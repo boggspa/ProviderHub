@@ -819,6 +819,56 @@ import Foundation
             self.assertEqual(ran.returncode, 0, ran.stderr)
             self.assertIn(marker, ran.stdout)
 
+    def test_activity_buckets_separate_commands_from_other_work(self):
+        source = Path(__file__).parent
+        strip = (source / "ChatActivityStrip.swift").read_text()
+        shared = (source / "ChatSharedActivity.swift").read_text()
+        companion = source.parent / "Packages/ProviderHubRemote/Sources/ProviderHubRemote/CompanionActivity.swift"
+        self.assertIn("model.jump(to: entryID)", strip)
+        self.assertIn("ChatActivityBuckets.group", strip)
+        self.assertIn("enum ChatActivityBuckets", shared)
+        self.assertIn("static func group", shared)
+        self.assertIn("Running a command", shared)
+        self.assertIn("model.jumpToActivity(row.entryID)", companion.read_text())
+        cases = r'''
+import Foundation
+@main struct Cases {
+    static func main() {
+        let shell = ChatToolDisplay.describe(tool: "run_shell", summary: "Run in /w:\nswift build -c release", live: true)
+        let vague = ChatToolDisplay.describe(tool: "run_shell", summary: "shell", live: true)
+        let edit = ChatToolDisplay.describe(tool: "apply_patch", summary: "Apply patch:\nUpdate: main.swift", live: true)
+        let read = ChatToolDisplay.describe(tool: "read_file", summary: "Read main.swift (line 1, limit 20)", live: true)
+        precondition(shell.verb == "Running", shell.verb)
+        precondition(vague.verb == "Running a command", vague.verb)
+        precondition(edit.verb == "Editing", edit.verb)
+        precondition(read.verb == "Reading", read.verb)
+        let rows = [
+            ChatActivityBuckets.Row(id: "sol", name: "Sol", route: "codex/sol", verb: shell.verb, live: true),
+            ChatActivityBuckets.Row(id: "nova", name: "Nova", route: "codex/nova", verb: vague.verb, live: true),
+            ChatActivityBuckets.Row(id: "flash", name: "Flash", route: "minimax/flash", verb: edit.verb, live: true),
+            ChatActivityBuckets.Row(id: "luna", name: "Luna", route: "codex/luna", verb: read.verb, live: true),
+            ChatActivityBuckets.Row(id: "opus", name: "Opus", route: "claude/opus", verb: "Thinking…", live: true),
+            ChatActivityBuckets.Row(id: "ivy", name: "Ivy", route: "claude/ivy", verb: "Replying…", live: true),
+            ChatActivityBuckets.Row(id: "kit", name: "Kit", route: "codex/kit", verb: "Continuing…", live: true),
+            ChatActivityBuckets.Row(id: "rex", name: "Rex", route: "codex/rex", verb: "Stopping…", live: true),
+            ChatActivityBuckets.Row(id: "wren", name: "Wren", route: "codex/wren", verb: "Waiting", live: false),
+            ChatActivityBuckets.Row(id: "update", name: "Update", route: "codex/update", verb: "Interrupting for your update…", live: true),
+        ]
+        let buckets = ChatActivityBuckets.group(rows)
+        precondition(buckets.map(\.title) == ["Running a command", "Editing", "Reading", "Thinking", "Replying", "Continuing", "Stopping", "Waiting", "Interrupting for your update"], buckets.map(\.title).joined(separator: " | "))
+        precondition(buckets[0].participants.map(\.name) == ["Sol", "Nova"])
+        precondition(buckets[0].participants.map(\.id) == ["sol", "nova"])
+        precondition(buckets[0].live)
+        precondition(buckets.first { $0.title == "Waiting" }?.live == false)
+        precondition(buckets.first { $0.title == "Editing" }?.participants.map(\.name) == ["Flash"])
+        precondition(ChatActivityBuckets.group([]).isEmpty)
+        print("Activity buckets keep commands, tools and members apart")
+    }
+}
+'''
+        self.run_native(["ChatTranscriptLayout.swift", "ChatToolGlyph.swift", "ChatSharedActivity.swift"], cases,
+                        "Activity buckets keep commands, tools and members apart")
+
     def test_parser_streaming_copy_budgets_and_column_layout(self):
         self.run_native(["ChatFonts.swift", "ChatHues.swift", "ChatMentions.swift", "ChatSharedHexColor.swift", "ChatSelectableText.swift", "ChatTranscriptText.swift"], CASES,
                         "Transcript parser, streaming, copy and layout checks passed", stubs=STUBS)

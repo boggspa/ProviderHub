@@ -228,12 +228,62 @@ class ChatCapabilities:
     def handles(self, name):
         return isinstance(name, str) and (name in BROWSER_NAMES or name.startswith("plugin__"))
 
+    @staticmethod
+    def _browser_owner(service):
+        owner = service
+        while getattr(owner, "team_parent", None) or getattr(owner, "helper_parent", None):
+            owner = getattr(owner, "team_parent", None) or owner.helper_parent
+        return owner
+
+    def _browser_binding(self, service, owner, target=None):
+        """Keep a team member's tab across its successive child services."""
+        member = getattr(service, "team_member", None)
+        member_id = member.get("id") if isinstance(member, dict) else None
+        if not member_id:
+            if target is not None: service._browser_tab_binding = (owner.chat["id"], target)
+            return getattr(service, "_browser_tab_binding", None)
+        key = (owner.chat["id"], member_id)
+        with self._lock:
+            bindings = getattr(owner, "_browser_tab_bindings", None)
+            if bindings is None:
+                bindings = owner._browser_tab_bindings = {}
+            if target is not None: bindings[key] = target
+            value = bindings.get(key)
+        return (key[0], value) if value else None
+
+    def _browser_arguments(self, service, name, arguments):
+        """Bind implicit follow-ups to the tab opened by this service.
+
+        A team member's browser work must not move when another member opens
+        or the user selects a different tab. Keep the binding transient and
+        scoped to the root chat. Explicit tab IDs always take precedence.
+        """
+        resolved = dict(arguments)
+        targetable = {"browser_navigate", "browser_observe", "browser_act", "browser_screenshot", "browser_close"}
+        if name == "browser_open" and arguments.get("new_tab") is False:
+            targetable.add("browser_open")
+        owner = self._browser_owner(service)
+        chat_id = owner.chat["id"]
+        binding = self._browser_binding(service, owner)
+        if name in targetable and "tab_id" not in resolved and binding and binding[0] == chat_id:
+            resolved["tab_id"] = binding[1]
+        # These actions can replace or discard a page. Without a stable
+        # target an approval could otherwise apply to a different tab created
+        # while the user is reviewing it. Observe/list can discover the ID.
+        if (name in {"browser_navigate", "browser_close"} or
+                name == "browser_open" and resolved.get("new_tab") is False) and "tab_id" not in resolved:
+            raise ValueError("Specify tab_id from browser_list or open a tab before this action.")
+        return resolved
+
     def describe(self, service, name, arguments):
         if not self.allowed(service): raise ValueError("Optional tools are unavailable in read-only chats")
         if name in BROWSER_NAMES:
             with self._lock:
                 if not self._browser_enabled: raise ValueError("Browser Use is disabled")
+            arguments = self._browser_arguments(service, name, arguments)
             description = self.browser.describe(name, arguments)
+            # The runtime freezes this target before requesting approval.
+            description["_browser_arguments"] = arguments
         else:
             try: description = self.plugins.describe(name, arguments)
             except MCPError as exc: raise ValueError(str(exc)) from exc
@@ -241,17 +291,31 @@ class ChatCapabilities:
         return description
 
     def execute(self, service, name, arguments):
-        self.describe(service, name, arguments)  # Recheck after any approval wait.
+        description = self.describe(service, name, arguments)  # Recheck after any approval wait.
         if name in BROWSER_NAMES:
             with self._lock:
                 if not self._browser_enabled: raise ValueError("Browser Use is disabled")
                 generation = self.native.generation()
-            owner = service
-            while getattr(owner, "team_parent", None) or getattr(owner, "helper_parent", None):
-                owner = getattr(owner, "team_parent", None) or owner.helper_parent
+            owner = self._browser_owner(service)
+            arguments = description["_browser_arguments"]
             browser = ChatBrowserTools(lambda chat, tool, request, cancel, request_id=None:
                 self.native.call(chat, tool, request, cancel, request_id, generation=generation))
-            return browser.execute(name, arguments, chat_id=owner.chat["id"], cancel_event=service.cancel)
+            result = browser.execute(name, arguments, chat_id=owner.chat["id"], cancel_event=service.cancel)
+            if not result.get("is_error"):
+                target = arguments.get("tab_id")
+                if name in {"browser_new", "browser_open", "browser_observe"}:
+                    for block in result.get("content", []):
+                        if block.get("type") != "text": continue
+                        try: details = json.loads(block.get("text", ""))
+                        except (ValueError, TypeError): continue
+                        if isinstance(details, dict) and isinstance(details.get("tab_id"), str):
+                            target = details["tab_id"]
+                            break
+                # Keep a closed tab's binding as a tombstone: a later implicit
+                # action must fail rather than move to another member's tab.
+                if target and name in {"browser_new", "browser_open", "browser_navigate", "browser_observe", "browser_act", "browser_screenshot", "browser_select"}:
+                    self._browser_binding(service, owner, target)
+            return result
         try: return self.plugins.dispatch(name, arguments, service.cancel)
         except MCPError as exc: raise ValueError(str(exc)) from exc
 

@@ -63,4 +63,34 @@ final class LiveStateTests: XCTestCase {
         XCTAssertEqual(rows.first?.description.verb, "Running")
         XCTAssertEqual(rows.first?.description.code, true)
     }
+
+    func testActivityBucketsDoNotTreatEveryToolAsACommand() {
+        let members: [RemoteValue] = [
+            .object(["id": .string("m1"), "name": .string("Sol"), "route": .string("codex/sol"), "status": .string("working"), "contributionID": .string("current")]),
+            .object(["id": .string("m2"), "name": .string("Flash"), "route": .string("minimax/flash"), "status": .string("working"), "contributionID": .string("next")]),
+            .object(["id": .string("m3"), "name": .string("Luna"), "route": .string("codex/luna"), "status": .string("waiting"), "waitReason": .string("Background process p1"), "contributionID": .string("wait")]),
+            .object(["id": .string("m4"), "name": .string("Opus"), "route": .string("claude/opus"), "status": .string("working"), "contributionID": .string("think")]),
+            .object(["id": .string("m5"), "name": .string("Ivy"), "route": .string("claude/ivy"), "status": .string("continuing"), "contributionID": .string("cont")]),
+            .object(["id": .string("m6"), "name": .string("Nova"), "route": .string("codex/nova"), "status": .string("working"), "contributionID": .string("reply")]),
+        ]
+        let shell = RemoteEntry.decode(["id": "shell", "role": "tool", "memberID": "m1", "contributionID": "current", "tool": "run_shell", "summary": "Run in /workspace:\nswift build", "detail": "Running…"], fallback: "shell")
+        let edit = RemoteEntry.decode(["id": "edit", "role": "tool", "memberID": "m2", "contributionID": "next", "tool": "apply_patch", "summary": "Apply patch:\nUpdate: main.swift", "detail": "Running…"], fallback: "edit")
+        let reply = RemoteEntry.decode(["id": "reply", "role": "assistant", "memberID": "m6", "contributionID": "reply", "text": "Hello", "isLive": true], fallback: "reply")
+        let rows = CompanionActivity.current(entries: [shell, edit, reply], members: members, teamEnabled: true, busy: true)
+        let buckets = ChatActivityBuckets.group(rows.map {
+            ChatActivityBuckets.Row(id: $0.id, name: $0.name, route: $0.route, verb: $0.description.verb, live: $0.description.live)
+        })
+        XCTAssertEqual(buckets.map(\.title), ["Running a command", "Editing", "Waiting", "Thinking", "Continuing", "Replying"])
+        XCTAssertEqual(buckets[0].participants.map(\.name), ["Sol"])
+        XCTAssertEqual(buckets[1].participants.map(\.name), ["Flash"])
+        XCTAssertEqual(buckets[2].participants.map(\.name), ["Luna"])
+        XCTAssertFalse(buckets[2].live)
+        XCTAssertEqual(buckets[5].participants.map(\.id), ["m6"])
+        let stopping = CompanionActivity.current(entries: [shell, edit, reply], members: members, teamEnabled: true, busy: true, transition: "Stopping…")
+        let stopped = ChatActivityBuckets.group(stopping.map {
+            ChatActivityBuckets.Row(id: $0.id, name: $0.name, route: $0.route, verb: $0.description.verb, live: $0.description.live)
+        })
+        XCTAssertEqual(stopped.map(\.title), ["Stopping"])
+        XCTAssertEqual(stopped[0].participants.map(\.name), ["Sol", "Flash", "Luna", "Opus", "Ivy", "Nova"])
+    }
 }

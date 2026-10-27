@@ -361,14 +361,14 @@ class RemoteTodoTests(unittest.TestCase):
     def test_phone_panel_keeps_every_lane_and_the_hosts_counts(self):
         long = [{"id": f"i{n}", "content": "x" * 200, "status": "completed" if n < 5 else "pending"} for n in range(24)]
         lanes = [{"id": str(n) * 32, "name": f"M{n}", "route": "r", "choice": "r|", "items": long, "done": 5, "total": 24,
-                  "updated": NOW} for n in range(8)]
+                  "updated": NOW} for n in range(12)]
         event = {"event": "todos", "chat": "c" * 32, "todos": {"team": True, "lanes": lanes,
                  "shared": {"id": "shared", "name": "Shared", "items": long[:2], "done": 2, "total": 2, "revision": 3, "updated": NOW,
                             "secret": "x"}}}
         projected = project(event, None)
         self.assertEqual(projected["panel"], "todos")
         value = projected["value"]
-        self.assertEqual([lane["name"] for lane in value["lanes"]], [f"M{n}" for n in range(8)])
+        self.assertEqual([lane["name"] for lane in value["lanes"]], [f"M{n}" for n in range(12)])
         self.assertTrue(all(lane["total"] == 24 and lane["done"] == 5 for lane in value["lanes"]))
         self.assertLess(len(value["lanes"][7]["items"]), 24, "a long list is shortened in transit")
         self.assertEqual((value["shared"]["revision"], value["shared"]["name"]), (3, "Shared"))
@@ -383,7 +383,7 @@ class SourceTests(unittest.TestCase):
     def test_mac_inspector_shows_lanes_with_progress_and_the_tool_row_a_checklist(self):
         inspector = (self.ROOT / "ChatInspector.swift").read_text()
         self.assertIn("ChatTodosSection(model: model)", inspector)
-        self.assertLess(inspector.index("ChatTeamControls(model: model)"), inspector.index("ChatTodosSection(model: model)"))
+        self.assertLess(inspector.index("ChatTeamControls(model: model, openEditor: openTeamEditor)"), inspector.index("ChatTodosSection(model: model)"))
         self.assertLess(inspector.index("ChatTodosSection(model: model)"), inspector.index("ChatBlackboardSection(model: model, chat: chat)"))
         section = (self.ROOT / "ChatTodos.swift").read_text()
         for needle in ("ChatSharedTodoLane(", "todos.shared", "lane.done", "lane.total", "ChatProviderIcon", "HubTheme.Semantic"):

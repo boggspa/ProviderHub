@@ -7,11 +7,11 @@ JSON-compatible tool result. The worker thread blocks while the Swift side
 runs the action asynchronously on the UI, so the host always stays in charge
 of cancellation, approval semantics and image persistence.
 
-There is exactly one visible browser per chat. The same WKWebView instance is
-shown in the Browser pane and driven by Browser Use, so what the user sees is
-what automation drives. Tools never get to inject arbitrary JavaScript: DOM
-observation runs in a fixed isolated-world script bundled with the host, and
-each call returns a snapshot id plus refs that become stale on navigation.
+Each chat has a set of browser tabs. The Browser pane displays the selected
+tab; tools can address another tab without changing the user's selection.
+Tools never get to inject arbitrary JavaScript: DOM observation runs in a
+fixed isolated-world script bundled with the host, and each call returns a
+snapshot id plus refs that become stale on navigation or belong to another tab.
 
 Wire protocol (the parent ``native_call`` implements):
 
@@ -60,6 +60,9 @@ DEFAULT_SCREENSHOT_HEIGHT = 1280
 # must be safe to embed in a JSON object and short enough to round-trip freely.
 MAX_SNAPSHOT_ID_LEN = 64
 _SNAPSHOT_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,%d}\Z" % MAX_SNAPSHOT_ID_LEN)
+MAX_TAB_ID_LEN = 64
+_TAB_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,%d}\Z" % MAX_TAB_ID_LEN)
+TAB_ID_SCHEMA = {"type": "string", "minLength": 1, "maxLength": MAX_TAB_ID_LEN}
 
 ALLOWED_SCHEMES = ("http", "https")
 
@@ -89,31 +92,48 @@ def _tool(name, description, properties, required):
 TOOL_DEFINITIONS = [
     _tool(
         "browser_open",
-        "Open a URL in the chat's persistent WKWebView. The first call "
-        "creates the WKWebView for this chat; later calls reuse it. Returns "
-        "the loaded URL, page title and snapshot id. Only http and https "
+        "Open a URL in a new browser tab. Existing tabs stay open and the "
+        "visible selection is preserved. Use the returned tab_id for later "
+        "observe, action and screenshot calls. Supply tab_id to reuse that "
+        "tab, or set new_tab to false to reuse your last tab. Only http and https "
         "URLs are accepted.",
         {
             "url": {"type": "string", "minLength": 1, "maxLength": MAX_URL},
+            "tab_id": TAB_ID_SCHEMA,
+            "new_tab": {"type": "boolean"},
         },
         ["url"],
     ),
     _tool(
         "browser_navigate",
-        "Navigate the chat's persistent WKWebView to a new URL. Returns the "
+        "Navigate the selected or identified browser tab to a new URL. Returns the "
         "new snapshot id, the URL that actually loaded after redirects, and "
         "a stale flag if any prior observe snapshot is no longer current.",
         {
             "url": {"type": "string", "minLength": 1, "maxLength": MAX_URL},
+            "tab_id": TAB_ID_SCHEMA,
         },
         ["url"],
     ),
     _tool(
         "browser_list",
-        "List the open browser sessions for this chat (page title, URL, "
-        "snapshot id). No action runs.",
+        "List the chat's browser tabs and the selected tab, including each "
+        "tab's id, title, URL and snapshot id. No action runs.",
         {},
         [],
+    ),
+    _tool(
+        "browser_new",
+        "Create an empty browser tab without changing the visible selection. "
+        "Use the returned tab_id to navigate it.",
+        {},
+        [],
+    ),
+    _tool(
+        "browser_select",
+        "Select an existing browser tab for the visible Browser pane.",
+        {"tab_id": TAB_ID_SCHEMA},
+        ["tab_id"],
     ),
     _tool(
         "browser_observe",
@@ -126,6 +146,7 @@ TOOL_DEFINITIONS = [
             "depth": {"type": "integer", "minimum": 0, "maximum": MAX_DEPTH},
             "max_bytes": {"type": "integer", "minimum": 1024, "maximum": MAX_OBSERVATION_BYTES},
             "snapshot_id": {"type": "string"},
+            "tab_id": TAB_ID_SCHEMA,
         },
         [],
     ),
@@ -138,6 +159,7 @@ TOOL_DEFINITIONS = [
         "wait_for_text, wait_for_selector.",
         {
             "snapshot_id": {"type": "string"},
+            "tab_id": TAB_ID_SCHEMA,
             "actions": {
                 "type": "array",
                 "minItems": 1,
@@ -158,7 +180,7 @@ TOOL_DEFINITIONS = [
                 },
             },
         },
-        ["actions"],
+        ["snapshot_id", "actions"],
     ),
     _tool(
         "browser_screenshot",
@@ -167,15 +189,16 @@ TOOL_DEFINITIONS = [
         {
             "max_width": {"type": "integer", "minimum": MIN_SCREENSHOT_EDGE, "maximum": MAX_SCREENSHOT_EDGE},
             "max_height": {"type": "integer", "minimum": MIN_SCREENSHOT_EDGE, "maximum": MAX_SCREENSHOT_EDGE},
+            "tab_id": TAB_ID_SCHEMA,
         },
         [],
     ),
     _tool(
         "browser_close",
-        "Close the chat's WKWebView and drop all snapshot state. The Browser "
-        "pane hides itself when the chat has no live page. Requires approval "
-        "because it discards the user's browsing state for this chat.",
-        {},
+        "Close the selected or identified browser tab and drop its snapshot "
+        "state. Other tabs remain open. Requires approval because it discards "
+        "the user's browsing state for that tab.",
+        {"tab_id": TAB_ID_SCHEMA},
         [],
     ),
 ]
@@ -299,22 +322,32 @@ def _validate_args(name, args):
     silently dropped, so the chat_runtime can surface them as user errors."""
     if not isinstance(args, dict):
         raise ValueError("Browser tool arguments must be an object")
+    if "tab_id" in args and not (isinstance(args["tab_id"], str) and _TAB_ID_PATTERN.fullmatch(args["tab_id"])):
+        raise ValueError("tab_id must be a valid browser tab identifier")
     if name == "browser_open":
-        if set(args) != {"url"}:
-            raise ValueError("browser_open only accepts 'url'")
+        if "url" not in args or set(args) - {"url", "tab_id", "new_tab"}:
+            raise ValueError("browser_open requires 'url' and accepts only 'tab_id' and 'new_tab'")
+        if "new_tab" in args and type(args["new_tab"]) is not bool:
+            raise ValueError("new_tab must be a boolean")
+        if args.get("new_tab") is True and "tab_id" in args:
+            raise ValueError("new_tab cannot be combined with tab_id")
         _validate_url(args["url"], "url")
         return
     if name == "browser_navigate":
-        if set(args) != {"url"}:
-            raise ValueError("browser_navigate only accepts 'url'")
+        if "url" not in args or set(args) - {"url", "tab_id"}:
+            raise ValueError("browser_navigate requires 'url' and accepts 'tab_id'")
         _validate_url(args["url"], "url")
         return
-    if name == "browser_list":
+    if name in {"browser_list", "browser_new"}:
         if args:
-            raise ValueError("browser_list takes no arguments")
+            raise ValueError("%s takes no arguments" % name)
+        return
+    if name == "browser_select":
+        if set(args) != {"tab_id"}:
+            raise ValueError("browser_select requires 'tab_id'")
         return
     if name == "browser_observe":
-        unknown = set(args) - {"depth", "max_bytes", "snapshot_id"}
+        unknown = set(args) - {"depth", "max_bytes", "snapshot_id", "tab_id"}
         if unknown:
             raise ValueError("browser_observe has unsupported keys: %s" % sorted(unknown))
         _integer(args, "depth", minimum=0, maximum=MAX_DEPTH, default=3)
@@ -324,7 +357,7 @@ def _validate_args(name, args):
             _validate_snapshot_id(args["snapshot_id"], "snapshot_id")
         return
     if name == "browser_act":
-        unknown = set(args) - {"snapshot_id", "actions"}
+        unknown = set(args) - {"snapshot_id", "actions", "tab_id"}
         if unknown:
             raise ValueError("browser_act has unsupported keys: %s" % sorted(unknown))
         if "snapshot_id" not in args:
@@ -335,7 +368,7 @@ def _validate_args(name, args):
         _validate_actions(args["actions"])
         return
     if name == "browser_screenshot":
-        unknown = set(args) - {"max_width", "max_height"}
+        unknown = set(args) - {"max_width", "max_height", "tab_id"}
         if unknown:
             raise ValueError("browser_screenshot has unsupported keys: %s" % sorted(unknown))
         _integer(args, "max_width", minimum=MIN_SCREENSHOT_EDGE,
@@ -344,8 +377,8 @@ def _validate_args(name, args):
                  maximum=MAX_SCREENSHOT_EDGE, default=DEFAULT_SCREENSHOT_HEIGHT)
         return
     if name == "browser_close":
-        if args:
-            raise ValueError("browser_close takes no arguments")
+        if set(args) - {"tab_id"}:
+            raise ValueError("browser_close only accepts 'tab_id'")
         return
     raise ValueError("Unknown browser tool")
 
@@ -370,6 +403,10 @@ def describe(name, args):
     if name == "browser_list":
         return {"summary": "List browser sessions",
                 "requires_approval": False}
+    if name == "browser_new":
+        return {"summary": "New browser tab", "requires_approval": False}
+    if name == "browser_select":
+        return {"summary": "Select browser tab", "requires_approval": False}
     if name == "browser_observe":
         depth = args.get("depth", 3)
         return {"summary": "Observe browser (depth %d)" % depth,

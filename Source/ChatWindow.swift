@@ -27,6 +27,7 @@ struct ChatWindow: View {
     @AppStorage(ChatZoom.defaultsKey) private var zoom = 1.0
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var dropTargeted = false
+    @State private var editingTeam = false
     @StateObject private var workspace = ChatWorkspaceController()
     @StateObject private var browser = ChatBrowserStore(storageRoot: FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         .appendingPathComponent(Bundle.main.object(forInfoDictionaryKey: "BridgeStateName") as? String ?? "Provider Hub", isDirectory: true)
@@ -68,7 +69,8 @@ struct ChatWindow: View {
                                 ChatPaneSizing.inspectorMaximum(proxy.size.width))) },
                             reset: { inspectorWidth = 0 })
                         ChatInspector(model: model, browserStore: browser,
-                                      browserInPane: model.selectedID.flatMap { workspace.browserPane(for: $0) } != nil)
+                                      browserInPane: model.selectedID.flatMap { workspace.browserPane(for: $0) } != nil,
+                                      openTeamEditor: { editingTeam = true })
                             .hubGlassPane(.inspector)
                             .frame(width: panes.inspector)
                     }
@@ -93,6 +95,10 @@ struct ChatWindow: View {
         // Own the hidden title-bar band, as CompactShell does, so the masthead
         // shares the traffic-light row rather than sitting beneath it.
         .ignoresSafeArea()
+        // Keep the editor owned by the window, not the inspector's selected
+        // tab: browser activity may reveal that tab while the draft is open.
+        .sheet(isPresented: $editingTeam) { ChatTeamEditor(model: model) }
+        .onChange(of: model.selectedID) { _, _ in editingTeam = false }
         // Chat's own settings menu also switches Glass/Solid, which the
         // window, not this view, has to apply.
         .onChange(of: windowStyle) { _, _ in (NSApp.delegate as? AppDelegate)?.applyWindowStyle() }
@@ -106,7 +112,10 @@ struct ChatWindow: View {
                       let arguments = event["arguments"] as? [String: Any] else {
                     return ChatBrowserResult.failure("Browser unavailable", "Browser Use is disabled or its chat is unavailable.")
                 }
-                if model.selectedID == chat, workspace.browserPane(for: chat) == nil { model.showInspector(.browser) }
+                if ["browser_open", "browser_new", "browser_navigate"].contains(tool),
+                   model.selectedID == chat, workspace.browserPane(for: chat) == nil {
+                    model.showInspector(.browser)
+                }
                 return await browser.perform(chatID: chat, requestID: request, tool: tool, arguments: arguments)
             }
             model.nativeCancelHandler = { request, chat in browser.cancel(chatID: chat, requestID: request) }

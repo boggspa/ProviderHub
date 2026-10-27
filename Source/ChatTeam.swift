@@ -61,13 +61,13 @@ private final class ChatTeamPresetStore: ObservableObject {
 /// transcript and share its composer. There is no separate orchestration view.
 struct ChatTeamControls: View {
     @ObservedObject var model: ChatModel
-    @State private var editing = false
+    var openEditor: () -> Void
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
                 Text("Team").font(.system(size: 13, weight: .semibold))
                 Spacer()
-                Button(model.team == nil ? "Set up" : "Edit") { editing = true }
+                Button(model.team == nil ? "Set up" : "Edit") { openEditor() }
                     .controlSize(.small).disabled(!model.canEditTeam)
             }
             Text(model.team?.taskMode == false
@@ -120,7 +120,6 @@ struct ChatTeamControls: View {
             }
             if model.teamRequest != nil { ProgressView().controlSize(.small) }
         }.padding(14)
-        .sheet(isPresented: $editing) { ChatTeamEditor(model: model) }
     }
     private func runReadout(_ team: ChatTeamSnapshot, tokens: Int, now: Date) -> String {
         var parts = ["Run"]
@@ -148,7 +147,7 @@ private struct TeamDraft: Identifiable {
     }
 }
 
-private struct ChatTeamEditor: View {
+struct ChatTeamEditor: View {
     @ObservedObject var model: ChatModel
     @Environment(\.dismiss) private var dismiss
     @State private var enabled = true
@@ -162,6 +161,9 @@ private struct ChatTeamEditor: View {
     @StateObject private var presetStore = ChatTeamPresetStore()
     @State private var savingPreset = false
     @State private var presetName = ""
+
+    init(model: ChatModel) { self.model = model }
+
     private var execution: ChatTeamExecution? {
         let minuteText = minutes.trimmingCharacters(in: .whitespacesAndNewlines)
         let tokenText = tokens.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -317,7 +319,7 @@ private struct ChatTeamEditor: View {
                     TextField("No limit", text: $tokens).textFieldStyle(.roundedBorder).accessibilityLabel("Reported token limit")
                 }
                 Picker("Context per member", selection: $contextTokens) {
-                    ForEach(Array(Set([16000, 32000, 64000, 128000, 200000, 500000, 1000000, 2000000,
+                    ForEach(Array(Set([16000, 32000, 64000, 120000, 128000, 200000, 325000, 500000, 650000, 1000000, 2000000,
                                        Int(contextTokens) ?? 200000])).sorted(), id: \.self) { value in
                         Text(value.formatted() + " tokens").tag(String(value))
                     }

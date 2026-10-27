@@ -5,6 +5,7 @@ struct ChatInspector: View {
     @ObservedObject var model: ChatModel
     var browserStore: ChatBrowserStore? = nil
     var browserInPane = false
+    var openTeamEditor: () -> Void = {}
     var body: some View {
         VStack(spacing: 0) {
             // The inspector can be 290 pt wide; when every label will not fit,
@@ -17,7 +18,7 @@ struct ChatInspector: View {
             Divider()
             switch model.inspectorTab {
             case .changes: ChatChangesPane(model: model)
-            case .agents: ChatAgentsPane(model: model)
+            case .agents: ChatAgentsPane(model: model, openTeamEditor: openTeamEditor)
             case .side: ChatSidePane(model: model)
             case .processes: ChatProcessesPane(model: model)
             case .browser:
@@ -167,6 +168,7 @@ private struct ChatChangesPane: View {
 
 private struct ChatAgentsPane: View {
     @ObservedObject var model: ChatModel
+    var openTeamEditor: () -> Void
     private var selected: ChatAgent? { model.agents.first { $0.id == model.inspectedAgentID } }
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -187,7 +189,7 @@ private struct ChatAgentsPane: View {
             } else {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 4) {
-                        ChatTeamControls(model: model)
+                        ChatTeamControls(model: model, openEditor: openTeamEditor)
                         if let chat = model.selectedID {
                             Divider().padding(.horizontal, 14)
                             ChatTodosSection(model: model)

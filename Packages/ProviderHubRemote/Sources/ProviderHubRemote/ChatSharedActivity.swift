@@ -24,6 +24,69 @@ struct ChatActivityDescription: Equatable {
     }
 }
 
+/// One member inside a collapsed activity count. The icon is chosen by route;
+/// the name stays in the accessible label so identical provider marks do not
+/// erase who is in the group.
+struct ChatActivityParticipant: Equatable, Identifiable {
+    var id: String
+    var name: String
+    var route: String
+}
+
+/// Live rows that share a state, in the order the rows were given (roster order).
+struct ChatActivityBucket: Equatable, Identifiable {
+    var title: String
+    var participants: [ChatActivityParticipant]
+    var live: Bool
+    var id: String { title }
+    var count: Int { participants.count }
+
+    var accessibilityLabel: String {
+        let names = participants.map(\.name).filter { !$0.isEmpty }.joined(separator: ", ")
+        return names.isEmpty ? "\(count) \(title)" : "\(count) \(title), \(names)"
+    }
+}
+
+/// Counts for the collapsed strip. A shell is "Running a command"; every other
+/// tool keeps its own live verb, so an edit or a read is not a command.
+enum ChatActivityBuckets {
+    struct Row: Equatable {
+        var id: String
+        var name: String
+        var route: String
+        var verb: String
+        var live: Bool
+    }
+
+    static func group(_ rows: [Row]) -> [ChatActivityBucket] {
+        var titles: [String] = []
+        var grouped: [String: (live: Bool, people: [ChatActivityParticipant])] = [:]
+        for row in rows {
+            let title = title(for: row.verb)
+            var current = grouped[title] ?? (live: false, people: [])
+            if grouped[title] == nil { titles.append(title) }
+            current.live = current.live || row.live
+            current.people.append(ChatActivityParticipant(id: row.id, name: row.name, route: row.route))
+            grouped[title] = current
+        }
+        return titles.compactMap { title in
+            grouped[title].map { ChatActivityBucket(title: title, participants: $0.people, live: $0.live) }
+        }
+    }
+
+    /// "Running" is only the live shell phrasing from `ChatToolDisplay`.
+    static func title(for verb: String) -> String {
+        switch verb {
+        case "Running", "Ran", "Running a command", "Ran a command":
+            return "Running a command"
+        case "Interrupting for your update…":
+            return "Interrupting for your update"
+        default:
+            return verb.hasSuffix("…") ? String(verb.dropLast()) : verb
+        }
+    }
+}
+
 /// Shared with the Mac's shimmer: it updates just its own label, respects
 /// Reduce Motion, and does not make the transcript redraw on every frame.
 struct ChatSharedShimmerText: View {
@@ -73,5 +136,60 @@ struct ChatSharedActivityLabel<Mark: View>: View {
             }
             Spacer(minLength: 0)
         }.contentShape(Rectangle())
+    }
+}
+
+/// The collapsed team row: a count per state, and one provider icon per member
+/// in that state. Narrow widths scroll the chips instead of dropping a member.
+struct ChatSharedActivitySummary<Mark: View>: View {
+    var buckets: [ChatActivityBucket]
+    var expanded: Bool
+    var ink: Color
+    var secondary: Color
+    var scale: CGFloat = 1
+    var accent: (ChatActivityParticipant) -> Color
+    var onToggle: () -> Void
+    @ViewBuilder var mark: (ChatActivityParticipant) -> Mark
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 4 * scale) {
+            Button(action: onToggle) {
+                Image(systemName: expanded ? "chevron.down" : "chevron.right")
+                    .font(.system(size: 9 * scale, weight: .bold))
+                    .foregroundStyle(secondary)
+                    .frame(width: 28 * scale, height: 28 * scale)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(expanded ? "Hide individual activity" : "Show individual activity")
+            ViewThatFits(in: .horizontal) {
+                chips
+                ScrollView(.horizontal, showsIndicators: false) { chips }
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    private var chips: some View {
+        HStack(spacing: 10 * scale) {
+            ForEach(buckets) { bucket in
+                Button(action: onToggle) {
+                    HStack(spacing: 4 * scale) {
+                        HStack(spacing: 2 * scale) {
+                            ForEach(bucket.participants) { person in
+                                mark(person).accessibilityHidden(true)
+                            }
+                        }
+                        ChatSharedShimmerText(text: "\(bucket.count) \(bucket.title)", active: bucket.live,
+                            accent: bucket.participants.first.map(accent) ?? ink, base: secondary)
+                            .font(.system(size: 11.5 * scale, weight: .medium))
+                            .lineLimit(1)
+                            .fixedSize(horizontal: true, vertical: false)
+                    }
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(bucket.accessibilityLabel)
+            }
+        }
     }
 }

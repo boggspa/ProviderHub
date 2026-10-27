@@ -1238,6 +1238,9 @@ class ChatService:
                                 raise ValueError("This read-only conversation only has read_file and search_files.")
                             elif self.capabilities and self.capabilities.handles(name):
                                 description = self.capabilities.describe(self, name, arguments)
+                                # Keep the browser tab shown for approval even if
+                                # selection changes while that approval is pending.
+                                arguments = description.get("_browser_arguments", arguments)
                             else:
                                 description = runner.describe(name, arguments)
                             must_ask = description["requires_approval"] and needs_approval(chat.get("approvalMode", "manual"), name, arguments, chat["workspace"])

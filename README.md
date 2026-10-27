@@ -1,6 +1,6 @@
 # Provider Hub
 
-**Version 0.5.33 (build 97).** Licensed Apache-2.0 — see [LICENSE](LICENSE),
+**Version 0.5.34 (build 98).** Licensed Apache-2.0 — see [LICENSE](LICENSE),
 with attributions in [NOTICE](NOTICE).
 
 A native macOS menu bar app that connects Claude Desktop and the Codex coding workspace to eleven model API connections: Mistral, Kimi Code, MiMo Token Plan, Ollama, DeepSeek, Cerebras, Muse, Grok, Qwen Token Plan, OpenRouter, and the Gemini API. Claude uses the local Messages endpoint. Codex uses Responses: Grok, Ollama, and OpenRouter retain native Responses transports, while the other eight use the local Messages bridge and their provider adapters.
@@ -72,7 +72,7 @@ Build 67 adds a Team Blackboard with attachment previews and reference inspectio
 Projects with attached folders, Recents, resizable panes and updated Claude/Codex
 marks. Chat switching decodes transcripts in the background; timestamped member
 sections keep interleaved tools together, and Changes stays current during runs.
-Teams support eight members and safe model replacements while peers keep working.
+Teams support twelve members and safe model replacements while peers keep working.
 The worker-wide model-request gate allows twelve requests. Adjacent desktop
 launches reuse a matching gateway without interrupting active work.
 Build 66 introduced continuous Team work across checkpoints and `@Name` routing.

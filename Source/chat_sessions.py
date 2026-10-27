@@ -180,6 +180,8 @@ class ChatHost:
         self.runner_type, self.max_active = runner, max_active
         self._metadata = threading.RLock()
         self._output = threading.RLock()
+        self._remote_browser_lock = threading.RLock()
+        self._remote_browser_pending = set()
         self._requests = ResourceGate(MAX_ACTIVE_REQUESTS)
         self._writers = {}
         self.processes = ProcessRegistry(self.publish_processes)
@@ -602,17 +604,28 @@ the same publication `initialize` and `select` perform, ending with `ready`.
                 publish_turn_changes(self, service)
                 return
             tool, arguments = command.get("tool"), command.get("arguments", {})
+            # Older companions use browser_open as their Go button. Preserve
+            # that behaviour for a single tab; multi-tab actions still fail
+            # closed if the old client cannot name its intended tab.
+            if tool == "browser_open" and "new_tab" not in arguments and "tab_id" not in arguments:
+                arguments = {**arguments, "new_tab": False}
             preview = tool == "browser_remote_preview"
+            # Phone actions are direct human controls, not a model service's
+            # implicit tab binding. Check the capability and validate the
+            # exact arguments that will be sent to the native surface.
+            self.capabilities.describe(service, "browser_list", {})
+            from chat_browser import describe as describe_browser
             if preview:
-                if arguments: raise ValueError("Preview takes no arguments.")
-                self.capabilities.describe(service, "browser_list", {})
-            else: self.capabilities.describe(service, tool, arguments)
+                if set(arguments) - {"tab_id"}: raise ValueError("Preview only accepts a tab ID.")
+                describe_browser("browser_screenshot", arguments)
+            else: describe_browser(tool, arguments)
             browser_generation = self.capabilities.native.generation()
-            pending = getattr(self, "_remote_browser_pending", set())
-            if identifier in pending: raise ValueError("Wait for this browser action to finish.")
-            self._remote_browser_pending = pending
-            pending.add(identifier)
+            pending = self._remote_browser_pending
+            with self._remote_browser_lock:
+                if identifier in pending: raise ValueError("Wait for this browser action to finish.")
+                pending.add(identifier)
             def browse():
+                output, image = None, None
                 try:
                     # These are direct human controls, independent of a model's
                     # Stop token. Still use the same validated native surface
@@ -621,8 +634,7 @@ the same publication `initialize` and `select` perform, ending with `ready`.
                     details, text = {}, []
                     for block in result.get("content", []):
                         if preview and block.get("type") == "image":
-                            self.emit({"event": "remote_browser_preview", "chat": identifier,
-                                       "image": (block.get("source") or {}).get("data")})
+                            image = (block.get("source") or {}).get("data")
                         if block.get("type") != "text": continue
                         value = block.get("text", "")
                         try:
@@ -630,11 +642,21 @@ the same publication `initialize` and `select` perform, ending with `ready`.
                             if isinstance(parsed, dict): details.update(parsed)
                             else: text.append(value)
                         except (ValueError, TypeError): text.append(value)
-                    self.emit({"event": "remote_browser", "chat": identifier, "summary": result.get("summary", ""),
-                               "text": "\n".join(text), "details": details, "isError": bool(result.get("is_error"))})
+                    output = {"event": "remote_browser", "chat": identifier, "request": command.get("request"),
+                              "tool": tool, "summary": result.get("summary", ""), "text": "\n".join(text),
+                              "details": details, "isError": bool(result.get("is_error"))}
                 except Exception as exc:
-                    self.emit({"event": "remote_browser", "chat": identifier, "summary": "Browser unavailable", "text": str(exc), "isError": True})
-                finally: pending.discard(identifier)
+                    output = {"event": "remote_browser", "chat": identifier, "request": command.get("request"),
+                              "tool": tool, "summary": "Browser unavailable", "text": str(exc), "isError": True}
+                with self._remote_browser_lock:
+                    try:
+                        if image is not None:
+                            self.emit({"event": "remote_browser_preview", "chat": identifier, "image": image,
+                                       "request": command.get("request"),
+                                       "tab_id": (details.get("tab_id") or arguments.get("tab_id")) if arguments.get("tab_id") else None,
+                                       "navigation_id": details.get("navigation_id")})
+                        if output is not None: self.emit(output)
+                    finally: pending.discard(identifier)
             threading.Thread(target=browse, name="remote-browser", daemon=True).start()
             return
         self.prune(keep=command.get("chat") or command.get("id"))

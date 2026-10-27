@@ -73,6 +73,15 @@ class RemoteParityTests(unittest.TestCase):
         self.assertEqual(sum(f["added"] for f in summary["files"]), 31)
         self.assertEqual(sum(f["removed"] for f in summary["files"]), 31)
         self.assertEqual(turn_changes(rows + [entry("user", "New turn")])["files"], [])
+
+    def test_turn_changes_preserves_twelve_member_names_for_one_file(self):
+        from chat_remote_actions import turn_changes
+        rows = [entry("user", "Start")]
+        rows.extend(entry("tool", "", changedFiles=["shared.swift"], memberName=f"Member {i}")
+                    for i in range(1, 13))
+        self.assertEqual(turn_changes(rows)["files"][0]["members"],
+                         [f"Member {i}" for i in range(1, 13)])
+
     def test_full_responsibility_survives_remote_team_edit(self):
         self.select(self.desktop)
         members = [{"name": "Lead", "choice": self.host.models[0]["id"], "responsibility": "A long responsibility. " * 70}]

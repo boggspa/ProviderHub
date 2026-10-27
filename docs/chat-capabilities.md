@@ -33,18 +33,20 @@ facades, while sends, approvals and Stop carry explicit chat identities.
 ## Browser
 
 Choose Browser in the inspector, or choose Browser in an empty workspace pane.
-The native WKWebView belongs to the chat and persists while its view moves.
-This initial implementation has one page per chat. The browser uses a separate
-WebKit data store; it does not import Safari, Chrome or provider sign-ins.
+Each chat has its own browser tabs, which persist while their view moves. Tabs
+share that chat's WebKit data store; they do not import Safari, Chrome or
+provider sign-ins. Opening a new page adds a tab without replacing the visible
+page. Select or close tabs in the Browser pane.
 
 Manual browsing works independently of **Settings → Plugins → Browser Use**.
-Enabling Browser Use adds the browser tools to eligible model requests. A tool
-operates the same WKWebView displayed in the pane. Turning it off revokes
+Enabling Browser Use adds the browser tools to eligible model requests. Tools
+can work in a background tab without changing the visible selection; their
+tab IDs and observation references identify the intended page. Turning it off revokes
 pending dispatch and cancels outstanding native requests. It cannot undo an
 action the page already received.
 
-The initial tool set covers navigation, DOM observation, basic element actions,
-screenshots and closing the page. The driver is implemented in this repository
+The tool set covers tab selection, navigation, DOM observation, basic element
+actions, screenshots and closing a tab. The driver is implemented in this repository
 using public WebKit APIs. Fixed scripts execute in an isolated content world;
 page text is untrusted observation data. This is not a Playwright backend.
 Cross-origin frame traversal, shadow DOM, browser extensions and complete key

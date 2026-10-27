@@ -19,7 +19,7 @@ import chat_todos
 from chat_history import portable_history
 from chat_tools import _tool
 
-MAX_MEMBERS = 8
+MAX_MEMBERS = 12
 # Automatic peer delivery is a discovery digest, not a copy of the transcript.
 # Full user input and explicit peer mentions have independent delivery paths.
 MAX_SHARED_BYTES = 6000

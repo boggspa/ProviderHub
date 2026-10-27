@@ -1,12 +1,11 @@
 import SwiftUI
 
-// A live activity strip between the transcript and the composer: one line per
-// speaker that is working right now, in the transcript's own words ("Running
-// swift build -c release", "Editing main.swift", "Thinking…"). In a Team the
-// members' tool rows interleave and scroll past quickly, so a whole page can
-// go by while one member is still mid-command with no reply yet; the strip
-// keeps every live member in view and a click jumps to their current row.
-// Nothing here is invented status: each line reads the member's newest row.
+// A live activity strip between the transcript and the composer. One working
+// speaker stays a single line in the transcript's own words ("Running swift
+// build -c release", "Editing main.swift", "Thinking…"). Several speakers
+// collapse to counts by state, with each member's provider icon on that
+// count, and expand back to those same lines. A click on a line jumps to
+// that member's current row. Nothing here is invented status.
 
 private typealias Semantic = HubTheme.Semantic
 
@@ -105,6 +104,8 @@ struct ChatActivity: Identifiable, Equatable {
 struct ChatActivityStrip: View {
     @ObservedObject var model: ChatModel
     @Environment(\.chatTextStyle) private var textStyle
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var expanded = false
 
     var body: some View {
         let rows = ChatActivity.current(entries: model.entries, team: model.team, busy: model.busy,
@@ -112,8 +113,11 @@ struct ChatActivityStrip: View {
                                         transition: transition, label: { model.label(for: $0) })
         if !rows.isEmpty {
             VStack(alignment: .leading, spacing: textStyle.scaled(3)) {
-                ForEach(rows) { row in
-                    activityRow(row)
+                if rows.count > 1 { summary(rows) }
+                if rows.count == 1 || expanded {
+                    ForEach(rows) { row in
+                        activityRow(row)
+                    }
                 }
             }
             // No panel or rule of its own: the lines float on the pane between
@@ -131,6 +135,22 @@ struct ChatActivityStrip: View {
     private var transition: String? {
         guard model.interrupting else { return nil }
         return ["Stopping…", "Interrupting for your update…"].contains(model.status) ? model.status : "Stopping…"
+    }
+
+    private func summary(_ rows: [ChatActivity]) -> some View {
+        let buckets = ChatActivityBuckets.group(rows.map {
+            ChatActivityBuckets.Row(id: $0.id, name: $0.name, route: $0.route, verb: $0.verb, live: $0.live)
+        })
+        return ChatSharedActivitySummary(buckets: buckets, expanded: expanded, ink: Semantic.ink,
+            secondary: Semantic.secondaryInk, scale: textStyle.scaled(1), accent: { model.accent(for: $0.route) },
+            onToggle: toggleExpanded) { person in
+                ChatProviderIcon(presentation: model.route(named: person.route)?.presentation, size: textStyle.scaled(13))
+            }
+    }
+
+    private func toggleExpanded() {
+        if reduceMotion { expanded.toggle() }
+        else { withAnimation(.easeInOut(duration: 0.16)) { expanded.toggle() } }
     }
 
     private func activityRow(_ row: ChatActivity) -> some View {
