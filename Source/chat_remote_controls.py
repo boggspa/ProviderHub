@@ -7,6 +7,8 @@ injection are never accepted from a remote client.
 import json
 import re
 
+from chat_team import MAX_MEMBERS
+
 VERSION = 3
 FIELDS = {
     "team": ("enabled", "status", "activeMemberID", "activeMemberIDs", "execution", "runUsage", "limitReason", "members"),
@@ -84,7 +86,7 @@ def project(event, entry_projector):
         todos = event.get("todos")
         value = None
         if isinstance(todos, dict):
-            lanes = [row for row in todos.get("lanes", [])[:8] if isinstance(row, dict)]
+            lanes = [row for row in todos.get("lanes", [])[:MAX_MEMBERS] if isinstance(row, dict)]
             shared = todos.get("shared") if isinstance(todos.get("shared"), dict) else None
             # Each list gets its own share of the frame, so one long list cannot
             # hide the lanes after it. Progress counts come from the host.
@@ -111,12 +113,12 @@ def project(event, entry_projector):
                 "value": {"busy": event.get("busy") is True, "interrupting": event.get("interrupting") is True,
                           "status": str(event.get("status") or "")[:160],
                           "rows": [bounded(pick(row, ("id", "name", "route", "status", "entryID", "kind", "tool", "summary", "runningTool", "streaming", "reason", "stopping")), 2400)
-                                   for row in event.get("rows", [])[:8] if isinstance(row, dict)]}, "notice": ""}
+                                   for row in event.get("rows", [])[:MAX_MEMBERS] if isinstance(row, dict)]}, "notice": ""}
     elif kind == "team":
         team = event.get("team")
         if isinstance(team, dict):
             value = pick(team, FIELDS["team"])
-            value["members"] = [pick(row, FIELDS["member"]) for row in team.get("members", [])[:8]]
+            value["members"] = [pick(row, FIELDS["member"]) for row in team.get("members", [])[:MAX_MEMBERS]]
             # Pending edits contain configuration, never provider context.
             for member in value["members"]:
                 if isinstance(member.get("pendingChange"), dict):
@@ -124,7 +126,7 @@ def project(event, entry_projector):
                 for key in ("nextStep", "failureReason", "waitReason"):
                     if isinstance(member.get(key), str): member[key] = member[key][:240]
             # Reserve room for every roster identity before verbose member
-            # text, so eight long responsibilities cannot hide later members.
+            # text, so long responsibilities cannot hide later members.
             # Editable configuration must round-trip losslessly.
             for member in value["members"]:
                 limits = {"id": 128, "name": 120, "choice": 512, "effort": 40, "responsibility": 2000}
@@ -157,11 +159,39 @@ def project(event, entry_projector):
                 "id": event.get("id"), "text": str(event.get("text") or "")[:4000],
                 "offset": max(0, event.get("offset", 0)) if type(event.get("offset", 0)) is int else 0}
     elif kind == "remote_browser":
-        panel, value = "browser", pick(event, ("summary", "text", "details", "isError"))
+        if event.get("tool") == "browser_list" and not event.get("isError"):
+            details = event.get("details") if isinstance(event.get("details"), dict) else {}
+            selected = str(details.get("selected_tab_id") or "")[:64]
+            tabs = details.get("tabs") if isinstance(details.get("tabs"), list) else []
+            # Preserve selected identity first and do not serialize the legacy
+            # duplicate `pages` array ahead of the tab list.
+            rows = [row for row in tabs if isinstance(row, dict) and row.get("tab_id") == selected]
+            rows += [row for row in tabs if isinstance(row, dict) and row.get("tab_id") != selected]
+            kept, used = [], 0
+            for row in rows:
+                item = {key: str(row.get(key) or "")[:limit] for key, limit in
+                        (("tab_id", 64), ("title", 160), ("url", 256))}
+                item["navigation_id"] = row.get("navigation_id") if type(row.get("navigation_id")) is int else 0
+                size = len(json.dumps(item, ensure_ascii=False).encode()) + 2
+                if used + size > 12000: break
+                kept.append(item); used += size
+            value = {"request": str(event.get("request") or "")[:128], "tool": "browser_list",
+                     "details": {"selected_tab_id": selected, "tabs": kept,
+                                 "total_tabs": len(tabs), "truncated": len(kept) < len(tabs)}}
+            # Keep the established `browser` panel for older companions; the
+            # companion mirrors it into `browserTabs` for tab-aware clients.
+            return {"event": "control", "chat": event.get("chat"), "panel": "browser", "alsoPanel": "browserTabs",
+                    "value": value, "notice": ""}
+        panel, value = "browser", pick(event, ("summary", "text", "details", "isError", "tool", "request"))
     elif kind == "remote_browser_preview":
         image = event.get("image")
         if not isinstance(image, str) or len(image) > 44000 or not re.fullmatch(r"[A-Za-z0-9+/]*={0,2}", image): return None
-        return {"event": "control", "chat": event.get("chat"), "panel": "browserPreview", "value": image, "notice": ""}
+        value = {"image": image, "request": str(event.get("request") or "")[:128],
+                 "tab_id": str(event.get("tab_id") or "")[:64], "navigation_id": event.get("navigation_id")}
+        # Older companions request a preview without a tab identifier and
+        # continue receiving the original plain image string.
+        if not event.get("tab_id"): value = image
+        return {"event": "control", "chat": event.get("chat"), "panel": "browserPreview", "value": value, "notice": ""}
     else: return None
     budget = 16000 if panel in {"models", "browser", "team"} else 10000
     return {"event": "control", "chat": event.get("chat"), "panel": panel,
@@ -210,7 +240,7 @@ def command(params, request_id):
     if action == "stop_process" and not isinstance(args.get("process"), str): raise ValueError("Exact process required")
     if action == "side_send" and (not isinstance(args.get("text"), str) or not args["text"].strip()): raise ValueError("Message required")
     if action == "remote_browser":
-        if args.get("tool") not in {"browser_open", "browser_navigate", "browser_list", "browser_observe", "browser_act", "browser_close", "browser_remote_preview"}: raise ValueError("Unsupported browser action")
+        if args.get("tool") not in {"browser_new", "browser_open", "browser_navigate", "browser_list", "browser_select", "browser_observe", "browser_act", "browser_close", "browser_remote_preview"}: raise ValueError("Unsupported browser action")
         if not isinstance(args.get("arguments", {}), dict): raise ValueError("Invalid browser arguments")
     return {"command": action, "id": chat, "chat": chat, "request": request_id, **args,
             **({"_remoteControl": True} if action.startswith("blackboard") or action == "configure_team" else {})}

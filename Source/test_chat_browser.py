@@ -26,6 +26,14 @@ import Combine
   func call(_ id:String,_ tool:String,_ args:[String:Any]=[:]) async -> [String:Any] {
    await store.perform(chatID:"fixture",requestID:id,tool:tool,arguments:args)
   }
+  func details(_ result:[String:Any]) -> [String:Any] {
+   for block in (result["content"] as? [[String:Any]] ?? []) {
+    guard let text = block["text"] as? String, let data = text.data(using:.utf8),
+          let object = (try? JSONSerialization.jsonObject(with:data)) as? [String:Any] else { continue }
+    return object
+   }
+   return [:]
+  }
   _ = await call("list","browser_list")
   check(store.sessions.isEmpty,"list is inert")
   let cancelled = Task { @MainActor in await call("cancel","browser_open",["url":url]) }
@@ -60,6 +68,54 @@ import Combine
   check(acted["is_error"] as? Bool == false,"act")
   let clicked = try? await evaluatePage("document.body.dataset.clicked")
   check(clicked as? String == "good","ref forgery rejected")
+  _ = try? await evaluatePage("document.cookie = 'tab_cookie=shared; path=/'")
+  guard let firstID = store.sessions["fixture"]?.tabID else { check(false,"first tab id"); return }
+  let openedBackground = await call("background","browser_open",["url":url+"background"])
+  guard let backgroundID = details(openedBackground)["tab_id"] as? String else { check(false,"background tab id"); return }
+  check(openedBackground["is_error"] as? Bool == false && backgroundID != firstID,"open creates another tab")
+  check(store.tabs["fixture"]?.count == 2 && store.sessions["fixture"]?.tabID == firstID,"background open preserves visible selection")
+  guard let backgroundWeb = store.tabs["fixture"]?.first(where: { $0.tabID == backgroundID })?.webView else { check(false,"background webview"); return }
+  let cookie: Any? = try? await withCheckedThrowingContinuation { continuation in
+   backgroundWeb.evaluateJavaScript("document.cookie") { value,error in
+    if let error { continuation.resume(throwing:error) } else { continuation.resume(returning:value) }
+   }
+  }
+  check((cookie as? String)?.contains("tab_cookie=shared") == true,"tabs share their chat's website data store")
+  let listing = details(await call("tab-list","browser_list"))
+  check((listing["tabs"] as? [[String:Any]])?.count == 2 && listing["selected_tab_id"] as? String == firstID,"list exposes tabs and selection")
+  let backgroundObserve = await call("background-observe","browser_observe",["tab_id":backgroundID])
+  guard let backgroundSnapshot = details(backgroundObserve)["snapshot_id"] as? String else { check(false,"background snapshot"); return }
+  check(details(backgroundObserve)["tab_id"] as? String == backgroundID,"observation identifies its tab")
+  let wrongTab = await call("cross-tab","browser_act",["tab_id":firstID,"snapshot_id":backgroundSnapshot,"actions":[["kind":"click","ref":"r1"]]])
+  check(wrongTab["is_error"] as? Bool == true,"snapshot rejected on another tab")
+  let backgroundAction = await call("background-act","browser_act",["tab_id":backgroundID,"snapshot_id":backgroundSnapshot,"actions":[["kind":"click","ref":"r1"]]])
+  check(backgroundAction["is_error"] as? Bool == false,"background tab can be driven by id")
+  let backgroundShot = await call("background-shot","browser_screenshot",["tab_id":backgroundID])
+  check(backgroundShot["is_error"] as? Bool == false,"background tab has a screenshot viewport")
+  let backgroundSlow = Task { @MainActor in await call("background-slow","browser_navigate",["tab_id":backgroundID,"url":url+"slow-background"]) }
+  try? await Task.sleep(nanoseconds:150_000_000)
+  store.cancel(chatID:"fixture",requestID:"background-slow")
+  let backgroundStopped = await backgroundSlow.value
+  check(backgroundStopped["is_error"] as? Bool == true && store.sessions["fixture"]?.tabID == firstID && store.sessions["fixture"]?.page.url == url,
+        "cancelling background navigation preserves the visible tab")
+  let selected = await call("select","browser_select",["tab_id":backgroundID])
+  check(selected["is_error"] as? Bool == false && store.sessions["fixture"]?.tabID == backgroundID,"select tab")
+  let ambiguous = await call("ambiguous","browser_navigate",["url":url+"wrong"])
+  check(ambiguous["is_error"] as? Bool == true,"ambiguous navigation requires a tab")
+  let reused = await call("reuse","browser_open",["url":url+"reused","new_tab":false,"tab_id":backgroundID])
+  check(reused["is_error"] as? Bool == false && store.tabs["fixture"]?.count == 2 && store.sessions["fixture"]?.tabID == backgroundID,"open can reuse selected tab")
+  let historyBack = await call("back","browser_back",["tab_id":backgroundID])
+  check(historyBack["is_error"] as? Bool == false && store.sessions["fixture"]?.page.url.hasSuffix("background") == true,"back targets tab history")
+  let historyForward = await call("forward","browser_forward",["tab_id":backgroundID])
+  check(historyForward["is_error"] as? Bool == false && store.sessions["fixture"]?.page.url.hasSuffix("reused") == true,"forward targets tab history")
+  let closed = await call("close-tab","browser_close",["tab_id":backgroundID])
+  check(closed["is_error"] as? Bool == false && store.tabs["fixture"]?.count == 1 && store.sessions["fixture"]?.tabID == firstID,"closing a tab preserves other tab")
+  let blank = await call("blank","browser_new")
+  guard let blankID = details(blank)["tab_id"] as? String else { check(false,"new blank tab id"); return }
+  check(store.sessions["fixture"]?.tabID == firstID && store.tabs["fixture"]?.count == 2,"new blank tab preserves selection")
+  let blankOpen = await call("blank-open","browser_navigate",["tab_id":blankID,"url":url+"blank"])
+  check(blankOpen["is_error"] as? Bool == false,"blank tab can navigate")
+  _ = await call("blank-close","browser_close",["tab_id":blankID])
   let first = Task { @MainActor in await call("slow","browser_navigate",["url":url+"slow"]) }
   try? await Task.sleep(nanoseconds:150_000_000)
   let second = Task { @MainActor in await call("queued","browser_navigate",["url":url+"queued"]) }
@@ -81,7 +137,7 @@ import Combine
   store.cancel(chatID:"fixture",requestID:"active")
   let stopped = await active.value
   check(stopped["is_error"] as? Bool == true,"active cancellation")
-  let after = await call("after","browser_open",["url":url])
+  let after = await call("after","browser_open",["url":url,"new_tab":false,"tab_id":firstID])
   check(after["is_error"] as? Bool == false,"navigation after cancellation")
   check(forwarded > 0,"session metadata forwarded to store")
   let serialA = Task { @MainActor in await call("serialA","browser_navigate",["url":url+"slow4"]) }
@@ -102,6 +158,31 @@ class WireTests(unittest.TestCase):
         for url in ("file:///etc/passwd", "javascript:alert(1)", "data:text/plain,hi"):
             with self.assertRaises(ValueError):
                 cb.describe("browser_open", {"url":url})
+
+    def test_tab_arguments_are_validated_and_forwarded(self):
+        calls = []
+        tools = cb.ChatBrowserTools(lambda *args: calls.append(args) or {"is_error": False, "content": []})
+        tools.execute("browser_open", {"url": "https://example.com", "new_tab": True}, chat_id="chat")
+        self.assertEqual(calls[-1][2], {"url": "https://example.com", "new_tab": True})
+        for name, args in (
+            ("browser_new", {}),
+            ("browser_select", {"tab_id": "tab-1"}),
+            ("browser_observe", {"tab_id": "tab-1"}),
+            ("browser_act", {"tab_id": "tab-1", "snapshot_id": "snapshot-1", "actions": [{"kind": "click", "ref": "r1"}]}),
+            ("browser_screenshot", {"tab_id": "tab-1"}),
+            ("browser_close", {"tab_id": "tab-1"}),
+        ):
+            with self.subTest(tool=name):
+                cb.describe(name, args)
+        for name, args in (
+            ("browser_select", {}),
+            ("browser_select", {"tab_id": "../other"}),
+            ("browser_open", {"url": "https://example.com", "new_tab": "yes"}),
+            ("browser_open", {"url": "https://example.com", "new_tab": True, "tab_id": "tab-1"}),
+            ("browser_close", {"tab_id": ""}),
+        ):
+            with self.subTest(tool=name, args=args), self.assertRaises(ValueError):
+                cb.describe(name, args)
 
 @unittest.skipUnless(platform.system() == "Darwin", "requires macOS WebKit")
 class WebKitTests(unittest.TestCase):

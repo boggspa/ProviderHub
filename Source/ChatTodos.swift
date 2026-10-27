@@ -7,12 +7,16 @@ import SwiftUI
 /// every change.
 struct ChatTodosSection: View {
     @ObservedObject var model: ChatModel
+    @State private var expanded = true
     private typealias Semantic = HubTheme.Semantic
     var body: some View {
         let todos = model.todos
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 6) {
-                Text("To-dos").font(.system(size: 13, weight: .semibold))
+                Button { expanded.toggle() } label: {
+                    Label("To-dos", systemImage: expanded ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 13, weight: .semibold))
+                }.buttonStyle(.plain).accessibilityValue(expanded ? "Expanded" : "Collapsed")
                 // A solo chat's one list carries its own count.
                 if let todos, todos.team, !todos.isEmpty {
                     let lanes = todos.all
@@ -21,6 +25,7 @@ struct ChatTodosSection: View {
                 }
                 Spacer(minLength: 0)
             }
+            if expanded {
             Text(todos?.team == true
                  ? "Each member keeps its own list, and any member can claim items on the shared list. A member's replacement model resumes from its list."
                  : "The model's plan for this chat. A model you switch to resumes from it.")
@@ -46,6 +51,19 @@ struct ChatTodosSection: View {
             }
             if !model.todosNotice.isEmpty {
                 Text(model.todosNotice).font(.system(size: 11.5)).foregroundStyle(.secondary).textSelection(.enabled)
+            }
+            } else if let todos, !todos.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 10) {
+                    ForEach(todos.all.filter { $0.total > 0 }) { lane in
+                        HStack(spacing: 3) {
+                            ChatProviderIcon(presentation: route(lane)?.presentation, size: 12)
+                            Text("\(lane.name) \(lane.done)/\(lane.total)")
+                                .font(.system(size: 10.5)).lineLimit(1)
+                        }
+                    }
+                }.frame(maxWidth: .infinity, alignment: .leading)
+                }
             }
         }
         .padding(14)

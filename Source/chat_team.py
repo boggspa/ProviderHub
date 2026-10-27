@@ -19,7 +19,7 @@ import chat_todos
 from chat_history import portable_history
 from chat_tools import _tool
 
-MAX_MEMBERS = 8
+MAX_MEMBERS = 12
 # Automatic peer delivery is a discovery digest, not a copy of the transcript.
 # Full user input and explicit peer mentions have independent delivery paths.
 MAX_SHARED_BYTES = 6000
@@ -836,6 +836,7 @@ def load_journal(store, chat):
                     or not isinstance(record.get("messages"), list) or not isinstance(record.get("decisions"), list)
                     or not isinstance(record.get("blackboard", {}), dict)
                     or not isinstance(record.get("todos", {}), dict)
+                    or not isinstance(record.get("teamTasks", []), list)
                     or not isinstance(record.get("updated"), str) or not isinstance(entries, list)
                     or any(not isinstance(e, dict) or not isinstance(e.get("id"), str) for e in entries)):
                 raise ValueError("Invalid Team checkpoint contents; the saved source has been preserved.")
@@ -848,6 +849,7 @@ def load_journal(store, chat):
             chat.update(teamJournalSequence=seq, decisions=record["decisions"], updated=record["updated"], status="working")
             if "blackboard" in record: chat["blackboard"] = record["blackboard"]
             if "todos" in record: chat["todos"] = record["todos"]
+            if "teamTasks" in record: chat["teamTasks"] = record["teamTasks"]
 
 
 def checkpoint(parent, member=None, dirty=None):
@@ -880,6 +882,7 @@ def _checkpoint(parent, member=None, dirty=None):
               "entries": entries, "decisions": chat.get("decisions", []), "updated": chat["updated"]}
     if "blackboard" in chat: record["blackboard"] = chat["blackboard"]
     if "todos" in chat: record["todos"] = chat["todos"]
+    if "teamTasks" in chat: record["teamTasks"] = chat["teamTasks"]
     raw = json.dumps(record, ensure_ascii=False).encode() + b"\n"
     path = journal_path(parent.store, chat["id"])
     fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
@@ -1102,6 +1105,7 @@ class MemberStore:
             refresh_status(self.parent.chat)
             if landed:
                 self.dirty.clear(); self.parent.save()
+                chat_todos.publish_tasks(self.parent)
             else:
                 checkpoint(self.parent, self.member, self.dirty)
             for item in notes: self.parent.emit({"event": "entry", "chat": self.parent.chat["id"], "entry": item})
@@ -1286,6 +1290,9 @@ def _land(parent, member, change, notes):
         _note(chat, notes, _who(member) + " was removed from the Team by the user.", member)
         chat.setdefault("archives", []).append({"kind": "team_member", "member": copy.deepcopy(member), "ended": now()})
         team["members"] = [m for m in team["members"] if m["id"] != member["id"]]
+        if "teamTasks" in chat:
+            chat["teamTasks"] = [{**row, "owner": "" if row.get("owner") == member["id"] else row.get("owner", "")}
+                                 for row in chat_todos.tasks(chat)]
         team["queue"] = [identifier for identifier in team["queue"] if identifier != member["id"]]
         team["activeMemberIDs"] = [i for i in team.get("activeMemberIDs", []) if i != member["id"]]
         for peer in team["members"]:
@@ -1397,6 +1404,7 @@ def configure_live(parent, command):
             raise ValueError("A member being removed is still finishing its current step, so the Team is full. "
                              "Add the new member once it has left.")
         saved_team = copy.deepcopy({key: value for key, value in team.items() if key != "members"})
+        saved_tasks = copy.deepcopy(chat.get("teamTasks"))
         saved = ([(member, dict(member)) for member in team["members"]], list(team["members"]), len(chat["entries"]),
                  len(chat.get("archives", [])), {key: chat[key] for key in ("route", "account", "scope", "effort")})
         notes, order, leaving = [], [], []
@@ -1437,6 +1445,7 @@ def configure_live(parent, command):
             del chat["entries"][entries:]
             if "archives" in chat: del chat["archives"][archives:]
             chat.update(identity)
+            if saved_tasks is not None: chat["teamTasks"] = saved_tasks
             raise
         for member in team["members"]:
             if member["status"] == "working":
@@ -1444,6 +1453,7 @@ def configure_live(parent, command):
         for item in notes: parent.emit({"event": "entry", "chat": chat["id"], "entry": item})
         # The inspector's lanes follow the roster.
         if chat.get("todos"): chat_todos.publish(parent)
+        chat_todos.publish_tasks(parent)
         parent.team_wake.set()
 
 

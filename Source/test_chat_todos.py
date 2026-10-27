@@ -39,6 +39,49 @@ class TodoListTests(unittest.TestCase):
         self.chat = {"id": "c" * 32, "route": "ollama/test", "account": "",
                      "team": {"enabled": True, "members": [{**SOL, "route": "r1"}, {**LUNA, "route": "r2"}]}}
 
+    def test_team_tasks_allow_multiple_claims_and_protect_ownership(self):
+        first = todos.task_update(self.chat, member=SOL, title="Inspect parser")
+        with self.assertRaisesRegex(ValueError, "already exists"):
+            todos.task_update(self.chat, member=LUNA, title="inspect parser")
+        second = todos.task_update(self.chat, member=SOL, title="Review tests", status="blocked")
+        self.assertEqual([row["owner"] for row in todos.tasks(self.chat)], [SOL["id"], SOL["id"]])
+        self.assertEqual(second["status"], "blocked")
+        with self.assertRaisesRegex(ValueError, "already assigned"):
+            todos.task_update(self.chat, member=LUNA, task_id=first["id"], status="completed")
+        first["owner"] = LUNA["id"]
+        with self.assertRaisesRegex(ValueError, "already assigned"):
+            todos.task_update(self.chat, member=SOL, task_id=first["id"], status="completed")
+        todos.task_update(self.chat, member=LUNA, task_id=first["id"], status="paused")
+        self.assertEqual(first["status"], "paused")
+        reference = json.dumps(todos.reference(self.chat, SOL["id"], team=True))
+        self.assertIn("Inspect parser", reference)
+        self.assertIn("Luna", reference)
+        previous = copy.deepcopy(self.chat)
+        self.chat["team"]["members"] = [SOL]
+        todos.carry(self.chat, previous)
+        self.assertEqual(first["owner"], LUNA["id"])
+        self.assertEqual(todos.tasks(self.chat)[0]["owner"], "")
+
+    def test_team_task_tools_publish_and_allow_only_owner_updates(self):
+        events, saves = [], []
+        owner = SimpleNamespace(chat=self.chat, _mutex=threading.RLock(), emit=events.append, save=lambda: saves.append(True))
+        sol = SimpleNamespace(role="team", team_parent=owner, team_member=SOL)
+        luna = SimpleNamespace(role="team", team_parent=owner, team_member=LUNA)
+        todos.execute(sol, "team_task_update", {"title": "Review API"})
+        task = self.chat["teamTasks"][0]
+        self.assertEqual(events[-1]["tasks"][0]["owner"], SOL["id"])
+        self.assertEqual(len(saves), 1)
+        self.assertIn("Review API", todos.execute(luna, "team_tasks_read", {})["content"][0]["text"])
+        with self.assertRaisesRegex(ValueError, "already assigned"):
+            todos.execute(luna, "team_task_update", {"task_id": task["id"], "status": "paused"})
+        todos.execute(sol, "team_task_update", {"task_id": task["id"], "status": "blocked"})
+        self.assertEqual(task["status"], "blocked")
+        self.assertEqual(len(saves), 2)
+        owner.save = lambda: (_ for _ in ()).throw(OSError("disk full"))
+        with self.assertRaisesRegex(OSError, "disk full"):
+            todos.execute(sol, "team_task_update", {"task_id": task["id"], "status": "completed"})
+        self.assertEqual(self.chat["teamTasks"][0]["status"], "blocked")
+
     def test_items_are_validated_and_content_is_one_line(self):
         rows = todos.items([item("a.1"), {"id": "B_2", "content": "  Write\n the   parser ", "status": "completed"}])
         self.assertEqual(rows[1], {"id": "B_2", "content": "Write the parser", "status": "completed"})
@@ -361,14 +404,14 @@ class RemoteTodoTests(unittest.TestCase):
     def test_phone_panel_keeps_every_lane_and_the_hosts_counts(self):
         long = [{"id": f"i{n}", "content": "x" * 200, "status": "completed" if n < 5 else "pending"} for n in range(24)]
         lanes = [{"id": str(n) * 32, "name": f"M{n}", "route": "r", "choice": "r|", "items": long, "done": 5, "total": 24,
-                  "updated": NOW} for n in range(8)]
+                  "updated": NOW} for n in range(12)]
         event = {"event": "todos", "chat": "c" * 32, "todos": {"team": True, "lanes": lanes,
                  "shared": {"id": "shared", "name": "Shared", "items": long[:2], "done": 2, "total": 2, "revision": 3, "updated": NOW,
                             "secret": "x"}}}
         projected = project(event, None)
         self.assertEqual(projected["panel"], "todos")
         value = projected["value"]
-        self.assertEqual([lane["name"] for lane in value["lanes"]], [f"M{n}" for n in range(8)])
+        self.assertEqual([lane["name"] for lane in value["lanes"]], [f"M{n}" for n in range(12)])
         self.assertTrue(all(lane["total"] == 24 and lane["done"] == 5 for lane in value["lanes"]))
         self.assertLess(len(value["lanes"][7]["items"]), 24, "a long list is shortened in transit")
         self.assertEqual((value["shared"]["revision"], value["shared"]["name"]), (3, "Shared"))
@@ -383,7 +426,7 @@ class SourceTests(unittest.TestCase):
     def test_mac_inspector_shows_lanes_with_progress_and_the_tool_row_a_checklist(self):
         inspector = (self.ROOT / "ChatInspector.swift").read_text()
         self.assertIn("ChatTodosSection(model: model)", inspector)
-        self.assertLess(inspector.index("ChatTeamControls(model: model)"), inspector.index("ChatTodosSection(model: model)"))
+        self.assertLess(inspector.index("ChatTeamControls(model: model, openEditor: openTeamEditor)"), inspector.index("ChatTodosSection(model: model)"))
         self.assertLess(inspector.index("ChatTodosSection(model: model)"), inspector.index("ChatBlackboardSection(model: model, chat: chat)"))
         section = (self.ROOT / "ChatTodos.swift").read_text()
         for needle in ("ChatSharedTodoLane(", "todos.shared", "lane.done", "lane.total", "ChatProviderIcon", "HubTheme.Semantic"):

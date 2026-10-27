@@ -181,10 +181,19 @@ class DiscoveryTests(unittest.TestCase):
         by_id = {model["id"]: model for model in result["models"]}
         self.assertEqual(
             set(by_id),
-            {"k3", "k3-256k", "kimi-for-coding", "kimi-for-coding-highspeed"},
+            {"k3.1-pro", "k3.1-pro-highspeed", "k3", "k3-256k", "kimi-for-coding", "kimi-for-coding-highspeed"},
         )
         self.assertIsNone(by_id["k3"]["context"])
         self.assertEqual(by_id["k3"]["context_options"], [262144, 1048576])
+        self.assertIsNone(by_id["k3.1-pro"]["context"])
+        self.assertEqual(by_id["k3.1-pro"]["context_options"], [262144, 1048576])
+        self.assertEqual(by_id["k3.1-pro-highspeed"]["context"], 1048576)
+        for model in ("k3.1-pro", "k3.1-pro-highspeed"):
+            self.assertTrue(by_id[model]["reasoning_mandatory"])
+            self.assertEqual(by_id[model]["effort_modes"], ["low", "high", "max"])
+            self.assertEqual(by_id[model]["default_effort"], "high")
+            self.assertFalse(by_id[model]["fast_mode"])
+        self.assertEqual(by_id["k3.1-pro-highspeed"]["speed_tier"], "highspeed")
         self.assertEqual(by_id["k3-256k"]["context"], 262144)
         self.assertEqual(by_id["kimi-for-coding"]["context"], 1048576)
         self.assertFalse(by_id["kimi-for-coding-highspeed"]["fast_mode"])

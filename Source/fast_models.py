@@ -10,7 +10,7 @@ from model_names import CLAUDE_CLI_ALIASES
 # https://developers.openai.com/api/docs/guides/fast-mode
 OPENAI_FAST_MODELS = frozenset({
     "gpt-5.5", "gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol",
-    "gpt-6-astra", "gpt-6-luna", "gpt-6-sol", "gpt-6.1-sol",
+    "gpt-6-astra", "gpt-6-luna", "gpt-6-sol", "gpt-6.1-sol", "gpt-6.1-terra",
 })
 
 # https://platform.claude.com/docs/en/build-with-claude/fast-mode
@@ -23,7 +23,7 @@ CLAUDE_FAST_BETA = "fast-mode-2026-02-01"
 # A fast route selected by ID or provider, with no second speed tier to choose.
 # The values are catalogue metadata, not request parameters.
 FIXED_SPEED_TIERS = {
-    "kimi": {"kimi-for-coding-highspeed": "highspeed"},
+    "kimi": {"kimi-for-coding-highspeed": "highspeed", "k3.1-pro-highspeed": "highspeed"},
     "antigravity": {
         "gemini-3.6-flash": "flash", "gemini-3.7-flash": "flash",
         "gemini-3.8-flash": "flash",

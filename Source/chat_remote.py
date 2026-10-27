@@ -38,6 +38,7 @@ import socket
 import threading
 import ipaddress
 import tempfile
+import time
 from pathlib import Path
 from collections import OrderedDict
 
@@ -655,7 +656,7 @@ class MacBridge:
         if self.peer == identity_b64:
             self.session.close()
 
-    def publish(self, event):
+    def publish(self, event, *, transmit=True):
         if (self.selected_chat and event.get("chat") and event.get("chat") != self.selected_chat
                 and event.get("event") not in {"chats", "catalogue", "plugins"}):
             return None
@@ -670,7 +671,7 @@ class MacBridge:
         self.log.append((self.cursor, projected))
         if len(self.log) > self.retain:
             self.log = self.log[-self.retain:]
-        if self.established and not (self.peer and self.registry.revoked(self.peer)):
+        if transmit and self.established and not (self.peer and self.registry.revoked(self.peer)):
             self._emit("session.delta", {"cursor": self.cursor, "event": projected})
         return projected
 
@@ -1105,6 +1106,7 @@ class RemoteServer:
         self._bridges = ()
         self.port = None
         self.error = None
+        self._refreshing = False
         if self.path.is_symlink():
             raise RemoteError("remote identity state must not be a symlink")
         if self.path.exists():
@@ -1242,8 +1244,14 @@ class RemoteServer:
                 conn, _ = listener.accept()
             except socket.timeout:
                 continue
-            except OSError:
-                return
+            except OSError as exc:
+                if self.listener is not listener:
+                    return
+                self.error = str(exc)[:300]
+                # Resource pressure can interrupt accept without closing the
+                # listening socket. Keep accepting until the user stops access.
+                time.sleep(.1)
+                continue
             with self.lock:
                 if len(self.connections) >= 8:
                     conn.close()
@@ -1300,12 +1308,39 @@ class RemoteServer:
 
     def publish(self, event):
         with self.lock:
-            self.bridge.publish(event)
+            self.bridge.publish(event, transmit=not self._refreshing)
             for connection, bridge in list(self.connections.items()):
                 try:
-                    bridge.publish(event)
+                    bridge.publish(event, transmit=not self._refreshing)
+                    if not self._refreshing:
+                        self._flush(connection, bridge)
+                except Exception as exc:
+                    # A broken or slow device retires only its own transport.
+                    # Its authenticated reconnect obtains a fresh snapshot.
+                    self.error = str(exc)[:300]
+                    self._disconnect(connection)
+
+    def resync(self, refresh):
+        """Rebuild authoritative views and catch devices up on their live channels."""
+        with self.lock:
+            self._refreshing = True
+            try:
+                for bridge in (self.bridge, *self.connections.values()):
+                    bridge.view = {"chats": [], "selected": None, "approval": None,
+                                   "controls": {"version": 1, "extensionVersion": 5}}
+                    bridge.log.clear()
+                refresh()
+            finally:
+                self._refreshing = False
+            self.error = None
+            for connection, bridge in list(self.connections.items()):
+                if not bridge.established:
+                    continue
+                try:
+                    bridge._emit("session.snapshot", bridge._snapshot())
                     self._flush(connection, bridge)
-                except OSError:
+                except Exception as exc:
+                    self.error = str(exc)[:300]
                     self._disconnect(connection)
 
     def confirm_pairing(self, identity, code, allow):

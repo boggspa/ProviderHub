@@ -29,12 +29,39 @@ class ControlTests(unittest.TestCase):
         processes = project_event({"event": "processes", "chat": CHAT, "processes": [{"id": "p", "command": "pytest", "output": "pass", "environment": {"TOKEN": "secret"}}]})
         self.assertNotIn("secret", json.dumps(processes))
 
-    def test_all_eight_members_survive_verbose_roster_projection(self):
+    def test_all_twelve_members_survive_verbose_roster_projection(self):
         event = {"event": "team", "team": {"enabled": True, "members": [
             {"id": str(i), "name": "Member " + str(i), "choice": "codex/sol|", "responsibility": "😀" * 2000,
-             "nextStep": "x" * 1000, "status": "working"} for i in range(8)]}}
+             "nextStep": "x" * 1000, "status": "working"} for i in range(12)]}}
         value = project_event(event)["value"]
-        self.assertEqual([m["id"] for m in value["members"]], list(map(str, range(8))))
+        self.assertEqual([m["id"] for m in value["members"]], list(map(str, range(12))))
+        self.assertEqual([m["responsibility"] for m in value["members"]], ["😀" * 2000] * 12)
+
+    def test_all_twelve_member_activity_rows_survive_projection(self):
+        rows = [{"id": str(i), "name": f"Member {i}", "status": "working"} for i in range(12)]
+        value = project_event({"event": "remote_activity", "chat": CHAT, "rows": rows})["value"]
+        self.assertEqual([row["id"] for row in value["rows"]], list(map(str, range(12))))
+
+    def test_browser_tab_list_keeps_selected_identity_ahead_of_large_pages(self):
+        tabs = [{"tab_id": f"tab-{i}", "title": "😀" * 1000, "url": "https://example.com/" + "x" * 4000}
+                for i in range(70)]
+        projected = project_event({"event": "remote_browser", "chat": CHAT, "tool": "browser_list", "request": "req",
+                                   "details": {"pages": tabs, "tabs": tabs, "selected_tab_id": "tab-69"}})
+        self.assertEqual(projected["panel"], "browser")
+        self.assertEqual(projected["alsoPanel"], "browserTabs")
+        value = projected["value"]
+        self.assertEqual(value["request"], "req")
+        self.assertEqual(value["details"]["selected_tab_id"], "tab-69")
+        self.assertEqual(value["details"]["tabs"][0]["tab_id"], "tab-69")
+        self.assertTrue(value["details"]["truncated"])
+        self.assertLess(len(json.dumps(projected, ensure_ascii=False).encode()), 16000)
+
+    def test_preview_retains_request_and_tab_without_breaking_legacy_preview(self):
+        modern = project_event({"event": "remote_browser_preview", "chat": CHAT, "image": "YWJj", "request": "req",
+                                "tab_id": "tab-1", "navigation_id": 3})
+        self.assertEqual(modern["value"], {"image": "YWJj", "request": "req", "tab_id": "tab-1", "navigation_id": 3})
+        legacy = project_event({"event": "remote_browser_preview", "chat": CHAT, "image": "YWJj"})
+        self.assertEqual(legacy["value"], "YWJj")
 
     def test_authenticated_controls_are_deduplicated_and_bound_to_selection(self):
         host, mac, phone = pair()
@@ -70,7 +97,7 @@ class ControlTests(unittest.TestCase):
         huge = '\x00\\"😀' * 20000
         events = [
             {"event": "catalogue", "models": [{"id": str(i), "label": huge} for i in range(256)]},
-            {"event": "team", "team": {"members": [{"id": str(i), "name": huge, "responsibility": huge} for i in range(8)]}},
+            {"event": "team", "team": {"members": [{"id": str(i), "name": huge, "responsibility": huge} for i in range(12)]}},
             {"event": "side", "side": {"id": CHAT, "entries": [{"kind": "assistant", "text": huge} for _ in range(30)]}},
             {"event": "agents", "agents": [{"id": CHAT, "entries": [{"text": huge}]} for _ in range(8)]},
             {"event": "processes", "processes": [{"id": str(i), "output": huge} for i in range(32)]},
@@ -79,7 +106,7 @@ class ControlTests(unittest.TestCase):
         ]
         for event in events:
             projected = mac.publish(event)
-            self.assertLess(len(json.dumps(projected, ensure_ascii=False).encode()), 80000 if event["event"] == "team" else 18000)
+            self.assertLess(len(json.dumps(projected, ensure_ascii=False).encode()), 180000 if event["event"] == "team" else 18000)
         snapshot = mac._snapshot()
         self.assertLess(len(json.dumps(snapshot, ensure_ascii=False).encode()), 120000)
         mac._emit("session.snapshot", snapshot)
@@ -121,14 +148,28 @@ class ControlTests(unittest.TestCase):
                 host.capabilities._browser_enabled = True
                 calls = []
                 def native(chat_id, tool, args, cancel, request_id=None, **kwargs):
-                    calls.append((chat_id, tool))
-                    return {"is_error": False, "summary": "Observed", "content": [{"type": "text", "text": json.dumps({"title": "Shared Mac page", "url": "https://example.com", "snapshot_id": "snapshot", "nodes": []})}]}
+                    calls.append((chat_id, tool, args))
+                    blocks = [{"type": "text", "text": json.dumps({"title": "Shared Mac page", "url": "https://example.com",
+                                                                         "tab_id": "tab-a", "navigation_id": 3,
+                                                                         "snapshot_id": "snapshot", "nodes": []})}]
+                    if tool == "browser_remote_preview": blocks.append({"type": "image", "source": {"data": "YWJj"}})
+                    return {"is_error": False, "summary": "Observed", "content": blocks}
                 host.capabilities.native.call = native
                 host.handle(command({"chat": chat, "action": "remote_browser", "arguments": {"tool": "browser_observe", "arguments": {"depth": 3, "max_bytes": 10000}}}, "browser"))
                 deadline = time.monotonic() + 2
                 while not any(e.get("event") == "remote_browser" for e in events) and time.monotonic() < deadline: time.sleep(.01)
                 browser = next(e for e in reversed(events) if e["event"] == "remote_browser")
                 self.assertEqual(browser["details"]["title"], "Shared Mac page")
-                self.assertEqual(calls, [(chat, "browser_observe")])
+                self.assertEqual(browser["request"], "browser")
+                self.assertEqual(calls, [(chat, "browser_observe", {"depth": 3, "max_bytes": 10000})])
+                host.handle(command({"chat": chat, "action": "remote_browser", "arguments": {"tool": "browser_remote_preview", "arguments": {"tab_id": "tab-a"}}}, "preview"))
+                deadline = time.monotonic() + 2
+                while not any(e.get("event") == "remote_browser_preview" for e in events) and time.monotonic() < deadline: time.sleep(.01)
+                preview = next(e for e in reversed(events) if e["event"] == "remote_browser_preview")
+                self.assertEqual((preview["request"], preview["tab_id"], preview["navigation_id"]), ("preview", "tab-a", 3))
+                host.handle(command({"chat": chat, "action": "remote_browser", "arguments": {"tool": "browser_open", "arguments": {"url": "https://example.com"}}}, "legacy"))
+                deadline = time.monotonic() + 2
+                while len(calls) < 3 and time.monotonic() < deadline: time.sleep(.01)
+                self.assertEqual(calls[-1], (chat, "browser_open", {"url": "https://example.com", "new_tab": False}))
                 self.assertEqual(host.view_id, chat)
             finally: host.shutdown()

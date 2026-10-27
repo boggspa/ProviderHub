@@ -9,9 +9,10 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest.mock import patch
 
-from chat_remote import MacBridge, PhoneClient, encode_line
-from chat_runtime import ChatStore
+from chat_remote import MacBridge, PhoneClient, RemoteError, encode_line
+from chat_runtime import ChatStore, entry
 from chat_sessions import ChatHost
 from test_chat_runtime import FakeTransport, response
 
@@ -130,6 +131,182 @@ class RemoteDeviceTests(unittest.TestCase):
         self.thread.join(3)
         self.assertFalse(any(row["event"] == "test_error" for row in self.events), self.events)
         self.directory.cleanup()
+
+    def test_repeated_backpressure_refreshes_both_devices_without_closing_listener(self):
+        phone, ipad = Device(self), Device(self)
+        phone.pair(); ipad.pair()
+        phone.select(self.chats[0]); ipad.select(self.chats[1])
+        listener = self.server.listener
+        original_dispatch = self.host.dispatch_event
+
+        def bounded_dispatch(callback):
+            if self.tasks.qsize() >= 32:
+                return False
+            return original_dispatch(callback)
+
+        self.host.dispatch_event = bounded_dispatch
+        for wave in range(2):
+            expected = {}
+
+            def burst():
+                for chat in self.chats:
+                    service = self.host.sessions[chat]
+                    row = entry("assistant", f"Recovered wave {wave} for {chat}")
+                    service.chat["entries"].append(row)
+                    expected[chat] = row["text"]
+                    for offset in range(350):
+                        self.host.emit({"event": "delta", "chat": chat, "id": row["id"],
+                                        "text": "x", "offset": offset})
+                self.host.sessions[self.chats[0]].approval = (
+                    {"id": "current-approval", "summary": "Still pending", "detail": "Current action"}
+                    if wave else None)
+                self.host.emit({"event": "approval", "chat": self.chats[0],
+                                "approval": {"id": "stale", "summary": "Already answered"}})
+
+            self.dispatch(burst)
+            for device, chat in [(phone, self.chats[0]), (ipad, self.chats[1])]:
+                device.until(lambda: any(row["text"] == expected[chat] for row in (device.phone.selected or {}).get("entries", [])))
+                self.assertFalse(device.phone.needs_snapshot)
+                self.assertEqual(device.phone.selected["id"], chat)
+            self.assertEqual((phone.phone.approval or {}).get("id"), "current-approval" if wave else None)
+            self.assertIsNone(ipad.phone.approval)
+            self.assertIs(self.server.listener, listener)
+            self.assertEqual(self.server.status()["connectedCount"], 2)
+            self.assertEqual(self.host.view_id, self.desktop)
+        # A refreshed cursor must continue accepting ordinary incremental updates.
+        self.dispatch(lambda: self.host.emit({"event": "delta", "chat": self.chats[0], "id": "after-recovery", "text": "Still live", "offset": 0}))
+        phone.until(lambda: (phone.phone.selected or {}).get("live") == "Still live")
+
+    def test_busy_dispatch_retries_without_needing_another_event(self):
+        phone = Device(self); phone.pair(); phone.select(self.chats[0])
+        listener = self.server.listener
+        original_dispatch = self.host.dispatch_event
+        attempts = []
+
+        def busy_dispatch(callback):
+            attempts.append(True)
+            return False if len(attempts) <= 3 else original_dispatch(callback)
+
+        self.host.dispatch_event = busy_dispatch
+
+        def update():
+            row = entry("assistant", "Delivered after the queue became available")
+            self.host.sessions[self.chats[0]].chat["entries"].append(row)
+            self.host.emit({"event": "entry", "chat": self.chats[0], "entry": row})
+
+        self.dispatch(update)
+        phone.until(lambda: any(row["text"] == "Delivered after the queue became available" for row in (phone.phone.selected or {}).get("entries", [])))
+        self.assertGreaterEqual(len(attempts), 4)
+        self.assertIs(self.server.listener, listener)
+
+    def test_updates_during_refresh_cannot_overwrite_newer_snapshot_state(self):
+        phone = Device(self); phone.pair(); phone.select(self.chats[0])
+        dispatch = self.host.dispatch_event
+        attempted = []
+
+        def busy_once(callback):
+            attempted.append(True)
+            return False if len(attempted) == 1 else dispatch(callback)
+
+        self.host.dispatch_event = busy_once
+        row = entry("assistant", "Newest authoritative text")
+        publish_workspaces = self.host.publish_workspaces
+        raced = threading.Event()
+
+        def concurrent_update():
+            if not raced.is_set():
+                raced.set()
+                # An already-created producer event arrives while the refresh
+                # is reading a newer copy of that same transcript entry.
+                producer = threading.Thread(target=lambda: self.host.emit(
+                    {"event": "entry", "chat": self.chats[0], "entry": {**row, "text": "Older text"}}))
+                producer.start(); producer.join(1)
+                self.assertFalse(producer.is_alive())
+            publish_workspaces()
+
+        with patch.object(self.host, "publish_workspaces", side_effect=concurrent_update):
+            def update():
+                self.host.sessions[self.chats[0]].chat["entries"].append(row)
+                self.host.emit({"event": "entry", "chat": self.chats[0], "entry": row})
+            self.dispatch(update)
+            phone.until(lambda: any(item["id"] == row["id"] for item in (phone.phone.selected or {}).get("entries", [])))
+            self.wait_for(lambda: not self.host._remote_scheduled)
+        self.assertTrue(raced.is_set())
+        self.dispatch(lambda: self.host.emit({"event": "delta", "chat": self.chats[0], "id": "after-refresh", "text": "Settled", "offset": 0}))
+        phone.until(lambda: (phone.phone.selected or {}).get("live") == "Settled")
+        self.assertEqual(next(item["text"] for item in phone.phone.selected["entries"] if item["id"] == row["id"]), row["text"])
+
+    def test_publish_failure_retries_a_fresh_snapshot_without_stopping(self):
+        phone = Device(self); phone.pair(); phone.select(self.chats[0])
+        listener = self.server.listener
+        publish = self.server.publish
+        attempts = []
+
+        def transient_failure(event):
+            attempts.append(True)
+            if len(attempts) == 1:
+                raise RemoteError("temporary delivery failure")
+            return publish(event)
+
+        with patch.object(self.server, "publish", side_effect=transient_failure):
+            def update():
+                row = entry("assistant", "Recovered from a publish failure")
+                self.host.sessions[self.chats[0]].chat["entries"].append(row)
+                self.host.emit({"event": "entry", "chat": self.chats[0], "entry": row})
+            self.dispatch(update)
+            phone.until(lambda: any(row["text"] == "Recovered from a publish failure" for row in (phone.phone.selected or {}).get("entries", [])))
+        self.assertIs(self.server.listener, listener)
+        self.assertEqual(self.server.status()["connectedCount"], 1)
+
+    def test_user_disable_cancels_pending_delivery_retries(self):
+        attempted = threading.Event()
+
+        def busy_dispatch(callback):
+            attempted.set()
+            return False
+
+        self.host.dispatch_event = busy_dispatch
+        self.dispatch(lambda: self.host.emit({"event": "chats", "chats": []}))
+        self.assertTrue(attempted.wait(1))
+        self.dispatch(lambda: self.host.handle({"command": "remote_stop"}))
+        attempted.clear()
+        self.assertFalse(attempted.wait(.35), "Remote access kept retrying after the user disabled it")
+        self.assertIsNone(self.server.listener)
+
+    def test_one_device_publish_error_preserves_listener_and_other_device(self):
+        phone, ipad = Device(self), Device(self)
+        phone.pair(); ipad.pair()
+        phone.select(self.chats[0]); ipad.select(self.chats[1])
+        listener = self.server.listener
+        bridge = self.dispatch(lambda: next(bridge for bridge in self.server.connections.values()
+                                             if bridge.peer == phone.phone.identity_b64()))
+        with patch.object(bridge, "publish", side_effect=RemoteError("invalid device frame")):
+            self.dispatch(lambda: self.host.emit({"event": "delta", "chat": self.chats[1], "text": "iPad stays live", "offset": 0}))
+            ipad.until(lambda: (ipad.phone.selected or {}).get("live") == "iPad stays live")
+            self.wait_for(lambda: self.server.status()["connectedCount"] == 1)
+        self.assertIs(self.server.listener, listener)
+        reconnect = Device(self, PhoneClient("providerhub-phone", identity=phone.phone.identity))
+        reconnect.until(lambda: reconnect.phone.established and len(reconnect.phone.chats) == 2)
+        reconnect.select(self.chats[0], request="select-after-recovery")
+        self.assertEqual(self.server.status()["connectedCount"], 2)
+
+    def test_transient_accept_error_does_not_strand_listener(self):
+        listener = self.server.listener
+        accept = socket.socket.accept
+        failed = threading.Event()
+
+        def interrupted_accept(connection):
+            if connection is listener and not failed.is_set():
+                failed.set()
+                raise OSError(errno.EMFILE, "temporary file descriptor pressure")
+            return accept(connection)
+
+        with patch.object(socket.socket, "accept", interrupted_accept):
+            self.assertTrue(failed.wait(2))
+            phone = Device(self)
+            phone.pair(); phone.select(self.chats[0])
+        self.assertIs(self.server.listener, listener)
+        self.assertEqual(self.server.status()["connectedCount"], 1)
 
     def test_phone_and_ipad_pair_select_stream_and_disconnect_independently(self):
         phone = Device(self, label="iPhone")

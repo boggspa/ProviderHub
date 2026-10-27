@@ -14,6 +14,83 @@ from test_chat_runtime import FakeTransport, response
 
 
 class ConcurrentChatTests(unittest.TestCase):
+    def test_user_task_reassignment_is_durable_and_rejects_stale_owner(self):
+        identifier = self.create()
+        self.host.handle({"command": "configure_team", "chat": identifier, "request": "roster", "enabled": True,
+                          "members": [{"name": "A", "choice": self.host.models[0]["id"], "effort": "", "responsibility": ""},
+                                      {"name": "B", "choice": self.host.models[0]["id"], "effort": "", "responsibility": ""}]})
+        service = self.host.session(identifier)
+        first, second = [member["id"] for member in service.chat["team"]["members"]]
+        self.host.handle({"command": "team_task_user", "chat": identifier, "owner": first, "title": "Inspect"})
+        task = service.chat["teamTasks"][0]["id"]
+        self.host.handle({"command": "team_task_user", "chat": identifier, "task": task, "owner": second, "expectedOwner": first, "status": "blocked"})
+        self.host.handle({"command": "team_task_user", "chat": identifier, "task": task, "owner": first, "expectedOwner": first})
+        self.assertIn("changed", self.events[-1]["notice"])
+        self.host.handle({"command": "team_task_user", "chat": identifier, "task": task, "owner": first, "expectedOwner": second})
+        saved = self.store.load(identifier)["teamTasks"][0]
+        self.assertEqual((saved["owner"], saved["status"]), (first, "blocked"))
+        with patch.object(service, "save", side_effect=OSError("disk full")), self.assertRaisesRegex(OSError, "disk full"):
+            self.host.handle({"command": "team_task_user", "chat": identifier, "task": task, "owner": second, "expectedOwner": first})
+        self.assertEqual(service.chat["teamTasks"][0]["owner"], first)
+
+    def test_searches_saved_and_live_transcripts_without_changing_selection(self):
+        older, current = self.create("older"), self.create("current")
+        service = self.send(older, [response("A unique needle in an earlier thread")])
+        self.wait(lambda: not service.busy)
+        self.host.prune()
+        self.assertNotIn(older, self.host.sessions)
+        service = self.send(current, [response("A second needle in the current thread")])
+        self.wait(lambda: not service.busy)
+        self.events.clear()
+        self.host.handle({"command": "search_transcripts", "query": "NEEDLE", "request": "search-1"})
+        self.wait(lambda: any(e.get("event") == "transcript_search" for e in self.events))
+        result = next(e for e in self.events if e.get("event") == "transcript_search")
+        self.assertEqual(result["request"], "search-1")
+        self.assertEqual({row["chat"] for row in result["results"]}, {older, current})
+        self.assertTrue(all(row["entry"] and "needle" in row["excerpt"] for row in result["results"]))
+        self.assertEqual(self.host.view_id, current)
+
+    def test_clearing_search_cancels_an_older_scan(self):
+        older, current = self.create("older"), self.create("current")
+        self.host.prune()
+        self.assertNotIn(older, self.host.sessions)
+        entered, release = threading.Event(), threading.Event()
+        load = self.store.load
+        def slow(identifier):
+            if identifier == older:
+                entered.set()
+                release.wait(2)
+            return load(identifier)
+        with patch.object(self.store, "load", side_effect=slow):
+            self.events.clear()
+            self.host.handle({"command": "search_transcripts", "query": "needle", "request": "old"})
+            self.assertTrue(entered.wait(2))
+            worker = next(thread for thread in threading.enumerate() if thread.name == "transcript-search")
+            self.host.handle({"command": "search_transcripts", "query": "", "request": "cancel"})
+            release.set()
+            worker.join(2)
+            self.assertFalse(worker.is_alive())
+        self.assertFalse(any(event.get("event") == "transcript_search" and event.get("request") == "old" for event in self.events))
+        self.assertEqual(self.host.view_id, current)
+
+    def test_search_limit_includes_title_matches(self):
+        older, current = self.create("older"), self.create("current")
+        old_service = self.host.session(older)
+        with old_service._mutex:
+            old_service.chat["title"] = "Needle archive"
+            old_service.chat["entries"].append({"id": "old", "text": "needle in old entry"})
+            old_service.save()
+        current_service = self.host.session(current)
+        with current_service._mutex:
+            current_service.chat["entries"].extend({"id": f"entry-{i}", "text": "needle"} for i in range(199))
+            current_service.save()
+        self.events.clear()
+        self.host.handle({"command": "search_transcripts", "query": "needle", "request": "limit"})
+        self.wait(lambda: any(event.get("event") == "transcript_search" for event in self.events))
+        result = next(event for event in self.events if event.get("event") == "transcript_search")
+        self.assertEqual(len(result["results"]), 200)
+        self.assertTrue(result["limited"])
+
     def test_browser_approval_revocation_and_native_roundtrip(self):
         from test_chat_agents import call
         identifier = self.create()

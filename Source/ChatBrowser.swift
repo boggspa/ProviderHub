@@ -104,6 +104,7 @@ final class ChatBrowserSession: NSObject, ObservableObject,
                                 WKNavigationDelegate, WKUIDelegate,
                                 WKScriptMessageHandler {
     let chatID: String
+    let tabID: String
     private let configuration: WKWebViewConfiguration
     private(set) var webView: WKWebView
     @Published private(set) var page: ChatBrowserPage
@@ -118,8 +119,9 @@ final class ChatBrowserSession: NSObject, ObservableObject,
     /// it; isolated-world JavaScript cannot reach the page.
     private let isolatedWorld = WKContentWorld.world(name: "ChatBrowserIsolated")
 
-    init(chatID: String, dataDirectory: URL) throws {
+    init(chatID: String, tabID: String, dataDirectory: URL) throws {
         self.chatID = chatID
+        self.tabID = tabID
         self.dataDirectory = dataDirectory
         let config = WKWebViewConfiguration()
         // Persistent per-chat profile. The chat id is a stable hex string;
@@ -135,7 +137,9 @@ final class ChatBrowserSession: NSObject, ObservableObject,
         let controller = WKUserContentController()
         config.userContentController = controller
         self.configuration = config
-        self.webView = WKWebView(frame: .zero, configuration: config)
+        // Background tabs must have a renderable viewport for screenshots
+        // even before a user selects them in the visible pane.
+        self.webView = WKWebView(frame: NSRect(x: 0, y: 0, width: 1024, height: 768), configuration: config)
         self.page = ChatBrowserPage(title: "", url: "", navigationID: 0, snapshotID: nil)
         super.init()
         // The body script runs only in the isolated world. The page world
@@ -158,13 +162,23 @@ final class ChatBrowserSession: NSObject, ObservableObject,
     // MARK: Navigation
 
     func open(url: URL) async -> Bool {
-        await navigate(url: url)
+        guard let scheme = url.scheme?.lowercased(), ["http", "https"].contains(scheme) else { return false }
+        return await navigate { self.webView.load(URLRequest(url: url)) }
     }
 
-    private func navigate(url: URL) async -> Bool {
+    func history(_ action: String) async -> Bool {
+        await navigate {
+            switch action {
+            case "back": return self.webView.goBack()
+            case "forward": return self.webView.goForward()
+            case "reload": return self.webView.reload()
+            default: return nil
+            }
+        }
+    }
+
+    private func navigate(_ start: () -> WKNavigation?) async -> Bool {
         guard !Task.isCancelled else { return false }
-        guard let scheme = url.scheme?.lowercased(),
-              ["http", "https"].contains(scheme) else { return false }
         isLoading = true
         let token = UUID()
         navigationToken = token
@@ -172,7 +186,11 @@ final class ChatBrowserSession: NSObject, ObservableObject,
             await withCheckedContinuation { continuation in
                 guard !Task.isCancelled else { continuation.resume(returning: false); return }
                 pendingNavigation = continuation
-                awaitedNavigation = webView.load(URLRequest(url: url))
+                awaitedNavigation = start()
+                if awaitedNavigation == nil {
+                    pendingNavigation = nil
+                    continuation.resume(returning: false)
+                }
             }
         } onCancel: {
             Task { @MainActor in
@@ -309,6 +327,7 @@ final class ChatBrowserSession: NSObject, ObservableObject,
         snapshotByNavigation[page.navigationID] = snapshotID
         page.snapshotID = snapshotID
         var details: [String: Any] = [
+            "tab_id": tabID,
             "snapshot_id": snapshotID,
             "url": page.url,
             "title": page.title,
@@ -766,15 +785,17 @@ enum ChatBrowserObservationScript {
 
 // MARK: - Store
 
-/// Owns one ``ChatBrowserSession`` per chat. Dispatches tool calls into the
-/// right session and exposes a SwiftUI view model for the Browser pane.
+/// Owns independent tab sessions per chat and exposes the selected session
+/// to the Browser pane. A tab's observation references never cross sessions.
 ///
 /// Per-chat operations are serialised, but cancellation targets exactly the
 /// task with the host-supplied request id so a new call started after cancel
 /// is not affected.
 @MainActor
 final class ChatBrowserStore: ObservableObject, ChatBrowserHost {
+    /// The visible tab for each chat; retained for existing pane callers.
     @Published private(set) var sessions: [String: ChatBrowserSession] = [:]
+    @Published private(set) var tabs: [String: [ChatBrowserSession]] = [:]
     let storageRoot: URL
     /// Inflight tasks keyed by ``chatID + "|" + requestID`` so cancellation
     /// can target the exact call without disturbing newer ones.
@@ -786,21 +807,54 @@ final class ChatBrowserStore: ObservableObject, ChatBrowserHost {
     private var tails: [String: Task<[String: Any], Error>] = [:]
     private var tailKeys: [String: String] = [:]
     private var active: [String: String] = [:]
+    private var activeSessions: [String: ChatBrowserSession] = [:]
     private var observers: [String: AnyCancellable] = [:]
 
     init(storageRoot: URL) {
         self.storageRoot = storageRoot
     }
 
-    private func session(for chatID: String) throws -> ChatBrowserSession {
-        if let existing = sessions[chatID] { return existing }
+    private func createSession(for chatID: String) throws -> ChatBrowserSession {
+        let tabID = UUID().uuidString
         let dir = storageRoot.appendingPathComponent(chatID, isDirectory: true)
-        let session = try ChatBrowserSession(chatID: chatID, dataDirectory: dir)
-        sessions[chatID] = session
-        observers[chatID] = session.objectWillChange.sink { [weak self] _ in
+        let session = try ChatBrowserSession(chatID: chatID, tabID: tabID, dataDirectory: dir)
+        tabs[chatID, default: []].append(session)
+        if sessions[chatID] == nil { sessions[chatID] = session }
+        observers[tabID] = session.objectWillChange.sink { [weak self] _ in
             self?.objectWillChange.send()
         }
         return session
+    }
+
+    private func session(for chatID: String, tabID: String?) -> ChatBrowserSession? {
+        if let tabID { return tabs[chatID]?.first { $0.tabID == tabID } }
+        return sessions[chatID]
+    }
+
+    @discardableResult
+    func select(chatID: String, tabID: String) -> Bool {
+        guard let session = session(for: chatID, tabID: tabID) else { return false }
+        sessions[chatID] = session
+        return true
+    }
+
+    /// A user-created blank tab becomes selected. Automated opens leave the
+    /// user's current selection alone after the initial tab.
+    func addTab(chatID: String) throws {
+        let session = try createSession(for: chatID)
+        sessions[chatID] = session
+    }
+
+    private func closeTab(chatID: String, tabID: String?) -> Bool {
+        guard let session = session(for: chatID, tabID: tabID),
+              var open = tabs[chatID], let index = open.firstIndex(where: { $0 === session }) else { return false }
+        let wasSelected = sessions[chatID] === session
+        open.remove(at: index)
+        session.teardown()
+        observers[session.tabID] = nil
+        tabs[chatID] = open.isEmpty ? nil : open
+        if wasSelected { sessions[chatID] = open.isEmpty ? nil : open[min(index, open.count - 1)] }
+        return true
     }
 
     func webView(forChatID chatID: String) -> WKWebView? {
@@ -852,33 +906,75 @@ final class ChatBrowserStore: ObservableObject, ChatBrowserHost {
     private func doPerform(chatID: String, tool: String,
                             arguments: [String: Any]) async -> [String: Any] {
         guard !Task.isCancelled else { return ChatBrowserResult.failure(tool, "Browser action cancelled.") }
+        let selectedTargetTools: Set<String> = ["browser_navigate", "browser_observe", "browser_act",
+                                                "browser_screenshot", "browser_remote_preview", "browser_close",
+                                                "browser_back", "browser_forward", "browser_reload"]
+        let reusesTab = tool == "browser_open" && arguments["new_tab"] as? Bool == false
+        if (selectedTargetTools.contains(tool) || reusesTab), arguments["tab_id"] == nil,
+           (tabs[chatID]?.count ?? 0) > 1 {
+            return ChatBrowserResult.failure(tool, "Multiple tabs are open. Specify tab_id from browser_list.")
+        }
         switch tool {
-        case "browser_list":
-            // List only the requested chat's page. ``browser_list`` must NOT
-            // create a session — that would leak a blank WKWebView.
-            guard let session = sessions[chatID] else {
-                return ChatBrowserResult.ok("List browser sessions", "0 open session(s)",
-                                             details: ["pages": []])
+        case "browser_new":
+            do {
+                let tab = try createSession(for: chatID)
+                return ChatBrowserResult.ok("New browser tab", "Tab created.", details: ["tab_id": tab.tabID])
+            } catch {
+                return ChatBrowserResult.failure("New browser tab", "Could not create a tab: \(error.localizedDescription)")
             }
-            let pages: [[String: Any]] = [[
-                "chat_id": session.chatID, "title": session.page.title,
-                "url": session.page.url,
-                "snapshot_id": session.page.snapshotID as Any,
-                "navigation_id": session.page.navigationID,
-            ]]
-            return ChatBrowserResult.ok("List browser sessions", "1 open session(s)",
-                                         details: ["pages": pages])
+        case "browser_list":
+            // Listing must not create a blank WKWebView.
+            let pages: [[String: Any]] = (tabs[chatID] ?? []).map { session in
+                ["chat_id": session.chatID, "tab_id": session.tabID,
+                 "title": session.page.title, "url": session.page.url,
+                 "snapshot_id": session.page.snapshotID as Any? ?? NSNull(),
+                 "navigation_id": session.page.navigationID]
+            }
+            return ChatBrowserResult.ok("List browser sessions", "\(pages.count) open tab(s)",
+                details: ["pages": pages, "tabs": pages,
+                          "selected_tab_id": sessions[chatID]?.tabID as Any? ?? NSNull()])
+        case "browser_select":
+            guard let tabID = arguments["tab_id"] as? String, select(chatID: chatID, tabID: tabID) else {
+                return ChatBrowserResult.failure("Select browser tab", "Browser tab not found.")
+            }
+            return ChatBrowserResult.ok("Select browser tab", "Tab selected.", details: ["tab_id": tabID])
         case "browser_close":
-            close(chatID: chatID)
-            return ChatBrowserResult.ok("Close browser", "Browser closed.")
+            guard closeTab(chatID: chatID, tabID: arguments["tab_id"] as? String) else {
+                return ChatBrowserResult.failure("Close browser", "Browser tab not found.")
+            }
+            return ChatBrowserResult.ok("Close browser", "Tab closed.",
+                details: ["selected_tab_id": sessions[chatID]?.tabID as Any? ?? NSNull()])
         default:
             break
         }
-        // Tools that actually need a session. ``browser_open`` reuses an
-        // existing session for the chat when one is already open.
+        if tool == "browser_open" || tool == "browser_navigate" {
+            guard let value = arguments["url"] as? String, let url = URL(string: value),
+                  let scheme = url.scheme?.lowercased(), ["http", "https"].contains(scheme),
+                  url.host != nil else {
+                return ChatBrowserResult.failure(tool, "Only http and https URLs with a host are accepted.")
+            }
+        }
+        // A new open keeps the existing selection visible. Other actions
+        // address an explicit tab or, for older callers, the selected tab.
         let session: ChatBrowserSession
-        do { session = try self.session(for: chatID) }
+        var created = false
+        do {
+            let requestedID = arguments["tab_id"] as? String
+            if tool == "browser_open", (arguments["new_tab"] as? Bool ?? (requestedID == nil)) {
+                session = try createSession(for: chatID)
+                created = true
+            } else if let existing = self.session(for: chatID, tabID: requestedID) {
+                session = existing
+            } else if requestedID == nil && (tool == "browser_open" || tool == "browser_navigate") {
+                session = try createSession(for: chatID)
+                created = true
+            } else {
+                return ChatBrowserResult.failure(tool, "Browser tab not found.")
+            }
+        }
         catch { return ChatBrowserResult.failure(tool, "Could not open browser session: \(error.localizedDescription)") }
+        activeSessions[chatID] = session
+        defer { activeSessions[chatID] = nil }
         do {
             switch tool {
             case "browser_open":
@@ -890,12 +986,13 @@ final class ChatBrowserStore: ObservableObject, ChatBrowserHost {
                 }
                 let ok = await session.open(url: url)
                 if !ok {
+                    if created { _ = closeTab(chatID: chatID, tabID: session.tabID) }
                     return ChatBrowserResult.failure("Open browser", "The page failed to load.")
                 }
                 let page = session.page
                 return ChatBrowserResult.ok("Open browser", "Page loaded.",
-                                             details: ["url": page.url, "title": page.title,
-                                                       "snapshot_id": page.snapshotID as Any,
+                                             details: ["tab_id": session.tabID, "url": page.url, "title": page.title,
+                                                       "snapshot_id": page.snapshotID as Any? ?? NSNull(),
                                                        "navigation_id": page.navigationID])
             case "browser_navigate":
                 guard let urlString = arguments["url"] as? String,
@@ -906,17 +1003,25 @@ final class ChatBrowserStore: ObservableObject, ChatBrowserHost {
                 }
                 let ok = await session.open(url: url)
                 if !ok {
+                    if created { _ = closeTab(chatID: chatID, tabID: session.tabID) }
                     return ChatBrowserResult.failure("Navigate browser", "The page failed to load.")
                 }
                 let page = session.page
                 return ChatBrowserResult.ok("Navigate browser", "Page loaded.",
-                                             details: ["url": page.url, "title": page.title,
-                                                       "snapshot_id": page.snapshotID as Any,
+                                             details: ["tab_id": session.tabID, "url": page.url, "title": page.title,
+                                                       "snapshot_id": page.snapshotID as Any? ?? NSNull(),
                                                        "navigation_id": page.navigationID])
             case "browser_observe":
                 let depth = (arguments["depth"] as? Int) ?? 3
                 let maxBytes = (arguments["max_bytes"] as? Int) ?? 200_000
                 return try await session.observe(depth: depth, maxBytes: maxBytes)
+            case "browser_back", "browser_forward", "browser_reload":
+                let action = String(tool.dropFirst("browser_".count))
+                guard await session.history(action) else {
+                    return ChatBrowserResult.failure("Browser navigation", "Could not \(action) this tab.")
+                }
+                return ChatBrowserResult.ok("Browser navigation", "Page loaded.",
+                    details: ["tab_id": session.tabID, "url": session.page.url, "title": session.page.title])
             case "browser_act":
                 guard let snapshotID = arguments["snapshot_id"] as? String,
                       let actions = arguments["actions"] as? [[String: Any]] else {
@@ -939,7 +1044,8 @@ final class ChatBrowserStore: ObservableObject, ChatBrowserHost {
                 for quality in [0.55, 0.35, 0.2, 0.1] {
                     if let jpeg = bitmap.representation(using: .jpeg, properties: [.compressionFactor: quality]), jpeg.count <= 32_000 {
                         return ChatBrowserResult.ok("Mac browser preview", "Captured the shared page on your Mac.",
-                            details: ["url": session.page.url, "title": session.page.title],
+                            details: ["tab_id": session.tabID, "url": session.page.url, "title": session.page.title,
+                                      "navigation_id": session.page.navigationID],
                             image: ChatBrowserResult.imageBlock(base64: jpeg.base64EncodedString(), mime: "image/jpeg",
                                 width: block["width"] as? Int ?? 640, height: block["height"] as? Int ?? 480))
                     }
@@ -962,13 +1068,17 @@ final class ChatBrowserStore: ObservableObject, ChatBrowserHost {
         let key = chatID + "|" + requestID
         guard let task = inflight[key] else { return }
         task.cancel()
-        if active[chatID] == key { sessions[chatID]?.webView.stopLoading() }
+        if active[chatID] == key { activeSessions[chatID]?.webView.stopLoading() }
     }
 
     func close(chatID: String) {
-        sessions[chatID]?.teardown()
+        for session in tabs[chatID] ?? [] {
+            session.teardown()
+            observers[session.tabID] = nil
+        }
+        tabs.removeValue(forKey: chatID)
         sessions.removeValue(forKey: chatID)
-        observers[chatID] = nil
+        activeSessions.removeValue(forKey: chatID)
         let prefix = chatID + "|"
         let keys = inflight.keys.filter { $0.hasPrefix(prefix) }
         for key in keys {
@@ -991,6 +1101,7 @@ struct ChatBrowserPane: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            tabBar
             controls
             Divider()
             content
@@ -1000,21 +1111,57 @@ struct ChatBrowserPane: View {
         .onChange(of: store.sessions[chatID]?.page.url) { _, new in
             inputURL = new ?? ""
         }
+        .onChange(of: store.sessions[chatID]?.tabID) { _, _ in
+            inputURL = store.sessions[chatID]?.page.url ?? ""
+        }
+    }
+
+    private var tabBar: some View {
+        HStack(spacing: 4) {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 4) {
+                    ForEach(store.tabs[chatID] ?? [], id: \.tabID) { tab in
+                        HStack(spacing: 4) {
+                            Button {
+                                store.select(chatID: chatID, tabID: tab.tabID)
+                            } label: {
+                                Text(tab.page.title.isEmpty ? (tab.page.url.isEmpty ? "New tab" : tab.page.url) : tab.page.title)
+                                    .lineLimit(1).truncationMode(.middle).frame(maxWidth: 150)
+                            }.buttonStyle(.plain)
+                                .accessibilityLabel("Select browser tab \(tab.page.title.isEmpty ? tab.page.url : tab.page.title)")
+                            Button {
+                                Task { _ = await store.perform(chatID: chatID, requestID: UUID().uuidString,
+                                                               tool: "browser_close", arguments: ["tab_id": tab.tabID]) }
+                            } label: { Image(systemName: "xmark").font(.system(size: 9, weight: .medium)) }
+                                .buttonStyle(.plain).help("Close tab")
+                                .accessibilityLabel("Close browser tab \(tab.page.title.isEmpty ? tab.page.url : tab.page.title)")
+                        }
+                        .padding(.horizontal, 9).padding(.vertical, 6)
+                        .background(store.sessions[chatID]?.tabID == tab.tabID ? Color.primary.opacity(0.12) : Color.primary.opacity(0.04),
+                                    in: RoundedRectangle(cornerRadius: 6))
+                    }
+                }
+            }
+            Button {
+                try? store.addTab(chatID: chatID)
+            } label: { Image(systemName: "plus") }
+                .buttonStyle(.plain).help("New browser tab").accessibilityLabel("New browser tab")
+        }.padding(.horizontal, 8).padding(.top, 6)
     }
 
     private var controls: some View {
         HStack(spacing: 8) {
             TextField("https://", text: $inputURL)
                 .textFieldStyle(.roundedBorder)
-                .onSubmit { Task { await navigate(inputURL) } }
-            Button("Go") { Task { await navigate(inputURL) } }
-            Button { Task { await back() } } label: { Image(systemName: "chevron.left") }
+                .onSubmit { navigateSelectedTab() }
+            Button("Go") { navigateSelectedTab() }
+            Button { history("browser_back") } label: { Image(systemName: "chevron.left") }
                 .help("Back")
                 .disabled(!(store.sessions[chatID]?.webView.canGoBack ?? false))
-            Button { Task { await forward() } } label: { Image(systemName: "chevron.right") }
+            Button { history("browser_forward") } label: { Image(systemName: "chevron.right") }
                 .help("Forward")
                 .disabled(!(store.sessions[chatID]?.webView.canGoForward ?? false))
-            Button { Task { await reload() } } label: { Image(systemName: "arrow.clockwise") }
+            Button { history("browser_reload") } label: { Image(systemName: "arrow.clockwise") }
                 .help("Reload")
             Button(role: .destructive) {
                 store.close(chatID: chatID)
@@ -1025,8 +1172,9 @@ struct ChatBrowserPane: View {
 
     @ViewBuilder
     private var content: some View {
-        if let session = store.sessions[chatID] {
+        if let session = store.sessions[chatID], !session.page.url.isEmpty || session.isLoading {
             BrowserWebContainer(webView: session.webView)
+                .id(session.tabID)
                 .overlay(alignment: .topLeading) {
                     if session.isLoading {
                         ProgressView().controlSize(.small).padding(8)
@@ -1044,31 +1192,30 @@ struct ChatBrowserPane: View {
         }
     }
 
-    private func navigate(_ url: String) async {
+    private func navigateSelectedTab() {
+        // Bind the target before the request enters the per-chat queue.
+        let url = inputURL
+        let tabID = store.sessions[chatID]?.tabID
+        Task { await navigate(url, tabID: tabID) }
+    }
+
+    private func navigate(_ url: String, tabID: String?) async {
         let trimmed = url.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, let url = URL(string: trimmed) else { return }
         guard let scheme = url.scheme?.lowercased(),
               ["http", "https"].contains(scheme) else { return }
         // Manual navigation uses a synthetic request id; cancel is unlikely
         // here, but the wire stays consistent.
+        var arguments: [String: Any] = ["url": url.absoluteString]
+        if let tabID { arguments["tab_id"] = tabID }
         _ = await store.perform(chatID: chatID, requestID: UUID().uuidString,
-                                tool: "browser_open",
-                                arguments: ["url": url.absoluteString])
+                                tool: "browser_navigate", arguments: arguments)
     }
 
-    private func back() async {
-        guard let session = store.sessions[chatID] else { return }
-        if session.webView.canGoBack { session.webView.goBack() }
-    }
-
-    private func forward() async {
-        guard let session = store.sessions[chatID] else { return }
-        if session.webView.canGoForward { session.webView.goForward() }
-    }
-
-    private func reload() async {
-        guard let session = store.sessions[chatID] else { return }
-        session.webView.reload()
+    private func history(_ tool: String) {
+        guard let tabID = store.sessions[chatID]?.tabID else { return }
+        Task { _ = await store.perform(chatID: chatID, requestID: UUID().uuidString,
+                                       tool: tool, arguments: ["tab_id": tabID]) }
     }
 }
 

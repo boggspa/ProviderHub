@@ -198,6 +198,9 @@ public struct CompanionStore: Equatable {
                 let owner = event["chat"] as? String
                 if owner == nil || owner == selectedID, let panel = event["panel"] as? String {
                     controls[panel] = try decode(RemoteValue.self, event["value"] ?? NSNull())
+                    if let additional = event["alsoPanel"] as? String {
+                        controls[additional] = try decode(RemoteValue.self, event["value"] ?? NSNull())
+                    }
                     if panel == "activity" || panel == "configuration", let value = controls[panel] {
                         let busy = panel == "configuration" ? value["runBusy"] : value["busy"]
                         if case .bool(let running) = busy { selectedBusy = running }

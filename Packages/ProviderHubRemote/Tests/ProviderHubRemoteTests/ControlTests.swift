@@ -126,6 +126,16 @@ final class ControlTests: XCTestCase {
         XCTAssertEqual(store.notices.last, "Connected")
     }
 
+    func testBrowserTabsMirrorKeepsLegacyBrowserPanel() throws {
+        var store = CompanionStore()
+        let value: [String: Any] = ["details": ["tabs": []]]
+        try store.receive(["method": "session.delta", "params": ["cursor": 1,
+            "event": ["event": "control", "panel": "browser", "alsoPanel": "browserTabs",
+                      "value": value]]])
+        XCTAssertEqual(store.controls["browser"], .object(["details": .object(["tabs": .array([])])]))
+        XCTAssertEqual(store.controls["browserTabs"], .object(["details": .object(["tabs": .array([])])]))
+    }
+
     func testNoticesStayBoundedAndClearForTheNextAction() throws {
         var store = CompanionStore()
         for cursor in 1...25 {

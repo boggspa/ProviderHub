@@ -59,6 +59,12 @@ Each running chat shows a small spinner; a hand marks a chat waiting for
 approval, including chats in another folder.
 In a narrow window, the saved-chats button opens the same list in a popover.
 
+Press **⌘F** to search the selected pane's transcript, including messages
+outside the currently visible page. The arrows move between matching entries.
+**⌘⇧F** opens sidebar search across saved and live chat titles and transcript
+entries; choose a result to open its chat and jump to the entry. Sidebar search
+shows at most 200 matches.
+
 You can switch chats or start a new one while other chats run. Each chat keeps
 its own model or Team, workspace, draft, attachments, elapsed time, and pending
 approval. Stop and updates affect the chat you are viewing. Different projects
@@ -160,7 +166,7 @@ The right-hand **inspector** has four views, each using the whole pane:
   login; an Open GitHub link remains available if that CLI is absent or the
   lookup fails. Refresh reloads repository information without changing Git
   state or fetching a remote.
-- **Team** configures up to eight persistent members, including the current
+- **Team** configures up to twelve persistent members, including the current
   chat model. Each contributes once by default and may explicitly continue with
   a next step. Members think and read in parallel through one attributed
   transcript, refreshed before every model round, with separate provider histories.

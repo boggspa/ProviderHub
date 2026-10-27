@@ -483,7 +483,7 @@ import Combine
         check(scalars(reselected.entries.first?.text) == scalars("\u{FEFF} @Builder") && drawsTag(reselected.entries.first),
               "a reopened transcript lost a leading U+FEFF")
         check(model.team?.taskMode == false, "legacy roster unexpectedly enabled Task mode")
-        let fullRoster = 8
+        let fullRoster = ChatTeamSnapshot.maxMembers
         var fullTeam = roster("ready")
         let rosterTemplate = (fullTeam["members"] as! [[String: Any]])[0]
         fullTeam["members"] = (1...fullRoster).map { number -> [String: Any] in
@@ -1189,7 +1189,22 @@ import Combine
         try paneEvent(["event":"selected", "id":"B", "entries":[], "busy":false])
         shared.observe(chats: ["A", "B"])
         let paneA = shared.paneModel(for: "A"), paneB = shared.paneModel(for: "B")
+        check(paneA.rootModel === shared && paneB.rootModel === shared, "Sidebar search must use the shared model")
+        paneA.rootModel.searchTranscripts("needle")
+        let searchID = paneCommands.last?["request"] as! String
+        check(paneCommands.last?["command"] as? String == "search_transcripts", "Sidebar search did not reach the worker")
+        try paneEvent(["event":"transcript_search", "request":"stale", "results":[["chat":"A", "entry":"old", "title":"Old", "excerpt":"old"]]])
+        check(shared.searchResults.isEmpty && shared.searchPending, "Stale search result displaced the latest request")
+        try paneEvent(["event":"transcript_search", "request":searchID, "results":[["chat":"A", "entry":"hit", "title":"A", "excerpt":"needle"]]])
+        check(shared.searchResults.first?.entry == "hit" && !shared.searchPending, "Search response did not settle")
+        shared.openSearchResult(shared.searchResults[0])
+        try paneEvent(["event":"selected", "id":"A", "entries":[], "busy":false])
+        check(paneA.jumpRequest?.id == "hit", "Search result did not request the matched pane row")
+        shared.select("B")
+        try paneEvent(["event":"selected", "id":"B", "entries":[], "busy":false])
         try paneEvent(["event":"snapshot", "chat":"A", "entries":[], "busy":false])
+        try paneEvent(["event":"team_tasks", "chat":"A", "tasks":[["id":"t1", "title":"Inspect", "owner":"member", "status":"blocked"]]])
+        check(paneA.teamTasks.first?.status == "blocked" && paneB.teamTasks.isEmpty, "Team task snapshot crossed pane ownership")
         paneA.draft = "From A"; paneB.draft = "From B"
         paneA.send()
         check(paneCommands.last?["chat"] as? String == "A" && paneA.busy && !paneB.busy, "Pane send crossed ownership")

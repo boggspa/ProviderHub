@@ -19,6 +19,18 @@ final class TeamEditorTests: XCTestCase {
         }
     }
 
+    func testTwelveMembersAndNewContextPresetsAreAccepted() {
+        let roster: [RemoteValue] = (1...12).map { number in
+            .object(["name": .string("Member \(number)"), "choice": .string("codex/sol|model")])
+        }
+        for context in [120000, 325000, 650000] {
+            XCTAssertTrue(CompanionTeamValidation.contextPresets.contains(context))
+            XCTAssertNil(CompanionTeamValidation.message(rows: roster, context: String(context), processes: "8", minutes: "", tokens: ""))
+        }
+        XCTAssertEqual(CompanionTeamValidation.message(rows: roster + [members[0]], context: "200000", processes: "8", minutes: "", tokens: ""),
+                       "A Team can have at most 12 members.")
+    }
+
     func testInvalidFieldsExplainWhyApplyIsDisabled() {
         XCTAssertEqual(CompanionTeamValidation.message(rows: members, context: "15999", processes: "16", minutes: "", tokens: ""),
                        "Context tokens must be between 16,000 and 2,000,000.")

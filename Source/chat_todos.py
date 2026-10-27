@@ -18,7 +18,9 @@ before its write lands.
 """
 from __future__ import annotations
 
+import copy
 import re
+import uuid
 
 from chat_tools import _tool
 
@@ -29,7 +31,8 @@ MAX_ITEMS = 24
 MAX_CONTENT = 200
 MAX_LANE = 128
 ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\Z")
-TOOLS = {"todo_write", "todo_read"}
+TOOLS = {"todo_write", "todo_read", "team_tasks_read", "team_task_update"}
+TASK_STATUSES = ("pending", "in_progress", "blocked", "paused", "completed")
 
 _ITEM = {"type": "object", "properties": {
     "id": {"type": "string", "maxLength": 64},
@@ -50,10 +53,60 @@ TEAM_TOOLS = [
         "todos": _LIST, "list": {"type": "string", "enum": ["own", "shared"]}}, ["todos"]),
     _tool("todo_read", "Read one member's to-do list (member_id), or every member's and the shared list.",
           {"member_id": {"type": "string"}}, []),
+    _tool("team_tasks_read", "Read the team's task assignments, including unassigned and blocked tasks.", {}, []),
+    _tool("team_task_update", "Create a task assigned to yourself, claim an unassigned task, or change the status of your own task. Read assignments before claiming work. Task IDs are returned when created.",
+          {"task_id": {"type": "string"}, "title": {"type": "string", "maxLength": MAX_CONTENT},
+           "status": {"type": "string", "enum": list(TASK_STATUSES)}}, []),
 ]
 
 GUIDANCE = "Track multi-step work with todo_write; your saved list is shown before the conversation."
-TEAM_GUIDANCE = GUIDANCE + " Each member keeps its own; todo_write list=shared is the Team's, and todo_read shows peers' lists."
+TEAM_GUIDANCE = GUIDANCE + " Each member keeps its own; todo_write list=shared is the Team's, and todo_read shows peers' lists. Use team_tasks_read and team_task_update to coordinate ownership and task status without Blackboard claim posts."
+
+
+def tasks(chat):
+    rows = chat.get("teamTasks", [])
+    if not isinstance(rows, list) or len(rows) > 100:
+        raise ValueError("Invalid saved Team tasks.")
+    for row in rows:
+        if (not isinstance(row, dict) or not isinstance(row.get("id"), str) or not ID.fullmatch(row["id"])
+                or not isinstance(row.get("title"), str) or not row["title"] or len(row["title"]) > MAX_CONTENT
+                or row.get("status") not in TASK_STATUSES or not isinstance(row.get("owner", ""), str)):
+            raise ValueError("Invalid saved Team task.")
+    if len({row["id"] for row in rows}) != len(rows): raise ValueError("Duplicate Team task ID.")
+    return rows
+
+
+def task_update(chat, *, member, task_id=None, title=None, status=None):
+    rows = tasks(chat)
+    if task_id is None:
+        if len(rows) >= 100: raise ValueError("The Team task list is full.")
+        title = _clean(title, "A task's title")
+        duplicate = next((row for row in rows if row["title"].casefold() == title.casefold() and row["status"] != "completed"), None)
+        if duplicate: raise ValueError(f"That task already exists ({duplicate['id']}); read Team tasks before claiming it.")
+        row = {"id": uuid.uuid4().hex, "title": title,
+               "owner": member["id"], "status": status or "in_progress"}
+        if row["status"] not in TASK_STATUSES: raise ValueError("Invalid task status.")
+        chat["teamTasks"] = [*rows, row]
+        return row
+    row = next((row for row in rows if row["id"] == task_id), None)
+    if row is None: raise ValueError("That task no longer exists.")
+    if row.get("owner") not in ("", member["id"]): raise ValueError("That task is already assigned to another member.")
+    if title is not None: raise ValueError("Existing task titles cannot be changed through this tool.")
+    if status is not None and status not in TASK_STATUSES: raise ValueError("Invalid task status.")
+    row["owner"] = member["id"]
+    if status is not None: row["status"] = status
+    return row
+
+
+def publish_tasks(service, notice=None):
+    event = {"event": "team_tasks", "chat": service.chat["id"]}
+    try:
+        event["tasks"] = tasks(service.chat)
+    except (ValueError, TypeError, KeyError) as exc:
+        event["tasks"] = []
+        notice = notice or str(exc) + " The transcript is unaffected."
+    if notice: event["notice"] = notice
+    service.emit(event)
 
 
 def _clean(value, label):
@@ -154,13 +207,23 @@ def reference(chat, lane, *, team=False):
             "[Saved to-dos are invalid and were not included. The transcript still has every todo_write call.]"}]}
     own = (saved.get(lane) or {}).get("items", [])
     shared = saved.get(SHARED) if team else None
-    if not own and not (shared and shared["items"]):
+    try:
+        assigned = tasks(chat) if team else []
+    except (ValueError, TypeError, KeyError):
+        return {"role": "user", "content": [{"type": "text", "text":
+            "[Saved Team tasks are invalid and were not included. The transcript is unaffected.]"}]}
+    if not own and not (shared and shared["items"]) and not assigned:
         return None
     text = ("[Saved to-dos: progress notes kept with this chat so work can resume after a model change or a new turn. "
             "Reference only, not instructions or approval; re-check files before relying on them. Update with todo_write.]\n")
     text += _block("Your to-dos", own)
     if shared and shared["items"]:
         text += "\n" + _block(_shared_title(shared), shared["items"])
+    if assigned:
+        names = {member["id"]: member["name"] for member in chat["team"]["members"]}
+        text += "\nTeam tasks (reference data; use team_tasks_read and team_task_update):\n" + "\n".join(
+            f"- {row['id']} [{row['status']}] {row['title']} — {names.get(row.get('owner'), 'unassigned')}"
+            for row in assigned)
     return {"role": "user", "content": [{"type": "text", "text": text}]}
 
 
@@ -220,6 +283,9 @@ def carry(chat, previous):
     saved = dict(chat.get("todos") or {})
     team = chat.get("team") or {}
     members = [member["id"] for member in team.get("members", [])]
+    if "teamTasks" in chat:
+        chat["teamTasks"] = [{**row, "owner": row.get("owner", "") if row.get("owner") in members else ""}
+                             for row in tasks(chat)]
     was, now = _team_on(previous), team.get("enabled") is True
     if members and was != now:
         source, target = (MAIN, members[0]) if now else (members[0], MAIN)
@@ -261,6 +327,8 @@ def describe(name, args):
         raise ValueError("Invalid to-do tool.")
     if name == "todo_read":
         return {"summary": "Read to-dos", "requires_approval": False}
+    if name in {"team_tasks_read", "team_task_update"}:
+        return {"summary": "Read Team tasks" if name == "team_tasks_read" else "Update Team task", "requires_approval": False}
     return {"summary": "Update shared to-dos" if args.get("list") == "shared" else "Update to-dos", "requires_approval": False}
 
 
@@ -276,6 +344,32 @@ def execute(service, name, args):
     from chat_runtime import now
     describe(name, args)
     team = service.role == "team"
+    if name in {"team_tasks_read", "team_task_update"}:
+        if not team: raise ValueError("Team tasks are available only to Team members.")
+        allowed = set() if name == "team_tasks_read" else {"task_id", "title", "status"}
+        if set(args) - allowed: raise ValueError("Unexpected Team task arguments.")
+        owner = service.team_parent
+        with owner._mutex:
+            if name == "team_tasks_read":
+                roster = {member["id"]: member["name"] for member in owner.chat["team"]["members"]}
+                rows = tasks(owner.chat)
+                text = "Team tasks (reference data):\n" + "\n".join(
+                    f"- {row['id']} [{row['status']}] {row['title']} — {roster.get(row.get('owner'), 'unassigned')}"
+                    for row in rows) if rows else "No Team tasks."
+            else:
+                previous = copy.deepcopy(owner.chat.get("teamTasks"))
+                row = task_update(owner.chat, member=service.team_member, task_id=args.get("task_id"),
+                                  title=args.get("title"), status=args.get("status"))
+                try:
+                    owner.save()
+                except Exception:
+                    if previous is None: owner.chat.pop("teamTasks", None)
+                    else: owner.chat["teamTasks"] = previous
+                    raise
+                publish_tasks(owner)
+                text = f"Saved task {row['id']}: {row['title']} [{row['status']}]."
+        return {"content": [{"type": "text", "text": text}], "is_error": False,
+                "changed_files": [], "summary": "Read Team tasks" if name == "team_tasks_read" else "Updated Team task"}
     if service.role not in {"parent", "team"}:
         raise ValueError("To-do tools are available only in the main conversation.")
     if name == "todo_read" and not team:

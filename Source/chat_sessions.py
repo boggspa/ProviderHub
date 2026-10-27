@@ -21,6 +21,7 @@ from chat_workspaces import ChatWorkspaces
 
 MAX_ACTIVE_CHATS = 16
 MAX_ACTIVE_REQUESTS = 16
+MAX_REMOTE_EVENTS = 256
 # Model requests share the gateway's 16-slot admission budget. Waiting for
 # user input or local work does not occupy a provider-request slot.
 HEADER_KEYS = ("id", "title", "updated", "route", "account", "workspace", "effort", "approvalMode", "scope", "status")
@@ -175,11 +176,20 @@ class ChatHost:
         self.dispatch_event = dispatch_event
         self.remote = None
         self.remote_host = None
-        self.remote_overflow = False
+        self._remote_delivery_lock = threading.Lock()
+        self._remote_events = []
+        self._remote_resync = False
+        self._remote_scheduled = False
+        self._remote_generation = 0
+        self._remote_retry = None
+        self._remote_refresh_thread = None
         self.client_factory = child_factory or (lambda: GatewayClient(transport.root))
         self.runner_type, self.max_active = runner, max_active
         self._metadata = threading.RLock()
+        self._search_generation = 0
         self._output = threading.RLock()
+        self._remote_browser_lock = threading.RLock()
+        self._remote_browser_pending = set()
         self._requests = ResourceGate(MAX_ACTIVE_REQUESTS)
         self._writers = {}
         self.processes = ProcessRegistry(self.publish_processes)
@@ -205,23 +215,119 @@ class ChatHost:
 
     def emit(self, event):
         self._emit(event)
-        if self.remote is not None and event.get("event") != "remote":
-            # Never take a network lock while a chat/output lock is held. All
-            # remote state and commands are reconciled on the main queue.
-            saved = copy.deepcopy(event)
-            def publish():
-                if self.remote is None: return
-                if self.remote_overflow:
-                    self.remote_overflow = False
-                    self.remote.stop()
-                    self.publish_remote("Remote updates fell behind. Reconnect to refresh the device.")
-                    return
-                try: self.remote.publish(saved)
-                except Exception as exc:
-                    self.remote.stop()
-                    self.publish_remote("Remote access stopped: " + str(exc)[:300])
-            if self.dispatch_event is not None and not self.dispatch_event(publish):
-                self.remote_overflow = True
+        if self.dispatch_event is None or self.remote is None or self.remote.listener is None or event.get("event") == "remote":
+            return
+        # A refresh runs on the serial owner and updates the bridge views before
+        # sending their snapshots. Other producer threads still queue normally.
+        if self._remote_refresh_thread == threading.get_ident():
+            self.remote.publish(event)
+            return
+        # One scheduled callback covers the whole bounded batch. Never take a
+        # network lock while a producer holds a chat/output lock.
+        with self._remote_delivery_lock:
+            if self._remote_refresh_thread is not None:
+                # The snapshot may already include this producer's update.
+                # Refresh again instead of replaying an older entry over it.
+                self._remote_events.clear()
+                self._remote_resync = True
+            elif not self._remote_resync:
+                if len(self._remote_events) >= MAX_REMOTE_EVENTS:
+                    self._remote_events.clear()
+                    self._remote_resync = True
+                else:
+                    self._remote_events.append(copy.deepcopy(event))
+            if self._remote_scheduled:
+                return
+            self._remote_scheduled = True
+            generation = self._remote_generation
+        self._schedule_remote_delivery(generation)
+
+    def _cancel_remote_delivery(self):
+        with self._remote_delivery_lock:
+            self._remote_generation += 1
+            self._remote_events.clear()
+            self._remote_resync = self._remote_scheduled = False
+            retry, self._remote_retry = self._remote_retry, None
+        if retry is not None:
+            retry.cancel()
+
+    def _schedule_remote_delivery(self, generation, *, delay=0):
+        with self._remote_delivery_lock:
+            if generation != self._remote_generation or not self._remote_scheduled:
+                return
+            if self.closing or self.remote is None or self.remote.listener is None:
+                return
+            if delay:
+                retry = threading.Timer(delay, lambda: self._schedule_remote_delivery(generation))
+                retry.daemon = True
+                self._remote_retry = retry
+                retry.start()
+                return
+        callback = lambda: self._deliver_remote_events(generation)
+        if self.dispatch_event is not None and self.dispatch_event(callback):
+            return
+        with self._remote_delivery_lock:
+            if generation != self._remote_generation:
+                return
+            self._remote_events.clear()
+            self._remote_resync = True
+        # A busy queue can become idle without another token arriving. Retry
+        # independently until delivery resumes or explicit stop cancels the lease.
+        self._schedule_remote_delivery(generation, delay=.1)
+
+    def _deliver_remote_events(self, generation):
+        with self._remote_delivery_lock:
+            if generation != self._remote_generation:
+                return
+            events, self._remote_events = self._remote_events, []
+            resync, self._remote_resync = self._remote_resync, False
+        failed = False
+        try:
+            if self.closing or self.remote is None or self.remote.listener is None:
+                return
+            if resync:
+                self.remote.resync(self._refresh_remote_state)
+                self.publish_remote()
+            else:
+                for event in events:
+                    self.remote.publish(event)
+        except Exception as exc:
+            failed = True
+            with self._remote_delivery_lock:
+                self._remote_events.clear()
+                self._remote_resync = True
+            self.publish_remote("Remote updates are catching up; retrying automatically: " + str(exc)[:300])
+        finally:
+            with self._remote_delivery_lock:
+                pending = bool(self._remote_events or self._remote_resync)
+                if not pending:
+                    self._remote_scheduled = False
+            if pending:
+                self._schedule_remote_delivery(generation, delay=.25 if failed else 0)
+
+    def _refresh_remote_state(self):
+        with self._remote_delivery_lock:
+            self._remote_refresh_thread = threading.get_ident()
+            self._remote_events.clear()
+        try:
+            self._last_summaries = None
+            self.publish_summaries()
+            self.publish_workspaces()
+            self.capabilities.publish()
+            for client, chat in self.remote.selections.items():
+                if chat not in self.headers:
+                    self.subscriptions.pop(client, None)
+                    continue
+                self.handle({"command": "subscribe", "client": client, "chats": [chat]})
+                service = self.sessions[chat]
+                with service._mutex:
+                    self.emit({"event": "approval", "chat": chat, "approval": copy.deepcopy(service.approval)})
+                self.publish_processes(chat)
+                service._last_remote_activity = None
+                self.publish_remote_activity(service)
+        finally:
+            with self._remote_delivery_lock:
+                self._remote_refresh_thread = None
 
     def publish_remote(self, notice=""):
         status = self.remote.status() if self.remote is not None else {"listening": False, "connected": False}
@@ -239,10 +345,12 @@ class ChatHost:
                 from chat_remote import RemoteServer
                 self.remote = RemoteServer(self.handle, self.store.root / "remote.json", dispatch=self.dispatch, detach=self.detach_client)
             self.remote.start(host=command.get("host"), port=command.get("port", 8765))
+            self._cancel_remote_delivery()
             self.remote_host = command.get("host")
             self._last_summaries = None
             self.publish_summaries()
         elif action == "remote_stop" and self.remote is not None:
+            self._cancel_remote_delivery()
             self.remote.stop()
             self.subscriptions.pop("remote", None)
         elif action == "remote_confirm":
@@ -555,6 +663,49 @@ the same publication `initialize` and `select` perform, ending with `ready`.
             else: self.stop_all()
             return
         if self.closing: raise ValueError("Chat is closing.")
+        if action == "search_transcripts":
+            query, request = command.get("query"), command.get("request")
+            if not isinstance(query, str) or len(query) > 256 or not isinstance(request, str) or not request or len(request) > 128:
+                raise ValueError("Provide a search query and request ID.")
+            self._search_generation += 1
+            generation = self._search_generation
+            if not query.strip(): return
+            needle = query.strip().casefold()
+            headers = self.session_store.headers()
+            def search():
+                results = []
+                for header in headers:
+                    if self.closing or generation != self._search_generation: return
+                    identifier = header["id"]
+                    service = self.sessions.get(identifier)
+                    try:
+                        if service is not None:
+                            with service._mutex:
+                                entries = [{key: row.get(key) for key in ("id", "text", "summary", "detail", "memberName")}
+                                           for row in service.chat["entries"] if isinstance(row, dict)]
+                        else:
+                            entries = self.store.load(identifier)["entries"]
+                    except (OSError, ValueError, KeyError):
+                        continue
+                    if needle in (header.get("title") or "").casefold():
+                        results.append({"chat": identifier, "entry": "", "title": header.get("title") or "Untitled", "excerpt": "Title match"})
+                        if len(results) >= 200: break
+                    for entry in entries:
+                        for field in ("text", "summary", "detail", "memberName"):
+                            value = entry.get(field)
+                            if not isinstance(value, str): continue
+                            index = value.casefold().find(needle)
+                            if index >= 0:
+                                excerpt = " ".join(value[max(0, index - 50):index + len(query) + 120].split())
+                                results.append({"chat": identifier, "entry": entry.get("id", ""), "title": header.get("title") or "Untitled", "excerpt": excerpt})
+                                break
+                        if len(results) >= 200: break
+                    if len(results) >= 200: break
+                with self._output:
+                    if generation == self._search_generation:
+                        self.emit({"event": "transcript_search", "request": request, "results": results, "limited": len(results) >= 200})
+            threading.Thread(target=search, name="transcript-search", daemon=True).start()
+            return
         if self.remote_command(command): return
         if self.capabilities.handle(command): return
         from chat_remote_actions import handle as remote_action
@@ -602,17 +753,28 @@ the same publication `initialize` and `select` perform, ending with `ready`.
                 publish_turn_changes(self, service)
                 return
             tool, arguments = command.get("tool"), command.get("arguments", {})
+            # Older companions use browser_open as their Go button. Preserve
+            # that behaviour for a single tab; multi-tab actions still fail
+            # closed if the old client cannot name its intended tab.
+            if tool == "browser_open" and "new_tab" not in arguments and "tab_id" not in arguments:
+                arguments = {**arguments, "new_tab": False}
             preview = tool == "browser_remote_preview"
+            # Phone actions are direct human controls, not a model service's
+            # implicit tab binding. Check the capability and validate the
+            # exact arguments that will be sent to the native surface.
+            self.capabilities.describe(service, "browser_list", {})
+            from chat_browser import describe as describe_browser
             if preview:
-                if arguments: raise ValueError("Preview takes no arguments.")
-                self.capabilities.describe(service, "browser_list", {})
-            else: self.capabilities.describe(service, tool, arguments)
+                if set(arguments) - {"tab_id"}: raise ValueError("Preview only accepts a tab ID.")
+                describe_browser("browser_screenshot", arguments)
+            else: describe_browser(tool, arguments)
             browser_generation = self.capabilities.native.generation()
-            pending = getattr(self, "_remote_browser_pending", set())
-            if identifier in pending: raise ValueError("Wait for this browser action to finish.")
-            self._remote_browser_pending = pending
-            pending.add(identifier)
+            pending = self._remote_browser_pending
+            with self._remote_browser_lock:
+                if identifier in pending: raise ValueError("Wait for this browser action to finish.")
+                pending.add(identifier)
             def browse():
+                output, image = None, None
                 try:
                     # These are direct human controls, independent of a model's
                     # Stop token. Still use the same validated native surface
@@ -621,8 +783,7 @@ the same publication `initialize` and `select` perform, ending with `ready`.
                     details, text = {}, []
                     for block in result.get("content", []):
                         if preview and block.get("type") == "image":
-                            self.emit({"event": "remote_browser_preview", "chat": identifier,
-                                       "image": (block.get("source") or {}).get("data")})
+                            image = (block.get("source") or {}).get("data")
                         if block.get("type") != "text": continue
                         value = block.get("text", "")
                         try:
@@ -630,11 +791,21 @@ the same publication `initialize` and `select` perform, ending with `ready`.
                             if isinstance(parsed, dict): details.update(parsed)
                             else: text.append(value)
                         except (ValueError, TypeError): text.append(value)
-                    self.emit({"event": "remote_browser", "chat": identifier, "summary": result.get("summary", ""),
-                               "text": "\n".join(text), "details": details, "isError": bool(result.get("is_error"))})
+                    output = {"event": "remote_browser", "chat": identifier, "request": command.get("request"),
+                              "tool": tool, "summary": result.get("summary", ""), "text": "\n".join(text),
+                              "details": details, "isError": bool(result.get("is_error"))}
                 except Exception as exc:
-                    self.emit({"event": "remote_browser", "chat": identifier, "summary": "Browser unavailable", "text": str(exc), "isError": True})
-                finally: pending.discard(identifier)
+                    output = {"event": "remote_browser", "chat": identifier, "request": command.get("request"),
+                              "tool": tool, "summary": "Browser unavailable", "text": str(exc), "isError": True}
+                with self._remote_browser_lock:
+                    try:
+                        if image is not None:
+                            self.emit({"event": "remote_browser_preview", "chat": identifier, "image": image,
+                                       "request": command.get("request"),
+                                       "tab_id": (details.get("tab_id") or arguments.get("tab_id")) if arguments.get("tab_id") else None,
+                                       "navigation_id": details.get("navigation_id")})
+                        if output is not None: self.emit(output)
+                    finally: pending.discard(identifier)
             threading.Thread(target=browse, name="remote-browser", daemon=True).start()
             return
         self.prune(keep=command.get("chat") or command.get("id"))
@@ -715,6 +886,41 @@ the same publication `initialize` and `select` perform, ending with `ready`.
                 self.emit({"event": "selected", "id": None, "entries": [], "busy": False, "approval": None})
             return
         service = self.session(identifier)
+        if action == "team_task_user":
+            import chat_todos
+            with service._mutex:
+                previous = copy.deepcopy(service.chat.get("teamTasks"))
+                try:
+                    team = service.chat.get("team") or {}
+                    members = {member["id"] for member in team.get("members", [])}
+                    owner = command.get("owner", "")
+                    if not team.get("enabled") or not isinstance(owner, str) or owner and owner not in members:
+                        raise ValueError("Choose a current Team member.")
+                    task_id = command.get("task")
+                    if task_id is None:
+                        title = chat_todos._clean(command.get("title"), "A task's title")
+                        rows = chat_todos.tasks(service.chat)
+                        if len(rows) >= 100: raise ValueError("The Team task list is full.")
+                        if any(row["title"].casefold() == title.casefold() and row["status"] != "completed" for row in rows):
+                            raise ValueError("That task already exists. Open its chip to reassign it.")
+                        import uuid
+                        service.chat["teamTasks"] = [*rows, {"id": uuid.uuid4().hex, "title": title, "owner": owner, "status": "pending"}]
+                    else:
+                        row = next((row for row in chat_todos.tasks(service.chat) if row["id"] == task_id), None)
+                        if row is None or command.get("expectedOwner") != row.get("owner", ""):
+                            raise ValueError("This task changed. Try again with the latest assignment.")
+                        status = command.get("status", row["status"])
+                        if status not in chat_todos.TASK_STATUSES: raise ValueError("Choose a valid task status.")
+                        row.update(owner=owner, status=status)
+                    service.save()
+                except Exception as exc:
+                    if previous is None: service.chat.pop("teamTasks", None)
+                    else: service.chat["teamTasks"] = previous
+                    if not isinstance(exc, ValueError): raise
+                    chat_todos.publish_tasks(service, str(exc))
+                else:
+                    chat_todos.publish_tasks(service)
+            return
         if action in {"send", "retry"} and service.busy:
             raise ValueError("This chat is already running. Use an update to interrupt it.")
         if action in {"send", "retry", "steer", "team_resume", "team_member_start", "answer_question"} and not service.busy:
@@ -795,6 +1001,7 @@ the same publication `initialize` and `select` perform, ending with `ready`.
             # because a later shutdown call returns early.
             self.processes.shutdown()
             self.capabilities.close()
+            self._cancel_remote_delivery()
             if self.remote is not None: self.remote.stop()
             if hasattr(self, "remote_files"): self.remote_files.close()
         deadline = time.monotonic() + timeout

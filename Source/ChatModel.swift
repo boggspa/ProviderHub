@@ -148,6 +148,8 @@ private struct ChatSessionState {
     var teamRequest: String?
     var todos: ChatTodoSnapshot?
     var todosNotice = ""
+    var teamTasks: [ChatTeamTask] = []
+    var teamTasksNotice = ""
     var inspectedAgentID: String?
     var sideChat: ChatSide?
     var sideDraft = ""
@@ -183,6 +185,11 @@ struct ChatJumpRequest: Equatable {
     var token: Int
 }
 
+struct ChatSearchResult: Decodable, Identifiable {
+    var chat: String; var entry: String; var title: String; var excerpt: String
+    var id: String { chat + ":" + entry }
+}
+
 @MainActor
 final class ChatModel: ObservableObject {
     @Published var chats: [ChatSummary] = []
@@ -195,6 +202,11 @@ final class ChatModel: ObservableObject {
     @Published var connected = false
     /// A transcript row the activity strip asked the window to show.
     @Published var jumpRequest: ChatJumpRequest?
+    @Published private(set) var searchResults: [ChatSearchResult] = []
+    @Published private(set) var searchPending = false
+    @Published private(set) var searchLimited = false
+    private var searchRequest: String?
+    private var pendingSearchJump: (chat: String, entry: String)?
     @Published private(set) var webSearchEnabled: Bool
     @Published private(set) var browserUseEnabled = false
     @Published private(set) var pluginStatus: [[String: Any]] = []
@@ -229,6 +241,7 @@ final class ChatModel: ObservableObject {
     // own selection. A layout change can never retarget a pane's composer.
     private var storage = ChatSessionStorage()
     private weak var paneOwner: ChatModel?
+    var rootModel: ChatModel { paneOwner ?? self }
     private var paneModels: [String: ChatModel] = [:]
     private var observedChats: Set<String> = []
     private var sessions: [String: ChatSessionState] {
@@ -290,6 +303,8 @@ final class ChatModel: ObservableObject {
     var teamRequest: String? { get { value(\.teamRequest) } set { update(\.teamRequest, newValue, background: true) } }
     var todos: ChatTodoSnapshot? { get { value(\.todos) } set { update(\.todos, newValue) } }
     var todosNotice: String { get { value(\.todosNotice) } set { update(\.todosNotice, newValue) } }
+    var teamTasks: [ChatTeamTask] { get { value(\.teamTasks) } set { update(\.teamTasks, newValue) } }
+    var teamTasksNotice: String { get { value(\.teamTasksNotice) } set { update(\.teamTasksNotice, newValue) } }
     var inspectedAgentID: String? { get { value(\.inspectedAgentID) } set { update(\.inspectedAgentID, newValue) } }
     var sideChat: ChatSide? { get { value(\.sideChat) } set { update(\.sideChat, newValue, background: true) } }
     var sideDraft: String { get { value(\.sideDraft) } set { update(\.sideDraft, newValue) } }
@@ -508,11 +523,37 @@ final class ChatModel: ObservableObject {
     }
     func select(_ id: String) {
         if let paneOwner { paneOwner.select(id); return }
+        if pendingSearchJump?.chat != id { pendingSearchJump = nil }
         pendingSelection = id
         let request = UUID().uuidString
         pendingSelectionRequest = request
         if !write(["command": "select", "id": id, "chat": id, "request": request]) {
             pendingSelection = nil; pendingSelectionRequest = nil
+        }
+    }
+    func searchTranscripts(_ query: String) {
+        let query = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        searchResults = []; searchLimited = false
+        guard connected else { searchRequest = nil; searchPending = false; return }
+        if query.isEmpty {
+            searchRequest = nil; searchPending = false
+            write(["command": "search_transcripts", "query": "", "request": UUID().uuidString])
+            return
+        }
+        let request = UUID().uuidString
+        searchRequest = request; searchPending = true
+        if !write(["command": "search_transcripts", "query": String(query.prefix(256)), "request": request]) {
+            searchRequest = nil; searchPending = false
+        }
+    }
+    func openSearchResult(_ result: ChatSearchResult) {
+        guard !result.entry.isEmpty else { select(result.chat); return }
+        if result.chat == selectedID {
+            let pane = paneModel(for: result.chat)
+            pane.jumpRequest = ChatJumpRequest(id: result.entry, token: (pane.jumpRequest?.token ?? 0) + 1)
+        } else {
+            pendingSearchJump = (result.chat, result.entry)
+            select(result.chat)
         }
     }
     func send() {
@@ -765,6 +806,11 @@ final class ChatModel: ObservableObject {
                 }
                 let remaining = Set(chats.map(\.id))
                 for id in previous.keys where !remaining.contains(id) && !isActive(id) { sessions[id] = nil; sideRequests[id] = nil }
+            case "transcript_search":
+                guard event["request"] as? String == searchRequest else { return }
+                searchResults = (try? payload([ChatSearchResult].self, "results")) ?? []
+                searchLimited = event["limited"] as? Bool ?? false
+                searchPending = false
             case "snapshot":
                 guard let id = event["chat"] as? String, isObserved(id) else { return }
                 withChat(id) { applySnapshot(event) }
@@ -772,6 +818,7 @@ final class ChatModel: ObservableObject {
                 guard event["id"] as? String == pendingSelection,
                       event["request"] as? String == pendingSelectionRequest else { return }
                 pendingSelection = nil; pendingSelectionRequest = nil
+                pendingSearchJump = nil
                 notice = event["message"] as? String ?? "Could not open that chat."
             case "selected":
                 let id = event["id"] as? String
@@ -783,6 +830,11 @@ final class ChatModel: ObservableObject {
                     if let selectedID, !observedChats.contains(selectedID) { sessions[selectedID]?.entries = [] }
                 }
                 selectedID = id; applySnapshot(event)
+                if let pending = pendingSearchJump, pending.chat == id {
+                    pendingSearchJump = nil
+                    let pane = paneModel(for: pending.chat)
+                    pane.jumpRequest = ChatJumpRequest(id: pending.entry, token: (pane.jumpRequest?.token ?? 0) + 1)
+                }
             default:
                 if let chat = event["chat"] as? String { withChat(chat) { consumeChatEvent(event) } }
                 else if ["error", "notice", "rejected"].contains(event["event"] as? String ?? "") {

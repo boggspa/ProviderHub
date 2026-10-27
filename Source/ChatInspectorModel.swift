@@ -35,6 +35,13 @@ struct ChatTodoSnapshot: Decodable, Equatable {
     var isEmpty: Bool { all.allSatisfy { $0.items.isEmpty } }
 }
 
+struct ChatTeamTask: Decodable, Identifiable, Equatable {
+    var id: String
+    var title: String
+    var owner: String
+    var status: String
+}
+
 struct ChatChange: Decodable, Identifiable {
     var path: String
     var oldPath: String?
@@ -261,7 +268,7 @@ struct ChatTeamRunUsage: Decodable {
 }
 struct ChatTeamSnapshot: Decodable {
     /// The runtime's MAX_MEMBERS (chat_team.py), including the chat's own model.
-    static let maxMembers = 8
+    static let maxMembers = 12
     var enabled: Bool; var status: String; var activeMemberID: String?; var members: [ChatTeamMember]
     var activeMemberIDs: [String]?
     var execution: ChatTeamExecution?; var runUsage: ChatTeamRunUsage?; var limitReason: String?
@@ -630,6 +637,9 @@ struct ChatTeamSnapshot: Decodable {
             let snapshot = decoded(event["todos"], as: ChatTodoSnapshot.self)
             if snapshot != todos { todos = snapshot }
             todosNotice = event["notice"] as? String ?? ""
+        case "team_tasks":
+            teamTasks = decoded(event["tasks"], as: [ChatTeamTask].self) ?? []
+            teamTasksNotice = event["notice"] as? String ?? ""
         default: break
         }
     }

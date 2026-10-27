@@ -38,6 +38,24 @@ capacity unknown. No model-name heuristic, cross-provider limit, or UI patch
 is used. A refreshed native catalogue is picked up on the next provider
 catalogue refresh.
 
+### GPT-6.1 Terra
+
+The Codex CLI provider discovers `gpt-6.1-terra` from the native runtime's
+catalogue; Hub does not seed it as an always-available model. OpenAI requires
+[Codex CLI 0.159.0 or newer](https://learn.chatgpt.com/docs/models). Context,
+input modalities and reasoning efforts come from the installed runtime's
+model card. Hub supports its documented
+[Fast control](https://learn.chatgpt.com/docs/agent-configuration/speed),
+alongside Standard; it does not assume an Ultrafast tier.
+
+A native cache predating the rollout can omit Terra. When Hub neutralizes
+a desktop catalogue override or pins code-mode cards to direct tools, it
+lists from that cache, so Hub's Refresh alone cannot fetch newer native
+cards. Refresh the account's native Codex catalogue first, then refresh
+that account in Hub and enable Terra for the desired picker. Account
+availability is established by a completed inference, not by a listing.
+Existing model selections and chats keep their current model IDs.
+
 ### Runtime updates and overflow recovery
 
 The desktop loads Provider Hub's projected catalogue separately from the

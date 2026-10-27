@@ -61,7 +61,7 @@ extension CompanionModel {
         switch tab {
         case .changes: control("inspect_git")
         case .processes: control("processes")
-        case .browser: control("remote_browser", ["tool": .string("browser_observe"), "arguments": .object(["max_bytes": .number(10000), "depth": .number(3)])])
+        case .browser: control("remote_browser", ["tool": .string("browser_list"), "arguments": .object([:])])
         default: control("remote_inspect")
         }
     }

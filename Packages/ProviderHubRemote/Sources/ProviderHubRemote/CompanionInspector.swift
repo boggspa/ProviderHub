@@ -16,6 +16,15 @@ struct CompanionInspector: View {
     @State private var sidePicker = false
     @State private var address = ""
     @State private var browserInput = ""
+    @State private var browserTabs: [RemoteValue] = []
+    @State private var browserTab = ""
+    @State private var browserResult: RemoteValue = .null
+    @State private var browserImage = ""
+    @State private var browserRequest: String?
+    @State private var browserTool = ""
+    @State private var browserNotice = ""
+    @State private var selectNewBrowserTab = false
+    @State private var browserOwnerChat: String?
     @State private var closeSide = false
     @State private var sideRequest: String?
     @State private var sentSideDraft = ""
@@ -25,7 +34,7 @@ struct CompanionInspector: View {
     @AppStorage("companionSurface") private var surfaceStyle = "solid"
 
     private var side: RemoteValue { model.store.controls["side"] ?? .null }
-    private var browser: RemoteValue { model.store.controls["browser"] ?? .null }
+    private var browser: RemoteValue { browserResult }
     private var connected: Bool { model.isConnected && model.controlSurfaceAvailable }
 
     var body: some View {
@@ -47,7 +56,7 @@ struct CompanionInspector: View {
                 if tab == .agents {
                     Button(model.members.isEmpty ? "Set up" : "Edit") { editingTeam = true }.controlSize(.small).disabled(!connected)
                 } else {
-                    Button { model.refreshInspector(tab) } label: { Image(systemName: "arrow.clockwise").frame(width: 32, height: 32) }
+                    Button { if tab == .browser { refreshBrowserTabs() } else { model.refreshInspector(tab) } } label: { Image(systemName: "arrow.clockwise").frame(width: 32, height: 32) }
                         .buttonStyle(.plain).accessibilityLabel("Refresh \(tab.title)")
                 }
             }.padding(.horizontal, 14).padding(.top, 10)
@@ -74,8 +83,12 @@ struct CompanionInspector: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(CompanionTheme.pane(.inspector, surfaceStyle: surfaceStyle)).foregroundStyle(CompanionTheme.ink)
         .disabled(!model.isConnected)
-        .task(id: "\(model.selectedChatID ?? "")-\(tab.rawValue)") {
-            model.refreshInspector(tab)
+        .task(id: "\(model.selectedChatID ?? "")-\(model.store.selectedID ?? "")-\(tab.rawValue)") {
+            if browserOwnerChat != model.selectedChatID {
+                resetBrowser()
+                browserOwnerChat = model.selectedChatID
+            }
+            if tab == .browser { refreshBrowserTabsWhenReady() } else { model.refreshInspector(tab) }
             while !Task.isCancelled && (tab == .processes || tab == .changes) {
                 do { try await Task.sleep(nanoseconds: 2_500_000_000) } catch { return }
                 if !Task.isCancelled { model.refreshInspector(tab) }
@@ -86,8 +99,32 @@ struct CompanionInspector: View {
                 if ok && sideDraft == sentSideDraft { sideDraft = "" }
                 sideRequest = nil
             }
+            if let request = browserRequest, acks[request] == false {
+                browserRequest = nil
+                browserNotice = "The Mac could not start this browser action. Refresh and try again."
+            }
         }
-        .onChange(of: model.isConnected) { _, connected in if !connected { sideRequest = nil } }
+        .onChange(of: model.isConnected) { _, connected in
+            if !connected { sideRequest = nil; resetBrowser(); browserOwnerChat = nil }
+            else if tab == .browser {
+                browserOwnerChat = model.selectedChatID
+                refreshBrowserTabsWhenReady()
+            }
+        }
+        .onChange(of: model.store.selectedID) { _, selected in
+            if selected != browserOwnerChat {
+                resetBrowser()
+                browserOwnerChat = selected
+            }
+            if tab == .browser { refreshBrowserTabsWhenReady() }
+        }
+        .onChange(of: model.store.controls["browserTabs"]) { _, value in receiveBrowserTabs(value) }
+        .onChange(of: model.store.controls["browser"]) { _, value in receiveBrowserResult(value) }
+        .onChange(of: model.store.controls["browserPreview"]) { _, value in
+            guard let value, value["request"].text == browserRequest,
+                  value["tab_id"].text == browserTab, browserTool == "browser_remote_preview" else { return }
+            browserImage = value["image"].text
+        }
         .sheet(isPresented: $editingTeam) { CompanionTeamEditor(model: model) }
         .sheet(isPresented: $blackboard) { CompanionBlackboard(model: model) }
         .sheet(isPresented: $sidePicker) {
@@ -104,7 +141,7 @@ struct CompanionInspector: View {
 
     private var teamPane: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text(model.team["execution"]["mode"].text == "contribution" ? "One contribution each. Members can continue when more work is needed." : "Up to eight members working independently on the same task.")
+            Text(model.team["execution"]["mode"].text == "contribution" ? "One contribution each. Members can continue when more work is needed." : "Up to twelve members working independently on the same task.")
                 .font(.system(size: 11.5)).foregroundStyle(CompanionTheme.secondary)
             if !model.members.isEmpty {
                 if !model.team["enabled"].flag { Text("Team is off").font(.system(size: 11.5)).foregroundStyle(CompanionTheme.secondary) }
@@ -125,7 +162,7 @@ struct CompanionInspector: View {
                     Button("Resume Team") { model.control("team_resume") }.buttonStyle(.bordered)
                 }
             } else {
-                Text("Add up to eight named models. The same Team runs on your Mac and appears in this inspector.")
+                Text("Add up to twelve named models. The same Team runs on your Mac and appears in this inspector.")
                     .font(.callout).foregroundStyle(CompanionTheme.secondary)
             }
             if let todos = CompanionTodoLists(model.store.controls["todos"]) { CompanionTodos(model: model, lists: todos) }
@@ -207,27 +244,68 @@ struct CompanionInspector: View {
     private var browserPane: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("The Mac’s shared browser session").font(.caption).foregroundStyle(CompanionTheme.secondary)
-            if let data = Data(base64Encoded: model.store.controls["browserPreview"]?.text ?? "") {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 6) {
+                    ForEach(browserTabs, id: \.self) { item in
+                        let id = item["tab_id"].text
+                        HStack(spacing: 4) {
+                            Button {
+                                clearBrowserPage()
+                                browserAction("browser_select", ["tab_id": .string(id)])
+                            } label: {
+                                Text(item["title"].text.isEmpty ? (item["url"].text.isEmpty ? "New tab" : item["url"].text) : item["title"].text)
+                                    .lineLimit(1).frame(maxWidth: 130)
+                            }.buttonStyle(.plain).accessibilityLabel("Select browser tab \(item["title"].text)")
+                            Button {
+                                clearBrowserPage()
+                                browserAction("browser_close", ["tab_id": .string(id)])
+                            } label: { Image(systemName: "xmark").font(.caption) }
+                                .buttonStyle(.plain).accessibilityLabel("Close browser tab \(item["title"].text)")
+                        }.padding(8).background(id == browserTab ? CompanionTheme.cardFill : CompanionTheme.raised,
+                                               in: RoundedRectangle(cornerRadius: 6))
+                    }
+                }
+            }.disabled(browserRequest != nil)
+            if let data = Data(base64Encoded: browserImage) {
                 #if os(iOS)
                 if let image = UIImage(data: data) { Image(uiImage: image).resizable().scaledToFit().clipShape(RoundedRectangle(cornerRadius: 8)) }
                 #else
                 if let image = NSImage(data: data) { Image(nsImage: image).resizable().scaledToFit().clipShape(RoundedRectangle(cornerRadius: 8)) }
                 #endif
             }
-            Button("Refresh Mac page preview") { browserAction("browser_remote_preview", [:]) }
+            Button("Refresh Mac page preview") {
+                browserImage = ""
+                browserAction("browser_remote_preview", ["tab_id": .string(browserTab)])
+            }.disabled(browserTab.isEmpty || browserRequest != nil)
             if model.store.controls["browserEnabled"]?.flag != true {
                 Text("Enable Browser Use in the Mac’s Plugins settings and keep its Chat window open.").font(.callout)
             }
             HStack {
                 TextField("https://…", text: $address).textFieldStyle(.roundedBorder)
-                Button("Go") { browserAction("browser_open", ["url": .string(address)]) }.disabled(address.isEmpty)
+                Button("Go") {
+                    clearBrowserPage()
+                    if browserTab.isEmpty {
+                        selectNewBrowserTab = true
+                        browserAction("browser_open", ["url": .string(address), "new_tab": .bool(true)])
+                    } else {
+                        browserAction("browser_navigate", ["url": .string(address), "tab_id": .string(browserTab)])
+                    }
+                }.disabled(address.isEmpty || browserRequest != nil)
+                Button("New tab") {
+                    selectNewBrowserTab = true
+                    browserAction("browser_new", [:])
+                }.disabled(browserRequest != nil)
             }
             if !browser["details"]["title"].text.isEmpty { Text(browser["details"]["title"].text).font(.headline) }
             Text(browser["details"]["url"].text).font(.caption).textSelection(.enabled)
             if !browser["text"].text.isEmpty { Text(browser["text"].text).font(.caption).textSelection(.enabled) }
             TextField("Text to enter into a page field", text: $browserInput).textFieldStyle(.roundedBorder)
             ForEach(browser["details"]["nodes"].rows, id: \.self) { node in browserNode(node) }
-            Button("Observe page") { model.refreshInspector(.browser) }
+            Button("Observe page") {
+                browserResult = .null
+                browserAction("browser_observe", ["tab_id": .string(browserTab), "max_bytes": .number(10000), "depth": .number(3)])
+            }.disabled(browserTab.isEmpty || browserRequest != nil)
+            if !browserNotice.isEmpty { Text(browserNotice).font(.caption).foregroundStyle(CompanionTheme.secondary) }
         }
     }
 
@@ -237,9 +315,9 @@ struct CompanionInspector: View {
                 Text(node["name"].text.isEmpty ? node["text"].text : node["name"].text).font(.caption).textSelection(.enabled)
                 Spacer()
                 if !node["ref"].text.isEmpty {
-                    Button("Click") { act(node, kind: "click") }
+                    Button("Click") { act(node, kind: "click") }.disabled(browserRequest != nil)
                     if ["input", "textarea", "select"].contains(node["tag"].text) || ["textbox", "searchbox", "combobox"].contains(node["role"].text) {
-                        Button("Fill") { act(node, kind: "fill") }
+                        Button("Fill") { act(node, kind: "fill") }.disabled(browserRequest != nil)
                     }
                 }
             }
@@ -247,12 +325,68 @@ struct CompanionInspector: View {
         }.padding(.leading, 8))
     }
     private func browserAction(_ tool: String, _ arguments: [String: RemoteValue]) {
-        model.control("remote_browser", ["tool": .string(tool), "arguments": .object(arguments)])
+        guard browserRequest == nil else { return }
+        browserTool = tool
+        browserNotice = ""
+        browserRequest = model.control("remote_browser", ["tool": .string(tool), "arguments": .object(arguments)])
     }
     private func act(_ node: RemoteValue, kind: String) {
+        guard !browserTab.isEmpty, browser["details"]["tab_id"].text == browserTab,
+              !browser["details"]["snapshot_id"].text.isEmpty else { return }
         var action = ["kind": RemoteValue.string(kind == "fill" ? "type" : kind), "ref": node["ref"]]
         if kind == "fill" { action["value"] = .string(browserInput) }
-        browserAction("browser_act", ["snapshot_id": browser["details"]["snapshot_id"], "actions": .array([.object(action)])])
+        browserAction("browser_act", ["tab_id": .string(browserTab), "snapshot_id": browser["details"]["snapshot_id"], "actions": .array([.object(action)])])
+        browserResult = .null
+    }
+
+    private func clearBrowserPage() { browserResult = .null; browserImage = "" }
+
+    private func resetBrowser() {
+        browserTabs = []; browserTab = ""; browserRequest = nil; browserTool = ""
+        browserNotice = ""; selectNewBrowserTab = false; clearBrowserPage()
+    }
+
+    private func refreshBrowserTabs() { browserAction("browser_list", [:]) }
+
+    private func refreshBrowserTabsWhenReady() {
+        guard model.selectedChatID == model.store.selectedID else { return }
+        refreshBrowserTabs()
+    }
+
+    private func receiveBrowserTabs(_ value: RemoteValue?) {
+        guard let value, value["request"].text == browserRequest, browserTool == "browser_list" else { return }
+        browserRequest = nil
+        let selected = value["details"]["selected_tab_id"].text
+        if selected != browserTab { clearBrowserPage() }
+        browserTab = selected
+        browserTabs = value["details"]["tabs"].rows
+        if value["details"]["truncated"].flag { browserNotice = "Some tabs are not shown. Close tabs on the Mac to see the rest." }
+        if !browserTab.isEmpty, browserResult == .null {
+            browserAction("browser_observe", ["tab_id": .string(browserTab), "max_bytes": .number(10000), "depth": .number(3)])
+        }
+    }
+
+    private func receiveBrowserResult(_ value: RemoteValue?) {
+        guard let value, value["request"].text == browserRequest else { return }
+        let tool = browserTool
+        browserRequest = nil
+        if value["isError"].flag {
+            selectNewBrowserTab = false
+            browserNotice = value["text"].text.isEmpty ? value["summary"].text : value["text"].text
+            return
+        }
+        if tool == "browser_observe" {
+            guard value["details"]["tab_id"].text == browserTab else { return }
+            browserResult = value
+        } else if (tool == "browser_open" || tool == "browser_new"), selectNewBrowserTab {
+            selectNewBrowserTab = false
+            let newID = value["details"]["tab_id"].text
+            if !newID.isEmpty { clearBrowserPage(); browserAction("browser_select", ["tab_id": .string(newID)]); return }
+        } else if tool == "browser_open" || tool == "browser_navigate" {
+            guard value["details"]["tab_id"].text == browserTab || value["details"]["tab_id"].text.isEmpty else { return }
+            browserResult = value
+        }
+        if ["browser_new", "browser_open", "browser_close", "browser_select", "browser_navigate"].contains(tool) { refreshBrowserTabs() }
     }
     private func entries(_ value: RemoteValue) -> some View {
         ForEach(value.rows, id: \.self) { entry in
@@ -318,10 +452,15 @@ private struct CompanionTeamEditor: View {
                         if rows.count > 1 { Button("Remove member", role: .destructive) { rows.remove(at: index) } }
                     }
                 }
-                if rows.count < 8 { Button("Add member") { addMember() } }
+                if rows.count < CompanionTeamValidation.maxMembers { Button("Add member") { addMember() } }
                 Section("Run settings") {
                     Picker("Mode", selection: $mode) { Text("Task").tag("task"); Text("Contribution").tag("contribution") }
-                    TextField("Context tokens", text: $context)
+                    Picker("Context per member", selection: $context) {
+                        ForEach(Array(Set(CompanionTeamValidation.contextPresets + [Int(context) ?? 200000])).sorted(), id: \.self) { value in
+                            Text(value.formatted() + " tokens").tag(String(value))
+                        }
+                    }.pickerStyle(.menu)
+                    TextField("Custom context tokens", text: $context)
                     TextField("Concurrent processes", text: $processes)
                     TextField("Minutes (optional)", text: $minutes)
                     TextField("Token limit (optional)", text: $tokens)
