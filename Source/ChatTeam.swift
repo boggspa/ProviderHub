@@ -231,16 +231,18 @@ private struct ChatTeamTaskChip: View {
                 Divider()
                 Menu("Assign to") {
                     ForEach(members) { member in
-                        Button(member.name) { update(owner: member.id, status: task.status); showing = false }
+                        Button(member.name) { update(owner: member.id); showing = false }
                     }
-                    Button("Unassigned") { update(owner: "", status: task.status); showing = false }
+                    Button("Unassigned") { update(owner: ""); showing = false }
                 }
             }.padding(14).frame(width: 260, alignment: .leading)
         }
     }
-    private func update(owner: String, status: String) {
-        model.inspectorCommand(["command": "team_task_user", "task": task.id, "owner": owner,
-                                "expectedOwner": task.owner, "status": status])
+    private func update(owner: String, status: String? = nil) {
+        var command: [String: Any] = ["command": "team_task_user", "task": task.id, "owner": owner,
+                                      "expectedOwner": task.owner]
+        if let status { command["status"] = status }
+        model.inspectorCommand(command)
     }
 }
 

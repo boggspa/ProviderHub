@@ -18,6 +18,7 @@ before its write lands.
 """
 from __future__ import annotations
 
+import copy
 import re
 import uuid
 
@@ -356,9 +357,15 @@ def execute(service, name, args):
                     f"- {row['id']} [{row['status']}] {row['title']} — {roster.get(row.get('owner'), 'unassigned')}"
                     for row in rows) if rows else "No Team tasks."
             else:
+                previous = copy.deepcopy(owner.chat.get("teamTasks"))
                 row = task_update(owner.chat, member=service.team_member, task_id=args.get("task_id"),
                                   title=args.get("title"), status=args.get("status"))
-                owner.save()
+                try:
+                    owner.save()
+                except Exception:
+                    if previous is None: owner.chat.pop("teamTasks", None)
+                    else: owner.chat["teamTasks"] = previous
+                    raise
                 publish_tasks(owner)
                 text = f"Saved task {row['id']}: {row['title']} [{row['status']}]."
         return {"content": [{"type": "text", "text": text}], "is_error": False,

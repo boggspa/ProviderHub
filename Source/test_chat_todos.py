@@ -77,6 +77,10 @@ class TodoListTests(unittest.TestCase):
         todos.execute(sol, "team_task_update", {"task_id": task["id"], "status": "blocked"})
         self.assertEqual(task["status"], "blocked")
         self.assertEqual(len(saves), 2)
+        owner.save = lambda: (_ for _ in ()).throw(OSError("disk full"))
+        with self.assertRaisesRegex(OSError, "disk full"):
+            todos.execute(sol, "team_task_update", {"task_id": task["id"], "status": "completed"})
+        self.assertEqual(self.chat["teamTasks"][0]["status"], "blocked")
 
     def test_items_are_validated_and_content_is_one_line(self):
         rows = todos.items([item("a.1"), {"id": "B_2", "content": "  Write\n the   parser ", "status": "completed"}])

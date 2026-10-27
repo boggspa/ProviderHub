@@ -888,6 +888,7 @@ the same publication `initialize` and `select` perform, ending with `ready`.
         if action == "team_task_user":
             import chat_todos
             with service._mutex:
+                previous = copy.deepcopy(service.chat.get("teamTasks"))
                 try:
                     team = service.chat.get("team") or {}
                     members = {member["id"] for member in team.get("members", [])}
@@ -911,9 +912,13 @@ the same publication `initialize` and `select` perform, ending with `ready`.
                         if status not in chat_todos.TASK_STATUSES: raise ValueError("Choose a valid task status.")
                         row.update(owner=owner, status=status)
                     service.save()
-                    chat_todos.publish_tasks(service)
-                except ValueError as exc:
+                except Exception as exc:
+                    if previous is None: service.chat.pop("teamTasks", None)
+                    else: service.chat["teamTasks"] = previous
+                    if not isinstance(exc, ValueError): raise
                     chat_todos.publish_tasks(service, str(exc))
+                else:
+                    chat_todos.publish_tasks(service)
             return
         if action in {"send", "retry"} and service.busy:
             raise ValueError("This chat is already running. Use an update to interrupt it.")

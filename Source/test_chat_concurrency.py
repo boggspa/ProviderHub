@@ -26,8 +26,12 @@ class ConcurrentChatTests(unittest.TestCase):
         self.host.handle({"command": "team_task_user", "chat": identifier, "task": task, "owner": second, "expectedOwner": first, "status": "blocked"})
         self.host.handle({"command": "team_task_user", "chat": identifier, "task": task, "owner": first, "expectedOwner": first})
         self.assertIn("changed", self.events[-1]["notice"])
+        self.host.handle({"command": "team_task_user", "chat": identifier, "task": task, "owner": first, "expectedOwner": second})
         saved = self.store.load(identifier)["teamTasks"][0]
-        self.assertEqual((saved["owner"], saved["status"]), (second, "blocked"))
+        self.assertEqual((saved["owner"], saved["status"]), (first, "blocked"))
+        with patch.object(service, "save", side_effect=OSError("disk full")), self.assertRaisesRegex(OSError, "disk full"):
+            self.host.handle({"command": "team_task_user", "chat": identifier, "task": task, "owner": second, "expectedOwner": first})
+        self.assertEqual(service.chat["teamTasks"][0]["owner"], first)
 
     def test_searches_saved_and_live_transcripts_without_changing_selection(self):
         older, current = self.create("older"), self.create("current")
