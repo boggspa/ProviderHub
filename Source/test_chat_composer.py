@@ -130,6 +130,23 @@ struct Composer: View {
         window.makeFirstResponder(text)
         text.insertText("@S", replacementRange: none); settle()
         check(menu.current?.id == "s", "the @ list did not open for @S")
+        // AppKit can notify selection changes inside text storage's edit
+        // processing. Publishing the menu there re-enters SwiftUI layout
+        // before TextKit has finished updating its character ranges.
+        text.setSelectedRange(NSRange(location: 0, length: 0)); settle()
+        check(menu.state == nil, "the @ list did not close when the caret moved away")
+        text.textStorage!.beginEditing()
+        text.setSelectedRange(NSRange(location: 2, length: 0))
+        check(menu.state == nil, "selection published the @ list during a text storage edit")
+        text.textStorage!.endEditing()
+        settle()
+        check(menu.current?.id == "s", "the deferred selection did not open the @ list")
+        // Multiple notifications before the queued refresh use the latest
+        // caret, rather than reopening the list for an obsolete selection.
+        text.setSelectedRange(NSRange(location: 0, length: 0))
+        text.setSelectedRange(NSRange(location: 2, length: 0))
+        settle()
+        check(menu.current?.id == "s", "a queued selection refresh used a stale caret")
         draft.enabled = false; settle()
         check(menu.state == nil, "the @ list stayed open over a disabled composer")
 

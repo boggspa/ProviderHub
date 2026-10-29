@@ -93,6 +93,9 @@ struct ComposerTextView: NSViewRepresentable {
         var members: [ChatMentionTarget] = []
         /// True while SwiftUI replaces the text, when nothing may be published.
         var applying = false
+        /// Selection notifications can arrive while TextKit is still
+        /// processing an edit. Publish the menu only after that edit ends.
+        private var menuRefreshPending = false
         init(_ parent: ComposerTextView) { self.parent = parent }
 
         var plain: [NSAttributedString.Key: Any] { [.font: font ?? NSFont.systemFont(ofSize: 14), .foregroundColor: NSColor.labelColor] }
@@ -109,12 +112,12 @@ struct ComposerTextView: NSViewRepresentable {
             parent.text = view.string
             paint(view)
             parent.measure(view)
-            refreshMenu(view)
+            scheduleMenuRefresh(view)
         }
 
         func textViewDidChangeSelection(_ notification: Notification) {
             guard !applying, let view = notification.object as? NSTextView else { return }
-            refreshMenu(view)
+            scheduleMenuRefresh(view)
         }
 
         /// Typed text never takes on a neighbouring tag's chip, colour or weight.
@@ -150,7 +153,18 @@ struct ComposerTextView: NSViewRepresentable {
             storage.endEditing()
         }
 
-        func refreshMenu(_ view: NSTextView) {
+        func scheduleMenuRefresh(_ view: NSTextView) {
+            guard !menuRefreshPending else { return }
+            menuRefreshPending = true
+            DispatchQueue.main.async { [weak self, weak view] in
+                guard let self else { return }
+                self.menuRefreshPending = false
+                guard let view else { return }
+                self.refreshMenu(view)
+            }
+        }
+
+        private func refreshMenu(_ view: NSTextView) {
             guard let menu = parent.mentionMenu else { return }
             let selection = view.selectedRange()
             let caret = selection.length == 0 && view.isEditable && !view.hasMarkedText() ? selection.location : nil
@@ -274,7 +288,7 @@ struct ComposerTextView: NSViewRepresentable {
         if repaint { coordinator.paint(view) }
         // The list publishes state, which must wait until this update ends.
         if refresh {
-            DispatchQueue.main.async { [weak view, weak coordinator] in if let view { coordinator?.refreshMenu(view) } }
+            coordinator.scheduleMenuRefresh(view)
         }
         measure(view)
     }
