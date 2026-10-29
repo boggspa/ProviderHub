@@ -815,23 +815,25 @@ struct ChatTranscript: View {
     @ViewBuilder private func fold(_ entries: [ChatEntry], live: Bool, liveEntryIDs: Set<String>) -> some View {
         let id = ChatTranscriptSegment<ChatEntry>.foldID(entries)
         let open = foldChoice[id] ?? entries.contains { expanded.contains($0.id) }
-        VStack(alignment: .leading, spacing: textStyle.scaled(4)) {
-            Button {
-                if reduceMotion { foldChoice[id] = !open } else { withAnimation(.easeInOut(duration: 0.15)) { foldChoice[id] = !open } }
-            } label: {
-                ChatFoldHeader(entries: entries, live: live, open: open, accent: model.accent(for: entries.first?.route ?? ""))
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel((live ? "Working, " : "Worked, ") + ChatToolDisplay.activity(entries.map(\.tool)))
-            .accessibilityValue(open ? "Expanded" : "Collapsed")
-            if open {
-                // Each row is a scroll target of its own, so a jump from the
-                // activity strip lands on the row, not the fold's centre.
-                VStack(alignment: .leading, spacing: textStyle.scaled(2)) { ForEach(entries) { entry in row(entry, liveEntryIDs: liveEntryIDs).id(entry.id) } }
-                    .padding(.leading, textStyle.scaled(18))
-                    .overlay(alignment: .leading) {
-                        Rectangle().fill(Semantic.hairline).frame(width: 1).padding(.leading, textStyle.scaled(7)).padding(.vertical, 2)
-                    }
+        ChatFoldHoverGroup(open: open) { hovering in
+            VStack(alignment: .leading, spacing: textStyle.scaled(4)) {
+                Button {
+                    if reduceMotion { foldChoice[id] = !open } else { withAnimation(.easeInOut(duration: 0.15)) { foldChoice[id] = !open } }
+                } label: {
+                    ChatFoldHeader(entries: entries, live: live, open: open, accent: model.accent(for: entries.first?.route ?? ""), hovering: hovering)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel((live ? "Working, " : "Worked, ") + ChatToolDisplay.activity(entries.map(\.tool)))
+                .accessibilityValue(open ? "Expanded" : "Collapsed")
+                if open {
+                    // Each row is a scroll target of its own, so a jump from the
+                    // activity strip lands on the row, not the fold's centre.
+                    VStack(alignment: .leading, spacing: textStyle.scaled(2)) { ForEach(entries) { entry in row(entry, liveEntryIDs: liveEntryIDs).id(entry.id) } }
+                        .padding(.leading, textStyle.scaled(18))
+                        .overlay(alignment: .leading) {
+                            Rectangle().fill(Semantic.hairline).frame(width: 1).padding(.leading, textStyle.scaled(7)).padding(.vertical, 2)
+                        }
+                }
             }
         }
     }

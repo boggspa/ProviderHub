@@ -410,17 +410,35 @@ struct ChatFoldHeader: View {
     var live: Bool
     var open: Bool
     var accent: Color
-    @State private var hovering = false
+    var hovering: Bool
     @Environment(\.chatTextStyle) private var textStyle
 
     var body: some View {
         ChatSharedFoldHeader(summary: .collect(entries), live: live, open: open, accent: accent,
             ink: Semantic.ink, secondary: Semantic.secondaryInk, scale: textStyle.scaled(1), hovering: hovering)
         .padding(.horizontal, 6).padding(.vertical, textStyle.scaled(4))
-        .background(RoundedRectangle(cornerRadius: 7, style: .continuous).fill(hovering ? Semantic.raisedSurface : .clear))
         .padding(.horizontal, -6)
         .contentShape(Rectangle())
-        .onHover { hovering = $0 }
+    }
+}
+
+/// Hover belongs to the whole fold, so its background follows expanded rows
+/// and their details. The rows keep their own stronger hover treatment.
+struct ChatFoldHoverGroup<Content: View>: View {
+    @State private var hovering = false
+    var open: Bool
+    @ViewBuilder var content: (Bool) -> Content
+
+    var body: some View {
+        content(hovering)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background {
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .fill(hovering ? Semantic.raisedSurface.opacity(open ? 0.55 : 1) : .clear)
+                    .padding(.horizontal, -6)
+            }
+            .contentShape(Rectangle().inset(by: -6))
+            .onHover { hovering = $0 }
     }
 }
 
