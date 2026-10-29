@@ -75,6 +75,7 @@ struct ChatTeamControls: View {
     @State private var expanded = true
     @State private var newTaskFor: String?
     @State private var taskTitle = ""
+    @State private var expandedTasks: Set<String> = []
     /// The member card (or "" for Unassigned) a task chip is over mid-drag.
     @State private var dropTarget: String?
     var openEditor: () -> Void
@@ -96,6 +97,30 @@ struct ChatTeamControls: View {
                 .font(.system(size: 11.5)).foregroundStyle(.secondary)
             if let team = model.team {
                 if !team.enabled { Text("Team is off").font(.system(size: 11.5)).foregroundStyle(.secondary) }
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Text("Unassigned · \(model.teamTasks.filter { $0.owner.isEmpty && $0.status != "completed" }.count)")
+                            .font(.system(size: 11, weight: .semibold))
+                        Spacer()
+                        Button { taskTitle = ""; newTaskFor = "" } label: {
+                            Label("Task", systemImage: "plus")
+                        }.buttonStyle(.plain).font(.system(size: 11))
+                            .disabled(!model.connected || !team.enabled)
+                            .popover(isPresented: Binding(get: { newTaskFor == "" }, set: { if !$0 { newTaskFor = nil } })) {
+                                VStack(alignment: .leading, spacing: 8) {
+                                    Text("New unassigned task").font(.headline)
+                                    TextField("Task", text: $taskTitle).onSubmit { addTask("") }
+                                    Button("Add task") { addTask("") }
+                                        .disabled(taskTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                                }.padding(14).frame(width: 280)
+                            }
+                    }
+                    taskList(owner: "", members: team.members)
+                }.padding(8)
+                    .background(HubTheme.Semantic.cardFill, in: RoundedRectangle(cornerRadius: 7))
+                    .overlay { dropRing("") }
+                    .onDrop(of: [.chatTeamTask], isTargeted: targeting("")) { receive($0, owner: "") }
+                    .accessibilityHint("Drop a task here to unassign it.")
                 ForEach(team.members) { member in
                     VStack(alignment: .leading, spacing: 0) {
                     ChatSharedMemberRow(name: member.name, model: member.label + (member.account.isEmpty ? "" : " · " + member.account),
@@ -109,42 +134,13 @@ struct ChatTeamControls: View {
                         control: { model.controlTeamMember(member.id, start: $0) }) {
                             ChatProviderIcon(presentation: model.models.first { $0.id == member.choice }?.presentation)
                         }
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 5) {
-                            ForEach(model.teamTasks.filter { $0.owner == member.id }) { task in
-                                ChatTeamTaskChip(task: task, model: model, members: team.members)
-                            }
-                            Button { taskTitle = ""; newTaskFor = member.id } label: {
-                                Label("Task", systemImage: "plus").font(.system(size: 10.5))
-                            }.buttonStyle(.plain).padding(.horizontal, 7).frame(height: 22)
-                                .background(HubTheme.Semantic.cardFill, in: RoundedRectangle(cornerRadius: ChatTeamTaskChip.radius, style: .continuous))
-                                .disabled(!model.connected || !team.enabled)
-                                .popover(isPresented: Binding(get: { newTaskFor == member.id }, set: { if !$0 { newTaskFor = nil } })) {
-                                    VStack(alignment: .leading, spacing: 8) {
-                                        Text("Assign task to \(member.name)").font(.headline)
-                                        TextField("Task", text: $taskTitle).onSubmit { addTask(member.id) }
-                                        Button("Add task") { addTask(member.id) }
-                                            .disabled(taskTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                                    }.padding(14).frame(width: 280)
-                                }
-                        }.padding(.horizontal, 8).padding(.bottom, 8)
-                    }.background(HubTheme.Semantic.cardFill)
+                    taskList(owner: member.id, members: team.members)
+                        .padding(.horizontal, 8).padding(.bottom, 8)
+                        .background(HubTheme.Semantic.cardFill)
                     }.clipShape(RoundedRectangle(cornerRadius: 7))
                     .overlay { dropRing(member.id) }
                     .onDrop(of: [.chatTeamTask], isTargeted: targeting(member.id)) { receive($0, owner: member.id) }
                     .accessibilityHint("Drop a task chip here to assign it to \(member.name).")
-                }
-                if model.teamTasks.contains(where: { $0.owner.isEmpty }) {
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 5) {
-                            Text("Unassigned").font(.system(size: 10.5)).foregroundStyle(.secondary)
-                            ForEach(model.teamTasks.filter { $0.owner.isEmpty }) { task in
-                                ChatTeamTaskChip(task: task, model: model, members: team.members)
-                            }
-                        }.padding(4)
-                    }
-                    .overlay { dropRing("") }
-                    .onDrop(of: [.chatTeamTask], isTargeted: targeting("")) { receive($0, owner: "") }
                 }
                 if !model.teamTasksNotice.isEmpty {
                     Text(model.teamTasksNotice).font(.system(size: 11)).foregroundStyle(.secondary).textSelection(.enabled)
@@ -192,6 +188,57 @@ struct ChatTeamControls: View {
                 }.background(HubTheme.Semantic.cardFill, in: RoundedRectangle(cornerRadius: 8))
             }
         }.padding(14)
+    }
+    @ViewBuilder private func taskList(owner: String, members: [ChatTeamMember]) -> some View {
+        let rows = model.teamTasks.filter { $0.owner == owner }
+        let open = expandedTasks.contains(owner)
+        let active = rows.filter { $0.status == "in_progress" }
+        let attention = rows.filter { $0.status == "blocked" || $0.status == "paused" }
+        let pending = rows.filter { $0.status == "pending" }
+        let completed = rows.filter { $0.status == "completed" }.sorted {
+            ($0.completedAt ?? $0.updated ?? "") > ($1.completedAt ?? $1.updated ?? "")
+        }
+        let primary = active.first ?? attention.first ?? completed.first
+        VStack(alignment: .leading, spacing: 5) {
+            if open {
+                taskGroup("In progress", rows: active, members: members)
+                taskGroup("Needs attention", rows: attention, members: members)
+                taskGroup(owner.isEmpty ? "Available" : "Queued", rows: pending, members: members)
+                taskGroup("Completed", rows: completed, members: members)
+                if !completed.isEmpty {
+                    Text("Only the latest 4 completed tasks per owner are kept. Linked context remains.")
+                        .font(.system(size: 10)).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            } else if owner.isEmpty {
+                if let first = pending.first ?? attention.first ?? active.first {
+                    ChatTeamTaskChip(task: first, model: model, members: members)
+                } else { Text("No unassigned tasks").font(.system(size: 10.5)).foregroundStyle(.secondary) }
+            } else if let primary {
+                ChatTeamTaskChip(task: primary, model: model, members: members)
+            } else {
+                Text("No active task").font(.system(size: 10.5)).foregroundStyle(.secondary)
+            }
+            if !rows.isEmpty {
+                Button {
+                    if open { expandedTasks.remove(owner) } else { expandedTasks.insert(owner) }
+                } label: {
+                    let counts = [("active", active.count), ("need attention", attention.count), ("queued", pending.count), ("completed", completed.count)]
+                        .filter { $0.1 > 0 }.map { "\($0.1) \($0.0)" }.joined(separator: " · ")
+                    HStack { Text(counts); Spacer(); Text(open ? "Hide tasks" : "View tasks"); Image(systemName: open ? "chevron.up" : "chevron.down") }
+                }.buttonStyle(.plain).font(.system(size: 10.5)).foregroundStyle(.secondary)
+                    .accessibilityValue(open ? "Expanded" : "Collapsed")
+            }
+        }.frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    @ViewBuilder private func taskGroup(_ title: String, rows: [ChatTeamTask], members: [ChatTeamMember]) -> some View {
+        if !rows.isEmpty {
+            Text(title).font(.system(size: 10, weight: .semibold)).foregroundStyle(.secondary)
+            ForEach(rows) { task in
+                ChatTeamTaskChip(task: task, model: model, members: members, expanded: true)
+            }
+        }
     }
     private func addTask(_ owner: String) {
         let title = taskTitle.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -256,6 +303,7 @@ private struct ChatTeamTaskChip: View {
     var task: ChatTeamTask
     @ObservedObject var model: ChatModel
     var members: [ChatTeamMember]
+    var expanded = false
     @State private var showing = false
 
     static func label(_ status: String) -> String { status == "in_progress" ? "In progress" : status.capitalized }
@@ -275,7 +323,8 @@ private struct ChatTeamTaskChip: View {
             HStack(spacing: 6) {
                 ChatTeamTaskGlyph(status: task.status).foregroundStyle(tone ?? Semantic.secondaryInk)
                 // The title gives way first, so the status never leaves the chip.
-                Text(task.title).lineLimit(1).truncationMode(.tail)
+                Text(task.title).lineLimit(expanded ? nil : 1).truncationMode(.tail)
+                    .fixedSize(horizontal: false, vertical: expanded)
                     .foregroundStyle(task.status == "completed" ? Semantic.secondaryInk : Semantic.ink)
                 Rectangle().fill(Semantic.secondaryInk.opacity(0.3)).frame(width: 0.5, height: 11)
                 Text(label).foregroundStyle(Semantic.secondaryInk).fixedSize().layoutPriority(1)
@@ -286,7 +335,8 @@ private struct ChatTeamTaskChip: View {
                     }.foregroundStyle(Semantic.secondaryInk.opacity(0.7)).fixedSize().layoutPriority(1)
                 }
             }
-            .font(.system(size: 10.5)).padding(.leading, 6).padding(.trailing, 8).frame(height: 22)
+            .font(.system(size: 10.5)).padding(.horizontal, 6).padding(.vertical, expanded ? 4 : 0)
+            .frame(minHeight: 22, alignment: .leading)
             .background {
                 shape.fill(Semantic.raisedSurface)
                 if let tone { shape.fill(tone.opacity(0.10)) }

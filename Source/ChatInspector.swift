@@ -168,6 +168,7 @@ private struct ChatChangesPane: View {
 
 private struct ChatAgentsPane: View {
     @ObservedObject var model: ChatModel
+    @State private var showEarlierTasks = false
     var openTeamEditor: () -> Void
     private var selected: ChatAgent? { model.agents.first { $0.id == model.inspectedAgentID } }
     var body: some View {
@@ -196,8 +197,12 @@ private struct ChatAgentsPane: View {
                             Divider().padding(.horizontal, 14)
                             ChatBlackboardSection(model: model, chat: chat)
                         }
-                        if !model.agents.isEmpty { Text("Earlier delegated tasks").font(.system(size: 11.5, weight: .medium)).foregroundStyle(.secondary).padding(8) }
-                        ForEach(model.agents) { agent in
+                        if !model.agents.isEmpty {
+                        Button { showEarlierTasks.toggle() } label: {
+                            Label("Earlier delegated tasks · \(model.agents.count)", systemImage: showEarlierTasks ? "chevron.down" : "chevron.right")
+                                .font(.system(size: 11.5, weight: .medium)).foregroundStyle(.secondary)
+                        }.buttonStyle(.plain).padding(8).accessibilityValue(showEarlierTasks ? "Expanded" : "Collapsed")
+                        if showEarlierTasks { ForEach(model.agents) { agent in
                             Button { model.inspectedAgentID = agent.id } label: {
                                 HStack(alignment: .top, spacing: 8) {
                                     ChatProviderIcon(presentation: model.models.first { $0.route == agent.route && $0.account == agent.account }?.presentation)
@@ -211,6 +216,7 @@ private struct ChatAgentsPane: View {
                                     else { Image(systemName: "chevron.right").font(.system(size: 9)).foregroundStyle(.secondary) }
                                 }.padding(8).frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
                             }.buttonStyle(.plain)
+                        } }
                         }
                     }.padding(6)
                 }

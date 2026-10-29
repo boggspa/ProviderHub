@@ -7,7 +7,7 @@ import SwiftUI
 struct ChatBlackboardSection: View {
     @ObservedObject var model: ChatModel
     @ObservedObject var board: ChatBlackboardModel
-    @State private var expanded = true
+    @State private var expanded = false
     var chat: String
     init(model: ChatModel, chat: String) { self.model = model; board = model.blackboard; self.chat = chat }
     /// Message attachments appear on the board; a new one asks for a fresh snapshot.
@@ -30,14 +30,14 @@ struct ChatBlackboardSection: View {
                     Image(systemName: "arrow.up.left.and.arrow.down.right")
                 }.buttonStyle(.plain).help("Open the Blackboard window").accessibilityLabel("Open Blackboard window")
             }
-            if expanded { Text("Pinned facts, decisions and files every member and you can refer to. Posts are reference notes, not verified facts.")
+            if expanded {
+            Text("Pinned facts, decisions and files every member and you can refer to. Posts are reference notes, not verified facts.")
                 .font(.system(size: 10.5)).foregroundStyle(.secondary)
-            }
             if let snapshot = state.snapshot {
                 if snapshot.posts.isEmpty {
                     Text("No posts yet.").font(.system(size: 11.5)).foregroundStyle(.secondary)
                 }
-                ForEach(expanded ? snapshot.latest : Array(snapshot.newest.prefix(1))) { post in
+                ForEach(snapshot.latest) { post in
                     ChatBlackboardPostCard(model: model, chat: chat, post: post)
                 }
                 if snapshot.posts.count > snapshot.latest.count {
@@ -57,6 +57,7 @@ struct ChatBlackboardSection: View {
                 ProgressView().controlSize(.small)
             }
             ChatBlackboardComposer(model: model, chat: chat)
+            }
             if !state.notice.isEmpty {
                 Text(state.notice).font(.system(size: 11.5)).foregroundStyle(.secondary).textSelection(.enabled)
             }
