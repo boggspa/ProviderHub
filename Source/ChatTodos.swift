@@ -7,7 +7,7 @@ import SwiftUI
 /// every change.
 struct ChatTodosSection: View {
     @ObservedObject var model: ChatModel
-    @State private var expanded = true
+    @State private var expanded = false
     private typealias Semantic = HubTheme.Semantic
     var body: some View {
         let todos = model.todos
@@ -49,21 +49,9 @@ struct ChatTodosSection: View {
             } else if model.todosNotice.isEmpty {
                 Text("No to-dos yet. Models keep one here for multi-step work.").font(.system(size: 11.5)).foregroundStyle(.secondary)
             }
+            }
             if !model.todosNotice.isEmpty {
                 Text(model.todosNotice).font(.system(size: 11.5)).foregroundStyle(.secondary).textSelection(.enabled)
-            }
-            } else if let todos, !todos.isEmpty {
-                ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 10) {
-                    ForEach(todos.all.filter { $0.total > 0 }) { lane in
-                        HStack(spacing: 3) {
-                            ChatProviderIcon(presentation: route(lane)?.presentation, size: 12)
-                            Text("\(lane.name) \(lane.done)/\(lane.total)")
-                                .font(.system(size: 10.5)).lineLimit(1)
-                        }
-                    }
-                }.frame(maxWidth: .infinity, alignment: .leading)
-                }
             }
         }
         .padding(14)

@@ -41,9 +41,12 @@ class TodoListTests(unittest.TestCase):
 
     def test_team_tasks_allow_multiple_claims_and_protect_ownership(self):
         first = todos.task_update(self.chat, member=SOL, title="Inspect parser")
+        self.assertEqual((first["owner"], first["status"]), ("", "pending"))
         with self.assertRaisesRegex(ValueError, "already exists"):
             todos.task_update(self.chat, member=LUNA, title="inspect parser")
-        second = todos.task_update(self.chat, member=SOL, title="Review tests", status="blocked")
+        second = todos.task_update(self.chat, member=SOL, title="Review tests")
+        todos.task_update(self.chat, member=SOL, task_id=first["id"], status="in_progress")
+        todos.task_update(self.chat, member=SOL, task_id=second["id"], status="blocked")
         self.assertEqual([row["owner"] for row in todos.tasks(self.chat)], [SOL["id"], SOL["id"]])
         self.assertEqual(second["status"], "blocked")
         with self.assertRaisesRegex(ValueError, "already assigned"):
@@ -69,18 +72,81 @@ class TodoListTests(unittest.TestCase):
         luna = SimpleNamespace(role="team", team_parent=owner, team_member=LUNA)
         todos.execute(sol, "team_task_update", {"title": "Review API"})
         task = self.chat["teamTasks"][0]
-        self.assertEqual(events[-1]["tasks"][0]["owner"], SOL["id"])
+        self.assertEqual(events[-1]["tasks"][0]["owner"], "")
         self.assertEqual(len(saves), 1)
         self.assertIn("Review API", todos.execute(luna, "team_tasks_read", {})["content"][0]["text"])
+        todos.execute(sol, "team_task_update", {"task_id": task["id"], "status": "in_progress"})
         with self.assertRaisesRegex(ValueError, "already assigned"):
             todos.execute(luna, "team_task_update", {"task_id": task["id"], "status": "paused"})
         todos.execute(sol, "team_task_update", {"task_id": task["id"], "status": "blocked"})
         self.assertEqual(task["status"], "blocked")
-        self.assertEqual(len(saves), 2)
+        self.assertEqual(len(saves), 3)
         owner.save = lambda: (_ for _ in ()).throw(OSError("disk full"))
         with self.assertRaisesRegex(OSError, "disk full"):
             todos.execute(sol, "team_task_update", {"task_id": task["id"], "status": "completed"})
         self.assertEqual(self.chat["teamTasks"][0]["status"], "blocked")
+
+    def test_completed_retention_is_per_owner_and_preserves_shared_context(self):
+        self.context()
+        for member in (SOL, LUNA):
+            for index in range(6):
+                task = todos.task_update(self.chat, member=member, title=f"{member['name']} {index}")
+                if index == 0:
+                    todos.task_update(self.chat, member=member, task_id=task["id"], pin={"kind": "post", "ref": "p1"})
+                todos.task_update(self.chat, member=member, task_id=task["id"], status="completed", now=f"2026-10-20T12:00:0{index}+00:00")
+        rows = todos.tasks(self.chat)
+        self.assertEqual([r["title"] for r in rows if r["owner"] == SOL["id"]], [f"Sol {i}" for i in range(2, 6)])
+        self.assertEqual([r["title"] for r in rows if r["owner"] == LUNA["id"]], [f"Luna {i}" for i in range(2, 6)])
+        self.assertEqual(self.chat["blackboard"]["posts"][0]["id"], "p1")
+        # Pinning an older completion later does not make it newly completed.
+        oldest = rows[0]
+        todos.task_update(self.chat, member=SOL, task_id=oldest["id"], pin={"kind": "post", "ref": "p1"}, now="2026-12-01")
+        task = todos.task_update(self.chat, member=SOL, title="Sol next")
+        todos.task_update(self.chat, member=SOL, task_id=task["id"], status="completed", now="2026-11-01")
+        self.assertNotIn(oldest["id"], [r["id"] for r in todos.tasks(self.chat)])
+
+    def test_legacy_completed_rows_make_room_without_losing_pending_work(self):
+        self.chat["teamTasks"] = [
+            {"id": f"old{i}", "title": f"Old {i}", "owner": SOL["id"], "status": "completed", "updated": f"2026-10-{i + 1:02}"}
+            for i in range(10)
+        ] + [{"id": f"work{i}", "title": f"Work {i}", "owner": "", "status": "pending"} for i in range(90)]
+        with self.assertRaisesRegex(ValueError, "New tasks start pending"):
+            todos.task_update(self.chat, member=SOL, title="Unexpected", status="in_progress")
+        self.assertEqual(len(self.chat["teamTasks"]), 100)
+        task = todos.task_update(self.chat, member=SOL, title="New work")
+        self.assertEqual((task["owner"], task["status"]), ("", "pending"))
+        self.assertEqual(len(self.chat["teamTasks"]), 95)
+        self.assertEqual([r["id"] for r in self.chat["teamTasks"] if r["status"] == "completed"], ["old6", "old7", "old8", "old9"])
+        self.assertEqual(sum(r["status"] == "pending" for r in self.chat["teamTasks"]), 91)
+
+    def test_claims_are_serialized_and_failed_save_restores_pruned_tasks(self):
+        events = []
+        owner = SimpleNamespace(chat=self.chat, _mutex=threading.RLock(), emit=events.append, save=lambda: None)
+        task = todos.user_task(self.chat, {"title": "Shared work"})
+        barrier = threading.Barrier(2)
+        results = []
+        def claim(member):
+            service = SimpleNamespace(role="team", team_parent=owner, team_member=member)
+            barrier.wait()
+            try:
+                todos.execute(service, "team_task_update", {"task_id": task["id"], "status": "in_progress"})
+                results.append("claimed")
+            except ValueError:
+                results.append("refused")
+        threads = [threading.Thread(target=claim, args=(member,)) for member in (SOL, LUNA)]
+        for thread in threads: thread.start()
+        for thread in threads: thread.join()
+        self.assertCountEqual(results, ["claimed", "refused"])
+        for index in range(4):
+            row = todos.task_update(self.chat, member=SOL, title=f"Done {index}")
+            todos.task_update(self.chat, member=SOL, task_id=row["id"], status="completed", now=f"2026-10-2{index}")
+        extra = todos.task_update(self.chat, member=SOL, title="Next")
+        before = copy.deepcopy(self.chat["teamTasks"])
+        owner.save = lambda: (_ for _ in ()).throw(OSError("disk full"))
+        sol = SimpleNamespace(role="team", team_parent=owner, team_member=SOL)
+        with self.assertRaisesRegex(OSError, "disk full"):
+            todos.execute(sol, "team_task_update", {"task_id": extra["id"], "status": "completed"})
+        self.assertEqual(self.chat["teamTasks"], before)
 
     def context(self):
         todos.write(self.chat, SOL["id"], todos.items([item("parser", "in_progress")]), now=NOW)
@@ -94,6 +160,7 @@ class TodoListTests(unittest.TestCase):
     def test_task_pins_link_existing_context_and_record_who_set_status(self):
         self.context()
         task = todos.task_update(self.chat, member=SOL, title="Fix loader", pin={"kind": "entry", "ref": "e1"}, now=NOW)
+        todos.task_update(self.chat, member=SOL, task_id=task["id"], status="in_progress", now=NOW)
         self.assertEqual((task["setBy"], task["updated"]), (SOL, NOW))
         self.assertEqual(task["pins"][0]["label"], "Sol: Found the race in the loader")
         # A peer may pin context to a task it does not hold, without claiming it.
@@ -123,6 +190,7 @@ class TodoListTests(unittest.TestCase):
     def test_user_reassignment_records_hand_over_for_the_next_seat(self):
         self.context()
         task = todos.task_update(self.chat, member=SOL, title="Fix loader", pin={"kind": "entry", "ref": "e1"}, now=NOW)
+        todos.task_update(self.chat, member=SOL, task_id=task["id"], status="in_progress", now=NOW)
         todos.user_task(self.chat, {"task": task["id"], "owner": LUNA["id"], "expectedOwner": SOL["id"]}, now="t2")
         self.assertEqual(task["owner"], LUNA["id"])
         self.assertEqual(task["history"], [{"owner": SOL["id"], "name": "Sol", "at": "t2", "by": todos.USER, "entry": "e1"}])

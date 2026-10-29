@@ -34,6 +34,7 @@ MAX_LANE = 128
 ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\Z")
 TOOLS = {"todo_write", "todo_read", "team_tasks_read", "team_task_update"}
 TASK_STATUSES = ("pending", "in_progress", "blocked", "paused", "completed")
+MAX_COMPLETED_PER_OWNER = 4
 # A task carries links to context that already exists elsewhere in the chat,
 # so a reassigned seat starts from what its predecessor found. A pin stores a
 # reference and the label it had when pinned, never a copy of the target.
@@ -63,8 +64,9 @@ TEAM_TOOLS = [
     _tool("todo_read", "Read one member's to-do list (member_id), or every member's and the shared list.",
           {"member_id": {"type": "string"}}, []),
     _tool("team_tasks_read", "Read the team's task assignments, including unassigned and blocked tasks.", {}, []),
-    _tool("team_task_update", "Create a task assigned to yourself, claim an unassigned task, or change the status of your own task. "
-          "Keep status current: it is how the user sees progress. Read assignments before claiming work. Task IDs are returned when created. "
+    _tool("team_task_update", "Create an unassigned pending task, claim an unassigned task, or change the status of your own task. "
+          "Read Team tasks first, identify the intended unassigned work and avoid duplicates; then claim a task by its ID and set it in_progress when starting. "
+          "Keep status current: it is how the user sees progress. Task IDs are returned when created. "
           "pin links existing context to any task so whoever holds it next starts from it: kind todo (ref lane:item_id, lane is a "
           "member id or shared), post (a Blackboard post id), file (a Blackboard attachment id) or entry (a visible transcript "
           f"entry ID). At most {MAX_PINS} pins per task. unpin removes a pin by its id.",
@@ -77,7 +79,7 @@ TEAM_TOOLS = [
 ]
 
 GUIDANCE = "Track multi-step work with todo_write; your saved list is shown before the conversation."
-TEAM_GUIDANCE = GUIDANCE + " Each member keeps its own; todo_write list=shared is the Team's, and todo_read shows peers' lists. Use team_tasks_read and team_task_update to coordinate ownership and task status without Blackboard claim posts."
+TEAM_GUIDANCE = GUIDANCE + " Each member keeps its own; todo_write list=shared is the Team's, and todo_read shows peers' lists. After a task request, read Team tasks and identify intended unassigned work before claiming or creating tasks; coordinate ownership and status with team_tasks_read and team_task_update without Blackboard claim posts. New tasks start unassigned and pending; claim by ID before working."
 
 
 def _now():
@@ -95,7 +97,8 @@ def _valid_task(row):
             or row.get("status") not in TASK_STATUSES or not isinstance(row.get("owner", ""), str)):
         return False
     # Rows saved before pins and hand-overs existed carry none of these.
-    if "setBy" in row and not _actor(row["setBy"]) or "updated" in row and not isinstance(row["updated"], str):
+    if ("setBy" in row and not _actor(row["setBy"]) or "updated" in row and not isinstance(row["updated"], str)
+            or "completedAt" in row and not isinstance(row["completedAt"], str)):
         return False
     pins, history = row.get("pins", []), row.get("history", [])
     if not isinstance(pins, list) or len(pins) > MAX_PINS or not isinstance(history, list) or len(history) > MAX_HISTORY:
@@ -124,6 +127,19 @@ def tasks(chat):
             raise ValueError("Invalid saved Team task.")
     if len({row["id"] for row in rows}) != len(rows): raise ValueError("Duplicate Team task ID.")
     return rows
+
+
+def _retained_tasks(rows):
+    """Keep each owner's four latest completions; pins are references, not owned data."""
+    groups = {}
+    for index, row in enumerate(rows):
+        if row["status"] == "completed":
+            groups.setdefault(row.get("owner", ""), []).append((index, row))
+    remove = set()
+    for group in groups.values():
+        ordered = sorted(group, key=lambda item: (item[1].get("completedAt", item[1].get("updated", "")), item[0]), reverse=True)
+        remove.update(row["id"] for _, row in ordered[MAX_COMPLETED_PER_OWNER:])
+    return [row for row in rows if row["id"] not in remove]
 
 
 def _roster(chat):
@@ -202,14 +218,15 @@ def task_update(chat, *, member, task_id=None, title=None, status=None, pin=None
     actor = {"id": member["id"], "name": member["name"]}
     rows = tasks(chat)
     if task_id is None:
-        if len(rows) >= 100: raise ValueError("The Team task list is full.")
         if unpin is not None: raise ValueError("unpin needs task_id.")
+        if status not in (None, "pending"): raise ValueError("New tasks start pending and unassigned; claim the task before changing its status.")
         title = _clean(title, "A task's title")
         duplicate = next((row for row in rows if row["title"].casefold() == title.casefold() and row["status"] != "completed"), None)
         if duplicate: raise ValueError(f"That task already exists ({duplicate['id']}); read Team tasks before claiming it.")
+        rows = _retained_tasks(rows)
+        if len(rows) >= 100: raise ValueError("The Team task list is full.")
         row = {"id": uuid.uuid4().hex, "title": title,
-               "owner": member["id"], "status": status or "in_progress", "setBy": actor, "updated": now}
-        if row["status"] not in TASK_STATUSES: raise ValueError("Invalid task status.")
+               "owner": "", "status": "pending", "setBy": actor, "updated": now}
         _annotate(chat, row, actor=actor, now=now, pin_args=pin)
         chat["teamTasks"] = [*rows, row]
         return row
@@ -227,9 +244,13 @@ def task_update(chat, *, member, task_id=None, title=None, status=None, pin=None
         working["owner"] = member["id"]
         if status is not None and status != working["status"] or "setBy" not in working:
             working["setBy"] = actor
-        if status is not None: working["status"] = status
+        if status is not None:
+            if status == "completed" and working["status"] != "completed": working["completedAt"] = now
+            elif status != "completed": working.pop("completedAt", None)
+            working["status"] = status
     working["updated"] = now
     row.clear(); row.update(working)
+    if not annotating: chat["teamTasks"] = _retained_tasks(rows)
     return row
 
 
@@ -244,9 +265,10 @@ def user_task(chat, command, *, now=None):
     task_id = command.get("task")
     if task_id is None:
         title = _clean(command.get("title"), "A task's title")
-        if len(rows) >= 100: raise ValueError("The Team task list is full.")
         if any(row["title"].casefold() == title.casefold() and row["status"] != "completed" for row in rows):
             raise ValueError("That task already exists. Open its chip to reassign it.")
+        rows = _retained_tasks(rows)
+        if len(rows) >= 100: raise ValueError("The Team task list is full.")
         row = {"id": uuid.uuid4().hex, "title": title, "owner": owner, "status": "pending", "setBy": dict(USER), "updated": now}
         chat["teamTasks"] = [*rows, row]
         return row
@@ -257,10 +279,16 @@ def user_task(chat, command, *, now=None):
     if status not in TASK_STATUSES: raise ValueError("Choose a valid task status.")
     working = copy.deepcopy(row)
     _annotate(chat, working, actor=USER, now=now, pin_args=command.get("pin"), unpin_id=command.get("unpin"))
+    owner_changed = owner != working.get("owner", "")
+    status_changed = status != working["status"]
     handover(chat, working, owner, actor=USER, now=now)
-    if status != working["status"]: working.update(status=status, setBy=dict(USER))
+    if status != working["status"]:
+        if status == "completed": working["completedAt"] = now
+        else: working.pop("completedAt", None)
+        working.update(status=status, setBy=dict(USER))
     working["updated"] = now
     row.clear(); row.update(working)
+    if owner_changed or status_changed: chat["teamTasks"] = _retained_tasks(rows)
     return row
 
 

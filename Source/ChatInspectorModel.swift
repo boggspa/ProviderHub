@@ -52,6 +52,7 @@ struct ChatTeamTask: Decodable, Identifiable, Equatable {
     var status: String
     var setBy: Actor?
     var updated: String?
+    var completedAt: String?
     var pins: [Pin]?
     var history: [Handover]?
     var pinList: [Pin] { pins ?? [] }
