@@ -129,6 +129,7 @@ class AccentMapTests(unittest.TestCase):
         self.assertIn(r"/^app:\/\/-\//", script)
         self.assertIn("observer.observe(document, ", script)  # never the root element: absent at document start
         self.assertIn("[data-codex-intelligence-trigger]", script)  # the composer pill
+        self.assertIn('[data-composer-navigation-target="reasoning"]', script)
         self.assertIn("[data-reasoning-effort]", script)  # its stacked effort layers
         self.assertIn('effort === "ultra"', script)  # Ultra takes the model's Ultra hue and the sweep
         self.assertIn('"kimi for coding": {"dark": "#0A82FF", "light": "#0065CC"}', script)
@@ -182,9 +183,11 @@ class AccentMapTests(unittest.TestCase):
 
     def test_tool_call_glyph_takes_the_accent_from_the_rows_icon_slot(self):
         selector = activity_glyph_selector()
-        self.assertEqual(selector, '[class~="group/activity-header"] span[class~="contents"] > svg[class~="text-text/60"]')
+        self.assertEqual(selector, '[class~="group/activity-header"] span[class~="contents"] > svg[class~="text-text/60"],'
+                                   '[class~="group/activity-header"] span[class~="contents"][class~="text-text/60"]'
+                                   ' > svg:not([class*="text-"]):not([style*="color"])')
         css = activity_glyph_css()
-        self.assertEqual(css, f'[{THEME_ATTRIBUTE}] {selector}:not([{THEME_ATTRIBUTE}="unknown"] *)'
+        self.assertEqual(css, f'[{THEME_ATTRIBUTE}] :is({selector}):not([{THEME_ATTRIBUTE}="unknown"] *)'
                               f"{{color:var({ACCENT_PROPERTY},currentColor)!important}}")
         # The glyph is taken by the slot's own child, so nothing else in the row is:
         # the disclosure chevron sits outside the slot, and a glyph that names a

@@ -55,6 +55,19 @@ const publishSidebar = async (page, entries) => {
   await flush(page);
 };
 const cases = {
+  async current_desktop_composer_and_activity_slot(page) {
+    const current = `<main><div class="group/activity-header"><span class="contents text-text/60"><svg id="current-glyph" class="icon-xs"></svg><svg id="current-warning" class="text-warning"></svg><svg id="current-identicon" style="color:rgb(10,20,30)"></svg></span></div>
+      <button data-composer-navigation-target="reasoning" data-selected-reasoning-effort="high"><span><span id="current-model">Kimi for Coding</span><span id="current-effort" data-composer-footer-collapse="none"><span><span data-reasoning-effort="high">High</span></span></span></span></button></main>`;
+    await mount(page, current);
+    assert.equal(await colour(page, 'current-glyph'), colours.kimi);
+    assert.equal(await colour(page, 'current-effort'), colours.kimi);
+    assert.notEqual(await colour(page, 'current-warning'), colours.kimi);
+    assert.equal(await colour(page, 'current-identicon'), 'rgb(10, 20, 30)');
+    await page.locator('#current-model').evaluate(el => { el.textContent = 'Qwen 3'; });
+    await flush(page);
+    assert.equal(await colour(page, 'current-glyph'), colours.qwen);
+    assert.equal(await colour(page, 'current-effort'), colours.qwen);
+  },
   async visible_child_model_wins_during_reuse_and_late_worker_replies(page) {
     await mount(page, main() + agent('codex/gpt-6-astra · High'));
     await page.locator('#agent-model').evaluate((element, id) => {

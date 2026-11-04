@@ -72,11 +72,8 @@ ACTIVITY_SHIMMER = ":is(.loading-shimmer-pure-text,.loading-shimmer)"
 # whole bundle, and both are this slot.
 ACTIVITY_HEADER = '[class~="group/activity-header"]'
 ACTIVITY_SLOT = 'span[class~="contents"]'
-# Every monochrome glyph the row draws is stamped with the app's muted grey,
-# and matching that grey is what does the excluding: the disclosure chevron
-# sits outside the slot, a remote app logo is an <img>, and the two glyphs
-# that name a colour of their own — a denied approval's warning mark and the
-# subagent identicon — carry no grey to match, so they keep their meaning.
+# Desktop has placed the muted grey on either the glyph or its slot. Keep
+# explicitly coloured glyphs in the latter slot out of the override.
 ACTIVITY_GLYPH_GREY = "text-text/60"
 # These are the app shell's authored tab hooks, shared by right and bottom
 # panels. Tab IDs distinguish conversation panes from browser/file tabs;
@@ -423,10 +420,12 @@ def activity_glyph_selector() -> str:
     shimmer to key on in either state, so these two names are used instead,
     and both are the app's own and load-bearing — the named group carries the
     row's hover and focus rules, and the slot's ``display:contents`` is what
-    keeps the glyph a flex item of the row's gap. The grey is matched on the
-    glyph itself so that anything colouring itself is skipped.
+    keeps the glyph a flex item of the row's gap. Match the grey on the glyph
+    or its slot, while skipping glyphs with their own colour in the latter.
     """
-    return f'{ACTIVITY_HEADER} {ACTIVITY_SLOT} > svg[class~="{ACTIVITY_GLYPH_GREY}"]'
+    return (f'{ACTIVITY_HEADER} {ACTIVITY_SLOT} > svg[class~="{ACTIVITY_GLYPH_GREY}"],'
+            f'{ACTIVITY_HEADER} {ACTIVITY_SLOT}[class~="{ACTIVITY_GLYPH_GREY}"]'
+            ' > svg:not([class*="text-"]):not([style*="color"])')
 
 
 def activity_glyph_css() -> str:
@@ -436,8 +435,8 @@ def activity_glyph_css() -> str:
     The grey it replaces is a plain utility in the app's ``utilities`` layer,
     which an ``!important`` declaration outranks whatever its specificity; the
     row's own ``!important`` grey sits on the label span, a *sibling* of the
-    slot, so it never reaches the glyph at all. ``!important`` is kept anyway,
-    because the icon component can merge an inline ``style`` onto the ``svg``.
+    slot, so it never reaches the glyph at all. Explicitly coloured glyphs in
+    the newer slot-grey layout keep their original colour.
     The theme attribute is on the root and recognised child panes while the
     watcher holds an accent; unknown child panes are excluded from this rule
     so the app's original grey utility wins. A build that renames either
@@ -446,7 +445,7 @@ def activity_glyph_css() -> str:
     # Unknown child panes must not enter this rule: `currentColor` on the
     # color property inherits the parent's text colour, not the glyph's
     # original grey utility. Leaving the rule out preserves that utility.
-    return (f'[{THEME_ATTRIBUTE}] {activity_glyph_selector()}:not([{THEME_ATTRIBUTE}="unknown"] *)'
+    return (f'[{THEME_ATTRIBUTE}] :is({activity_glyph_selector()}):not([{THEME_ATTRIBUTE}="unknown"] *)'
             f"{{color:var({ACCENT_PROPERTY},currentColor)!important}}")
 
 
@@ -606,7 +605,7 @@ _WATCHER = r"""
     // localised text, so it is only read when there is no pill to ask.
     function ultraSelected(container) {
       // A retained page's pill (see drawn) says nothing about this popover.
-      const triggers = Array.prototype.filter.call(document.querySelectorAll("[data-codex-intelligence-trigger][data-selected-reasoning-effort]"), drawn);
+      const triggers = Array.prototype.filter.call(document.querySelectorAll(':is([data-codex-intelligence-trigger],[data-composer-navigation-target="reasoning"])[data-selected-reasoning-effort]'), drawn);
       if (triggers.length) { return triggers.some((trigger) =>norm(trigger.getAttribute("data-selected-reasoning-effort")) === "ultra"); }
       const title = container.querySelector('[data-maximum="true"]');
       return !!title && norm(title.textContent) === "ultra";
@@ -734,7 +733,7 @@ _WATCHER = r"""
       let accent = "";
       let theme = "";
       let hue = "";
-      for (const trigger of document.querySelectorAll("[data-codex-intelligence-trigger]")) {
+      for (const trigger of document.querySelectorAll(':is([data-codex-intelligence-trigger],[data-composer-navigation-target="reasoning"][data-selected-reasoning-effort])')) {
         if (trigger.closest("[inert],[hidden]")) { continue; }
         const effort = norm(trigger.getAttribute("data-selected-reasoning-effort"));
         const labels = [];
@@ -896,7 +895,7 @@ _WATCHER = r"""
       }
       for (const element of panels) {
         const ownsComposer = (trigger) => trigger.closest(TAB_PANEL_SELECTOR) === element && !trigger.closest("[inert],[hidden]");
-        const hasComposer = Array.from(element.querySelectorAll("[data-codex-intelligence-trigger]")).some(ownsComposer);
+        const hasComposer = Array.from(element.querySelectorAll(':is([data-codex-intelligence-trigger],[data-composer-navigation-target="reasoning"][data-selected-reasoning-effort])')).some(ownsComposer);
         // A present but unknown composer is authoritative too: the header
         // may still describe the previous turn's model until the next send.
         const model = models.find((model) => ownsComposer(model.element)) || (hasComposer ? null : headerModel(element));
@@ -1061,7 +1060,7 @@ _WATCHER = r"""
       const spinners = document.querySelectorAll(SIDEBAR_SPINNER);
       let inRows = 0;
       for (const element of spinners) { if (element.closest("[" + SIDEBAR_ROW + "]")) { inRows += 1; } }
-      const composers = Array.from(document.querySelectorAll("[data-codex-intelligence-trigger]"));
+      const composers = Array.from(document.querySelectorAll(':is([data-codex-intelligence-trigger],[data-composer-navigation-target="reasoning"][data-selected-reasoning-effort])'));
       return { colours: sidebar.colours.size, rows: all.length, local: rows.length,
                matched: rows.filter(row => sidebar.colours.has(row.id)).length,
                spinners: spinners.length, rowSpinners: inRows, painted: sidebar.targets.size,
