@@ -9,6 +9,9 @@ final class ChatTranscriptFollow: ObservableObject {
     private var pending: DispatchWorkItem?
     private var generation: UInt64 = 0
     private(set) var interacting = false
+    /// A jump window ends above the latest rows, so reaching its bottom is
+    /// not reaching the latest; only Latest resumes following then.
+    var holdsAboveLatest = false
 
     func request(_ action: @escaping () -> Void) {
         guard followsLatest, !interacting, pending == nil else { return }
@@ -34,7 +37,7 @@ final class ChatTranscriptFollow: ObservableObject {
     func beginInteraction() { interacting = true; pause() }
     func endInteraction(atBottom: Bool) {
         interacting = false
-        if atBottom, !followsLatest { followsLatest = true }
+        if atBottom, !holdsAboveLatest, !followsLatest { followsLatest = true }
     }
     func resume() {
         cancel(); interacting = false

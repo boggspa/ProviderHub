@@ -90,6 +90,39 @@ final class TranscriptParityTests: XCTestCase {
         XCTAssertTrue(CompanionTranscriptState.liveEntryIDs(entries: solo, runIsOpen: false, activities: [outside]).isEmpty)
     }
 
+    func testJumpFarBackShowsABoundedWindowNotTheWholeTail() {
+        let entries = (0..<2400).map { entry("r\($0)", "assistant", member: $0 % 2 == 0 ? "sol" : "luna", text: "Reply \($0)") }
+        let rows = outline(entries, open: false)
+        let target = rows.firstIndex { $0.id == "r3" }!
+        let window = Segment.visibleWindow(rows, around: target, before: 50, after: 50)
+        XCTAssertLessThanOrEqual(window.segments.count, 102)
+        XCTAssertTrue(window.segments.contains { $0.id == "r3" })
+        XCTAssertTrue(window.hasLater)
+        XCTAssertEqual(window.hasEarlier, target > 50)
+        XCTAssertEqual(Set(window.segments.map(\.id)).count, window.segments.count)
+        // Reaching the bottom, the window is the paged tail it would grow into.
+        let near = rows.count - 10
+        let bottom = Segment.visibleWindow(rows, around: near, before: 40, after: 50)
+        XCTAssertFalse(bottom.hasLater)
+        XCTAssertEqual(bottom.segments.map(\.id), Segment.visibleTail(rows, limit: rows.count - (near - 40)).map(\.id))
+        XCTAssertTrue(Segment.visibleWindow([], around: 0, before: 5, after: 5).segments.isEmpty)
+    }
+
+    func testWindowStartingInsideASectionKeepsItsAuthorHeader() throws {
+        let entries = [entry("reply", "assistant", text: "Working on it.")] + (0..<30).map { entry("t\($0)", tool: "apply_patch") }
+            + (0..<30).map { entry("later\($0)", "assistant", member: "luna", text: "Later \($0)") }
+        let rows = outline(entries, open: false)
+        let target = try XCTUnwrap(rows.indices.first { index in
+            guard index > 0, !rows[index - 1].isSpeaker, rows[index].previousSpeaker != nil else { return false }
+            if case .fold = rows[index].content { return true }
+            return false
+        })
+        let window = Segment.visibleWindow(rows, around: target, before: 0, after: 3)
+        let speaker = try XCTUnwrap(rows[target].previousSpeaker)
+        XCTAssertEqual(window.segments.first?.id, "speaker-" + speaker.id)
+        XCTAssertEqual(window.segments.dropFirst().first?.id, rows[target].id)
+    }
+
     func testSharedFoldSummaryIncludesOrderedGlyphsFileCountsPatchTotalsAndFailures() {
         let patch = "--- a/Controls.swift\n+++ b/Controls.swift\n@@ -1 +1,2 @@\n-old\n+new\n+extra"
         var edit = entry("edit", tool: "apply_patch", detail: patch)

@@ -630,7 +630,13 @@ struct ChatTranscript: View {
     @Environment(\.chatTextStyle) private var textStyle
     @StateObject private var follow = ChatTranscriptFollow()
     @State private var visibleSegmentLimit = 100
+    /// Set by a jump to a row far above the tail: the rows around it, so the
+    /// eager stack never lays out everything from there to the bottom.
+    @State private var jumpWindow: JumpWindow?
+    private struct JumpWindow: Equatable { var anchor: String; var before = 60; var after = 60 }
     private let bottomID = "chat-transcript-bottom"
+    /// How far back a jump may still page the tail rather than open a window.
+    private static let jumpPagingReach = 200
 
     var body: some View {
         ScrollViewReader { proxy in
@@ -645,12 +651,13 @@ struct ChatTranscript: View {
             .onChange(of: model.transcriptVersion) { _, _ in scrollToEnd(proxy) }
             // Back at the latest activity, history paged in for reading goes
             // again, so the eager stack stays one page tall while it streams.
-            .onChange(of: follow.followsLatest) { _, follows in if follows { visibleSegmentLimit = 100 } }
+            .onChange(of: follow.followsLatest) { _, follows in if follows { visibleSegmentLimit = 100; jumpWindow = nil } }
+            .onChange(of: jumpWindow) { _, window in follow.holdsAboveLatest = window != nil }
             .onChange(of: model.jumpRequest) { _, request in
                 if let request { jump(to: request.id, proxy: proxy) }
             }
             .onChange(of: model.selectedID) { _, _ in
-                visibleSegmentLimit = 100; follow.resume()
+                visibleSegmentLimit = 100; jumpWindow = nil; follow.resume()
                 scrollToEnd(proxy)
             }
             .onAppear {
@@ -662,7 +669,7 @@ struct ChatTranscript: View {
             .overlay(alignment: .bottomTrailing) {
                 if !follow.followsLatest {
                     Button {
-                        follow.resume(); scrollToEnd(proxy)
+                        jumpWindow = nil; follow.resume(); scrollToEnd(proxy)
                     } label: {
                         Label("Latest", systemImage: "arrow.down").font(.system(size: 11.5, weight: .medium))
                             .padding(.horizontal, 11).padding(.vertical, 7)
@@ -702,7 +709,15 @@ struct ChatTranscript: View {
         if model.team?.enabled != true, model.busy, let speaker = segments.last(where: \.isSpeaker) {
             liveSpeakers.insert(speaker.id)
         }
-        let visible = ChatTranscriptSegment<ChatEntry>.visibleTail(segments, limit: visibleSegmentLimit, liveEntryIDs: liveEntryIDs)
+        let anchor = jumpWindow.flatMap { window in segments.firstIndex { $0.id == window.anchor } }
+        let visible: [ChatTranscriptSegment<ChatEntry>], hasEarlier: Bool, hasLater: Bool
+        if let jumpWindow, let anchor {
+            (visible, hasEarlier, hasLater) = ChatTranscriptSegment<ChatEntry>.visibleWindow(
+                segments, around: anchor, before: jumpWindow.before, after: jumpWindow.after, liveEntryIDs: liveEntryIDs)
+        } else {
+            visible = ChatTranscriptSegment<ChatEntry>.visibleTail(segments, limit: visibleSegmentLimit, liveEntryIDs: liveEntryIDs)
+            (hasEarlier, hasLater) = (segments.count > visibleSegmentLimit, false)
+        }
         // Eager, not lazy: a lazy stack only estimates the height of rows it
         // has not drawn, so when a Team member's section above the viewport
         // shrinks or leaves the tail, the viewport can land past the rows it
@@ -711,10 +726,10 @@ struct ChatTranscript: View {
         // paged, so every row it holds is measured exactly.
         return VStack(alignment: .leading, spacing: 0) {
             if model.entries.isEmpty { ChatInvitation(model: model) }
-            if segments.count > visibleSegmentLimit {
+            if hasEarlier {
                 Button("Load earlier messages") {
                     follow.pause()
-                    visibleSegmentLimit += 100
+                    if jumpWindow != nil { jumpWindow?.before += 100 } else { visibleSegmentLimit += 100 }
                     // Rows arrive above the one being read; keep it in place.
                     if let first = visible.first?.id { DispatchQueue.main.async { proxy.scrollTo(first, anchor: .top) } }
                 }
@@ -737,6 +752,19 @@ struct ChatTranscript: View {
                     }
                 }
                 .padding(.top, gap(segment.spacing))
+            }
+            if hasLater {
+                // Rows arrive below the one being read, so nothing moves. A
+                // window that would reach the bottom becomes the tail again,
+                // so scrolling to the end can resume following.
+                Button("Load later messages") {
+                    guard let window = jumpWindow, let anchor else { return }
+                    if anchor + window.after + 101 >= segments.count {
+                        visibleSegmentLimit = segments.count - max(0, anchor - window.before)
+                        jumpWindow = nil
+                    } else { jumpWindow?.after += 100 }
+                }
+                    .frame(maxWidth: .infinity).padding(.top, 16)
             }
             // Headroom: the follow target is this spacer's bottom edge, so the
             // newest row sits a little above the composer instead of against
@@ -764,8 +792,9 @@ struct ChatTranscript: View {
     }
 
     /// Show the segment holding an entry: its own row, or the fold it sits
-    /// in, which opens so the row is visible. The tail is paged out far
-    /// enough to include it first. The user asked for this position, so
+    /// in, which opens so the row is visible. A row within reach of the tail
+    /// pages the tail out to it; one further back gets a window of its own
+    /// rather than everything below it. The user asked for this position, so
     /// following pauses as it does for a manual scroll; Latest resumes it.
     private func jump(to entryID: String, proxy: ScrollViewProxy) {
         let liveEntryIDs = model.streamingEntryIDs()
@@ -783,7 +812,15 @@ struct ChatTranscript: View {
         follow.pause()
         expanded.insert(entryID)
         if case .fold = segments[index].content { foldChoice[target] = true; inFold = true }
-        if segments.count - index > visibleSegmentLimit { visibleSegmentLimit = segments.count - index + 20 }
+        if let window = jumpWindow, let anchor = segments.firstIndex(where: { $0.id == window.anchor }),
+           (anchor - window.before)...(anchor + window.after) ~= index {
+            // Already on screen in the current window.
+        } else if segments.count - index <= max(visibleSegmentLimit, Self.jumpPagingReach) {
+            jumpWindow = nil
+            visibleSegmentLimit = max(visibleSegmentLimit, segments.count - index + 20)
+        } else {
+            jumpWindow = JumpWindow(anchor: target)
+        }
         func scroll(to id: String) {
             if reduceMotion { proxy.scrollTo(id, anchor: .center) }
             else { withAnimation(.easeInOut(duration: 0.2)) { proxy.scrollTo(id, anchor: .center) } }

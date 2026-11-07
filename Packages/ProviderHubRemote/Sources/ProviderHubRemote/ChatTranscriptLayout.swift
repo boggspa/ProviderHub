@@ -153,17 +153,33 @@ struct ChatTranscriptSegment<Item: ChatTranscriptItem>: Identifiable {
             }
             return selected.sorted().map { segments[$0] }
         }
-        var tail = Array(segments[start...])
-        guard start > 0, let first = tail.first, let speaker = first.previousSpeaker else { return tail }
+        return withSectionHeader(Array(segments[start...]), start: start, in: segments)
+    }
+
+    /// A jump far above the paged tail shows a window around its target
+    /// rather than paging everything below it in: `before` segments above
+    /// the target and `after` below. A window that reaches the bottom is the
+    /// tail, live rows included.
+    static func visibleWindow(_ segments: [Self], around anchor: Int, before: Int, after: Int,
+                              liveEntryIDs: Set<String> = []) -> (segments: [Self], hasEarlier: Bool, hasLater: Bool) {
+        let anchor = min(max(0, anchor), max(0, segments.count - 1))
+        let start = max(0, anchor - max(0, before))
+        let end = anchor + max(0, after) + 1
+        guard end < segments.count else {
+            return (visibleTail(segments, limit: segments.count - start, liveEntryIDs: liveEntryIDs), start > 0, false)
+        }
+        return (withSectionHeader(Array(segments[start..<end]), start: start, in: segments), start > 0, true)
+    }
+
+    private static func withSectionHeader(_ slice: [Self], start: Int, in segments: [Self]) -> [Self] {
+        guard start > 0, let first = slice.first, let speaker = first.previousSpeaker else { return slice }
         switch first.content {
         case .entry(let item) where item.kind == "assistant" || item.kind == "tool": break
         case .fold: break
-        default: return tail
+        default: return slice
         }
-        if let header = segments[..<start].last(where: { $0.id == "speaker-" + speaker.id }) {
-            tail.insert(header, at: 0)
-        }
-        return tail
+        guard let header = segments[..<start].last(where: { $0.id == "speaker-" + speaker.id }) else { return slice }
+        return [header] + slice
     }
 
     /// Preserve first-arrival section order while routing later tools back to
