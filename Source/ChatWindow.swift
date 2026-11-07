@@ -519,13 +519,109 @@ private struct ChatInvitation: View {
 
 // MARK: - Transcript
 
+/// Find in transcript. The typed text lives here rather than on the
+/// transcript, so a keystroke redraws this bar instead of the whole eager
+/// transcript. A search waits for typing to pause and needs two characters
+/// unless Return asks for it; it scans a snapshot off the main thread, and
+/// only a changed query jumps.
+@MainActor
+private struct ChatTranscriptFindBar: View {
+    let model: ChatModel
+    /// New rows refresh the matches without moving the reader.
+    let entryCount: Int
+    let focusRequest: Int
+    let jump: (String) -> Void
+    let close: () -> Void
+    @State private var text = ""
+    @State private var matches: [String] = []
+    @State private var index = 0
+    @State private var searchedQuery = ""
+    @FocusState private var focused: Bool
+    private static let minimumLength = 2
+
+    private struct Key: Equatable { var query: String; var entryCount: Int }
+
+    private var query: String { text.trimmingCharacters(in: .whitespacesAndNewlines) }
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+            TextField("Find in transcript", text: $text).textFieldStyle(.plain)
+                .focused($focused).onSubmit(submit)
+            Text(status).font(.system(size: 11)).foregroundStyle(.secondary)
+            Button { move(-1) } label: { Image(systemName: "chevron.up") }
+                .disabled(matches.isEmpty).help("Previous match")
+            Button { move(1) } label: { Image(systemName: "chevron.down") }
+                .disabled(matches.isEmpty).help("Next match")
+            Button { close() } label: { Image(systemName: "xmark") }
+                .help("Close transcript search")
+        }.buttonStyle(.plain).padding(10)
+        .onExitCommand { close() }
+        .onAppear { focused = true }
+        .onChange(of: focusRequest) { _, _ in focused = true }
+        .task(id: Key(query: query, entryCount: entryCount)) {
+            let query = query
+            guard !query.isEmpty, query.count >= Self.minimumLength || query == searchedQuery else {
+                matches = []; index = 0; searchedQuery = ""
+                return
+            }
+            try? await Task.sleep(for: .milliseconds(250))
+            guard !Task.isCancelled else { return }
+            await search(query)
+        }
+    }
+
+    private var status: String {
+        if query != searchedQuery {
+            return !query.isEmpty && query.count < Self.minimumLength ? "Return to search" : ""
+        }
+        return matches.isEmpty ? "0 results" : "\(min(index + 1, matches.count)) of \(matches.count)"
+    }
+
+    private func submit() {
+        let query = query
+        guard !query.isEmpty else { return }
+        if query == searchedQuery { move(1) } else { Task { await search(query) } }
+    }
+
+    private func move(_ amount: Int) {
+        guard !matches.isEmpty else { return }
+        index = (index + amount + matches.count) % matches.count
+        jump(matches[index])
+    }
+
+    private func search(_ query: String) async {
+        let snapshot = model.entries.map { entry in
+            (entry.id, [entry.text, entry.summary ?? "", entry.detail ?? "", entry.memberName ?? ""])
+        }
+        let scan = Task.detached(priority: .userInitiated) { () -> [String]? in
+            var found: [String] = []
+            for (offset, (id, fields)) in snapshot.enumerated() {
+                if offset % 64 == 0, Task.isCancelled { return nil }
+                if fields.contains(where: { $0.localizedCaseInsensitiveContains(query) }) { found.append(id) }
+            }
+            return found
+        }
+        let result = await withTaskCancellationHandler { await scan.value } onCancel: { scan.cancel() }
+        guard let found = result, !Task.isCancelled, query == self.query else { return }
+        if query == searchedQuery {
+            // Same words, new rows: stay on the current match.
+            let current = matches.indices.contains(index) ? matches[index] : nil
+            matches = found
+            index = current.flatMap { found.firstIndex(of: $0) } ?? min(index, max(found.count - 1, 0))
+        } else {
+            matches = found; searchedQuery = query; index = 0
+            if let first = found.first { jump(first) }
+        }
+    }
+}
+
 @MainActor
 struct ChatTranscript: View {
     @ObservedObject var model: ChatModel
     @State private var searching = false
-    @State private var searchText = ""
-    @State private var searchIndex = 0
-    @FocusState private var searchFocused: Bool
+    /// Bumped by Cmd-F so an open find bar takes focus again.
+    @State private var searchFocusRequest = 0
     @State private var expanded: Set<String> = []
     /// Explicit open/closed choices per fold; a fold without one stays closed
     /// unless it holds a row the user expanded.
@@ -535,37 +631,13 @@ struct ChatTranscript: View {
     @StateObject private var follow = ChatTranscriptFollow()
     @State private var visibleSegmentLimit = 100
     private let bottomID = "chat-transcript-bottom"
-    private var searchMatches: [ChatEntry] {
-        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !query.isEmpty else { return [] }
-        return model.entries.filter { entry in
-            [entry.text, entry.summary ?? "", entry.detail ?? "", entry.memberName ?? ""]
-                .contains { $0.localizedCaseInsensitiveContains(query) }
-        }
-    }
 
     var body: some View {
         ScrollViewReader { proxy in
             VStack(spacing: 0) {
             if searching {
-                HStack(spacing: 8) {
-                    Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-                    TextField("Find in transcript", text: $searchText).textFieldStyle(.plain)
-                        .focused($searchFocused).onSubmit { searchMove(1, proxy: proxy) }
-                    Text(searchMatches.isEmpty ? "0 results" : "\(min(searchIndex + 1, searchMatches.count)) of \(searchMatches.count)")
-                        .font(.system(size: 11)).foregroundStyle(.secondary)
-                    Button { searchMove(-1, proxy: proxy) } label: { Image(systemName: "chevron.up") }
-                        .disabled(searchMatches.isEmpty).help("Previous match")
-                    Button { searchMove(1, proxy: proxy) } label: { Image(systemName: "chevron.down") }
-                        .disabled(searchMatches.isEmpty).help("Next match")
-                    Button { searching = false; searchFocused = false } label: { Image(systemName: "xmark") }
-                        .help("Close transcript search")
-                }.buttonStyle(.plain).padding(10)
-                .onExitCommand { searching = false; searchFocused = false }
-                .onChange(of: searchText) { _, _ in
-                    searchIndex = 0
-                    if let first = searchMatches.first { jump(to: first.id, proxy: proxy) }
-                }
+                ChatTranscriptFindBar(model: model, entryCount: model.entries.count, focusRequest: searchFocusRequest,
+                                      jump: { jump(to: $0, proxy: proxy) }, close: { searching = false })
             }
             ScrollView {
                 content(proxy).background(ChatTranscriptScrollObserver(follow: follow))
@@ -600,18 +672,11 @@ struct ChatTranscript: View {
             }
             }
             .background {
-                Button("Find in transcript") { searching = true; searchFocused = true }
+                Button("Find in transcript") { searching = true; searchFocusRequest += 1 }
                     .keyboardShortcut(model.hasPaneFocus ? KeyboardShortcut("f", modifiers: .command) : nil)
                     .frame(width: 0, height: 0).opacity(0)
             }
         }
-    }
-
-    private func searchMove(_ amount: Int, proxy: ScrollViewProxy) {
-        let matches = searchMatches
-        guard !matches.isEmpty else { return }
-        searchIndex = (searchIndex + amount + matches.count) % matches.count
-        jump(to: matches[searchIndex].id, proxy: proxy)
     }
 
     private func content(_ proxy: ScrollViewProxy) -> some View {
