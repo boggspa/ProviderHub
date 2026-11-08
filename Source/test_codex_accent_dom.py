@@ -421,7 +421,7 @@ const cases = {
     // component that rendered the aside is what names it a usage banner.
     const aside = id => `<aside id="${id}" role="status" aria-live="polite"><h3>Banner ${id}</h3><button>Add Credits</button></aside>`;
     const gauge = '<aside id="gauge"><svg><path d="M10.8343 12.0693C10 12.5 9 12 8.5 11.4Z"></path></svg>Out of usage</aside>';
-    await page.setContent(styles + main() + ['referral', 'exhausted', 'own', 'model', 'fallback', 'notice', 'bare'].map(aside).join('') + gauge);
+    await page.setContent(styles + main() + ['referral', 'exhausted', 'own', 'model', 'upsell', 'fallback', 'notice', 'bare'].map(aside).join('') + gauge);
     await page.evaluate(() => {
       const layout = parent => ({memoizedProps: {Icon: null, variant: 'recovery'}, return: parent});
       const server = actions => layout({memoizedProps: {banner: {banner_type: 'free_or_go_rate_limit_reached', ctas: actions.map(action => ({action, label: action}))}, behavior: {actions: {}}}, return: null});
@@ -430,6 +430,9 @@ const cases = {
       host('exhausted', server(['add_credits']));
       host('own', layout({memoizedProps: {rateLimitStatus: {plan_type: 'free'}, imageGenerationLimit: null, lastImageGenerationImpressionKeyRef: {current: null}}, return: null}));
       host('model', layout({memoizedProps: {modelName: 'gpt-6-astra', resetAt: null}, return: null}));
+      // 26.1103: the status's own upsell handed down beside the status.
+      const upsell = {banner_type: 'plus_rate_limit_reached', ctas: [{action: 'add_credits'}]};
+      host('upsell', layout({memoizedProps: {sendBlocked: true, banner: upsell, rateLimitStatus: {plan_type: 'plus', rate_limit_upsell: upsell}}, return: null}));
       // Other content under the provider must not borrow its banner, and a
       // chat hard-block notice in the same layout stays.
       host('fallback', {memoizedProps: {title: 'x'}, return: {memoizedProps: {banner: {ctas: [{action: 'refer'}]}, fallbackContent: null}, return: server(['refer'])}});
@@ -439,9 +442,9 @@ const cases = {
     assert.equal(installed.usageBanner, true);
     await flush(page);
     const display = id => page.locator('#' + id).evaluate(el => getComputedStyle(el).display);
-    for (const id of ['referral', 'exhausted', 'own', 'model', 'gauge']) { assert.equal(await display(id), 'none', id); }
+    for (const id of ['referral', 'exhausted', 'own', 'model', 'upsell', 'gauge']) { assert.equal(await display(id), 'none', id); }
     for (const id of ['fallback', 'notice', 'bare']) { assert.equal(await display(id), 'block', id); }
-    assert.equal(await page.evaluate(() => window.__providerHubAccent.check().banners), 5);
+    assert.equal(await page.evaluate(() => window.__providerHubAccent.check().banners), 6);
     // A reused aside that stops being a usage banner comes back.
     await page.evaluate(() => {
       const el = document.getElementById('referral');
@@ -457,7 +460,7 @@ const cases = {
       await page.goto('about:blank'); // Reset watcher and JSON.parse wrapper.
       const gauge = '<svg><path d="M10.8343 12.0693C10 12.5 9 12 8.5 11.4Z"></path></svg>';
       const aside = id => `<aside id="${id}"><h3>Limit ${id}</h3>${gauge}</aside>`;
-      await page.setContent(styles + main() + ['core', 'image', 'server-core', 'server-image', 'unknown', 'icon', 'model'].map(aside).join(''));
+      await page.setContent(styles + main() + ['core', 'image', 'server-core', 'server-image', 'unknown', 'icon', 'model', 'upsell', 'upsell-image', 'upsell-other'].map(aside).join(''));
       await page.evaluate(() => {
         const owner = imageGenerationLimit => ({
           memoizedProps: {rateLimitStatus: {}, lastImageGenerationImpressionKeyRef: {}, imageGenerationLimit},
@@ -477,15 +480,22 @@ const cases = {
         // Newer Desktop notices have no legacy image-impression marker.
         attach('unknown', server({memoizedProps: {rateLimitStatus: {}}, return: null}));
         attach('model', {memoizedProps: {modelName: 'gpt-6-astra', resetAt: null}, return: null});
+        // 26.1103 account upsell; its image variant and a banner that is not
+        // the status's own upsell stay visible in native mode.
+        const upsell = {banner_type: 'plus_rate_limit_reached', ctas: []};
+        attach('upsell', {memoizedProps: {sendBlocked: true, banner: upsell, rateLimitStatus: {rate_limit_upsell: upsell}}, return: null});
+        const image = {banner_type: 'image_generation_limit_reached', ctas: []};
+        attach('upsell-image', {memoizedProps: {banner: image, lastImpressionKeyRef: {}, rateLimitStatus: {rate_limit_upsell: image}}, return: null});
+        attach('upsell-other', {memoizedProps: {banner: {ctas: []}, rateLimitStatus: {rate_limit_upsell: upsell}}, return: null});
       });
       const script = native ? input.nativeBannerScript : input.bannerScript;
       await page.evaluate(script.replace('String(location.href)', '"app://-/"'));
       await flush(page);
       const display = id => page.locator('#' + id).evaluate(el => getComputedStyle(el).display);
-      for (const id of ['model']) {
+      for (const id of ['model', 'upsell']) {
         assert.equal(await display(id), 'none', id);
       }
-      for (const id of ['core', 'server-core', 'image', 'server-image', 'unknown', 'icon']) {
+      for (const id of ['core', 'server-core', 'image', 'server-image', 'unknown', 'icon', 'upsell-image', 'upsell-other']) {
         assert.equal(await display(id), native ? 'block' : 'none', id);
       }
       if (native) {
@@ -527,12 +537,13 @@ const cases = {
     const seen = await page.evaluate(() => {
       const status = JSON.parse('{"user_id":"u1","account_id":"a1","plan_type":"plus","rate_limit":{"allowed":false,"limit_reached":true,"primary_window":{"used_percent":100}},"additional_rate_limits":[{"limit_name":"gpt-reserve","rate_limit":{"allowed":false}}],"credits":{"has_credits":false}}');
       const snapshot = JSON.parse('{"version":1,"stream_id":"s","sequence":2,"usage":{"user_id":"u1","account_id":"a1","plan_type":"plus","rate_limit":{"allowed":false,"limit_reached":true}}}');
+      const push = JSON.parse('{"type":"usage.snapshot","payload":{"version":1,"stream_id":"s","sequence":3,"usage_by_client":{"electron":{"user_id":"u1","account_id":"a1","plan_type":"plus","rate_limit":{"allowed":false,"limit_reached":true}}}}}');
       const other = JSON.parse('{"rate_limit":{"allowed":false},"plan_type":"plus"}');
       const allowed = JSON.parse('{"user_id":"u1","account_id":"a1","plan_type":"plus","rate_limit":{"allowed":true}}');
       const revived = JSON.parse('{"a":1}', (key, value) => (key === 'a' ? value + 1 : value));
       let failure = null;
       try { JSON.parse('{nope'); } catch (error) { failure = error.name; }
-      return { status, snapshot, other, allowed, revived, failure, list: JSON.parse('[1,2]'), length: JSON.parse.length, name: JSON.parse.name,
+      return { status, snapshot, push, other, allowed, revived, failure, list: JSON.parse('[1,2]'), length: JSON.parse.length, name: JSON.parse.name,
                check: window.__providerHubAccent.check().unlock, glyph: getComputedStyle(document.getElementById('main-glyph')).color };
     });
     assert.equal(seen.status.rate_limit.allowed, true);
@@ -541,6 +552,8 @@ const cases = {
     assert.equal(seen.status.additional_rate_limits[0].rate_limit.allowed, false);
     assert.equal(seen.status.credits.has_credits, false);
     assert.equal(seen.snapshot.usage.rate_limit.allowed, true);
+    assert.equal(seen.push.payload.usage_by_client.electron.rate_limit.allowed, true);
+    assert.equal(seen.push.payload.usage_by_client.electron.rate_limit.limit_reached, true);
     assert.equal(seen.other.rate_limit.allowed, false);
     assert.equal(seen.allowed.rate_limit.allowed, true);
     assert.equal(seen.revived.a, 2);
@@ -548,7 +561,7 @@ const cases = {
     assert.deepEqual(seen.list, [1, 2]);
     assert.equal(seen.length, 2);
     assert.equal(seen.name, 'parse');
-    assert.deepEqual(seen.check, {seen: 3, unlocked: 2});
+    assert.deepEqual(seen.check, {seen: 4, unlocked: 3});
     assert.equal(seen.glyph, colours.parent);
     assert.deepEqual(await page.evaluate(unlockScript), {skipped: 'installed'});
   },

@@ -577,9 +577,19 @@ _WATCHER = r"""
         unlock.unlocked += 1;
         return true;
       };
+      // Where a status sits: the poll body itself, a 26.917 stream snapshot's
+      // `usage`, and from 26.1103 a push snapshot's
+      // `payload.usage_by_client.<client>` (the app reads `electron`).
+      const freeAll = (value) => {
+        if (free(value) || free(value.usage)) { return; }
+        const byClient = value.payload && typeof value.payload === "object" ? value.payload.usage_by_client : null;
+        if (byClient && typeof byClient === "object" && !Array.isArray(byClient)) {
+          for (const key of Object.keys(byClient)) { free(byClient[key]); }
+        }
+      };
       const wrapped = function parse(text, reviver) {
         const value = original.call(JSON, text, reviver);
-        try { if (value && typeof value === "object") { free(value) || free(value.usage); } } catch (error) {}
+        try { if (value && typeof value === "object" && !Array.isArray(value)) { freeAll(value); } } catch (error) {}
         return value;
       };
       try { Object.defineProperty(wrapped, "__providerHubUnlock", { value: unlock }); } catch (error) {}
@@ -1075,6 +1085,18 @@ _WATCHER = r"""
     // server-banner renderer passes `banner` with `fallbackContent`; an aside
     // reaching that first is other fallback content, so the walk stops there.
     const own = (props, name) => Object.prototype.hasOwnProperty.call(props, name);
+    // From 26.1103 the account's usage banner is drawn by a component given
+    // the status's own `rate_limit_upsell` as `banner` beside that status
+    // (`rateLimitStatus`), with no `behavior`. The image-generation variant
+    // is the same component with `lastImpressionKeyRef` and its own type.
+    const statusUpsell = (props) => {
+      const banner = props.banner;
+      const status = props.rateLimitStatus;
+      return !!banner && typeof banner === "object" && !!status && typeof status === "object"
+        && status.rate_limit_upsell === banner;
+    };
+    const imageUpsell = (props) => own(props, "lastImpressionKeyRef")
+      || String(props.banner.banner_type || "").startsWith("image_generation");
     const usageBanners = new Set();
     function textUsageBanner(element) {
       const fiberKey = Object.keys(element).find(name => name.startsWith("__reactFiber$"));
@@ -1090,6 +1112,7 @@ _WATCHER = r"""
           return false;
         }
         if (own(props, "modelName") && own(props, "resetAt")) { return true; }
+        if (statusUpsell(props)) { return !imageUpsell(props); }
         const banner = props.banner;
         if (banner && typeof banner === "object") {
           // Cross a server renderer to look for a definitive owning component,
@@ -1107,6 +1130,7 @@ _WATCHER = r"""
       for (let depth = 0; fiber && depth < 16; depth += 1, fiber = fiber.return) {
         const props = fiber.memoizedProps;
         if (!props || typeof props !== "object") { continue; }
+        if (statusUpsell(props)) { return true; }
         const banner = props.banner;
         if (banner && typeof banner === "object") {
           return !!props.behavior && typeof props.behavior === "object" && Array.isArray(banner.ctas);
