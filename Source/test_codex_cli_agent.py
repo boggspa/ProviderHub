@@ -1346,6 +1346,104 @@ class RunTurnTests(unittest.TestCase):
                     self.assertNotIn(codex._tool_alias("view_image"), thread["developerInstructions"])
                     self.assertNotIn("no native image viewer", thread["developerInstructions"])
 
+    def test_question_tools_use_offered_host_aliases_and_preserve_mode_limits(self):
+        questions = [{"name": name, "description": "Only available in Default or Plan mode.",
+                      "input_schema": {"type": "object", "properties": {"questions": {"type": "array"}}}}
+                     for name in codex._QUESTION_TOOLS]
+        other = {"name": "exec_command", "input_schema": {"type": "object"}}
+        for offered, choice, expected in ((questions, None, codex._QUESTION_TOOLS),
+                                          (questions[1:2], None, ("request_user_input_async",)),
+                                          ([other], None, ()),
+                                          (questions, {"type": "none"}, ())):
+            with self.subTest(offered=offered, choice=choice):
+                fake = FakeCodexSession([])
+                fake.script = [_completed_turn()]
+                _, session, _ = self._run(self._request(tools=offered, tool_choice=choice), fake)
+                thread = next(params for method, params, _ in session.requests if method == "thread/start")
+                instructions = thread["developerInstructions"]
+                for name in codex._QUESTION_TOOLS:
+                    self.assertEqual(f"call host.{codex._tool_alias(name)} for {name}" in instructions,
+                                     name in expected)
+                if expected:
+                    self.assertIn("host tool's actual schema, description and mode restrictions", instructions)
+                    self.assertIn("Do not replace that call with a plain-text question", instructions)
+                    self.assertIn("never invent answers", instructions)
+                    dynamic = thread["dynamicTools"][0]["tools"]
+                    self.assertEqual([tool["inputSchema"] for tool in dynamic],
+                                     [codex._unsealed(tool["input_schema"]) for tool in offered])
+                    self.assertTrue(all("Only available in Default or Plan mode." in tool["description"]
+                                        for tool in dynamic))
+                else:
+                    self.assertNotIn("Interactive questions are host tools here", instructions)
+
+    def test_native_question_rpc_can_recover_into_a_real_host_question(self):
+        arguments = {"questions": [{"id": "pads", "header": "Locations", "question": "Where should pads go?",
+                     "options": [{"label": "Planet surface", "description": "Use surface pads."},
+                                 {"label": "Also inside", "description": "Add interior pads."}]}]}
+        tool = {"name": "request_user_input", "input_schema": {"type": "object"}}
+        fake = FakeCodexSession([])
+        fake.script = [{"id": 1, "method": "item/tool/requestUserInput", "params": {
+            "threadId": "t1", "turnId": "t1", "itemId": "question-1", "isBlocking": True,
+            **arguments}}, {"id": 2, "method": "item/tool/call", "params": {
+            "namespace": "host", "tool": codex._tool_alias("request_user_input"),
+            "arguments": arguments, "callId": "host-question"}}]
+        events, session, _ = self._run(self._request(tools=[tool]), fake)
+        self.assertEqual(events, [{"type": "tool_call", "id": "host-question",
+                                  "name": "request_user_input", "input": arguments},
+                                 {"type": "message_stop", "stop_reason": "tool_use"}])
+        self.assertEqual(session.sent[0]["id"], 1)
+        self.assertEqual(session.sent[0]["error"]["code"], -32601)
+        self.assertIn("No question was shown and no user answer was supplied", session.sent[0]["error"]["message"])
+        self.assertNotIn("result", session.sent[0])
+
+    def test_native_questions_do_not_fabricate_host_tools_or_answers(self):
+        for extra in ({"tools": []}, {"tools": [{"name": "request_user_input"}],
+                                      "tool_choice": {"type": "none"}}):
+            fake = FakeCodexSession([])
+            fake.script = [{"id": 1, "method": "item/tool/requestUserInput", "params": {"questions": []}}]
+            events, session, _ = self._run(self._request(**extra), fake)
+            self.assertEqual([e["type"] for e in events], ["error"])
+            self.assertIn("unsupported interactive action", events[0]["message"])
+            self.assertEqual(session.sent, [])
+
+    def test_native_nonblocking_question_redirects_to_offered_async_tool(self):
+        tool = {"name": "request_user_input_async", "input_schema": {"type": "object"}}
+        fake = FakeCodexSession([])
+        fake.script = [{"id": 1, "method": "item/tool/requestUserInput", "params": {
+            "isBlocking": False, "autoResolutionMs": 1, "questions": []}}, _completed_turn()]
+        events, session, _ = self._run(self._request(tools=[tool]), fake)
+        self.assertEqual(events, [{"type": "message_stop", "stop_reason": "end_turn"}])
+        message = session.sent[0]["error"]["message"]
+        self.assertIn(f"call host.{codex._tool_alias('request_user_input_async')}", message)
+        self.assertNotIn(f"call host.{codex._tool_alias('request_user_input')} ", message)
+        self.assertNotIn("result", session.sent[0])
+
+    def test_prose_questions_remain_text_and_do_not_fabricate_cards(self):
+        text = "Where should pads go?\n- Surface (Recommended)\n- Inside too"
+        fake = FakeCodexSession([])
+        fake.script = [_delta_ev(text), _completed_turn()]
+        events, session, _ = self._run(self._request(tools=[{"name": "request_user_input"}]), fake)
+        self.assertEqual("".join(e.get("text", "") for e in events), text)
+        self.assertFalse(any(e["type"] == "tool_call" for e in events))
+        self.assertEqual(session.sent, [])
+
+    def test_repeated_native_question_requests_are_bounded(self):
+        fake = FakeCodexSession([])
+        fake.script = [{"id": n, "method": "item/tool/requestUserInput", "params": {"questions": []}}
+                       for n in range(8)]
+        events, session, _ = self._run(self._request(tools=[{"name": "request_user_input"}]), fake)
+        self.assertEqual(len(session.sent), 3)
+        self.assertTrue(all("error" in reply and "result" not in reply for reply in session.sent))
+        self.assertEqual([e["type"] for e in events], ["error"])
+        self.assertEqual(events[0]["http_status"], 400)
+
+    def test_other_interactive_requests_remain_unsupported(self):
+        fake = FakeCodexSession([])
+        fake.script = [{"id": 1, "method": "item/commandExecution/requestApproval", "params": {}}]
+        events, session, _ = self._run(self._request(tools=[{"name": "request_user_input"}]), fake)
+        self.assertEqual([e["type"] for e in events], ["error"])
+        self.assertEqual(session.sent, [])
+
     def test_goal_tools_are_named_to_the_model_by_their_host_aliases(self):
         # Goals keep an autonomous seat working. The nested runtime's own goal
         # tools are off (its thread is ephemeral), so a Codex model that wants

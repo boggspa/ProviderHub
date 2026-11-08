@@ -178,6 +178,34 @@ _HOST_TOOL_NAMESPACE = "host"
 #: names, but here they are host tools under bridge_ aliases, so each offered
 #: one is named for the model in the developer instructions.
 _GOAL_TOOLS = ("create_goal", "update_goal", "get_goal")
+_QUESTION_TOOLS = ("request_user_input", "request_user_input_async", "ask_user_question")
+
+
+def _question_tools_note(tools):
+    """Name only the question tools the outer host actually offered.
+
+    The nested runtime can advertise its own Plan-only request_user_input.
+    That gate does not describe a desktop host tool with the same leaf name.
+    Keep the host's description authoritative, including its mode limits.
+    """
+    offered = {tool["name"] for tool in tools or []}
+    names = [name for name in _QUESTION_TOOLS if name in offered]
+    if not names:
+        return ""
+    return (
+        "\nInteractive questions are host tools here: "
+        + "; ".join(f"call host.{_tool_alias(name)} for {name}" for name in names)
+        + ". When a clarification question is needed and the host instructions allow it, "
+        "call the offered host tool to display the desktop's interactive question card. "
+        "Do not replace that call with a plain-text question and bullet-point options. "
+        "Follow that host tool's actual schema, description and mode restrictions; the "
+        "nested runtime's native request_user_input mode gate applies only to its own tool. "
+        "Use the async host tool only when it is offered and independent work can continue. "
+        "Wait for the actual host result; never invent answers or treat dismissal, elapsed "
+        "time or a recommended option as consent. Questions do not grant tool permissions."
+    )
+
+
 _HOST_INSTRUCTIONS = HOST_EXECUTION_NOTE + (
     " Host tools are registered in the host namespace with bridge_ aliases. "
     "Each tool description identifies its original host name. Use the registered "
@@ -1502,6 +1530,7 @@ def _normalise_request(request):
     if goals:
         instructions += ("\nThread goals are host tools here and persist on the host's thread: "
                          + "; ".join(f"call host.{_tool_alias(name)} for {name}" for name in goals) + ".")
+    instructions += _question_tools_note(tools)
     return {"model": _checked_model(model),
             "effort": _checked_effort(request.get("effort")),
             "prompt": prompt, "system": instructions, "tools": tools,
@@ -1777,6 +1806,24 @@ def _stream_turn(session, *, turn_id, deadline, tools=None, thread_id=None, summ
                                method == "item/completed" and
                                (params.get("item") or {}).get("type") in {"agentMessage", "reasoning"}):
                     timing.mark("first_model_event")
+                if method == "item/tool/requestUserInput" and "id" in event:
+                    # This RPC belongs to the nested runtime, not Desktop's
+                    # question registry. A fake answer loses the card, and
+                    # forwarding the RPC verbatim loses its host tool owner.
+                    # Reject it explicitly so the model can call the offered
+                    # host alias, whose schema and answer lifecycle stay intact.
+                    question_note = _question_tools_note(tools)
+                    if question_note:
+                        rejected_calls += 1
+                        if rejected_calls > 3:
+                            yield {"type": "error", "http_status": 400,
+                                   "message": "Codex repeatedly requested native questions instead of the offered host question tool."}
+                            return
+                        session.send(json.dumps({"id": event["id"], "error": {
+                            "code": -32601,
+                            "message": "The nested question UI is unavailable. No question was shown and no user answer was supplied. "
+                                       + question_note.strip()}}))
+                        continue
                 if method == "item/tool/call":
                     if "id" not in event or params.get("namespace") != _HOST_TOOL_NAMESPACE:
                         yield {"type": "error", "message": "Codex requested an unregistered native tool."}

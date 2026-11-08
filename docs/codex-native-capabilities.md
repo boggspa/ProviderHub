@@ -51,6 +51,31 @@ banner structure; unknown notices stay visible, so some ordinary text usage
 banners may reappear. Account/usage pages and submit errors remain the
 authoritative diagnostics.
 
+## Interactive questions
+
+Desktop owns the question card and its answer lifecycle. On a Hub Codex CLI
+route, the offered `request_user_input`, `request_user_input_async` or
+`ask_user_question` host tool is registered under a `host.bridge_…` alias.
+The transport names the offered aliases explicitly so the nested runtime's
+own Plan-only question instructions do not suppress a host tool available in
+Default mode. The host tool's own mode limits and schema still apply.
+
+The installed Codex 0.167.0-alpha.3.2 protocol also has a separate
+`item/tool/requestUserInput` server request, with `isBlocking` and question
+fields. If the nested runtime requests that UI while a host question tool is
+offered, Hub returns a bounded, explicit RPC error directing it to that host
+tool. It does not supply an answer, select an option, convert prose into a
+card, or infer consent from a timeout. The model must then make a real host
+tool call; Desktop renders the card and supplies its result normally.
+
+This is transport compatibility, not an account-mode or launch toggle. A
+question written as prose alone cannot establish whether the model declined
+to use an available tool or encountered a transport mismatch. Verify the
+actual tool call when reproducing. Other provider transports continue to use
+Desktop's offered question tools through their normal function-call bridge.
+
+Protocol reference: [Codex app-server user input](https://learn.chatgpt.com/docs/app-server#toolrequestuserinput).
+
 ## Qualification
 
 Automated tests use disposable homes, scripted runtime events and local

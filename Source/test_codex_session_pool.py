@@ -62,6 +62,40 @@ class PersistentTurnTests(unittest.TestCase):
                 {'type': 'tool_result', 'tool_use_id': call['id'], 'content': 'host value',
                  'is_error': error}]}]
 
+    def test_interactive_question_waits_for_real_host_answer_then_resumes(self):
+        arguments = {"questions": [{"id": "pads", "header": "Pads", "question": "Where should pads go?",
+                                  "options": [{"label": "Surface", "description": "Planet surface."},
+                                              {"label": "Inside too", "description": "Include interiors."}]}]}
+        tools = [{"name": "request_user_input", "description": "Show a desktop question card.",
+                  "input_schema": {"type": "object"}}]
+        self.fake.script = deque([
+            {"id": 40, "method": "item/tool/requestUserInput", "params": {
+                "threadId": "t1", "turnId": "t1", "itemId": "q1", "isBlocking": True, **arguments}},
+            {"id": 41, "method": "item/tool/call", "params": {
+                "threadId": "t1", "turnId": "t1", "callId": "native-question",
+                "namespace": "host", "tool": codex._tool_alias("request_user_input"), "arguments": arguments}}])
+        events = self.run_leg(tools=tools)
+        call = next(e for e in events if e["type"] == "tool_call")
+        self.assertEqual(call["name"], "request_user_input")
+        self.assertEqual(call["input"], arguments)
+        self.assertEqual(len(self.fake.sent), 1)
+        self.assertIn("error", self.fake.sent[0])
+        # The pending call receives nothing until the desktop actually answers.
+        self.assertEqual(self.pool.leases[0].pending["rpc_id"], 41)
+        answer = {"answers": {"pads": {"answers": ["Inside too"]}}}
+        self.history += [
+            {"role": "assistant", "content": [{"type": "tool_use",
+                **{key: call[key] for key in ("id", "name", "input")}}]},
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": call["id"],
+                "content": json.dumps(answer)}]}]
+        self.fake.script.extend([_delta_ev("Using your interior-pad choice."), _completed_turn()])
+        events = self.run_leg(tools=tools)
+        self.assertEqual(events[-1]["stop_reason"], "end_turn")
+        self.assertEqual(self.fake.sent[-1], {"id": 41, "result": {
+            "contentItems": [{"type": "inputText", "text": json.dumps(answer)}], "success": True}})
+        self.assertEqual(self.spawn.call_count, 1)
+        self.assertEqual(sum(method == "turn/start" for method, _, _ in self.fake.requests), 1)
+
     def test_three_handoffs_use_one_process_and_one_native_turn(self):
         for number in (41, 42, 43):
             if number != 41:
