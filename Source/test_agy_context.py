@@ -116,3 +116,48 @@ class ContextPackagingTests(unittest.TestCase):
             self.assertEqual(invoke("finish", 4), {"decision": "allow"})
             self.assertIn("captured this request", invoke("run_command", 5)["reason"])
             self.assertTrue((hook / "blocked-5.json").exists())
+
+    def test_context_deferral_streamed_before_its_receipt_does_not_strand_the_turn(self):
+        # 8 Nov 2026: agy streamed a premature run_command as ACTIVE before the
+        # hook wrote context-wait-N.json, then ERROR once it had. The turn
+        # later finished normally but failed as an unresolved native request.
+        with tempfile.TemporaryDirectory() as directory:
+            part = str((Path(directory) / "context-0001.txt").resolve())
+            Path(part).write_text("only line\n")
+            state = adapter._TurnState()
+            state.structured = True
+            state.tools = [{"name": "Bash", "input_schema": {"type": "object", "properties": {
+                "command": {"type": "string"}}}}]
+            state.hook_root = adapter._install_host_hook(directory, [], [part])
+            state.context_reads = context.ContextReads([part])
+            state.context_reads.checkpoint(state.hook_root / "context-pending.json")
+
+            def step(index, name, phase, args, error=None):
+                info = {"name": name, "parameters": args}
+                if error:
+                    info["error"] = {"message": error}
+                return {"event": "step_update", "step_update": {
+                    "step_type": "tool", "step_index": index, "conversation_id": "c1",
+                    "state": phase, "tool_info": info}}
+
+            command = {"CommandLine": "ls -la"}
+            self.assertEqual(adapter._translate(step(6, "run_command", "ACTIVE", command), state), [])
+            payload = {"conversationId": "c1", "stepIdx": 6,
+                       "toolCall": {"name": "run_command", "args": command}}
+            denied = subprocess.run([sys.executable, str(state.hook_root / "host_handoff.py")],
+                                    input=json.dumps(payload), text=True, capture_output=True, check=True)
+            reason = json.loads(denied.stdout)["reason"]
+            adapter._translate(step(6, "run_command", "ERROR", command,
+                                    "tool call denied by pre-tool hook: " + reason), state)
+            self.assertIsNone(state.failure)
+            self.assertFalse(state.saw_tool_step)
+            self.assertEqual(state.pending_native, set())
+
+            adapter._translate(step(8, "read_file", "DONE", {"Path": part}), state)
+            reply = {"text": "Done.", "tool_calls": []}
+            adapter._translate({"event": "result", "result": {
+                "status": "SUCCESS", "conversation_id": "c1", "response": "Done.",
+                "structured_output": reply}}, state)
+            self.assertIsNone(state.failure)
+            self.assertTrue(state.terminal)
+            self.assertEqual(json.loads(state.result_text), reply)

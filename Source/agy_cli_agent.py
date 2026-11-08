@@ -1090,6 +1090,14 @@ def _context_wait(step, state):
             or receipt.get("stepIdx") != index or (receipt.get("toolCall") or {}).get("name") != name:
         raise AgyCliAgentError("agy context deferral receipt did not match the streamed request")
     phase = str(step.get("state") or "").upper()
+    # agy can stream a step's ACTIVE row before the hook has written this
+    # receipt, so that row was held as a pending native request. The deferral
+    # resolves it: nothing ran and no host action is owed. Left pending, the
+    # turn's later finish failed as an unresolved native request (8 Nov 2026,
+    # Team turns that tried run_command before reading their context).
+    state.pending_native.discard(index)
+    if state.structured:
+        state.saw_tool_step = bool(state.pending_native)
     if phase in {"ACTIVE", "PENDING", "RUNNING"}:
         return True
     detail = (info.get("error") or {}).get("message", "")
