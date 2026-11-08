@@ -332,11 +332,16 @@ final class ChatModel: ObservableObject {
     private var preparedFields: [String: Any] = [:]
     private var commandSink: (([String: Any]) -> Bool)?
     private var starting = false
+    @Published private var workerFailure = ""
+    var connectionError: String { paneOwner?.connectionError ?? workerFailure }
+    private var startupTimeout: Task<Void, Never>?
+    private var startupTimeoutSeconds: TimeInterval = 30
     private let preferences: UserDefaults
     private var uptime: () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
 
-    init(bridge: BridgeModel) {
+    init(bridge: BridgeModel, startupTimeoutSeconds: TimeInterval = 30) {
         self.bridge = bridge
+        self.startupTimeoutSeconds = startupTimeoutSeconds
         preferences = .standard
         webSearchEnabled = preferences.object(forKey: "chatAllowWebSearch") as? Bool ?? true
     }
@@ -420,19 +425,33 @@ final class ChatModel: ObservableObject {
     func accent(for route: String) -> Color { models.first { $0.route == route }?.accent ?? .secondary }
 
     func start() async {
+        if let paneOwner { await paneOwner.start(); return }
         guard !starting else { return }
         starting = true; defer { starting = false }
-        guard let bridge, let python = bridge.python else { notice = "A supported Python runtime is needed."; return }
+        let retryingFailure = !workerFailure.isEmpty
+        clearConnectionFailure()
+        guard let bridge, let python = bridge.python else {
+            connectionFailed("A supported Python runtime is needed."); return
+        }
         do {
             do { try await bridge.startGateway() }
             catch { notice = "Saved chats remain available. " + error.localizedDescription }
-            if process?.isRunning == true { refresh(); return }
+            if let previous = process, previous.isRunning {
+                if !retryingFailure { refresh(); return }
+                startupTimeout?.cancel(); startupTimeout = nil
+                process = nil
+                try? input?.fileHandleForWriting.close(); input = nil
+                output?.fileHandleForReading.readabilityHandler = nil; output = nil
+                previous.terminate()
+            }
+            connected = false
             let child = Process(), stdin = Pipe(), stdout = Pipe(), stderr = Pipe()
             child.executableURL = URL(fileURLWithPath: python)
             child.arguments = [bridge.helper.deletingLastPathComponent().appendingPathComponent("chat_runtime.py").path]
             child.environment = bridge.workerEnvironment
             child.standardInput = stdin; child.standardOutput = stdout; child.standardError = stderr
             let reader = ChatEventReader()
+            let diagnostics = ChatWorkerDiagnostics()
             stdout.fileHandleForReading.readabilityHandler = { [weak self] handle in
                 let data = handle.availableData
                 if data.isEmpty { handle.readabilityHandler = nil; return }
@@ -443,15 +462,23 @@ final class ChatModel: ObservableObject {
                 }
             }
             stderr.fileHandleForReading.readabilityHandler = { handle in
-                if handle.availableData.isEmpty { handle.readabilityHandler = nil }
+                let data = handle.availableData
+                if data.isEmpty { handle.readabilityHandler = nil }
+                else { diagnostics.append(data) }
             }
             child.terminationHandler = { [weak self] _ in
-                guard let owner = self else { return }
-                Task { @MainActor in
+                // Deliver the final JSON error before reporting process exit.
+                reader.finish { [weak self] in
+                    guard let owner = self else { return }
                     guard owner.process === child else { return }
-                    owner.connected = false; owner.process = nil; owner.input = nil
+                    owner.startupTimeout?.cancel(); owner.startupTimeout = nil
+                    owner.process = nil; owner.input = nil
                     owner.output?.fileHandleForReading.readabilityHandler = nil; owner.output = nil
-                    owner.disconnected("Chat disconnected. Reopen Chat to reconnect; saved work is kept.")
+                    let detail = diagnostics.text
+                    let reason = owner.workerFailure.isEmpty
+                        ? "Chat worker exited (\(child.terminationReason == .uncaughtSignal ? "signal" : "status") \(child.terminationStatus))." + (detail.isEmpty ? "" : "\n" + detail)
+                        : owner.workerFailure
+                    owner.connectionFailed(reason + "\nSaved chats are kept. Retry the connection.")
                 }
             }
             // A listener lives in the worker that opened it; a replacement
@@ -459,7 +486,35 @@ final class ChatModel: ObservableObject {
             remoteStatus = [:]
             framer = ChatLineFramer(); input = stdin; output = stdout; process = child
             try child.run()
-        } catch { notice = error.localizedDescription; connected = false; process = nil; input = nil }
+            startupTimeout?.cancel()
+            let deadline = startupTimeoutSeconds
+            startupTimeout = Task { @MainActor [weak self] in
+                do { try await Task.sleep(nanoseconds: UInt64(deadline * 1_000_000_000)) } catch { return }
+                guard let self, self.process === child, !self.connected else { return }
+                self.process = nil; self.input = nil
+                self.output?.fileHandleForReading.readabilityHandler = nil; self.output = nil
+                if child.isRunning { child.terminate() }
+                self.connectionFailed("Chat worker did not become ready within \(deadline.formatted()) seconds. Saved chats are kept. Retry the connection.")
+            }
+        } catch {
+            process = nil; input = nil
+            output?.fileHandleForReading.readabilityHandler = nil; output = nil
+            connectionFailed("Could not start Chat: " + error.localizedDescription)
+        }
+    }
+
+    private func connectionFailed(_ message: String) {
+        workerFailure = message
+        disconnected(message)
+    }
+
+    private func clearConnectionFailure() {
+        guard !workerFailure.isEmpty else { return }
+        for id in Array(sessions.keys) {
+            withChat(id) { if notice == workerFailure { notice = "" } }
+        }
+        if unselected.notice == workerFailure { unselected.notice = "" }
+        workerFailure = ""
     }
 
     func shutdown() {
@@ -703,6 +758,7 @@ final class ChatModel: ObservableObject {
     /// in hidden chats. Accepted input has already cleared its pending record.
     func disconnected(_ message: String) {
         connected = false
+        workerFailure = message
         // The remote listener ran inside the worker that just went away.
         remoteStatus = [:]
         pendingSelection = nil; pendingSelectionRequest = nil
@@ -761,6 +817,7 @@ final class ChatModel: ObservableObject {
             }
             switch event["event"] as? String {
             case "ready":
+                startupTimeout?.cancel(); startupTimeout = nil; clearConnectionFailure()
                 connected = true
                 write(["command": "preferences", "webSearch": webSearchEnabled])
                 if !observedChats.isEmpty { write(["command": "subscribe", "client": "desktop", "chats": observedChats.sorted()]) }
@@ -841,6 +898,7 @@ final class ChatModel: ObservableObject {
                     // Transport/catalogue errors have no execution owner. They
                     // must not stop or restore another chat's submitted input.
                     notice = event["message"] as? String ?? "Chat failed."
+                    if !connected && event["event"] as? String == "error" { workerFailure = notice }
                 }
             }
     }
@@ -874,7 +932,10 @@ final class ChatModel: ObservableObject {
             tokenUsage = event["usage"] as? Int ?? tokenUsage
             if event.keys.contains("approval") { approval = decodeApproval(event["approval"]) }
             if !busy || (event["interrupting"] as? Bool == true) { approval = nil }
-        case "error": restorePendingSend(); notice = event["message"] as? String ?? "Chat failed."; setBusy(false); approval = nil
+        case "error":
+            let message = event["message"] as? String ?? "Chat failed."
+            if !connected { workerFailure = message }
+            restorePendingSend(); notice = message; setBusy(false); approval = nil
         case "rejected":
             restorePendingSend(); notice = event["message"] as? String ?? "The update was not accepted."
             setBusy(event["busy"] as? Bool ?? false); interrupting = event["interrupting"] as? Bool ?? false
@@ -982,6 +1043,24 @@ final class ChatEventReader {
                 DispatchQueue.main.async { apply(parsed) }
             }
         }
+    }
+    func finish(_ completion: @escaping @MainActor () -> Void) {
+        queue.async { DispatchQueue.main.async { completion() } }
+    }
+}
+
+/// Stderr arrives off the main actor; retain only a bounded diagnostic tail.
+final class ChatWorkerDiagnostics {
+    private let lock = NSLock()
+    private var tail = Data()
+    func append(_ data: Data) {
+        lock.lock(); defer { lock.unlock() }
+        tail.append(data)
+        if tail.count > 8192 { tail = Data(tail.suffix(8192)) }
+    }
+    var text: String {
+        lock.lock(); defer { lock.unlock() }
+        return String(decoding: tail, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }
 

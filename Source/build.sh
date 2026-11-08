@@ -116,6 +116,13 @@ cat > "$APP_DIR/Contents/Info.plist" <<'PLIST'
 </dict></plist>
 PLIST
 if [ -f "$SOURCE_DIR/AppIcon.icns" ]; then cp "$SOURCE_DIR/AppIcon.icns" "$APP_DIR/Contents/Resources/"; fi
+# Prove imports against the assembled worker, never the source checkout. A
+# missing module otherwise exits before ready and leaves Chat Connecting.
+WORKER_PYTHON="${MISTRAL_BRIDGE_WORKER_PYTHON:-$APP_DIR/Contents/Resources/python/bin/python3}"
+if [ ! -x "$WORKER_PYTHON" ]; then
+  WORKER_PYTHON="$(command -v python3.13 || command -v python3.12 || command -v python3.11 || command -v python3)"
+fi
+python3 "$SOURCE_DIR/check_worker_imports.py" "$APP_DIR/Contents/Resources/worker" --python "$WORKER_PYTHON"
 python3 "$SOURCE_DIR/build_provenance.py" write --source-dir "$SOURCE_DIR" \
   --app-dir "$APP_DIR" --swift-sources "${SWIFT_SOURCES[@]}" "$SOURCE_DIR/ChatBlackboardPDF.swift"
 if [ "${MISTRAL_BRIDGE_SKIP_CODESIGN:-0}" = "1" ]; then

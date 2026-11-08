@@ -777,7 +777,7 @@ class ConcurrentChatTests(unittest.TestCase):
         self.assertEqual(self.events[-1]["request"], "side-request")
         self.assertIsNone(self.events[-1]["side"])
 
-    def test_startup_recovers_all_interrupted_chats_without_provider_replay(self):
+    def test_interrupted_chats_recover_when_opened_without_provider_replay(self):
         a, b = self.create("a"), self.create("b")
         self.host.shutdown()
         for identifier in (a, b):
@@ -785,8 +785,10 @@ class ConcurrentChatTests(unittest.TestCase):
         client = FakeTransport([]); client.root = self.root
         recovered = ChatHost(self.store, client, self.events.append, child_factory=lambda: client)
         recovered.initialize(); self.addCleanup(recovered.shutdown)
-        self.assertEqual(self.store.load(a)["status"], "interrupted")
+        self.assertEqual(self.store.load(a)["status"], "working")
         self.assertEqual(self.store.load(b)["status"], "interrupted")
+        recovered.handle({"command": "select", "id": a})
+        self.assertEqual(self.store.load(a)["status"], "interrupted")
         self.assertEqual(client.requests, [])
 
     def test_shutdown_prevents_a_steered_request_from_restarting(self):

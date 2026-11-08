@@ -152,7 +152,7 @@ struct ChatWorkspaceRail: View {
                         }
                     }
                     if rail.projects.isEmpty && rail.workspaces.isEmpty && rail.recents.isEmpty {
-                        Text(model.connected ? "Choose a folder to begin." : "Connecting…")
+                        Text(model.connected ? "Choose a folder to begin." : (model.connectionError.isEmpty ? "Connecting…" : "Chat could not connect. Use Retry connection above."))
                             .font(HubTheme.Typography.detail).foregroundStyle(Semantic.secondaryInk).padding(8)
                     }
                     }

@@ -61,6 +61,56 @@ import Combine
         let preferences = UserDefaults(suiteName: preferencesID)!
         defer { preferences.removePersistentDomain(forName: preferencesID) }
         let model = ChatModel(sendCommand: { commands.append($0); return writable }, uptime: { clock }, preferences: preferences)
+        let diagnostics = ChatWorkerDiagnostics()
+        diagnostics.append(Data(repeating: 120, count: 100_000))
+        diagnostics.append(Data("\nstartup traceback".utf8))
+        precondition(diagnostics.text.utf8.count <= 8192 && diagnostics.text.hasSuffix("startup traceback"), "stderr must have a bounded diagnostic tail")
+        let workerFolder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: workerFolder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: workerFolder) }
+        let worker = workerFolder.appendingPathComponent("chat_runtime.py")
+        let bridge = BridgeModel()
+        bridge.python = "/usr/bin/python3"
+        bridge.helper = workerFolder.appendingPathComponent("gateway.py")
+        let startup = ChatModel(bridge: bridge)
+        func awaitConnection(_ condition: () -> Bool) async throws {
+            for _ in 0..<250 {
+                if condition() { return }
+                try await Task.sleep(nanoseconds: 20_000_000)
+            }
+            preconditionFailure("worker connection did not settle")
+        }
+        try "import sys, time\nprint('ImportError: missing startup module', file=sys.stderr, flush=True)\ntime.sleep(.1)\nsys.exit(7)\n".write(to: worker, atomically: true, encoding: .utf8)
+        await startup.start()
+        try await awaitConnection { !startup.connectionError.isEmpty }
+        precondition(!startup.connected && startup.connectionError.contains("status 7") && startup.connectionError.contains("missing startup module"), "worker exit must expose stderr and exit status")
+        try "import json, time\nprint(json.dumps({'event':'error','message':'Saved chat could not be opened'}), flush=True)\ntime.sleep(.15)\n".write(to: worker, atomically: true, encoding: .utf8)
+        await startup.start()
+        try await awaitConnection { startup.connectionError.contains("Retry the connection") }
+        precondition(startup.connectionError.contains("Saved chat could not be opened"), "termination must preserve the worker's startup error")
+        try "import json, sys\nprint(json.dumps({'event':'ready'}), flush=True)\nfor line in sys.stdin:\n if 'shutdown' in line: break\n".write(to: worker, atomically: true, encoding: .utf8)
+        await startup.start()
+        try await awaitConnection { startup.connected }
+        precondition(startup.connectionError.isEmpty, "successful retry must clear the connection failure")
+        startup.shutdown()
+        let stalled = ChatModel(bridge: bridge, startupTimeoutSeconds: 0.5)
+        try "import time\ntime.sleep(10)\n".write(to: worker, atomically: true, encoding: .utf8)
+        await stalled.start()
+        try await awaitConnection { !stalled.connectionError.isEmpty }
+        precondition(!stalled.connected && stalled.connectionError.contains("did not become ready"), "a stalled worker must stop Connecting at the deadline")
+        try "import json, sys\nprint(json.dumps({'event':'ready'}), flush=True)\nfor line in sys.stdin:\n if 'shutdown' in line: break\n".write(to: worker, atomically: true, encoding: .utf8)
+        await stalled.start()
+        try await awaitConnection { stalled.connected }
+        precondition(stalled.connectionError.isEmpty && stalled.notice.isEmpty, "retry after timeout must clear the stale error")
+        stalled.shutdown()
+        try "import json, time\nprint(json.dumps({'event':'error','message':'Startup failed before exit'}), flush=True)\ntime.sleep(10)\n".write(to: worker, atomically: true, encoding: .utf8)
+        await startup.start()
+        try await awaitConnection { startup.connectionError.contains("Startup failed before exit") }
+        try "import json, sys\nprint(json.dumps({'event':'ready'}), flush=True)\nfor line in sys.stdin:\n if 'shutdown' in line: break\n".write(to: worker, atomically: true, encoding: .utf8)
+        await startup.start()
+        try await awaitConnection { startup.connected }
+        precondition(startup.connectionError.isEmpty, "retry must replace a failed worker that has not exited yet")
+        startup.shutdown()
         func send(_ original: [String: Any]) throws {
             var event = original
             if ["state", "error", "rejected", "approval"].contains(event["event"] as? String ?? ""), event["chat"] == nil {

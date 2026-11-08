@@ -576,7 +576,9 @@ the same publication `initialize` and `select` perform, ending with `ready`.
 
     def session(self, identifier):
         if identifier not in self.sessions:
-            self.sessions[identifier] = self.new_session(self.store.load(identifier))
+            service = self.new_session()
+            service.chat = service.recover_chat(self.store.load(identifier))
+            self.sessions[identifier] = service
         return self.sessions[identifier]
 
     def watched_chats(self):

@@ -546,29 +546,42 @@ class ChatService:
             return self.chat["workspace"]
         return self.workspaces.folders[0] if self.workspaces.folders else str(Path.home())
 
+    def recover_chat(self, chat):
+        """Settle a saved chat when opened, before any new work can run."""
+        changed = chat_questions.recover(chat)
+        from chat_agents import recover_agents
+        changed = recover_agents(chat, self.settle) or changed
+        if chat_team.recover(chat, self.settle):
+            changed = True
+            for item in chat["entries"]:
+                if item.get("memberID") and item.get("detail") == "Running…":
+                    item.update(detail="Interrupted; inspect workspace state before retrying.", isError=True)
+        if chat.get("status") == "working" or chat.get("pending_update"):
+            self.settle(chat, "Chat was interrupted before a recorded result. Inspect the workspace before retrying.")
+            self.apply_pending_update(chat)
+            chat["entries"].append(entry("notice", "Interrupted when Chat closed. Recorded changes and output are kept.", chat["route"]))
+            for item in chat["entries"]:
+                if item.get("kind") == "tool" and item.get("detail") == "Running…":
+                    item["detail"] = "Interrupted. Inspect the workspace before running this action again."; item["isError"] = True
+            chat["status"] = "interrupted"
+            changed = True
+        if changed: self.store.save(chat)
+        return chat
+
     def initialize(self):
         self.publish_workspaces()
         chats = self.store.headers()
-        for header in chats:
-            chat = self.store.load(header["id"])
-            if chat_questions.recover(chat): self.store.save(chat)
-            from chat_agents import recover_agents
-            if recover_agents(chat, self.settle): self.store.save(chat)
-            if chat_team.recover(chat, self.settle):
-                for item in chat["entries"]:
-                    if item.get("memberID") and item.get("detail") == "Running…":
-                        item.update(detail="Interrupted; inspect workspace state before retrying.", isError=True)
-                self.store.save(chat)
-            if chat.get("status") == "working" or chat.get("pending_update"):
-                self.settle(chat, "Chat was interrupted before a recorded result. Inspect the workspace before retrying.")
-                self.apply_pending_update(chat)
-                chat["entries"].append(entry("notice", "Interrupted when Chat closed. Recorded changes and output are kept.", chat["route"]))
-                for item in chat["entries"]:
-                    if item.get("kind") == "tool" and item.get("detail") == "Running…":
-                        item["detail"] = "Interrupted. Inspect the workspace before running this action again."; item["isError"] = True
-                chat["status"] = "interrupted"; self.store.save(chat)
+        # Only metadata is needed for the rail. Recovery of other transcripts
+        # waits until they are opened; image-heavy histories can be gigabytes.
         if chats:
-            self.chat = self.store.load(chats[0]["id"])
+            identifier = chats[0]["id"]
+            try:
+                if self.store.path(identifier).stat().st_size <= 16 * 1024 * 1024:
+                    self.chat = self.recover_chat(self.store.load(identifier))
+                else:
+                    self.emit({"event": "notice", "message": "Saved chats are available. Your last chat is large; select it in the sidebar to load it."})
+            except (ValueError, OSError, KeyError, TypeError) as exc:
+                self.emit({"event": "notice", "message": "Could not open the last chat. Saved files are kept; choose another chat. " + str(exc)})
         # Saved chats show before the gateway answers. This is the only
         # transcript sent before ready: the window decodes each copy in full.
         self.publish()
@@ -793,7 +806,7 @@ class ChatService:
         elif action == "create":
             self.create(command["choice"], command.get("workspace", self.current_workspace()))
         elif action == "select":
-            selected = self.store.load(command["id"])
+            selected = self.recover_chat(self.store.load(command["id"]))
             # Reading a saved transcript must also work with a disconnected
             # drive. New chats and tool execution still require a real folder.
             self.workspaces.remember(selected["workspace"], require_available=False)

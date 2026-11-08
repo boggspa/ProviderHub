@@ -38,6 +38,17 @@ struct ChatWindow: View {
     var body: some View {
         VStack(spacing: 0) {
             titleBar
+            if !model.connectionError.isEmpty {
+                HStack(alignment: .top, spacing: 12) {
+                    Image(systemName: "exclamationmark.triangle")
+                    Text(model.connectionError).font(.caption).textSelection(.enabled)
+                        .lineLimit(5).frame(maxWidth: .infinity, alignment: .leading)
+                        .help(model.connectionError)
+                    Button("Retry connection") { Task { await model.start() } }
+                }
+                .padding(12)
+                .background(Semantic.selection)
+            }
             GeometryReader { proxy in
                 let panes = ChatPaneSizing.layout(window: proxy.size.width, railPreferred: railPreferred,
                     inspectorVisible: model.inspectorVisible, rail: railWidth, inspector: inspectorWidth)
@@ -418,8 +429,13 @@ private struct ChatHeader: View {
     @ViewBuilder private var connection: some View {
         if !model.connected {
             HStack(spacing: 5) {
-                ProgressView().controlSize(.mini)
-                Text("Connecting").font(HubTheme.Typography.detail).foregroundStyle(Semantic.secondaryInk)
+                if model.connectionError.isEmpty {
+                    ProgressView().controlSize(.mini)
+                    Text("Connecting").font(HubTheme.Typography.detail).foregroundStyle(Semantic.secondaryInk)
+                } else {
+                    Button("Retry connection") { Task { await model.start() } }
+                        .help(model.connectionError)
+                }
             }
         }
     }
@@ -1084,7 +1100,7 @@ private struct ChatComposer: View {
 
     private var placeholder: String {
         guard model.selectedID != nil else { return "Start a new chat to begin" }
-        guard model.connected else { return "Connecting…" }
+        guard model.connected else { return model.connectionError.isEmpty ? "Connecting…" : "Chat disconnected" }
         if model.team?.enabled == true { return "Message the Team, or @ a member…" }
         guard let route = model.selectedRoute else { return "Choose a model above" }
         return "Message " + route.label + "…"
