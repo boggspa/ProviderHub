@@ -13,6 +13,8 @@ import threading
 import time
 import uuid
 
+import usage_ledger
+
 from bridge_core import BridgeError, MAX_REQUEST_BODY, atomic_json, read_json
 from hub_config import connection_signature, qualify, split_route
 from protocol import mask_effort_rejection
@@ -1179,6 +1181,11 @@ def handle_responses(handler):
     delegated = plan["protocol"] == "messages_bridge"
     if delegated:
         plan["url"] = f"http://127.0.0.1:{handler.server.server_port}/v1/messages"
+    else:
+        # A delegated turn is planned and ledgered again by /v1/messages; a
+        # native one is ledgered here, under the key account it was sent with.
+        plan["request_id"] = usage_ledger.new_request_id()
+        plan["usage_account"] = runtime.usage_account(plan["provider_id"])
     closed = threading.Event()
     disconnected = threading.Event()
     write_lock = threading.Lock()
@@ -1505,7 +1512,8 @@ def handle_responses(handler):
         if not delegated:
             runtime.record("error" if terminal in {"error", "response.failed"} else "completed",
                            plan["route"], 502 if terminal in {"error", "response.failed"} else 200,
-                           usage, service_tier=service_tier)
+                           usage, service_tier=service_tier,
+                           request_id=plan.get("request_id"), account=plan.get("usage_account"))
     except Exception as exc:
         if disconnected.is_set() or isinstance(exc, (BrokenPipeError, ConnectionResetError)):
             if not delegated:

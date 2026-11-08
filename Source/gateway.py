@@ -25,6 +25,7 @@ import urllib.parse
 import urllib.request
 
 import cli_routes
+import usage_ledger
 from bridge_core import (BridgeError, CATALOGUE_DETAIL_KEYS, ClaudeProfile, MAX_REQUEST_BODY, atomic_json, attach_model_specs, bootstrap_metadata, cached_catalogue, chat_source_specs, credentials, discover_provider, gateway_token,
                          inspect_state, key_account_states, load_settings, model_labels, prepare_vibe_account, private_directory, private_token, read_json, ssl_context, state_root, validate_settings)
 from catalogue_lifecycle import (CataloguePreparationError, catalogue_fingerprint,
@@ -487,6 +488,11 @@ class Runtime:
                     model_spec=spec, estimate_raw=raw_estimate_fn(payload))
         plan["credential_mode"] = connection.get("credential_mode")
         plan["surface"] = ("chat" if is_chat else "responses" if payload.get("_provider_hub_surface") == "responses" else "messages")
+        # Fixed at planning time, so the usage ledger names the account this
+        # request actually ran as even if the active account changes mid-turn.
+        plan["request_id"] = usage_ledger.new_request_id()
+        plan["usage_account"] = (self.usage_account(provider_id, connection, chat_directory) if is_chat
+                                 else self.usage_account(provider_id))
         if calibration_factor < 1.0:
             plan.setdefault("compatibility", {})["estimate_calibration"] = round(calibration_factor, 3)
         if reminders_rewritten:
@@ -551,10 +557,27 @@ class Runtime:
                     "codex_catalogue_digest": self.codex_catalogue_digest,
                     "providers": {key: dict(value) for key, value in self.provider_counts.items()}}
 
+    def usage_account(self, provider_id, connection=None, config_dir=None):
+        """The account serving a request, for the usage ledger.
+
+        Chat passes the connection and folder it chose. Everything else uses
+        the live settings: the active API-key account, or the active CLI
+        folder that ``cli_account_dir`` resolves for the next turn.
+        """
+        if connection is None:
+            connection = dict(self.credential_settings()["providers"].get(provider_id) or {})
+            if usage_ledger.uses_folder_accounts(provider_id, connection.get("credential_mode")):
+                config_dir = self.cli_account_dir(provider_id)
+                live = getattr(self, "_cli_account_settings", None)
+                live_connection = ((live[1] if live else self.settings).get("providers") or {}).get(provider_id) or {}
+                connection["cli_accounts"] = live_connection.get("cli_accounts") or connection.get("cli_accounts")
+        return usage_ledger.account(provider_id, connection, config_dir)
+
     def record(self, kind, model="", code=None, usage=None, model_unavailable=False, service_tier=None,
-               credential_mode=None, surface=None):
+               credential_mode=None, surface=None, request_id=None, account=None):
         # Deliberately excludes prompts, tool arguments, response text, headers,
         # credentials, and raw upstream error bodies.
+        ledger_usage = usage
         event = {"time": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "event": kind}
         if model:
             event["model"] = model
@@ -617,6 +640,11 @@ class Runtime:
             fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
             with os.fdopen(fd, "a") as stream:
                 stream.write(json.dumps(event) + "\n")
+        if kind == "completed" and request_id and model:
+            # activity.jsonl above rotates within hours; this line is permanent.
+            usage_ledger.append(self.root, usage_ledger.entry(
+                request_id, model, split_route(model)[0], account, ledger_usage,
+                surface=surface, service_tier=service_tier))
 
     def upstream(self, url):
         parsed = urllib.parse.urlsplit(url)
@@ -1189,7 +1217,8 @@ they exit or restart, so none of them can interrupt another's requests.
                 if self._serve_cli_turn(plan, payload, disconnected, closed, write_lock, usage):
                     self.runtime.calibration.observe(plan["route"], plan.get("estimate_raw"), reported_input_tokens(usage))
                     self.runtime.record("completed", plan["route"], 200, usage,
-                                        credential_mode=plan.get("credential_mode"), surface=plan.get("surface"))
+                                        credential_mode=plan.get("credential_mode"), surface=plan.get("surface"),
+                                        request_id=plan.get("request_id"), account=plan.get("usage_account"))
                 return
             encoded = json.dumps(upstream, ensure_ascii=False).encode()
             headers = {**plan["headers"], "Accept": "text/event-stream" if upstream.get("stream") else "application/json"}
@@ -1425,7 +1454,8 @@ they exit or restart, so none of them can interrupt another's requests.
                 self.close_connection = True
             self.runtime.calibration.observe(plan["route"], plan.get("estimate_raw"), reported_input_tokens(usage))
             self.runtime.record("completed", plan["route"], 200, usage, service_tier=service_tier,
-                                credential_mode=plan.get("credential_mode"), surface=plan.get("surface"))
+                                credential_mode=plan.get("credential_mode"), surface=plan.get("surface"),
+                                request_id=plan.get("request_id"), account=plan.get("usage_account"))
         except (BrokenPipeError, ConnectionResetError):
             self.runtime.record("cancelled", plan["route"])
         except Exception as exc:
