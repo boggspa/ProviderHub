@@ -538,12 +538,16 @@ const cases = {
       const status = JSON.parse('{"user_id":"u1","account_id":"a1","plan_type":"plus","rate_limit":{"allowed":false,"limit_reached":true,"primary_window":{"used_percent":100}},"additional_rate_limits":[{"limit_name":"gpt-reserve","rate_limit":{"allowed":false}}],"credits":{"has_credits":false}}');
       const snapshot = JSON.parse('{"version":1,"stream_id":"s","sequence":2,"usage":{"user_id":"u1","account_id":"a1","plan_type":"plus","rate_limit":{"allowed":false,"limit_reached":true}}}');
       const push = JSON.parse('{"type":"usage.snapshot","payload":{"version":1,"stream_id":"s","sequence":3,"usage_by_client":{"electron":{"user_id":"u1","account_id":"a1","plan_type":"plus","rate_limit":{"allowed":false,"limit_reached":true}}}}}');
+      // 26.1103 pubsub socket: a frame is an array of topic messages, and a
+      // subscribe reply carries missed messages as `catchups`.
+      const frame = JSON.parse('[{"type":"message","topic_id":"codex-work-usage-push-v1","offset":"7","payload":{"type":"usage.snapshot","payload":{"version":1,"stream_id":"s","sequence":4,"usage_by_client":{"electron":{"user_id":"u1","account_id":"a1","plan_type":"plus","rate_limit":{"allowed":false}}}}}},{"id":3,"reply":{"ok":true}}]');
+      const catchup = JSON.parse('{"type":"subscribe","topic_id":"t","recovered":true,"catchups":[{"type":"message","topic_id":"t","payload":{"type":"usage.snapshot","payload":{"usage_by_client":{"electron":{"user_id":"u1","plan_type":"plus","rate_limit":{"allowed":false}}}}}}]}');
       const other = JSON.parse('{"rate_limit":{"allowed":false},"plan_type":"plus"}');
       const allowed = JSON.parse('{"user_id":"u1","account_id":"a1","plan_type":"plus","rate_limit":{"allowed":true}}');
       const revived = JSON.parse('{"a":1}', (key, value) => (key === 'a' ? value + 1 : value));
       let failure = null;
       try { JSON.parse('{nope'); } catch (error) { failure = error.name; }
-      return { status, snapshot, push, other, allowed, revived, failure, list: JSON.parse('[1,2]'), length: JSON.parse.length, name: JSON.parse.name,
+      return { status, snapshot, push, frame, catchup, other, allowed, revived, failure, list: JSON.parse('[1,2]'), length: JSON.parse.length, name: JSON.parse.name,
                check: window.__providerHubAccent.check().unlock, glyph: getComputedStyle(document.getElementById('main-glyph')).color };
     });
     assert.equal(seen.status.rate_limit.allowed, true);
@@ -554,6 +558,9 @@ const cases = {
     assert.equal(seen.snapshot.usage.rate_limit.allowed, true);
     assert.equal(seen.push.payload.usage_by_client.electron.rate_limit.allowed, true);
     assert.equal(seen.push.payload.usage_by_client.electron.rate_limit.limit_reached, true);
+    assert.equal(seen.frame[0].payload.payload.usage_by_client.electron.rate_limit.allowed, true);
+    assert.deepEqual(seen.frame[1], {id: 3, reply: {ok: true}});
+    assert.equal(seen.catchup.catchups[0].payload.payload.usage_by_client.electron.rate_limit.allowed, true);
     assert.equal(seen.other.rate_limit.allowed, false);
     assert.equal(seen.allowed.rate_limit.allowed, true);
     assert.equal(seen.revived.a, 2);
@@ -561,7 +568,7 @@ const cases = {
     assert.deepEqual(seen.list, [1, 2]);
     assert.equal(seen.length, 2);
     assert.equal(seen.name, 'parse');
-    assert.deepEqual(seen.check, {seen: 4, unlocked: 3});
+    assert.deepEqual(seen.check, {seen: 6, unlocked: 5});
     assert.equal(seen.glyph, colours.parent);
     assert.deepEqual(await page.evaluate(unlockScript), {skipped: 'installed'});
   },

@@ -579,17 +579,31 @@ _WATCHER = r"""
       };
       // Where a status sits: the poll body itself, a 26.917 stream snapshot's
       // `usage`, and from 26.1103 a push snapshot's
-      // `payload.usage_by_client.<client>` (the app reads `electron`).
-      const freeAll = (value) => {
-        if (free(value) || free(value.usage)) { return; }
-        const byClient = value.payload && typeof value.payload === "object" ? value.payload.usage_by_client : null;
-        if (byClient && typeof byClient === "object" && !Array.isArray(byClient)) {
-          for (const key of Object.keys(byClient)) { free(byClient[key]); }
+      // `payload.usage_by_client.<client>` (the app reads `electron`). That
+      // snapshot arrives over the ChatGPT pubsub socket as a frame: an array
+      // of `{type: "message", topic_id, payload}` (or a subscribe reply's
+      // `catchups`, or a command `reply`). So the walk follows only these
+      // envelope keys, through arrays, a few levels deep, and never visits
+      // the rest of a large document.
+      const ENVELOPE = ["usage", "payload", "usage_by_client", "catchups", "reply", "data", "body", "snapshot"];
+      const freeAll = (value, depth) => {
+        if (!value || typeof value !== "object" || depth > 6) { return; }
+        if (Array.isArray(value)) {
+          for (let index = 0; index < value.length && index < 64; index += 1) { freeAll(value[index], depth + 1); }
+          return;
+        }
+        if (free(value)) { return; }
+        for (const key of ENVELOPE) {
+          const inner = value[key];
+          if (!inner || typeof inner !== "object") { continue; }
+          if (key === "usage_by_client" && !Array.isArray(inner)) {
+            for (const client of Object.keys(inner)) { freeAll(inner[client], depth + 1); }
+          } else { freeAll(inner, depth + 1); }
         }
       };
       const wrapped = function parse(text, reviver) {
         const value = original.call(JSON, text, reviver);
-        try { if (value && typeof value === "object" && !Array.isArray(value)) { freeAll(value); } } catch (error) {}
+        try { freeAll(value, 0); } catch (error) {}
         return value;
       };
       try { Object.defineProperty(wrapped, "__providerHubUnlock", { value: unlock }); } catch (error) {}

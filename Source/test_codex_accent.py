@@ -165,7 +165,8 @@ class AccentMapTests(unittest.TestCase):
         self.assertIn('typeof value.plan_type === "string" && typeof value.user_id === "string"', unlocking)
         self.assertIn("status.rate_limit.allowed = true;", unlocking)  # only the core limit's flag
         self.assertNotIn("limit_reached", unlocking)  # windows, per-model limits and credits stay as sent
-        self.assertIn("free(value) || free(value.usage)", unlocking)  # the poll and the stream snapshot
+        self.assertIn("if (free(value)) { return; }", unlocking)  # the poll body itself
+        self.assertIn('const ENVELOPE = ["usage", "payload", "usage_by_client", "catchups", "reply"', unlocking)  # stream and socket frames
         self.assertIn("unlock: UNLOCK_COMPOSER ? { seen: unlock.seen, unlocked: unlock.unlocked } : null", unlocking)
         self.assertNotIn("__HUB_", unlocking)
 
