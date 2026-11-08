@@ -1,4 +1,4 @@
-# Provider Hub 0.5.39 (build 103)
+# Provider Hub 0.5.40 (build 104)
 
 Use your model accounts inside Claude Desktop, the Codex coding workspace, or Provider Hub's lightweight **Chat with Model…** window. See [Chat in Provider Hub](docs/chat.md) for its tools, attachments, approvals and model switching.
 
