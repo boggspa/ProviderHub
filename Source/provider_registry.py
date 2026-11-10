@@ -571,7 +571,7 @@ _CLAUDE_CONTEXT_DOCS = "https://platform.claude.com/docs/en/build-with-claude/co
 _CLAUDE_EFFORT_DOCS = "https://platform.claude.com/docs/en/build-with-claude/effort"
 # Exact documented IDs only; the Models API's capability flags take precedence.
 _CLAUDE_FIVE_EFFORT_MODELS = {
-    "claude-fable-5-1", "claude-fable-5", "claude-mythos-5-1", "claude-mythos-5",
+    "claude-fable-5-2", "claude-fable-5-1", "claude-fable-5", "claude-mythos-5-1", "claude-mythos-5",
     "claude-opus-5-5", "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7",
     "claude-sonnet-5-5", "claude-sonnet-5", "claude-haiku-5-5",
 }
@@ -590,6 +590,8 @@ def claude_effort_modes(identifier: str) -> list[str]:
 # Exact published model ceilings, checked 2026-09-19; claude-opus-5-5 added
 # 2026-09-22, claude-sonnet-5-5 2026-09-28, claude-haiku-5-5 2026-10-07. These
 # are model capacities, not a claim that a particular subscription grants access.
+# claude-fable-5-2 is deliberately absent: as of 2026-11-10 no ceiling is
+# published, and Claude Code 2.1.293 only reports its 200K unknown-model default.
 _CLAUDE_CONTEXT_WINDOWS = {
     "claude-fable-5-1": 1000000,
     "claude-fable-5": 1000000,

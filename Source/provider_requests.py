@@ -34,7 +34,7 @@ CLAUDE_THINKING_BINDING_BETA = "thinking-binding-controls-2026-08-01"
 # Making that default explicit lets Responses and Chat attach binding controls
 # without enabling thinking on a legacy model whose default is off.
 _CLAUDE_DEFAULT_ADAPTIVE = {
-    "claude-fable-5-1", "claude-mythos-5-1", "claude-fable-5", "claude-mythos-5",
+    "claude-fable-5-2", "claude-fable-5-1", "claude-mythos-5-1", "claude-fable-5", "claude-mythos-5",
     "claude-mythos-preview", "claude-opus-5-5", "claude-sonnet-5-5",
     "claude-haiku-5-5", "claude-opus-5", "claude-sonnet-5",
 }

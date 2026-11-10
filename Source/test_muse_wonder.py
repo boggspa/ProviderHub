@@ -70,6 +70,8 @@ class MuseWonderTests(unittest.TestCase):
         self.assertIn("muse-wonder-1.0", rows)
         self.assertIn("muse-wonder-full-1.0", rows)
         self.assertEqual(rows["muse-wonder-full-1.0"]["context"], 1007997)
+        self.assertEqual(rows["muse-ember-1.0"]["context"], 1007997)
+        self.assertEqual(rows["muse-ember-1.0"]["effort_modes"], muse_cli_agent.MUSE_EFFORTS)
         self.assertTrue(fallback["warnings"])
         live = muse_cli_agent._row({"modelId": "muse-wonder-1.0", "contextLimit": 800000})
         with patch.object(muse_cli_agent, "auth_state", return_value={"state": "unknown"}), \

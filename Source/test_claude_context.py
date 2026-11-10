@@ -81,7 +81,7 @@ class ClaudeContextTests(unittest.TestCase):
     def test_saved_catalogues_gain_documented_context_without_refresh(self):
         self.settings["providers"]["claude"]["credential_mode"] = "cli"
         cases = (
-            ("claude", "fable", 1_000_000),
+            ("claude", "claude-fable-5-1", 1_000_000),
             ("claude", "opus", 1_000_000),
             ("claude", "claude-opus-5-5", 1_000_000),
             ("claude", "claude-opus-5", 1_000_000),

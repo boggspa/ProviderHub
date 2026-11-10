@@ -210,6 +210,13 @@ KNOWN_MODELS = (
      "reasoning_levels": list(MUSE_EFFORTS),
      "default_effort": "high",
      "context": 1007997, "max_output": 128000},
+    # Muse Code 1.4.14-R7309.1 model/list, captured 2026-11-10: same CLI
+    # limits as Wonder. No Model API row or published card exists yet.
+    {"id": "muse-ember-1.0",
+     "display_name": "muse-ember-1.0",
+     "reasoning_levels": list(MUSE_EFFORTS),
+     "default_effort": "high",
+     "context": 1007997, "max_output": 128000},
     {"id": "muse-spark-1.3",
      "display_name": "muse-spark-1.3",
      "reasoning_levels": list(MUSE_EFFORTS),

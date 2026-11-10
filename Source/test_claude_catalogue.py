@@ -13,7 +13,8 @@ from protocol import identity_note, model_catalog
 
 
 EXPECTED = {
-    "claude-fable-5-1": "Claude Fable 5.1",
+    "claude-fable-5-2": "Claude Fable 5.2",
+    "claude-fable-5-1": "Claude Fable 5.1 (Legacy)",
     "claude-fable-5": "Claude Fable 5 (Legacy)",
     "claude-opus-5-5": "Claude Opus 5.5",
     "claude-opus-5": "Claude Opus 5 (Legacy)",
@@ -51,7 +52,7 @@ class ClaudeCatalogueTests(unittest.TestCase):
         self.adapter.start()
         self.addCleanup(self.adapter.stop)
 
-    def test_repeated_discovery_offers_twelve_versions_without_alias_rows(self):
+    def test_repeated_discovery_offers_thirteen_versions_without_alias_rows(self):
         with patch.object(claude_cli_agent, "auth_state", return_value={"state": "authenticated"}):
             for _ in range(2):
                 inventory = cli_routes.discover_via_cli("claude")
@@ -61,9 +62,9 @@ class ClaudeCatalogueTests(unittest.TestCase):
                     self.assertEqual(argv[argv.index("--model") + 1], row["id"])
 
     def test_saved_aliases_request_the_displayed_version(self):
-        for alias, version in (("fable", "claude-fable-5-1"), ("opus", "claude-opus-5-5"),
+        for alias, version in (("fable", "claude-fable-5-2"), ("opus", "claude-opus-5-5"),
                                ("sonnet", "claude-sonnet-5-5"), ("haiku", "claude-haiku-5-5"),
-                               ("claude-fable-5", "claude-fable-5"),
+                               ("claude-fable-5-1", "claude-fable-5-1"), ("claude-fable-5", "claude-fable-5"),
                                ("claude-future", "claude-future")):
             with self.subTest(model=alias):
                 argv = claude_cli_agent.build_argv(alias)
@@ -76,10 +77,12 @@ class ClaudeCatalogueTests(unittest.TestCase):
         self.assertEqual(inventory, before)
         self.assertEqual({row["model_id"]: row["display_name"] for row in projected}, EXPECTED)
         specs = route_specs({"models": projected})
-        for alias, version in (("fable", "claude-fable-5-1"), ("opus", "claude-opus-5-5"),
+        for alias, version in (("fable", "claude-fable-5-2"), ("opus", "claude-opus-5-5"),
                                ("sonnet", "claude-sonnet-5-5"), ("haiku", "claude-haiku-5-5")):
             self.assertIs(specs["claude/" + alias], specs["claude/" + version])
         self.assertIsNot(specs["claude/fable"], specs["claude/claude-fable-5"])
+        self.assertIsNot(specs["claude/fable"], specs["claude/claude-fable-5-1"])
+        self.assertEqual(specs["claude/fable"]["effort_modes"], ["low", "medium", "high", "xhigh", "max"])
         self.assertTrue(specs["claude/haiku"]["reasoning"])
         self.assertEqual(specs["claude/haiku"]["effort_modes"], ["low", "medium", "high", "xhigh", "max"])
         self.assertFalse(specs["claude/claude-haiku-4-5"]["reasoning"])
@@ -101,12 +104,12 @@ class ClaudeCatalogueTests(unittest.TestCase):
                 codex = project_codex(config, {"models": rows})
                 self.assertEqual(codex["excluded"], [])
                 self.assertIn(default, {row["slug"] for row in codex["models"]})
-                expected = {"Claude Opus 5.5", "Claude Opus 5 (Legacy)", "Claude Fable 5.1",
+                expected = {"Claude Opus 5.5", "Claude Opus 5 (Legacy)", "Claude Fable 5.2",
                             "Claude Fable 5 (Legacy)", "Claude Sonnet 5.5"}
                 self.assertEqual([len(codex["models"]), len(model_catalog(config)["data"])], [5, 5])
                 self.assertEqual({row["display_name"] for row in codex["models"]}, expected)
                 self.assertEqual({row["display_name"] for row in model_catalog(config)["data"]}, expected)
-                self.assertIn("Claude Fable 5.1", identity_note(config["_model_specs"]["claude/fable"]))
+                self.assertIn("Claude Fable 5.2", identity_note(config["_model_specs"]["claude/fable"]))
 
     def test_api_labels_do_not_seed_unadvertised_models_or_change_routing(self):
         identifier = "claude-haiku-4-5-20251001"
@@ -122,10 +125,13 @@ class ClaudeCatalogueTests(unittest.TestCase):
         inventory["models"][0]["context"] = 12345
         inventory["models"][3]["context"] = 200000
         inventory["models"].append({"id": "claude-future", "display_name": "Future model", "context": 333333})
-        self.config["branding_overrides"] = {"claude": {"modelLabels": {"claude-fable-5-1": "My Fable"}}}
+        self.config["branding_overrides"] = {"claude": {"modelLabels": {"claude-fable-5-2": "My Fable"}}}
         specs = route_specs({"models": project_catalogue("claude", inventory, self.config)})
         self.assertEqual(specs["claude/fable"]["display_name"], "My Fable")
-        self.assertEqual(specs["claude/fable"]["context"], 1000000)
+        # The stale alias row's context never transfers; Fable 5.2 has no
+        # published ceiling yet, so its window stays provider-managed.
+        self.assertIsNone(specs["claude/fable"]["context"])
+        self.assertEqual(specs["claude/claude-fable-5-1"]["context"], 1000000)
         self.assertEqual(specs["claude/claude-fable-5"]["context"], 200000)
         self.assertEqual(specs["claude/claude-future"]["context"], 333333)
 

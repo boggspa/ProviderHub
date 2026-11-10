@@ -31,7 +31,8 @@ PINNED_LABELS = {
 # from generic name parsing: another provider (notably AntiGravity) may offer
 # the same family with its own lifecycle and display metadata.
 CLAUDE_MODEL_LABELS = {
-    "claude-fable-5-1": "Claude Fable 5.1",
+    "claude-fable-5-2": "Claude Fable 5.2",
+    "claude-fable-5-1": "Claude Fable 5.1 (Legacy)",
     "claude-fable-5": "Claude Fable 5 (Legacy)",
     "claude-opus-5-5": "Claude Opus 5.5",
     "claude-opus-5": "Claude Opus 5 (Legacy)",
@@ -48,7 +49,7 @@ CLAUDE_MODEL_LABELS = {
 # Compatibility for selections saved before the versioned CLI catalogue.
 # New picker rows use the full ID; short names are never extra picker rows.
 CLAUDE_CLI_ALIASES = {
-    "fable": "claude-fable-5-1",
+    "fable": "claude-fable-5-2",
     "opus": "claude-opus-5-5",
     "sonnet": "claude-sonnet-5-5",
     "haiku": "claude-haiku-5-5",
