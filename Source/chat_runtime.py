@@ -53,6 +53,13 @@ REQUEST_BACKOFF = (2, 5, 10, 20)  # Five attempts total, including the first.
 # budget becomes that variable for the child, which aborts an over-long reply
 # outright instead of truncating it.
 CLAUDE_CLI_OUTPUT = 32000
+# Ceiling for a route whose catalogue publishes its output limit. The old 8192
+# clamp cut off large apply_patch calls mid-JSON on models allowing far more.
+PUBLISHED_OUTPUT_CEILING = 32000
+# Without a published limit most providers reject an over-large max_tokens, so
+# 4096 stays the default. Mistral's API bounds max_tokens only by the context
+# window, and its rows carry no max_output, so 4096 was truncating its patches.
+UNPUBLISHED_OUTPUT = {"mistral": 16384}
 CHAT_ID = re.compile(r"[0-9a-f]{32}\Z")
 APPROVAL_MODES = {"manual", "accept_edits", "yolo"}
 SYSTEM = """You are an assistant in Provider Hub Chat, a small local coding harness.
@@ -85,6 +92,60 @@ class ModelRequestError(ValueError):
         super().__init__(message)
         self.status, self.code, self.retryable = status, code, retryable
         self.attempts = []
+
+
+def broken_tool_error(name, raw, stop_reason):
+    raw = raw if isinstance(raw, str) else ""
+    evidence = (f"tool {name or 'unknown'}, {len(raw):,} argument characters, "
+                f"stop_reason {stop_reason or 'none'}, ending {raw[-120:]!r}")
+    if stop_reason == "max_tokens":
+        return ModelRequestError("The model reached its output limit while writing a tool call, so the call was "
+                                 f"cut off ({evidence}).", code="output_truncated")
+    return ModelRequestError(f"The provider returned invalid tool arguments ({evidence}).",
+                             code="invalid_tool_arguments")
+
+
+def empty_response_error(stop_reason):
+    if stop_reason == "max_tokens":
+        return ModelRequestError("The model used its whole output allowance before replying or calling a tool "
+                                 "(stop_reason max_tokens).", code="empty_response", retryable=True)
+    return ModelRequestError("The model returned an empty response"
+                             + (f" (stop_reason {stop_reason})." if stop_reason else "."), code="empty_response", retryable=True)
+
+
+#: Failures in what the model wrote, not in the connection. Resending the same
+#: request reproduces them, so the retry tells the model what went wrong.
+CORRECTIONS = {
+    "output_truncated": (
+        "[Host note: your previous reply was discarded because it reached the output limit "
+        "({limit} tokens) while writing a tool call, so nothing was executed. Retry with smaller "
+        "steps: split a large patch or file write into several calls of a few hundred lines each, "
+        "and keep any text before the call brief.]"),
+    "invalid_tool_arguments": (
+        "[Host note: your previous reply was discarded because a tool call's arguments were not "
+        "valid JSON, so nothing was executed. Detail: {error} Retry the step with a valid JSON "
+        "object; if the content is large, split it into smaller calls.]"),
+    "empty_response": (
+        "[Host note: your previous reply contained no text and no tool call, so nothing happened. "
+        "Continue the task now: make the next tool call, or reply if the task is complete.]"),
+}
+#: Corrected retries per round, beyond the role's ordinary retry allowance.
+MAX_CORRECTIONS = 2
+
+
+def corrected_payload(payload, code, error):
+    """A copy of ``payload`` whose final user turn carries the correction note.
+
+    Projection only: the note is never saved into the conversation history.
+    """
+    note = CORRECTIONS[code].format(limit=payload.get("max_tokens") or "its", error=str(error)[:400])
+    messages = [*payload.get("messages", [])]
+    if messages:
+        # Only the turn that receives the note is copied; strict APIs need it
+        # inside the newest tool result, which append_note already handles.
+        messages[-1] = copy.deepcopy(messages[-1])
+    chat_context.append_note(messages, note)
+    return {**payload, "messages": messages}
 
 
 def retryable_request(exc):
@@ -331,6 +392,7 @@ class GatewayClient:
     def stream(self, payload, cancel, delta):
         connection = self.connect()
         blocks, fragments, usage = {}, {}, {}
+        broken = {}
         open_blocks = set()
         stopped = False
         reason = None
@@ -395,8 +457,12 @@ class GatewayClient:
                     if index not in open_blocks:
                         raise ModelRequestError("The model stream ended an unknown content block.", code="invalid_stream", retryable=True)
                     if fragments.get(index):
-                        value = json.loads(fragments[index])
-                        blocks[index]["input"] = value
+                        try:
+                            blocks[index]["input"] = json.loads(fragments[index])
+                        except ValueError:
+                            # Classified once the stop reason is known: a call cut
+                            # off at the output limit needs a different correction.
+                            broken[index] = fragments[index]
                     open_blocks.remove(index)
                 elif kind == "message_delta":
                     incoming = event.get("usage") or {}
@@ -414,9 +480,12 @@ class GatewayClient:
                 raise InterruptedError("Stopped")
             if not stopped:
                 raise ModelRequestError("The model stream ended before its response completed. No pending tool was executed.", code="incomplete_stream", retryable=True)
+            if broken:
+                index, raw = next(iter(broken.items()))
+                raise broken_tool_error(blocks[index].get("name"), raw, reason)
             content = [blocks[index] for index in sorted(blocks)]
             if not content:
-                raise ModelRequestError("The model returned an empty response.", code="empty_response", retryable=True)
+                raise empty_response_error(reason)
             return {"role": "assistant", "content": content, "usage": usage, "stop_reason": reason}
         except (json.JSONDecodeError, UnicodeError) as exc:
             raise ModelRequestError("Invalid model stream: " + str(exc), code="invalid_stream", retryable=True) from exc
@@ -454,6 +523,7 @@ class ChatService:
         self.question_inbox = []
         self.child_factory = child_factory or (lambda: GatewayClient(transport.root))
         self.child = None
+        self.approval_gate = chat_team.FifoGate()
         self.team_children = {}
         self.team_saved_entries = 0
         self.lanes = []
@@ -632,7 +702,7 @@ class ChatService:
 
     def reserve_delegations(self, count):
         with self._mutex:
-            if self.role != "parent" or type(count) is not int or count < 1 or self._delegations + count > 4:
+            if self.role not in {"parent", "team"} or type(count) is not int or count < 1 or self._delegations + count > 4:
                 raise ValueError("This logical turn has reached its four-helper limit.")
             self._delegations += count
             self.chat["delegationsThisTurn"] = self._delegations
@@ -709,6 +779,8 @@ class ChatService:
             self._steering = True; self._working = True; self._resume_after_interrupt = True
             previous = self.thread
             self.cancel.set(); self.transport.cancel(); self.approval_event.set()
+            from chat_agents import cancel_background
+            cancel_background(self)
             if self.child:
                 self.child.cancel.set(); self.child.transport.cancel(); self.child.approval_event.set()
             chat_team.cancel_children(self)
@@ -749,6 +821,14 @@ class ChatService:
         action = command.get("command")
         if self.closing and action != "stop":
             raise ValueError("Chat is closing.")
+        if action == "background_delegate":
+            if not self.chat or command.get("id") != self.chat["id"]:
+                raise ValueError("Select the owning chat before shelving its helper.")
+            display_id = command.get("call")
+            if not isinstance(display_id, str) or not display_id:
+                raise ValueError("Choose the running delegate row.")
+            from chat_agents import shelve_delegate
+            return shelve_delegate(self, display_id, member=command.get("memberID"))
         if action == "answer_question":
             return chat_questions.registry(self).answer(command)
         if action in {"configure", "select", "create"} and self.chat and any(
@@ -784,6 +864,8 @@ class ChatService:
                 if hasattr(chat_questions.owner(self), "questions"): chat_questions.registry(self).cancel(self)
                 self._resume_after_interrupt = False
                 self.cancel.set(); self.transport.cancel(); self.approval_event.set()
+                from chat_agents import cancel_background
+                cancel_background(self)
                 if self.child:
                     self.child.cancel.set(); self.child.transport.cancel(); self.child.approval_event.set()
                 chat_team.cancel_children(self)
@@ -926,12 +1008,14 @@ class ChatService:
         if self.role in {"side", "lane"}:
             tools = [tool for tool in tools if tool["name"] in {"read_file", "search_files"}]
         elif self.role == "parent" and tools:
-            from chat_agents import delegate_definition
-            tools.append(delegate_definition(self.models))
+            from chat_agents import delegate_definition, delegate_status_definition
+            tools.extend([delegate_definition(self.models), delegate_status_definition()])
             tools.extend([*chat_memory.TOOL_DEFINITIONS, *chat_todos.SOLO_TOOLS])
         elif self.role == "team" and tools:
             tools.extend([*chat_memory.TOOL_DEFINITIONS, chat_team.STATUS_TOOL, *chat_blackboard.TOOL_DEFINITIONS,
                           *chat_reactions.TOOL_DEFINITIONS, *chat_todos.TEAM_TOOLS])
+            from chat_agents import delegate_definition, delegate_status_definition
+            tools.extend([delegate_definition(self.models), delegate_status_definition()])
         if choice["supportsTools"]:
             tools.extend(chat_questions.TOOL_DEFINITIONS)
         context = choice.get("context")
@@ -940,7 +1024,11 @@ class ChatService:
             # general 4096 fallback failed any longer file write or thinking pass.
             output = min(choice.get("max_output") or CLAUDE_CLI_OUTPUT, CLAUDE_CLI_OUTPUT)
         else:
-            output = min(choice.get("max_output") or 4096, 8192)
+            published = choice.get("max_output")
+            if type(published) is int and published > 0:
+                output = min(published, PUBLISHED_OUTPUT_CEILING)
+            else:
+                output = UNPUBLISHED_OUTPUT.get(choice.get("route", "").split("/", 1)[0], 4096)
         if isinstance(context, int) and context > 0:
             output = min(output, max(1, context // 4))
         permission = {"manual": "Manual: patches and shell commands need the user's Allow once.",
@@ -1056,6 +1144,10 @@ class ChatService:
         return payload
 
     def approved(self, summary, detail=None, *, member=None):
+        with self.approval_gate.enter(self.cancel):
+            return self._approved(summary, detail, member=member)
+
+    def _approved(self, summary, detail=None, *, member=None):
         with self._mutex:
             if self.cancel.is_set() or self.closing: return False
             if member and member.get("pendingChange"): return False
@@ -1072,7 +1164,10 @@ class ChatService:
         """Retry only a provider round; no history or host action is replayed."""
         attempts = []
         limit = len(REQUEST_BACKOFF) + 1 if self.role == "team" else 1
-        for index in range(limit):
+        corrections = 0
+        index = -1
+        while True:
+            index += 1
             if self.cancel.is_set(): raise InterruptedError("Stopped")
             started, stamp = time.monotonic(), now()
             try:
@@ -1080,7 +1175,7 @@ class ChatService:
                 message = self.transport.stream(payload, self.cancel, delta)
                 if not any(block.get("type") == "tool_use" or block.get("type") == "text" and block.get("text", "").strip()
                            for block in message["content"]):
-                    raise ModelRequestError("The model returned an empty response.", code="empty_response", retryable=True)
+                    raise empty_response_error(message.get("stop_reason"))
                 return message
             except Exception as exc:
                 if self.cancel.is_set() or isinstance(exc, InterruptedError): raise InterruptedError("Stopped") from exc
@@ -1089,13 +1184,23 @@ class ChatService:
                 attempts.append({"attempt": index + 1, "at": stamp, "elapsed": round(time.monotonic() - started, 3),
                                  "code": failure.code, "status": failure.status, "error": str(exc)})
                 failure.attempts = attempts
-                if index + 1 == limit or not retryable_request(exc): raise failure from exc
-                delay = REQUEST_BACKOFF[index] + random.uniform(0, .3)
+                if failure.code in CORRECTIONS and corrections < MAX_CORRECTIONS:
+                    # Resending the same request reproduces a model-output
+                    # failure; tell the model what happened instead.
+                    corrections += 1
+                    payload = corrected_payload(payload, failure.code, exc)
+                    attempts[-1]["correction"] = True
+                    delay = .5
+                else:
+                    ordinary = index - corrections
+                    if ordinary + 1 >= limit or not retryable_request(exc): raise failure from exc
+                    delay = REQUEST_BACKOFF[ordinary] + random.uniform(0, .3)
                 attempts[-1]["wait"] = round(delay, 3)
                 with self._mutex:
                     current.update(text="", recorded=False)
                     self.emit({"event": "entry", "chat": self.chat["id"], "entry": current})
-                self.emit({"event": "state", "busy": True, "status": f"Retrying ({index + 2}/{limit})…"})
+                self.emit({"event": "state", "busy": True, "status": "Retrying with a correction…" if attempts[-1].get("correction")
+                           else f"Retrying ({index - corrections + 2}/{limit})…"})
                 if self.cancel.wait(delay): raise InterruptedError("Stopped")
 
     def run(self):
@@ -1119,16 +1224,12 @@ class ChatService:
             # a project actually has attached folders.
             roots = self.workspaces.secondaries(chat["workspace"])
             runner = self.runner_type(chat["workspace"], cancel_event=self.cancel, **({"roots": roots} if roots else {}))
-            closing_rounds = chat_team.CLOSING_ROUNDS if self.role in {"parent", "team"} else 0
             import itertools
             for round_index in itertools.count():
                 if self.cancel.is_set(): raise InterruptedError("Stopped")
                 if chat_execution.task(self):
                     if round_index and round_index % self.max_rounds == 0:
                         if not chat_execution.checkpoint(self): break
-                elif round_index >= self.max_rounds + closing_rounds:
-                    if closing_rounds: chat_team.finish_checkpoint(self); break
-                    raise ValueError(f"This turn reached its {self.max_rounds}-step limit. Send Continue to carry on from recorded results.")
                 if self.role == "team":
                     with self.team_parent._mutex:
                         reason = chat_execution.limit(self.team_parent.chat["team"])
@@ -1194,10 +1295,7 @@ class ChatService:
                         if self.role == "team":
                             chat["status"] = "yielded" if chat["teamDecision"]["state"] == "continue" else "needs_input"
                             break
-                    if round_index >= self.max_rounds and not chat_execution.task(self):
-                        chat_team.finish_checkpoint(self)
-                    else:
-                        chat["status"] = "ready"
+                    chat["status"] = "ready"
                     break
                 results = {"role": "user", "content": []}
                 chat["messages"].append(results)
@@ -1223,6 +1321,8 @@ class ChatService:
                                 from chat_agents import validate_delegate, delegate_summary
                                 validate_delegate(self, arguments)
                                 description = {"summary": delegate_summary(arguments), "requires_approval": False}
+                            elif name == "delegate_status" and self.role in {"parent", "team"}:
+                                description = {"summary": "Check background helpers", "requires_approval": False}
                             elif name == "team_status" and self.role == "team":
                                 description = {"summary": "Team contribution outcome", "requires_approval": False}
                             elif name in chat_memory.MEMORY_TOOLS:
@@ -1270,6 +1370,9 @@ class ChatService:
                                 if name == "delegate":
                                     from chat_agents import delegate
                                     result = delegate(self, arguments, call["id"])
+                                elif name == "delegate_status" and self.role in {"parent", "team"}:
+                                    from chat_agents import delegate_status
+                                    result = delegate_status(self, arguments)
                                 elif name == "team_status" and self.role == "team":
                                     result = chat_team.decide(self, arguments)
                                 elif name in chat_memory.MEMORY_TOOLS:
@@ -1360,13 +1463,16 @@ class ChatService:
                 chat["failureReason"] = reason
                 detail = "\n".join(f"Attempt {a['attempt']} · {a['at']} · {a['elapsed']:g}s · "
                     f"{a['code'] or 'request error'}" + (f" · HTTP {a['status']}" if a['status'] else "") +
-                    f"\n{a['error']}" + (f"\nWaited {a['wait']:g}s before retrying." if 'wait' in a else "") for a in attempts) or text
+                    f"\n{a['error']}" + (f"\nWaited {a['wait']:g}s before retrying" + (
+                        " with a correction sent to the model." if a.get("correction") else ".") if 'wait' in a else "")
+                    for a in attempts) or text
                 chat["failureEntry"] = entry("notice", f"Team member stopped after {count} attempt{'s' if count != 1 else ''} · {reason}",
                     chat["route"], noticeKind="team_failure", detail=detail, isError=True, recorded=True)
             else:
                 self.add(entry("notice" if stopped else "error", text, chat["route"], isError=not stopped))
         finally:
-            self.approval = None
+            # Approval requests own their slot until settled. A background
+            # helper may still be waiting when this model finishes its turn.
             if self.cancel.is_set() and hasattr(chat_questions.owner(self), "questions"):
                 chat_questions.registry(self).cancel(self)
             try:

@@ -6,15 +6,18 @@ same gateway, run loop and inspector for both forms.
 
 ## First scope
 
-The blocking `delegate` tool lets the parent ask another model to
+The `delegate` tool lets a solo parent or Team member ask another model to
 complete a self-contained task, waits for its result, then continues. One child
 at a time, one level deep. The child receives the existing local tools but
 cannot delegate. Use the existing Messages gateway and provider adapters.
 
 This gives a second opinion, focused investigation or bounded implementation
-without concurrent edits, mailboxes, queues, separate chat tabs or an agent
-dashboard. The parent blocks while its child works. Up to four helpers can be
-launched in one turn; each has twelve model/tool rounds. The host rejects
+without mailboxes, queues, separate chat tabs or an agent dashboard. By default
+the parent waits while its child works. Set `background: true`, or choose
+**Run in background** beside its live activity, to continue independently.
+Use `delegate_status` to retrieve recorded results, optionally with a bounded
+wait. Up to four helpers can be launched in one turn. Helpers continue until
+their model finishes or they are stopped. The host rejects
 recursive delegation even if a child invents a call.
 
 ## Presentation
@@ -26,7 +29,8 @@ pane with its task, messages and tools, without a composer. The workspace sideba
 stays for user chats. The parent turn clock continues through delegation.
 
 Child approvals use the existing approval strip and identify the requesting
-model. Only one writable task is executing, so no approval queue is needed.
+model. A shared approval gate serializes parent and helper requests; cancelling
+a waiting helper does not answer another agent's approval.
 Git counts already cover the workspace and need no separate child view.
 
 ## Execution contract
@@ -40,10 +44,10 @@ Git counts already cover the workspace and need no separate child view.
   reasoning. A nested child loop must own its history and tool-result IDs;
   re-entering the mutable parent `ChatService` is not sufficient.
 - Inherit the workspace and the parent's Manual / Accept Edits / YOLO ceiling.
-  Delegation cannot raise permissions. The parent blocks while the child acts,
-  so they cannot issue simultaneous patches. Keep normal repository claims and
+  Delegation cannot raise permissions. Parent and background helper patches
+  and shell calls share the workspace's write gate. Keep normal repository claims and
   patch validation. Do not classify shell commands as read-only by their label.
-- Enforce depth, launch, round and output limits in the host. Omit delegation
+- Enforce depth, launch and output limits in the host. Omit delegation
   from the child catalogue and reject attempts anyway; prompts are not limits.
 - Stop cancels the active request and foreground local command, including a
   child's. A steer cancels the child, waits for tool cleanup and a recorded
@@ -78,9 +82,10 @@ for that lane; the harness does not retry it silently.
 {"tasks": [{"task": "Review the cancellation path"}, {"task": "Check the persistence boundary", "choice": "provider/model|account"}]}
 ```
 
-Each lane has a separate cancellable client, history and eight-round limit. Only
-`read_file` and `search_files` are offered; host dispatch also rejects mutation,
-shell and recursive delegation. The parent is blocked until all lanes settle.
+Each lane has a separate cancellable client and history. Its local tools are
+`read_file` and `search_files`; host dispatch also rejects mutation,
+shell and recursive delegation. The parent waits until all lanes settle unless
+the call is launched in the background or shelved while running.
 Successful results survive a sibling failure. The parent receives bounded,
 identified recorded output through normal tool-result continuation, without an
 extra synthesis prompt. Native reasoning stays within the owning lane's saved
@@ -98,9 +103,9 @@ settles incomplete calls without relaunching lanes. Retry continues from the
 recorded outcomes; another delegation is a new explicit model tool call.
 
 Fixture tests prove overlapping execution, sibling/account isolation, all-or-none
-admission, denied writes, partial failure, eight-round limits and thread-start
+admission, denied writes, partial failure, continuous turns and thread-start
 failure recovery. They also exercise denial, cancellation, steer during delegation, interrupted
-recovery, route/account overrides, depth and round limits, Side Chat generations
+recovery, route/account overrides, depth limits, Side Chat generations
 and opaque-history isolation. No live-provider concurrency guarantee is implied.
 The header's
 context figure must continue to describe the parent's context rather than sum

@@ -405,7 +405,8 @@ class ChatHost:
     def active(self, service):
         identifier = service.chat["id"] if service.chat else None
         side = self.sides.get(identifier)
-        return service.busy or service._steering or service._branch_working or bool(side and side.busy)
+        from chat_agents import background_running
+        return service.busy or service._steering or service._branch_working or bool(side and side.busy) or background_running(service)
 
     def record(self, chat):
         # Headers contain no transcript, image payload, or provider reasoning.

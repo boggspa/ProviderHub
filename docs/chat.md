@@ -117,11 +117,12 @@ real results. Use Stop to cancel the Team.
 
 **Turn time** beneath the composer counts the active turn, including tool and
 approval waits. Steering and provider-request restarts keep the same clock;
-completion, failure or an acknowledged Stop resets it to `00:00`. In a solo
-chat the status word sits beside the approval mode. A Team chat leaves it out
-and shows what is running only in the live activity strip above the composer,
-so the composer does not shift as members' commands wrap. While a turn runs,
-the status word, the activity strip and the **Thinking…** label in the
+completion, failure or an acknowledged Stop resets it to `00:00`. Solo and Team
+chats show what is running in the live activity strip above the composer,
+so the composer does not shift as commands wrap. Pending question cards sit
+above that strip in one pinned stack, with controls to move between askers;
+answered cards remain in the transcript. While a turn runs,
+the activity strip and the **Thinking…** label in the
 transcript sweep the model's provider accent; with Reduce Motion on they take
 the accent without movement.
 
@@ -315,13 +316,14 @@ windowing is a separate optimization to consider after measuring long chats.
 
 The local tools are read file, search files, apply patch, and run shell, which
 can also start a background process followed with read process and stop
-process. In solo
-mode the parent also has **delegate**, which runs one helper at a time and returns its
+process. Solo chats and Team members also have **delegate**, which runs one helper and returns its
 recorded result. Helpers inherit the workspace and approval mode, get the
-local tools and cannot delegate. A turn can launch at most four helpers, with
-twelve model/tool rounds per serial helper. Its alternative `tasks` form runs
-two or three read-only lanes together, with eight rounds per lane; all count
-toward the same four-helper limit. Read-only lanes have read/search local tools only,
+local tools and cannot delegate. A turn can launch at most four helpers.
+Its alternative `tasks` form runs two or three read-only lanes together; all count
+toward the same four-helper limit. Set `background: true` to continue while
+helpers run, or choose **Run in background** beside a running delegate's activity
+row. **delegate_status** retrieves their status and recorded output.
+Read-only lanes have read/search local tools only,
 even in YOLO. Stop and steering cancel every lane and wait for cleanup before
 the parent continues. See [Subagents](chat-subagents.md). File
 tools stay inside the chosen workspace and reject symlink paths. A small menu
@@ -499,11 +501,10 @@ with search_history. Unknown limits stay unknown. The token
 indicator reports the latest request's input usage, rather than a lifetime
 token total. With a known limit, a small ring beside it fills in the provider
 accent, turning amber at 80% and red at 95% of the window; with an unknown
-limit no ring is shown. A solo turn pauses after 24 model/tool rounds and can
-be continued.
-New Teams use Task mode: the 24-round boundary saves progress and keeps working
-without a sign-off. One contribution mode keeps the earlier closing phase;
-existing Teams retain that mode until changed. Members resume independently and
+limit no ring is shown. Solo turns, Team contributions and helpers continue
+until the model finishes or the user stops them; round counts never remove
+tools or force a sign-off. Task mode saves quiet progress checkpoints.
+Members resume independently and
 can wait for a process or peer without model polling. There is no lifetime Team
 contribution quota. Run settings optionally limit elapsed minutes and cumulative
 reported tokens; these are separate from the per-member context indicators.

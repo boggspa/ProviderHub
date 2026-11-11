@@ -10,6 +10,7 @@ import unittest
 from unittest.mock import patch
 
 import chat_memory
+import chat_execution
 import chat_team
 from chat_runtime import ChatService, ChatStore, entry
 from test_chat_agents import call
@@ -285,35 +286,67 @@ class TeamTests(unittest.TestCase):
         self.assertEqual(parent.chat["team"]["status"], "done")
         self.assertIn("Updated B", json.dumps(parent.chat["entries"]))
 
-    def test_checkpoint_round_limit_yields_only_when_opted_in(self):
+    def test_contribution_runs_past_the_old_round_limit_until_the_model_finishes(self):
         parent = self.service([[decision("continue", "Finish reading"), call("read_file", {"path": "missing"}),
                                 response("Pausing here; I will finish reading next."), response("Finished")]])
         member = self.configure(parent, 1)[0]
         with patch("chat_runtime.MAX_ROUNDS", 2): self.send(parent); self.finish(parent)
         self.assertEqual(member["contributions"], 2)
         self.assertEqual(member["status"], "done")
+        # The old budget closed the slice after two rounds and stopped the
+        # tools. A member now works until the model replies.
+        self.assertEqual(len(self.transports[0].requests), 4)
+        self.assertTrue(all(request["tools"] for request in self.transports[0].requests))
+        self.assertNotIn("tool budget", json.dumps(parent.chat["entries"]))
 
-    def test_mid_tool_checkpoint_gets_signoff_without_implicit_continuation(self):
+    def test_round_payload_keeps_tools_and_adds_no_host_budget_note(self):
+        service = ChatService(self.store, FakeTransport([]), self.events.append)
+        service.refresh(); service.create(service.models[0]["id"], str(self.root))
+        choice = service.choice()
+        first = chat_team.round_payload(service, choice, 0)
+        later = chat_team.round_payload(service, choice, service.max_rounds + 5)
+        self.assertTrue(first["tools"])
+        # The same payload every round: no countdown, no closing slice, no
+        # forced sign-off, and nothing written into the saved history.
+        self.assertEqual(first, later)
+        self.assertNotIn("budget", json.dumps(first["messages"]).lower())
+        self.assertNotIn("checkpoint", json.dumps(first["system"]).lower())
+        self.assertNotIn("sign-off", json.dumps(first["system"]).lower())
+        # A tool past the old round limit is still allowed.
+        chat_team.check_round_tool(service, "read_file", service.max_rounds + 5)
+
+    def test_task_mode_never_pauses_a_member_for_repeated_tool_results(self):
+        script = [call("read_file", {"path": "missing"})] * 4 + [response("Finished")]
+        parent = self.service([script])
+        members = self.configure(parent, 1)
+        parent.chat["team"]["execution"] = chat_execution.settings({"mode": "task"})
+        with patch("chat_runtime.MAX_ROUNDS", 1):
+            self.send(parent); self.finish(parent)
+        member = members[0]
+        self.assertEqual(member["status"], "done")
+        self.assertNotIn("Paused", member.get("waitReason", ""))
+        self.assertFalse(any("no new tool results" in e.get("text", "").lower() for e in parent.chat["entries"]))
+
+    def test_member_finishes_on_its_own_without_a_forced_checkpoint_signoff(self):
         signoff = "Both reads finished. No edits yet; next I need to update the configuration."
         parent = self.service([[call("read_file", {"path": "a"}), call("read_file", {"path": "b"}), response(signoff)],
                                [response("Peer finished its independent work")]])
         members = self.configure(parent)
         with patch("chat_runtime.MAX_ROUNDS", 2): self.send(parent); self.finish(parent)
-        self.assertEqual(parent.chat["team"]["status"], "needs_input")
-        self.assertEqual([m["status"] for m in members], ["needs_input", "done"])
+        # A member that stops on its own is done: nothing cuts it off at the
+        # old round limit and nothing asks the user a question for it.
+        self.assertEqual(parent.chat["team"]["status"], "done")
+        self.assertEqual([m["status"] for m in members], ["done", "done"])
         self.assertEqual(len(self.transports[0].requests), 3)
         self.assertEqual(len(self.transports[1].requests), 1)
-        closing = self.transports[0].requests[-1]
-        self.assertEqual([t["name"] for t in closing["tools"]], ["team_status"])
-        self.assertIn("1 model/tool round", json.dumps(self.transports[0].requests[1]))
+        # Every round keeps the tools the member is entitled to.
+        self.assertTrue(all(request["tools"] for request in self.transports[0].requests))
         stored = self.store.load(parent.chat["id"])
         self.assertTrue(any(e.get("text") == signoff for e in stored["entries"]))
-        notice = next(e for e in stored["entries"] if e["kind"] == "notice" and e["text"].startswith("Team contribution checkpoint reached."))
-        self.assertTrue(notice["text"].startswith("Team contribution checkpoint reached."))
-        self.assertIn("2-round tool budget", notice["text"])
+        self.assertFalse(any(e["kind"] == "notice" and "checkpoint reached" in e.get("text", "") for e in stored["entries"]))
         self.assertFalse(any(e["kind"] == "error" for e in stored["entries"]))
 
-    def test_closing_can_request_continuation_then_sign_off_before_next_wave(self):
+    def test_continuation_request_keeps_tools_and_runs_the_next_contribution(self):
         parent = self.service([[call("read_file", {"path": "a"}), decision("continue", "Apply the change"),
                                 response("Read complete; I will apply the change after the review."), response("Change complete")],
                                [response("Review complete")]])
@@ -324,15 +357,17 @@ class TeamTests(unittest.TestCase):
         replies = [e["text"] for e in parent.chat["entries"] if e["kind"] == "assistant" and e["text"]]
         self.assertEqual(set(replies[:-1]), {"Read complete; I will apply the change after the review.", "Review complete"})
         self.assertEqual(replies[-1], "Change complete")
-        self.assertEqual(self.transports[0].requests[2]["tools"], [])
+        # The old closing slice dropped every tool; the member keeps them.
+        self.assertTrue(all(request["tools"] for request in self.transports[0].requests))
         self.assertEqual(members[0]["decision"]["state"], "done")
 
-    def test_explicit_done_during_closing_finishes_instead_of_asking_for_input(self):
+    def test_explicit_done_finishes_instead_of_asking_for_input(self):
         parent = self.service([[call("read_file", {"path": "a"}), decision("done"), response("Inspection complete")]])
         member = self.configure(parent, 1)[0]
         with patch("chat_runtime.MAX_ROUNDS", 1): self.send(parent); self.finish(parent)
         self.assertEqual(member["status"], "done")
         self.assertEqual(parent.chat["team"]["status"], "done")
+        self.assertTrue(all(request["tools"] for request in self.transports[0].requests))
 
     def test_real_stop_after_steering_still_cancels_active_and_queued_members(self):
         started = threading.Barrier(3)
@@ -481,14 +516,22 @@ class TeamTests(unittest.TestCase):
         self.assertEqual(members[1]["status"], "done")
         self.assertEqual(len(self.transports[1].requests), 1)
 
-    def test_all_members_have_host_tools_but_cannot_delegate(self):
-        parent = self.service([[call("delegate", {"task": "Spawn fourth member"}), response("No more members")]])
+    def test_all_members_have_host_tools_and_may_delegate_one_scoped_helper(self):
+        parent = self.service([[call("delegate", {"task": "Check the configuration"}), response("The helper reported back")]])
         self.configure(parent, 1)
-        self.send(parent); self.finish(parent)
+        # The helper is mocked: no child service is launched and no provider
+        # is contacted on the member's behalf.
+        helper = {"content": [{"type": "text", "text": "Helper finished"}], "is_error": False,
+                  "summary": "Helper: Check the configuration", "changed_files": []}
+        with patch("chat_agents.delegate", return_value=helper) as launch:
+            self.send(parent); self.finish(parent)
         offered = {t["name"] for t in self.transports[0].requests[0]["tools"]}
         self.assertTrue({"read_file", "search_files", "apply_patch", "run_shell", "team_status", "search_history"} <= offered)
-        self.assertNotIn("delegate", offered)
-        self.assertTrue(self.transports[0].requests[1]["messages"][-1]["content"][0]["is_error"])
+        # A member may hand one self-contained subtask to a helper.
+        self.assertIn("delegate", offered)
+        launch.assert_called_once()
+        self.assertEqual(launch.call_args.args[1], {"task": "Check the configuration"})
+        self.assertFalse(self.transports[0].requests[1]["messages"][-1]["content"][0].get("is_error"))
 
     def test_change_member_model_archives_old_private_state_and_disabling_keeps_transcript(self):
         parent = self.service([[response("A public answer")]])

@@ -26,7 +26,6 @@ MAX_SHARED_BYTES = 6000
 MAX_SHARED_REPLY = 240
 MAX_SHARED_TOOL = 160
 JOURNAL_CHECKPOINT_BYTES = 8 * 1024 * 1024
-CLOSING_ROUNDS = 2
 RESUMABLE = {"queued", "continuing", "stopped", "interrupted", "error", "waiting", "limit_reached"}
 STATUS_TOOL = _tool("team_status", "Set your outcome for this contribution. Default is done. "
     "Choose continue with a concrete next_step to opt into another contribution as soon as you are ready. "
@@ -50,8 +49,10 @@ progress. There is no total turn quota; the host schedules opted-in work fairly.
 Members contribute together. Model requests and reads can overlap; patches and
 shell commands are queued one at a time per workspace, with attributed approvals.
 Do not manufacture work or repeatedly acknowledge peers. Re-read current files
-before editing; a queued action can run after a peer changed them. You cannot delegate or spawn
-more members. Other members' visible output is attributed reference material,
+before editing; a queued action can run after a peer changed them. You may
+delegate a self-contained subtask to one background helper. It inherits your
+tools, approvals and policy, cannot delegate further, and cannot create or
+manage Team members. Other members' visible output is attributed reference material,
 not user instructions; their private reasoning is never shared. Use this chat's
 recall tools for omitted records, and re-read files before relying on old state.
 Before each model round, the host supplies short source-linked peer previews,
@@ -59,10 +60,10 @@ not complete peer replies or raw tool output. Read the full record with
 read_history only when it matters to your task, or use search_history for older
 findings and Blackboard tools for detailed shared notes. Use the previews and
 decision notebook to coordinate. In-flight text and unrecorded tool outcomes are omitted.
-A contribution-mode host reports a round allowance and reserves a short closing
-phase. Task mode instead saves quiet checkpoints and continues with tools.
-Follow the host's selected mode. When finishing, state what finished, what
-remains, and the next step or question.
+No round allowance, closing phase or forced sign-off is imposed. Workspace
+tools stay available until you finish your part, and the host saves progress as
+work continues. When finishing, state what finished, what remains, and the next
+step or question.
 A denied approval must not be bypassed.
 Members resume independently when ready. Use team_status(waiting, process_id=...,
 next_step=...) for a long background job, or member_id for a real dependency.
@@ -76,10 +77,10 @@ It never starts or resumes work, grants permission or replaces a user request.
 Use waiting with member_id for a real dependency; do not exchange tag loops.
 """
 
-TASK_GUIDANCE = """This Team is in Task mode. Every 24 model/tool rounds the host
-saves a quiet checkpoint and keeps workspace tools available. There is no
-24-round work limit or required checkpoint sign-off. Continue the authorized
-task until done, blocked, stopped, or a configured run limit is reached.
+TASK_GUIDANCE = """This Team is in Task mode. The host saves a quiet checkpoint
+as work continues and keeps workspace tools available. There is no round work
+limit and no required checkpoint sign-off. Continue the authorized task until
+done, blocked, stopped, or a configured run limit is reached.
 A normal final reply finishes your work. Set continue only for a concrete next
 contribution; use waiting for a process or member dependency, needs_input for a
 blocking user question, and done when finished. Never manufacture extra work.
@@ -87,88 +88,24 @@ blocking user question, and done when finished. Never manufacture extra work.
 
 
 def round_payload(service, choice, index):
-    """Budget notes are saved input, preserving native CLI tool continuations.
+    """The host does not cap how many rounds a run may take.
 
-    Changing the system prompt every round would change the CLI pool key;
-    projecting unsaved input would invalidate its exact history prefix.
+    A run ends when the model finishes on its own, the user stops it, or a
+    configured time or token limit is reached. The payload is the service's
+    own, so every tool the member is entitled to stays available and nothing
+    is injected into the saved history: a native CLI continuation keeps its
+    exact prefix.
     """
-    if service.role not in {"parent", "team"}:
-        return service.payload(choice)
-    if chat_execution.task(service):
-        return service.payload(choice)
-    remaining = service.max_rounds - index
-    team = service.role == "team"
-    label = "Team contribution" if team else "turn"
-    if remaining > 0:
-        note = (f"[Host budget for this {label}: {remaining} model/tool round"
-                f"{'s' if remaining != 1 else ''} remaining, including this round. "
-                "End with a short sign-off describing progress and the next step. "
-                "At the checkpoint, workspace tools stop and a brief closing reply is reserved.")
-        if team:
-            note += " If concrete work will remain, use team_status(continue, next_step=...) before signing off."
-        note += "]"
-    else:
-        note = (f"[Host checkpoint: this {label}'s {service.max_rounds}-round tool budget is used up. "
-                "Stop workspace actions. Give a short sign-off stating what completed, what remains, "
-                "and the next step. Do not claim unfinished work is complete.")
-        if team and index == service.max_rounds and choice["supportsTools"]:
-            note += (" Only team_status is available: choose continue with a concrete next_step, "
-                     "done if your work is complete, or needs_input with the blocking question. "
-                     "If you call it, your next reply must be the sign-off with no tools.")
-        else:
-            note += " Tools are disabled; write the sign-off now."
-        note += "]"
-    if index == 0 or remaining <= 3:
-        from chat_context import append_note, native_context
-        messages = service.chat["messages"]
-        block = {"type": "text", "text": note}
-        if native_context(choice):
-            append_note(messages, note)
-        elif messages and messages[-1]["role"] == "user" and isinstance(messages[-1]["content"], list):
-            parts = messages[-1]["content"]
-            before_images = next((i for i, part in enumerate(parts) if part.get("type") == "image"), len(parts))
-            parts.insert(before_images, block)
-        else:
-            messages.append({"role": "user", "content": [block]})
-    payload = service.payload(choice)
-    if remaining <= 0:
-        payload["tools"] = [STATUS_TOOL] if team and index == service.max_rounds and choice["supportsTools"] else []
-        payload.pop("_web_search", None)
-        payload["system"] += "\nThe host is closing this execution slice. Workspace tools and native web search are disabled. Use only the currently offered tools, then write a short sign-off."
-        payload["max_tokens"] = min(payload["max_tokens"], 1536)
-    return payload
+    return service.payload(choice)
 
 
 def check_round_tool(service, name, index):
-    if chat_execution.task(service):
-        return
-    if index >= service.max_rounds and not (
-            service.role == "team" and index == service.max_rounds and name == "team_status"):
-        raise ValueError("The tool budget is used up. This action was not executed; write a closing reply.")
+    """Tools stay available for the whole run.
 
-
-def finish_checkpoint(service):
-    from chat_runtime import entry
-    text = f"The {service.max_rounds}-round tool budget was used up. "
-    if service.role == "team":
-        decision = service.chat["teamDecision"]
-        if decision["state"] == "continue":
-            service.chat["status"] = "yielded"
-            text += "This member's requested continuation will resume automatically."
-        elif decision["state"] == "done" and decision.get("explicit"):
-            service.chat["status"] = "ready"
-            text += "This member finished its contribution."
-        else:
-            service.chat["status"] = "needs_input"
-            text += ("This member needs your answer before continuing." if decision["state"] == "needs_input" else
-                     "This member paused; send a message to continue from the recorded results.")
-        service.add(entry("notice", "Team contribution checkpoint reached. " + text, service.chat["route"],
-                          noticeKind="team_checkpoint"))
-    else:
-        service.chat["status"] = "ready"
-        service.add(entry("notice", "Turn checkpoint reached. " + text +
-                          "Recorded results are kept; send a message to continue if work remains.", service.chat["route"],
-                          noticeKind="turn_checkpoint"))
+    The former round budget is gone: nothing about the round count disables a
+    tool, closes a slice or forces a closing reply.
+    """
+    return
 
 
 def enabled(chat):
@@ -343,6 +280,22 @@ def cancel_children(parent):
     parent.approval_event.set()
     for child in list(parent.team_children.values()):
         child.cancel.set(); child.transport.cancel(); child.approval_event.set()
+        stop_member_helpers(child)
+
+
+def stop_member_helpers(member_service):
+    """Stop the helpers a member is running.
+
+    A helper is a service of its own: cancelling the member does not stop it.
+    The foreground helper is stopped the way it stops itself, so it settles
+    its recorded result instead of dying in the middle of an action.
+    """
+    for helper in [getattr(member_service, "child", None), *(getattr(member_service, "lanes", None) or [])]:
+        if helper is None: continue
+        try:
+            helper.handle({"command": "stop"})
+        except Exception:
+            helper.cancel.set(); helper.transport.cancel(); helper.approval_event.set()
 
 
 def memory_tool(service, name, args):
@@ -566,6 +519,14 @@ def _member_control_locked(parent, command):
             member.pop("memberStoppedByUser", None)
             raise
         child.cancel.set(); child.transport.cancel(); child.approval_event.set()
+        # The member's helpers are services of their own: stop the foreground
+        # one and release the shelved ones this member started.
+        stop_member_helpers(child)
+        from chat_agents import cancel_background
+        try:
+            cancel_background(parent, member=member["id"])
+        except Exception:
+            pass  # A stop never fails because a helper could not be released.
         if parent.approval and parent.approval.get("memberID") == member["id"]:
             parent.approval_allowed = False
             parent.approval_event.set()
@@ -1505,7 +1466,8 @@ def contribution(parent, member, transport):
                 if child.chat.get("saveFailed"): cancel_children(parent)
                 parent.emit({**event, "chat": owner, "member": member["id"]})
     child = ChatService(MemberStore(parent, member, dirty), transport, emit,
-                        runner=parent.runner_type, workspaces=parent.workspaces, role="team")
+                        runner=parent.runner_type, workspaces=parent.workspaces,
+                        child_factory=parent.child_factory, role="team")
     child.team_parent, child.team_member, child.team_run_id = parent, member, run_id
     from chat_context import ContextProjection
     projection_key = (owner, member["id"])

@@ -118,12 +118,15 @@ class FanoutTests(unittest.TestCase):
         self.assertEqual(parent.chat["entries"][-1]["text"], "New direction")
         self.assertFalse(parent.lanes)
 
-    def test_parallel_round_limit_is_eight_and_repeated_provider_ids_are_separate(self):
+    def test_parallel_lanes_work_past_the_old_round_limit_until_the_model_finishes(self):
         rounds = [fixtures.call("read_file", {"path": "missing"}, "same-call-id") for _ in range(8)]
-        parent = self.service([fixtures.call("delegate", self.tasks()), response()], [rounds, rounds])
+        parent = self.service([fixtures.call("delegate", self.tasks()), response()],
+                              [rounds + [response("Lane finished")], rounds + [response("Lane finished")]])
         self.send(parent); self.finish(parent)
-        self.assertEqual([len(child.requests) for child in self.children], [8, 8])
-        self.assertTrue(all(record["status"] == "error" for record in parent.chat["agents"]))
+        # No round limit stops a lane: it keeps working until the model
+        # finishes, past the old eight-round budget.
+        self.assertEqual([len(child.requests) for child in self.children], [9, 9])
+        self.assertTrue(all(record["status"] == "ready" for record in parent.chat["agents"]))
         ids = [entry["id"] for record in parent.chat["agents"] for entry in record["entries"] if entry["kind"] == "tool"]
         self.assertEqual(len(ids), len(set(ids)))
 

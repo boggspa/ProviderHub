@@ -237,15 +237,17 @@ class ContinuityTests(unittest.TestCase):
         self.assertEqual(parent.chat["team"]["status"], "done")
         self.assertNotIn("limitReason", parent.chat["team"])
 
-    def test_repeated_unchanged_reads_pause_but_new_findings_count_as_progress(self):
+    def test_repeated_unchanged_reads_keep_working_until_the_model_finishes(self):
         (self.root / "a").write_text("Same finding")
-        parent = self.task_team([[call("read_file", {"path": "a"})] * 5])
+        parent = self.task_team([[call("read_file", {"path": "a"})] * 4 + [response("Finished")]])
         with patch("chat_runtime.MAX_ROUNDS", 1):
             self.send(parent); self.finish(parent)
-        self.assertEqual(parent.chat["team"]["status"], "stopped")
-        self.assertEqual(len(self.transports[0].requests), 4)
-        self.assertIn("No new tool results", json.dumps(parent.chat["entries"]))
-        self.assertEqual(parent.chat["team"]["members"][0]["waitReason"], "Paused: no new tool results in three checkpoints")
+        # Repeated unchanged reads are no longer a reason to stop: the member
+        # keeps working until the model finishes.
+        self.assertEqual(parent.chat["team"]["status"], "done")
+        self.assertEqual(len(self.transports[0].requests), 5)
+        self.assertNotIn("No new tool results", json.dumps(parent.chat["entries"]))
+        self.assertNotIn("Paused", parent.chat["team"]["members"][0].get("waitReason", ""))
         self.assertGreaterEqual(parent.chat["team"]["runUsage"]["ended"], parent.chat["team"]["runUsage"]["started"])
 
     def test_effective_context_and_progress_survive_contribution_and_disk(self):

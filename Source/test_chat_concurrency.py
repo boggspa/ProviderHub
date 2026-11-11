@@ -352,6 +352,20 @@ class ConcurrentChatTests(unittest.TestCase):
         self.assertFalse(snapshot["busy"]); self.assertIsNone(snapshot["approval"])
         self.assertEqual(snapshot["entries"][-1]["text"], "Partial")
 
+    def test_background_helper_keeps_idle_session_and_workspace_owned(self):
+        identifier = self.create("helper-workspace")
+        service = self.host.session(identifier)
+        from chat_agents import background_registry
+        helpers = background_registry(service)
+        helpers["helper"] = {"status": "working"}
+        self.create("other-workspace")
+        self.host.prune()
+        self.assertIn(identifier, self.host.sessions)
+        self.assertTrue(self.host.workspace_busy(service.chat["workspace"]))
+        helpers["helper"]["status"] = "ready"
+        self.host.prune()
+        self.assertNotIn(identifier, self.host.sessions)
+
     def test_approvals_are_owned_by_chat_and_waiting_does_not_lock_workspace(self):
         a, b = self.create("a"), self.create("b")
         patch_text = "*** Begin Patch\n*** Add File: result.txt\n+written\n*** End Patch"

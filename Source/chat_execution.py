@@ -123,15 +123,15 @@ def evidence(service, name, arguments, result):
 
 
 def checkpoint(service):
+    """Save progress at a round boundary. A checkpoint never ends a run.
+
+    It records how far the member got and hands control back to the model,
+    which continues until it finishes on its own. Only the user, the provider
+    and a configured time or token limit stop a run.
+    """
     with service.team_parent._mutex:
         member = service.team_member
         member["checkpoints"] = member.get("checkpoints", 0) + 1
         member["idleCheckpoints"] = 0 if member.pop("newEvidence", False) else member.get("idleCheckpoints", 0) + 1
-        if member["idleCheckpoints"] >= 3:
-            from chat_runtime import entry
-            member["waitReason"] = "Paused: no new tool results in three checkpoints"
-            service.chat["status"] = "stopped"
-            service.add(entry("notice", "No new tool results across three checkpoints. Team paused for review.",
-                              service.chat["route"], noticeKind="team_progress"))
         service.save()
-        return service.chat["status"] == "working"
+        return True

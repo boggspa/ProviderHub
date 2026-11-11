@@ -14,6 +14,7 @@ import unittest
 from unittest import mock
 
 from chat_runtime import ChatService, ChatStore, GatewayClient, ModelRequestError, entry, needs_approval, retryable_request
+from chat_runtime import MAX_CORRECTIONS
 from chat_tools import ChatToolRunner
 
 
@@ -99,9 +100,44 @@ class ChatRuntimeTests(unittest.TestCase):
                 # Other routes keep the general budget.
                 ({"source": "keychain", "route": "claude/opus", "max_output": None, "context": 1000000}, 4096),
                 ({"source": "cli", "route": "codex/gpt-6", "max_output": None, "context": 1000000}, 4096),
-                ({"max_output": 64000}, 8192)):
+                # A published limit is honoured up to 32000; the old 8192 clamp
+                # cut large tool calls off mid-JSON.
+                ({"max_output": 64000, "context": 1000000}, 32000),
+                ({"max_output": 12000, "context": 1000000}, 12000),
+                ({"max_output": 64000, "context": 100000}, 25000),
+                # Mistral publishes no max_output; its API bounds it by context.
+                ({"route": "mistral/mistral-large-4", "max_output": None, "context": 1048576}, 16384)):
             with self.subTest(**overrides):
                 self.assertEqual(service.payload({**base, **overrides})["max_tokens"], expected)
+
+    def test_invalid_tool_arguments_are_retried_with_a_correction_then_stopped(self):
+        def fail(payload, cancel, delta):
+            raise ModelRequestError(
+                "The provider returned invalid tool arguments (tool apply_patch, 3 argument characters, "
+                "stop_reason tool_use, ending '{').", code="invalid_tool_arguments")
+
+        service, transport = self.service([fail, fail, fail, fail, fail])
+        self.send(service)
+        self.finish(service)
+        self.assertEqual(len(transport.requests), 1 + MAX_CORRECTIONS)
+        self.assertNotIn("Host note", json.dumps(transport.requests[0]))
+        self.assertIn("valid JSON", json.dumps(transport.requests[1]))
+        stored = self.store.load(service.chat["id"])
+        self.assertNotIn("Host note", json.dumps(stored["messages"]))
+        self.assertIn("invalid tool arguments", json.dumps(stored["entries"]))
+
+    def test_a_corrected_retry_can_finish_the_round(self):
+        def fail_once(payload, cancel, delta):
+            raise ModelRequestError("The model returned an empty response.", code="empty_response")
+
+        service, transport = self.service([fail_once, response("Done")])
+        self.send(service)
+        self.finish(service)
+        self.assertEqual(len(transport.requests), 2)
+        self.assertIn("no text and no tool call", json.dumps(transport.requests[1]))
+        stored = self.store.load(service.chat["id"])
+        self.assertEqual(stored["entries"][-1]["text"], "Done")
+        self.assertNotIn("Host note", json.dumps(stored["messages"]))
 
     def test_streaming_reply_saved_with_opaque_reasoning(self):
         reply = response()
@@ -127,7 +163,7 @@ class ChatRuntimeTests(unittest.TestCase):
         result = transport.requests[1]["messages"][-1]["content"][0]
         self.assertTrue(result["is_error"]); self.assertIn("denied", result["content"][0]["text"])
 
-    def test_solo_tool_checkpoint_gets_final_reply_and_preserves_completed_action(self):
+    def test_solo_keeps_tools_and_web_search_after_former_round_budget(self):
         patch_text = "*** Begin Patch\n*** Add File: budget.txt\n+saved\n*** End Patch"
         service, transport = self.service([response("", patch_text), response("Change saved; tests are the next step.")])
         service.max_rounds = 1
@@ -135,26 +171,25 @@ class ChatRuntimeTests(unittest.TestCase):
         service.models[0]["supportsWebSearch"] = True
         self.send(service); self.finish(service)
         self.assertEqual((self.root / "budget.txt").read_text(), "saved\n")
-        self.assertEqual(transport.requests[-1]["tools"], [])
-        self.assertNotIn("_web_search", transport.requests[-1])
+        self.assertTrue(transport.requests[-1]["tools"])
+        self.assertIn("_web_search", transport.requests[-1])
         self.assertEqual(service.chat["status"], "ready")
         self.assertTrue(any(e.get("text") == "Change saved; tests are the next step." for e in service.chat["entries"]))
         self.assertFalse(any(e["kind"] == "error" for e in service.chat["entries"]))
 
-    def test_closing_rejects_workspace_calls_even_if_model_ignores_tool_allowlist(self):
-        patch_text = "*** Begin Patch\n*** Add File: forbidden.txt\n+unexpected\n*** End Patch"
-        service, transport = self.service([response("", patch_text), response("", patch_text), response("", patch_text)])
+    def test_solo_executes_tools_beyond_former_round_budget_until_model_finishes(self):
+        patch_text = "*** Begin Patch\n*** Add File: continued.txt\n+saved\n*** End Patch"
+        second_patch = "*** Begin Patch\n*** Add File: continued-again.txt\n+saved again\n*** End Patch"
+        service, transport = self.service([response("", patch_text), response("", second_patch), response("Finished")])
         service.max_rounds = 1
-        # The first tool is denied; closing must not offer another approval.
-        self.send(service)
-        service.handle({"command": "approve", "id": self.approval(service), "allow": False})
-        self.finish(service)
+        service.chat["approvalMode"] = "yolo"
+        self.send(service); self.finish(service)
         self.assertEqual(len(transport.requests), 3)
-        self.assertFalse((self.root / "forbidden.txt").exists())
+        self.assertEqual((self.root / "continued.txt").read_text(), "saved\n")
+        self.assertEqual((self.root / "continued-again.txt").read_text(), "saved again\n")
         self.assertIsNone(service.approval)
-        closing_tools = [e for e in service.chat["entries"] if e["kind"] == "tool"][-2:]
-        self.assertTrue(all(e["isError"] for e in closing_tools))
-        self.assertIn("tool budget", service.chat["entries"][-1]["text"])
+        self.assertEqual(service.chat["status"], "ready")
+        self.assertFalse(any("checkpoint reached" in e.get("text", "").lower() for e in service.chat["entries"]))
 
     def test_web_search_default_toggle_and_unsupported_models(self):
         service, transport = self.service([response(), response(), response()])
@@ -557,7 +592,15 @@ class MessagesStreamTests(unittest.TestCase):
     def test_truncated_or_invalid_tool_stream_fails_before_execution(self):
         with self.assertRaises(ValueError): self.stream(self.events()[:-1])
         events = self.events(); events[6]["delta"]["partial_json"] = "not json"
-        with self.assertRaises(ValueError): self.stream(events)
+        with self.assertRaises(ModelRequestError) as caught:
+            self.stream(events)
+        self.assertEqual(caught.exception.code, "invalid_tool_arguments")
+        self.assertIn("read_file", str(caught.exception))
+        events = self.events(); events[6]["delta"]["partial_json"] = '{"path":'
+        events[-2]["delta"]["stop_reason"] = "max_tokens"
+        with self.assertRaises(ModelRequestError) as caught:
+            self.stream(events)
+        self.assertEqual(caught.exception.code, "output_truncated")
 
     def test_message_stop_cannot_execute_initial_input_of_an_unfinished_block(self):
         events = [{"type": "content_block_start", "index": 0, "content_block": {

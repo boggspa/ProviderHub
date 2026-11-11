@@ -10,7 +10,9 @@ import unittest
 from unittest.mock import patch
 
 from chat_runtime import ChatService, ChatStore
-from chat_agents import close_side, close_all_sides, validate_delegate, make_child, visible
+from chat_agents import (MemoryStore, active_runs, background_agents, background_running, cancel_background, close_all_sides,
+                         close_side, delegate, delegate_status, has_background, make_child,
+                         shelve_delegate, validate_delegate, visible)
 from test_chat_runtime import FakeTransport, model, response
 
 
@@ -146,6 +148,19 @@ class AgentTests(unittest.TestCase):
         parent.handle({"command": "retry", "id": parent.chat["id"]}); self.finish(parent)
         self.assertEqual(len(parent.chat["agents"]), 1)
         self.assertEqual(len(self.children[0].requests), 2)
+
+    def test_parent_finish_preserves_background_helper_approval(self):
+        patch_text = "*** Begin Patch\n*** Add File: approved-later.txt\n+saved\n*** End Patch"
+        def finish_with_pending_approval(payload, cancel, delta):
+            self.wait_for(lambda: parent.approval is not None)
+            return response("Independent work finished")
+        parent = self.service([call("delegate", {"task": "Write", "background": True}),
+                               finish_with_pending_approval], [[response("", patch_text), response("Helper finished")]])
+        self.send(parent); self.finish(parent)
+        self.assertIsNotNone(parent.approval)
+        parent.handle({"command": "approve", "id": parent.approval["id"], "allow": True})
+        self.wait_for(lambda: not background_running(parent))
+        self.assertEqual((self.root / "approved-later.txt").read_text(), "saved\n")
         self.assertFalse((self.root / "never.txt").exists())
 
     def test_steer_waits_for_child_cleanup(self):
@@ -292,13 +307,224 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(side.chat["entries"][-1]["text"], "Side updated")
         self.assertEqual(parent.chat["entries"][-1]["text"], "Parent finished")
 
-    def test_child_round_limit_is_twelve(self):
+    def test_child_rounds_are_not_capped(self):
         parent = self.service([call("delegate", {"task": "Task"}), response()],
                               [[call("read_file", {"path": "missing"}, str(i)) for i in range(12)]])
         self.send(parent); self.finish(parent)
-        self.assertEqual(len(self.children[0].requests), 12)
+        # The former round budget is gone: the helper keeps working until the
+        # provider itself stops answering.
+        self.assertEqual(len(self.children[0].requests), 13)
         self.assertEqual(parent.chat["agents"][0]["status"], "error")
-        self.assertIn("12-step", parent.chat["agents"][0]["entries"][-1]["text"])
+
+    def test_background_delegate_returns_immediately_and_keeps_working(self):
+        started, release = threading.Event(), threading.Event()
+        def helper(payload, cancel, delta):
+            started.set(); release.wait(3); return response("Background answer")
+        parent = self.service([call("delegate", {"task": "Long job", "background": True}), response("Parent continued")],
+                              [[helper]])
+        self.send(parent); self.finish(parent)
+        self.assertTrue(started.wait(2))
+        row = next(row for row in parent.chat["entries"] if row.get("tool") == "delegate")
+        agent_id = row["agentID"]
+        self.assertIn("background", row["summary"].lower())
+        self.assertEqual(parent.chat["entries"][-1]["text"], "Parent continued")
+        self.assertTrue(has_background(parent))
+        record = background_agents(parent)[agent_id]
+        self.assertEqual(record["status"], "working")
+        self.assertEqual(record["chatId"], parent.chat["id"])
+        release.set()
+        self.wait_for(lambda: background_agents(parent)[agent_id]["status"] != "working")
+        self.assertEqual(background_agents(parent)[agent_id]["result"], "Background answer")
+        self.assertEqual(background_agents(parent)[agent_id]["status"], "ready")
+
+    def test_background_status_waits_and_reports_the_recorded_result(self):
+        started, release = threading.Event(), threading.Event()
+        def helper(payload, cancel, delta):
+            started.set(); release.wait(3); return response("Recorded answer")
+        parent = self.service([call("delegate", {"task": "Long job", "background": True}), response("Parent continued")],
+                              [[helper]])
+        self.send(parent); self.finish(parent)
+        self.assertTrue(started.wait(2))
+        agent_id = next(iter(background_agents(parent)))
+        running = delegate_status(parent, {"agent_id": agent_id})
+        self.assertIn("Still running", running["content"][0]["text"])
+        release.set()
+        finished = delegate_status(parent, {"agent_id": agent_id, "wait_seconds": 5})
+        self.assertIn("Recorded answer", finished["content"][0]["text"])
+        self.assertFalse(finished["is_error"])
+        with self.assertRaises(ValueError):
+            delegate_status(parent, {"agent_id": "missing"})
+        with self.assertRaises(ValueError):
+            delegate_status(parent, {"wait_seconds": 1000})
+
+    def test_background_completion_never_writes_into_another_chat(self):
+        started, release = threading.Event(), threading.Event()
+        def helper(payload, cancel, delta):
+            started.set(); release.wait(3); return response("Late answer")
+        parent = self.service([call("delegate", {"task": "Long job", "background": True}), response("Parent continued")],
+                              [[helper]])
+        self.send(parent); self.finish(parent)
+        self.assertTrue(started.wait(2))
+        agent_id = next(iter(background_agents(parent)))
+        first = parent.chat["id"]
+        parent.create(parent.models[0]["id"], str(self.root))
+        self.assertNotEqual(parent.chat["id"], first)
+        release.set()
+        self.wait_for(lambda: background_agents(parent)[agent_id]["status"] != "working")
+        self.assertEqual(parent.chat.get("agents", []), [])
+        self.assertEqual(background_agents(parent)[agent_id]["result"], "Late answer")
+
+    def test_background_helper_can_be_cancelled(self):
+        started, ended = threading.Event(), threading.Event()
+        def helper(payload, cancel, delta):
+            started.set()
+            try: cancel.wait(3)
+            finally: ended.set()
+            raise InterruptedError("Stopped")
+        parent = self.service([call("delegate", {"task": "Long job", "background": True}), response("Parent continued")],
+                              [[helper]])
+        self.send(parent); self.finish(parent)
+        self.assertTrue(started.wait(2))
+        agent_id = next(iter(background_agents(parent)))
+        self.assertEqual(cancel_background(parent, agent_id), 1)
+        self.assertTrue(ended.wait(2))
+        self.wait_for(lambda: background_agents(parent)[agent_id]["status"] != "working")
+        self.assertEqual(background_agents(parent)[agent_id]["status"], "stopped")
+        with self.assertRaises(ValueError):
+            cancel_background(parent, "missing")
+
+    def test_running_delegate_can_be_shelved_into_the_background(self):
+        started, release = threading.Event(), threading.Event()
+        def helper(payload, cancel, delta):
+            started.set(); release.wait(3); return response("Shelved answer")
+        parent = self.service([call("delegate", {"task": "Long job"}), response("Parent continued")],
+                              [[helper]])
+        self.send(parent)
+        self.assertTrue(started.wait(2))
+        row = next(row for row in parent.chat["entries"]
+                   if row.get("tool") == "delegate" and row.get("recorded") is not True)
+        self.assertTrue(shelve_delegate(parent, row["id"]))
+        self.wait_for(lambda: not parent.busy)
+        self.assertEqual(parent.chat["entries"][-1]["text"], "Parent continued")
+        agent_id = row["agentID"]
+        self.assertTrue(has_background(parent))
+        release.set()
+        self.wait_for(lambda: background_agents(parent)[agent_id]["status"] != "working")
+        self.assertEqual(background_agents(parent)[agent_id]["result"], "Shelved answer")
+        with self.assertRaises(ValueError):
+            shelve_delegate(parent, row["id"])
+
+    def test_team_member_may_delegate_and_the_root_keeps_the_records(self):
+        started, release = threading.Event(), threading.Event()
+        def helper(payload, cancel, delta):
+            started.set(); release.wait(3); return response("Team helper answer")
+        parent = self.service([response("Parent continued")], [[helper]])
+        member = ChatService(self.store, FakeTransport([]), self.events.append,
+                             child_factory=lambda: self.children[0], role="team")
+        member.team_parent = parent
+        member.team_member = {"id": "member-1", "name": "Scout"}
+        member.models = parent.models
+        member.preferences = parent.preferences
+        member.chat = {"id": "member-1", "title": "Scout", "updated": 0, "route": parent.models[0]["route"],
+                       "account": parent.models[0]["account"], "scope": parent.models[0]["scope"],
+                       "label": parent.models[0]["label"], "effort": "", "workspace": str(self.root),
+                       "approvalMode": "manual", "entries": [], "messages": [], "status": "working"}
+        choice, effort = validate_delegate(member, {"task": "Team helper", "background": True})
+        self.assertEqual(choice["id"], parent.models[0]["id"])
+        result = delegate(member, {"task": "Team helper", "background": True}, "team-call")
+        agent_id = result["agent_id"]
+        self.assertTrue(started.wait(2))
+        self.assertNotIn("agents", member.chat)
+        self.assertEqual(len(parent.chat["agents"]), 1)
+        self.assertEqual(parent.chat["agents"][0]["id"], agent_id)
+        self.assertEqual(background_agents(parent)[agent_id]["memberId"], "member-1")
+        release.set()
+        self.wait_for(lambda: background_agents(parent)[agent_id]["status"] != "working")
+        self.assertEqual(background_agents(parent)[agent_id]["result"], "Team helper answer")
+
+    def member_service(self, parent, name, transport):
+        """A Team member service that shares the root's chat and helpers."""
+        member = ChatService(MemoryStore(parent.store.root), FakeTransport([]), self.events.append, role="team")
+        member.team_parent = parent
+        member.team_member = {"id": name, "name": name}
+        member.models = parent.models
+        member.preferences = parent.preferences
+        member.child_factory = lambda: transport
+        member.chat = {"id": name, "title": name, "updated": 0, "route": parent.models[0]["route"],
+                       "account": parent.models[0]["account"], "scope": parent.models[0]["scope"],
+                       "label": parent.models[0]["label"], "effort": "", "workspace": str(self.root),
+                       "approvalMode": "manual", "entries": [], "messages": [], "status": "working"}
+        return member
+
+    def test_two_delegations_with_the_same_provider_call_id_stay_separate(self):
+        started = [threading.Event(), threading.Event()]
+        release = threading.Event()
+        def helper(index):
+            def stream(payload, cancel, delta):
+                started[index].set(); release.wait(3); return response(f"Answer {index}")
+            return stream
+        parent = self.service([], [[helper(0)], [helper(1)]])
+        first = self.member_service(parent, "member-1", self.children[0])
+        second = self.member_service(parent, "member-2", self.children[1])
+        def launch(service):
+            delegate(service, {"task": "Shared call id"}, "same-call-id")
+        workers = [threading.Thread(target=launch, args=(service,)) for service in (first, second)]
+        for worker in workers: worker.start()
+        self.assertTrue(all(event.wait(2) for event in started))
+        runs = list(active_runs(parent).values())
+        self.assertEqual(len(runs), 2)
+        self.assertEqual(len({run["id"] for run in runs}), 2)
+        self.assertEqual(len({run["agentIds"][0] for run in runs}), 2)
+        self.assertEqual({run["callId"] for run in runs}, {"same-call-id"})
+        release.set()
+        for worker in workers: worker.join(3)
+
+    def test_team_member_background_helper_completes_after_the_member_finishes(self):
+        started, release = threading.Event(), threading.Event()
+        def helper(payload, cancel, delta):
+            started.set(); release.wait(3); return response("Team helper answer")
+        member_transport = FakeTransport([call("delegate", {"task": "Team helper", "background": True}),
+                                          response("Member finished")])
+        parent = self.service([], [[helper]])
+        transports = iter([member_transport, self.children[0]])
+        parent.child_factory = lambda: next(transports)
+        specs = [{"choice": parent.models[0]["id"], "name": "Scout", "effort": "", "responsibility": "Look"}]
+        parent.handle({"command": "configure_team", "id": parent.chat["id"], "enabled": True,
+                       "execution": {"mode": "contribution"}, "members": specs, "request": "team"})
+        self.assertTrue(parent.chat.get("team"), self.events[-1])
+        parent.handle({"command": "send", "id": parent.chat["id"], "text": "Delegate a helper"})
+        parent.thread.join(6)
+        self.assertTrue(started.wait(2))
+        registry = background_agents(parent)
+        agent_id = next(iter(registry))
+        record = registry[agent_id]
+        members = parent.chat["team"]["members"]
+        roster = list(members.values()) if isinstance(members, dict) else members
+        self.assertIn(record["memberId"], [member["id"] for member in roster])
+        self.assertTrue(any(event.get("event") == "agent_entry" for event in self.events))
+        release.set()
+        self.wait_for(lambda: background_agents(parent)[record["id"]]["status"] != "working")
+        self.assertEqual(background_agents(parent)[record["id"]]["result"], "Team helper answer")
+        self.assertEqual(parent.chat["agents"][0]["status"], "ready")
+
+    def test_helpers_may_not_delegate(self):
+        parent = self.service([], [])
+        for role in ("delegate", "lane", "side"):
+            helper = type("Helper", (), {"role": role, "_delegations": 0})()
+            with self.assertRaisesRegex(ValueError, "Helpers cannot delegate"):
+                validate_delegate(helper, {"task": "Task"})
+
+    def test_background_flag_is_validated_and_never_mixed(self):
+        parent = self.service([], [])
+        with self.assertRaises(ValueError):
+            validate_delegate(parent, {"task": "Task", "background": "yes"})
+        with self.assertRaises(ValueError):
+            validate_delegate(parent, {"tasks": [{"task": "One", "background": True}, {"task": "Two"}]})
+        with self.assertRaises(ValueError):
+            validate_delegate(parent, {"tasks": [{"task": "One", "background": True}],
+                                    "background": False})
+        lanes = validate_delegate(parent, {"tasks": [{"task": "One"}, {"task": "Two"}], "background": True})
+        self.assertEqual(len(lanes), 2)
 
     def test_worktree_creation_does_not_move_chat_selection_archives_context(self):
         parent = self.service([response("Keep this transcript")], [])
