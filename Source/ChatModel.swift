@@ -52,6 +52,9 @@ struct ChatEntry: Decodable, Identifiable {
     var tool: String?
     var summary: String?
     var detail: String?
+    /// False while a tool row is still running. A recorded row carries its
+    /// result instead, and a row that never ran has no value here.
+    var recorded: Bool?
     var isError: Bool
     var changedFiles: [String]
     var attachments: [ChatAttachment]?
@@ -699,6 +702,17 @@ final class ChatModel: ObservableObject {
         guard let owner = stateChatID, connected else { return }
         write(["command": "answer_question", "chat": owner, "question_id": question.id,
                "answers": answers, "dismiss": dismiss])
+    }
+    /// Shelves a running helper: it keeps working in the background and this
+    /// chat carries on without waiting for it. The call id names the running
+    /// row, so a click that has gone stale is ignored by the worker rather
+    /// than shelving whatever happens to be running now. In a Team the
+    /// member's id says which member's helper to shelve.
+    func backgroundDelegate(_ entry: ChatEntry) {
+        guard let owner = stateChatID, connected else { return }
+        var command: [String: Any] = ["command": "background_delegate", "id": owner, "chat": owner, "call": entry.id]
+        if let memberID = entry.memberID { command["memberID"] = memberID }
+        write(command)
     }
     func chooseAttachments() {
         let owner = selectedID

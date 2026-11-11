@@ -154,6 +154,29 @@ struct ChatActivityStrip: View {
     }
 
     private func activityRow(_ row: ChatActivity) -> some View {
+        HStack(spacing: 8) {
+            jumpButton(row)
+            if let delegate = shelvableDelegate(row) {
+                backgroundButton(delegate)
+            }
+        }
+    }
+
+    /// The helper behind this line, while it still works. The line reads its
+    /// speaker's newest row, so a running helper is that row; a recorded row
+    /// carries its result instead and no longer offers the action. A turn
+    /// that is stopping or taking an update reads its own status instead:
+    /// there is nothing to shelve then.
+    private func shelvableDelegate(_ row: ChatActivity) -> ChatEntry? {
+        guard transition == nil else { return nil }
+        guard let entryID = row.entryID else { return nil }
+        guard let entry = model.entries.first(where: { $0.id == entryID }) else { return nil }
+        guard entry.kind == "tool", entry.tool == "delegate", entry.detail == "Running…" else { return nil }
+        guard entry.recorded == false else { return nil }
+        return entry
+    }
+
+    private func jumpButton(_ row: ChatActivity) -> some View {
         Button {
             if let entryID = row.entryID { model.jump(to: entryID) }
         } label: {
@@ -163,6 +186,20 @@ struct ChatActivityStrip: View {
         .disabled(row.entryID == nil)
         .help(row.entryID == nil ? "" : "Show " + row.name + "’s current row")
         .accessibilityLabel(row.name + " " + row.verb + (row.subject.isEmpty ? "" : " " + row.subject))
+    }
+
+    /// Shelving the helper, beside the line that shows it working: the
+    /// helper keeps running in the background and this chat carries on.
+    private func backgroundButton(_ delegate: ChatEntry) -> some View {
+        Button { model.backgroundDelegate(delegate) } label: {
+            Text("Run in background").font(.system(size: 10.5, weight: .medium))
+                .foregroundStyle(Semantic.secondaryInk)
+                .padding(.horizontal, 8).padding(.vertical, 3)
+                .background(Capsule().fill(Semantic.raisedSurface))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Run the helper in the background")
+        .help("Let this helper keep working in the background; this chat carries on without it")
     }
 
     private func activityLabel(_ row: ChatActivity) -> some View {

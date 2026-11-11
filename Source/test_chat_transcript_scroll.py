@@ -124,8 +124,9 @@ class TranscriptStackTests(unittest.TestCase):
         self.assertFalse("LazyVStack" in transcript, "the Chat transcript went lazy again")
         self.assertIn("return VStack(alignment: .leading, spacing: 0)", transcript)
         self.assertIn("visibleTail(segments, limit: visibleSegmentLimit", transcript)
-        # Paged-in history goes again once the reader is back at the latest.
-        self.assertIn(".onChange(of: follow.followsLatest) { _, follows in if follows { visibleSegmentLimit = 100 } }", transcript)
+        # Paged-in history goes again once the reader is back at the latest,
+        # and the window a far-back jump opened closes with it.
+        self.assertIn(".onChange(of: follow.followsLatest) { _, follows in if follows { visibleSegmentLimit = 100; jumpWindow = nil } }", transcript)
 
     def test_companion_transcript_is_an_eager_paged_stack_that_follows_by_intent(self):
         transcript = self.section("Packages/ProviderHubRemote/Sources/ProviderHubRemote/CompanionTranscript.swift",

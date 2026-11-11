@@ -230,6 +230,14 @@ struct ChatPane: View {
             VStack(spacing: 0) {
                 if model.selectedID == nil { ChatWelcome(model: model) }
                 else { ChatTranscript(model: model) }
+                if model.selectedID != nil {
+                    // The pinned stack owns the pending questions: one card
+                    // at a time, above the activity rows and the composer.
+                    // The identity wrapper keeps its queue memory inside one
+                    // chat, so a chat switch starts the queue afresh.
+                    ChatPinnedQuestions(model: model)
+                        .id(model.stateChatID)
+                }
                 if model.selectedID != nil { ChatActivityStrip(model: model) }
                 if let approval = model.approval { ApprovalStrip(model: model, approval: approval) }
                 ChatComposer(model: model)
@@ -865,7 +873,10 @@ struct ChatTranscript: View {
         case "assistant":
             AssistantRow(entry: entry, accent: model.accent(for: entry.route), streaming: liveEntryIDs.contains(entry.id), onReact: react)
         case "question":
-            if let question = entry.question {
+            // A pending question is drawn by the pinned stack above the
+            // composer, so it is not drawn twice. The answered ones stay in
+            // the transcript: they are the record of what was asked.
+            if let question = entry.question, question.status != "pending" {
                 ChatQuestionCard(question: question, accent: model.accent(for: entry.route), enabled: model.connected) { answers, dismiss in
                     model.answerQuestion(question, answers: answers, dismiss: dismiss)
                 }
@@ -1131,18 +1142,15 @@ private struct ChatComposer: View {
             .help("Interrupt and send this update (Return)").accessibilityLabel("Interrupt and send update")
     }
 
-    /// The approval mode, any notice or status, and the turn clock. A Team
-    /// leaves what is running to the activity strip above the composer: with
-    /// several members the status line here wrapped and unwrapped as each
-    /// tool started, moving the composer. A solo chat keeps its status line.
+    /// The approval mode, any notice, and the turn clock. What is running
+    /// belongs to the activity strip above the composer, in a Team and in a
+    /// solo chat alike: a status line here repeated it, and it wrapped and
+    /// unwrapped as each tool started, moving the composer.
     private var footer: some View {
         HStack(alignment: .top) {
             approvalModeMenu
             if !model.notice.isEmpty {
                 Text(model.notice).font(HubTheme.Typography.detail).foregroundStyle(Semantic.accentOnSurface).textSelection(.enabled)
-            } else if model.team?.enabled != true {
-                ChatShimmerText(text: model.status, active: model.busy && model.approval == nil, accent: model.activeAccent)
-                    .font(HubTheme.Typography.detail)
             }
             Spacer(minLength: 8)
             ChatTurnTime(model: model)
