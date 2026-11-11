@@ -135,6 +135,11 @@ def observe_events(events, timing):
 
 
 class TurnTiming:
+    #: Set by the gateway to its state folder. The record holds timings and
+    #: labels such as ``reuse``/``cold_reason``; never prompts or tool data.
+    default_log = None
+    log_limit = 1_000_000
+
     def __init__(self, provider, model, *, clock=time.monotonic, sink=None):
         self.clock = clock
         self.started = clock()
@@ -166,9 +171,11 @@ class TurnTiming:
         try:
             if self.sink:
                 self.sink(values)
-            path = os.environ.get("PROVIDER_HUB_CLI_TIMING_LOG")
+            path = os.environ.get("PROVIDER_HUB_CLI_TIMING_LOG") or TurnTiming.default_log
             if path:
                 # No prompts, tool arguments/results, task identifiers or login data.
+                if os.path.exists(path) and os.path.getsize(path) > TurnTiming.log_limit:
+                    os.replace(path, str(path) + ".previous")
                 with open(path, "a", encoding="utf-8") as handle:
                     handle.write(json.dumps(values, sort_keys=True) + "\n")
         except Exception:

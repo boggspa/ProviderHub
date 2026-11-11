@@ -983,6 +983,30 @@ def _synthetic_tool_id(occurrence: int, name: str, arguments: str) -> str:
     return "toolu_" + digest[:22]
 
 
+class ToolOutputError(BridgeError):
+    """A provider tool call that cannot be used, with the evidence of why.
+
+    ``code`` separates a call cut off at the output limit (``output_truncated``)
+    from one the model wrote badly (``invalid_tool_arguments``); Chat retries
+    the round with a correction rather than resending it unchanged.
+    """
+
+    def __init__(self, message, *, code):
+        super().__init__(message)
+        self.code = code
+
+
+def tool_output_error(name, arguments, finish_reason, *, incomplete=False) -> ToolOutputError:
+    raw = arguments if isinstance(arguments, str) else ""
+    evidence = (f"tool {name or 'unknown'}, {len(raw):,} argument characters, "
+                f"finish_reason {finish_reason or 'none'}, ending {raw[-120:]!r}")
+    if finish_reason == "length":
+        return ToolOutputError("The model reached its output limit while writing a tool call, so the call was "
+                               f"cut off ({evidence}).", code="output_truncated")
+    what = "an incomplete tool call" if incomplete else "invalid tool arguments"
+    return ToolOutputError(f"The provider returned {what} ({evidence}).", code="invalid_tool_arguments")
+
+
 def translate_response(response, requested, names):
     try:
         choice = response["choices"][0]
@@ -1002,9 +1026,20 @@ def translate_response(response, requested, names):
         for tool in msg.get("tool_calls") or []:
             fn = tool["function"]
             args = fn.get("arguments", "{}")
+            if isinstance(args, str):
+                try:
+                    value = json.loads(args)
+                    if not isinstance(value, dict):
+                        raise ValueError("Tool arguments must be an object")
+                except ValueError as exc:
+                    raise tool_output_error(fn.get("name"), args, choice.get("finish_reason")) from exc
+            else:
+                value = args
+                if not isinstance(value, dict):
+                    raise tool_output_error(fn.get("name"), args, choice.get("finish_reason"))
             content.append({"type": "tool_use", "id": tool.get("id") or "toolu_" + secrets.token_hex(10),
                             "name": names.get(fn["name"], fn["name"]),
-                            "input": json.loads(args) if isinstance(args, str) else args})
+                            "input": value})
         return {"id": "msg_" + secrets.token_hex(12), "type": "message", "role": "assistant", "model": requested,
                 "content": content,
                 "stop_reason": stop_reason(choice.get("finish_reason"), bool(msg.get("tool_calls")) or converted > 0),
@@ -1152,13 +1187,14 @@ class StreamTranslator:
         self._flush_buffer(events, final=True)
         for tool in self.tools.values():
             if tool["index"] is None:
-                raise BridgeError("The provider returned an incomplete tool call.")
+                raise tool_output_error(tool["name"], tool["arguments"], self.finish, incomplete=True)
             try:
                 value = json.loads(tool["arguments"] or "{}")
                 if not isinstance(value, dict):
                     raise ValueError()
             except ValueError as exc:
-                raise BridgeError("The provider returned invalid tool arguments.") from exc
+                raise tool_output_error(self.names.get(tool["name"], tool["name"]), tool["arguments"],
+                                        self.finish) from exc
         result = [{"type": "content_block_stop", "index": i} for i in sorted(self.open_indices)]
         result.append({"type": "message_delta", "delta": {"stop_reason": stop_reason(self.finish, bool(self.tools) or bool(self.converted)), "stop_sequence": None}, "usage": self.usage})
         result.append({"type": "message_stop"})

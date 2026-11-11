@@ -629,6 +629,76 @@ def render_prompt(messages, *, system=None) -> str:
     return "\n\n".join(blocks) + "\n"
 
 
+#: Grok excerpts a prompt over about 100 KB: the model sees roughly its first
+#: 99 KB and last few lines, and the rest moves to a file it must read back.
+#: Observed on 1.0.4x: no prompt of 83 KB or less was offloaded and none of
+#: 132 KB or more was kept whole. A chat cold start stays under this budget.
+PROMPT_EXCERPT_BUDGET = 80_000
+#: Largest prompt size observed still delivered whole. A preview is added only
+#: above this, so a prompt that already fits is not pushed into an excerpt.
+PROMPT_EXCERPT_SEEN = 100_000
+#: The opening user turn usually states the task; keep this much of it.
+_OPENING_KEEP = 12_000
+_PREVIEW_EDGE = 3_000
+
+
+def _turn_bytes(message) -> int:
+    return len(message["content"].encode("utf-8")) + 32
+
+
+def bounded_transcript(messages, budget=PROMPT_EXCERPT_BUDGET):
+    """Keep the opening user turn and the newest turns that fit ``budget``.
+
+    Projection for a cold Grok spawn only: the host's history, and the live
+    session matching that relies on it, are unchanged. The newest turn is
+    always kept whole.
+    """
+    if sum(_turn_bytes(message) for message in messages) <= budget or len(messages) < 3:
+        return messages
+    first = dict(messages[0])
+    if first["role"] == "user" and _turn_bytes(first) > _OPENING_KEEP:
+        first["content"] = first["content"][:_OPENING_KEEP] + "\n[…opening turn shortened…]"
+    remaining = budget - _turn_bytes(first) - 400
+    kept = []
+    for message in reversed(messages[1:]):
+        size = _turn_bytes(message)
+        if kept and size > remaining:
+            break
+        kept.append(message)
+        remaining -= size
+    kept.reverse()
+    omitted = len(messages) - 1 - len(kept)
+    if not omitted:
+        return [first, *kept]
+    note = {"role": "user", "content": (
+        f"[Provider Hub omitted {omitted} earlier turn{'s' if omitted != 1 else ''} here to keep this prompt "
+        "readable in one piece. They remain in the saved conversation: use search_history or read_history "
+        "when they are relevant, and re-read files rather than relying on remembered state.]")}
+    return [first, note, *kept]
+
+
+def with_current_turn(prompt, messages, budget=PROMPT_EXCERPT_SEEN):
+    """Repeat the newest turn's edges near the top of a prompt Grok will excerpt.
+
+    Only when the prompt is still over the size Grok has been seen to keep
+    whole (a single very large newest turn): the excerpt keeps the head, so
+    the current request stays visible. A prompt that already fits is left
+    alone, because adding the preview could push it into an excerpt.
+    """
+    if len(prompt.encode("utf-8")) <= budget or len(messages) < 2:
+        return prompt
+    content = messages[-1]["content"]
+    preview = content if len(content) <= 2 * _PREVIEW_EDGE else (
+        content[:_PREVIEW_EDGE] + "\n[…middle of this turn is in the full transcript below…]\n"
+        + content[-_PREVIEW_EDGE:])
+    block = (f'<current_turn_preview role="{messages[-1]["role"]}">\n'
+             "This is a preview of the final turn of the transcript below, repeated here because this "
+             "prompt is long. Respond to the final turn itself, not to this preview.\n\n"
+             f"{preview}\n</current_turn_preview>")
+    head, separator, rest = prompt.partition("\n\n")
+    return head + "\n\n" + block + separator + rest if separator else block + "\n\n" + prompt
+
+
 # ---------------------------------------------------------------------------
 # Turn execution
 # ---------------------------------------------------------------------------
@@ -1259,7 +1329,14 @@ def _surface(plan, mode) -> dict:
             if message["role"] == "user":
                 message["content"] = (message["content"] + "\n\n" + anchor) if message["content"] else anchor
                 break
+    # A native resume's delta holds only new turns: none of it may be dropped.
+    bounded = plan.get("conversation") and not plan.get("resume_delta")
+    if bounded:
+        # Chat only: its host offers search_history/read_history for what is cut.
+        messages = bounded_transcript(messages)
     prompt = render_prompt(messages)
+    if bounded:
+        prompt = with_current_turn(prompt, messages)
     argv_bytes = len(prompt.encode("utf-8")) + len(system.encode("utf-8"))
     return {**plan, "mode": mode, "system": system, "prompt": prompt,
             "prompt_file": bool(plan["images"]) or argv_bytes > _MAX_PROMPT_ARGV_BYTES}
@@ -1578,7 +1655,7 @@ def _resume_completed(plan, live, messages, *, spawner, timeout):
     # created by this lease, never --continue or a user's most-recent session.
     from cli_routes import _messages_for_cli
     flattened, _ = _messages_for_cli(messages, None)
-    surface = _surface({**plan, "messages": flattened, "images": []}, "live")
+    surface = _surface({**plan, "messages": flattened, "images": [], "resume_delta": True}, "live")
     path = Path(live.workspace) / "prompt.json"
     path.unlink(missing_ok=True)
     argv = _turn_argv(surface, live.workspace, extra_removals=sorted(_LEARNED_REMOVALS))
@@ -1637,6 +1714,54 @@ def _spawn_live(surface, state, *, spawner, timeout, extra_removals) -> live_ses
     return _RetainedGrok(session, workspace_path, bridge, state, interrupt=_interrupt)
 
 
+def _history_mismatch(pending, history) -> str:
+    """Which check stopped a waiting process from continuing ``history``."""
+    if not pending.get("prefix"):
+        return "tool_results_mismatch"
+    blocks = history_blocks(history)
+    count = pending.get("prefix_count", 0)
+    if len(blocks) <= count:
+        return "history_not_extended"
+    if digest(blocks[:count]) != pending.get("prefix"):
+        # Earlier turns were rewritten: compaction, a projected reference
+        # note edited in place, or an image removed from older results.
+        return "history_rewritten"
+    if pending.get("completed"):
+        return "completed_reply_mismatch"
+    if any(role == "user" and block.get("type") != "tool_result" for role, block in blocks[count:]):
+        return "user_content_with_tool_results"
+    return "tool_results_mismatch"
+
+
+def _cold_reason(owner, lease, key, history) -> str:
+    """Why a cold start found no waiting Grok process to continue (diagnostics only)."""
+    # Diagnostics must not fail the turn they describe.
+    try:
+        scope = getattr(lease, "scope", None)
+        if scope is None:
+            return "no_conversation_scope"
+        condition = getattr(owner, "condition", None)
+        leases = getattr(owner, "leases", None)
+        if condition is None or leases is None:
+            return "unclassified"
+        with condition:
+            waiting = []
+            for entry in leases:
+                pending = getattr(entry, "pending", None)
+                if entry is lease or not isinstance(pending, dict) or getattr(entry, "scope", None) != scope:
+                    continue
+                waiting.append((getattr(entry, "key", None), dict(pending)))
+        if not waiting:
+            return "no_waiting_process"
+        same = [pending for entry_key, pending in waiting if entry_key == key]
+        if not same:
+            # Same chat, different argv/system text/tool list: nothing could match.
+            return "settings_changed"
+        return _history_mismatch(same[-1], history)
+    except Exception:
+        return "unclassified"
+
+
 def _live_turn(plan, owner, *, spawner, timeout):
     """One host request on a live session, resumed from its waiting calls or started cold.
 
@@ -1665,6 +1790,8 @@ def _live_turn(plan, owner, *, spawner, timeout):
     except Exception as exc:  # the client cancelled while the lease was awaited
         yield {"type": "error", "message": _describe(exc, None, timeout)}
         return None
+    # Diagnostics only: lets a cold start name the waiting process it missed.
+    lease.scope = plan["conversation"]
 
     def on_handoff(live):
         return lambda: live_session.hold(live, lease, history, deadline, events=_iter_events,
@@ -1708,7 +1835,7 @@ def _live_turn(plan, owner, *, spawner, timeout):
                 timing.label(continuation_kind="native_session" if completed else "tool_result")
             return (yield from stream(live, retry_allowed=False))
         if timing:
-            timing.label(reuse="cold")
+            timing.label(reuse="cold", cold_reason=_cold_reason(owner, lease, key, history))
         surface = _surface(plan, "live")
         removals = frozenset(_LEARNED_REMOVALS)
         for attempt in (1, 2):

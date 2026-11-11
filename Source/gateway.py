@@ -131,6 +131,8 @@ def save_key_metadata(root: Path, provider_id: str, value: dict, *, credential_s
 class Runtime:
     def __init__(self, root: Path, upstream_url=None, key=None, request_planner=None):
         self.root = root
+        # CLI turn timings, including whether a live CLI was reused or why not.
+        cli_routes.TurnTiming.default_log = str(Path(root) / "cli-timing.jsonl")
         # Serve the selection the prepare step projected (launch-plan.json),
         # so the snapshot matches what activation handed the desktop app.
         saved = load_settings(root)
@@ -1468,7 +1470,9 @@ they exit or restart, so none of them can interrupt another's requests.
                 self.runtime.record("error", plan["route"], 502)
                 try:
                     if streaming:
-                        emit({"type": "error", "error": {"type": "api_error", "message": message}})
+                        code = getattr(exc, "code", None)
+                        emit({"type": "error", "error": {"type": "api_error", "message": message,
+                                                         **({"code": code} if isinstance(code, str) else {})}})
                         closed.set()
                         with write_lock:
                             self.wfile.write(b"0\r\n\r\n")
