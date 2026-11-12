@@ -123,6 +123,8 @@ class AccentMapTests(unittest.TestCase):
         self.assertIn('"kimi for coding": "#0073E6"', script)
         self.assertIn('"qwen 3": "#8C52EF"', script)
         self.assertIn(PROPERTY, script)
+        # ChatGPT 26.1106 paints the slider's fill and title with these instead.
+        self.assertIn('const PICKER_PROPERTIES = [PROPERTY, ...["--color-accent", "--color-text-accent"]];', script)
         self.assertIn("window.__providerHubAccent", script)
         self.assertIn('[data-explicit-model="true"]', script)
         self.assertIn("window !== window.top", script)

@@ -589,6 +589,24 @@ const cases = {
     const child = page.frames().find(frame => frame !== page.mainFrame());
     assert.deepEqual(await child.evaluate(fixtureScript), {skipped:'frame'});
   },
+  async picker_slider_takes_the_accent_on_old_and_new_tokens(page) {
+    // ChatGPT 26.1106: the fill reads --color-accent and the title
+    // --color-text-accent; earlier builds read --color-chart-blue for both.
+    const picker = (effort) => `<div data-side="top"><div data-explicit-model="true"><span id="picker-title" data-accent="true">${effort}</span><span id="picker-model">Kimi for Coding</span></div>
+      <div data-model-picker-power-slider><span id="picker-fill" style="background-color:var(--color-accent)"></span></div></div>`;
+    await page.setContent(`<style>:root{--color-accent:rgb(1,2,3);--color-text-accent:rgb(4,5,6);--color-chart-blue:rgb(7,8,9)} #picker-title{color:var(--color-text-accent)}</style>` + picker('High'));
+    assert.equal((await page.evaluate(fixtureScript)).installed, true);
+    await flush(page);
+    assert.equal(await colour(page, 'picker-title'), colours.kimi);
+    assert.equal(await page.locator('#picker-fill').evaluate(el => getComputedStyle(el).backgroundColor), colours.kimi);
+    for (const property of ['--color-accent', '--color-text-accent', '--color-chart-blue']) {
+      assert.equal(await custom(page, 'picker-fill', property), '#0073E6');
+    }
+    // Closing the picker hands every token back to the app.
+    await page.locator('[data-explicit-model]').evaluate(el => el.setAttribute('data-explicit-model', 'false'));
+    await flush(page);
+    assert.equal(await page.locator('[data-side]').evaluate(el => el.getAttribute('style') || ''), '');
+  },
 };
 (async () => {
   let browser;

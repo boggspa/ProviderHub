@@ -1,7 +1,9 @@
 """Codex provider accents for pickers, activity and sidebar spinners.
 
-The ChatGPT desktop app paints its model picker's power slider with one
-app-wide design token (``--color-chart-blue``); its model records carry no
+The ChatGPT desktop app paints its model picker's power slider with
+app-wide design tokens (``--color-chart-blue`` up to 26.1103; the slider's
+fill ``--color-accent`` and its title ``--color-text-accent`` since 26.1106);
+its model records carry no
 colour, and it offers no per-model theming hook. This module gives Hub and
 native Codex models their accents without touching the app bundle: the app is started
 as a child of the worker with Chromium's ``--remote-debugging-pipe`` switch,
@@ -47,6 +49,10 @@ from pathlib import Path
 from codex_catalogue import project_codex
 
 PROPERTY = "--color-chart-blue"
+# ChatGPT 26.1106 moved the power slider's fill to the app's accent token
+# and its effort title (and the Fast toggle) to the accent's text token.
+# The picker sets these beside PROPERTY so older and newer builds both tint.
+PICKER_PROPERTIES = ("--color-accent", "--color-text-accent")
 NATIVE_CODEX_ACCENT = "#705AFF"
 _HEX = re.compile(r"^#[0-9A-Fa-f]{6}$")
 THEME_ATTRIBUTE = "data-provider-hub-theme"
@@ -520,6 +526,7 @@ _WATCHER = r"""
     const ULTRA = __HUB_ULTRA__;
     const STYLE_CSS = __HUB_STYLE_CSS__;
     const PROPERTY = "__HUB_PROPERTY__";
+    const PICKER_PROPERTIES = [PROPERTY, ...__HUB_PICKER_PROPERTIES__];
     const MARK = "data-provider-hub-tint";
     const THEME = "__HUB_THEME_ATTRIBUTE__";
     const ACCENT_PROPERTY = "__HUB_ACCENT_PROPERTY__";
@@ -690,7 +697,9 @@ _WATCHER = r"""
       // Only undo our own values: leave any inline value the app set itself.
       for (const target of state.targets) {
         try {
-          if (norm(target.style.getPropertyValue(PROPERTY)) === norm(state.colour)) { target.style.removeProperty(PROPERTY); }
+          for (const property of PICKER_PROPERTIES) {
+            if (norm(target.style.getPropertyValue(property)) === norm(state.colour)) { target.style.removeProperty(property); }
+          }
           if (state.purple && norm(target.style.getPropertyValue(ULTRA_PROPERTY)) === norm(state.purple)) { target.style.removeProperty(ULTRA_PROPERTY); }
           if (state.ultra && norm(target.style.getPropertyValue(ULTRA_ACCENT_PROPERTY)) === norm(state.ultra)) { target.style.removeProperty(ULTRA_ACCENT_PROPERTY); }
         } catch (error) {}
@@ -720,7 +729,7 @@ _WATCHER = r"""
       if (!same) {
         clearMenu();
         for (const target of targets) {
-          target.style.setProperty(PROPERTY, colour);
+          for (const property of PICKER_PROPERTIES) { target.style.setProperty(property, colour); }
           if (purple) { target.style.setProperty(ULTRA_PROPERTY, purple); }
           if (ultra) { target.style.setProperty(ULTRA_ACCENT_PROPERTY, ultra); }
         }
@@ -1263,6 +1272,7 @@ def watcher_script(accents: dict, property_name: str = PROPERTY, hide_usage_bann
             .replace("__HUB_ULTRA_ACCENT_PROPERTY__", ULTRA_ACCENT_PROPERTY)
             .replace("__HUB_ULTRA_PROPERTY__", ULTRA_PROPERTY)
             .replace("__HUB_ULTRA_MARK__", ULTRA_MARK)
+            .replace("__HUB_PICKER_PROPERTIES__", json.dumps(list(PICKER_PROPERTIES)))
             .replace("__HUB_PROPERTY__", property_name))
 
 
