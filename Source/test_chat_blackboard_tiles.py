@@ -140,8 +140,15 @@ class BlackboardTileSourceTests(unittest.TestCase):
             self.assertIn(needle, tile)
 
     def test_mac_inspector_counts_attachments_and_opens_the_board_past_the_limit(self):
-        section = (SOURCE / "ChatBlackboard.swift").read_text().split("struct ChatBlackboardBoard: View {", 1)[0]
-        self.assertIn('Text("Attachments · \\(snapshot.attachments.count)")', section)
+        posts, section = (SOURCE / "ChatBlackboard.swift").read_text().split("struct ChatBlackboardFilesSection: View {", 1)
+        section = section.split("struct ChatBlackboardBoard: View {", 1)[0]
+        self.assertIn('Label("Images & attachments"', section)
+        self.assertIn('Text("\\(snapshot.attachments.count)")', section)
+        self.assertIn("@State private var expanded = true", section)
+        self.assertNotIn("ChatBlackboardAttachments(", posts)
+        inspector = (SOURCE / "ChatInspector.swift").read_text()
+        self.assertIn("ChatBlackboardSection(model: model, chat: chat)", inspector)
+        self.assertIn("ChatBlackboardFilesSection(model: model, chat: chat)", inspector)
         self.assertRegex(section, re.compile(r"if snapshot\.attachments\.count > ChatSharedBlackboardTileLayout\.limit \{\s*"
             r'Button\("Show all \\\(snapshot\.attachments\.count\) attachments"\) \{ ChatBlackboardWindows\.shared\.show\(model: model, chat: chat\) \}'))
 
