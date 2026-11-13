@@ -746,6 +746,8 @@ def _chat_effort(provider_id: str, payload: dict, model_spec: dict, upstream_mod
         target = {"minimal": "low", "max": "xhigh", "ultra": "xhigh"}.get(requested, requested)
         if target not in supported:
             target = cap_high_end(target, supported)
+        if target is None:
+            target = nearest_effort(requested, supported)
         if target is None or target not in supported:
             raise ProviderError(f"Grok effort {requested!r} is not advertised for this model. Use its default reasoning setting.")
         return target
@@ -763,6 +765,13 @@ def _chat_effort(provider_id: str, payload: dict, model_spec: dict, upstream_mod
             requested = "none"
         if requested is None:
             return "high" if "high" in supported else (supported[-1] if supported else None)
+        if "high" in supported and set(supported) <= {"none", "high"}:
+            # These models expose an on/off switch. Every positive fallback
+            # means thinking on; preserve Off only when it is supported.
+            normalized = nearest_effort(requested, supported)
+            if normalized is None:
+                raise ProviderError("Unsupported Mistral reasoning effort.")
+            return normalized
         normalized = map_effort(requested, supported, MISTRAL_EFFORT_ALIASES)
         if normalized is None:
             normalized = cap_high_end(MISTRAL_EFFORT_ALIASES.get(requested), supported)

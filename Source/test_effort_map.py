@@ -9,6 +9,7 @@ from effort_map import (
     MISTRAL_NARROW_EFFORTS,
     MISTRAL_REASONING_EFFORTS,
     cap_high_end,
+    display_effort_modes,
     nearest_effort,
     map_effort,
     mistral_effort_modes,
@@ -25,6 +26,17 @@ from bridge_core import SLOTS
 
 
 class EffortMapUnitTests(unittest.TestCase):
+    def test_high_only_display_fallbacks_preserve_native_metadata(self):
+        for modes in (["high"], ["none", "high"]):
+            with self.subTest(modes=modes):
+                spec = {"reasoning": True, "effort_modes": list(modes)}
+                expected = [rank for rank in EFFORT_ORDER if rank != "none" or "none" in modes]
+                self.assertEqual(display_effort_modes(spec), expected)
+                self.assertEqual(spec["effort_modes"], modes)
+        self.assertEqual(display_effort_modes({"reasoning": False, "effort_modes": ["high"]}), [])
+        self.assertEqual(display_effort_modes({"reasoning": True}), [])
+        self.assertEqual(display_effort_modes({"effort_modes": ["low", "high"]}), ["low", "high"])
+
     def test_vibe_ranks_are_off_low_medium_high_max(self):
         self.assertEqual(MISTRAL_REASONING_EFFORTS, ["none", "low", "medium", "high", "max"])
         self.assertNotIn("xhigh", MISTRAL_REASONING_EFFORTS)
@@ -129,6 +141,35 @@ class EffortMapUnitTests(unittest.TestCase):
 
 
 class EffortTransportTests(unittest.TestCase):
+    def test_high_only_fallbacks_use_supported_wire_controls(self):
+        for provider, identifier in (("mistral", "mistral-large-4"),
+                                     ("grok", "grok-4.6"),
+                                     ("cerebras", "gpt-oss-120b")):
+            spec = {"reasoning": True, "effort_modes": ["high"]}
+            for effort in display_effort_modes(spec):
+                with self.subTest(provider=provider, effort=effort):
+                    plan = prepare_request(provider, {}, "key",
+                        text_prompt(output_config={"effort": effort}), identifier, spec)
+                    self.assertEqual(plan["body"]["reasoning_effort"], "high")
+        spec = {"reasoning": True, "effort_modes": ["none", "high"]}
+        for effort in display_effort_modes(spec):
+            with self.subTest(provider="mistral", effort=effort):
+                plan = prepare_request("mistral", {}, "key",
+                    text_prompt(output_config={"effort": effort}), "mistral-large-4", spec)
+                self.assertEqual(plan["body"]["reasoning_effort"], "none" if effort == "none" else "high")
+
+    def test_minimax_fallbacks_keep_native_thinking_controls(self):
+        for identifier in ("MiniMax-M3", "MiniMax-M2.7"):
+            spec = next(row for row in discover("minimax", {}, None)["models"] if row["id"] == identifier)
+            for effort in display_effort_modes(spec):
+                with self.subTest(model=identifier, effort=effort):
+                    plan = prepare_request("minimax", {}, "key",
+                        text_prompt(output_config={"effort": effort}), identifier, spec)
+                    self.assertNotIn("effort", plan["body"].get("output_config", {}))
+                    if identifier == "MiniMax-M3":
+                        self.assertEqual(plan["body"]["thinking"]["type"],
+                                         "disabled" if effort == "none" else "adaptive")
+
     def test_mistral_collapses_vibe_ranks_to_wire_none_high(self):
         spec = {"reasoning": True, "effort_modes": list(MISTRAL_REASONING_EFFORTS)}
         for requested, expected in (("low", "none"), ("medium", "high"), ("max", "high"), ("xhigh", "high")):

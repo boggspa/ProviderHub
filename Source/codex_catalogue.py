@@ -7,6 +7,7 @@ import json
 from hub_config import MODEL_VARIANT_FIELDS, SUBAGENT_POOL_SIZE, connection_signature, split_route
 from catalogue import fits_desktop_baseline, image_input_blocked
 from fast_models import supports_fast_toggle
+from effort_map import display_effort_modes
 from providers import PROVIDERS
 
 
@@ -91,7 +92,7 @@ def _empty_ladder_placeholder(provider_id, entry):
 def _reasoning_levels(provider_id, entry):
     levels = []
     seen = set()
-    for effort in entry.get("effort_modes") or []:
+    for effort in display_effort_modes(entry):
         if effort not in _CHAT_EFFORTS or effort in seen:
             continue
         seen.add(effort)
@@ -403,7 +404,9 @@ def project_codex(settings, inventory):
             # position that selects them, so a route that could already
             # delegate had no way to say so.
             "multi_agent_version": "v2" if efforts else None,
-            "multi_agent_reasoning_effort": _subagent_effort(levels) if efforts else None,
+            "multi_agent_reasoning_effort": _subagent_effort(
+                [level for level in levels if level["effort"] in (entry.get("effort_modes") or [])]
+                or levels) if efforts else None,
         }
         # Absence is the only way to say "no search" here. The field takes
         # "text" or "text_and_image" and nothing else - not null, not "none",

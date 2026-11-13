@@ -44,15 +44,6 @@ struct ChatBlackboardSection: View {
                     Button("Show all \(snapshot.posts.count) posts") { ChatBlackboardWindows.shared.show(model: model, chat: chat) }
                         .buttonStyle(.link).font(.system(size: 11.5))
                 }
-                if !snapshot.attachments.isEmpty {
-                    // The count says how many sit past the visible columns.
-                    Text("Attachments · \(snapshot.attachments.count)").font(.system(size: 11.5, weight: .medium)).foregroundStyle(.secondary).padding(.top, 2)
-                    ChatBlackboardAttachments(model: model, chat: chat, snapshot: snapshot, compact: true)
-                    if snapshot.attachments.count > ChatSharedBlackboardTileLayout.limit {
-                        Button("Show all \(snapshot.attachments.count) attachments") { ChatBlackboardWindows.shared.show(model: model, chat: chat) }
-                            .buttonStyle(.link).font(.system(size: 11.5))
-                    }
-                }
             } else if state.notice.isEmpty {
                 ProgressView().controlSize(.small)
             }
@@ -66,6 +57,48 @@ struct ChatBlackboardSection: View {
         .dropDestination(for: URL.self) { urls, _ in model.attachToBlackboard(chat, urls: urls); return !urls.isEmpty }
         .task(id: chat + (model.connected ? "|on" : "|off")) { model.refreshBlackboard(chat) }
         .onChange(of: messageFiles) { _, _ in model.refreshBlackboard(chat) }
+    }
+}
+
+/// Files remain visible when the independently collapsible post board closes.
+struct ChatBlackboardFilesSection: View {
+    @ObservedObject var model: ChatModel
+    @ObservedObject var board: ChatBlackboardModel
+    @State private var expanded = true
+    var chat: String
+    init(model: ChatModel, chat: String) { self.model = model; board = model.blackboard; self.chat = chat }
+    var body: some View {
+        let state = board.state(chat)
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Button { expanded.toggle() } label: {
+                    Label("Images & attachments", systemImage: expanded ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 13, weight: .semibold))
+                }.buttonStyle(.plain).accessibilityValue(expanded ? "Expanded" : "Collapsed")
+                if let snapshot = state.snapshot {
+                    Text("\(snapshot.attachments.count)").font(.system(size: 10.5)).foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 0)
+                Button { model.chooseBlackboardFiles(chat) } label: { Image(systemName: "plus") }
+                    .buttonStyle(.plain).help("Add files").accessibilityLabel("Add images or attachments")
+            }
+            if expanded {
+                if let snapshot = state.snapshot {
+                    if snapshot.attachments.isEmpty {
+                        Text("Drop images or files here. Message attachments appear here too.")
+                            .font(.system(size: 11.5)).foregroundStyle(.secondary)
+                    } else {
+                        ChatBlackboardAttachments(model: model, chat: chat, snapshot: snapshot, compact: true)
+                        if snapshot.attachments.count > ChatSharedBlackboardTileLayout.limit {
+                            Button("Show all \(snapshot.attachments.count) attachments") { ChatBlackboardWindows.shared.show(model: model, chat: chat) }
+                                .buttonStyle(.link).font(.system(size: 11.5))
+                        }
+                    }
+                } else { ProgressView().controlSize(.small) }
+            }
+        }
+        .padding(14)
+        .dropDestination(for: URL.self) { urls, _ in model.attachToBlackboard(chat, urls: urls); return !urls.isEmpty }
     }
 }
 

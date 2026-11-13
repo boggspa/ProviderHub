@@ -5,6 +5,21 @@ from __future__ import annotations
 # effort control and the Codex effort slider; provider aliases map onto it.
 EFFORT_ORDER = ("none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra")
 
+
+def display_effort_modes(spec: dict) -> list[str]:
+    """Offer fallback ranks for a model whose only thinking depth is High.
+
+    Keep native capability metadata intact for request translation. Off is
+    offered only when the provider advertises it; reasoning-free and unknown
+    models retain their existing controls.
+    """
+    modes = list(spec.get("effort_modes") or [])
+    if spec.get("reasoning") is False:
+        return []
+    if "high" in modes and set(modes) <= {"none", "high"}:
+        return [rank for rank in EFFORT_ORDER if rank != "none" or "none" in modes]
+    return modes
+
 # Vibe CLI thinking levels: Off, Low, Medium, High, Max. No xhigh or ultra.
 # These are UI-level distinctions. On the wire, the Mistral API only accepts
 # "none" and "high" for reasoning_effort — the Vibe CLI itself collapses all

@@ -301,7 +301,7 @@ class Runtime:
         provider_id = split_route(requested)[0]
         startup_mode = self.settings["providers"][provider_id]["credential_mode"]
         if (connection["credential_mode"] == startup_mode
-                or connection["credential_mode"] != "cli" and startup_mode != "cli"):
+                or connection["credential_mode"] not in {"cli", "vibe"} and startup_mode not in {"cli", "vibe"}):
             route = self.resolve_route(requested)
             return route, self.settings["_model_specs"][route]
         source = chat_extra_source(settings["providers"][provider_id], provider_id)

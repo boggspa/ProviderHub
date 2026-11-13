@@ -187,7 +187,7 @@ def cli_account_dir(settings: dict, provider_id: str) -> str | None:
 #: can list the two side by side (``chat_both_sources``); the desktop
 #: launchers keep following the one active ``credential_mode``. AntiGravity
 #: has only its CLI, so there is no second source to list.
-CHAT_SOURCE_PROVIDERS = frozenset({"codex", "claude", "muse", "grok"})
+CHAT_SOURCE_PROVIDERS = frozenset({"codex", "claude", "mistral", "muse", "grok"})
 CHAT_SOURCE_LABELS = {"cli": "Installed CLI", "keychain": "API key",
                       "environment": "API key (environment)", "vibe": "Vibe key"}
 
@@ -202,6 +202,8 @@ def chat_extra_source(connection: dict, provider_id: str) -> str | None:
     """
     if provider_id not in CHAT_SOURCE_PROVIDERS or connection.get("chat_both_sources") is not True:
         return None
+    if provider_id == "mistral":
+        return "keychain" if connection.get("credential_mode") == "vibe" else "vibe"
     return "keychain" if connection.get("credential_mode") == "cli" else "cli"
 
 

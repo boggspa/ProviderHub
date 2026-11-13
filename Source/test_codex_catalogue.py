@@ -304,7 +304,7 @@ class EffortAndFastProjectionTests(unittest.TestCase):
         )
         self.assertEqual(
             [entry["effort"] for entry in rows["mistral/codestral"]["supported_reasoning_levels"]],
-            ["none", "high", "ultra"],
+            ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"],
         )
         self.assertEqual(rows["mistral/codestral"]["default_reasoning_level"], "high")
         self.assertEqual(
@@ -341,11 +341,9 @@ class EffortAndFastProjectionTests(unittest.TestCase):
         self.assertEqual(row["multi_agent_version"], "v2")
         self.assertEqual(row["multi_agent_reasoning_effort"], "medium")
 
-    def test_kimi_highspeed_placeholder_rank_yields_a_two_step_ladder(self):
-        # HighSpeed documents thinking always on and no effort ladder. Its one
-        # placeholder rank keeps the slider from being empty and lets the
-        # synthesized Ultra alias carry the multi-agent affordance; the
-        # gateway drops both ranks on the wire.
+    def test_kimi_highspeed_offers_fallback_ladder_with_high_native_rank(self):
+        # HighSpeed always thinks; fallback choices keep the full control
+        # usable while delegation still asks for the native High rank.
         rows = self.projected(model(
             "kimi/kimi-for-coding-highspeed", name="Kimi for Coding HighSpeed",
             context=262144, effort_modes=["high"], speed_tier="highspeed",
@@ -353,7 +351,7 @@ class EffortAndFastProjectionTests(unittest.TestCase):
         row = rows["kimi/kimi-for-coding-highspeed"]
         self.assertEqual(
             [entry["effort"] for entry in row["supported_reasoning_levels"]],
-            ["high", "ultra"],
+            ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"],
         )
         self.assertEqual(row["default_reasoning_level"], "high")
         self.assertEqual(row["multi_agent_version"], "v2")
@@ -503,7 +501,7 @@ class EffortAndFastProjectionTests(unittest.TestCase):
         self.assertEqual(rows["muse/muse-spark-1.3"]["service_tiers"][0]["id"], "priority")
         self.assertEqual(
             [entry["effort"] for entry in rows["ollama/thinker:latest"]["supported_reasoning_levels"]],
-            ["none", "high", "ultra"],
+            ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"],
         )
         self.assertEqual(rows["ollama/thinker:latest"]["service_tiers"], [])
 

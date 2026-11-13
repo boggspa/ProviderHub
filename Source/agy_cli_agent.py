@@ -122,8 +122,8 @@ READ_ONLY_FLAGS = (
 # Models and effort
 # ---------------------------------------------------------------------------
 
-# agy --effort accepts these three on adjustable models (agy 1.2.7).
-# Claude 5.5 rows accept it too (agy 1.2.16); the 4.6 rows rejected it.
+# Conservative fallback for unknown adjustable models. Known family rows
+# override this with their own native rung, including Hydrogen's XHigh.
 AGY_EFFORTS = ["low", "medium", "high"]
 AGY_EFFORT_ALIASES = {
     "none": "low",
@@ -136,23 +136,33 @@ AGY_EFFORT_ALIASES = {
     "ultra": "high",
 }
 
-# `agy models` emits ids whose trailing -low/-medium/-high is an EFFORT RUNG of
-# one underlying model, not three separate models. The ladder is folded onto
-# every member of the group so gemini-3.8-flash-high reports
-# ["low","medium","high"], while each real id stays individually addressable —
-# no synthetic base id is ever invented, because only the real ids resolve.
-_EFFORT_SUFFIXES = ("low", "medium", "high")
-_EFFORT_RANK = {"low": 0, "medium": 1, "high": 2}
+# `agy models` emits ids whose trailing reasoning suffix is an EFFORT RUNG of
+# one underlying model. Parse the ladder across its rows, then collapse known
+# families for the picker. Real row IDs remain addressable on the wire.
+_EFFORT_SUFFIXES = ("low", "medium", "high", "xhigh", "max")
+_EFFORT_RANK = {rung: index for index, rung in enumerate(_EFFORT_SUFFIXES)}
+
+# Resolve these families against this turn's account inventory. Carbon is
+# intentionally absent from accounts whose CLI does not enumerate its rows.
+_ACCOUNT_TIER_FAMILIES = {"gemini-4-hydrogen", "gemini-4-carbon"}
 
 # ---------------------------------------------------------------------------
-# Model family collapse: 18 agy rows -> 7 model families
+# Model family collapse
 # ---------------------------------------------------------------------------
 
 # agy row id -> (family_id, canonical_display_name, provider_effort_rung)
 # The family_id is what the hub picker shows; the native row id is what we
 # pass to --model on the wire. provider_effort_rung is the agy-native rung
-# string (low/medium/high).
+# string (low/medium/high/xhigh).
 _AGY_ROW_MAP: dict[str, tuple[str, str, str]] = {
+    # agy 1.5.7: Hydrogen adds XHigh; Carbon exposes Low/Medium/High.
+    "gemini-4-hydrogen-low":    ("gemini-4-hydrogen", "Gemini 4 Hydrogen", "low"),
+    "gemini-4-hydrogen-medium": ("gemini-4-hydrogen", "Gemini 4 Hydrogen", "medium"),
+    "gemini-4-hydrogen-high":   ("gemini-4-hydrogen", "Gemini 4 Hydrogen", "high"),
+    "gemini-4-hydrogen-xhigh":  ("gemini-4-hydrogen", "Gemini 4 Hydrogen", "xhigh"),
+    "gemini-4-carbon-low":    ("gemini-4-carbon", "Gemini 4 Carbon", "low"),
+    "gemini-4-carbon-medium": ("gemini-4-carbon", "Gemini 4 Carbon", "medium"),
+    "gemini-4-carbon-high":   ("gemini-4-carbon", "Gemini 4 Carbon", "high"),
     # Gemini 4 Argon: agy 1.3.6 exposes three native reasoning rows.
     "gemini-4-argon-low":    ("gemini-4-argon", "Gemini 4 Argon", "low"),
     "gemini-4-argon-medium": ("gemini-4-argon", "Gemini 4 Argon", "medium"),
@@ -195,6 +205,12 @@ _AGY_RUNG_TO_CANONICAL: dict[str, str] = {
 # For families with fewer than 3 rungs, we map canonical ranks to the
 # nearest available rung. This is used by build_argv to pick the native row.
 _FAMILY_CANONICAL_TO_RUNG: dict[str, dict[str, str]] = {
+    "gemini-4-hydrogen": {"none": "low", "minimal": "low", "low": "low",
+                           "medium": "medium", "high": "high", "xhigh": "xhigh",
+                           "max": "xhigh", "ultra": "xhigh"},
+    "gemini-4-carbon": {"none": "low", "minimal": "low", "low": "low",
+                         "medium": "medium", "high": "high", "xhigh": "high",
+                         "max": "high", "ultra": "high"},
     "gemini-4-argon": {"none": "low", "minimal": "low", "low": "low",
                         "medium": "medium", "high": "high",
                         "xhigh": "high", "max": "high", "ultra": "high"},
@@ -225,6 +241,8 @@ _FAMILY_CANONICAL_TO_RUNG: dict[str, dict[str, str]] = {
 
 # Effort modes that each family advertises (canonical ranks).
 _FAMILY_EFFORT_MODES: dict[str, list[str]] = {
+    "gemini-4-hydrogen": ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"],
+    "gemini-4-carbon": ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"],
     "gemini-4-argon": ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"],
     "gemini-3.8-flash": ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"],
     "gemini-3.7-flash": ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"],
@@ -237,6 +255,8 @@ _FAMILY_EFFORT_MODES: dict[str, list[str]] = {
 
 # Default effort for each family (canonical rank).
 _FAMILY_DEFAULT_EFFORT: dict[str, str] = {
+    "gemini-4-hydrogen": "medium",
+    "gemini-4-carbon": "medium",
     "gemini-4-argon": "medium",
     "gemini-3.8-flash": "medium",
     "gemini-3.7-flash": "medium",
@@ -249,6 +269,8 @@ _FAMILY_DEFAULT_EFFORT: dict[str, str] = {
 
 # Provider-native effort rungs exposed by each family (what agy accepts).
 _FAMILY_PROVIDER_EFFORT_MODES: dict[str, list[str]] = {
+    "gemini-4-hydrogen": ["low", "medium", "high", "xhigh"],
+    "gemini-4-carbon": ["low", "medium", "high"],
     "gemini-4-argon": ["low", "medium", "high"],
     "gemini-3.8-flash": ["low", "medium", "high"],
     "gemini-3.7-flash": ["low", "medium", "high"],
@@ -513,7 +535,7 @@ GEMINI_CONTEXT = 1_000_000
 
 
 def _collapse_models(raw_models: list[dict]) -> list[dict]:
-    """Collapse 18 agy row ids into 7 model families for the hub picker.
+    """Collapse native agy reasoning rows into model families for the picker.
 
     Each family card carries:
     - id: the family id (e.g., "gemini-3.8-flash")
@@ -542,13 +564,20 @@ def _collapse_models(raw_models: list[dict]) -> list[dict]:
         display_name = row_entries[0][1]
         # Collect all native row ids as aliases
         aliases = [row_id for row_id, _ in row_entries]
+        provider_modes = list(_FAMILY_PROVIDER_EFFORT_MODES.get(family_id, []))
+        default_effort = _FAMILY_DEFAULT_EFFORT.get(family_id)
+        if family_id in _ACCOUNT_TIER_FAMILIES:
+            provider_modes = sorted({_AGY_ROW_MAP[row][2] for row in aliases},
+                                    key=_EFFORT_RANK.__getitem__)
+            default_effort = min(provider_modes, key=lambda rung:
+                (abs(_EFFORT_RANK[rung] - _EFFORT_RANK[default_effort]), -_EFFORT_RANK[rung]))
 
         collapsed.append({
             "id": family_id,
             "display_name": display_name,
             "effort_modes": list(_FAMILY_EFFORT_MODES.get(family_id, [])),
-            "default_effort": _FAMILY_DEFAULT_EFFORT.get(family_id),
-            "provider_effort_modes": list(_FAMILY_PROVIDER_EFFORT_MODES.get(family_id, [])),
+            "default_effort": default_effort,
+            "provider_effort_modes": provider_modes,
             "aliases": aliases,
             "reasoning": True,
             # agy models reports names and effort only. Gemini 3 publishes a
@@ -701,8 +730,19 @@ def build_argv(model, *, effort=None, system=None, stream=True, available_rows=N
     agy has no system-prompt flag. Callers must fold the system text into the
     prompt via ``render_prompt(messages, system=...)``; run_turn does.
     """
+    validated_effort = _validate_effort(effort)
+    effort = effort.strip().casefold() if effort is not None else None
     # Resolve the model to a native row id, using effort if provided
     native_row = _resolve_native_row(model, effort)
+    if model in _ACCOUNT_TIER_FAMILIES and available_rows is not None:
+        available = [row for row in set(available_rows)
+                     if row in _AGY_ROW_MAP and _AGY_ROW_MAP[row][0] == model]
+        if not available:
+            raise AgyCliAgentError(f"{model} is not available in this account's agy model inventory")
+        target = _EFFORT_RANK[_AGY_ROW_MAP[native_row][2]]
+        native_row = min(available, key=lambda row:
+            (abs(_EFFORT_RANK[_AGY_ROW_MAP[row][2]] - target),
+             -_EFFORT_RANK[_AGY_ROW_MAP[row][2]]))
     if model == "gemini-4-argon":
         # The older CLI advertised the bare ID. Only select a suffixed row
         # when this turn's inventory actually advertises it; never cache
@@ -716,7 +756,6 @@ def build_argv(model, *, effort=None, system=None, stream=True, available_rows=N
                 (abs(_EFFORT_RANK[_AGY_ROW_MAP[row][2]] - target), row))
                 if candidates and model not in available else model)
     validated_model = _validate_model(native_row, resolve_family=False)
-    validated_effort = _validate_effort(effort)
     if system is not None and not isinstance(system, str):
         raise AgyCliAgentError(
             "system must be a string or None; note that agy has no "
@@ -731,7 +770,7 @@ def build_argv(model, *, effort=None, system=None, stream=True, available_rows=N
         # Known rows encode their effort. For example Gemini Pro's medium
         # request maps to its high row, so --effort must agree with that row.
         native_effort = _AGY_ROW_MAP.get(validated_model, (None, None, None))[2]
-        argv += ["--effort", native_effort if native_effort in {"low", "medium", "high"}
+        argv += ["--effort", native_effort if native_effort in _EFFORT_SUFFIXES
                  else validated_effort]
     return _assert_safe(argv)
 
@@ -1447,7 +1486,10 @@ def _single_turn(request, *, spawner=None, timeout=300, retained=None) -> Iterat
         model = model.strip()
         messages = _coerce_messages(request.get("messages"))
         requested_effort = request.get("effort")
-        effort = _validate_effort(requested_effort)
+        _validate_effort(requested_effort)
+        # Validate first, but retain the canonical rank until family routing:
+        # the legacy three-rung normalizer would erase Hydrogen's XHigh.
+        effort = requested_effort.strip().casefold() if requested_effort is not None else None
         system = request.get("system")
         if system is not None and not isinstance(system, str):
             raise AgyCliAgentError("system must be a string or None")
@@ -1464,7 +1506,7 @@ def _single_turn(request, *, spawner=None, timeout=300, retained=None) -> Iterat
         # prompt here and deliberately NOT passed to build_argv.
         prompt = render_prompt(messages, system=system)
         available_rows = None
-        if model == "gemini-4-argon":
+        if model == "gemini-4-argon" or model in _ACCOUNT_TIER_FAMILIES:
             inventory, _ = catalogue(**({"config_dir": request["config_dir"]} if request.get("config_dir") else {}))
             available_rows = [alias for row in inventory
                               if row["id"] == model for alias in row.get("aliases", [])]

@@ -501,6 +501,118 @@ gpt-oss-120b-medium	GPT-OSS 120B (Medium)
                     if selected != "gemini-4-argon" and effort is not None:
                         self.assertEqual(argv[argv.index("--effort") + 1], selected.rsplit("-", 1)[1])
 
+    def test_hydrogen_and_carbon_collapse_with_native_ladders(self):
+        from agy_cli_agent import catalogue
+
+        families = {"hydrogen": ["low", "medium", "high", "xhigh"],
+                    "carbon": ["low", "medium", "high"]}
+        for name, rungs in families.items():
+            with self.subTest(family=name):
+                output = "\n".join(
+                    f"gemini-4-{name}-{rung}\tGemini 4 {name.title()} ({rung.title()})"
+                    for rung in reversed(rungs))
+                with mock.patch("agy_cli_agent._resolve_binary", return_value="/fake/agy"):
+                    rows, warnings = catalogue(capture=lambda *args, **kwargs:
+                        subprocess.CompletedProcess(args[0], 0, output, ""))
+                row, = rows
+                self.assertEqual(warnings, [])
+                self.assertEqual(row["id"], f"gemini-4-{name}")
+                self.assertEqual(row["display_name"], f"Gemini 4 {name.title()}")
+                self.assertEqual(row["provider_effort_modes"], rungs)
+                self.assertEqual(row["default_effort"], "medium")
+                self.assertEqual(row["effort_modes"],
+                    ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"])
+                self.assertEqual(set(row["aliases"]),
+                    {f"gemini-4-{name}-{rung}" for rung in rungs})
+
+    def test_hydrogen_parser_groups_xhigh_with_other_rungs(self):
+        from agy_cli_agent import _parse_models
+
+        rungs = ["low", "medium", "high", "xhigh"]
+        rows = _parse_models("\n".join(
+            f"gemini-4-hydrogen-{rung}\tHydrogen ({rung})" for rung in reversed(rungs)))
+        for row in rows:
+            self.assertEqual(row["reasoning_levels"], rungs)
+
+    def test_new_family_dispatch_preserves_each_effort_and_account_inventory(self):
+        import agy_cli_agent as module
+
+        ladder = {"none": "low", "minimal": "low", "low": "low", "medium": "medium",
+                  "high": "high", "xhigh": "xhigh", "max": "xhigh", "ultra": "xhigh"}
+        for name, rungs in (("hydrogen", ["low", "medium", "high", "xhigh"]),
+                            ("carbon", ["low", "medium", "high"])):
+            family = f"gemini-4-{name}"
+            for available_rungs in (rungs, ["low", rungs[-1]], [rungs[-1]]):
+                aliases = [f"{family}-{rung}" for rung in available_rungs]
+                for effort in [None, *ladder]:
+                    with self.subTest(family=family, inventory=aliases, effort=effort):
+                        session = mock.MagicMock()
+                        session.returncode = 0
+                        session.__enter__.return_value = session
+                        session.__exit__.return_value = False
+                        session.events.return_value = iter([])
+                        inventory = [{"id": family, "aliases": aliases}]
+                        with mock.patch.object(module, "catalogue", return_value=(inventory, [])) as discover, \
+                                mock.patch.object(module, "_resolve_binary", return_value="/fake/agy"), \
+                                mock.patch.object(module, "StdioSession", return_value=session) as spawn:
+                            list(module.run_turn({"model": family, "effort": effort,
+                                "config_dir": "/fake/account", "messages": [{"role": "user", "content": "Test"}]}))
+                        discover.assert_called_once_with(config_dir="/fake/account")
+                        argv = spawn.call_args.args[0]
+                        selected = argv[argv.index("--model") + 1]
+                        self.assertIn(selected, aliases)
+                        if len(available_rungs) == len(rungs):
+                            expected = ladder.get(effort, "medium")
+                            if name == "carbon" and expected == "xhigh":
+                                expected = "high"
+                            self.assertEqual(selected, f"{family}-{expected}")
+                        elif len(available_rungs) == 1:
+                            self.assertEqual(selected, aliases[0])
+                        elif effort == "medium":
+                            # Missing intermediate ranks round upward on a tie.
+                            self.assertEqual(selected, f"{family}-{rungs[-1] if name == 'carbon' else 'low'}")
+                        if effort is not None:
+                            self.assertEqual(argv[argv.index("--effort") + 1], selected.rsplit("-", 1)[1])
+
+    def test_unavailable_families_do_not_launch_or_appear_in_catalogue(self):
+        import agy_cli_agent as module
+
+        self.assertEqual(module._collapse_models([]), [])
+        pro_rows = module._collapse_models(module._parse_models(
+            "gemini-4-hydrogen-high\tGemini 4 Hydrogen (High)"))
+        self.assertEqual([row["id"] for row in pro_rows], ["gemini-4-hydrogen"])
+        self.assertEqual(pro_rows[0]["provider_effort_modes"], ["high"])
+        self.assertEqual(pro_rows[0]["default_effort"], "high")
+        for family in ("gemini-4-hydrogen", "gemini-4-carbon"):
+            with self.subTest(family=family), \
+                    mock.patch.object(module, "catalogue", return_value=([], [])), \
+                    mock.patch.object(module, "StdioSession") as spawn:
+                events = list(module.run_turn({"model": family, "effort": "max",
+                    "messages": [{"role": "user", "content": "Test"}]}))
+                spawn.assert_not_called()
+                self.assertIn("not available", str(events))
+
+    def test_saved_native_aliases_keep_their_selected_tier(self):
+        from agy_cli_agent import build_argv
+
+        for name, rungs in (("hydrogen", ["low", "medium", "high", "xhigh"]),
+                            ("carbon", ["low", "medium", "high"])):
+            for rung in rungs:
+                alias = f"gemini-4-{name}-{rung}"
+                with self.subTest(alias=alias):
+                    argv = build_argv(alias, effort="ultra")
+                    self.assertEqual(argv[argv.index("--model") + 1], alias)
+                    self.assertEqual(argv[argv.index("--effort") + 1], rung)
+
+    def test_hydrogen_effort_normalization_keeps_xhigh(self):
+        from agy_cli_agent import build_argv
+
+        for effort in ("XHIGH", " Max ", "Ultra"):
+            with self.subTest(effort=effort):
+                argv = build_argv("gemini-4-hydrogen", effort=effort)
+                self.assertEqual(argv[argv.index("--model") + 1], "gemini-4-hydrogen-xhigh")
+                self.assertEqual(argv[argv.index("--effort") + 1], "xhigh")
+
     def test_catalogue_empty_output(self):
         """Test catalogue handles empty agy models output."""
         from agy_cli_agent import catalogue

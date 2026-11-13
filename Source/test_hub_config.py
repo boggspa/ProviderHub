@@ -371,22 +371,23 @@ class SettingsMigrationTests(unittest.TestCase):
 
     def test_chat_may_list_a_second_credential_source_only_where_two_exist(self):
         self.assertEqual(CHAT_SOURCE_PROVIDERS, frozenset(
-            provider for provider in CLI_AUTH_PROVIDERS if "keychain" in credential_modes(provider)))
+            provider for provider in CLI_AUTH_PROVIDERS | {"mistral"} if "keychain" in credential_modes(provider)))
         for provider_id in sorted(CHAT_SOURCE_PROVIDERS):
             with self.subTest(provider=provider_id):
-                chosen = normalize({"providers": {provider_id: {"credential_mode": "cli", "chat_both_sources": True}}},
+                installed = "vibe" if provider_id == "mistral" else "cli"
+                chosen = normalize({"providers": {provider_id: {"credential_mode": installed, "chat_both_sources": True}}},
                                    SLOTS, "mistral-test")
                 connection = chosen["providers"][provider_id]
                 self.assertIs(connection["chat_both_sources"], True)
-                self.assertEqual(chat_sources(connection, provider_id), ["cli", "keychain"])
-                keyed = normalize({"providers": {provider_id: {"chat_both_sources": True}}}, SLOTS, "mistral-test")
-                self.assertEqual(chat_sources(keyed["providers"][provider_id], provider_id), ["keychain", "cli"])
+                self.assertEqual(chat_sources(connection, provider_id), [installed, "keychain"])
+                keyed = normalize({"providers": {provider_id: {"credential_mode": "keychain", "chat_both_sources": True}}}, SLOTS, "mistral-test")
+                self.assertEqual(chat_sources(keyed["providers"][provider_id], provider_id), ["keychain", installed])
                 # Off is the absent default, so untouched settings keep their shape.
-                off = normalize({"providers": {provider_id: {"chat_both_sources": False}}}, SLOTS, "mistral-test")
+                off = normalize({"providers": {provider_id: {"credential_mode": "keychain", "chat_both_sources": False}}}, SLOTS, "mistral-test")
                 self.assertNotIn("chat_both_sources", off["providers"][provider_id])
                 self.assertIsNone(chat_extra_source(off["providers"][provider_id], provider_id))
                 self.assertEqual(chat_sources(off["providers"][provider_id], provider_id), ["keychain"])
-        for provider_id in ("antigravity", "mistral", "ollama", "kimi"):
+        for provider_id in ("antigravity", "ollama", "kimi"):
             with self.subTest(provider=provider_id), self.assertRaises(ValueError):
                 normalize({"providers": {provider_id: {"chat_both_sources": True}}}, SLOTS, "mistral-test")
         with self.assertRaises(ValueError):

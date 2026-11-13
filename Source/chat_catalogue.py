@@ -19,6 +19,7 @@ from codex_catalogue import choices as codex_choices
 from hub_config import (CHAT_SOURCE_LABELS, chat_extra_source, chat_sources, claude_routes, cli_account_dir,
                         connection_signature, split_chat_account)
 from model_names import friendly_model_name
+from effort_map import display_effort_modes
 
 
 def native_search_available(spec, connection, provider):
@@ -113,9 +114,7 @@ def _rows(settings, specs, candidates, *, source=None, only=None, native=None):
         presentation = resolve_presentation(provider, model, overrides, supplied_label=label)
         connection_presentation = resolve_presentation(provider, overrides=overrides)
         label = presentation.get("modelLabel") or spec.get("display_name") or model
-        efforts = spec.get("effort_modes") or []
-        if spec.get("reasoning") is False:
-            efforts = []
+        efforts = display_effort_modes(spec)
         for account in accounts:
             identifier = account["id"] if source is None else source + ":" + account["id"]
             _, _, directory, scope = chat_connection(settings, provider, identifier)

@@ -20,6 +20,23 @@ class ChatCatalogueTests(unittest.TestCase):
         self.assertEqual(rows[0]["efforts"], ["low", "high"])
         self.assertEqual(rows[0]["context"], 200000)
 
+    def test_high_only_and_switch_models_offer_fallback_choices(self):
+        from effort_map import EFFORT_ORDER
+
+        for provider, identifier, native in (("mistral", "mistral-large-4", ["none", "high"]),
+                                              ("minimax", "MiniMax-M3", ["none", "high"]),
+                                              ("minimax", "MiniMax-M2.7", ["high"])):
+            route = provider + "/" + identifier
+            config = defaults(SLOTS, "mistral-vibe-cli-latest", 11438)
+            config["providers"][provider]["credential_mode"] = "keychain"
+            config["_model_specs"] = {route: {"id": route, "provider_id": provider,
+                "model_id": identifier, "reasoning": True, "effort_modes": native}}
+            with self.subTest(model=identifier):
+                row, = chat_choices(config)
+                self.assertEqual(row["efforts"],
+                    [rank for rank in EFFORT_ORDER if rank != "none" or "none" in native])
+                self.assertEqual(config["_model_specs"][route]["effort_modes"], native)
+
     def test_a_second_credential_source_lists_beside_the_active_one(self):
         # Claude runs on the installed CLI; the Keychain key is listed too.
         self.settings["providers"]["claude"]["chat_both_sources"] = True
@@ -279,6 +296,74 @@ class ChatCatalogueTests(unittest.TestCase):
             chat_connection(self.settings, "mistral", "work", rows[0]["scope"])
         with self.assertRaisesRegex(ValueError, "no longer configured"):
             chat_connection(self.settings, "mistral", "removed")
+
+    def test_mistral_and_codex_list_api_keys_alongside_installed_accounts(self):
+        from bridge_core import credentials
+
+        for provider, installed in (("mistral", "vibe"), ("codex", "cli")):
+            for active_mode in (installed, "keychain"):
+                with self.subTest(provider=provider, active=active_mode):
+                    config = defaults(SLOTS, "mistral-test", 11438)
+                    config["providers"][provider].update(credential_mode=active_mode, chat_both_sources=True,
+                        cli_account="work", cli_accounts=[{"id": "work", "label": "Work", "config_dir": "/accounts/work"}],
+                        key_account="personal", key_accounts=[{"id": "personal", "label": "Personal"},
+                                                              {"id": "other", "label": "Other"}])
+                    route = provider + "/test-model"
+                    spec = {"id": route, "provider_id": provider, "model_id": "test-model", "tools": True,
+                            "context": 200000, "reasoning": True, "effort_modes": ["high"]}
+                    config["_model_specs"] = {route: spec}
+                    config["codex_model"] = route
+                    config["codex_catalogue"] = [route]
+                    extra = "keychain" if active_mode == installed else installed
+                    config["_chat_source_specs"] = {provider: {extra: {route: spec}}}
+                    before = copy.deepcopy(config)
+                    with patch("chat_catalogue.native_context_limits", return_value={}):
+                        rows = chat_choices(config)
+                    self.assertEqual(len(rows), 5)
+                    self.assertEqual({(r["source"], r["account"].split(":")[-1]) for r in rows},
+                        {(installed, ""), (installed, "work"), ("keychain", ""),
+                         ("keychain", "personal"), ("keychain", "other")})
+                    self.assertEqual(len({row["scope"] for row in rows}), 5)
+                    for row in rows:
+                        selected, connection, folder, _ = chat_connection(config, provider, row["account"], row["scope"])
+                        account = row["account"].split(":")[-1]
+                        self.assertEqual(connection["credential_mode"], row["source"])
+                        if row["source"] == installed:
+                            self.assertEqual(folder, "/accounts/work" if account else None)
+                            if provider == "mistral":
+                                with patch("bridge_core.vibe_credentials", return_value=("vibe-key", "Vibe")) as read:
+                                    self.assertEqual(credentials(selected, provider)[0], "vibe-key")
+                                    if folder:
+                                        read.assert_called_once_with(folder)
+                                    else:
+                                        read.assert_called_once_with()
+                        else:
+                            self.assertIsNone(folder)
+                            with patch("bridge_core.keychain_read", return_value="api-key") as read:
+                                self.assertEqual(credentials(selected, provider)[0], "api-key")
+                                self.assertTrue(read.call_args.args[1].endswith("." + account) if account
+                                                else not read.call_args.args[1].endswith((".personal", ".other")))
+                    self.assertEqual(config, before)
+
+    def test_mistral_gateway_uses_each_sources_catalogue(self):
+        from gateway import Runtime
+        from pathlib import Path
+
+        route = "mistral/test-model"
+        for startup, alternate in (("vibe", "keychain"), ("keychain", "vibe")):
+            with self.subTest(startup=startup):
+                settings = defaults(SLOTS, "mistral-test", 11438)
+                settings["providers"]["mistral"].update(credential_mode=startup, chat_both_sources=True)
+                startup_spec = {"id": route, "context": 200000}
+                other_spec = {"id": route, "context": 1000000}
+                settings["_model_specs"] = {route: startup_spec}
+                runtime = Runtime.__new__(Runtime)
+                runtime.settings = settings
+                runtime.root = Path("/mock-state")
+                with patch.object(runtime, "resolve_route", return_value=route), \
+                        patch("gateway.chat_source_specs", return_value={"mistral": {alternate: {route: other_spec}}}):
+                    self.assertEqual(runtime.chat_route(route, {"credential_mode": startup}, settings), (route, startup_spec))
+                    self.assertEqual(runtime.chat_route(route, {"credential_mode": alternate}, settings), (route, other_spec))
 
     def test_antigravity_accounts_added_after_gateway_start_reach_picker_and_turns(self):
         import http.client

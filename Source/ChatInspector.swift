@@ -196,6 +196,8 @@ private struct ChatAgentsPane: View {
                             ChatTodosSection(model: model)
                             Divider().padding(.horizontal, 14)
                             ChatBlackboardSection(model: model, chat: chat)
+                            Divider().padding(.horizontal, 14)
+                            ChatBlackboardFilesSection(model: model, chat: chat)
                         }
                         if !model.agents.isEmpty {
                         Button { showEarlierTasks.toggle() } label: {
