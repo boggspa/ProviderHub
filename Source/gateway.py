@@ -204,16 +204,64 @@ class Runtime:
             self._credential_settings = self._cli_account_settings = None
         return self.status()
 
-    def resolve_route(self, requested):
+    def resolve_route(self, requested, settings=None):
+        settings = settings or self.settings
         if not isinstance(requested, str):
             raise BridgeError("Choose a model route.")
         try:
-            route = resolve_model(requested, claude_routes(self.settings))
+            route = resolve_model(requested, claude_routes(settings))
         except BridgeError:
             route = qualify(*split_route(requested.removesuffix("[1m]")))
-        if route not in self.settings["_model_specs"]:
+        if route not in settings["_model_specs"]:
             raise BridgeError("This route is not in the current provider catalogue. Refresh its models first.")
         return route
+
+    def _chat_stamp(self):
+        """What a fresh Chat projection depends on: settings, plan and cached catalogues.
+
+        The activity logs feed only context observations and change on every
+        request, so they are left out; the startup snapshot ignores them too.
+        """
+        stamp = []
+        for path in (self.root / "settings.json", self.root / "launch-plan.json", self.root / "catalog.json"):
+            try:
+                info = path.stat()
+                stamp.append((path.name, info.st_ino, info.st_mtime_ns, info.st_size))
+            except OSError:
+                stamp.append((path.name, None))
+        try:
+            with os.scandir(self.root / "catalogues") as entries:
+                for entry in sorted(entries, key=lambda e: e.name):
+                    info = entry.stat()
+                    stamp.append((entry.name, info.st_ino, info.st_mtime_ns, info.st_size))
+        except OSError:
+            stamp.append(("catalogues", None))
+        return tuple(stamp)
+
+    def chat_settings(self):
+        """Saved settings with route specs projected fresh, for Chat alone.
+
+        Desktop launches keep the snapshot taken at start or at a launch
+        refresh, because their profiles were written from it. Chat writes no
+        profile, so a route ticked, or a model a catalogue refresh found, after
+        the gateway started reaches its picker and its next turn without a
+        restart. Rebuilt only when a file it reads changes; an unreadable state
+        keeps the last good projection, then the startup snapshot.
+        """
+        stamp = self._chat_stamp()
+        with self.lock:
+            cached = getattr(self, "_chat_projection", None)
+            if cached is not None and cached[0] == stamp:
+                return cached[1]
+        try:
+            saved = load_settings(self.root)
+            planned, _ = apply_plan(saved, cached_catalogue(saved, self.root), self.root)
+            fresh, _ = attach_model_specs(planned, self.root)
+        except (BridgeError, OSError, ValueError):
+            return cached[1] if cached is not None else self.settings
+        with self.lock:
+            self._chat_projection = (stamp, fresh)
+        return fresh
 
     def cli_account_dir(self, provider_id):
         """The active CLI account's config folder, read live from settings.json.
@@ -291,19 +339,21 @@ class Runtime:
     def chat_route(self, requested, connection, settings):
         """Resolve a Chat request's route and spec on the credential source its account names.
 
-        The active source serves the startup snapshot like every other
-        request. The second source (hub_config.chat_sources) is Chat-only, so
-        its specs are read fresh from its cached catalogue (``settings`` is
-        the saved state naming it): a refresh reaches the next request without
-        a restart. It is keyed the same way, because a route id reads the same
-        on both while the models behind it need not.
+        Both sources are read fresh, since Chat writes no desktop profile:
+        the active one from ``chat_settings`` (the same projection a launch
+        would take now), the second (hub_config.chat_sources) from its cached
+        catalogue (``settings`` is the saved state naming it). A route ticked
+        or a catalogue refreshed reaches the next request without a restart.
+        Both are keyed the same way, because a route id reads the same on
+        both while the models behind it need not.
         """
         provider_id = split_route(requested)[0]
-        startup_mode = self.settings["providers"][provider_id]["credential_mode"]
-        if (connection["credential_mode"] == startup_mode
-                or connection["credential_mode"] not in {"cli", "vibe"} and startup_mode not in {"cli", "vibe"}):
-            route = self.resolve_route(requested)
-            return route, self.settings["_model_specs"][route]
+        current = self.chat_settings()
+        active_mode = current["providers"][provider_id]["credential_mode"]
+        if (connection["credential_mode"] == active_mode
+                or connection["credential_mode"] not in {"cli", "vibe"} and active_mode not in {"cli", "vibe"}):
+            route = self.resolve_route(requested, current)
+            return route, current["_model_specs"][route]
         source = chat_extra_source(settings["providers"][provider_id], provider_id)
         if connection["credential_mode"] != source:
             # Only an active source changed since start reaches here: the
@@ -1030,12 +1080,12 @@ they exit or restart, so none of them can interrupt another's requests.
         elif path == "/_bridge/codex/models":
             self.json_response(200, {"models": codex_choices(self.runtime.settings, self.runtime.catalogue)})
         elif path == "/_bridge/chat/models":
-            # The active source's route metadata stays on the serving snapshot.
-            # Accounts and display overrides are read live without changing a
-            # desktop's selection, and so is the second source Chat lists: no
-            # desktop depends on it, so a refresh reaches the picker's next ask.
+            # Everything here is read live without changing a desktop's
+            # selection: accounts, display overrides, ticked routes and both
+            # sources' route metadata. No desktop profile depends on Chat's
+            # list, so a tick or a refresh reaches the picker's next ask.
             live = load_settings(self.runtime.root)
-            settings = {**live, "_model_specs": self.runtime.settings["_model_specs"],
+            settings = {**live, "_model_specs": self.runtime.chat_settings()["_model_specs"],
                         "_chat_source_specs": chat_source_specs(live, self.runtime.root)}
             self.json_response(200, {"models": chat_choices(settings)})
         elif path == "/v1/agents/sessions":

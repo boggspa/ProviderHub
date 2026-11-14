@@ -189,11 +189,12 @@ class ChatCatalogueTests(unittest.TestCase):
             self.assertEqual([row for row in listed() if row[1].endswith("opus-4-1")], [])
             with self.assertRaisesRegex(Exception, "not in the API key catalogue"):
                 runtime.plan({**base, "model": "claude/claude-opus-4-1", "_provider_hub_account": "keychain:"})
-            # Changing the active source while the gateway runs still needs a
-            # restart: the snapshot was built for the CLI, and Chat says so.
+            # Chat follows an active source changed while the gateway runs: it
+            # serves the new source's own catalogue, so until that is
+            # refreshed it asks for a refresh rather than a restart.
             settings["providers"]["claude"]["credential_mode"] = "keychain"
             atomic_json(root / "settings.json", settings)
-            with self.assertRaisesRegex(Exception, "earlier credential source"):
+            with self.assertRaisesRegex(Exception, "Refresh its models first"):
                 runtime.plan({**base, "model": "claude/claude-sonnet-5", "_provider_hub_account": ""})
             # And the key source is only reachable while the switch is on.
             settings["providers"]["claude"]["credential_mode"] = "cli"
@@ -361,9 +362,60 @@ class ChatCatalogueTests(unittest.TestCase):
                 runtime.settings = settings
                 runtime.root = Path("/mock-state")
                 with patch.object(runtime, "resolve_route", return_value=route), \
+                        patch.object(runtime, "chat_settings", return_value=settings), \
                         patch("gateway.chat_source_specs", return_value={"mistral": {alternate: {route: other_spec}}}):
                     self.assertEqual(runtime.chat_route(route, {"credential_mode": startup}, settings), (route, startup_spec))
                     self.assertEqual(runtime.chat_route(route, {"credential_mode": alternate}, settings), (route, other_spec))
+
+    def test_routes_ticked_or_found_after_gateway_start_reach_chat_but_not_desktops(self):
+        # A model a catalogue refresh found and the user then ticked, both
+        # after the gateway started (Gemini 4 Hydrogen, Nov 2026): Chat lists
+        # and serves it at once; the desktops keep their launch snapshot.
+        import http.client
+        import json
+        import test_gateway_hub as fixtures
+        from bridge_core import BridgeError, atomic_json, load_settings, read_json
+        harness = fixtures.GatewayHubHTTPTests()
+        harness.setUp()
+        try:
+            route = harness.start_gateway("deepseek", "deepseek-test", {"context": 131072})
+            added = "deepseek/deepseek-added"
+            runtime = harness.runtime
+
+            def listed():
+                connection = http.client.HTTPConnection("127.0.0.1", harness.gateway.server_port, timeout=5)
+                connection.request("GET", "/_bridge/chat/models", headers={"Authorization": "Bearer " + runtime.token})
+                response = connection.getresponse()
+                self.assertEqual(response.status, 200)
+                rows = json.loads(response.read())["models"]
+                connection.close()
+                return {r["route"] for r in rows}
+
+            self.assertIn(route, listed())
+            self.assertNotIn(added, listed())
+            first = runtime.chat_settings()
+            self.assertIs(runtime.chat_settings(), first)  # unchanged files reuse the projection
+
+            path = harness.root / "catalogues" / "deepseek.json"
+            catalogue = read_json(path)
+            catalogue["models"].append({**catalogue["models"][0], "id": "deepseek-added", "canonical_id": "deepseek-added",
+                                        "display_name": "Mock deepseek-added", "aliases": ["deepseek-added"]})
+            atomic_json(path, catalogue)
+            saved = load_settings(harness.root)
+            saved["codex_catalogue"] = [route, added]
+            atomic_json(harness.root / "settings.json", saved)
+
+            self.assertIsNot(runtime.chat_settings(), first)
+            self.assertIn(added, listed())
+            payload = {"model": added, "messages": [{"role": "user", "content": "Hello"}], "max_tokens": 32,
+                       "_provider_hub_surface": "chat"}
+            self.assertEqual(runtime.plan(payload)["body"]["model"], "deepseek-added")
+            # The desktops' snapshot moves only on a launch refresh.
+            self.assertNotIn(added, runtime.settings["_model_specs"])
+            with self.assertRaises(BridgeError):
+                runtime.plan({key: value for key, value in payload.items() if key != "_provider_hub_surface"})
+        finally:
+            harness.tearDown()
 
     def test_antigravity_accounts_added_after_gateway_start_reach_picker_and_turns(self):
         import http.client
@@ -433,9 +485,10 @@ class ChatCatalogueTests(unittest.TestCase):
         harness.setUp()
         try:
             route = "claude/claude-sonnet-5"
-            spec = harness.runtime.settings["_model_specs"][route]
-            spec["web_search"] = True
             cli_routes._cache["claude"].WEB_SEARCH = True
+            # Chat reads its own projection (cached while the files hold still).
+            spec = harness.runtime.chat_settings()["_model_specs"][route]
+            spec["web_search"] = True
             harness.events = [
                 {"type": "web_search", "status": "completed", "id": "s1", "action": {"type": "search", "query": "news"},
                  "results": [{"url": "https://example.com/news", "title": "News"}]},

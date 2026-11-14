@@ -29,7 +29,8 @@ private let subscriptionProviders: Set<String> = ["claude", "codex", "antigravit
 private let cliAccountProviders: Set<String> = ["codex", "claude", "antigravity"]
 /// Providers with both an API-key source and an installed-CLI source, which
 /// Chat can list side by side. Mirrors `hub_config.CHAT_SOURCE_PROVIDERS`.
-private let chatSourceProviders: Set<String> = ["codex", "claude", "muse", "grok"]
+// Matches hub_config.CHAT_SOURCE_PROVIDERS: every provider with a second credential source.
+private let chatSourceProviders: Set<String> = ["codex", "claude", "mistral", "muse", "grok"]
 private let tierOrder = ["fable", "opus", "sonnet", "haiku"]
 
 // MARK: - Model helpers the shell needs that the classic panes keep in views
@@ -630,15 +631,19 @@ private struct SubscriptionPane: View {
 }
 
 /// Chat's second credential source (`chat_both_sources`): the Keychain key
-/// while the CLI is active, the installed CLI otherwise. Claude Desktop and
-/// Codex keep following the picker above; the worker drops an explicit false.
+/// while the CLI (or Mistral's Vibe) is active, the installed CLI (or Vibe)
+/// otherwise. Claude Desktop and Codex keep following the picker above; the
+/// worker drops an explicit false.
 private struct ChatSourceRow: View {
     @ObservedObject var model: BridgeModel
     var provider: ProviderDefinition
     var body: some View {
-        let cli = model.settings.providers[provider.id]?.credential_mode == "cli"
+        let mode = model.settings.providers[provider.id]?.credential_mode
+        let title = mode == "cli" || mode == "vibe" ? "Also list this provider’s API key models in Chat"
+            : provider.id == "mistral" ? "Also list this provider’s Vibe accounts in Chat"
+            : "Also list this provider’s installed CLI models in Chat"
         VStack(alignment: .leading, spacing: 2) {
-            OptionRow(title: cli ? "Also list this provider’s API key models in Chat" : "Also list this provider’s installed CLI models in Chat",
+            OptionRow(title: title,
                       isOn: Binding(get: { model.settings.providers[provider.id]?.chat_both_sources ?? false },
                                     set: { model.settings.providers[provider.id]?.chat_both_sources = $0 ? true : nil }),
                       accent: provider.presentation.color)
