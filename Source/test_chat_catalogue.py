@@ -64,17 +64,27 @@ class ChatCatalogueTests(unittest.TestCase):
         api["web_search"] = True
         rows = chat_choices(self.settings)
         self.assertEqual([row["supportsWebSearch"] for row in rows], [True, True, False, False])
-        # Without the switch the second catalogue is ignored and labels stay bare.
+        # On is the default: the switch need not be saved at all.
         del self.settings["providers"]["claude"]["chat_both_sources"]
+        self.assertEqual(len(chat_choices(self.settings)), 4)
+        # A second source that is not set up lists nothing, and labels stay bare.
+        self.settings["_chat_source_specs"] = {"claude": {"keychain": {}}}
+        rows = chat_choices(self.settings)
+        self.assertEqual([row["account"] for row in rows], ["work", ""])
+        self.assertEqual(rows[1]["accountLabel"], "Default")
+        # Opting out ignores the second catalogue, and labels stay bare.
+        self.settings["_chat_source_specs"] = {"claude": {"keychain": {api["id"]: api}}}
+        self.settings["providers"]["claude"]["chat_both_sources"] = False
         rows = chat_choices(self.settings)
         self.assertEqual([row["account"] for row in rows], ["work", ""])
         self.assertEqual(rows[1]["accountLabel"], "Default")
 
     def test_a_second_source_account_selects_that_source_without_touching_the_active_one(self):
         before = copy.deepcopy(self.settings)
+        self.settings["providers"]["claude"]["chat_both_sources"] = False
         with self.assertRaisesRegex(ValueError, "no longer offered"):
             chat_connection(self.settings, "claude", "keychain:")
-        self.settings["providers"]["claude"]["chat_both_sources"] = True
+        del self.settings["providers"]["claude"]["chat_both_sources"]  # on by default
         selected, connection, directory, scope = chat_connection(self.settings, "claude", "keychain:")
         self.assertEqual(connection["credential_mode"], "keychain")
         self.assertIsNone(connection["key_account"])
@@ -92,15 +102,14 @@ class ChatCatalogueTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "no longer offered"):
             chat_connection(self.settings, "claude", "environment:")
         # A saved chat on the second source is refused once the switch is off.
-        self.settings["providers"]["claude"].pop("chat_both_sources")
+        self.settings["providers"]["claude"]["chat_both_sources"] = False
         with self.assertRaisesRegex(ValueError, "no longer offered"):
             chat_connection(self.settings, "claude", "keychain:", scope)
-        self.settings["providers"]["claude"]["chat_both_sources"] = True
+        del self.settings["providers"]["claude"]["chat_both_sources"]
         self.settings["providers"]["claude"]["credential_revision"] += 1
         with self.assertRaisesRegex(ValueError, "connection changed"):
             chat_connection(self.settings, "claude", "keychain:", scope)
         self.settings["providers"]["claude"]["credential_revision"] -= 1
-        del self.settings["providers"]["claude"]["chat_both_sources"]
         self.assertEqual(self.settings, before)
 
     def test_gateway_serves_a_chat_on_the_second_source_from_its_own_catalogue(self):
@@ -196,9 +205,9 @@ class ChatCatalogueTests(unittest.TestCase):
             atomic_json(root / "settings.json", settings)
             with self.assertRaisesRegex(Exception, "Refresh its models first"):
                 runtime.plan({**base, "model": "claude/claude-sonnet-5", "_provider_hub_account": ""})
-            # And the key source is only reachable while the switch is on.
+            # And the key source is unreachable once the provider opts out.
             settings["providers"]["claude"]["credential_mode"] = "cli"
-            settings["providers"]["claude"].pop("chat_both_sources")
+            settings["providers"]["claude"]["chat_both_sources"] = False
             atomic_json(root / "settings.json", settings)
             with self.assertRaisesRegex(Exception, "no longer offered"):
                 runtime.plan({**base, "model": "claude/claude-sonnet-5", "_provider_hub_account": "keychain:"})

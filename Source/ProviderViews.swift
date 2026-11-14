@@ -102,15 +102,15 @@ struct ProviderPage: View {
                         }.pickerStyle(.segmented)
                         if chatSourceProviders.contains(provider.id) {
                             Toggle(isOn: Binding(
-                                get: { model.settings.providers[provider.id]?.chat_both_sources ?? false },
-                                set: { model.settings.providers[provider.id]?.chat_both_sources = $0 ? true : nil })) {
+                                get: { model.settings.providers[provider.id]?.chat_both_sources != false },
+                                set: { model.settings.providers[provider.id]?.chat_both_sources = $0 ? nil : false })) {
                                 Text(connection.credential_mode == "cli" || connection.credential_mode == "vibe"
                                      ? "Also list this provider’s API key models in Chat"
                                      : (provider.id == "mistral"
                                         ? "Also list this provider’s Vibe accounts in Chat"
                                         : "Also list this provider’s installed CLI models in Chat"))
                             }.toggleStyle(.checkbox)
-                            Text("Chat shows both sources side by side, each row labelled with its source; Claude Desktop and Codex keep using the source chosen above. Refresh the catalogue after turning this on.")
+                            Text("Chat shows both sources side by side, each row labelled with its source; Claude Desktop and Codex keep using the source chosen above. On by default; a source that is not set up lists nothing.")
                                 .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                         }
                         if connection.credential_mode == "keychain" {

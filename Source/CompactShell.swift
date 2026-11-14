@@ -633,7 +633,7 @@ private struct SubscriptionPane: View {
 /// Chat's second credential source (`chat_both_sources`): the Keychain key
 /// while the CLI (or Mistral's Vibe) is active, the installed CLI (or Vibe)
 /// otherwise. Claude Desktop and Codex keep following the picker above; the
-/// worker drops an explicit false.
+/// worker saves only the opt-out, an explicit false; on is the default.
 private struct ChatSourceRow: View {
     @ObservedObject var model: BridgeModel
     var provider: ProviderDefinition
@@ -644,10 +644,10 @@ private struct ChatSourceRow: View {
             : "Also list this provider’s installed CLI models in Chat"
         VStack(alignment: .leading, spacing: 2) {
             OptionRow(title: title,
-                      isOn: Binding(get: { model.settings.providers[provider.id]?.chat_both_sources ?? false },
-                                    set: { model.settings.providers[provider.id]?.chat_both_sources = $0 ? true : nil }),
+                      isOn: Binding(get: { model.settings.providers[provider.id]?.chat_both_sources != false },
+                                    set: { model.settings.providers[provider.id]?.chat_both_sources = $0 ? nil : false }),
                       accent: provider.presentation.color)
-            Text("Chat shows both sources side by side, each row labelled with its source; Claude Desktop and Codex keep the source chosen above. Refresh after turning this on.")
+            Text("Chat shows both sources side by side, each row labelled with its source; Claude Desktop and Codex keep the source chosen above. On by default; a source that is not set up lists nothing.")
                 .font(.system(size: 10.5)).foregroundStyle(.tertiary).fixedSize(horizontal: false, vertical: true)
         }.padding(.top, 2)
     }

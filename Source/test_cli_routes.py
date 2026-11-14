@@ -882,7 +882,8 @@ class DiscoverProviderBranchTest(unittest.TestCase):
 
     def test_cli_mode_discovery_uses_the_adapter_not_http(self):
         settings = default_settings()
-        settings["providers"]["claude"]["credential_mode"] = "cli"
+        # The active source alone: the second, on by default, is covered below.
+        settings["providers"]["claude"].update(credential_mode="cli", chat_both_sources=False)
         called = {}
 
         def fake_discover(provider_id, **kwargs):

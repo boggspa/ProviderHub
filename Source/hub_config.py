@@ -184,9 +184,9 @@ def cli_account_dir(settings: dict, provider_id: str) -> str | None:
 
 
 #: Providers with both an API-key source and an installed-CLI source. Chat
-#: can list the two side by side (``chat_both_sources``); the desktop
-#: launchers keep following the one active ``credential_mode``. AntiGravity
-#: has only its CLI, so there is no second source to list.
+#: lists the two side by side unless ``chat_both_sources`` is false; the
+#: desktop launchers keep following the one active ``credential_mode``.
+#: AntiGravity has only its CLI, so there is no second source to list.
 CHAT_SOURCE_PROVIDERS = frozenset({"codex", "claude", "mistral", "muse", "grok"})
 CHAT_SOURCE_LABELS = {"cli": "Installed CLI", "keychain": "API key",
                       "environment": "API key (environment)", "vibe": "Vibe key"}
@@ -196,11 +196,13 @@ def chat_extra_source(connection: dict, provider_id: str) -> str | None:
     """The second credential source Chat lists for this provider, or None.
 
     With the installed CLI active it is the Keychain key, the slot "Save key"
-    writes; with any API-key source active it is the installed CLI. Nothing
-    is listed until the provider's ``chat_both_sources`` is on: the
-    per-provider choice stays the gate, as it is for the CLI source itself.
+    writes; with any API-key source active it is the installed CLI. It is
+    listed by default, so every connected login sits in Chat together; a
+    provider opts out with ``chat_both_sources: false``. A second source that
+    is not set up lists nothing: its discovery failure is recorded, never
+    raised, and its catalogue holds no models.
     """
-    if provider_id not in CHAT_SOURCE_PROVIDERS or connection.get("chat_both_sources") is not True:
+    if provider_id not in CHAT_SOURCE_PROVIDERS or connection.get("chat_both_sources") is False:
         return None
     if provider_id == "mistral":
         return "keychain" if connection.get("credential_mode") == "vibe" else "vibe"
@@ -739,16 +741,17 @@ def normalize(value: dict, slots, vibe_model: str, port: int = 11436) -> dict:
             connection["key_accounts"] = key_accounts
         if key_active is not None:
             connection["key_account"] = key_active
-        # Chat may list the provider's other credential source beside the
-        # active one. Present only while on, like the account fields.
+        # Chat lists the provider's other credential source beside the active
+        # one by default. Present only as the opt-out; a true saved by an
+        # older build is the default now and drops on the next save.
         both = requested.get("chat_both_sources")
         if both is not None:
             if type(both) is not bool:
                 raise ValueError("chat_both_sources must be true or false.")
             if provider_id not in CHAT_SOURCE_PROVIDERS:
                 raise ValueError(f"{PROVIDERS[provider_id]['name']} has only one credential source for Chat to list.")
-            if both:
-                connection["chat_both_sources"] = True
+            if not both:
+                connection["chat_both_sources"] = False
         result["providers"][provider_id] = connection
     result["branding_overrides"] = validate_overrides(value.get("branding_overrides", {}))
     if value.get("codex_model") is not None:

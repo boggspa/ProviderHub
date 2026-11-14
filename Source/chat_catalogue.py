@@ -70,16 +70,24 @@ def chat_choices(settings):
     selected = list(dict.fromkeys([*claude_routes(settings).values(),
                                   *(row["id"] for row in codex_choices(settings, inventory))]))
     native = {}
-    rows = _rows(settings, specs, selected, native=native)
+    # The second source is on by default, so it is often not set up; only one
+    # that actually lists models labels its provider's rows with their source.
+    extras = {}
     for provider, sources in (settings.get("_chat_source_specs") or {}).items():
         connection = (settings.get("providers") or {}).get(provider) or {}
         extra = chat_extra_source(connection, provider)
-        if extra and extra in sources:
-            rows.extend(_rows(settings, sources[extra], list(sources[extra]), source=extra, only=provider, native=native))
+        if extra and sources.get(extra):
+            extras[provider] = extra
+    paired = set(extras)
+    rows = _rows(settings, specs, selected, native=native, paired=paired)
+    for provider, extra in extras.items():
+        sources = settings["_chat_source_specs"][provider]
+        rows.extend(_rows(settings, sources[extra], list(sources[extra]), source=extra, only=provider,
+                          native=native, paired=paired))
     return rows
 
 
-def _rows(settings, specs, candidates, *, source=None, only=None, native=None):
+def _rows(settings, specs, candidates, *, source=None, only=None, native=None, paired=frozenset()):
     # Per-account native limits, read once per (provider, folder) per listing.
     native = {} if native is None else native
     rows, seen = [], set()
@@ -97,7 +105,7 @@ def _rows(settings, specs, candidates, *, source=None, only=None, native=None):
         connection = (settings.get("providers") or {}).get(provider)
         if not connection or connection.get("protocol") == "agent_session":
             continue
-        labelled = len(chat_sources(connection, provider)) > 1
+        labelled = provider in paired
         if source is not None:
             connection = {**connection, "credential_mode": source}
         mode = connection.get("credential_mode")
