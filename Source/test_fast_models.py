@@ -30,7 +30,7 @@ class FastModelTests(unittest.TestCase):
     def test_exact_toggle_allowlists_exclude_retired_opus_fast_modes(self):
         self.assertEqual(CLAUDE_FAST_MODELS,
                          {"claude-opus-5-5", "claude-opus-5", "claude-opus-4-8"})
-        self.assertEqual(len(OPENAI_FAST_MODELS), 9)
+        self.assertEqual(len(OPENAI_FAST_MODELS), 11)
         for model in ("claude-opus-4-7", "claude-opus-4-6", "claude-sonnet-5"):
             self.assertFalse(supports_fast_toggle("claude", model))
         self.assertFalse(supports_fast_toggle("codex", "gpt-5.5-pro"))
@@ -38,8 +38,11 @@ class FastModelTests(unittest.TestCase):
 
     def test_discovery_and_old_cache_enable_exact_openai_fast_rows(self):
         listed = ["gpt-5.5", "gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol",
-                  "gpt-6-luna", "gpt-6-sol", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-astra", "gpt-5.5-pro"]
+                  "gpt-6-luna", "gpt-6-sol", "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-astra",
+                  "gpt-6.2-astra", "gpt-6.2-sol", "gpt-5.5-pro"]
         self.assertTrue(supports_fast_toggle("codex", "gpt-6.1-sol"))
+        self.assertTrue(supports_fast_toggle("codex", "gpt-6.2-astra"))
+        self.assertTrue(supports_fast_toggle("codex", "gpt-6.2-sol"))
         inventory = discover("codex", None, "key", transport=lambda _: {
             "data": [{"id": model} for model in listed],
         })
