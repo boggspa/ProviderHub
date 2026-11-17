@@ -6,7 +6,7 @@ import json
 
 from hub_config import MODEL_VARIANT_FIELDS, SUBAGENT_POOL_SIZE, connection_signature, split_route
 from catalogue import fits_desktop_baseline, image_input_blocked
-from fast_models import supports_fast_toggle
+from fast_models import route_speeds, supports_fast_toggle
 from effort_map import display_effort_modes
 from providers import PROVIDERS
 
@@ -174,8 +174,16 @@ def _service_tiers(provider_id, entry):
     # Codex maps a selected Fast to wire service_tier "priority" and omits it,
     # silently, unless the row advertises that exact id (codex-cli 0.159).
     # OpenAI's own rows use it; every hub planner reads it as Fast.
-    return [{"id": "priority", "name": "Fast",
-             "description": "Same-model Fast processing advertised by this provider."}]
+    speeds = {option["id"]: option for option in route_speeds(
+        provider_id, entry, entry.get("model_id") or entry["id"].split("/", 1)[-1])}
+    tiers = [{"id": "priority", "name": "Fast",
+              "description": speeds.get("fast", {}).get("detail")
+              or "Same-model Fast processing advertised by this provider."}]
+    if provider_id == "codex" and "ultrafast" in speeds:
+        # Codex sends a selected tier's id as the wire service_tier; both the
+        # API and CLI planners accept "ultrafast" only where it is offered.
+        tiers.append({"id": "ultrafast", "name": "Ultrafast", "description": speeds["ultrafast"]["detail"]})
+    return tiers
 
 
 def _codex_description(provider_id, provider, context, service_tiers, speed_tier=None):

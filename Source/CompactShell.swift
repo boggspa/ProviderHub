@@ -444,7 +444,11 @@ private struct ModelRow: View {
                 }
                 chip("CL", claude != nil, Chroma.claude) { toggleClaude() }
                 chip("CX", inCodex, Chroma.codex) { model.codexMaterialise(); model.codexSetListed(entry.id, !inCodex) }
-                Image(systemName: "bolt.fill").font(.system(size: 9)).foregroundStyle(accent.opacity(entry.fast_mode == true ? 0.85 : 0)).frame(width: 10)
+                // One bolt for Fast, two when Ultrafast is offered too.
+                ChatSpeedGlyph(speed: entry.speed_options?.last?.id ?? "fast")
+                    .foregroundStyle(accent.opacity(entry.fast_mode == true || entry.speed_options?.isEmpty == false ? 0.85 : 0))
+                    .frame(width: 16)
+                    .help(entry.speed_options.map { $0.map { $0.label + ": " + $0.detail }.joined(separator: "\n") } ?? (entry.fast_mode == true ? "Fast" : ""))
                 Image(systemName: "checkmark").font(.system(size: 10, weight: .semibold)).foregroundStyle(accent.opacity(listed ? 1 : 0)).frame(width: 12)
             }
             .padding(.horizontal, 8).padding(.vertical, 5)
@@ -688,7 +692,7 @@ private struct ProviderSide: View {
             SectionLabel(text: "Selected")
             Text(model.modelLabel(entry.id)).font(.system(size: 12, weight: .semibold)).lineLimit(2)
             Text(entry.id).font(.system(size: 9.5, design: .monospaced)).foregroundStyle(.tertiary).lineLimit(1).truncationMode(.middle)
-            Text(model.contextLabel(entry) + " context" + (entry.fast_mode == true ? " · Fast" : "")).font(.system(size: 10.5)).foregroundStyle(.secondary)
+            Text(model.contextLabel(entry) + " context" + speedSummary(entry)).font(.system(size: 10.5)).foregroundStyle(.secondary)
             SectionLabel(text: "Claude tier")
             tierPills(entry, claude)
             VStack(spacing: 6) {
@@ -944,4 +948,10 @@ private struct SettingsPage: View {
             if let detail { Text(detail).font(.system(size: 10)).foregroundStyle(.tertiary).fixedSize(horizontal: false, vertical: true) }
         }.padding(.vertical, 2)
     }
+}
+
+/// " · Fast, Ultrafast" for a route's speed ladder, or "" at Standard only.
+private func speedSummary(_ entry: ModelEntry) -> String {
+    if let speeds = entry.speed_options, !speeds.isEmpty { return " · " + speeds.map(\.label).joined(separator: ", ") }
+    return entry.fast_mode == true ? " · Fast" : ""
 }

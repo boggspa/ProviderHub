@@ -280,7 +280,9 @@ struct ProviderPage: View {
         if model.vision == true { values.append("Vision") }
         if model.reasoning == true { values.append("Reasoning") }
         if let modes = model.effort_modes, !modes.isEmpty { values.append("Effort: " + modes.joined(separator: ", ")) }
-        if model.fast_mode == true { values.append("Fast supported") }
+        if let speeds = model.speed_options, !speeds.isEmpty {
+            values.append("Speeds: " + speeds.map { $0.label + " (" + $0.detail + ")" }.joined(separator: ", "))
+        } else if model.fast_mode == true { values.append("Fast supported") }
         if let tier = model.speed_tier {
             values.append(tier == "accelerated_inference" ? "Accelerated serving" : "Fast variant (always on)")
         }

@@ -22,7 +22,7 @@ from provider_registry import (
 from catalogue import image_input_blocked
 from chat_tool_order import repair_openai_tool_order
 from effort_map import CEREBRAS_EFFORT_ALIASES, DEEPSEEK_EFFORT_ALIASES, EFFORT_ORDER, MISTRAL_EFFORT_ALIASES, cap_high_end, map_effort, mistral_effort_modes, nearest_effort, ollama_effort_aliases
-from fast_models import CLAUDE_FAST_BETA, supports_fast_toggle
+from fast_models import CLAUDE_FAST_BETA, OPENAI_ULTRAFAST_MODELS, requested_speed, supports_fast_toggle
 from gemini_provider import GeminiError, prepare_request as gemini_prepare_request
 from openrouter_provider import OpenRouterError, finalize as openrouter_finalize, normalize_messages as openrouter_controls
 from qwen_provider import QwenError, normalize_controls as qwen_controls
@@ -1041,7 +1041,11 @@ def _translate_chat_payload(
         ).encode()).hexdigest()
     elif provider_id == "codex":
         tier = payload.get("service_tier")
-        if payload.get("speed") == "fast" or tier in {"fast", "priority"}:
+        if requested_speed(payload) == "ultrafast":
+            if model_spec.get("fast_mode") is not True or upstream_model not in OPENAI_ULTRAFAST_MODELS:
+                raise ProviderError("OpenAI Ultrafast is unavailable for this model.")
+            body["service_tier"] = "ultrafast"
+        elif payload.get("speed") == "fast" or tier in {"fast", "priority"}:
             if model_spec.get("fast_mode") is not True or not supports_fast_toggle(provider_id, upstream_model):
                 raise ProviderError("OpenAI Fast mode is unavailable for this model.")
             body["service_tier"] = "fast"

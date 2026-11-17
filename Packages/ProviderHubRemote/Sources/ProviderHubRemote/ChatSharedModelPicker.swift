@@ -1,5 +1,13 @@
 import SwiftUI
 
+/// One speed beyond Standard that Provider Hub offers for a model, e.g.
+/// Fast ("2x speed · 2x usage") or Ultrafast. Standard is implicit.
+struct ChatPickerSpeed: Decodable, Hashable, Identifiable {
+    var id: String
+    var label: String
+    var detail: String
+}
+
 protocol ChatPickerChoice: Identifiable where ID == String {
     var label: String { get }
     var accountLabel: String { get }
@@ -9,6 +17,11 @@ protocol ChatPickerChoice: Identifiable where ID == String {
     var connectionLabel: String { get }
     var accent: Color { get }
     var connectionAccent: Color { get }
+    var speedOptions: [ChatPickerSpeed] { get }
+}
+
+extension ChatPickerChoice {
+    var speedOptions: [ChatPickerSpeed] { [] }
 }
 
 /// The desktop's combined model picker, shared without host/model dependencies.
@@ -19,16 +32,21 @@ struct ChatSharedModelPicker<Choice: ChatPickerChoice, Mark: View>: View {
     var initialChoiceID: String?
     var initialEffort: String
     var disabled = false
+    /// Speed ("" is Standard). The Speed section appears only with a handler.
+    var initialSpeed = ""
+    var chooseSpeed: ((String) -> Void)? = nil
     var refresh: () -> Void
     var choose: (String, String) -> Void
     @ViewBuilder var mark: (Choice, Bool, CGFloat) -> Mark
     @State private var provider = ""
     @State private var choiceID = ""
     @State private var effort = ""
+    @State private var speed = ""
     @State private var search = ""
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private var choice: Choice? { choices.first { $0.id == choiceID } }
+    private var speeds: [ChatPickerSpeed] { chooseSpeed == nil ? [] : choice?.speedOptions ?? [] }
     private var groups: [String] {
         var seen = Set<String>()
         return choices.compactMap { seen.insert($0.connectionID).inserted ? $0.connectionID : nil }
@@ -52,7 +70,7 @@ struct ChatSharedModelPicker<Choice: ChatPickerChoice, Mark: View>: View {
                     providerRail.frame(width: compact ? 56 : 64)
                     Divider()
                     modelList.frame(maxWidth: .infinity)
-                    if !compact { Divider(); reasoning.frame(width: 120) }
+                    if !compact { Divider(); reasoning.frame(width: speeds.isEmpty ? 120 : 138) }
                 }
                 if compact {
                     Divider()
@@ -63,13 +81,19 @@ struct ChatSharedModelPicker<Choice: ChatPickerChoice, Mark: View>: View {
                                 if let choice { ForEach(Array(choice.efforts.reversed()) + [""], id: \.self) { effortRow($0, accent: choice.accent) } }
                             }
                         }
+                        if let choice, !speeds.isEmpty {
+                            Text("Speed").font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary)
+                            ScrollView(.horizontal, showsIndicators: false) {
+                                HStack(spacing: 16) { ForEach(speedValues, id: \.self) { speedRow($0, accent: choice.accent) } }
+                            }
+                        }
                     }.padding(.horizontal, 14).padding(.vertical, 8)
                 }
                 Divider()
                 HStack {
                     Text("Enabled in Provider Hub").font(.system(size: 10.5)).foregroundStyle(.secondary)
                     Spacer()
-                    Button("Use model") { if let choice { choose(choice.id, effort) } }.controlSize(.small)
+                    Button("Use model") { if let choice { chooseSpeed?(speed); choose(choice.id, effort) } }.controlSize(.small)
                         .buttonStyle(.borderedProminent).tint(choice?.accent ?? .accentColor)
                         .disabled(choice == nil || disabled).keyboardShortcut(.defaultAction)
                 }.padding(.horizontal, 14).padding(.vertical, 12)
@@ -82,6 +106,7 @@ struct ChatSharedModelPicker<Choice: ChatPickerChoice, Mark: View>: View {
         let row = choices.first { $0.id == initialChoiceID } ?? choices.first
         choiceID = row?.id ?? ""; provider = row?.connectionID ?? ""
         effort = row?.efforts.contains(initialEffort) == true ? initialEffort : ""
+        speed = row?.speedOptions.contains { $0.id == initialSpeed } == true ? initialSpeed : ""
     }
     private var providerRail: some View {
         ScrollView(showsIndicators: false) {
@@ -106,7 +131,11 @@ struct ChatSharedModelPicker<Choice: ChatPickerChoice, Mark: View>: View {
             ScrollView {
                 LazyVStack(spacing: 2) {
                     ForEach(visible) { row in
-                        Button { choiceID = row.id; if !row.efforts.contains(effort) { effort = "" } } label: {
+                        Button {
+                            choiceID = row.id
+                            if !row.efforts.contains(effort) { effort = "" }
+                            if !row.speedOptions.contains(where: { $0.id == speed }) { speed = "" }
+                        } label: {
                             HStack(spacing: 7) {
                                 mark(row, false, 14)
                                 VStack(alignment: .leading, spacing: 2) {
@@ -114,6 +143,10 @@ struct ChatSharedModelPicker<Choice: ChatPickerChoice, Mark: View>: View {
                                     Text(row.accountLabel + (row.context.map { " · \($0 / 1000)K" } ?? "")).font(.system(size: 10)).foregroundStyle(.secondary)
                                 }
                                 Spacer(minLength: 2)
+                                if chooseSpeed != nil, !row.speedOptions.isEmpty {
+                                    Image(systemName: "bolt.fill").font(.system(size: 8)).foregroundStyle(.secondary.opacity(0.7))
+                                        .help("Offers " + row.speedOptions.map(\.label).joined(separator: " and "))
+                                }
                                 if choiceID == row.id { Image(systemName: "checkmark").font(.system(size: 10, weight: .semibold)).foregroundStyle(row.accent) }
                             }.padding(.horizontal, 8).padding(.vertical, 7).frame(maxWidth: .infinity, alignment: .leading)
                                 .background(RoundedRectangle(cornerRadius: 6).fill(choiceID == row.id ? row.accent.opacity(0.1) : .clear)).contentShape(Rectangle())
@@ -130,7 +163,32 @@ struct ChatSharedModelPicker<Choice: ChatPickerChoice, Mark: View>: View {
             if let choice, !choice.efforts.isEmpty {
                 ScrollView { VStack(alignment: .leading, spacing: 3) { ForEach(Array(choice.efforts.reversed()) + [""], id: \.self) { effortRow($0, accent: choice.accent) } } }
             } else { Text("Provider default").font(.system(size: 11)).foregroundStyle(.secondary); Spacer() }
+            if let choice, !speeds.isEmpty {
+                Divider()
+                Text("Speed").font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 2) { ForEach(speedValues, id: \.self) { speedRow($0, accent: choice.accent) } }
+            }
         }.padding(.horizontal, 10).padding(.vertical, 10).frame(maxHeight: .infinity, alignment: .top)
+    }
+    /// Standard first, then each offered speed, cheapest first.
+    private var speedValues: [String] { [""] + speeds.map(\.id) }
+    private func speedRow(_ value: String, accent: Color) -> some View {
+        let option = speeds.first { $0.id == value }
+        let title = option?.label ?? "Standard"
+        let selected = speed == value
+        return Button { withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.12)) { speed = value } } label: {
+            HStack(alignment: .firstTextBaseline, spacing: 7) {
+                ChatSpeedGlyph(speed: value).foregroundStyle(selected ? accent : Color.secondary.opacity(0.55)).frame(width: 14, alignment: .leading)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(title).font(.system(size: 11, weight: selected ? .semibold : .regular)).foregroundStyle(selected ? Color.primary : .secondary)
+                    if let detail = option?.detail, !detail.isEmpty {
+                        Text(detail).font(.system(size: 9.5)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }.frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 4).contentShape(Rectangle())
+        }.buttonStyle(.plain)
+            .accessibilityLabel("Speed: " + title + (option.map { ", " + $0.detail } ?? ""))
+            .accessibilityAddTraits(selected ? .isSelected : [])
     }
     private func effortRow(_ value: String, accent: Color) -> some View {
         let title = ChatSharedEffort.title(value)
@@ -149,5 +207,20 @@ enum ChatSharedEffort {
     static func title(_ effort: String) -> String {
         if effort.isEmpty { return "Default" }
         return effort.lowercased() == "xhigh" ? "Extra high" : effort.prefix(1).uppercased() + effort.dropFirst()
+    }
+}
+
+/// Standard is a dot, Fast one bolt, Ultrafast two: a ladder that reads at a glance.
+struct ChatSpeedGlyph: View {
+    var speed: String
+    var body: some View {
+        switch speed {
+        case "fast": Image(systemName: "bolt.fill").font(.system(size: 9, weight: .semibold))
+        case "ultrafast":
+            HStack(spacing: -2) {
+                Image(systemName: "bolt.fill"); Image(systemName: "bolt.fill")
+            }.font(.system(size: 9, weight: .semibold))
+        default: Circle().frame(width: 6, height: 6)
+        }
     }
 }

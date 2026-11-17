@@ -181,6 +181,8 @@ struct RouteSettings: Codable, Equatable {
     var codex_subagent_route: String?
 }
 struct ModelEntry: Decodable, Identifiable {
+    /// One speed beyond Standard a route offers, with its usage detail.
+    struct SpeedOption: Decodable, Hashable { var id: String; var label: String; var detail: String }
     var id: String
     var model_id: String?
     var provider_id: String?
@@ -196,6 +198,8 @@ struct ModelEntry: Decodable, Identifiable {
     var reasoning: Bool?
     var effort_modes: [String]?
     var fast_mode: Bool?
+    /// Speeds beyond Standard (Fast, Ultrafast) with their usage detail.
+    var speed_options: [SpeedOption]?
     var speed_tier: String?
     var web_search: Bool?
     var aliases: [String]?

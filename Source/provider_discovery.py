@@ -35,7 +35,7 @@ from provider_registry import (
 )
 from devin_agent import catalogue as devin_catalogue
 from effort_map import mistral_effort_modes, ollama_effort_modes
-from fast_models import supports_fast_toggle
+from fast_models import speed_options, supports_fast_toggle
 from gemini_provider import GeminiError, discover as gemini_discover
 from openrouter_provider import OpenRouterError, discover as openrouter_discover
 from qwen_provider import catalogue as qwen_catalogue
@@ -741,6 +741,8 @@ def _models_from_api(provider_id: str, raw: dict, evidence: str, *, enriched=Non
             models.append(_catalogue_entry(
                 identifier,
                 fast_mode=supports_fast_toggle(provider_id, identifier),
+                **({"speed_options": speed_options(provider_id, identifier)}
+                   if speed_options(provider_id, identifier) else {}),
                 source="provider_api",
                 evidence=evidence,
             ))

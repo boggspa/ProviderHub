@@ -575,7 +575,8 @@ class ChatService:
 
     def summaries(self):
         keys = ("id", "title", "updated", "route", "account", "workspace", "effort", "approvalMode", "scope")
-        return [{key: chat[key] for key in keys} for chat in self.store.headers()]
+        return [{**{key: chat[key] for key in keys}, **({"speed": chat["speed"]} if chat.get("speed") else {})}
+                for chat in self.store.headers()]
 
     def publish(self):
         with self._mutex: self._publish()
@@ -673,11 +674,21 @@ class ChatService:
             raise ValueError("This model/account is no longer in the gateway catalogue. Refresh models and choose a new chat.")
         return row
 
-    def create(self, identifier, workspace, effort="", approval_mode="manual"):
+    @staticmethod
+    def check_speed(choice, speed):
+        """Validate a Chat speed choice: "" is Standard, else one the route offers."""
+        if speed in ("", "standard"):
+            return ""
+        if not isinstance(speed, str) or speed not in {option.get("id") for option in choice.get("speeds") or []}:
+            raise ValueError("Choose a speed this model offers.")
+        return speed
+
+    def create(self, identifier, workspace, effort="", approval_mode="manual", speed=""):
         choice = self.choice(identifier)
         folder = available_workspace(workspace)
         if effort and effort not in choice["efforts"]:
             raise ValueError("Choose one of this model's supported reasoning levels.")
+        speed = self.check_speed(choice, speed)
         if approval_mode not in APPROVAL_MODES:
             raise ValueError("Choose Manual, Accept Edits, or YOLO.")
         self.workspaces.remember(folder)
@@ -686,6 +697,8 @@ class ChatService:
                      "route": choice["route"], "account": choice["account"], "scope": choice["scope"],
                      "workspace": str(folder), "effort": effort, "approvalMode": approval_mode,
                      "entries": [], "messages": [], "status": "ready"}
+        if speed:
+            self.chat["speed"] = speed
         self.store.save(self.chat); self.publish()
 
     def add(self, item):
@@ -897,23 +910,30 @@ class ChatService:
         elif action == "configure":
             if self.chat and command.get("expectedWorkspace", self.chat["workspace"]) != self.chat["workspace"]:
                 raise ValueError("This chat's workspace changed. Choose its approval mode again.")
-            if chat_team.enabled(self.chat) and ("choice" in command or "effort" in command):
+            if chat_team.enabled(self.chat) and ("choice" in command or "effort" in command or "speed" in command):
                 raise ValueError("Choose each member's model and effort in Team.")
             choice = self.choice(command.get("choice") or (self.models[0]["id"] if not self.chat and self.models else None))
             folder = command.get("workspace", self.current_workspace())
             if "workspace" in command:
                 folder = available_workspace(folder)
             effort = command.get("effort", self.chat["effort"] if self.chat and choice["route"] == self.chat["route"] else "")
+            # Speed carries over only to the same model, and only while offered.
+            kept = self.chat.get("speed", "") if self.chat and choice["route"] == self.chat["route"] else ""
+            speed = self.check_speed(choice, command["speed"]) if "speed" in command else (
+                kept if kept in {option.get("id") for option in choice.get("speeds") or []} else "")
             mode = command.get("approvalMode", self.chat.get("approvalMode", "manual") if self.chat else "manual")
             if mode not in APPROVAL_MODES:
                 raise ValueError("Choose Manual, Accept Edits, or YOLO.")
-            if self.chat and not self.chat["entries"] and not self.chat.get("team") and not self.side and not (("effort" in command or "approvalMode" in command) and "choice" not in command and "workspace" not in command):
+            settings_only = (("effort" in command or "approvalMode" in command or "speed" in command)
+                             and "choice" not in command and "workspace" not in command)
+            if self.chat and not self.chat["entries"] and not self.chat.get("team") and not self.side and not settings_only:
                 old_id = self.chat["id"]
-                self.create(choice["id"], folder, effort, mode); self.store.delete(old_id); self.publish()
-            elif self.chat and ("effort" in command or "approvalMode" in command) and "choice" not in command and "workspace" not in command:
+                self.create(choice["id"], folder, effort, mode, speed); self.store.delete(old_id); self.publish()
+            elif self.chat and settings_only:
                 if effort and effort not in choice["efforts"]:
                     raise ValueError("Choose a supported reasoning level.")
                 # CLI adapters already restart native reasoning when effort changes.
+                self.chat["speed"] = speed
                 self.chat["effort"] = effort; self.chat["approvalMode"] = mode; self.save(); self.publish()
             elif self.chat and "choice" in command and folder == self.chat["workspace"]:
                 if effort and effort not in choice["efforts"]:
@@ -926,7 +946,7 @@ class ChatService:
                 archive["ended"] = now()
                 self.chat.setdefault("archives", []).append(archive)
                 self.chat.update(route=choice["route"], account=choice["account"], scope=choice["scope"],
-                                 effort=effort, messages=messages, status="ready")
+                                 effort=effort, speed=speed, messages=messages, status="ready")
                 self.add(entry("notice", "Switched to " + choice["label"] + ". Conversation and tool results carried over; earlier provider reasoning kept in the saved log.", choice["route"]))
                 self.save(); self.publish()
             else:
@@ -1108,6 +1128,10 @@ class ChatService:
             memory = {"role": "user", "content": [*(memory["content"] if memory else []), *board["content"]]}
         if chat["effort"]:
             payload["output_config"] = {"effort": chat["effort"]}
+        speed = chat.get("speed") or ""
+        if speed and speed in {option.get("id") for option in choice.get("speeds") or []}:
+            # The gateway's planners read this field and validate it per route.
+            payload["speed"] = speed
         if isinstance(context, int) and context > 0:
             budget = max(1, int(context * .85) - payload["max_tokens"])
             # Trim to a lower watermark rather than shaving one tool cycle

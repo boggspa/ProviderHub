@@ -10,6 +10,8 @@ struct ChatSummary: Decodable, Identifiable {
     var account: String
     var workspace: String
     var effort: String
+    /// "fast" or "ultrafast"; absent means Standard.
+    var speed: String?
     var approvalMode: String?
     var scope: String?
 }
@@ -23,6 +25,8 @@ struct ChatRoute: Decodable, Identifiable {
     var accountLabel: String
     var scope: String
     var efforts: [String]
+    /// Speeds beyond Standard this model/account may request.
+    var speeds: [ChatRouteSpeed]?
     var context: Int?
     var supportsTools: Bool
     var supportsWebSearch: Bool?
@@ -32,6 +36,13 @@ struct ChatRoute: Decodable, Identifiable {
     var connectionID: String { connectionPresentation?.runtimeProvider ?? String(route.split(separator: "/").first ?? "") }
     var connectionLabel: String { connectionPresentation?.displayProvider ?? connectionID.capitalized }
     var connectionAccent: Color { connectionPresentation?.color ?? accent }
+}
+
+/// One speed beyond Standard offered for a Chat route ("fast", "ultrafast").
+struct ChatRouteSpeed: Decodable, Hashable {
+    var id: String
+    var label: String
+    var detail: String
 }
 
 struct ChatQuestionRecord: Decodable, Identifiable {
@@ -642,16 +653,23 @@ final class ChatModel: ObservableObject {
         guard !busy, teamRequest == nil, team?.enabled != true, let choice = models.first(where: { $0.id == choiceID }) else { return }
         configure(["choice": choice.id])
     }
-    func setSelection(_ choiceID: String, effort: String) {
+    func setSelection(_ choiceID: String, effort: String, speed: String? = nil) {
         guard !busy, teamRequest == nil, team?.enabled != true, let choice = models.first(where: { $0.id == choiceID }) else { return }
-        configure(["choice": choice.id, "effort": effort])
+        var fields: [String: Any] = ["choice": choice.id, "effort": effort]
+        if let speed { fields["speed"] = speed }
+        configure(fields)
     }
     private func configure(_ fields: [String: Any]) {
         var command = fields; command["command"] = "configure"
         if let stateChatID { command["id"] = stateChatID; command["chat"] = stateChatID }
         write(command)
     }
-    func setEffort(_ effort: String) { guard !busy, teamRequest == nil, team?.enabled != true else { return }; configure(["effort": effort]) }
+    func setEffort(_ effort: String, speed: String? = nil) {
+        guard !busy, teamRequest == nil, team?.enabled != true else { return }
+        var fields: [String: Any] = ["effort": effort]
+        if let speed { fields["speed"] = speed }
+        configure(fields)
+    }
     func setApprovalMode(_ mode: String, chat: String? = nil, workspace: String? = nil) {
         guard let owner = chat ?? stateChatID else { return }
         withChat(owner) {

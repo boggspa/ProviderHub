@@ -5,8 +5,9 @@ from claude_cli_agent import ClaudeCliAgentError, build_argv
 from cli_routes import CliRouteError, _hub_row, plan_turn
 from catalogue import route_specs
 from codex_catalogue import project_codex
-from fast_models import (CLAUDE_FAST_MODELS, OPENAI_FAST_MODELS,
-                         fixed_speed_tier, supports_fast_toggle)
+from fast_models import (CLAUDE_FAST_MODELS, OPENAI_FAST_MODELS, OPENAI_ULTRAFAST_MODELS,
+                         fixed_speed_tier, requested_speed, route_speeds, speed_options,
+                         supports_fast_toggle)
 from hub_config import SLOTS, defaults, project_catalogue
 from providers import ProviderError, discover, prepare_request
 from protocol import model_catalog
@@ -56,7 +57,8 @@ class FastModelTests(unittest.TestCase):
             projected = project_codex(config, {"models": rows})["models"][0]
             # Codex sends Fast as wire "priority" only when a row advertises that id.
             self.assertEqual([tier["id"] for tier in projected["service_tiers"]],
-                             ["priority"] if model in OPENAI_FAST_MODELS else [])
+                             (["priority"] + (["ultrafast"] if model in OPENAI_ULTRAFAST_MODELS else []))
+                             if model in OPENAI_FAST_MODELS else [])
 
     def test_discovery_and_old_cache_gate_claude_opus_fast_rows(self):
         listed = ["claude-opus-5-5", "claude-opus-5", "claude-opus-4-8",
@@ -190,6 +192,86 @@ class FastModelTests(unittest.TestCase):
                 self.assertEqual(item["fast_mode"], fast)
                 self.assertEqual(item.get("speed_tier"), fixed)
                 self.assertTrue(item["description"].endswith("token context"))
+
+
+
+NATIVE_FAST = {"id": "priority", "name": "Fast", "description": "2x speed, increased usage"}
+NATIVE_ULTRA = {"id": "ultrafast", "name": "Ultrafast", "description": "Up to 4.5x speed"}
+
+
+class SpeedLadderTests(unittest.TestCase):
+    message = {"messages": [{"role": "user", "content": "Hello"}]}
+
+    def test_ultrafast_follows_the_published_api_list(self):
+        self.assertEqual(OPENAI_ULTRAFAST_MODELS, {"gpt-6.2-astra", "gpt-6.2-sol", "gpt-6-astra", "gpt-6.1-sol"})
+        self.assertEqual([o["id"] for o in speed_options("codex", "gpt-6.2-sol")], ["fast", "ultrafast"])
+        self.assertEqual([o["id"] for o in speed_options("codex", "gpt-6.1-terra")], ["fast"])
+        self.assertEqual(speed_options("codex", "gpt-5.5-pro"), [])
+        self.assertEqual([o["id"] for o in speed_options("claude", "opus")], ["fast"])
+        self.assertEqual(speed_options("antigravity", "gemini-3.8-flash"), [])
+
+    def test_subscription_routes_offer_only_what_the_account_card_lists(self):
+        plain = speed_options("codex", "gpt-6.2-astra", source="cli", native_tiers=[NATIVE_FAST])
+        self.assertEqual([(o["id"], o["wire"]) for o in plain], [("fast", "priority")])
+        self.assertEqual(plain[0]["detail"], "2x speed, 2x usage")
+        pro = speed_options("codex", "gpt-6.2-astra", source="cli", native_tiers=[NATIVE_ULTRA, NATIVE_FAST])
+        self.assertEqual([o["id"] for o in pro], ["fast", "ultrafast"])
+        self.assertEqual(pro[1]["detail"], "Up to 4.5x speed · 6x usage")
+        self.assertEqual(speed_options("codex", "gpt-6.2-astra", source="cli", native_tiers=[]), [])
+        # Without a card, a subscription route offers the documented Fast alone.
+        self.assertEqual([o["id"] for o in speed_options("codex", "gpt-6.1-sol", source="cli")], ["fast"])
+
+    def test_cli_rows_store_the_card_ladder(self):
+        row = _hub_row("codex", {"id": "gpt-6.2-sol", "serviceTiers": [NATIVE_FAST, NATIVE_ULTRA]})
+        self.assertEqual([o["id"] for o in row["speed_options"]], ["fast", "ultrafast"])
+        self.assertIs(row["fast_mode"], True)
+        without = _hub_row("codex", {"id": "gpt-6.2-sol", "serviceTiers": []})
+        self.assertEqual(without["speed_options"], [])
+        self.assertIs(without["fast_mode"], False)
+
+    def test_route_speeds_prefers_stored_options_and_upgrades_old_entries(self):
+        stored = {"fast_mode": True, "speed_options": [{"id": "fast", "label": "Fast", "detail": "x"}, {"id": "bogus"}]}
+        self.assertEqual([o["id"] for o in route_speeds("codex", stored, "gpt-6.2-sol")], ["fast"])
+        self.assertEqual([o["id"] for o in route_speeds("codex", {"fast_mode": True, "id": "gpt-6-astra"})],
+                         ["fast", "ultrafast"])
+        self.assertEqual(route_speeds("codex", {"fast_mode": False, "id": "gpt-6-astra"}), [])
+
+    def test_requested_speed_normalises_both_vocabularies(self):
+        self.assertEqual(requested_speed({"speed": "ultrafast"}), "ultrafast")
+        self.assertEqual(requested_speed({"service_tier": "ultrafast"}), "ultrafast")
+        self.assertEqual(requested_speed({"service_tier": "priority"}), "fast")
+        self.assertEqual(requested_speed({"speed": "standard"}), "standard")
+
+    def test_api_ultrafast_reaches_the_wire_only_on_supported_models(self):
+        for field in ({"speed": "ultrafast"}, {"service_tier": "ultrafast"}):
+            ultra = prepare_request("codex", None, "key", prompt(**field), "gpt-6.2-sol", {"fast_mode": True})
+            self.assertEqual(ultra["body"]["service_tier"], "ultrafast")
+        with self.assertRaises(ProviderError):
+            prepare_request("codex", None, "key", prompt(speed="ultrafast"), "gpt-6.1-terra", {"fast_mode": True})
+
+    def test_cli_ultrafast_uses_the_card_id_and_never_exceeds_the_plan(self):
+        offered = {"fast_mode": True, "speed_options": speed_options(
+            "codex", "gpt-6.2-sol", source="cli", native_tiers=[NATIVE_FAST, NATIVE_ULTRA])}
+        body = plan_turn("codex", "gpt-6.2-sol", {**self.message, "speed": "ultrafast"}, offered, wanted_output=100)["body"]
+        self.assertEqual(body["service_tier"], "ultrafast")
+        plain = {"fast_mode": True, "speed_options": speed_options(
+            "codex", "gpt-6.2-sol", source="cli", native_tiers=[NATIVE_FAST])}
+        with self.assertRaises(CliRouteError):
+            plan_turn("codex", "gpt-6.2-sol", {**self.message, "service_tier": "ultrafast"}, plain, wanted_output=100)
+        with self.assertRaises(CliRouteError):
+            plan_turn("claude", "opus", {**self.message, "speed": "ultrafast"}, {"fast_mode": True}, wanted_output=100)
+        fast = plan_turn("codex", "gpt-6.2-sol", {**self.message, "speed": "fast"}, plain, wanted_output=100)["body"]
+        self.assertEqual(fast["service_tier"], "fast")
+
+    def test_codex_desktop_rows_describe_each_tier(self):
+        config = defaults(SLOTS, "mistral-test")
+        inventory = cached_inventory("codex", "gpt-6.2-astra", fast_mode=True)
+        inventory["models"][0]["speed_options"] = speed_options(
+            "codex", "gpt-6.2-astra", source="cli", native_tiers=[NATIVE_FAST, NATIVE_ULTRA])
+        rows = project_catalogue("codex", inventory, config)
+        tiers = project_codex(config, {"models": rows})["models"][0]["service_tiers"]
+        self.assertEqual([(t["id"], t["name"]) for t in tiers], [("priority", "Fast"), ("ultrafast", "Ultrafast")])
+        self.assertIn("6x usage", tiers[1]["description"])
 
 
 if __name__ == "__main__":

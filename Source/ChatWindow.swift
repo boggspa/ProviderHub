@@ -349,6 +349,10 @@ private struct ChatHeader: View {
                 if let effort = model.selected?.effort, !effort.isEmpty {
                     Text("· " + ChatSharedEffort.title(effort)).font(HubTheme.Typography.detail).foregroundStyle(Semantic.secondaryInk)
                 }
+                if let speed = model.selected?.speed, !speed.isEmpty {
+                    ChatSpeedGlyph(speed: speed).foregroundStyle(model.selectedRoute?.accent ?? Semantic.secondaryInk)
+                        .accessibilityLabel(speed == "ultrafast" ? "Ultrafast" : "Fast")
+                }
                 Image(systemName: "chevron.down").font(.system(size: 9)).foregroundStyle(Semantic.secondaryInk)
             }
             .lineLimit(1)

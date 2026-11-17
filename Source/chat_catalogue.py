@@ -20,6 +20,7 @@ from hub_config import (CHAT_SOURCE_LABELS, chat_extra_source, chat_sources, cla
                         connection_signature, split_chat_account)
 from model_names import friendly_model_name
 from effort_map import display_effort_modes
+from fast_models import route_speeds, speed_options
 
 
 def native_search_available(spec, connection, provider):
@@ -123,10 +124,12 @@ def _rows(settings, specs, candidates, *, source=None, only=None, native=None, p
         connection_presentation = resolve_presentation(provider, overrides=overrides)
         label = presentation.get("modelLabel") or spec.get("display_name") or model
         efforts = display_effort_modes(spec)
+        speeds = route_speeds(provider, spec, model)
         for account in accounts:
             identifier = account["id"] if source is None else source + ":" + account["id"]
             _, _, directory, scope = chat_connection(settings, provider, identifier)
             account_spec = spec
+            account_speeds = speeds
             if mode == "cli":
                 # The gateway's frozen specs follow the active account at its
                 # start; each login shows the window its own cards allow now.
@@ -134,11 +137,24 @@ def _rows(settings, specs, candidates, *, source=None, only=None, native=None, p
                 if key not in native:
                     native[key] = native_context_limits(provider, config_dir=directory)
                 account_spec = native_context_spec(provider, model, spec, limits=native[key].get(model) or {})
+                if provider == "codex":
+                    # Each plan's own card lists the speeds it may use.
+                    tier_key = ("tiers", directory)
+                    if tier_key not in native:
+                        try:
+                            from codex_cli_agent import native_service_tiers
+                            native[tier_key] = native_service_tiers(directory or None)
+                        except Exception:  # noqa: BLE001 - fall back to the frozen spec
+                            native[tier_key] = {}
+                    if model in native[tier_key]:
+                        account_speeds = speed_options(provider, model, source="cli",
+                                                       native_tiers=native[tier_key][model])
             account_label = account["label"] + (" · " + CHAT_SOURCE_LABELS.get(mode, mode) if labelled else "")
             rows.append({"id": route + "|" + identifier, "route": route, "label": label,
                          "provider": presentation["displayProvider"], "account": identifier,
                          "accountLabel": account_label, "source": mode, "scope": scope,
-                         "efforts": efforts, "context": account_spec.get("runtime_context") or account_spec.get("context"),
+                         "efforts": efforts, "speeds": account_speeds,
+                         "context": account_spec.get("runtime_context") or account_spec.get("context"),
                          "max_output": spec.get("max_output"), "supportsTools": spec.get("tools") is not False,
                          "supportsWebSearch": native_search_available(spec, connection, provider),
                          "vision": spec.get("vision"),

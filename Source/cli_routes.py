@@ -37,7 +37,7 @@ from cli_tool_call import (HOST_EXECUTION_NOTE, MAX_CALLS_PER_TURN, TOOL_RESULTS
                            ToolCallParser, hosted_search_note, normalize_tools,
                            render_tool_anchor, render_tool_manifest, validate_host_call)
 from effort_map import EFFORT_ORDER
-from fast_models import fixed_speed_tier, supports_fast_toggle
+from fast_models import fixed_speed_tier, requested_speed, route_speeds, speed_options, supports_fast_toggle
 from cli_images import (IMAGE_COORDINATE_NOTE, CliImageError, image_label,
                         normalize_image, normalize_images)
 from hub_config import CLI_ACCOUNT_PROVIDERS, MODEL_ID
@@ -172,6 +172,13 @@ def _hub_row(provider_id: str, row):
         "source": "cli",
         "evidence": row.get("evidence") or f"the installed {ADAPTERS[provider_id][1]} CLI",
     }
+    # A Codex account's own card lists the speeds its plan allows (Ultrafast
+    # only on eligible plans); other CLIs follow the published lists.
+    native_tiers = row.get("serviceTiers") if provider_id == "codex" and isinstance(row.get("serviceTiers"), list) else None
+    speeds = speed_options(provider_id, identifier, source="cli", native_tiers=native_tiers)
+    if speeds or native_tiers is not None:
+        result["speed_options"] = speeds
+        result["fast_mode"] = any(option["id"] == "fast" for option in speeds)
     if type(row.get("runtime_context")) is int and row["runtime_context"] > 0:
         result["runtime_context"] = row["runtime_context"]
     # Hosted search only where the adapter can relay it and the vendor's own
@@ -532,10 +539,17 @@ def plan_turn(provider_id: str, upstream_model: str, payload: dict, spec: dict,
     if provider_id in {"codex", "claude"}:
         tier = payload.get("service_tier")
         speed = payload.get("speed")
-        requested_fast = speed == "fast" or tier in {"fast", "priority"}
+        wanted = requested_speed(payload)
+        requested_fast = wanted == "fast"
         if requested_fast and (spec.get("fast_mode") is not True
                                or not supports_fast_toggle(provider_id, upstream_model)):
             raise CliRouteError(f"{provider_id.title()} Fast mode is unavailable for this model.")
+        if wanted == "ultrafast":
+            offered = {option["id"]: option for option in route_speeds(provider_id, spec, upstream_model)}
+            if provider_id != "codex" or "ultrafast" not in offered:
+                raise CliRouteError(f"{provider_id.title()} Ultrafast is unavailable for this model or account.")
+            # The account card's own id for the tier; the app-server takes it verbatim.
+            request["service_tier"] = offered["ultrafast"].get("wire") or "ultrafast"
         if provider_id == "claude":
             if speed not in (None, "standard", "fast") or tier not in (
                     None, "", "auto", "default", "standard", "fast", "priority"):
@@ -545,7 +559,7 @@ def plan_turn(provider_id: str, upstream_model: str, payload: dict, spec: dict,
             request["fast_mode"] = requested_fast
         elif requested_fast:
             request["service_tier"] = "fast"
-        elif tier is not None:
+        elif tier is not None and wanted != "ultrafast":
             request["service_tier"] = tier
     if search is not None:
         # Set only by the Responses planner, for a route whose catalogue entry

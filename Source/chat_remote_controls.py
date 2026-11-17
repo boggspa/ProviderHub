@@ -13,7 +13,7 @@ VERSION = 3
 FIELDS = {
     "team": ("enabled", "status", "activeMemberID", "activeMemberIDs", "execution", "runUsage", "limitReason", "members"),
     "member": ("id", "name", "label", "choice", "route", "effort", "responsibility", "status", "nextStep", "contributions", "contributionID", "usage", "context", "failureReason", "waitReason", "pendingChange", "memberStoppedByUser"),
-    "model": ("id", "route", "label", "provider", "accountLabel", "efforts", "context", "supportsTools", "presentation", "connectionPresentation"),
+    "model": ("id", "route", "label", "provider", "accountLabel", "efforts", "speeds", "context", "supportsTools", "presentation", "connectionPresentation"),
     "side": ("id", "label", "route", "effort", "status", "busy", "notice", "entries", "truncated"),
     "process": ("id", "pid", "command", "status", "code", "output", "started", "ended", "memberID", "route", "truncated"),
     "file": ("path", "oldPath", "status", "added", "deleted", "binary", "diff"),

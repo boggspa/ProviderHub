@@ -44,7 +44,37 @@ desktop app ignores the entry's description and always labels Fast "1.5x
 speed, increased usage"; OpenAI lists 2x for GPT-6.1 Sol and GPT-6 Astra.
 A toggle applies from the next message in the same thread. Ultrafast
 (`service_tier: "ultrafast"`; GPT-6.2 Astra, GPT-6.2 Sol, GPT-6 Astra and
-GPT-6.1 Sol, plan- and workspace-gated) is not offered.
+GPT-6.1 Sol, plan- and workspace-gated) is offered as described below.
+
+## Speed ladder (Standard, Fast, Ultrafast)
+
+Added 2026-11-17. One speed toggle cannot describe providers whose tiers
+differ in speed and price, so every catalogue entry carries `speed_options`:
+the speeds beyond Standard, cheapest first, each `{id, label, detail}`, using
+the hub's ids `fast` and `ultrafast` (`fast_models.speed_options`).
+
+- **Codex CLI (ChatGPT sign-in):** the account's own model card decides.
+  `serviceTiers` from `model/list` (or `service_tiers` in that account's
+  `models_cache.json`) lists only the tiers its plan may use, so Ultrafast
+  appears only where OpenAI's card offers it. The detail keeps OpenAI's speed
+  wording and adds the included-usage multiplier from
+  [Codex pricing](https://learn.chatgpt.com/docs/pricing#speed-multipliers):
+  Fast 2x on GPT-6.2, 2.5x on GPT-6.1 and GPT-6; Ultrafast 6x on GPT-6.2 and
+  8x on GPT-6 Astra and GPT-6.1 Sol. Each option records the card's own tier
+  id as `wire`, which the CLI planner passes to the app-server.
+- **OpenAI API:** Fast on the Fast list; Ultrafast on the four
+  [Ultrafast models](https://developers.openai.com/api/docs/guides/ultrafast-mode),
+  sent as `service_tier: "ultrafast"`. API keys pay API token prices.
+- **Claude:** Fast only (`speed: "fast"`), up to 2.5x output speed at premium
+  pricing. Ultrafast requests are rejected.
+
+Where it shows: Chat's model picker has a **Speed** section under Reasoning
+(dot for Standard, one bolt for Fast, two for Ultrafast, each with its usage
+detail), the composer chip shows the chosen bolt, and Provider route rows show
+two bolts when Ultrafast is offered. A chat saves its speed, keeps it across
+effort changes, and drops it when you switch to a model that does not offer
+it. Side Chats, helpers and Team members run at Standard. Codex Desktop
+receives an extra `ultrafast` service tier on rows that offer it.
 Claude Desktop's `/v1/models` response carries `fast_mode` and fixed-route
 `speed_tier` metadata, while its subtitle remains context-only. The native
 client may ignore those extra fields. Both the API and CLI planners validate
