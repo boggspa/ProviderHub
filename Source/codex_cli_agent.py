@@ -646,6 +646,115 @@ def _code_mode_cards(payload):
                for card in payload["models"])
 
 
+#: How old a pinned catalogue cache may get before the hub has the installed
+#: runtime fetch it again. Seen live on 17 Nov 2026: an extra account's cache
+#: stayed at 0.159.0 for three weeks and hid GPT-6.2. A direct-mode copy pins
+#: every app-server the hub starts there, so none of them re-fetches it, and
+#: Codex Desktop and the CLI only maintain the default home.
+_CATALOG_MAX_AGE = 24 * 3600
+#: One refresh attempt per cache in this window, whatever its outcome.
+_CATALOG_REFRESH_COOLDOWN = 300
+_CATALOG_REFRESH_TIMEOUT = 20
+_catalog_refresh_attempts: dict[str, float] = {}
+
+
+def _version_tuple(text):
+    match = re.match(r"(\d+)\.(\d+)(?:\.(\d+))?", str(text or ""))
+    return tuple(int(part or 0) for part in match.groups()) if match else None
+
+
+_runtime_versions: dict[tuple, tuple | None] = {}
+
+
+def _runtime_version(executable):
+    """The installed runtime's version, cached per binary identity; None if unknown."""
+    try:
+        info = os.stat(executable)
+    except (OSError, TypeError, ValueError):
+        return None
+    key = (str(executable), info.st_mtime_ns, info.st_size)
+    if key not in _runtime_versions:
+        try:
+            result = subprocess.run([executable, "--version"], capture_output=True, text=True,
+                                    timeout=10, env=minimal_env(), stdin=subprocess.DEVNULL)
+            _runtime_versions[key] = _version_tuple(_parse_version(result.stdout)) if result.returncode == 0 else None
+        except (OSError, subprocess.SubprocessError, ValueError):
+            _runtime_versions[key] = None
+    return _runtime_versions[key]
+
+
+def _catalog_stale(payload, cache, runtime_version, now):
+    """Whether a usable cache predates the installed runtime or is over a day old."""
+    cached = _version_tuple(payload.get("client_version"))
+    if runtime_version is not None and (cached is None or cached < runtime_version):
+        return True
+    fetched = None
+    stamp = payload.get("fetched_at")
+    if isinstance(stamp, str):
+        try:
+            from datetime import datetime
+            fetched = datetime.fromisoformat(stamp.replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            fetched = None
+    if fetched is None:
+        try:
+            fetched = cache.stat().st_mtime
+        except OSError:
+            return False
+    return now - fetched > _CATALOG_MAX_AGE
+
+
+def _refresh_stale_catalog(home=None, binary=None, *, clock=time.time):
+    """Have the installed runtime re-fetch a stale account catalogue. Never raises.
+
+    Only for a home without a configured ``model_catalog_json``: there,
+    ``codex debug models`` re-fetches the account's own list into its cache
+    (verified on codex-cli 0.169.0), and nothing else does once the hub has
+    pinned it. With a configured catalog the command leaves the cache alone,
+    and the desktop app that owns that home keeps it current. A home that has
+    never listed is left for the app-server, which lists unpinned. Returns
+    whether a refresh ran.
+    """
+    try:
+        if _configured_catalog(home):
+            return False
+        cache = _models_cache(home)
+        payload = _usable_catalog(cache)
+        if payload is None:
+            return False
+        now = clock()
+        key = str(cache)
+        if now - _catalog_refresh_attempts.get(key, float("-inf")) < _CATALOG_REFRESH_COOLDOWN:
+            return False
+        executable = runtime_binary(binary or _pinned_binary())
+        if not os.access(executable, os.X_OK):
+            return False
+        if not _catalog_stale(payload, cache, _runtime_version(executable), now):
+            return False
+        _catalog_refresh_attempts[key] = now
+        result = subprocess.run([executable, "debug", "models"], env=minimal_env(_home_env(home)),
+                                cwd=tempfile.gettempdir(), stdin=subprocess.DEVNULL,
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                timeout=_CATALOG_REFRESH_TIMEOUT)
+        return result.returncode == 0
+    except Exception:  # noqa: BLE001 - a stale list must never block a turn
+        return False
+
+
+def native_service_tiers(home=None) -> dict:
+    """Each slug's speed tiers as this account's own cached card lists them.
+
+    ``{slug: [{"id", "name", "description"}]}``; a slug whose card carries no
+    ``service_tiers`` list is absent, and an unreadable cache yields ``{}``.
+    """
+    payload = _usable_catalog(_models_cache(home))
+    tiers = {}
+    for card in (payload or {}).get("models") or []:
+        if isinstance(card, dict) and isinstance(card.get("slug"), str) and isinstance(card.get("service_tiers"), list):
+            tiers[card["slug"]] = [entry for entry in card["service_tiers"] if isinstance(entry, dict)]
+    return tiers
+
+
 def _direct_catalog(cache, payload):
     """``cache`` rewritten with every card in direct tool mode; None if unwritable.
 
@@ -721,6 +830,7 @@ def _openai_catalog_override(home=None):
     a card would select code mode; to the raw cache when that copy cannot be
     written but a configured catalog still needs neutralizing; else None.
     """
+    _refresh_stale_catalog(home)
     cache = _models_cache(home)
     payload = _usable_catalog(cache)
     if payload is None:

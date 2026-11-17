@@ -1783,5 +1783,76 @@ class ResumeHostCallTests(unittest.TestCase):
                 self.assertEqual(session.sent, [])
 
 
+class StaleCatalogRefreshTests(unittest.TestCase):
+    """A pinned account catalogue is re-fetched once it predates the runtime or ages out."""
+
+    def setUp(self):
+        codex._catalog_refresh_attempts.clear()
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.home = self.temporary.name
+        self.binary = os.path.join(self.home, "fake-codex")
+        with open(self.binary, "w", encoding="utf-8") as stream:
+            stream.write("#!/bin/sh\nexit 0\n")
+        os.chmod(self.binary, 0o755)
+
+    def write_cache(self, version="0.159.0", age=0):
+        stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - age))
+        with open(os.path.join(self.home, "models_cache.json"), "w", encoding="utf-8") as stream:
+            json.dump({"client_version": version, "fetched_at": stamp, "models": [{"slug": "gpt-6.1-sol"}]}, stream)
+
+    def refresh(self, version=(0, 169, 0)):
+        with mock.patch.object(codex, "runtime_binary", return_value=self.binary), \
+                mock.patch.object(codex, "_runtime_version", return_value=version), \
+                mock.patch.object(codex.subprocess, "run", return_value=mock.Mock(returncode=0)) as run:
+            ran = codex._refresh_stale_catalog(self.home)
+        return ran, run
+
+    def test_cache_older_than_the_runtime_is_refetched_in_that_account(self):
+        self.write_cache("0.159.0")
+        ran, run = self.refresh()
+        self.assertTrue(ran)
+        argv, = run.call_args.args
+        self.assertEqual(argv, [self.binary, "debug", "models"])
+        self.assertEqual(run.call_args.kwargs["env"]["CODEX_HOME"], self.home)
+
+    def test_current_cache_is_left_alone_until_it_is_a_day_old(self):
+        self.write_cache("0.169.0", age=60)
+        ran, run = self.refresh()
+        self.assertFalse(ran); run.assert_not_called()
+        self.write_cache("0.169.0", age=codex._CATALOG_MAX_AGE + 60)
+        ran, run = self.refresh()
+        self.assertTrue(ran)
+
+    def test_one_attempt_per_cooldown(self):
+        self.write_cache("0.159.0")
+        self.assertTrue(self.refresh()[0])
+        ran, run = self.refresh()
+        self.assertFalse(ran); run.assert_not_called()
+
+    def test_configured_catalogs_and_unlisted_homes_are_never_touched(self):
+        ran, run = self.refresh()  # no cache yet: the app-server lists unpinned
+        self.assertFalse(ran); run.assert_not_called()
+        self.write_cache("0.159.0")
+        with open(os.path.join(self.home, "config.toml"), "w", encoding="utf-8") as stream:
+            stream.write('model_catalog_json = "/elsewhere/catalog.json"\n')
+        ran, run = self.refresh()
+        self.assertFalse(ran); run.assert_not_called()
+
+    def test_a_failing_refresh_never_raises(self):
+        self.write_cache("0.159.0")
+        with mock.patch.object(codex, "runtime_binary", return_value=self.binary), \
+                mock.patch.object(codex, "_runtime_version", return_value=(0, 169, 0)), \
+                mock.patch.object(codex.subprocess, "run", side_effect=codex.subprocess.TimeoutExpired("codex", 20)):
+            self.assertFalse(codex._refresh_stale_catalog(self.home))
+
+    def test_account_card_speed_tiers_are_read_per_home(self):
+        with open(os.path.join(self.home, "models_cache.json"), "w", encoding="utf-8") as stream:
+            json.dump({"models": [{"slug": "gpt-6.2-sol", "service_tiers": [{"id": "priority", "name": "Fast"}]},
+                                  {"slug": "gpt-5.5"}]}, stream)
+        self.assertEqual(codex.native_service_tiers(self.home),
+                         {"gpt-6.2-sol": [{"id": "priority", "name": "Fast"}]})
+
+
 if __name__ == "__main__":
     unittest.main()
