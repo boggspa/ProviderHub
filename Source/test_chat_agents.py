@@ -10,7 +10,7 @@ import unittest
 from unittest.mock import patch
 
 from chat_runtime import ChatService, ChatStore
-from chat_agents import (MemoryStore, active_runs, background_agents, background_running, cancel_background, close_all_sides,
+from chat_agents import (GUIDANCE, MemoryStore, active_runs, background_agents, background_running, cancel_background, close_all_sides,
                          close_side, delegate, delegate_status, has_background, make_child,
                          shelve_delegate, validate_delegate, visible)
 from test_chat_runtime import FakeTransport, model, response
@@ -40,6 +40,19 @@ class AgentTests(unittest.TestCase):
 
     def send(self, parent):
         parent.handle({"command": "send", "id": parent.chat["id"], "text": "Parent task"})
+
+    def test_delegation_is_described_wherever_delegate_is_offered(self):
+        parent = self.service([], [[], [], []])
+        payload = parent.payload(parent.choice())
+        self.assertIn("delegate", {tool["name"] for tool in payload["tools"]})
+        self.assertIn(GUIDANCE, payload["system"])
+        for role in ("delegate", "lane", "side"):
+            child = make_child(parent, parent.models[0], "", role, lambda _: None)
+            child_payload = child.payload(child.choice())
+            self.assertNotIn("delegate", {tool["name"] for tool in child_payload["tools"]})
+            self.assertNotIn(GUIDANCE, child_payload["system"])
+        parent.models[0]["supportsTools"] = False
+        self.assertNotIn(GUIDANCE, parent.payload(parent.models[0])["system"])
 
     def test_search_preference_reaches_existing_children_and_each_models_capability(self):
         parent = self.service([], [[], [], []])

@@ -13,6 +13,15 @@ BACKGROUND_LIMIT = 8
 BACKGROUND_WAIT_LIMIT = 120
 SHELF_POLL = 0.05
 DELEGATE_FIELDS = {"task", "choice", "effort", "background"}
+# Codex models reach for helpers unprompted; other families (Claude, Gemini,
+# Mistral) treat an undescribed tool as opt-in and almost never call it. So the
+# offer is spelled out wherever delegate is in the tool list.
+GUIDANCE = ("You can delegate without being asked when the work splits cleanly: 2-3 independent read-only "
+            "investigations (different areas of the code, separate files to compare, a diff reviewed from "
+            "several angles) as parallel tasks, or one self-contained subtask as a serial helper, which keeps "
+            "this conversation's context small. Give each helper the paths, constraints and result you need, "
+            "because it cannot see this conversation. Use background:true when you have independent work to do "
+            "meanwhile. Do not delegate a single quick lookup or work that depends on context only you hold.")
 
 
 class MemoryStore:

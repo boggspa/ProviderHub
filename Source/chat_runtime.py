@@ -1063,8 +1063,10 @@ class ChatService:
         elif self.role == "lane":
             payload["system"] += "\nThis is a read-only parallel helper lane. The local tools are limited to read_file and search_files. Do not edit files, run commands or delegate. Report findings to the parent."
         if self.role in {"parent", "team"} and tools:
+            from chat_agents import GUIDANCE as DELEGATE_GUIDANCE
             payload["system"] += "\n" + chat_memory.GUIDANCE
             payload["system"] += "\n" + (chat_todos.TEAM_GUIDANCE if self.role == "team" else chat_todos.GUIDANCE)
+            payload["system"] += "\n" + DELEGATE_GUIDANCE
         if self.role == "team":
             payload["system"] += "\n" + chat_team.GUIDANCE + "\nYour member name: " + self.team_member["name"]
             if tools: payload["system"] += "\n" + chat_blackboard.GUIDANCE + "\n" + chat_reactions.GUIDANCE
