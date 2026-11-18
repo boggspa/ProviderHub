@@ -68,6 +68,15 @@ const cases = {
     assert.equal(await colour(page, 'current-glyph'), colours.qwen);
     assert.equal(await colour(page, 'current-effort'), colours.qwen);
   },
+  async chatgpt_26_1111_label_icon_takes_the_accent(page) {
+    // 26.1111: no display:contents slot; the tool's own icon leads the label span.
+    const row = `<main><div class="group/activity-header relative inline-flex min-w-0"><span class="inline-flex min-w-0 gap-2 items-center text-size-chat text-text/40"><svg id="label-glyph" class="shrink-0 text-text/60"></svg><span id="label-text" class="text-text/60">Ran commands</span></span><span class="pointer-events-none relative flex"><svg id="label-chevron" class="text-text/60"></svg></span></div>
+      <button data-composer-navigation-target="reasoning" data-selected-reasoning-effort="high"><span><span id="label-model">Kimi for Coding</span></span></button></main>`;
+    await mount(page, row);
+    assert.equal(await colour(page, 'label-glyph'), colours.kimi);
+    assert.notEqual(await colour(page, 'label-text'), colours.kimi);
+    assert.notEqual(await colour(page, 'label-chevron'), colours.kimi);
+  },
   async visible_child_model_wins_during_reuse_and_late_worker_replies(page) {
     await mount(page, main() + agent('codex/gpt-6-astra · High'));
     await page.locator('#agent-model').evaluate((element, id) => {

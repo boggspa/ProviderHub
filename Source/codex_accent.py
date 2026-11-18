@@ -81,6 +81,11 @@ ACTIVITY_SLOT = 'span[class~="contents"]'
 # Desktop has placed the muted grey on either the glyph or its slot. Keep
 # explicitly coloured glyphs in the latter slot out of the override.
 ACTIVITY_GLYPH_GREY = "text-text/60"
+# ChatGPT 26.1111 dropped the slot: each tool renders its own icon, an svg
+# with "shrink-0 text-text/60", as the first child of the row's label span
+# (an inline-flex span directly inside the header). Seen in the bundle's
+# renderAgentActivityIcon callbacks and the label component they feed.
+ACTIVITY_ICON = "shrink-0"
 # These are the app shell's authored tab hooks, shared by right and bottom
 # panels. Tab IDs distinguish conversation panes from browser/file tabs;
 # the main composer lives outside all such panels.
@@ -428,10 +433,13 @@ def activity_glyph_selector() -> str:
     row's hover and focus rules, and the slot's ``display:contents`` is what
     keeps the glyph a flex item of the row's gap. Match the grey on the glyph
     or its slot, while skipping glyphs with their own colour in the latter.
+    From ChatGPT 26.1111 there is no slot: the grey icon is the first child
+    of the label span that sits directly in the header.
     """
     return (f'{ACTIVITY_HEADER} {ACTIVITY_SLOT} > svg[class~="{ACTIVITY_GLYPH_GREY}"],'
             f'{ACTIVITY_HEADER} {ACTIVITY_SLOT}[class~="{ACTIVITY_GLYPH_GREY}"]'
-            ' > svg:not([class*="text-"]):not([style*="color"])')
+            ' > svg:not([class*="text-"]):not([style*="color"]),'
+            f'{ACTIVITY_HEADER} > span > svg[class~="{ACTIVITY_ICON}"][class~="{ACTIVITY_GLYPH_GREY}"]')
 
 
 def activity_glyph_css() -> str:
