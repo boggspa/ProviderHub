@@ -504,6 +504,7 @@ gpt-oss-120b-medium	GPT-OSS 120B (Medium)
         from agy_cli_agent import catalogue
 
         families = {"hydrogen": ["low", "medium", "high", "xhigh"],
+                    "neon": ["low", "medium", "high", "xhigh"],
                     "carbon": ["low", "medium", "high"]}
         for name, rungs in families.items():
             with self.subTest(family=name):
@@ -540,6 +541,7 @@ gpt-oss-120b-medium	GPT-OSS 120B (Medium)
         ladder = {"none": "low", "minimal": "low", "low": "low", "medium": "medium",
                   "high": "high", "xhigh": "xhigh", "max": "xhigh", "ultra": "xhigh"}
         for name, rungs in (("hydrogen", ["low", "medium", "high", "xhigh"]),
+                            ("neon", ["low", "medium", "high", "xhigh"]),
                             ("carbon", ["low", "medium", "high"])):
             family = f"gemini-4-{name}"
             for available_rungs in (rungs, ["low", rungs[-1]], [rungs[-1]]):
@@ -596,6 +598,7 @@ gpt-oss-120b-medium	GPT-OSS 120B (Medium)
         from agy_cli_agent import build_argv
 
         for name, rungs in (("hydrogen", ["low", "medium", "high", "xhigh"]),
+                            ("neon", ["low", "medium", "high", "xhigh"]),
                             ("carbon", ["low", "medium", "high"])):
             for rung in rungs:
                 alias = f"gemini-4-{name}-{rung}"
@@ -612,6 +615,32 @@ gpt-oss-120b-medium	GPT-OSS 120B (Medium)
                 argv = build_argv("gemini-4-hydrogen", effort=effort)
                 self.assertEqual(argv[argv.index("--model") + 1], "gemini-4-hydrogen-xhigh")
                 self.assertEqual(argv[argv.index("--effort") + 1], "xhigh")
+
+    def test_agy_1_5_11_listing_coalesces_neon_into_one_laddered_family(self):
+        from agy_cli_agent import _collapse_models, _parse_models, build_argv
+        from claude_context import _ANTIGRAVITY_GEMINI_MODELS
+
+        rows = _collapse_models(_parse_models("\n".join((
+            "gemini-4-neon-high\tGemini 4 Neon (High)",
+            "gemini-4-neon-xhigh\tGemini 4 Neon (XHigh)",
+            "gemini-4-neon-medium\tGemini 4 Neon (Medium)",
+            "gemini-4-neon-low\tGemini 4 Neon (Low)",
+            "gemini-4-hydrogen-high\tGemini 4 Hydrogen (High)",
+            "gemini-4-hydrogen-low\tGemini 4 Hydrogen (Low)",
+        ))))
+        by_id = {row["id"]: row for row in rows}
+        self.assertEqual(set(by_id), {"gemini-4-neon", "gemini-4-hydrogen"})
+        neon = by_id["gemini-4-neon"]
+        self.assertEqual(neon["display_name"], "Gemini 4 Neon")
+        self.assertEqual(neon["provider_effort_modes"], ["low", "medium", "high", "xhigh"])
+        self.assertEqual(neon["default_effort"], "medium")
+        self.assertEqual(neon["context"], 1_000_000)
+        self.assertIn("gemini-4-neon", neon["context_evidence"])
+        self.assertIn("gemini-4-neon", _ANTIGRAVITY_GEMINI_MODELS)
+        for effort, rung in (("low", "low"), (None, "medium"), ("high", "high"), ("ultra", "xhigh")):
+            with self.subTest(effort=effort):
+                argv = build_argv("gemini-4-neon", effort=effort)
+                self.assertEqual(argv[argv.index("--model") + 1], f"gemini-4-neon-{rung}")
 
     def test_catalogue_empty_output(self):
         """Test catalogue handles empty agy models output."""

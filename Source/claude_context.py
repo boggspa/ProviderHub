@@ -20,7 +20,7 @@ _CODEX_MODELS = frozenset({
 _CODEX_DEFAULT_CONTEXT = 256_000
 _ANTIGRAVITY_GEMINI_MODELS = frozenset({
     "gemini-3.1-pro", "gemini-3.6-flash", "gemini-3.7-flash", "gemini-3.8-flash",
-    "gemini-4-argon", "gemini-4-carbon", "gemini-4-hydrogen",
+    "gemini-4-argon", "gemini-4-carbon", "gemini-4-hydrogen", "gemini-4-neon",
 })
 
 

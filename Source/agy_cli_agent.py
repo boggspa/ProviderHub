@@ -144,7 +144,7 @@ _EFFORT_RANK = {rung: index for index, rung in enumerate(_EFFORT_SUFFIXES)}
 
 # Resolve these families against this turn's account inventory. Carbon is
 # intentionally absent from accounts whose CLI does not enumerate its rows.
-_ACCOUNT_TIER_FAMILIES = {"gemini-4-hydrogen", "gemini-4-carbon"}
+_ACCOUNT_TIER_FAMILIES = {"gemini-4-hydrogen", "gemini-4-carbon", "gemini-4-neon"}
 
 # ---------------------------------------------------------------------------
 # Model family collapse
@@ -160,6 +160,11 @@ _AGY_ROW_MAP: dict[str, tuple[str, str, str]] = {
     "gemini-4-hydrogen-medium": ("gemini-4-hydrogen", "Gemini 4 Hydrogen", "medium"),
     "gemini-4-hydrogen-high":   ("gemini-4-hydrogen", "Gemini 4 Hydrogen", "high"),
     "gemini-4-hydrogen-xhigh":  ("gemini-4-hydrogen", "Gemini 4 Hydrogen", "xhigh"),
+    # agy 1.5.11: Neon ships as four reasoning rows (Low/Medium/High/XHigh).
+    "gemini-4-neon-low":    ("gemini-4-neon", "Gemini 4 Neon", "low"),
+    "gemini-4-neon-medium": ("gemini-4-neon", "Gemini 4 Neon", "medium"),
+    "gemini-4-neon-high":   ("gemini-4-neon", "Gemini 4 Neon", "high"),
+    "gemini-4-neon-xhigh":  ("gemini-4-neon", "Gemini 4 Neon", "xhigh"),
     "gemini-4-carbon-low":    ("gemini-4-carbon", "Gemini 4 Carbon", "low"),
     "gemini-4-carbon-medium": ("gemini-4-carbon", "Gemini 4 Carbon", "medium"),
     "gemini-4-carbon-high":   ("gemini-4-carbon", "Gemini 4 Carbon", "high"),
@@ -208,6 +213,9 @@ _FAMILY_CANONICAL_TO_RUNG: dict[str, dict[str, str]] = {
     "gemini-4-hydrogen": {"none": "low", "minimal": "low", "low": "low",
                            "medium": "medium", "high": "high", "xhigh": "xhigh",
                            "max": "xhigh", "ultra": "xhigh"},
+    "gemini-4-neon": {"none": "low", "minimal": "low", "low": "low",
+                      "medium": "medium", "high": "high", "xhigh": "xhigh",
+                      "max": "xhigh", "ultra": "xhigh"},
     "gemini-4-carbon": {"none": "low", "minimal": "low", "low": "low",
                          "medium": "medium", "high": "high", "xhigh": "high",
                          "max": "high", "ultra": "high"},
@@ -242,6 +250,7 @@ _FAMILY_CANONICAL_TO_RUNG: dict[str, dict[str, str]] = {
 # Effort modes that each family advertises (canonical ranks).
 _FAMILY_EFFORT_MODES: dict[str, list[str]] = {
     "gemini-4-hydrogen": ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"],
+    "gemini-4-neon": ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"],
     "gemini-4-carbon": ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"],
     "gemini-4-argon": ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"],
     "gemini-3.8-flash": ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"],
@@ -256,6 +265,7 @@ _FAMILY_EFFORT_MODES: dict[str, list[str]] = {
 # Default effort for each family (canonical rank).
 _FAMILY_DEFAULT_EFFORT: dict[str, str] = {
     "gemini-4-hydrogen": "medium",
+    "gemini-4-neon": "medium",
     "gemini-4-carbon": "medium",
     "gemini-4-argon": "medium",
     "gemini-3.8-flash": "medium",
@@ -270,6 +280,7 @@ _FAMILY_DEFAULT_EFFORT: dict[str, str] = {
 # Provider-native effort rungs exposed by each family (what agy accepts).
 _FAMILY_PROVIDER_EFFORT_MODES: dict[str, list[str]] = {
     "gemini-4-hydrogen": ["low", "medium", "high", "xhigh"],
+    "gemini-4-neon": ["low", "medium", "high", "xhigh"],
     "gemini-4-carbon": ["low", "medium", "high"],
     "gemini-4-argon": ["low", "medium", "high"],
     "gemini-3.8-flash": ["low", "medium", "high"],
@@ -536,6 +547,7 @@ _GEMINI_4_CONTEXT_EVIDENCE = {
     "gemini-4-argon": "https://deepmind.google/models/model-cards/gemini-4-argon/",
     "gemini-4-carbon": "https://storage.googleapis.com/deepmind-media/Model-Cards/Gemini-4-Carbon-Model-Card.pdf",
     "gemini-4-hydrogen": "https://deepmind.google/models/model-cards/gemini-4-hydrogen/",
+    "gemini-4-neon": "https://ai.google.dev/gemini-api/docs/models/gemini-4-neon",
 }
 
 
