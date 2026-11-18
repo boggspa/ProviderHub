@@ -128,9 +128,9 @@ class ClaudeCatalogueTests(unittest.TestCase):
         self.config["branding_overrides"] = {"claude": {"modelLabels": {"claude-fable-5-2": "My Fable"}}}
         specs = route_specs({"models": project_catalogue("claude", inventory, self.config)})
         self.assertEqual(specs["claude/fable"]["display_name"], "My Fable")
-        # The stale alias row's context never transfers; Fable 5.2 has no
-        # published ceiling yet, so its window stays provider-managed.
-        self.assertIsNone(specs["claude/fable"]["context"])
+        # The stale alias row's context never transfers; the pinned version's
+        # documented ceiling is used instead.
+        self.assertEqual(specs["claude/fable"]["context"], 1000000)
         self.assertEqual(specs["claude/claude-fable-5-1"]["context"], 1000000)
         self.assertEqual(specs["claude/claude-fable-5"]["context"], 200000)
         self.assertEqual(specs["claude/claude-future"]["context"], 333333)
@@ -148,6 +148,18 @@ class ClaudeCatalogueTests(unittest.TestCase):
         self.assertEqual(model_catalog(self.config)["data"][0]["display_name"], "Claude Opus 5.5 · AntiGravity")
         self.assertEqual(project_codex(self.config, {"models": rows})["models"][0]["display_name"],
                          "Claude Opus 5.5 · AntiGravity")
+
+    def test_old_antigravity_cache_gains_context_without_overwriting_limits(self):
+        inventory = {"source": "cli", "models": [
+            {"id": "gemini-4-hydrogen", "context": None},
+            {"id": "gemini-4-carbon", "context": 300000},
+            {"id": "gemini-future", "context": None}]}
+        before = copy.deepcopy(inventory)
+        rows = project_catalogue("antigravity", inventory, self.config)
+        self.assertEqual({row["model_id"]: row.get("context") for row in rows}, {
+            "gemini-4-hydrogen": 1000000, "gemini-4-carbon": 300000,
+            "gemini-future": None})
+        self.assertEqual(inventory, before)
 
 
 if __name__ == "__main__":

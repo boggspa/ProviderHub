@@ -17,7 +17,8 @@ from protocol import estimated_tokens, model_catalog
 
 CODEX_MODELS = ("gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol", "gpt-6-astra",
                 "gpt-6-luna", "gpt-6-sol")
-GEMINI_MODELS = ("gemini-3.1-pro", "gemini-3.6-flash", "gemini-3.7-flash", "gemini-3.8-flash")
+GEMINI_MODELS = ("gemini-3.1-pro", "gemini-3.6-flash", "gemini-3.7-flash", "gemini-3.8-flash",
+                 "gemini-4-argon", "gemini-4-carbon", "gemini-4-hydrogen")
 
 
 class ClaudeContextTests(unittest.TestCase):
@@ -198,11 +199,11 @@ model_context_window = 800_000
         self.assertEqual(inventory, before)
 
     def test_antigravity_gemini_families_and_native_effort_ids_get_1m(self):
-        for suffix in ("", "-low", "-medium", "-high"):
+        for suffix in ("", "-low", "-medium", "-high", "-xhigh"):
             with self.subTest(suffix=suffix):
-                self.catalogue("antigravity", tuple(model + suffix for model in GEMINI_MODELS), 200_000)
+                self.catalogue("antigravity", tuple(model + suffix for model in GEMINI_MODELS), None)
                 rows = model_catalog(self.settings)["data"]
-                self.assertEqual(len(rows), 4)
+                self.assertEqual(len(rows), len(GEMINI_MODELS))
                 for row in rows:
                     self.assertEqual(row["max_tokens"], 1_000_000)
                     self.assertTrue(row["id"].endswith("[1m]"))
@@ -235,7 +236,8 @@ model_context_window = 800_000
             model_catalog(self.settings)
             self.assertEqual(self.settings, original)
             self.assertEqual(project_codex(self.settings, inventory), codex_before)
-            self.assertEqual({row["context_window"] for row in codex_before["models"]}, {None})
+            expected = {None, 1_000_000} if provider == "antigravity" else {None}
+            self.assertEqual({row["context_window"] for row in codex_before["models"]}, expected)
 
     def test_resolved_window_clears_stale_ambiguous_identity(self):
         self.configure("model_context_window = 1_000_000\n")

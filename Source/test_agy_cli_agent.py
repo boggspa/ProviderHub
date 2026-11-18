@@ -428,8 +428,7 @@ gpt-oss-120b-medium	GPT-OSS 120B (Medium)
     def test_argon_native_rows_collapse_and_route_every_effort(self):
         from agy_cli_agent import build_argv, catalogue
 
-        # Captured from agy 1.3.6 models; no Gemini API token limits are
-        # assumed for this subscription route.
+        # Captured from agy 1.3.6 models.
         output = "\n".join(
             f"gemini-4-argon-{rung}\tGemini 4 Argon ({rung.title()})"
             for rung in ("medium", "high", "low")
@@ -445,7 +444,7 @@ gpt-oss-120b-medium	GPT-OSS 120B (Medium)
         self.assertEqual(row["provider_effort_modes"], ["low", "medium", "high"])
         self.assertEqual(set(row["aliases"]), {
             "gemini-4-argon-low", "gemini-4-argon-medium", "gemini-4-argon-high"})
-        self.assertNotIn("context", row)
+        self.assertEqual(row["context"], 1_000_000)
         expected = {"none": "low", "minimal": "low", "low": "low",
                     "medium": "medium", "high": "high", "xhigh": "high",
                     "max": "high", "ultra": "high"}
@@ -517,6 +516,7 @@ gpt-oss-120b-medium	GPT-OSS 120B (Medium)
                 row, = rows
                 self.assertEqual(warnings, [])
                 self.assertEqual(row["id"], f"gemini-4-{name}")
+                self.assertEqual(row["context"], 1_000_000)
                 self.assertEqual(row["display_name"], f"Gemini 4 {name.title()}")
                 self.assertEqual(row["provider_effort_modes"], rungs)
                 self.assertEqual(row["default_effort"], "medium")

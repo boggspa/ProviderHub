@@ -590,9 +590,9 @@ def claude_effort_modes(identifier: str) -> list[str]:
 # Exact published model ceilings, checked 2026-09-19; claude-opus-5-5 added
 # 2026-09-22, claude-sonnet-5-5 2026-09-28, claude-haiku-5-5 2026-10-07. These
 # are model capacities, not a claim that a particular subscription grants access.
-# claude-fable-5-2 is deliberately absent: as of 2026-11-10 no ceiling is
-# published, and Claude Code 2.1.293 only reports its 200K unknown-model default.
+# Fable 5.2's 1M ceiling was documented after its initial release.
 _CLAUDE_CONTEXT_WINDOWS = {
+    "claude-fable-5-2": 1000000,
     "claude-fable-5-1": 1000000,
     "claude-fable-5": 1000000,
     "claude-opus-5-5": 1000000,

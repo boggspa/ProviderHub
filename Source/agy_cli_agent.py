@@ -532,6 +532,11 @@ def _parse_version(text: str) -> str | None:
 # ---------------------------------------------------------------------------
 
 GEMINI_CONTEXT = 1_000_000
+_GEMINI_4_CONTEXT_EVIDENCE = {
+    "gemini-4-argon": "https://deepmind.google/models/model-cards/gemini-4-argon/",
+    "gemini-4-carbon": "https://storage.googleapis.com/deepmind-media/Model-Cards/Gemini-4-Carbon-Model-Card.pdf",
+    "gemini-4-hydrogen": "https://deepmind.google/models/model-cards/gemini-4-hydrogen/",
+}
 
 
 def _collapse_models(raw_models: list[dict]) -> list[dict]:
@@ -580,11 +585,14 @@ def _collapse_models(raw_models: list[dict]) -> list[dict]:
             "provider_effort_modes": provider_modes,
             "aliases": aliases,
             "reasoning": True,
-            # agy models reports names and effort only. Gemini 3 publishes a
-            # 1M window: https://ai.google.dev/gemini-api/docs/gemini-3
+            # agy models reports names and effort only. These are model
+            # capacities; the CLI may manage its own checkpointing separately.
             **({"context": GEMINI_CONTEXT, "context_kind": "verified_documentation",
                 "context_evidence": "https://ai.google.dev/gemini-api/docs/gemini-3"}
-               if family_id.startswith("gemini-3") else {}),
+               if family_id.startswith("gemini-3") else
+               {"context": GEMINI_CONTEXT, "context_kind": "model_capacity",
+                "context_evidence": _GEMINI_4_CONTEXT_EVIDENCE[family_id]}
+               if family_id in _GEMINI_4_CONTEXT_EVIDENCE else {}),
         })
 
     return collapsed

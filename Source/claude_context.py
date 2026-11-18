@@ -20,6 +20,7 @@ _CODEX_MODELS = frozenset({
 _CODEX_DEFAULT_CONTEXT = 256_000
 _ANTIGRAVITY_GEMINI_MODELS = frozenset({
     "gemini-3.1-pro", "gemini-3.6-flash", "gemini-3.7-flash", "gemini-3.8-flash",
+    "gemini-4-argon", "gemini-4-carbon", "gemini-4-hydrogen",
 })
 
 
@@ -75,11 +76,14 @@ def claude_context_spec(spec: dict, settings: dict) -> dict:
             context = _CODEX_DEFAULT_CONTEXT
     elif provider == "antigravity":
         # Old snapshots can contain native effort IDs instead of family IDs.
-        family = re.sub(r"-(?:low|medium|high)$", "", model)
+        family = re.sub(r"-(?:low|medium|high|xhigh)$", "", model)
         if family not in _ANTIGRAVITY_GEMINI_MODELS:
             return spec
-        # Gemini 3's published 1M window; agy models reports names/effort only.
-        # https://ai.google.dev/gemini-api/docs/gemini-3
+        if family.startswith("gemini-4-") and (
+                type(spec.get("context")) is int and spec["context"] > 0 or
+                any(type(value) is int and value > 0 for value in spec.get("context_options") or [])):
+            return spec
+        # Model capacity; agy manages its own checkpointing independently.
         context = 1_000_000
     else:
         # Preserve account-reported limits and ranges. Only fill absent

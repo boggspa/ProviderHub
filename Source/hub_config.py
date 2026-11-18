@@ -1012,6 +1012,14 @@ def project_catalogue(provider_id: str, inventory: dict, settings: dict, observa
                   if preferred in identifiers), group["entries"][0]),
         )
         item = copy.deepcopy(source)
+        if provider_id == "antigravity" and inventory.get("source") == "cli" and not item.get("context"):
+            # Upgrade saved inventories created before these model capacities
+            # were published, without replacing an account-reported limit.
+            from agy_cli_agent import GEMINI_CONTEXT, _GEMINI_4_CONTEXT_EVIDENCE, _split_effort
+            family, _ = _split_effort(preferred)
+            if family in _GEMINI_4_CONTEXT_EVIDENCE and not item.get("context_options"):
+                item.update(context=GEMINI_CONTEXT, context_kind="model_capacity",
+                            context_evidence=_GEMINI_4_CONTEXT_EVIDENCE[family])
         # Upgrade older saved provider inventories as well as fresh discovery:
         # picker metadata must follow the currently documented exact ID.
         if provider_id in {"codex", "claude"}:
