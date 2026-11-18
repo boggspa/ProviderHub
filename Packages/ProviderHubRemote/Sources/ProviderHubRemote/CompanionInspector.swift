@@ -428,6 +428,7 @@ private struct CompanionTeamEditor: View {
     @State private var minutes = ""
     @State private var tokens = ""
     @State private var pickingMember: Int?
+    @State private var memberSpeed = CompanionSpeedBox()
 
     var body: some View {
         NavigationStack {
@@ -484,10 +485,11 @@ private struct CompanionTeamEditor: View {
             }
         }.sheet(isPresented: Binding(get: { pickingMember != nil }, set: { if !$0 { pickingMember = nil } })) {
             if let index = pickingMember, rows.indices.contains(index) {
-                CompanionRoutePicker(model: model, initialChoiceID: rows[index]["choice"].text, initialEffort: rows[index]["effort"].text, toolsOnly: true) { row, effort in
+                CompanionRoutePicker(model: model, initialChoiceID: rows[index]["choice"].text, initialEffort: rows[index]["effort"].text, toolsOnly: true,
+                                     initialSpeed: rows[index]["speed"].text, chooseSpeed: { [memberSpeed] in memberSpeed.value = $0 }) { row, effort in
                     guard rows.indices.contains(index) else { return }
                     var member = rows[index].object
-                    member["choice"] = row["id"]; member["effort"] = .string(effort)
+                    member["choice"] = row["id"]; member["effort"] = .string(effort); member["speed"] = .string(memberSpeed.value)
                     rows[index] = .object(member); pickingMember = nil
                 }
             }

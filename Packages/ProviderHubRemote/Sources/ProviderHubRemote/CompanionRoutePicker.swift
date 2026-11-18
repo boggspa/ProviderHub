@@ -26,13 +26,24 @@ struct CompanionPickerChoice: ChatPickerChoice {
     }
     var accent: Color { presentation.accent }
     var connectionAccent: Color { connectionPresentation.accent }
+    var speedOptions: [ChatPickerSpeed] {
+        row["speeds"].rows.compactMap { item in
+            item["id"].text.isEmpty ? nil : ChatPickerSpeed(id: item["id"].text, label: item["label"].text, detail: item["detail"].text)
+        }
+    }
 }
+
+/// The speed handed to a picker's commit, read synchronously by it.
+final class CompanionSpeedBox { var value = "" }
 
 struct CompanionRoutePicker: View {
     @ObservedObject var model: CompanionModel
     var initialChoiceID: String? = nil
     var initialEffort: String? = nil
     var toolsOnly = false
+    /// When set, the Speed section appears; called with the chosen speed before choose.
+    var initialSpeed: String? = nil
+    var chooseSpeed: ((String) -> Void)? = nil
     var choose: (RemoteValue, String) -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var owner: String?
@@ -42,6 +53,8 @@ struct CompanionRoutePicker: View {
                 initialChoiceID: initialChoiceID ?? model.configuration["choice"].text,
                 initialEffort: initialEffort ?? model.configuration["effort"].text,
                 disabled: !model.isConnected,
+                initialSpeed: initialSpeed ?? "",
+                chooseSpeed: chooseSpeed,
                 refresh: { Task { @MainActor in await model.refreshRemoteOptions() } },
                 choose: { id, effort in
                     guard owner == model.selectedChatID, let row = model.models.first(where: { $0["id"].text == id }) else { dismiss(); return }

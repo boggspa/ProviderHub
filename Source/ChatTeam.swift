@@ -16,6 +16,7 @@ private struct ChatTeamPreset: Codable, Identifiable {
         var name: String
         var choice: String
         var effort: String
+        var speed: String?
         var responsibility: String
     }
     struct RunSettings: Codable {
@@ -50,7 +51,7 @@ private final class ChatTeamPresetStore: ObservableObject {
         let cleanName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleanName.isEmpty, members.count <= ChatTeamSnapshot.maxMembers else { return }
         let preset = ChatTeamPreset(id: UUID().uuidString, name: String(cleanName.prefix(60)),
-            members: members.map { .init(name: $0.name, choice: $0.choice, effort: $0.effort, responsibility: $0.responsibility) },
+            members: members.map { .init(name: $0.name, choice: $0.choice, effort: $0.effort, speed: $0.speed.isEmpty ? nil : $0.speed, responsibility: $0.responsibility) },
             execution: .init(mode: execution.mode, minutes: execution.minutes, tokens: execution.tokens,
                              contextTokens: execution.contextTokens, processes: execution.processes))
         presets.append(preset)
@@ -591,9 +592,10 @@ private struct TeamDraft: Identifiable {
     var name: String
     var choice: String
     var effort: String
+    var speed = ""
     var responsibility: String
     var wire: [String: Any] {
-        var value: [String: Any] = ["name": name, "choice": choice, "effort": effort, "responsibility": responsibility]
+        var value: [String: Any] = ["name": name, "choice": choice, "effort": effort, "speed": speed, "responsibility": responsibility]
         if let existingID { value["id"] = existingID }
         return value
     }
@@ -662,6 +664,7 @@ struct ChatTeamEditor: View {
                                         Text(account).foregroundStyle(.secondary)
                                     }
                                     if !member.effort.isEmpty { Text(member.effort).foregroundStyle(.secondary) }
+                                    if !member.speed.isEmpty { ChatSpeedGlyph(speed: member.speed).foregroundStyle(.secondary) }
                                     Image(systemName: "chevron.down")
                                 }.font(.system(size: 12))
                             }.buttonStyle(.plain)
@@ -669,7 +672,7 @@ struct ChatTeamEditor: View {
                                     ChatModelPicker(model: model, dismiss: { picking = nil }, initialChoiceID: member.choice,
                                         initialEffort: member.effort, onSelect: { choice, effort in
                                             member.choice = choice; member.effort = effort; picking = nil
-                                        })
+                                        }, initialSpeed: member.speed, onSelectSpeed: { member.speed = $0 })
                                 }
                             TextField("Responsibility (optional)", text: $member.responsibility, axis: .vertical)
                                 .lineLimit(2...4).textFieldStyle(.roundedBorder)
@@ -728,6 +731,7 @@ struct ChatTeamEditor: View {
                     let pending = member.pendingChange
                     return TeamDraft(id: member.id, existingID: member.id, name: pending?.name ?? member.name,
                                      choice: pending?.choice ?? member.choice, effort: pending?.effort ?? member.effort,
+                                     speed: pending?.speed ?? member.speed ?? "",
                                      responsibility: pending?.responsibility ?? member.responsibility)
                 }
             } else { add() }
@@ -742,7 +746,7 @@ struct ChatTeamEditor: View {
     private func apply(_ preset: ChatTeamPreset) {
         drafts = preset.members.map { member in
             TeamDraft(id: UUID().uuidString, name: member.name, choice: member.choice,
-                      effort: member.effort, responsibility: member.responsibility)
+                      effort: member.effort, speed: member.speed ?? "", responsibility: member.responsibility)
         }
         mode = preset.execution.mode
         minutes = preset.execution.minutes.map(String.init) ?? ""

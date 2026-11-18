@@ -12,7 +12,7 @@ from chat_team import MAX_MEMBERS
 VERSION = 3
 FIELDS = {
     "team": ("enabled", "status", "activeMemberID", "activeMemberIDs", "execution", "runUsage", "limitReason", "members"),
-    "member": ("id", "name", "label", "choice", "route", "effort", "responsibility", "status", "nextStep", "contributions", "contributionID", "usage", "context", "failureReason", "waitReason", "pendingChange", "memberStoppedByUser"),
+    "member": ("id", "name", "label", "choice", "route", "effort", "speed", "responsibility", "status", "nextStep", "contributions", "contributionID", "usage", "context", "failureReason", "waitReason", "pendingChange", "memberStoppedByUser"),
     "model": ("id", "route", "label", "provider", "accountLabel", "efforts", "speeds", "context", "supportsTools", "presentation", "connectionPresentation"),
     "side": ("id", "label", "route", "effort", "status", "busy", "notice", "entries", "truncated"),
     "process": ("id", "pid", "command", "status", "code", "output", "started", "ended", "memberID", "route", "truncated"),
@@ -122,14 +122,14 @@ def project(event, entry_projector):
             # Pending edits contain configuration, never provider context.
             for member in value["members"]:
                 if isinstance(member.get("pendingChange"), dict):
-                    member["pendingChange"] = pick(member["pendingChange"], ("remove", "name", "label", "choice", "effort", "responsibility"))
+                    member["pendingChange"] = pick(member["pendingChange"], ("remove", "name", "label", "choice", "effort", "speed", "responsibility"))
                 for key in ("nextStep", "failureReason", "waitReason"):
                     if isinstance(member.get(key), str): member[key] = member[key][:240]
             # Reserve room for every roster identity before verbose member
             # text, so long responsibilities cannot hide later members.
             # Editable configuration must round-trip losslessly.
             for member in value["members"]:
-                limits = {"id": 128, "name": 120, "choice": 512, "effort": 40, "responsibility": 2000}
+                limits = {"id": 128, "name": 120, "choice": 512, "effort": 40, "speed": 40, "responsibility": 2000}
                 exact = {key: str(member[key])[:limit] for key, limit in limits.items() if key in member and member[key] is not None}
                 display = bounded(member, 1400)
                 member.clear(); member.update(display); member.update(exact)
@@ -153,7 +153,7 @@ def project(event, entry_projector):
     elif kind == "plugins":
         panel, value = "browserEnabled", event.get("browserUse") is True
     elif kind == "remote_configuration":
-        panel, value = "configuration", pick(event, ("choice", "effort", "approvalMode", "workspace", "busy", "runBusy", "interrupting", "status"))
+        panel, value = "configuration", pick(event, ("choice", "effort", "speed", "approvalMode", "workspace", "busy", "runBusy", "interrupting", "status"))
     elif kind == "side_delta":
         return {"event": "side_delta", "chat": event.get("chat"), "side": event.get("side"),
                 "id": event.get("id"), "text": str(event.get("text") or "")[:4000],
@@ -208,7 +208,7 @@ COMMANDS = {
     "blackboard": (), "blackboard_post": ("key", "body", "category", "quote"),
     "blackboard_remove": ("post",), "blackboard_attach": ("url", "title"), "blackboard_detach": ("attachment",),
     "remote_inspect": (), "inspect_git": (), "processes": (), "clear_processes": (),
-    "configure": ("choice", "effort", "approvalMode", "expectedWorkspace"),
+    "configure": ("choice", "effort", "speed", "approvalMode", "expectedWorkspace"),
     "configure_team": ("enabled", "members", "execution"),
     "team_resume": ("member",), "team_member_start": ("member",), "team_member_stop": ("member",),
     "stop_process": ("process",), "open_side": ("choice", "effort"),

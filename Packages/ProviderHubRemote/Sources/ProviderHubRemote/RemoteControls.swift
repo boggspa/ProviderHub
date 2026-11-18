@@ -80,7 +80,7 @@ extension CompanionModel {
     }
     public func configureMembers(_ rows: [RemoteValue], enabled: Bool = true, execution: RemoteValue? = nil) {
         var arguments: [String: RemoteValue] = ["enabled": .bool(enabled), "members": .array(rows.map { row in
-            .object(row.object.filter { ["id", "name", "choice", "effort", "responsibility"].contains($0.key) })
+            .object(row.object.filter { ["id", "name", "choice", "effort", "speed", "responsibility"].contains($0.key) })
         })]
         if let execution { arguments["execution"] = execution }
         else if case .object = team["execution"] { arguments["execution"] = team["execution"] }

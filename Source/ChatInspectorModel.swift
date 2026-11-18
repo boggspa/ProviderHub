@@ -204,7 +204,7 @@ struct ChatProcess: Decodable, Identifiable, Equatable {
 
 struct ChatTeamMember: Decodable, Identifiable {
     var id: String; var name: String; var label: String; var choice: String; var route: String
-    var account: String; var effort: String; var responsibility: String; var status: String
+    var account: String; var effort: String; var speed: String?; var responsibility: String; var status: String
     var nextStep: String; var contributions: Int; var contributionID: String?; var usage: Int?; var context: Int?
     var failureReason: String?
     var waitReason: String?; var modelContext: Int?; var checkpoints: Int?
@@ -250,8 +250,8 @@ extension ChatTeamMember {
 /// The target of a Team edit still waiting for its member's boundary.
 struct ChatTeamPendingChange: Decodable {
     var remove = false
-    var name: String?; var label: String?; var choice: String?; var effort: String?; var responsibility: String?
-    private enum CodingKeys: String, CodingKey { case remove, name, label, choice, effort, responsibility }
+    var name: String?; var label: String?; var choice: String?; var effort: String?; var speed: String?; var responsibility: String?
+    private enum CodingKeys: String, CodingKey { case remove, name, label, choice, effort, speed, responsibility }
     init(from decoder: Decoder) throws {
         let row = try decoder.container(keyedBy: CodingKeys.self)
         remove = (try? row.decodeIfPresent(Bool.self, forKey: .remove)) ?? false
@@ -259,6 +259,7 @@ struct ChatTeamPendingChange: Decodable {
         label = try? row.decodeIfPresent(String.self, forKey: .label)
         choice = try? row.decodeIfPresent(String.self, forKey: .choice)
         effort = try? row.decodeIfPresent(String.self, forKey: .effort)
+        speed = try? row.decodeIfPresent(String.self, forKey: .speed)
         responsibility = try? row.decodeIfPresent(String.self, forKey: .responsibility)
     }
 }

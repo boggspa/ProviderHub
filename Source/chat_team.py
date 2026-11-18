@@ -307,7 +307,7 @@ def memory_tool(service, name, args):
 def public(team):
     if not isinstance(team, dict):
         return None
-    keys = ("id", "name", "label", "choice", "route", "account", "effort", "responsibility",
+    keys = ("id", "name", "label", "choice", "route", "account", "effort", "speed", "responsibility",
             "status", "nextStep", "contributions", "contributionID", "usage", "context", "failureReason",
             "modelContext", "waitReason", "checkpoints")
     keys += ("pendingChange", "memberStoppedByUser")
@@ -340,7 +340,7 @@ def validate_members(parent, specifications):
     existing = {m["id"]: m for m in (parent.chat.get("team") or {}).get("members", [])}
     members, used, archived = [], set(), []
     for position, spec in enumerate(specifications):
-        if not isinstance(spec, dict) or set(spec) - {"id", "choice", "name", "effort", "responsibility"}:
+        if not isinstance(spec, dict) or set(spec) - {"id", "choice", "name", "effort", "speed", "responsibility"}:
             raise ValueError("Invalid Team member settings.")
         identifier = spec.get("id")
         if identifier is not None and (not isinstance(identifier, str) or identifier not in existing or identifier in used):
@@ -353,6 +353,9 @@ def validate_members(parent, specifications):
         effort = _text(spec.get("effort", ""), "Effort", 32, empty=True)
         if effort and effort not in choice["efforts"]:
             raise ValueError("Choose a supported reasoning effort for every member.")
+        # Speed is a per-request tier, not part of the member's identity: changing
+        # it keeps the member's private history.
+        speed = parent.check_speed(choice, spec.get("speed", ""))
         responsibility = _text(spec.get("responsibility", ""), "Responsibility", 2000, empty=True)
         name = _text(spec.get("name", f"Member {position + 1}"), "Member name", 60)
         old = existing.get(identifier)
@@ -365,7 +368,7 @@ def validate_members(parent, specifications):
             member = {"id": identifier or uuid.uuid4().hex, "messages": [], "cursor": 0,
                       "contributions": 0, "usage": None, "repeats": 0}
         member.update(choice=choice_id, name=name, label=choice["label"], route=choice["route"],
-                      account=choice["account"], scope=choice["scope"], effort=effort,
+                      account=choice["account"], scope=choice["scope"], effort=effort, speed=speed,
                       responsibility=responsibility, workspace=parent.chat["workspace"],
                       context=choice.get("context"), status="ready", nextStep="")
         members.append(member)
@@ -1104,7 +1107,7 @@ def refresh_status(chat):
 # not executed. The change then lands in the checkpoint that ends that
 # contribution. A later edit supersedes a pending one; Stop or a closed Chat
 # discards it whole, so the saved roster is the previous one or the applied one.
-CHANGE_FIELDS = ("choice", "name", "label", "route", "account", "scope", "effort", "responsibility", "modelContext")
+CHANGE_FIELDS = ("choice", "name", "label", "route", "account", "scope", "effort", "speed", "responsibility", "modelContext")
 IDENTITY_FIELDS = ("choice", "scope", "effort", "responsibility")
 NOT_STARTED = ("Not executed: the user changed this Team member before this action started. "
                "Nothing ran; inspect current files before repeating it.")
@@ -1223,6 +1226,8 @@ def _change_text(old, new):
     parts = []
     if old["name"] != new["name"]: parts.append("renamed to " + new["name"])
     if old["effort"] != new["effort"]: parts.append(f"effort {old['effort'] or 'default'} → {new['effort'] or 'default'}")
+    if (old.get("speed") or "") != (new.get("speed") or ""):
+        parts.append(f"speed {old.get('speed') or 'standard'} → {new.get('speed') or 'standard'}")
     if old["responsibility"] != new["responsibility"]: parts.append("responsibility updated")
     return f"{_who(old)} was updated by the user: " + ", ".join(parts or ["settings updated"]) + "."
 
@@ -1269,7 +1274,7 @@ def _land(parent, member, change, notes):
         chat.setdefault("archives", []).append({"kind": "team_member", "member": copy.deepcopy(member), "ended": now()})
         _fresh_context(chat, member, choice, change["name"])
         getattr(parent, "team_fresh", set()).add(member["id"])
-    member.update({key: change[key] for key in CHANGE_FIELDS})
+    member.update({key: change[key] for key in CHANGE_FIELDS if key in change})
     member["context"] = chat_execution.context(team, choice)
     if identity and member["status"] in {"error", "interrupted", "stopped"}:
         # The replacement picks up where the slot stopped.
@@ -1491,6 +1496,7 @@ def contribution(parent, member, transport):
         ("Your previous stated next step: " + member["nextStep"] if member.get("nextStep") else "Complete your part of the request; declare dependencies instead of polling.")}]})
     child.chat = {"id": member["id"], "title": member["name"], "updated": chat["updated"],
                   **{key: member[key] for key in ("route", "account", "scope", "effort")},
+                  "speed": member.get("speed") or "",
                   "workspace": chat["workspace"], "approvalMode": chat.get("approvalMode", "manual"),
                   "entries": [], "messages": messages, "status": "working",
                   "teamDecision": {"state": "done", "next_step": ""}}

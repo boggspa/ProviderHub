@@ -263,6 +263,7 @@ public struct CompanionView: View {
     @State private var inspectorTab: RemoteInspectorTab = .agents
     @State private var showingPermissionConfirmation = false
     @State private var choosingModel = false
+    @State private var pendingSpeed = CompanionSpeedBox()
     @State private var creatingChat = false
     @State private var importingFiles = false
     @StateObject private var mentionMenu = CompanionMentionMenu()
@@ -467,11 +468,16 @@ public struct CompanionView: View {
                         Text(chat.displayModel).font(.caption.weight(.medium))
                         let effort = model.configuration["effort"].text
                         if !effort.isEmpty { Text("· " + ChatSharedEffort.title(effort)).font(.caption).foregroundStyle(CompanionTheme.secondary) }
+                        let speed = model.configuration["speed"].text
+                        if !speed.isEmpty { ChatSpeedGlyph(speed: speed).font(.caption).foregroundStyle(CompanionTheme.secondary) }
                         Image(systemName: "chevron.down").font(.system(size: 9))
                     }
                 }.buttonStyle(.plain)
                     .sheet(isPresented: $choosingModel) {
-                        CompanionRoutePicker(model: model) { row, effort in model.configure(["choice": row["id"], "effort": .string(effort)]) }
+                        CompanionRoutePicker(model: model, initialSpeed: model.configuration["speed"].text,
+                                             chooseSpeed: { [pendingSpeed] in pendingSpeed.value = $0 }) { row, effort in
+                            model.configure(["choice": row["id"], "effort": .string(effort), "speed": .string(pendingSpeed.value)])
+                        }
                     }
                     .disabled(!model.configurable)
                     .accessibilityLabel("Model")

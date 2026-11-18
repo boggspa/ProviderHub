@@ -453,7 +453,8 @@ class ChatHost:
         if chat:
             self.emit({"event": "remote_configuration", "chat": chat["id"],
                        "choice": chat["route"] + "|" + chat.get("account", ""),
-                       "effort": chat.get("effort", ""), "approvalMode": chat.get("approvalMode", "manual"),
+                       "effort": chat.get("effort", ""), "speed": chat.get("speed", ""),
+                       "approvalMode": chat.get("approvalMode", "manual"),
                        "workspace": chat["workspace"], "busy": self.active(service),
                        "runBusy": service.busy, "interrupting": self.state(service)["interrupting"],
                        "status": self.state(service)["status"]})
