@@ -640,9 +640,11 @@ def _usable_catalog(cache):
     return None
 
 
-def _code_mode_cards(payload):
-    """Whether any card would put the runtime's tools behind its native exec."""
-    return any(isinstance(card, dict) and card.get("tool_mode") not in (None, _DIRECT_TOOL_MODE)
+def _requires_direct_catalog(payload):
+    """Whether any card selects a tool surface incompatible with this transport."""
+    return any(isinstance(card, dict) and (
+                   card.get("tool_mode") not in (None, _DIRECT_TOOL_MODE)
+                   or card.get("use_responses_lite") is True)
                for card in payload["models"])
 
 
@@ -756,12 +758,19 @@ def native_service_tiers(home=None) -> dict:
 
 
 def _direct_catalog(cache, payload):
-    """``cache`` rewritten with every card in direct tool mode; None if unwritable.
+    """``cache`` copied for direct tools on standard Responses; None if unwritable.
 
     Written only when its content would change, so a long session does not
     churn the file, and atomically, so the runtime never reads a torn copy.
     """
-    models = [{**card, "tool_mode": _DIRECT_TOOL_MODE} if isinstance(card, dict) else card
+    # 0.169.0 + GPT-6.2 reproduces a reserved web.run schema 400 on the Lite
+    # path, even with standalone_web_search disabled. Standard Responses
+    # accepts the same hosted search and host tools. Change only our copy;
+    # keep the native catalogue and its web-search capabilities intact.
+    # https://github.com/openai/codex/issues/59782
+    models = [{**card, "tool_mode": _DIRECT_TOOL_MODE,
+               **({"use_responses_lite": False} if card.get("use_responses_lite") is True else {})}
+              if isinstance(card, dict) else card
               for card in payload["models"]]
     rendered = json.dumps({**payload, "models": models}, ensure_ascii=False)
     path = cache.with_name(_DIRECT_CATALOG_NAME)
@@ -825,10 +834,16 @@ def _openai_catalog_override(home=None):
     code-mode card is copied even with no configured catalog to neutralize,
     and the copy lives beside the cache under a name no Codex client touches.
 
+    Cards selecting ``use_responses_lite`` also require that copy. On CLI
+    0.169.0 the Lite path rejects GPT-6.2's web.run schema before any output;
+    standard Responses accepts the same request with hosted search enabled.
+    The copy disables Lite while preserving the model's search metadata.
+
     Returns ``("model_catalog_json", <path>)`` to the direct-mode copy when
     the cache is usable and either a configured catalog needs neutralizing or
-    a card would select code mode; to the raw cache when that copy cannot be
-    written but a configured catalog still needs neutralizing; else None.
+    a card would select code mode or Lite; to the raw cache when that copy
+    cannot be written but a configured catalog still needs neutralizing;
+    else None.
     """
     _refresh_stale_catalog(home)
     cache = _models_cache(home)
@@ -836,7 +851,7 @@ def _openai_catalog_override(home=None):
     if payload is None:
         return None
     configured = _configured_catalog(home)
-    if not configured and not _code_mode_cards(payload):
+    if not configured and not _requires_direct_catalog(payload):
         return None
     direct = _direct_catalog(cache, payload)
     if direct is not None:

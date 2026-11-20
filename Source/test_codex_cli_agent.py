@@ -452,6 +452,52 @@ class CodexTurnWorkspaceTests(unittest.TestCase):
             self.assertEqual(json.loads(direct.read_text(encoding="utf-8"))["models"],
                              [{"slug": "gpt-7", "tool_mode": "direct"}])
 
+    def test_lite_cards_use_standard_responses_without_losing_search(self):
+        # The Lite path fails before output on 6.2 with a reserved web.run
+        # schema 400. Already-direct cards must also select the override.
+        for model in ("gpt-6.2-sol", "gpt-6.2-astra"):
+            with self.subTest(model=model), tempfile.TemporaryDirectory() as tmp:
+                base = codex.Path(tmp)
+                cache = base / ".codex" / "models_cache.json"
+                cache.parent.mkdir()
+                card = {"slug": model, "tool_mode": "direct", "use_responses_lite": True,
+                        "supports_search_tool": True, "web_search_tool_type": "text_and_image",
+                        "context_window": 272000, "max_context_window": 1000000,
+                        "experimental_supported_tools": ["literature_search_query"]}
+                payload = {"client_version": "0.169.0", "models": [card]}
+                cache.write_text(json.dumps(payload), encoding="utf-8")
+                direct = cache.with_name(codex._DIRECT_CATALOG_NAME)
+                with mock.patch.object(codex.Path, "home", return_value=base), \
+                        mock.patch.object(codex, "runtime_binary", return_value="/fake/codex"):
+                    argv = codex.build_argv(model)
+                    self.assertIn("model_catalog_json=" + json.dumps(str(direct)), argv)
+                    self.assertEqual(json.loads(direct.read_text(encoding="utf-8")),
+                                     {**payload, "models": [{**card, "use_responses_lite": False}]})
+                    self.assertIn(model, codex._catalogue_search(argv))
+                    self.assertIn("model_context_window=1000000", argv)
+                    with mock.patch.object(codex.tempfile, "mkstemp",
+                                           side_effect=AssertionError("rewrote unchanged copy")):
+                        self.assertEqual(codex._openai_catalog_override(),
+                                         ("model_catalog_json", str(direct)))
+                    self.assertEqual(json.loads(cache.read_text(encoding="utf-8")), payload)
+                    # Once the native card no longer needs compatibility
+                    # overrides, let the runtime manage its own catalogue.
+                    cache.write_text(json.dumps({"models": [{**card, "use_responses_lite": False}]}),
+                                     encoding="utf-8")
+                    self.assertIsNone(codex._openai_catalog_override())
+
+    def test_code_mode_lite_cards_apply_both_transport_overrides(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = codex.Path(tmp) / "models_cache.json"
+            card = {"slug": "gpt-6.2-sol", "tool_mode": "code_mode_only", "use_responses_lite": True}
+            payload = {"models": [card, {"slug": "older", "use_responses_lite": False}, "not-a-card"]}
+            direct = codex._direct_catalog(cache, payload)
+            self.assertEqual(json.loads(direct.read_text(encoding="utf-8"))["models"], [
+                {**card, "tool_mode": "direct", "use_responses_lite": False},
+                {"slug": "older", "tool_mode": "direct", "use_responses_lite": False}, "not-a-card"])
+            self.assertTrue(payload["models"][0]["use_responses_lite"])
+            self.assertEqual(payload["models"][0]["tool_mode"], "code_mode_only")
+
     def test_unwritable_direct_copy_falls_back_only_for_a_configured_catalog(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = codex.Path(tmp)
