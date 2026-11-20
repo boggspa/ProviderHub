@@ -10,6 +10,7 @@
   "fallbackHueKey": "ensemble",
   "accents": {
     "ensemble": "#986781",
+    "devin": "#4878AE",
     "mistral": "#D44404",
     "kimi": "#0073E6",
     "xiaomi": "#008844",
@@ -257,8 +258,17 @@
     },
     "devin": {
       "displayProvider": "Devin",
-      "hueKey": "ensemble",
+      "hueKey": "devin",
       "shortCode": "DEV",
+      "logo": {
+        "light": "provider-logos/provider-logo-devin.png",
+        "template": true
+      }
+    },
+    "devin-cli": {
+      "displayProvider": "Devin CLI",
+      "hueKey": "devin",
+      "shortCode": "DVC",
       "logo": {
         "light": "provider-logos/provider-logo-devin.png",
         "template": true

@@ -72,7 +72,8 @@ def cli_auth_available(provider_id: str) -> bool:
 #: keeps refreshing its own login there. Vibe uses VIBE_HOME; its saved API
 #: credential is resolved by bridge_core rather than a CLI turn adapter.
 #: Antigravity uses an isolated subprocess HOME and its own ~/.gemini tree.
-CLI_ACCOUNT_PROVIDERS = frozenset({"claude", "codex", "mistral", "antigravity"})
+#: Devin reads XDG_DATA_HOME, keeping credentials.toml under <folder>/devin.
+CLI_ACCOUNT_PROVIDERS = frozenset({"claude", "codex", "mistral", "antigravity", "devin-cli"})
 MAX_CLI_ACCOUNTS = 8
 _CLI_ACCOUNT_ID = re.compile(r"[a-z0-9][a-z0-9-]{0,31}\Z")
 

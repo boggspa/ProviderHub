@@ -1323,6 +1323,8 @@ final class BridgeModel: ObservableObject {
             ? "Choose or create a separate home for this Antigravity account, e.g. ~/.antigravity-work. Use an empty folder; the CLI will create .gemini inside it."
             : provider == "claude"
             ? "Choose or create a folder for this Claude account, e.g. ~/.claude-work. Claude Code keeps that account's login there."
+            : provider == "devin-cli"
+            ? "Choose or create an XDG data folder for this Devin account, e.g. ~/.devin-work. Devin keeps that account's login under <folder>/devin."
             : "Choose or create a folder for this Codex account, e.g. ~/.codex-lite. Codex keeps that account's login there."
         panel.prompt = "Use Folder"
         guard panel.runModal() == .OK, let url = panel.url else { return }
@@ -1371,11 +1373,21 @@ final class BridgeModel: ObservableObject {
             return
         }
         func quote(_ value: String) -> String { "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'" }
-        let variable = provider == "claude" ? "CLAUDE_CONFIG_DIR" : "CODEX_HOME"
-        // Codex turns read the login from auth.json (see codex_cli_agent's
-        // credentials-store override), so the sign-in stores it there too.
-        let login = provider == "claude" ? "claude auth login && claude auth status"
-            : "codex login -c " + quote("cli_auth_credentials_store=\"file\"") + " && codex login status"
+        let variable: String
+        let login: String
+        switch provider {
+        case "claude":
+            variable = "CLAUDE_CONFIG_DIR"
+            login = "claude auth login && claude auth status"
+        case "devin-cli":
+            variable = "XDG_DATA_HOME"
+            login = "devin auth login && devin auth status"
+        default:
+            variable = "CODEX_HOME"
+            // Codex turns read the login from auth.json (see codex_cli_agent's
+            // credentials-store override), so the sign-in stores it there too.
+            login = "codex login -c " + quote("cli_auth_credentials_store=\"file\"") + " && codex login status"
+        }
         let script = folder.map { "export \(variable)=\(quote($0)) && mkdir -p \"$\(variable)\" && " + login } ?? login
         openCliAccountTerminal(script)
     }

@@ -195,6 +195,51 @@ class ProbeTests(unittest.TestCase):
         self.assertIn("dev@example.com", state["detail"])
 
     @mock.patch.object(m, "_resolve_binary", return_value="/fake/devin")
+    def test_auth_config_dir_points_xdg_data_home(self, _rb):
+        seen = {}
+
+        def capture(argv, **kwargs):
+            seen.update(kwargs)
+            return (0, "Logged in as dev@example.com\n", "")
+
+        state = m.auth_state(capture=capture, config_dir="/tmp/devin-acct")
+        self.assertEqual(state["state"], "authenticated")
+        self.assertEqual((seen.get("env") or {}).get("XDG_DATA_HOME"),
+                         "/tmp/devin-acct")
+
+    @mock.patch.object(m, "_resolve_binary", return_value="/fake/devin")
+    def test_auth_default_account_sends_no_env_override(self, _rb):
+        seen = {}
+
+        def capture(argv, **kwargs):
+            seen.update(kwargs)
+            return (0, "Logged in\n", "")
+
+        m.auth_state(capture=capture)
+        self.assertFalse(seen.get("env"))
+
+    @mock.patch.object(m, "_resolve_binary", return_value="/fake/devin")
+    def test_auth_config_dir_must_be_absolute(self, _rb):
+        # A relative folder is a caller bug, not a login state: the probe
+        # reports unknown rather than guessing (same contract as claude).
+        state = m.auth_state(capture=lambda argv, **k: (0, "", ""),
+                             config_dir="relative/dir")
+        self.assertEqual(state["state"], "unknown")
+
+    @mock.patch.object(m, "_resolve_binary", return_value="/fake/devin")
+    def test_catalogue_config_dir_points_xdg_data_home(self, _rb):
+        seen = {}
+
+        def capture(argv, **kwargs):
+            seen.update(kwargs)
+            return (0, json.dumps({"families": [{"slug": "swe-2"}]}), "")
+
+        rows, _ = m.catalogue(capture=capture, config_dir="/tmp/devin-acct")
+        self.assertTrue(rows)
+        self.assertEqual((seen.get("env") or {}).get("XDG_DATA_HOME"),
+                         "/tmp/devin-acct")
+
+    @mock.patch.object(m, "_resolve_binary", return_value="/fake/devin")
     def test_catalogue_signed_out_is_a_note_not_an_error(self, _rb):
         rows, notes = m.catalogue(capture=lambda argv, **k: (
             1, "", "Error: Not logged in. Run `devin auth login`."))
@@ -288,6 +333,25 @@ class TurnTests(unittest.TestCase):
         new_params = fake.requests[1][1]
         self.assertEqual(new_params["mcpServers"], [])
         self.assertTrue(new_params["cwd"].startswith("/"))
+
+    def test_config_dir_scopes_the_child_env(self):
+        fake = self._scripted([
+            _update("agent_message_chunk", "hi"),
+            _prompt_response(100, "end_turn"),
+        ])
+        events, fake = _run(fake, {"model": "swe-2", "config_dir": "/tmp/devin-acct",
+                                   "messages": [{"role": "user", "content": "hi"}]})
+        self.assertEqual(events[-1]["type"], "message_stop")
+        self.assertEqual((fake.env or {}).get("XDG_DATA_HOME"), "/tmp/devin-acct")
+
+    def test_default_turn_sends_no_xdg_override(self):
+        fake = self._scripted([
+            _update("agent_message_chunk", "hi"),
+            _prompt_response(100, "end_turn"),
+        ])
+        events, fake = _run(fake)
+        self.assertEqual(events[-1]["type"], "message_stop")
+        self.assertFalse((fake.env or {}).get("XDG_DATA_HOME"))
 
     def test_host_tool_call_ends_turn_with_tool_call_event(self):
         fake = self._scripted([

@@ -40,6 +40,7 @@ follow-ups, not v1 scope.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import tempfile
@@ -170,7 +171,21 @@ def _resolve_binary() -> str | None:
     return resolve_binary(BINARY_NAMES, extra_dirs=extra)
 
 
-def _default_capture(argv, *, timeout=30):
+def _account_env(config_dir) -> dict:
+    """Point the CLI at one account's XDG data folder; empty means the default login.
+
+    ``devin`` keeps ``credentials.toml`` under ``$XDG_DATA_HOME/devin``, so a
+    per-account folder is an XDG data root, not the credentials directory
+    itself. The CLI still owns the login inside it.
+    """
+    if not config_dir:
+        return {}
+    if not isinstance(config_dir, str) or not os.path.isabs(config_dir):
+        raise ValueError("A Devin account's config folder must be an absolute path")
+    return {"XDG_DATA_HOME": config_dir}
+
+
+def _default_capture(argv, *, timeout=30, env=None):
     """Run argv with the Route-2 minimal environment; (rc, out, err)."""
     try:
         result = subprocess.run(
@@ -178,7 +193,7 @@ def _default_capture(argv, *, timeout=30):
             capture_output=True,
             text=True,
             timeout=timeout,
-            env=minimal_env(),
+            env={**minimal_env(), **(env or {})},
         )
         return result.returncode, result.stdout, result.stderr
     except subprocess.TimeoutExpired:
@@ -187,12 +202,14 @@ def _default_capture(argv, *, timeout=30):
         return -1, "", str(exc)
 
 
-def _invoke(capture, argv, *, timeout=30) -> tuple[int | None, str, str]:
+def _invoke(capture, argv, *, timeout=30, env=None) -> tuple[int | None, str, str]:
     """Call an injected capture (or the real subprocess runner) on full argv.
 
     ``capture`` is the adapter contract's read-only probe seam: a callable
     ``capture(argv, *, timeout) -> (rc, stdout, stderr)``. It receives the
-    resolved binary as argv[0], exactly like the real spawn.
+    resolved binary as argv[0], exactly like the real spawn. ``env`` is the
+    account overlay (see :func:`_account_env`); it is only passed when set so
+    captures written before extra accounts existed keep working.
     """
     binary = _resolve_binary()
     if not binary:
@@ -200,8 +217,16 @@ def _invoke(capture, argv, *, timeout=30) -> tuple[int | None, str, str]:
     runner = capture or _default_capture
     full_argv = [binary] + list(argv)
     try:
-        rc, out, err = runner(full_argv, timeout=timeout)
+        if env:
+            rc, out, err = runner(full_argv, timeout=timeout, env=env)
+        else:
+            rc, out, err = runner(full_argv, timeout=timeout)
     except TypeError:
+        if env:
+            # A capture that cannot take the account overlay must fail
+            # loudly: silently retrying would probe the default login and
+            # report it as this account's state.
+            raise
         rc, out, err = runner(full_argv)
     return rc, out, err
 
@@ -221,18 +246,20 @@ def discover(*, capture=None) -> dict:
     return {"installed": True, "binary": binary, "version": version}
 
 
-def auth_state(*, capture=None) -> dict:
+def auth_state(*, capture=None, config_dir=None) -> dict:
     """Ask ``devin auth status`` — and only the CLI — whether it is signed in.
 
     Never reads ``~/.local/share/devin/credentials.toml`` or the Keychain:
     Route 2's discipline is that the CLI owns its login end to end.
+    ``config_dir`` scopes the probe to one extra account's XDG data folder.
     """
     binary = _resolve_binary()
     if not binary:
         return {"state": "missing",
                 "detail": "the devin CLI is not installed or not on PATH"}
     try:
-        rc, out, err = _invoke(capture, ["auth", "status"], timeout=30)
+        rc, out, err = _invoke(capture, ["auth", "status"], timeout=30,
+                               env=_account_env(config_dir))
     except Exception as exc:
         return {"state": "unknown", "detail": f"auth probe failed: {exc}"}
 
@@ -250,20 +277,21 @@ def auth_state(*, capture=None) -> dict:
             "detail": f"devin auth status exited {rc}" + (f": {tail}" if tail else "")}
 
 
-def catalogue(*, capture=None, timeout=30) -> tuple[list[dict], list[str]]:
+def catalogue(*, capture=None, timeout=30, config_dir=None) -> tuple[list[dict], list[str]]:
     """The account's live model inventory via ``devin models list --format json``.
 
     Signed out, the subcommand exits non-zero with "Not logged in" — that is
     reported as a note, not an exception, and the hub falls back to
     KNOWN_MODELS seeds. An unrecognised JSON shape degrades the same way
-    rather than emitting garbage rows.
+    rather than emitting garbage rows. ``config_dir`` scopes the listing to
+    one extra account's XDG data folder.
     """
     binary = _resolve_binary()
     if not binary:
         return [], ["the devin CLI is not installed or not on PATH"]
     try:
         rc, out, err = _invoke(capture, ["models", "list", "--format", "json"],
-                               timeout=timeout)
+                               timeout=timeout, env=_account_env(config_dir))
     except Exception as exc:
         return [], [f"devin models list probe failed: {exc}"]
     if rc != 0:
@@ -859,7 +887,7 @@ def run_turn(request, *, spawner=None, timeout=300) -> Iterator[dict]:
         argv[0] = binary
         session = StdioSession(
             argv,
-            env=minimal_env(),
+            env={**minimal_env(), **_account_env(request.get("config_dir"))},
             cwd=workspace_path,
             timeout=float(timeout),
             spawner=spawner,

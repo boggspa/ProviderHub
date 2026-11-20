@@ -28,7 +28,7 @@ enum Chroma {
 private typealias Semantic = HubTheme.Semantic
 
 private let subscriptionProviders: Set<String> = ["claude", "codex", "antigravity", "devin", "devin-cli"]
-private let cliAccountProviders: Set<String> = ["codex", "claude", "antigravity"]
+private let cliAccountProviders: Set<String> = ["codex", "claude", "antigravity", "devin-cli"]
 /// Providers with both an API-key source and an installed-CLI source, which
 /// Chat can list side by side. Mirrors `hub_config.CHAT_SOURCE_PROVIDERS`.
 // Matches hub_config.CHAT_SOURCE_PROVIDERS: every provider with a second credential source.
