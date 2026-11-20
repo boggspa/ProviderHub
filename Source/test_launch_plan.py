@@ -25,6 +25,7 @@ func check(_ yes: Bool, _ text: String) {
     var claudeLive = false
     var codexLive = false
     var vibeLive = false
+    var antigravityLive = false
     var running = true
     var inFlight = 0
     var port = 0

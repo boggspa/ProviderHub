@@ -8,7 +8,7 @@ import SwiftUI
 // designs edit the same unsaved settings and either can save or launch.
 // Spec: Source/HubUI/mockups/provider-hub-shell-v3.template.html.
 
-enum ShellTab: Hashable { case provider(String), claude, codex, vibe, settings }
+enum ShellTab: Hashable { case provider(String), claude, codex, vibe, antigravity, settings }
 
 enum Chroma {
     static let one = Color(red: 0x5a / 255, green: 0x8c / 255, blue: 0xff / 255)
@@ -17,6 +17,7 @@ enum Chroma {
     static let claude = Color(red: 0xd9 / 255, green: 0x7b / 255, blue: 0x3a / 255)
     static let codex = Color(red: 0x70 / 255, green: 0x5a / 255, blue: 0xff / 255)
     static let vibe = Color(red: 0xf7 / 255, green: 0x6a / 255, blue: 0x2c / 255)
+    static let antigravity = Color(red: 0x4f / 255, green: 0x7c / 255, blue: 0xf6 / 255)
     static let ok = Color(red: 0x3e / 255, green: 0xcf / 255, blue: 0x8e / 255)
     static let warn = Color(red: 0xf5 / 255, green: 0xb6 / 255, blue: 0x42 / 255)
     static let bad = Color(red: 1, green: 0x5d / 255, blue: 0x5d / 255)
@@ -96,6 +97,11 @@ extension BridgeModel {
     /// compatible route, so nothing is listed until one is chosen.
     func vibeListed(_ route: String) -> Bool {
         settings.vibe_catalogue?.contains(route) ?? false
+    }
+    /// Whether a route is in Antigravity's picker. A nil catalogue serves
+    /// every compatible route, so nothing is listed until one is chosen.
+    func antigravityListed(_ route: String) -> Bool {
+        settings.antigravity_catalogue?.contains(route) ?? false
     }
     func shellProviderState(_ id: String) -> (text: String, color: Color, on: Bool) {
         if id == "ollama" { return ("Local daemon", Chroma.ok, true) }
@@ -219,6 +225,7 @@ struct CompactShell: View {
             appTab(.claude, "Claude Desktop", Chroma.claude, logo: "claude", live: model.claudeRunning && model.profileActive, count: model.claudeCatalogue.count)
             appTab(.codex, "Codex / ChatGPT", Chroma.codex, logo: "codex", live: model.codexRunning && model.codexProfileActive, count: model.codexCuratedRoutes.count)
             appTab(.vibe, "Vibe Desktop", Chroma.vibe, logo: "mistral", live: model.vibeRunning && model.vibeProfileActive, count: model.vibeRoutes.count)
+            appTab(.antigravity, "Antigravity", Chroma.antigravity, logo: "antigravity", live: model.antigravityRunning && model.antigravityProfileActive, count: model.antigravityRoutes.count)
             Button { withAnimation(.easeOut(duration: 0.2)) { railOpen.toggle() } } label: {
                 Image(systemName: railOpen ? "chevron.left" : "chevron.right").font(.system(size: 10, weight: .semibold)).foregroundStyle(.tertiary)
                     .frame(width: 24, height: 20)
@@ -303,6 +310,7 @@ struct CompactShell: View {
                     case .claude: ClaudeShellPane(model: model, jump: jump)
                     case .codex: CodexShellPane(model: model, jump: jump)
                     case .vibe: VibeShellPane(model: model, jump: jump)
+                    case .antigravity: AntigravityShellPane(model: model, jump: jump)
                     case .settings: EmptyView()
                     }
                 }.padding(.horizontal, 10).padding(.vertical, 6).frame(maxWidth: .infinity, alignment: .topLeading)
@@ -333,6 +341,7 @@ struct CompactShell: View {
             case .claude: AppSide(model: model, surface: .claude)
             case .codex: AppSide(model: model, surface: .codex)
             case .vibe: AppSide(model: model, surface: .vibe)
+            case .antigravity: AppSide(model: model, surface: .antigravity)
             case .settings: EmptyView()
             }
         }.padding(.horizontal, 10).padding(.vertical, 6).frame(maxHeight: .infinity, alignment: .top)
@@ -443,7 +452,8 @@ private struct ModelRow: View {
         let claude = model.claudeEntry(entry.id)
         let inCodex = model.codexCuratedRoutes.contains(entry.id) && model.settings.codex_catalogue != nil
         let inVibe = model.vibeListed(entry.id)
-        let listed = claude != nil || inCodex || inVibe
+        let inAntigravity = model.antigravityListed(entry.id)
+        let listed = claude != nil || inCodex || inVibe || inAntigravity
         Button(action: onFocus) {
             HStack(spacing: 7) {
                 Text(model.modelLabel(entry.id)).font(.system(size: 12.5, weight: listed ? .medium : .regular)).foregroundStyle(listed ? .primary : .secondary).lineLimit(1)
@@ -455,6 +465,7 @@ private struct ModelRow: View {
                 chip("CL", claude != nil, Chroma.claude) { toggleClaude() }
                 chip("CX", inCodex, Chroma.codex) { model.codexMaterialise(); model.codexSetListed(entry.id, !inCodex) }
                 chip("ML", inVibe, Chroma.vibe) { model.vibeMaterialise(); model.vibeSetListed(entry.id, !inVibe) }
+                chip("AG", inAntigravity, Chroma.antigravity) { model.antigravityMaterialise(); model.antigravitySetListed(entry.id, !inAntigravity) }
                 // One bolt for Fast, two when Ultrafast is offered too.
                 ChatSpeedGlyph(speed: entry.speed_options?.last?.id ?? "fast")
                     .foregroundStyle(accent.opacity(entry.fast_mode == true || entry.speed_options?.isEmpty == false ? 0.85 : 0))
@@ -493,7 +504,7 @@ private struct ProviderShellPane: View {
         let query = search.trimmingCharacters(in: .whitespaces)
         return query.isEmpty ? all : all.filter { (model.modelLabel($0.id) + " " + $0.id).localizedCaseInsensitiveContains(query) }
     }
-    var listedCount: Int { model.providerModels(provider.id).filter { model.claudeEntry($0.id) != nil || (model.settings.codex_catalogue?.contains($0.id) ?? false) || model.vibeListed($0.id) }.count }
+    var listedCount: Int { model.providerModels(provider.id).filter { model.claudeEntry($0.id) != nil || (model.settings.codex_catalogue?.contains($0.id) ?? false) || model.vibeListed($0.id) || model.antigravityListed($0.id) }.count }
 
     var body: some View {
         let state = model.shellProviderState(provider.id)
@@ -712,6 +723,7 @@ private struct ProviderSide: View {
                     if on { if model.settings.claude_catalogue == nil { model.settings.claude_catalogue = model.claudeCatalogue }; model.addClaudeRoute(entry.id) } else { model.removeClaudeRoute(entry.id) } }), accent: Chroma.claude)
                 OptionRow(title: "Codex", isOn: Binding(get: { inCodex }, set: { model.codexMaterialise(); model.codexSetListed(entry.id, $0) }), accent: Chroma.codex)
                 OptionRow(title: "Vibe", isOn: Binding(get: { model.vibeListed(entry.id) }, set: { model.vibeMaterialise(); model.vibeSetListed(entry.id, $0) }), accent: Chroma.vibe)
+                OptionRow(title: "Antigravity", isOn: Binding(get: { model.antigravityListed(entry.id) }, set: { model.antigravityMaterialise(); model.antigravitySetListed(entry.id, $0) }), accent: Chroma.antigravity)
                 HStack { Text("Subagent priority").foregroundStyle(.secondary); Spacer()
                     Stepper("", value: Binding(get: { model.settings.codex_subagent_rank?[entry.id] ?? 0 }, set: { model.codexSetRank(entry.id, $0 == 0 ? nil : $0) }), in: 0...5).labelsHidden().controlSize(.mini)
                     Text(model.settings.codex_subagent_rank?[entry.id].map(String.init) ?? "auto").font(.system(size: 10.5, design: .monospaced)).frame(width: 30, alignment: .trailing) }
@@ -882,22 +894,52 @@ private struct VibeShellPane: View {
     }
 }
 
+/// The Antigravity desktop app: the routes its picker offers and the one it
+/// opens on. Antigravity reads both from its own settings file, which the
+/// Hub writes when the app is launched from here.
+private struct AntigravityShellPane: View {
+    @ObservedObject var model: BridgeModel
+    var jump: (String) -> Void
+    var body: some View {
+        let presentation = model.providerDefinitions.first { $0.id == "antigravity" }?.presentation
+        let running = model.antigravityRunning && model.antigravityProfileActive
+        VStack(alignment: .leading, spacing: 4) {
+            PaneHeader(presentation: presentation, title: "Antigravity", subtitle: model.antigravityAppPath == nil ? "not installed" : "desktop app", accent: Chroma.antigravity,
+                       state: (running ? "Running" : "Closed", running ? Chroma.ok : Color.secondary))
+            SectionLabel(text: "Catalogue", trailing: "\(model.antigravityRoutes.count) listed")
+            HStack(spacing: 6) {
+                ModeCard(title: "All compatible", code: "all_compatible", selected: model.antigravityMode == "all", accent: Chroma.antigravity) { model.setAntigravityMode("all") }
+                ModeCard(title: "Custom", code: "custom", selected: model.antigravityMode == "custom", accent: Chroma.antigravity) { model.setAntigravityMode("custom") }
+            }
+            SectionLabel(text: "Default model")
+            Picker("", selection: Binding(get: { model.settings.antigravity_model ?? "" }, set: { model.antigravityMaterialise(); model.settings.antigravity_model = $0.isEmpty ? nil : $0 })) {
+                Text("Choose a model…").tag("")
+                ForEach(model.antigravityRoutes, id: \.self) { route in Text(model.modelLabel(route)).tag(route) }
+            }.labelsHidden().controlSize(.small).frame(maxWidth: 260, alignment: .leading)
+            SectionLabel(text: "Listed models")
+            ForEach(model.antigravityRoutes, id: \.self) { route in
+                HStack(spacing: 8) {
+                    if let presentation = model.modelEntry(route)?.presentation { ProviderMark(presentation: presentation, size: 16) }
+                    Text(model.modelLabel(route)).lineLimit(1)
+                    Spacer()
+                    Button("Change") { jump(route) }.buttonStyle(.borderless).font(.system(size: 10.5)).foregroundStyle(.secondary)
+                }.padding(.horizontal, 8).padding(.vertical, 4).hubCard(cornerRadius: 6, accent: Chroma.antigravity)
+            }
+        }
+    }
+}
+
 private struct AppSide: View {
     @ObservedObject var model: BridgeModel
-    enum Surface { case claude, codex, vibe }
+    enum Surface { case claude, codex, vibe, antigravity }
     var surface: Surface
     var body: some View {
-        let accent: Color = surface == .claude ? Chroma.claude : (surface == .codex ? Chroma.codex : Chroma.vibe)
-        let title: String = surface == .claude ? "Claude" : (surface == .codex ? "Codex" : "Vibe")
-        let count = surface == .claude ? model.claudeCatalogue.count : (surface == .codex ? model.codexCuratedRoutes.count : model.vibeRoutes.count)
-        let running = surface == .claude ? (model.claudeRunning && model.profileActive)
-            : (surface == .codex ? (model.codexRunning && model.codexProfileActive) : (model.vibeRunning && model.vibeProfileActive))
-        let canLaunch = surface == .claude ? model.claudeInstalled
-            : (surface == .codex ? (model.codexAppPath != nil && model.settings.codex_model != nil)
-               : (model.vibeAppPath != nil && model.settings.vibe_model != nil))
-        let needsRestore = surface == .claude ? (!model.recoveryNeeded || model.claudeRunning)
-            : (surface == .codex ? (!model.codexRecoveryNeeded || model.codexRunning)
-               : (!model.vibeRecoveryNeeded || model.vibeRunning))
+        let accent = accentColor
+        let title = titleText
+        let count = modelCount
+        let running = isRunning
+        let canLaunch = canLaunchNow
+        let needsRestore = needsRestoreNow
         VStack(alignment: .leading, spacing: 8) {
             SectionLabel(text: title)
             Text("\(count)").font(.system(size: 18, weight: .semibold))
@@ -906,8 +948,10 @@ private struct AppSide: View {
                 Text(running ? "Show \(title)" : "Launch \(title)").foregroundStyle(HubTheme.Control.ink).frame(maxWidth: .infinity)
             }.buttonStyle(.borderedProminent).tint(accent).controlSize(.regular)
                 .disabled(model.busy || !canLaunch)
-            Button("Restore") { Task { await restore() } }.controlSize(.small)
-                .disabled(model.busy || !needsRestore)
+            if surface != .antigravity {
+                Button("Restore") { Task { await restore() } }.controlSize(.small)
+                    .disabled(model.busy || !needsRestore)
+            }
             if surface == .claude && model.claudeRunning && !model.profileActive {
                 Text("Claude is open with another profile. Quit it first.").font(.system(size: 10.5)).foregroundStyle(Chroma.warn)
             }
@@ -917,7 +961,64 @@ private struct AppSide: View {
             if surface == .vibe && model.vibeRunning && !model.vibeProfileActive {
                 Text("Vibe is open. Quit it, then launch it here.").font(.system(size: 10.5)).foregroundStyle(Chroma.warn)
             }
+            if surface == .antigravity && model.antigravityRunning && !model.antigravityProfileActive {
+                Text("Antigravity is open. Quit it, then launch it here.").font(.system(size: 10.5)).foregroundStyle(Chroma.warn)
+            }
             Spacer()
+        }
+    }
+
+    private var accentColor: Color {
+        switch surface {
+        case .claude: return Chroma.claude
+        case .codex: return Chroma.codex
+        case .vibe: return Chroma.vibe
+        case .antigravity: return Chroma.antigravity
+        }
+    }
+
+    private var titleText: String {
+        switch surface {
+        case .claude: return "Claude"
+        case .codex: return "Codex"
+        case .vibe: return "Vibe"
+        case .antigravity: return "Antigravity"
+        }
+    }
+
+    private var modelCount: Int {
+        switch surface {
+        case .claude: return model.claudeCatalogue.count
+        case .codex: return model.codexCuratedRoutes.count
+        case .vibe: return model.vibeRoutes.count
+        case .antigravity: return model.antigravityRoutes.count
+        }
+    }
+
+    private var isRunning: Bool {
+        switch surface {
+        case .claude: return model.claudeRunning && model.profileActive
+        case .codex: return model.codexRunning && model.codexProfileActive
+        case .vibe: return model.vibeRunning && model.vibeProfileActive
+        case .antigravity: return model.antigravityRunning && model.antigravityProfileActive
+        }
+    }
+
+    private var canLaunchNow: Bool {
+        switch surface {
+        case .claude: return model.claudeInstalled
+        case .codex: return model.codexAppPath != nil && model.settings.codex_model != nil
+        case .vibe: return model.vibeAppPath != nil && model.settings.vibe_model != nil
+        case .antigravity: return model.antigravityAppPath != nil && model.settings.antigravity_model != nil
+        }
+    }
+
+    private var needsRestoreNow: Bool {
+        switch surface {
+        case .claude: return !model.recoveryNeeded || model.claudeRunning
+        case .codex: return !model.codexRecoveryNeeded || model.codexRunning
+        case .vibe: return !model.vibeRecoveryNeeded || model.vibeRunning
+        case .antigravity: return !model.antigravityRecoveryNeeded || model.antigravityRunning
         }
     }
 
@@ -926,6 +1027,7 @@ private struct AppSide: View {
         case .claude: await model.launchClaude()
         case .codex: await model.launchCodex()
         case .vibe: await model.launchVibe()
+        case .antigravity: await model.launchAntigravity()
         }
     }
 
@@ -934,6 +1036,7 @@ private struct AppSide: View {
         case .claude: await model.restore()
         case .codex: await model.restoreCodex()
         case .vibe: await model.restoreVibe()
+        case .antigravity: await model.restoreAntigravity()
         }
     }
 }

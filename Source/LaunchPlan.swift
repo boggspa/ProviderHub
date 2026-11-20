@@ -22,6 +22,8 @@ enum ChangeKind: String, Equatable {
     case codexOnly
     /// Only Vibe's selection.
     case vibeOnly
+    /// Only Antigravity's selection.
+    case antigravityOnly
     /// Claude's model selection (mappings, catalogue, branding).
     case claudeRouting
     /// More than one selection.
@@ -62,7 +64,11 @@ func classifyChange(_ settings: RouteSettings, from saved: RouteSettings) -> Cha
     withoutVibe.vibe_catalogue = saved.vibe_catalogue
     withoutVibe.vibe_model = saved.vibe_model
     let vibeChanged = withoutVibe != mine
-    var prefsOnly = withoutVibe
+    var withoutAntigravity = withoutVibe
+    withoutAntigravity.antigravity_catalogue = saved.antigravity_catalogue
+    withoutAntigravity.antigravity_model = saved.antigravity_model
+    let antigravityChanged = withoutAntigravity != withoutVibe
+    var prefsOnly = withoutAntigravity
     prefsOnly.providers = saved.providers  // only CLI accounts can differ here
     prefsOnly.auto_stop = saved.auto_stop
     prefsOnly.auto_mode = saved.auto_mode
@@ -70,20 +76,25 @@ func classifyChange(_ settings: RouteSettings, from saved: RouteSettings) -> Cha
     prefsOnly.claude_code_settings = saved.claude_code_settings
     prefsOnly.claude_workflows = saved.claude_workflows
     if prefsOnly == saved {
-        if codexChanged && vibeChanged { return .mixed }
-        return codexChanged ? .codexOnly : (vibeChanged ? .vibeOnly : .prefs)
+        let changed = [codexChanged, vibeChanged, antigravityChanged].filter { $0 }
+        if changed.count > 1 { return .mixed }
+        if codexChanged { return .codexOnly }
+        if vibeChanged { return .vibeOnly }
+        if antigravityChanged { return .antigravityOnly }
+        return .prefs
     }
-    return (codexChanged || vibeChanged) ? .mixed : .claudeRouting
+    return (codexChanged || vibeChanged || antigravityChanged) ? .mixed : .claudeRouting
 }
 
 enum LaunchSurface {
-    case claude, codex, vibe
+    case claude, codex, vibe, antigravity
 
     var label: String {
         switch self {
         case .claude: return "Claude"
         case .codex: return "Codex / ChatGPT"
         case .vibe: return "Vibe"
+        case .antigravity: return "Antigravity"
         }
     }
     var otherLabel: String {
@@ -91,6 +102,7 @@ enum LaunchSurface {
         case .claude: return "Codex / ChatGPT"
         case .codex: return "Claude"
         case .vibe: return "Claude and Codex / ChatGPT"
+        case .antigravity: return "Claude, Codex / ChatGPT and Vibe"
         }
     }
     /// The prepare command's result key for the snapshot this surface needs,
@@ -104,6 +116,7 @@ enum LaunchSurface {
         case .claude: return "catalogue_fingerprint"
         case .codex: return "codex_catalogue_digest"
         case .vibe: return "vibe_catalogue_digest"
+        case .antigravity: return "antigravity_catalogue_digest"
         }
     }
     func serving(_ status: GatewayStatus) -> String? {
@@ -111,6 +124,7 @@ enum LaunchSurface {
         case .claude: return status.fingerprint
         case .codex: return status.digest
         case .vibe: return status.vibeDigest
+        case .antigravity: return status.antigravityDigest
         }
     }
 }
@@ -122,6 +136,7 @@ struct GatewayStatus {
     var fingerprint: String?
     var digest: String?
     var vibeDigest: String? = nil
+    var antigravityDigest: String? = nil
 }
 
 struct LaunchRefusal: LocalizedError {
@@ -143,6 +158,7 @@ protocol LaunchHost: AnyObject {
     var claudeLive: Bool { get }
     var codexLive: Bool { get }
     var vibeLive: Bool { get }
+    var antigravityLive: Bool { get }
     func refreshDesktopState()
     func waitForCatalogueRefresh() async
     /// Persist `settings` and make it the saved state.
@@ -163,13 +179,13 @@ extension LaunchHost {
     func startGatewayForUse(save: () async throws -> Void) async throws {
         guard !running else { return }
         refreshDesktopState()
-        if !(chatBusy || activeRequests > 0 || claudeLive || codexLive || vibeLive) { try await save() }
+        if !(chatBusy || activeRequests > 0 || claudeLive || codexLive || vibeLive || antigravityLive) { try await save() }
         try await startGateway()
     }
 
     /// No surface is keeping the gateway alive and nothing is in flight.
     func mayStopGateway() -> Bool {
-        !(claudeLive || codexLive || vibeLive || chatWindowOpen || chatBusy) && activeRequests == 0
+        !(claudeLive || codexLive || vibeLive || antigravityLive || chatWindowOpen || chatBusy) && activeRequests == 0
     }
 
     /// A live app's profile is never rewritten from under it.
@@ -179,9 +195,11 @@ extension LaunchHost {
             return "Quit Codex / ChatGPT before changing its model catalogue or default."
         case .vibeOnly where vibeLive:
             return "Quit Vibe before changing its model catalogue or default."
+        case .antigravityOnly where antigravityLive:
+            return "Quit Antigravity before changing its model catalogue or default."
         case .claudeRouting where claudeLive:
             return "Quit Claude before changing its model or provider settings."
-        case .mixed where claudeLive || codexLive || vibeLive:
+        case .mixed where claudeLive || codexLive || vibeLive || antigravityLive:
             return "Quit the desktop sessions using this gateway before changing the apps' model settings."
         default:
             return nil

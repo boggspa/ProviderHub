@@ -146,6 +146,10 @@ struct RouteSettings: Codable, Equatable {
     // A nil catalogue serves every compatible route.
     var vibe_catalogue: [String]?
     var vibe_model: String?
+    // Antigravity tab: the route Antigravity opens on, and the rows its
+    // picker offers. A nil catalogue serves every compatible route.
+    var antigravity_catalogue: [String]?
+    var antigravity_model: String?
     var codex_model: String?
     var codex_catalogue: [String]?
     var codex_chatgpt_account = false

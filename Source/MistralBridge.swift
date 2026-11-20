@@ -110,6 +110,12 @@ final class BridgeModel: ObservableObject {
     @Published var vibeRecoveryNeeded = false
     var observedOwnedVibe = false
     var vibeLaunchTime = Date.distantPast
+    @Published var antigravityAppPath: String?
+    @Published var antigravityRunning = false
+    @Published var antigravityProfileActive = false
+    @Published var antigravityRecoveryNeeded = false
+    var observedOwnedAntigravity = false
+    var antigravityLaunchTime = Date.distantPast
     @Published var activeRequests = 0
     @Published var completed = 0
     @Published var failures = 0
@@ -361,6 +367,7 @@ final class BridgeModel: ObservableObject {
     func readCatalogue(_ object: [String: Any], modelsKey: String) {
         readCodexState(object)
         readVibeState(object)
+        readAntigravityState(object)
         func decode<T: Decodable>(_ type: T.Type, _ raw: Any?) -> T? {
             guard let raw, let data = try? JSONSerialization.data(withJSONObject: raw) else { return nil }
             return try? JSONDecoder().decode(type, from: data)
@@ -600,9 +607,12 @@ final class BridgeModel: ObservableObject {
         switch changeKind {
         case .codexOnly where codexLive:
             return "Quit Codex / ChatGPT to apply its catalogue or configuration changes."
+        case .antigravityOnly where antigravityLive:
+            return "Quit Antigravity to apply its catalogue or configuration changes."
         case .claudeRouting where claudeLive:
             return "Quit Claude to apply its model or provider changes."
-        case .mixed where claudeLive || codexLive, .shared where claudeLive || codexLive:
+        case .mixed where claudeLive || codexLive || vibeLive || antigravityLive,
+             .shared where claudeLive || codexLive || vibeLive || antigravityLive:
             return "Quit the desktop sessions using this gateway to apply these changes."
         default: return nil
         }
@@ -612,6 +622,8 @@ final class BridgeModel: ObservableObject {
         await waitForCatalogueRefresh()
         updateClaudeRunning()
         updateCodexRunning()
+        updateVibeRunning()
+        updateAntigravityRunning()
         let kind = changeKind
         if kind == .unchanged { return }
         if chatBusy && kind != .prefs {
@@ -619,7 +631,7 @@ final class BridgeModel: ObservableObject {
         }
         let claudeLive = claudeRunning && profileActive
         let codexLive = codexRunning && codexRecoveryNeeded
-        if activeRequests > 0 || claudeLive || codexLive {
+        if activeRequests > 0 || claudeLive || codexLive || vibeLive || antigravityLive {
             // While one desktop session is live, only changes scoped to the
             // idle harness's selection are writable; the launch flow offers a
             // live gateway refresh when the new selection needs a fresh snapshot.
@@ -635,18 +647,22 @@ final class BridgeModel: ObservableObject {
                 guard !vibeLive else {
                     throw WorkerError(message: "Quit Mistral Vibe before changing its model catalogue or default.")
                 }
+            case .antigravityOnly:
+                guard !antigravityLive else {
+                    throw WorkerError(message: "Quit Antigravity before changing its model catalogue or default.")
+                }
             case .claudeRouting:
                 guard !claudeLive else {
                     throw WorkerError(message: "Quit Claude before changing its provider settings.")
                 }
             case .mixed:
-                guard !claudeLive && !codexLive else {
+                guard !claudeLive && !codexLive && !vibeLive && !antigravityLive else {
                     throw WorkerError(message: "Quit the desktop sessions using this gateway before changing both apps' model settings.")
                 }
             case .shared:
                 // The running gateway listens on the saved port and serves
                 // these connections; it must stop before they are written.
-                guard !claudeLive && !codexLive else {
+                guard !claudeLive && !codexLive && !vibeLive && !antigravityLive else {
                     throw WorkerError(message: "Quit the desktop sessions using this gateway before changing its port or provider connections.")
                 }
                 throw WorkerError(message: "Wait for the gateway's requests to finish before changing its port or provider connections.")
@@ -684,7 +700,8 @@ final class BridgeModel: ObservableObject {
               let status = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
         return GatewayStatus(active: status["active"] as? Int, fingerprint: status["catalogue_fingerprint"] as? String,
                              digest: status["codex_catalogue_digest"] as? String,
-                             vibeDigest: status["vibe_catalogue_digest"] as? String)
+                             vibeDigest: status["vibe_catalogue_digest"] as? String,
+                             antigravityDigest: status["antigravity_catalogue_digest"] as? String)
     }
 
     func refreshGateway(_ surface: LaunchSurface, expected: String) async throws -> GatewayStatus? {
@@ -702,13 +719,15 @@ final class BridgeModel: ObservableObject {
         }
         return GatewayStatus(active: value["active"] as? Int, fingerprint: value["catalogue_fingerprint"] as? String,
                              digest: value["codex_catalogue_digest"] as? String,
-                             vibeDigest: value["vibe_catalogue_digest"] as? String)
+                             vibeDigest: value["vibe_catalogue_digest"] as? String,
+                             antigravityDigest: value["antigravity_catalogue_digest"] as? String)
     }
 
     func refreshDesktopState() {
         updateClaudeRunning()
         updateCodexRunning()
         updateVibeRunning()
+        updateAntigravityRunning()
     }
 
     func checkIdleGateway() async throws {
@@ -933,6 +952,7 @@ final class BridgeModel: ObservableObject {
         updateClaudeRunning()
         updateCodexRunning()
         updateVibeRunning()
+        updateAntigravityRunning()
         let metaPath = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library/Application Support/Claude-3p/configLibrary/_meta.json")
         if let data = try? Data(contentsOf: metaPath), let meta = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
             profileActive = meta["appliedId"] as? String == hubProfileID
@@ -952,6 +972,7 @@ final class BridgeModel: ObservableObject {
         }
         await pollCodexRecovery()
         await pollVibeRecovery()
+        await pollAntigravityRecovery()
         if running && !checkingStatus { await refreshStatus() }
         loadActivity()
     }

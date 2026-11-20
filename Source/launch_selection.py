@@ -20,6 +20,7 @@ from pathlib import Path
 from codex_catalogue import choices as codex_choices
 from hub_config import SLOTS, _TIER_FALLBACKS, claude_routes, provider_label, split_route
 from vibe_catalogue import choices as vibe_choices
+from antigravity_catalogue import choices as antigravity_choices
 
 PLAN_FILE = "launch-plan.json"
 
@@ -136,6 +137,15 @@ def effective_launch_settings(settings: dict, inventory: dict, *, blocked=None) 
                 omissions.append(_omission(settings, "vibe", route, reason(route)))
         result["vibe_catalogue"] = kept
 
+    if settings.get("antigravity_catalogue") is not None:
+        kept = []
+        for route in settings["antigravity_catalogue"]:
+            if usable(route):
+                kept.append(route)
+            else:
+                omissions.append(_omission(settings, "antigravity", route, reason(route)))
+        result["antigravity_catalogue"] = kept
+
     model = settings.get("codex_model")
     if isinstance(model, str) and model and not usable(model):
         available = [choice["id"] for choice in codex_choices(result, inventory) if usable(choice["id"])]
@@ -157,6 +167,17 @@ def effective_launch_settings(settings: dict, inventory: dict, *, blocked=None) 
                 existing["replacement"] = available[0]
             else:
                 omissions.append(_omission(settings, "vibe", model, reason(model), replacement=available[0]))
+
+    model = settings.get("antigravity_model")
+    if isinstance(model, str) and model and not usable(model):
+        available = [choice["id"] for choice in antigravity_choices(result, inventory) if usable(choice["id"])]
+        if available:
+            result["antigravity_model"] = available[0]
+            existing = next((item for item in omissions if item["surface"] == "antigravity" and item["route"] == model), None)
+            if existing is not None:
+                existing["replacement"] = available[0]
+            else:
+                omissions.append(_omission(settings, "antigravity", model, reason(model), replacement=available[0]))
     return result, omissions
 
 
@@ -178,10 +199,14 @@ def servable_shortfall(settings: dict, inventory: dict, *, blocked=None, surface
     elif surface == "codex":
         model = settings.get("codex_model")
         routes = {model} if isinstance(model, str) and model else set()
-    else:
+    elif surface == "vibe":
         model = settings.get("vibe_model")
         routes = {model} if isinstance(model, str) and model else set()
         routes.update(settings.get("vibe_catalogue") or [])
+    else:
+        model = settings.get("antigravity_model")
+        routes = {model} if isinstance(model, str) and model else set()
+        routes.update(settings.get("antigravity_catalogue") or [])
     return sorted(route for route in routes
                   if route not in advertised or split_route(route)[0] in blocked)
 

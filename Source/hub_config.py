@@ -668,6 +668,10 @@ def defaults(slots, vibe_model: str, port: int = 11436) -> dict:
             # Vibe tab: the model Vibe starts on, and the catalogue it offers.
             # A nil catalogue serves every compatible route.
             "vibe_catalogue": None, "vibe_model": None,
+            # Antigravity tab: the model Antigravity starts on, and the
+            # catalogue it offers. A nil catalogue serves every compatible
+            # route.
+            "antigravity_catalogue": None, "antigravity_model": None,
             "codex_accent_slider": False, "codex_hide_usage_banner": False,
             "codex_unlock_composer": False, "codex_quick_composer": False, "codex_quick_composer_window": True,
             "codex_goal_budget": False, "codex_subagent_rank": None, "codex_subagent_route": None}
@@ -805,6 +809,26 @@ def normalize(value: dict, slots, vibe_model: str, port: int = 11436) -> dict:
         result["vibe_model"] = qualify(*split_route(vibe_model))
         if result["vibe_catalogue"] is not None and result["vibe_model"] not in result["vibe_catalogue"]:
             raise ValueError("Choose the Vibe default model from the catalogue selection.")
+    # antigravity_catalogue narrows the rows Antigravity offers; a nil
+    # selection serves every compatible route, the same way the Codex
+    # catalogue does.
+    catalogue = value.get("antigravity_catalogue")
+    if catalogue is not None:
+        if not isinstance(catalogue, list) or not catalogue:
+            raise ValueError("The Antigravity catalogue selection must be a non-empty list of model routes.")
+        selected = []
+        for route in catalogue:
+            qualified = qualify(*split_route(route))
+            if qualified not in selected:
+                selected.append(qualified)
+        result["antigravity_catalogue"] = selected
+    # antigravity_model is the route Antigravity opens on, and the route the
+    # Hub checks before launching it.
+    antigravity_model = value.get("antigravity_model")
+    if antigravity_model is not None:
+        result["antigravity_model"] = qualify(*split_route(antigravity_model))
+        if result["antigravity_catalogue"] is not None and result["antigravity_model"] not in result["antigravity_catalogue"]:
+            raise ValueError("Choose the Antigravity default model from the catalogue selection.")
     # codex_subagent_route is the model a spawned sub-agent runs on when the
     # parent does not name one itself. Codex has a configuration key for this,
     # default_subagent_model, and on 26.908 it is inert - a real spawn with it
