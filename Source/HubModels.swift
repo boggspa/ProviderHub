@@ -148,7 +148,8 @@ struct RouteSettings: Codable, Equatable {
     var vibe_model: String?
     // Launch Vibe through the DevTools-pipe helper that paints provider
     // accents and logos in its picker and tool steps (see vibe_accent.py).
-    var vibe_accent = false
+    // On by default; off launches Vibe through LaunchServices.
+    var vibe_accent = true
     // Antigravity tab: the route Antigravity opens on, and the rows its
     // picker offers. A nil catalogue serves every compatible route.
     var antigravity_catalogue: [String]?

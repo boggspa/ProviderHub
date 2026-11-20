@@ -160,6 +160,12 @@ class SettingsMigrationTests(unittest.TestCase):
         self.assertEqual(routes["claude-haiku-4-5"], "mistral/mistral-small-4")
         self.assertNotIn("mistral/a", routes.values())
 
+    def test_vibe_accent_is_on_by_default_and_an_explicit_off_survives(self):
+        self.assertIs(normalize({}, SLOTS, "mistral-test")["vibe_accent"], True)
+        self.assertIs(normalize({"vibe_accent": False}, SLOTS, "mistral-test")["vibe_accent"], False)
+        with self.assertRaises(ValueError):
+            normalize({"vibe_accent": "on"}, SLOTS, "mistral-test")
+
     def test_codex_catalogue_is_optional_deduped_and_binds_the_default(self):
         base = defaults(SLOTS, "mistral-test")
         self.assertIsNone(base["codex_catalogue"])
