@@ -240,6 +240,7 @@ _WATCHER = r"""
   const LOGO = 'data-provider-hub-logo';
   const ITEM = 'data-provider-hub-item';
   const TURN = 'data-provider-hub-turn';
+  const EFFORT = 'data-provider-hub-effort';
   const STYLE_ID = 'provider-hub-vibe-accent';
   const ICON = 'svg[class~="size-4"][class~="shrink-0"]:not([data-icon-asset="thinking"]):not([class~="absolute"])';
   const TRIGGER = 'button[class~="group/model-picker"]';
@@ -256,6 +257,7 @@ _WATCHER = r"""
     svg[${LOGO}="tint"] > * { opacity: 1 !important; }
     [${ITEM}] :has(> input[type="radio"]:checked) > label,
     [${ITEM}] input[type="radio"]:checked ~ label { background-color: var(--provider-hub-accent) !important; }
+    [${EFFORT}] { color: var(--provider-hub-accent) !important; }
     [${TURN}] [data-step-state] > span[class~="text-icon-default-muted"],
     [${TURN}] [data-step-state] > svg[class~="text-icon-default-muted"] { color: var(--provider-hub-turn-accent) !important; }
     [${TURN}] [data-step-state] > span[class~="animate-spin"] { border-top-color: var(--provider-hub-turn-accent) !important; }
@@ -361,6 +363,45 @@ _WATCHER = r"""
     return composer;
   }
 
+  // The effort level ("Low", "High") is an AuraTypography span (class
+  // text-subtle) in the pill's label span, after the model label's text and
+  // an optional "Preview" span of the same kind: [model, preview?, " · Low"].
+  // Only the span that opens with the " · " separator (or stands alone when
+  // the pill shows no model) is the level. The menu's "Thinking" sub-trigger
+  // holds it as the last span of a flex-col span (text-xs, text-muted); the
+  // sub-menu's rows carry a radio but no model icon. The menu is portalled,
+  // so all of these take the composer model's accent.
+  function paintEffort(composer) {
+    const entry = composer ? entryFor(composer) : null;
+    const targets = new Set();
+    if (entry) {
+      for (const host of document.querySelectorAll(TRIGGER)) {
+        const label = host.querySelector('span[class~="hidden"]');
+        const level = label && label.lastElementChild;
+        if (level && level.tagName === 'SPAN' && level.className.includes('text-subtle')
+            && (label.childNodes.length === 1 || clean(level.textContent).startsWith('\u00b7'))) targets.add(level);
+      }
+      for (const host of document.querySelectorAll(SUB_TRIGGER)) {
+        if (!host.querySelector('svg[data-icon-asset="thinking"]')) continue;
+        const level = host.querySelector('span[class~="flex-col"] > span:last-child');
+        if (level && level.children.length === 0) targets.add(level);
+      }
+    }
+    for (const span of targets) { setAttribute(span, EFFORT, composer); setProperty(span, '--provider-hub-accent', entry.accent); }
+    for (const span of document.querySelectorAll(`[${EFFORT}]`)) if (!targets.has(span)) unpaint(span, EFFORT, ['--provider-hub-accent']);
+    // The thinking sub-menu's checked radio. Other composer menus (approval
+    // policy) also hold icon-less radio rows, so only while the Thinking
+    // sub-trigger reports its sub-menu open (Radix data-state="open").
+    const thinkingOpen = [...document.querySelectorAll(SUB_TRIGGER)].some((host) =>
+      host.getAttribute('data-state') === 'open' && host.querySelector('svg[data-icon-asset="thinking"]'));
+    for (const input of document.querySelectorAll('[role^="menuitem"] input[type="radio"]')) {
+      const item = input.closest('[role^="menuitem"]');
+      if (!item || item.querySelector(ICON)) continue;
+      if (entry && thinkingOpen) { setAttribute(item, ITEM, composer); setProperty(item, '--provider-hub-accent', entry.accent); }
+      else unpaint(item, ITEM, ['--provider-hub-accent']);
+    }
+  }
+
   function paintTurns(composer) {
     const items = [...document.querySelectorAll('[data-thread-item-key]')];
     const notices = items.map((item) => {
@@ -397,7 +438,9 @@ _WATCHER = r"""
         document.head.appendChild(style);
       }
       paintMenu();
-      paintTurns(paintSelected());
+      const composer = paintSelected();
+      paintEffort(composer);
+      paintTurns(composer);
     } catch (error) {
       stats.error = String(error && error.message || error).slice(0, 200);
     }

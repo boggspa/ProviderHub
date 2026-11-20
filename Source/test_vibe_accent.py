@@ -1,6 +1,7 @@
 import json
 import os
 import shutil
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -111,6 +112,8 @@ class WatcherScriptTests(unittest.TestCase):
         self.assertIn("__reactFiber$", script)
         self.assertIn("data-thread-item-key", script)
         self.assertIn("[data-step-state]", script)
+        self.assertIn("data-provider-hub-effort", script)
+        self.assertIn("function paintEffort", script)
 
     def test_script_parses_as_javascript_when_node_is_available(self):
         node = shutil.which("node")
@@ -120,6 +123,128 @@ class WatcherScriptTests(unittest.TestCase):
         script = watcher_script({"routes": {}, "labels": {}, "native": None, "foreign": [], "logos": {}})
         result = subprocess.run([node, "--check", "-"], input=script, capture_output=True, text=True, timeout=30)
         self.assertEqual(result.returncode, 0, result.stderr)
+
+
+EFFORT_BROWSER_TESTS = r"""
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const input = JSON.parse(fs.readFileSync(0, 'utf8'));
+let chromium;
+try { chromium = require('playwright').chromium; }
+catch (error) {
+  if (error.code !== 'MODULE_NOT_FOUND') { throw error; }
+  process.stdout.write(JSON.stringify({skip: 'Playwright is not installed'}));
+  process.exit(0);
+}
+const kimi = 'rgb(31, 111, 235)', mistral = 'rgb(212, 68, 4)', plain = 'rgb(120, 120, 120)';
+const styles = `<style>:root{color:rgb(10,20,30)} button{color:inherit} .text-subtle,.text-muted{color:rgb(120,120,120)} .hidden{display:none}</style>`;
+const fixtureScript = input.script.replace('String(location.href)', '"lechat://app/code/p/s"');
+const flush = (page) => page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+const colour = (page, id) => page.locator('#' + id).evaluate(el => getComputedStyle(el).color);
+const icon = '<svg class="size-4 shrink-0"></svg>';
+// button.group/model-picker > span.hidden @lg/chat-input-row:inline > [model text, preview span?, " · Low" span]
+const pill = (model, effort, preview = '') =>
+  `<button class="group/model-picker gap-2 px-2">${icon}<span class="hidden @lg/chat-input-row:inline" id="label">${model}${preview ? `<span class="transition-colors text-subtle" id="preview"> ${preview}</span>` : ''}${effort ? `<span class="transition-colors text-subtle" id="effort">${effort}</span>` : ''}</span></button>`;
+const menu = () => `<div role="menu"><div role="menuitem" aria-haspopup="menu" data-state="open"><svg data-icon-asset="thinking" class="mt-0.5 size-4 shrink-0"></svg><span class="flex min-w-0 flex-1 flex-col gap-0.5"><span class="text-sm text-default" id="thinking-title">Thinking</span><span class="text-xs text-muted" id="thinking-level">Low</span></span></div>
+  <div role="menu"><div role="menuitem" id="low-row"><span class="truncate">Low</span><input type="radio" checked><label id="low-radio" style="background-color:rgb(1,2,3)"></label></div></div></div>`;
+const mount = async (page, content) => {
+  await page.setContent(styles + content);
+  const installed = await page.evaluate(fixtureScript);
+  assert.equal(installed.installed, true);
+  await flush(page);
+};
+const cases = {
+  async effort_takes_the_models_accent_and_the_label_does_not(page) {
+    await mount(page, pill('Kimi K2', ' · Low'));
+    assert.equal(await colour(page, 'effort'), kimi);
+    assert.equal(await page.locator('#label').evaluate(el => getComputedStyle(el).color), 'rgb(10, 20, 30)');
+    // The model switches: the level follows without a loop of mutations.
+    await page.locator('#label').evaluate(el => { el.firstChild.data = 'GLM 5.2'; });
+    await flush(page);
+    assert.equal(await colour(page, 'effort'), mistral);
+    await page.locator('#effort').evaluate(el => { el.textContent = ' · High'; });
+    await flush(page);
+    assert.equal(await colour(page, 'effort'), mistral);
+    // An unknown model takes the accent away again.
+    await page.locator('#label').evaluate(el => { el.firstChild.data = 'Mystery'; });
+    await flush(page);
+    assert.equal(await colour(page, 'effort'), plain);
+    assert.equal(await page.locator('#effort').evaluate(el => el.hasAttribute('data-provider-hub-effort') || el.style.length > 0), false);
+  },
+  async preview_span_is_not_mistaken_for_the_effort_level(page) {
+    await mount(page, pill('Kimi K2', ' · Low', 'Preview'));
+    assert.equal(await colour(page, 'effort'), kimi);
+    assert.equal(await colour(page, 'preview'), plain);
+    // No thinking level: the trailing span is the model's Preview badge.
+    await page.evaluate(() => document.getElementById('effort').remove());
+    await flush(page);
+    assert.equal(await colour(page, 'preview'), plain);
+  },
+  async level_alone_in_a_pill_without_model(page) {
+    await mount(page, pill('', 'Low'));
+    // No model text to resolve: nothing to colour, nothing breaks.
+    assert.equal(await colour(page, 'effort'), plain);
+  },
+  async thinking_submenu_level_and_checked_radio(page) {
+    await mount(page, pill('Kimi K2', ' · Low') + menu());
+    assert.equal(await colour(page, 'thinking-level'), kimi);
+    assert.equal(await colour(page, 'thinking-title'), 'rgb(10, 20, 30)');
+    assert.equal(await page.locator('#low-radio').evaluate(el => getComputedStyle(el).backgroundColor), 'rgb(31, 111, 235)');
+  },
+  async painting_settles_without_a_mutation_loop(page) {
+    await mount(page, pill('Kimi K2', ' · Low') + menu());
+    const writes = await page.evaluate(() => new Promise(resolve => {
+      let count = 0;
+      const observer = new MutationObserver(records => { count += records.length; });
+      observer.observe(document.documentElement, { subtree: true, attributes: true, childList: true, characterData: true });
+      setTimeout(() => resolve(count), 400);
+    }));
+    assert.equal(writes, 0);
+  },
+};
+(async () => {
+  let browser;
+  try { browser = await chromium.launch({headless: true, ...(input.executablePath ? {executablePath: input.executablePath} : {})}); }
+  catch (error) {
+    if (!String(error).includes("Executable doesn't exist")) { throw error; }
+    process.stdout.write(JSON.stringify({skip: 'Playwright Chromium is not installed'}));
+    return;
+  }
+  const results = {};
+  try {
+    for (const [name, run] of Object.entries(cases)) {
+      const page = await browser.newPage();
+      try { await run(page); results[name] = null; }
+      catch (error) { results[name] = error.stack; }
+      finally { await page.close(); }
+    }
+  } finally { await browser.close(); }
+  process.stdout.write(JSON.stringify({results}));
+})().catch(error => { console.error(error); process.exitCode = 1; });
+"""
+
+
+class EffortAccentBrowserTests(unittest.TestCase):
+    def test_rendered_effort_level_accent(self):
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("Node is not installed")
+        catalogue = {"routes": {"kimi/kimi-k2": {"accent": "#1F6FEB", "provider": "Kimi"},
+                                "mistral/glm-5-2": {"accent": "#D44404", "provider": "Mistral"}},
+                     "labels": {"Kimi K2": "kimi/kimi-k2", "GLM 5.2": "mistral/glm-5-2"},
+                     "native": None, "providers": {}, "foreign": [], "logos": {}}
+        result = subprocess.run([node, "-e", EFFORT_BROWSER_TESTS], input=json.dumps({
+            "script": watcher_script(catalogue),
+            "executablePath": os.environ.get("PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH")}),
+            text=True, capture_output=True, timeout=90)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        report = json.loads(result.stdout)
+        if report.get("skip"):
+            self.skipTest(report["skip"])
+        self.assertGreaterEqual(len(report["results"]), 5)
+        for name, error in report["results"].items():
+            with self.subTest(case=name):
+                self.assertIsNone(error, error)
 
 
 class BridgeTests(unittest.TestCase):
