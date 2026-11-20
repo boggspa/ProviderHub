@@ -103,13 +103,17 @@ extension BridgeModel {
             }
             _ = try await command("vibe-activate")
             vibeProfileActive = true; vibeRecoveryNeeded = true
-            let configuration = NSWorkspace.OpenConfiguration()
-            configuration.activates = true
-            configuration.environment = ["PROVIDER_HUB_VIBE_TOKEN": try gatewayToken()]
-            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-                NSWorkspace.shared.openApplication(at: URL(fileURLWithPath: appPath), configuration: configuration) { _, error in
-                    if let error { continuation.resume(throwing: error) }
-                    else { continuation.resume() }
+            if savedSettings.vibe_accent {
+                try await launchVibeWithAccentBridge(appPath: appPath)
+            } else {
+                let configuration = NSWorkspace.OpenConfiguration()
+                configuration.activates = true
+                configuration.environment = ["PROVIDER_HUB_VIBE_TOKEN": try gatewayToken()]
+                try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                    NSWorkspace.shared.openApplication(at: URL(fileURLWithPath: appPath), configuration: configuration) { _, error in
+                        if let error { continuation.resume(throwing: error) }
+                        else { continuation.resume() }
+                    }
                 }
             }
             vibeLaunchTime = Date(); observedOwnedVibe = false
@@ -124,6 +128,74 @@ extension BridgeModel {
                 }
             }
             tell(error.localizedDescription, error: true)
+        }
+    }
+
+    /// Start Vibe through the worker's vibe-accent helper, which holds a
+    /// DevTools pipe into the app and paints provider accents and logos in
+    /// its picker and tool steps. The helper lives as long as the app and is
+    /// never terminated once Vibe runs: closing its pipe is Vibe's cue to quit.
+    /// The gateway token reaches Vibe through the helper's environment, which
+    /// forwards that one variable and nothing else of the Hub's.
+    func launchVibeWithAccentBridge(appPath: String) async throws {
+        guard let python else { throw WorkerError(message: "Provider Hub needs Python 3.11 or newer for the accent helper.") }
+        if let existing = vibeAccentProcess, existing.isRunning {
+            throw WorkerError(message: "A previous Vibe accent helper is still running. Quit Vibe, then launch again.")
+        }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: python)
+        process.arguments = [helper.path, "vibe-accent", "--app", appPath]
+        var environment = workerEnvironment
+        environment["PROVIDER_HUB_VIBE_TOKEN"] = try gatewayToken()
+        process.environment = environment
+        let output = Pipe(), errors = Pipe()
+        process.standardOutput = output; process.standardError = errors
+        process.standardInput = FileHandle.nullDevice
+        try process.run()
+        vibeAccentProcess = process
+        // The helper reports Vibe's spawn as a JSON line; an early exit means
+        // Vibe never started. The reader keeps draining for the helper's life
+        // so its output never blocks on a full pipe.
+        let launched = await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+            let lock = NSLock()
+            var finished = false
+            func finish(_ value: Bool) {
+                lock.lock(); defer { lock.unlock() }
+                if !finished { finished = true; continuation.resume(returning: value) }
+            }
+            DispatchQueue.global(qos: .userInitiated).async {
+                var buffer = Data()
+                while true {
+                    let chunk = output.fileHandleForReading.availableData
+                    if chunk.isEmpty { break }
+                    buffer.append(chunk)
+                    while let newline = buffer.firstIndex(of: UInt8(ascii: "\n")) {
+                        let line = buffer[buffer.startIndex..<newline]
+                        buffer.removeSubrange(buffer.startIndex...newline)
+                        if let object = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any],
+                           object["event"] as? String == "launched" { finish(true) }
+                    }
+                }
+                finish(false)
+            }
+            DispatchQueue.global(qos: .utility).async { _ = errors.fileHandleForReading.readDataToEndOfFile() }
+            DispatchQueue.global().asyncAfter(deadline: .now() + 20) { finish(false) }
+        }
+        guard launched else {
+            if process.isRunning { process.terminate() }
+            vibeAccentProcess = nil
+            throw WorkerError(message: "Vibe did not start through the accent helper. Turn provider accents for Vibe off to launch it the usual way.")
+        }
+        // A direct spawn is not activated the way a LaunchServices open is;
+        // bring Vibe forward once it has registered with the window server.
+        Task { @MainActor in
+            for _ in 0..<40 {
+                try? await Task.sleep(nanoseconds: 250_000_000)
+                if let app = NSWorkspace.shared.runningApplications.first(where: { $0.bundleIdentifier == "ai.mistral.lechat.desktop" }) {
+                    app.activate(options: [.activateAllWindows])
+                    return
+                }
+            }
         }
     }
 

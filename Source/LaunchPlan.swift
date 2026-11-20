@@ -63,6 +63,7 @@ func classifyChange(_ settings: RouteSettings, from saved: RouteSettings) -> Cha
     var withoutVibe = mine
     withoutVibe.vibe_catalogue = saved.vibe_catalogue
     withoutVibe.vibe_model = saved.vibe_model
+    withoutVibe.vibe_accent = saved.vibe_accent
     let vibeChanged = withoutVibe != mine
     var withoutAntigravity = withoutVibe
     withoutAntigravity.antigravity_catalogue = saved.antigravity_catalogue

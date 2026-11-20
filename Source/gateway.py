@@ -1833,11 +1833,11 @@ def catalogue_command_result(settings, root, lifecycle):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=["inspect", "validate", "save", "save-key-metadata", "save-key-accounts", "discover", "refresh-all", "prepare-launch", "activate", "restore", "serve", "codex-status", "codex-projects", "codex-prepare", "codex-activate", "codex-restore", "codex-accent", "vibe-status", "vibe-prepare", "vibe-activate", "vibe-restore", "antigravity-status", "antigravity-prepare", "antigravity-activate", "antigravity-register", "antigravity-restore", "cli-accounts", "prepare-vibe-account", "prepare-antigravity-account", "key-accounts"])
+    parser.add_argument("command", choices=["inspect", "validate", "save", "save-key-metadata", "save-key-accounts", "discover", "refresh-all", "prepare-launch", "activate", "restore", "serve", "codex-status", "codex-projects", "codex-prepare", "codex-activate", "codex-restore", "codex-accent", "vibe-accent", "vibe-status", "vibe-prepare", "vibe-activate", "vibe-restore", "antigravity-status", "antigravity-prepare", "antigravity-activate", "antigravity-register", "antigravity-restore", "cli-accounts", "prepare-vibe-account", "prepare-antigravity-account", "key-accounts"])
     parser.add_argument("--provider", choices=list(PROVIDERS), default="mistral")
     parser.add_argument("--parent-pipe", action="store_true")
     parser.add_argument("--detach", action="store_true", help="serve: run as a detached service, stopped only on request")
-    parser.add_argument("--app", help="App bundle to launch for codex-accent")
+    parser.add_argument("--app", help="App bundle to launch for codex-accent or vibe-accent")
     args = parser.parse_args()
     root = state_root()
     bootstrap_metadata(root)
@@ -1854,6 +1854,18 @@ def main():
         private_directory(root)
         sys.exit(codex_accent_bridge(args.app, settings, cached_catalogue(settings, root), log_path=root / "codex-accent.log",
                                      state_root=root))
+    if args.command == "vibe-accent":
+        # Long-lived like codex-accent: launches Vibe with a DevTools pipe,
+        # paints provider accents and logos in its picker and tool steps,
+        # and exits when Vibe does. Imported here so other commands never
+        # pay for it.
+        if not args.app:
+            raise BridgeError("vibe-accent needs --app <bundle path>.")
+        from vibe_accent import bridge_command as vibe_accent_bridge
+        settings = load_settings(root)
+        private_directory(root)
+        sys.exit(vibe_accent_bridge(args.app, settings, cached_catalogue(settings, root), log_path=root / "vibe-accent.log",
+                                    state_root=root))
     if args.command == "inspect":
         result = inspect_state(root)
         settings = load_settings(root)

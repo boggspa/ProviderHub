@@ -1148,6 +1148,10 @@ private struct SettingsPage: View {
                     option("Claude in Chrome", nil, $model.settings.claude_features.claude_in_chrome, Chroma.claude)
                     option("Scheduled tasks", nil, $model.settings.claude_features.scheduled_tasks, Chroma.claude)
                     option("Cowork tab", "Features apply at the next Claude launch.", $model.settings.claude_features.cowork_tab, Chroma.claude)
+                    Spacer().frame(height: 10)
+                    PaneHeader(presentation: model.providerDefinitions.first { $0.id == "mistral" }?.presentation, title: "Vibe Desktop", subtitle: "app preferences", accent: Chroma.vibe, state: nil)
+                    SectionLabel(text: "Appearance")
+                    option("Provider accent colours and logos", "Launches Vibe through the DevTools-pipe helper that paints provider logos in its model picker and accents its tool steps. Unsupported by Mistral.", $model.settings.vibe_accent, Chroma.vibe)
                 }.frame(maxWidth: .infinity, alignment: .topLeading)
                 VStack(alignment: .leading, spacing: 6) {
                     PaneHeader(presentation: model.providerDefinitions.first { $0.id == "codex" }?.presentation, title: "Codex / ChatGPT", subtitle: "app preferences", accent: Chroma.codex, state: nil)

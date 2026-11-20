@@ -84,6 +84,7 @@ final class BridgeModel: ObservableObject {
     /// The codex-accent helper holding the DevTools pipe into a Codex session
     /// launched with the power-slider colour switch on.
     var codexAccentProcess: Process?
+    var vibeAccentProcess: Process?
     /// The helper's stdin, carrying the quick-composer panel's commands.
     var codexAccentInput: Pipe?
     /// The floating recent-chat composer (QuickComposerPanel.swift).

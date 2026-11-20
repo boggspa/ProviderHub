@@ -670,7 +670,7 @@ def defaults(slots, vibe_model: str, port: int = 11436) -> dict:
             "claude_catalogue": None, "claude_code_settings": True, "claude_workflows": False,
             # Vibe tab: the model Vibe starts on, and the catalogue it offers.
             # A nil catalogue serves every compatible route.
-            "vibe_catalogue": None, "vibe_model": None,
+            "vibe_catalogue": None, "vibe_model": None, "vibe_accent": False,
             # Antigravity tab: the model Antigravity starts on, and the
             # catalogue it offers. A nil catalogue serves every compatible
             # route.
@@ -892,6 +892,8 @@ def normalize(value: dict, slots, vibe_model: str, port: int = 11436) -> dict:
     # helper owns over the pipe, see codex_quick_window) instead of an
     # overlay inside Codex's window. On by default; only meaningful with the
     # popover on.
+    # vibe_accent: launch Vibe through the DevTools-pipe helper that paints
+    # provider accents and logos in its picker and tool steps (vibe_accent).
     # codex_goal_budget: leave the optional token budget on Codex's goal tools.
     # Off - the default - deletes the property, so a goal starts unlimited on
     # every route instead of wherever the model honoured Codex's "omit unless
@@ -901,7 +903,7 @@ def normalize(value: dict, slots, vibe_model: str, port: int = 11436) -> dict:
                           ("claude_workflows", False), ("codex_accent_slider", False),
                           ("codex_hide_usage_banner", False), ("codex_unlock_composer", False),
                           ("codex_quick_composer", False), ("codex_quick_composer_window", True),
-                          ("codex_goal_budget", False)):
+                          ("codex_goal_budget", False), ("vibe_accent", False)):
         requested = value.get(key, fallback)
         if type(requested) is not bool:
             raise ValueError(f"{key} must be true or false.")
