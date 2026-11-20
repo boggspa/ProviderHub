@@ -132,7 +132,10 @@ struct CompactShell: View {
     @Environment(\.hubWindow) private var hubWindow
 
     var apiProviders: [ProviderDefinition] { model.providerDefinitions.filter { !subscriptionProviders.contains($0.id) } }
-    var cliProviders: [ProviderDefinition] { model.providerDefinitions.filter { subscriptionProviders.contains($0.id) } }
+    /// `devin-cli` stays a real provider id (its routes, Chat rows and
+    /// credential lane are unchanged) but shares the Devin tab: the rail
+    /// shows one Devin entry whose pane carries both credential sources.
+    var cliProviders: [ProviderDefinition] { model.providerDefinitions.filter { subscriptionProviders.contains($0.id) && $0.id != "devin-cli" } }
     var auditAllowed: Bool { UserDefaults.standard.bool(forKey: "hubShowAudit") }
 
     var body: some View {
@@ -167,7 +170,10 @@ struct CompactShell: View {
         // has to reach the traffic lights, so the whole shell owns that band.
         .ignoresSafeArea()
         .sheet(isPresented: $showAudit) { auditSheet }
-        .onAppear { if model.providerDefinitions.contains(where: { $0.id == model.selectedProvider }) { tab = .provider(model.selectedProvider) } }
+        .onAppear {
+            let initial = model.selectedProvider == "devin-cli" ? "devin" : model.selectedProvider
+            if model.providerDefinitions.contains(where: { $0.id == initial }) { tab = .provider(initial) }
+        }
         .onChange(of: tab) { _, new in if case .provider(let id) = new { model.selectedProvider = id; model.secretDraft = "" }; if new != .settings { search = ""; focusedRoute = nil } }
         .onChange(of: windowStyle) { _, _ in (NSApp.delegate as? AppDelegate)?.applyWindowStyle() }
         .accentColor(HubTheme.Accent.brand)
@@ -302,9 +308,12 @@ struct CompactShell: View {
             ScrollView {
                 Group {
                     switch tab {
-                    case .provider(let id):
+                    case .provider(let raw):
+                        // devin-cli routes live inside the Devin tab.
+                        let id = raw == "devin-cli" ? "devin" : raw
                         if let provider = model.providerDefinitions.first(where: { $0.id == id }) {
-                            if subscriptionProviders.contains(id) { SubscriptionPane(model: model, provider: provider, focused: $focusedRoute, search: $search) }
+                            if id == "devin" { DevinProviderPane(model: model, focused: $focusedRoute, search: $search) }
+                            else if subscriptionProviders.contains(id) { SubscriptionPane(model: model, provider: provider, focused: $focusedRoute, search: $search) }
                             else { ProviderShellPane(model: model, provider: provider, focused: $focusedRoute, search: $search) }
                         } else { Text("Choose a provider").foregroundStyle(.secondary).padding() }
                     case .claude: ClaudeShellPane(model: model, jump: jump)
@@ -325,7 +334,8 @@ struct CompactShell: View {
     }
 
     private func jump(_ route: String) {
-        let provider = String(route.split(separator: "/", maxSplits: 1).first ?? "")
+        var provider = String(route.split(separator: "/", maxSplits: 1).first ?? "")
+        if provider == "devin-cli" { provider = "devin" }
         tab = .provider(provider); DispatchQueue.main.async { focusedRoute = route }
     }
 
@@ -334,8 +344,17 @@ struct CompactShell: View {
     @ViewBuilder private var sidePane: some View {
         VStack(alignment: .leading, spacing: 8) {
             switch tab {
-            case .provider(let id):
-                if let provider = model.providerDefinitions.first(where: { $0.id == id }) {
+            case .provider(let raw):
+                // devin-cli has no rail entry of its own; its routes focus
+                // under the provider that actually serves them.
+                let id = raw == "devin-cli" ? "devin" : raw
+                var providerID = id
+                if id == "devin", let route = focusedRoute,
+                   let entryProvider = model.modelEntry(route)?.provider_id,
+                   model.providerDefinitions.contains(where: { $0.id == entryProvider }) {
+                    providerID = entryProvider
+                }
+                if let provider = model.providerDefinitions.first(where: { $0.id == providerID }) {
                     ProviderSide(model: model, provider: provider, focused: $focusedRoute)
                 }
             case .claude: AppSide(model: model, surface: .claude)
@@ -608,16 +627,40 @@ private struct ProviderShellPane: View {
     private func regionLabel(_ region: String) -> String { ["ams": "Amsterdam", "sgp": "Singapore", "cn": "China"][region] ?? region.capitalized }
 }
 
+/// The Devin tab hosts two credential lanes under one provider mark: the
+/// agent-session API key (provider `devin`) and the installed Devin CLI
+/// login (provider `devin-cli`). The CLI lane renders embedded, without its
+/// own pane header, below a divider.
+private struct DevinProviderPane: View {
+    @ObservedObject var model: BridgeModel
+    @Binding var focused: String?
+    @Binding var search: String
+    var body: some View {
+        if let devin = model.providerDefinitions.first(where: { $0.id == "devin" }) {
+            SubscriptionPane(model: model, provider: devin, focused: $focused, search: $search)
+        }
+        if let cli = model.providerDefinitions.first(where: { $0.id == "devin-cli" }) {
+            SectionLabel(text: "Devin CLI")
+            SubscriptionPane(model: model, provider: cli, focused: $focused, search: $search, embedded: true)
+        }
+    }
+}
+
 /// Claude Code, Codex CLI, Antigravity, Devin: accounts and the routes the CLI advertises.
 private struct SubscriptionPane: View {
     @ObservedObject var model: BridgeModel
     var provider: ProviderDefinition
     @Binding var focused: String?
     @Binding var search: String
+    /// Embedded inside another provider's tab (Devin CLI under Devin): no
+    /// pane header, since the parent tab already names the surface.
+    var embedded = false
     var body: some View {
         let state = model.shellProviderState(provider.id)
         VStack(alignment: .leading, spacing: 4) {
-            PaneHeader(presentation: provider.presentation, title: provider.presentation.displayProvider, subtitle: provider.id == "devin" ? "Agent sessions" : "Subscription · CLI route", accent: provider.presentation.color, state: (state.text, state.color))
+            if !embedded {
+                PaneHeader(presentation: provider.presentation, title: provider.presentation.displayProvider, subtitle: provider.id == "devin" ? "Agent sessions" : "Subscription · CLI route", accent: provider.presentation.color, state: (state.text, state.color))
+            }
             SectionLabel(text: provider.id == "devin" ? "Credential" : "Accounts")
             if provider.id == "devin" {
                 KeyAccountsSection(model: model, provider: provider.id).controlSize(.small)
@@ -626,9 +669,14 @@ private struct SubscriptionPane: View {
                     Button("Save key") { Task { await model.saveKey() } }.controlSize(.small).disabled(model.busy || model.secretDraft.isEmpty)
                 }
             } else {
-                Picker("", selection: Binding(get: { model.settings.providers[provider.id]?.credential_mode ?? "cli" }, set: { model.settings.providers[provider.id]?.credential_mode = $0 })) {
-                    Text("Installed CLI").tag("cli"); Text("Paste a key").tag("keychain")
-                }.pickerStyle(.segmented).labelsHidden().controlSize(.small).fixedSize()
+                // A CLI-only provider (devin-cli, antigravity) has no key
+                // source to pick between; offering one would write a mode
+                // the worker rejects.
+                if provider.credential_modes?.contains("keychain") ?? true {
+                    Picker("", selection: Binding(get: { model.settings.providers[provider.id]?.credential_mode ?? "cli" }, set: { model.settings.providers[provider.id]?.credential_mode = $0 })) {
+                        Text("Installed CLI").tag("cli"); Text("Paste a key").tag("keychain")
+                    }.pickerStyle(.segmented).labelsHidden().controlSize(.small).fixedSize()
+                }
                 if model.settings.providers[provider.id]?.credential_mode == "keychain" {
                     if keyAccountProviders.contains(provider.id) { KeyAccountsSection(model: model, provider: provider.id).controlSize(.small) }
                     HStack(spacing: 8) {
@@ -638,7 +686,10 @@ private struct SubscriptionPane: View {
                 } else if cliAccountProviders.contains(provider.id) {
                     CliAccountsSection(model: model, provider: provider.id).controlSize(.small)
                 } else {
-                    Text("Sign in through the \(provider.presentation.displayProvider) CLI itself, then save.").foregroundStyle(.secondary)
+                    // "Devin CLI" already ends in CLI; don't double it.
+                    let cliName = provider.presentation.displayProvider.hasSuffix(" CLI")
+                        ? String(provider.presentation.displayProvider.dropLast(4)) : provider.presentation.displayProvider
+                    Text("Sign in through the \(cliName) CLI itself, then save.").foregroundStyle(.secondary)
                 }
                 if chatSourceProviders.contains(provider.id) { ChatSourceRow(model: model, provider: provider) }
             }

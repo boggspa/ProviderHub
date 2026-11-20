@@ -23,27 +23,30 @@ struct ProviderPage: View {
     @ObservedObject var model: BridgeModel
     @State private var expandedBranding = false
     @State private var modelSearch = ""
-    var selected: ProviderDefinition? { model.providerDefinitions.first { $0.id == model.selectedProvider } }
-    var connection: ProviderConnection? { model.settings.providers[model.selectedProvider] }
-    var state: ProviderState? { model.providerStates[model.selectedProvider] }
-    var allModels: [ModelEntry] { model.availableModels.filter { $0.provider_id == model.selectedProvider } }
+    /// devin-cli shares the Devin card: one provider mark, two credential
+    /// lanes (agent-session API key + installed CLI login).
+    var selectedID: String { model.selectedProvider == "devin-cli" ? "devin" : model.selectedProvider }
+    var selected: ProviderDefinition? { model.providerDefinitions.first { $0.id == selectedID } }
+    var connection: ProviderConnection? { model.settings.providers[selectedID] }
+    var state: ProviderState? { model.providerStates[selectedID] }
+    var allModels: [ModelEntry] { model.availableModels.filter { $0.provider_id == selectedID } }
     var inventory: [ModelEntry] { allModels.filter { modelSearch.isEmpty || (($0.display_name ?? "") + " " + $0.id).localizedCaseInsensitiveContains(modelSearch) } }
 
     func connectionField(_ key: WritableKeyPath<ProviderConnection, String>) -> Binding<String> {
-        Binding(get: { model.settings.providers[model.selectedProvider]?[keyPath: key] ?? "" }, set: { model.settings.providers[model.selectedProvider]?[keyPath: key] = $0 })
+        Binding(get: { model.settings.providers[selectedID]?[keyPath: key] ?? "" }, set: { model.settings.providers[selectedID]?[keyPath: key] = $0 })
     }
     func brandingField(_ key: WritableKeyPath<BrandOverride, String?>, fallback: String) -> Binding<String> {
-        Binding(get: { model.settings.branding_overrides[model.selectedProvider]?[keyPath: key] ?? fallback }, set: {
-            var value = model.settings.branding_overrides[model.selectedProvider] ?? BrandOverride()
+        Binding(get: { model.settings.branding_overrides[selectedID]?[keyPath: key] ?? fallback }, set: {
+            var value = model.settings.branding_overrides[selectedID] ?? BrandOverride()
             value[keyPath: key] = $0.isEmpty ? nil : $0
-            model.settings.branding_overrides[model.selectedProvider] = value
+            model.settings.branding_overrides[selectedID] = value
         })
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
             LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: 3), spacing: 10) {
-                ForEach(model.providerDefinitions) { provider in
+                ForEach(model.providerDefinitions.filter { $0.id != "devin-cli" }) { provider in
                     Button {
                         model.selectedProvider = provider.id
                         model.secretDraft = ""
@@ -57,7 +60,7 @@ struct ProviderPage: View {
                             }
                             Spacer(minLength: 0)
                         }.frame(maxWidth: .infinity, minHeight: 34, alignment: .leading).padding(12)
-                            .background(provider.presentation.color.opacity(model.selectedProvider == provider.id ? 0.10 : 0), in: RoundedRectangle(cornerRadius: 10))
+                            .background(provider.presentation.color.opacity(selectedID == provider.id ? 0.10 : 0), in: RoundedRectangle(cornerRadius: 10))
                             .hubCard(cornerRadius: 10, accent: provider.presentation.color)
                     }.buttonStyle(.plain)
                 }
@@ -146,6 +149,29 @@ struct ProviderPage: View {
                         Button("Reconnect") { Task { await model.reconnect() } }.disabled(model.busy)
                     }
                 }.tint(provider.presentation.color)
+                if provider.id == "devin", let cli = model.providerDefinitions.first(where: { $0.id == "devin-cli" }) {
+                    Panel {
+                        HStack(spacing: 12) {
+                            ProviderMark(presentation: cli.presentation, size: 36)
+                            VStack(alignment: .leading, spacing: 5) {
+                                Text(cli.presentation.displayProvider).font(.system(size: 18, weight: .semibold))
+                                Text("Installed Devin CLI login · selectable models").font(.caption).foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            let cliState = model.providerStates["devin-cli"]
+                            Text(cliState?.credential_found == true ? (cliState?.credential_source ?? "Signed in") : "Not signed in")
+                                .font(.system(size: 11)).foregroundStyle(cliState?.credential_found == true ? Color.secondary : Color.orange)
+                        }
+                        Text("Runs the installed devin CLI's own login (`devin auth login`); the hub never reads or copies its credentials. Its models appear in Chat and the model pickers beside the agent-session routes.")
+                            .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                        HStack {
+                            Text("\(model.availableModels.filter { $0.provider_id == "devin-cli" }.count) CLI models")
+                                .font(.caption).foregroundStyle(.secondary)
+                            Spacer()
+                            Button("Reconnect") { Task { await model.reconnect() } }.disabled(model.busy)
+                        }
+                    }
+                }
                 Panel {
                     HStack {
                         Text("Model catalogue").font(.headline)

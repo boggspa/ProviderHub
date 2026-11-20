@@ -237,13 +237,14 @@ struct HubGatewayControl: View {
 /// closed. One click launches (or shows) the app with the current catalogue,
 /// as the app tab's button does.
 private enum HubLaunchApp {
-    case claude, codex, vibe
+    case claude, codex, vibe, antigravity
 
     var providerID: String {
         switch self {
         case .claude: return "claude"
         case .codex: return "codex"
         case .vibe: return "mistral"
+        case .antigravity: return "antigravity"
         }
     }
 
@@ -252,6 +253,7 @@ private enum HubLaunchApp {
         case .claude: return "Claude"
         case .codex: return "Codex"
         case .vibe: return "Vibe"
+        case .antigravity: return "Antigravity"
         }
     }
 
@@ -260,6 +262,7 @@ private enum HubLaunchApp {
         case .claude: return model.claudeRunning
         case .codex: return model.codexRunning
         case .vibe: return model.vibeRunning
+        case .antigravity: return model.antigravityRunning
         }
     }
 
@@ -268,6 +271,7 @@ private enum HubLaunchApp {
         case .claude: return model.claudeRunning && model.profileActive
         case .codex: return model.codexRunning && model.codexProfileActive
         case .vibe: return model.vibeRunning && model.vibeProfileActive
+        case .antigravity: return model.antigravityRunning && model.antigravityProfileActive
         }
     }
 
@@ -281,6 +285,9 @@ private enum HubLaunchApp {
         case .vibe:
             if model.vibeAppPath == nil { return "Install the Vibe desktop app first" }
             return model.settings.vibe_model == nil ? "Choose a model for Vibe first" : nil
+        case .antigravity:
+            if model.antigravityAppPath == nil { return "Install the Antigravity app first" }
+            return model.settings.antigravity_model == nil ? "Choose a model for Antigravity first" : nil
         }
     }
 
@@ -289,7 +296,7 @@ private enum HubLaunchApp {
         guard running else { return "" }
         switch self {
         case .codex: return " · open with another profile; asks before restarting it"
-        case .claude, .vibe: return " · open with another profile; quit it first"
+        case .claude, .vibe, .antigravity: return " · open with another profile; quit it first"
         }
     }
 }
@@ -304,6 +311,7 @@ struct HubLaunchCluster: View {
             mark(.claude)
             mark(.codex)
             mark(.vibe)
+            mark(.antigravity)
         }
     }
 
@@ -322,6 +330,7 @@ struct HubLaunchCluster: View {
                 case .claude: await model.launchClaude()
                 case .codex: await model.launchCodex()
                 case .vibe: await model.launchVibe()
+                case .antigravity: await model.launchAntigravity()
                 }
             }, attention: attention)
         } label: {
