@@ -195,6 +195,28 @@ class PureFunctionTests(unittest.TestCase):
                                           "effort": None}, home)
         self.assertNotIn("config", no_effort)
 
+    def test_tool_schema_is_repaired_for_the_runtime_parser(self):
+        # Antigravity's search_marketplace tool sends "minItems": "1"; the
+        # runtime's usize field rejected the whole thread/start with
+        # 'invalid type: string "1", expected usize'.
+        schema = {"type": "object",
+                  "properties": {"queries": {"type": "array", "items": {"type": "string"},
+                                             "minItems": "1"},
+                                 "filters": {"type": "object", "properties": "bad",
+                                             "required": ["kind", 3]},
+                                 "note": {"type": "string", "description": 5}},
+                  "required": ["queries", None],
+                  "additionalProperties": "yes"}
+        repaired = codex._codex_tool_schema(schema)
+        self.assertEqual(repaired["properties"]["queries"]["minItems"], 1)
+        self.assertNotIn("description", repaired["properties"]["note"])
+        self.assertNotIn("properties", repaired["properties"]["filters"])
+        self.assertEqual(repaired["properties"]["filters"]["required"], ["kind"])
+        self.assertEqual(repaired["required"], ["queries"])
+        self.assertNotIn("additionalProperties", repaired)
+        # The caller's schema is not edited underneath the repair.
+        self.assertEqual(schema["properties"]["queries"]["minItems"], "1")
+
     def test_turn_params(self):
         params = codex._turn_params(
             {"model": "gpt-5.6-sol", "effort": "high", "prompt": "hi"}, "t1")
@@ -1416,7 +1438,7 @@ class RunTurnTests(unittest.TestCase):
                     self.assertIn("never invent answers", instructions)
                     dynamic = thread["dynamicTools"][0]["tools"]
                     self.assertEqual([tool["inputSchema"] for tool in dynamic],
-                                     [codex._unsealed(tool["input_schema"]) for tool in offered])
+                                     [codex._codex_tool_schema(tool["input_schema"]) for tool in offered])
                     self.assertTrue(all("Only available in Default or Plan mode." in tool["description"]
                                         for tool in dynamic))
                 else:

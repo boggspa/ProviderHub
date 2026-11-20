@@ -1450,18 +1450,101 @@ def _handshake(session, *, timeout):
     session.notify("initialized", {})
 
 
-def _unsealed(schema):
-    """The schema without the desktop's `"encrypted"` keyword.
+def _min_items(value):
+    """``minItems`` as the usize the runtime's schema parser expects.
 
-    This runtime is the one place proven to honour it: OpenAI returns the
-    marked argument as a token only its servers can open, and the desktop
-    hands that token to a child as its task. Request ingress already strips
-    the keyword (responses_tools.strip_sealed_keyword); this covers any
-    caller that reaches the runtime another way.
+    The runtime deserializes ``minItems`` into a ``usize``, so a stringly
+    ``"1"`` fails ``thread/start`` outright. Coerce integral values and
+    report None for anything else, which drops the keyword.
     """
-    schema = copy.deepcopy(schema)
-    drop_schema_keyword(schema)
-    return schema
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value >= 0 else None
+    if isinstance(value, float) and value.is_integer() and value >= 0:
+        return int(value)
+    if isinstance(value, str):
+        try:
+            number = int(value.strip(), 10)
+        except ValueError:
+            return None
+        return number if number >= 0 else None
+    return None
+
+
+def _codex_schema_node(node, _depth=0):
+    """One schema node in the shape the runtime's parser accepts.
+
+    The runtime deserializes each dynamic tool's ``inputSchema`` into a fixed
+    field set, so a keyword it types - ``minItems`` as a usize, ``required``
+    as a string list, ``properties`` as a map of schemas - fails the whole
+    ``thread/start`` when a client sends it stringly or misshapen. Only the
+    fields that parser models are checked; every other keyword passes through
+    untouched, as do valid nodes.
+    """
+    if _depth > 64:
+        return {}
+    if isinstance(node, bool):
+        return node
+    if not isinstance(node, dict):
+        return {}
+    repaired = {}
+    for key, value in node.items():
+        if key in ("description", "$ref"):
+            if isinstance(value, str):
+                repaired[key] = value
+        elif key == "enum":
+            if isinstance(value, list):
+                repaired[key] = value
+        elif key == "required":
+            if isinstance(value, list):
+                repaired[key] = [name for name in value if isinstance(name, str)]
+        elif key == "minItems":
+            minimum = _min_items(value)
+            if minimum is not None:
+                repaired[key] = minimum
+        elif key in ("properties", "$defs", "definitions"):
+            if isinstance(value, dict):
+                repaired[key] = {name: _codex_schema_node(child, _depth + 1)
+                                 for name, child in value.items()}
+        elif key == "items":
+            # Tuple-form items become the anyOf the runtime does model.
+            if isinstance(value, list):
+                repaired[key] = {"anyOf": [_codex_schema_node(item, _depth + 1)
+                                           for item in value]}
+            else:
+                repaired[key] = _codex_schema_node(value, _depth + 1)
+        elif key == "additionalProperties":
+            if isinstance(value, bool):
+                repaired[key] = value
+            elif isinstance(value, dict):
+                repaired[key] = _codex_schema_node(value, _depth + 1)
+        elif key in ("anyOf", "oneOf", "allOf"):
+            if isinstance(value, list):
+                repaired[key] = [_codex_schema_node(item, _depth + 1) for item in value]
+        else:
+            repaired[key] = value
+    return repaired
+
+
+def _codex_tool_schema(schema):
+    """A host tool's input schema in the shape the runtime accepts.
+
+    The schema without the desktop's `"encrypted"` keyword, repaired for the
+    runtime's own parser. This runtime is the one place proven to honour the
+    keyword: OpenAI returns the marked argument as a token only its servers
+    can open, and the desktop hands that token to a child as its task.
+    Request ingress already strips the keyword
+    (responses_tools.strip_sealed_keyword); this covers any caller that
+    reaches the runtime another way.
+
+    The repair is what Antigravity's ``search_marketplace`` tool needed: it
+    sends ``"minItems": "1"`` and the runtime refused the whole turn with
+    ``invalid type: string "1", expected usize``.
+    """
+    repaired = copy.deepcopy(schema)
+    drop_schema_keyword(repaired)
+    return _codex_schema_node(repaired)
 
 
 def _thread_params(payload, workspace):
@@ -1479,7 +1562,7 @@ def _thread_params(payload, workspace):
             "description": "Tools executed by the host application under its permissions.",
             "tools": [{"type": "function", "name": _tool_alias(tool["name"]),
                        "description": f"Host tool: {tool['name']}.\n{tool['description']}",
-                       "inputSchema": _unsealed(tool["input_schema"])}
+                       "inputSchema": _codex_tool_schema(tool["input_schema"])}
                       for tool in payload["tools"]],
         }]
     if payload["effort"] is not None:
