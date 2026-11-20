@@ -56,7 +56,7 @@ SUBAGENT_POOL_SIZE = 5
 #: refresh token revokes the first, and ChatGPT's rotates on every use.  So
 #: the hub spawns the vendor's own runtime and never reads, copies, or
 #: refreshes a credential file.
-CLI_AUTH_PROVIDERS = frozenset({"codex", "claude", "muse", "grok", "antigravity"})
+CLI_AUTH_PROVIDERS = frozenset({"codex", "claude", "muse", "grok", "antigravity", "devin-cli"})
 
 
 def cli_auth_available(provider_id: str) -> bool:
@@ -235,8 +235,9 @@ def chat_source_settings(settings: dict, provider_id: str, source: str) -> dict:
 
 
 def _default_credential_mode(provider_id: str) -> str:
-    if provider_id == "antigravity":
-        # CLI-only provider: its installed `agy` binary is the whole transport.
+    if provider_id in {"antigravity", "devin-cli"}:
+        # CLI-only providers: the installed binary fronting its own login is
+        # the whole transport (agy for AntiGravity, `devin acp` for Devin).
         return "cli"
     if provider_id == "mistral":
         return "vibe"
@@ -248,13 +249,14 @@ def _default_credential_mode(provider_id: str) -> str:
 def credential_modes(provider_id: str) -> list[str]:
     """The credential sources a provider offers, in picker order.
 
-    AntiGravity has no hosted API of its own, so its installed CLI is the only
-    source. The other CLI-capable providers keep their API-key sources beside
+    AntiGravity and Devin CLI have no hosted model API of their own, so their
+    installed CLIs are the only source. The other CLI-capable providers keep
+    their API-key sources beside
     it, and the API key stays the default everywhere: the per-provider choice
     is the whole gate, so an existing install changes nothing until a provider
     is switched by hand.
     """
-    if provider_id == "antigravity":
+    if provider_id in {"antigravity", "devin-cli"}:
         return ["cli"]
     if provider_id == "ollama":
         return ["none"]

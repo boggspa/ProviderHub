@@ -27,7 +27,7 @@ enum Chroma {
 /// Shorthands for the semantic colours the shell lays over the glass.
 private typealias Semantic = HubTheme.Semantic
 
-private let subscriptionProviders: Set<String> = ["claude", "codex", "antigravity", "devin"]
+private let subscriptionProviders: Set<String> = ["claude", "codex", "antigravity", "devin", "devin-cli"]
 private let cliAccountProviders: Set<String> = ["codex", "claude", "antigravity"]
 /// Providers with both an API-key source and an installed-CLI source, which
 /// Chat can list side by side. Mirrors `hub_config.CHAT_SOURCE_PROVIDERS`.

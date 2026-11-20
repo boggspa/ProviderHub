@@ -36,13 +36,13 @@ import shutil
 import subprocess
 from typing import NamedTuple
 
-#: The five CLIs this experiment can front as hub model routes. Order is the
+#: The CLIs this experiment can front as hub model routes. Order is the
 #: display order the settings pane uses, so every list this module returns is
 #: stable across calls rather than following dict iteration of a probe result.
-SUPPORTED_PROVIDERS = ("codex", "claude", "muse", "grok", "antigravity")
+SUPPORTED_PROVIDERS = ("codex", "claude", "muse", "grok", "antigravity", "devin-cli")
 
 #: One probe's whole budget. Generous enough for a CLI that phones home before
-#: it prints (``agy models`` fetches), short enough that five of them in series
+#: it prints (``agy models`` fetches), short enough that all of them in series
 #: cannot wedge the settings pane.
 DEFAULT_TIMEOUT = 25
 
@@ -55,6 +55,7 @@ ALLOWED_VERBS = (
     ("login", "status"),
     ("auth", "status"),
     ("models",),
+    ("models", "list", "--format", "json"),
 )
 
 #: Which auth states mean "this CLI can carry a turn". ``missing`` and
@@ -93,6 +94,7 @@ _PROVIDERS = {
     # thing that swaps the binary the hub is about to route through.
     "grok": _Provider("grok", "~/.grok/bin/grok", no_auto_update=True),
     "antigravity": _Provider("agy", "~/.local/bin/agy"),
+    "devin-cli": _Provider("devin", "~/.local/bin/devin"),
 }
 
 #: The turn transport each CLI is known to offer, named for the settings pane.
@@ -106,6 +108,7 @@ KNOWN_TURN_TRANSPORTS = {
     "muse": "muse serve",
     "grok": "grok agent (stdio)",
     "antigravity": "agy --print",
+    "devin-cli": "devin acp",
 }
 
 #: A bare ``x.y`` or ``x.y.z``, which is what every one of these CLIs prints
@@ -126,7 +129,7 @@ _GROK_DEFAULT = re.compile(r"^Default model:\s*(\S+)", re.IGNORECASE)
 def normalize_version(raw) -> str:
     """Reduce a CLI's version line to the bare version it contains.
 
-    Each of these five prints a different sentence around the same fact -
+    Each of these CLIs prints a different sentence around the same fact -
     ``codex-cli 0.153.0``, ``2.1.276 (Claude Code)``, ``grok 1.0.34
     (3736acbc8658) [stable]`` - and the hub wants the fact, with the sentence
     kept separately as ``version_raw`` for a user who needs to recognize it.
@@ -389,8 +392,8 @@ def _parse_agy_models(answer: _Answer, warnings: list[str]) -> list[dict]:
 
 
 #: What each CLI can be asked, and how its answer is read. Kept as a table so
-#: the read-only surface of the whole module is legible in one place: five
-#: providers, and between them four verbs from ALLOWED_VERBS.
+#: the read-only surface of the whole module is legible in one place: six
+#: providers, and between them six verbs from ALLOWED_VERBS.
 def _probe_codex(runner: _Runner) -> tuple[str, str, list[dict]]:
     answer = runner.run(("login", "status"))
     if answer is None:
@@ -458,12 +461,43 @@ def _probe_antigravity(runner: _Runner) -> tuple[str, str, list[dict]]:
     return state, detail, models
 
 
+def _probe_devin(runner: _Runner) -> tuple[str, str, list[dict]]:
+    # `devin auth status` is the CLI's own read-only login report; the models
+    # list is the same subcommand the route's catalogue() runs, so the pane
+    # and the picker can never disagree about what the account advertises.
+    answer = runner.run(("auth", "status"))
+    if answer is None:
+        return "unknown", "", []
+    combined = f"{answer.stdout}\n{answer.stderr}"
+    if "not logged in" in combined.casefold():
+        state, detail = "missing", ("devin reports no active login; sign in with the devin "
+                                    "CLI itself (`devin auth login`).")
+    elif answer.rc == 0:
+        state, detail = "authenticated", _first_line(answer.stdout) or "signed in"
+    else:
+        state = "unknown"
+        detail = f"`devin auth status` exited {answer.rc}."
+    models: list[dict] = []
+    listing = runner.run(("models", "list", "--format", "json"))
+    if listing is not None and listing.rc == 0:
+        try:
+            from devin_models import catalogue_rows
+            models = catalogue_rows(json.loads(listing.stdout or "null"))
+        except Exception:  # noqa: BLE001 - an unreadable listing costs rows, not the probe
+            models = []
+    if not models:
+        runner.warnings.append("devin advertised no model list on this run; "
+                               "routes fall back to the hub's seeded Devin families.")
+    return state, detail, models
+
+
 _PROBES = {
     "codex": _probe_codex,
     "claude": _probe_claude,
     "muse": _probe_muse,
     "grok": _probe_grok,
     "antigravity": _probe_antigravity,
+    "devin-cli": _probe_devin,
 }
 
 
@@ -488,7 +522,7 @@ def probe_provider(provider_id: str, *, capture=None, timeout: int = DEFAULT_TIM
     """One CLI's install, version, auth and model facts, read-only and bounded.
 
     Returns a dict rather than raising for everything except an unknown
-    ``provider_id``: the caller is a settings pane drawing five rows, and one
+    ``provider_id``: the caller is a settings pane drawing one row per provider, and one
     wedged CLI should cost that row its detail, not the whole pane.
     """
     if not isinstance(provider_id, str) or provider_id not in _PROVIDERS:
@@ -530,7 +564,7 @@ def probe_provider(provider_id: str, *, capture=None, timeout: int = DEFAULT_TIM
 
 
 def probe_all(*, capture=None, timeout: int = DEFAULT_TIMEOUT) -> dict[str, dict]:
-    """Every supported CLI's probe, always all five entries.
+    """Every supported CLI's probe, always all entries.
 
     The fixed shape is the contract the settings pane relies on: it can render
     a row per provider without first working out which providers answered.

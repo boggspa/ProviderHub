@@ -8,7 +8,7 @@ import SwiftUI
 ///
 /// Local-only and opt-in per provider — there is no master flag. Choosing
 /// "Installed CLI login" *is* turning the experiment on for that one provider.
-fileprivate let cliAuthProviders: Set<String> = ["codex", "claude", "muse", "grok", "antigravity"]
+fileprivate let cliAuthProviders: Set<String> = ["codex", "claude", "muse", "grok", "antigravity", "devin-cli"]
 /// Mirrors hub_config.KEY_ACCOUNT_PROVIDERS: every hosted API-key connection.
 /// CLI subscription logins remain separately configured in CliAccountsSection.
 let keyAccountProviders: Set<String> = ["mistral", "kimi", "mimo", "deepseek", "cerebras", "gemini", "grok", "qwen-token-plan", "minimax", "openrouter", "claude", "codex", "muse", "devin"]
@@ -266,6 +266,7 @@ struct ProviderPage: View {
         case "openrouter": return "OpenRouter API key · Curated models"
         case "gemini": return "Google AI Studio API key"
         case "devin": return "Devin API key · Session-based agents"
+        case "devin-cli": return "Devin CLI · devin auth login"
         default: return "Provider model API"
         }
     }

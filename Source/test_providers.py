@@ -63,7 +63,7 @@ class RegistryTests(unittest.TestCase):
         self.assertEqual(
             set(PROVIDERS),
             {"mistral", "kimi", "mimo", "ollama", "deepseek", "cerebras", "muse", "grok", "qwen-token-plan", "openrouter", "gemini", "devin",
-             "claude", "codex", "antigravity", "minimax"},
+             "claude", "codex", "antigravity", "minimax", "devin-cli"},
         )
         json.loads(json.dumps(PROVIDERS))
         for provider_id, descriptor in PROVIDERS.items():
@@ -75,7 +75,7 @@ class RegistryTests(unittest.TestCase):
                 self.assertIn(key, descriptor)
             self.assertIsInstance(descriptor["regions"], dict)
             self.assertIn(descriptor["default_region"], descriptor["regions"])
-            if provider_id in {"ollama", "antigravity"}:
+            if provider_id in {"ollama", "antigravity", "devin-cli"}:
                 # No API key exists for these routes: the daemon / the CLI
                 # owns the login by design.
                 self.assertIsNone(descriptor["credential_env"])

@@ -279,6 +279,7 @@ from minimax_provider import DESCRIPTOR as MINIMAX_DESCRIPTOR, OFFICIAL_PATHS as
 from openrouter_provider import DESCRIPTOR as OPENROUTER_DESCRIPTOR, OFFICIAL_PATHS as OPENROUTER_PATHS, OpenRouterError, discover as openrouter_discover, finalize as openrouter_finalize, normalize_messages as openrouter_controls, app_headers as openrouter_app_headers
 from gemini_provider import DESCRIPTOR as GEMINI_DESCRIPTOR, OFFICIAL_PATHS as GEMINI_PATHS, GeminiError, discover as gemini_discover, prepare_request as gemini_prepare_request, validate_connection as gemini_validate_connection
 from devin_agent import DESCRIPTOR as DEVIN_DESCRIPTOR, OFFICIAL_PATHS as DEVIN_PATHS, DevinAgentError, catalogue as devin_catalogue, validate_connection as devin_validate_connection
+from devin_cli_agent import DESCRIPTOR as DEVIN_CLI_DESCRIPTOR, OFFICIAL_PATHS as DEVIN_CLI_PATHS
 from effort_map import EFFORT_ORDER, CEREBRAS_EFFORT_ALIASES, DEEPSEEK_EFFORT_ALIASES, MISTRAL_EFFORT_ALIASES, MISTRAL_REASONING_EFFORTS, cap_high_end, map_effort, mistral_effort_modes, nearest_effort, ollama_effort_aliases, ollama_effort_modes
 
 PROVIDERS[QWEN_DESCRIPTOR["id"]] = QWEN_DESCRIPTOR
@@ -286,6 +287,7 @@ PROVIDERS[MINIMAX_DESCRIPTOR["id"]] = MINIMAX_DESCRIPTOR
 PROVIDERS[OPENROUTER_DESCRIPTOR["id"]] = OPENROUTER_DESCRIPTOR
 PROVIDERS[GEMINI_DESCRIPTOR["id"]] = GEMINI_DESCRIPTOR
 PROVIDERS[DEVIN_DESCRIPTOR["id"]] = DEVIN_DESCRIPTOR
+PROVIDERS[DEVIN_CLI_DESCRIPTOR["id"]] = DEVIN_CLI_DESCRIPTOR
 
 _OFFICIAL_PATHS = {
     "mistral": {"", "/v1", "/v1/models", "/v1/chat/completions"},
@@ -302,6 +304,7 @@ _OFFICIAL_PATHS = {
     "openrouter": OPENROUTER_PATHS,
     "gemini": GEMINI_PATHS,
     "devin": DEVIN_PATHS,
+    "devin-cli": DEVIN_CLI_PATHS,
 }
 
 _OLLAMA_PATHS = {"", "/v1", "/v1/messages", "/api/tags"}
@@ -810,10 +813,10 @@ def validate_connection(provider_id: str, connection: dict | None) -> dict:
     if any(str(key).lower() in _LOCAL_CREDENTIAL_FIELDS for key in connection):
         raise ProviderError("Provider credentials cannot be stored in connection settings.")
 
-    if provider_id == "antigravity":
-        # CLI-only provider: there is no hosted endpoint to validate. The
+    if provider_id in {"antigravity", "devin-cli"}:
+        # CLI-only providers: there is no hosted endpoint to validate. The
         # routing fields exist so settings round-trip and the connection
-        # signature stays stable; the installed `agy` binary is the transport.
+        # signature stays stable; the installed binary is the transport.
         return {"region": "local", "base_url": ""}
 
     requested_region = connection.get("region")

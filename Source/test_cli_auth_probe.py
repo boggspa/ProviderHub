@@ -358,6 +358,51 @@ class AntigravityProbeTests(unittest.TestCase):
         self.assertEqual(probe["auth_state"], "authenticated")
 
 
+class DevinCliProbeTests(unittest.TestCase):
+    DEVIN_MODELS_JSON = (
+        '{"families": ['
+        '{"slug": "swe-2", "family_label": "SWE-2", '
+        '"variants": [{"model_uid": "swe-2-high", "label": "SWE-2 High"}]},'
+        '{"slug": "claude-opus-5.5", "family_label": "Claude Opus 5.5"}'
+        ']}'
+    )
+
+    def test_happy_path_reads_auth_and_family_rows(self):
+        capture = FakeCapture({
+            "--version": (0, "devin 3000.11.1 (cc4e349ca55e)", ""),
+            "auth status": (0, "Logged in as dev@example.com\n", ""),
+            "models list --format json": (0, self.DEVIN_MODELS_JSON, ""),
+        })
+        probe = probe_provider("devin-cli", capture=capture)
+        self.assertEqual(probe["binary"], "devin")
+        self.assertTrue(probe["installed"])
+        self.assertEqual(probe["version"], "3000.11.1")
+        self.assertEqual(probe["auth_state"], "authenticated")
+        self.assertEqual([model["id"] for model in probe["models"]],
+                         ["swe-2", "claude-opus-5.5"])
+
+    def test_signed_out_is_missing_with_a_working_models_note(self):
+        capture = FakeCapture({
+            "--version": (0, "devin 3000.11.1", ""),
+            "auth status": (1, "", "Not logged in.\nRun `devin auth login`."),
+            "models list --format json": (1, "", "Error: Not logged in."),
+        })
+        probe = probe_provider("devin-cli", capture=capture)
+        self.assertEqual(probe["auth_state"], "missing")
+        self.assertEqual(probe["models"], [])
+        self.assertTrue(any("seeded Devin families" in note for note in probe["warnings"]))
+
+    def test_unparseable_listing_costs_rows_not_the_probe(self):
+        capture = FakeCapture({
+            "--version": (0, "devin 3000.11.1", ""),
+            "auth status": (0, "Logged in as dev@example.com", ""),
+            "models list --format json": (0, "not json", ""),
+        })
+        probe = probe_provider("devin-cli", capture=capture)
+        self.assertEqual(probe["auth_state"], "authenticated")
+        self.assertEqual(probe["models"], [])
+
+
 class FailureDegradationTests(unittest.TestCase):
     def test_a_missing_binary_is_not_an_error(self):
         capture = FakeCapture(default=FileNotFoundError(2, "No such file or directory"))
@@ -443,7 +488,7 @@ class ProbeAllTests(unittest.TestCase):
             return (0, "1.0.0", "")
 
         probes = probe_all(capture=FakeCapture(default=selective))
-        self.assertEqual(len(probes), 5)
+        self.assertEqual(len(probes), 6)
         self.assertFalse(probes["muse"]["installed"])
         self.assertTrue(probes["codex"]["installed"])
 
@@ -459,7 +504,7 @@ class ProbeAllTests(unittest.TestCase):
         summary = summarize(probes)
         self.assertEqual(summary["installed"], list(SUPPORTED_PROVIDERS))
         self.assertEqual(summary["missing"], [])
-        self.assertEqual(len(summary["usable_for_routes"]), 5)
+        self.assertEqual(len(summary["usable_for_routes"]), 6)
         # grok's models answer is read as agy's shape by this shared script, so
         # only the count that is independent of that aliasing is asserted.
         self.assertGreaterEqual(summary["model_count"], 5)
@@ -493,7 +538,8 @@ class AllowlistTests(unittest.TestCase):
     def test_the_allowlist_is_exactly_the_read_only_verbs(self):
         self.assertEqual(set(ALLOWED_VERBS),
                          {("--version",), ("--help",), ("login", "status"),
-                          ("auth", "status"), ("models",)})
+                          ("auth", "status"), ("models",),
+                          ("models", "list", "--format", "json")})
 
     def test_every_allowed_verb_builds_for_every_provider(self):
         for provider_id in SUPPORTED_PROVIDERS:
@@ -550,7 +596,7 @@ class InjectedCaptureIsolationTests(unittest.TestCase):
             probes = probe_all(capture=answered(**{"--version": "1.0.0"}))
         finally:
             cli_auth_probe.default_capture = original
-        self.assertEqual(len(probes), 5)
+        self.assertEqual(len(probes), 6)
 
     def test_the_argv_handed_to_a_capture_starts_with_the_bare_binary_name(self):
         capture = answered(**{"--version": CODEX_VERSION, "login status": CODEX_LOGIN_STATUS})
@@ -583,7 +629,8 @@ class SummarizeTests(unittest.TestCase):
     def test_a_provider_with_no_binary_is_missing_and_unusable(self):
         summary = summarize(self.healthy(
             muse=self.row("muse", installed=False, auth_state="unsupported")))
-        self.assertEqual(summary["installed"], ["codex", "claude", "grok", "antigravity"])
+        self.assertEqual(summary["installed"],
+                         ["codex", "claude", "grok", "antigravity", "devin-cli"])
         self.assertEqual(summary["missing"], ["muse"])
         self.assertNotIn("muse", summary["usable_for_routes"])
 
@@ -632,7 +679,7 @@ class SummarizeTests(unittest.TestCase):
         summary = summarize(probes)
         self.assertNotIn("devin", summary["installed"])
         self.assertNotIn("claude", summary["installed"])
-        self.assertEqual(len(summary["installed"]), 4)
+        self.assertEqual(len(summary["installed"]), 5)
 
     def test_a_partially_built_result_still_summarizes(self):
         summary = summarize({"codex": self.row("codex")})
@@ -718,7 +765,7 @@ class ReadOnlyByConstructionTests(unittest.TestCase):
             elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
                 imported.add(node.module.split(".")[0])
         self.assertLessEqual(imported, {"__future__", "json", "re", "shutil", "subprocess",
-                                        "typing", "cli_session"})
+                                        "typing", "cli_session", "devin_models"})
 
     def test_the_docstring_states_the_read_only_rule(self):
         doctrine = ast.get_docstring(self.tree) or ""
@@ -728,7 +775,8 @@ class ReadOnlyByConstructionTests(unittest.TestCase):
 
 class PublicApiTests(unittest.TestCase):
     def test_the_documented_surface_exists(self):
-        self.assertEqual(SUPPORTED_PROVIDERS, ("codex", "claude", "muse", "grok", "antigravity"))
+        self.assertEqual(SUPPORTED_PROVIDERS,
+                         ("codex", "claude", "muse", "grok", "antigravity", "devin-cli"))
         self.assertTrue(issubclass(CliProbeError, RuntimeError))
         for name in ("probe_provider", "probe_all", "summarize"):
             self.assertTrue(callable(getattr(cli_auth_probe, name)))
