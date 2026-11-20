@@ -458,12 +458,6 @@ def plan_turn(provider_id: str, upstream_model: str, payload: dict, spec: dict,
     tool_choice = payload.get("tool_choice")
     if isinstance(tool_choice, dict) and tool_choice.get("type") == "none":
         tools, tool_choice = [], None
-    if provider_id == "devin-cli":
-        # Devin's ACP agent owns a native tool loop inside its own session;
-        # this route exposes no host-tool surface, so client tools are dropped
-        # rather than rendered as a call protocol the model cannot honourably
-        # emit. Its own tools are denied at the ACP permission seam instead.
-        tools, tool_choice = [], None
     dynamic_tools = transport == "dynamic"
     # AntiGravity enforces its response schema on both desktop surfaces.
     # Muse/Grok retain their existing Responses handoff; their Messages

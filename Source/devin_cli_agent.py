@@ -18,20 +18,24 @@ the minimal honest slice:
 
 * one ``devin acp --model <id>`` child per turn, in a fresh empty workspace
   (the agent's own tools have nothing to touch and every permission request
-  is answered with a reject/cancel outcome — never an allow);
+  for a non-host tool is answered with a reject/cancel outcome — never an
+  allow for Devin's own side effects);
 * the rendered transcript is the whole prompt, exactly like the other text
   adapters, and only ``agent_message_chunk``/``agent_thought_chunk`` updates
   become ``text_delta``/``thinking_delta`` events;
-* no host-tool manifest is rendered (``cli_routes.plan_turn`` drops client
-  tools for this provider), because Devin's agent would answer with its own
-  native tool calls, not the host's call protocol — advertising tools the
-  route cannot honour would produce silent non-compliance, not capability.
+* host tools ride ``session/new``'s ``mcpServers`` as a list-only
+  ``host_tools_mcp`` stdio server — Devin sees them as native MCP tools and
+  calls them itself, but the server executes nothing: the adapter translates
+  the ACP ``tool_call`` update into a ``tool_call`` event, ends the turn, and
+  the desktop harness runs the call and replays its result next turn. This is
+  the stateless Option-A shape; a live ``HostCallBridge`` continuation is a
+  documented follow-up, not v1.
 
-``session/new`` advertises ``mcpServers: []`` and fs capabilities are never
-claimed, so nothing outside the transcript channel is exposed. ACP session
-resumption, ``--agent-type`` profiles (summarizer/review carry the wrong
-persona for a chat route), ``--cloud`` relay, and the env-key credential lane
-are all documented follow-ups, not v1 scope.
+fs capabilities are never claimed, so nothing outside the transcript and the
+attached host MCP server is exposed. ACP session resumption, ``--agent-type``
+profiles (summarizer/review carry the wrong persona for a chat route),
+``--cloud`` relay, and the env-key credential lane are all documented
+follow-ups, not v1 scope.
 """
 from __future__ import annotations
 
@@ -43,15 +47,20 @@ import time
 from pathlib import Path
 from typing import Any, Iterator
 
+from cli_host_mcp import SERVER_NAME, HostToolset, server_command
 from cli_lifecycle import cleanup_after_exit
 from cli_session import CliSessionError, StdioSession, minimal_env, resolve_binary
-from cli_tool_call import TOOL_RESULTS_KEY, transcript_footer
+from cli_tool_call import (HOST_EXECUTION_NOTE, TOOL_RESULTS_KEY,
+                           normalize_tools, transcript_footer)
 from devin_models import catalogue_rows
 
 PROVIDER_ID = "devin-cli"
 PROVIDER_NAME = "Devin CLI"
 TRANSPORT = "acp_stdio"
 SYSTEM_PROMPT_TRANSPORT = "prompt"
+#: Host tools reach Devin as native MCP tools on session/new, never as a
+#: rendered call protocol — the same surface claude_cli_agent declares.
+HOST_TOOL_TRANSPORT = "mcp"
 BINARY_NAMES = ("devin",)
 _EXTRA_BIN_DIRS = ("~/.local/bin",)
 
@@ -139,9 +148,7 @@ DESCRIPTOR = {
     "setup_url": "https://devin.ai/",
     "capabilities": {
         "streaming": True,
-        # The route answers text/thinking only; client tools are dropped at
-        # plan time and Devin's own tools are denied at the ACP seam.
-        "tools": False,
+        "tools": True,
         "thinking": True,
         "vision": False,
         "model_discovery": "cli",
@@ -419,18 +426,152 @@ def _content_text(update: dict) -> str | None:
     return None
 
 
-def _update_events(item: dict) -> Iterator[dict]:
-    """One session/update notification -> adapter events (text/thinking only).
+#: Envelope keys Devin's MCP client wraps a tool call in. ``tool_input``/
+#: ``toolInput`` are the nested-argument spellings TaskWraith's broker gate
+#: already tolerates; ``name`` is deliberately NOT stripped — for some tools
+#: it is a real argument, so it is only removed when it was the identity
+#: that resolved the call.
+_IDENTITY_KEYS = ("tool_name", "toolName", "tool_input", "toolInput")
 
-    Devin's own tool-call, plan, mode, and command updates are deliberately
-    not surfaced: this route's contract is text in, text out, and the agent's
-    native tools are already denied at the permission seam.
+#: Qualifiers a CLI's MCP client may prepend to a served tool name when it
+#: reports the call back (``host__x``, ``host.x``, ``mcp__host__x`` ...). The
+#: bare served name is tried first, so a host tool that legitimately contains
+#: one of these spellings still resolves exactly.
+_NAME_QUALIFIERS = ("mcp__host__", "host__", "host.", "host:", "host/", "mcp__")
+
+
+def _iter_identities(payload: dict):
+    """(qualified_name, container, key) candidates a toolCall payload carries.
+
+    Mirrors the fields TaskWraith's ACP permission gate reads: the structured
+    ``rawInput`` envelopes first, then the update's own name-ish fields, and
+    the human ``title`` last (titles are free text, so they only match when
+    they happen to spell a served name exactly).
+    """
+    raw = payload.get("rawInput")
+    raw = raw if isinstance(raw, dict) else {}
+    snake = raw.get("tool_input")
+    camel = raw.get("toolInput")
+    nested = snake if isinstance(snake, dict) else (
+        camel if isinstance(camel, dict) else None)
+    # Explicit tool_name/toolName identities first; ``name`` last because for
+    # some tools it is a real argument (a filename, a target) rather than the
+    # tool's identity, and a coincidental match must not preempt a title or
+    # payload-level identity that resolves correctly.
+    for keys in (("tool_name", "toolName"), ("name",)):
+        for container in (nested, raw):
+            if not isinstance(container, dict):
+                continue
+            for key in keys:
+                value = container.get(key)
+                if isinstance(value, str) and value:
+                    yield value, container, key
+    for key in ("toolName", "tool_name", "name"):
+        value = payload.get(key)
+        if isinstance(value, str) and value:
+            yield value, payload, key
+    title = payload.get("title")
+    if isinstance(title, str) and title:
+        yield title, None, None
+
+
+def _resolve_host_tool(toolset: HostToolset | None, qualified: str) -> str | None:
+    """The host tool a (possibly qualified) model-facing name stands for."""
+    if toolset is None or not isinstance(qualified, str):
+        return None
+    host = toolset.host_name(qualified)
+    if host is not None:
+        return host
+    for prefix in _NAME_QUALIFIERS:
+        if qualified.startswith(prefix):
+            host = toolset.host_name(qualified[len(prefix):])
+            if host is not None:
+                return host
+    return None
+
+
+def _host_tool_call(payload: dict, toolset: HostToolset | None):
+    """(host_name, arguments) when an ACP toolCall payload names a host tool.
+
+    Returns None for Devin's own native tools and for calls with no
+    resolvable identity — those stay denied/ignored at the permission seam.
+    """
+    if toolset is None or not isinstance(payload, dict):
+        return None
+    for qualified, container, key in _iter_identities(payload):
+        host = _resolve_host_tool(toolset, qualified)
+        if host is None:
+            continue
+        raw = payload.get("rawInput")
+        raw = raw if isinstance(raw, dict) else {}
+        snake = raw.get("tool_input")
+        camel = raw.get("toolInput")
+        nested = snake if isinstance(snake, dict) else (
+            camel if isinstance(camel, dict) else None)
+        # The dispatch input is the nested envelope when present, else rawInput.
+        arguments = dict(nested if nested is not None else raw)
+        for strip in _IDENTITY_KEYS:
+            arguments.pop(strip, None)
+        if key and (container is nested or container is raw):
+            arguments.pop(key, None)
+        return host, arguments
+    return None
+
+
+def _host_tools_note(toolset: HostToolset, tool_choice=None) -> str:
+    """System text telling Devin how the attached host MCP tools are named."""
+    example = toolset.tools[0]["name"]
+    served = toolset.model_name(example)
+    lines = [
+        HOST_EXECUTION_NOTE,
+        "The host application's tools are attached to this session as MCP tools "
+        f"(server `{SERVER_NAME}`). Call them directly as tools — they may appear "
+        f"qualified with the server name, e.g. `{SERVER_NAME}__{served}` for "
+        f"`{example}`. Each call ends your turn: the host runs it and returns the "
+        "result on the next turn. They are the only tools that act on the host; "
+        "your own built-in tools are disabled.",
+    ]
+    if isinstance(tool_choice, dict):
+        kind = tool_choice.get("type")
+        if kind in {"any", "required"}:
+            lines.append("You must call at least one host tool in this reply.")
+        elif kind == "tool" and isinstance(tool_choice.get("name"), str):
+            try:
+                lines.append(f"You must call `{toolset.model_name(tool_choice['name'])}` "
+                             "in this reply.")
+            except KeyError:
+                pass
+    return " ".join(lines)
+
+
+def _update_events(item: dict, toolset: HostToolset | None = None,
+                   state: dict | None = None) -> Iterator[dict]:
+    """One session/update notification -> adapter events.
+
+    Text/thinking chunks pass through as before. A ``tool_call`` update that
+    resolves to one of this turn's host MCP tools becomes a ``tool_call``
+    event and sets ``state['host_call']`` so the driver ends the turn — the
+    harness executes the call and the next turn replays its result. Devin's
+    own tool calls resolve to nothing and stay invisible here (they are
+    denied at the permission seam regardless).
     """
     params = item.get("params")
     update = params.get("update") if isinstance(params, dict) else None
     if not isinstance(update, dict):
         return
     kind = str(update.get("sessionUpdate") or "")
+    if kind == "tool_call":
+        resolved = _host_tool_call(update, toolset)
+        if resolved is not None:
+            host, arguments = resolved
+            tool_call_id = update.get("toolCallId")
+            if not isinstance(tool_call_id, str) or not tool_call_id:
+                return
+            if state is not None:
+                state["host_call"] = True
+            yield {"type": "tool_call", "id": tool_call_id,
+                   "name": host, "input": arguments}
+        return
     if "thought" in kind or "reasoning" in kind:
         text = _content_text(update)
         if text:
@@ -461,21 +602,53 @@ def _reject_option(options: Any) -> str | None:
     return None
 
 
-def _answer_inbound(session: StdioSession, item: dict) -> None:
+def _allow_option(options: Any) -> str | None:
+    """Pick an allow optionId, preferring the one-shot kind."""
+    entries = options if isinstance(options, list) else []
+    kinds = []
+    for entry in entries:
+        if isinstance(entry, dict):
+            option_id = entry.get("optionId")
+            kind = entry.get("kind")
+            if isinstance(option_id, str) and option_id:
+                kinds.append((option_id, str(kind or "")))
+    for wanted in ("allow_once",):
+        for option_id, kind in kinds:
+            if kind == wanted:
+                return option_id
+    for option_id, kind in kinds:
+        if kind.startswith("allow"):
+            return option_id
+    return None
+
+
+def _answer_inbound(session: StdioSession, item: dict,
+                    toolset: HostToolset | None = None) -> None:
     """Answer an agent->client JSON-RPC request; best-effort, never raises.
 
-    ``session/request_permission`` is always denied: v1 grants the agent no
-    side effects at all. Every other request method gets -32601 so the peer
-    is never left waiting on an unanswered id.
+    ``session/request_permission`` is approved only when the toolCall resolves
+    to one of this turn's attached host MCP tools — those execute nothing
+    locally (the list-only server returns its NOT_HERE result and the adapter
+    has already ended the turn at the ``tool_call`` update). Every other
+    request, including all of Devin's own native tools, is denied: v1 grants
+    the agent no side effects of its own. Every other request method gets
+    -32601 so the peer is never left waiting on an unanswered id.
     """
     rpc_id = item.get("id")
     method = item.get("method")
     try:
         if method == _PERMISSION_METHOD:
             params = item.get("params") if isinstance(item.get("params"), dict) else {}
-            option_id = _reject_option(params.get("options"))
-            outcome = ({"outcome": "selected", "optionId": option_id}
-                       if option_id else {"outcome": "cancelled"})
+            tool_call = params.get("toolCall")
+            host = _host_tool_call(tool_call, toolset)
+            if host is not None:
+                option_id = _allow_option(params.get("options"))
+                outcome = ({"outcome": "selected", "optionId": option_id}
+                           if option_id else {"outcome": "cancelled"})
+            else:
+                option_id = _reject_option(params.get("options"))
+                outcome = ({"outcome": "selected", "optionId": option_id}
+                           if option_id else {"outcome": "cancelled"})
             session.send(json.dumps({"jsonrpc": "2.0", "id": rpc_id,
                                      "result": {"outcome": outcome}}))
         else:
@@ -521,17 +694,28 @@ def _plan(request: Any) -> dict:
     system = request.get("system")
     if system is not None and not isinstance(system, str):
         raise DevinCliAgentError("system must be a string or None")
-    return {"model": model, "prompt": render_prompt(messages, system=system)}
+    tools = normalize_tools(request.get("tools"))
+    tool_choice = request.get("tool_choice")
+    toolset = HostToolset(tools, prefix="") if tools else None
+    if toolset is not None:
+        note = _host_tools_note(toolset, tool_choice)
+        system = note + ("\n\n" + system if system else "")
+    return {"model": model, "prompt": render_prompt(messages, system=system),
+            "tools": tools, "tool_choice": tool_choice, "toolset": toolset}
 
 
 def _drive_turn(session: StdioSession, plan: dict, cwd: str,
-                *, timeout: float) -> Iterator[dict]:
+                *, timeout: float,
+                mcp_servers: list | None = None,
+                toolset: HostToolset | None = None) -> Iterator[dict]:
     """Run the ACP handshake + one prompt, yielding adapter events.
 
     initialize -> session/new -> session/prompt, then a manual event loop:
     ``session.request`` cannot be used for the prompt itself because the agent
     sends ``session/request_permission`` *requests* mid-turn that must be
-    answered while the prompt is still outstanding.
+    answered while the prompt is still outstanding. ``mcp_servers`` is the
+    list-only host tool server (empty when the request carried no tools) and
+    ``toolset`` resolves the tool names its calls report back as.
     """
     deadline = time.monotonic() + timeout
     try:
@@ -550,7 +734,7 @@ def _drive_turn(session: StdioSession, plan: dict, cwd: str,
     try:
         remaining = max(0.01, deadline - time.monotonic())
         response = session.request("session/new",
-                                   {"cwd": cwd, "mcpServers": []},
+                                   {"cwd": cwd, "mcpServers": mcp_servers or []},
                                    timeout=min(60.0, remaining))
     except CliSessionError as exc:
         yield {"type": "error", "message": str(exc)}
@@ -580,7 +764,8 @@ def _drive_turn(session: StdioSession, plan: dict, cwd: str,
 
     stop_reason = None
     prompt_error = None
-    while stop_reason is None and prompt_error is None:
+    call_state: dict = {}
+    while stop_reason is None and prompt_error is None and not call_state.get("host_call"):
         remaining = deadline - time.monotonic()
         if remaining <= 0 or getattr(session, "_eof", False):
             break
@@ -591,10 +776,12 @@ def _drive_turn(session: StdioSession, plan: dict, cwd: str,
                 continue  # raw diagnostic lines carry no protocol state
             method = item.get("method")
             if method is not None and "id" in item:
-                _answer_inbound(session, item)
+                _answer_inbound(session, item, toolset)
                 continue
             if method == "session/update":
-                yield from _update_events(item)
+                yield from _update_events(item, toolset, call_state)
+                if call_state.get("host_call"):
+                    break
                 continue
             if method is not None:
                 continue  # notifications we do not model (mode, commands, usage)
@@ -612,6 +799,12 @@ def _drive_turn(session: StdioSession, plan: dict, cwd: str,
 
     if prompt_error is not None:
         yield {"type": "error", "message": prompt_error}
+        return
+    if call_state.get("host_call"):
+        # The harness owns execution from here: the tool_call event already
+        # went out, and cli_routes' stream wrapper rewrites this stop as
+        # "tool_use" once it validates the call against the offered tools.
+        yield {"type": "message_stop", "stop_reason": "tool_use"}
         return
     if stop_reason is not None:
         yield {"type": "message_stop", "stop_reason": stop_reason}
@@ -652,8 +845,15 @@ def run_turn(request, *, spawner=None, timeout=300) -> Iterator[dict]:
             )
         # A fresh empty directory per turn: the agent's own tools (which this
         # route cannot supervise) have no workspace to touch, and session/new
-        # still gets a real cwd the CLI requires.
+        # still gets a real cwd the CLI requires. The host tool manifest lives
+        # here too, owner-only, and dies with the directory.
         workspace_path = tempfile.mkdtemp(prefix="devin_cli_")
+        mcp_servers = []
+        if plan.get("toolset") is not None:
+            tools_path = plan["toolset"].write(workspace_path)
+            command = server_command(tools_path)
+            mcp_servers = [{"name": SERVER_NAME, "command": command[0],
+                            "args": command[1:], "env": []}]
         stderr_handle = tempfile.TemporaryFile(mode="w+", encoding="utf-8")
         argv = build_argv(plan["model"])
         argv[0] = binary
@@ -681,7 +881,9 @@ def run_turn(request, *, spawner=None, timeout=300) -> Iterator[dict]:
     try:
         with session:
             yield from _drive_turn(session, plan, workspace_path,
-                                   timeout=float(timeout))
+                                   timeout=float(timeout),
+                                   mcp_servers=mcp_servers,
+                                   toolset=plan.get("toolset"))
     except Exception as exc:  # noqa: BLE001
         yield {"type": "error", "message": str(exc)}
     finally:

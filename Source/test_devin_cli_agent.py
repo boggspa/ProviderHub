@@ -228,6 +228,30 @@ class ProbeTests(unittest.TestCase):
         self.assertTrue(notes)
 
 
+def _tool_call_update(tool_call_id, *, title=None, kind=None, raw_input=None):
+    update = {"sessionUpdate": "tool_call", "toolCallId": tool_call_id}
+    if title is not None:
+        update["title"] = title
+    if kind is not None:
+        update["kind"] = kind
+    if raw_input is not None:
+        update["rawInput"] = raw_input
+    return {"jsonrpc": "2.0", "method": "session/update",
+            "params": {"sessionId": "s1", "update": update}}
+
+
+_TOOLS = [{"name": "get_weather",
+           "description": "Fetch the weather.",
+           "input_schema": {"type": "object",
+                            "properties": {"city": {"type": "string"}}}}]
+
+
+def _tools_request():
+    return {"model": "swe-2",
+            "messages": [{"role": "user", "content": "weather in Paris?"}],
+            "tools": _TOOLS}
+
+
 class TurnTests(unittest.TestCase):
     def _scripted(self, lines, *, session_id="s1"):
         fake = FakeSession([])
@@ -264,6 +288,110 @@ class TurnTests(unittest.TestCase):
         new_params = fake.requests[1][1]
         self.assertEqual(new_params["mcpServers"], [])
         self.assertTrue(new_params["cwd"].startswith("/"))
+
+    def test_host_tool_call_ends_turn_with_tool_call_event(self):
+        fake = self._scripted([
+            _update("agent_message_chunk", "Let me check."),
+            _tool_call_update("call-1", title="host__get_weather",
+                              raw_input={"tool_name": "host__get_weather",
+                                         "city": "Paris"}),
+            # The prompt response never arrives: the turn ends at the call.
+        ])
+        events, _ = _run(fake, _tools_request())
+        kinds = [e["type"] for e in events]
+        self.assertEqual(kinds, ["text_delta", "tool_call", "message_stop"])
+        call = events[1]
+        self.assertEqual(call["id"], "call-1")
+        self.assertEqual(call["name"], "get_weather")
+        self.assertEqual(call["input"], {"city": "Paris"})
+        self.assertEqual(events[-1]["stop_reason"], "tool_use")
+
+    def test_host_tool_call_matches_bare_and_qualified_names(self):
+        for qualifier in ("get_weather", "host.get_weather",
+                          "host__get_weather", "mcp__host__get_weather"):
+            fake = self._scripted([
+                _tool_call_update("c", raw_input={"tool_name": qualifier,
+                                                  "city": "Oslo"}),
+            ])
+            events, _ = _run(fake, _tools_request())
+            calls = [e for e in events if e["type"] == "tool_call"]
+            self.assertEqual(len(calls), 1, qualifier)
+            self.assertEqual(calls[0]["name"], "get_weather", qualifier)
+
+    def test_devin_native_tool_call_is_not_a_host_call(self):
+        fake = self._scripted([
+            _tool_call_update("native-1", title="bash", kind="execute",
+                              raw_input={"command": "ls"}),
+            _update("agent_message_chunk", "done"),
+            _prompt_response(100, "end_turn"),
+        ])
+        events, _ = _run(fake, _tools_request())
+        self.assertNotIn("tool_call", [e["type"] for e in events])
+        self.assertEqual(events[-1]["stop_reason"], "end_turn")
+
+    def test_tool_call_update_for_known_id_does_not_duplicate(self):
+        fake = self._scripted([
+            _tool_call_update("call-1", raw_input={"tool_name": "host__get_weather",
+                                                  "city": "Paris"}),
+        ])
+        events, _ = _run(fake, _tools_request())
+        self.assertEqual(len([e for e in events if e["type"] == "tool_call"]), 1)
+
+    def test_host_tool_permission_is_allowed_native_still_denied(self):
+        fake = self._scripted([
+            {"jsonrpc": "2.0", "id": 557, "method": "session/request_permission",
+             "params": {"sessionId": "s1",
+                        "toolCall": {"toolCallId": "c1", "kind": "other",
+                                     "rawInput": {"tool_name": "host__get_weather",
+                                                  "city": "Paris"}},
+                        "options": [{"optionId": "allow1", "kind": "allow_once"},
+                                    {"optionId": "deny1", "kind": "reject_once"}]}},
+            {"jsonrpc": "2.0", "id": 558, "method": "session/request_permission",
+             "params": {"sessionId": "s1",
+                        "toolCall": {"toolCallId": "c2", "kind": "execute",
+                                     "rawInput": {"command": "rm -rf /"}},
+                        "options": [{"optionId": "allow2", "kind": "allow_once"},
+                                    {"optionId": "deny2", "kind": "reject_once"}]}},
+            _prompt_response(100),
+        ])
+        _run(fake, _tools_request())
+        answers = {a["id"]: a for a in
+                   (json.loads(s) for s in fake.sent) if "result" in a}
+        self.assertEqual(answers[557]["result"]["outcome"]["optionId"], "allow1")
+        self.assertEqual(answers[558]["result"]["outcome"]["optionId"], "deny2")
+
+    def test_tools_attach_list_only_host_mcp_server(self):
+        fake = self._scripted([_prompt_response(100)])
+        captured = {}
+        original_request = fake.request
+
+        def request(method, params=None, timeout=None):
+            result = original_request(method, params, timeout)
+            if method == "session/new":
+                captured["params"] = params
+                path = params["mcpServers"][0]["args"][-1]
+                with open(path) as handle:
+                    captured["manifest"] = json.load(handle)
+            return result
+
+        fake.request = request
+        _run(fake, _tools_request())
+        servers = captured["params"]["mcpServers"]
+        self.assertEqual(len(servers), 1)
+        server = servers[0]
+        self.assertEqual(set(server), {"name", "command", "args", "env"})
+        self.assertEqual(server["name"], "host")
+        self.assertTrue(server["command"].endswith("python3")
+                        or "python" in server["command"])
+        self.assertIn("host_tools_mcp.py", " ".join(server["args"]))
+        self.assertIn("get_weather", json.dumps(captured["manifest"]))
+        # No bridge endpoint: list-only mode must not forward calls.
+        self.assertNotIn("bridge", captured["manifest"])
+
+    def test_no_tools_still_sends_empty_mcp_servers(self):
+        fake = self._scripted([_prompt_response(100)])
+        _run(fake)
+        self.assertEqual(fake.requests[1][1]["mcpServers"], [])
 
     def test_argv_carries_model_and_acp(self):
         fake = self._scripted([_prompt_response(100)])
@@ -373,20 +501,21 @@ class TurnTests(unittest.TestCase):
 
 
 class PlanTurnIntegrationTests(unittest.TestCase):
-    """cli_routes.plan_turn must drop client tools for this provider."""
+    """cli_routes.plan_turn hands client tools to this provider natively."""
 
-    def test_plan_turn_suppresses_host_tools(self):
+    def test_plan_turn_passes_host_tools(self):
         from cli_routes import plan_turn
         payload = {"messages": [{"role": "user", "content": "hi"}],
                    "tools": [{"name": "get_weather", "description": "Fetch.",
                               "input_schema": {"type": "object",
                                                "properties": {"city": {"type": "string"}}}}]}
         plan = plan_turn("devin-cli", "swe-2", payload, {}, wanted_output=64)
-        self.assertFalse(plan["cli_tool_calls"])
-        self.assertEqual(plan["body"]["tools"], [])
-        # No tool manifest leaked into the system text or the user turn.
-        self.assertNotIn("host_note", plan["body"]["messages"][-1]["content"])
+        self.assertTrue(plan["cli_tool_calls"])
+        self.assertEqual([t["name"] for t in plan["body"]["tools"]], ["get_weather"])
+        # Native MCP transport: no text manifest leaks into system or user text.
+        self.assertNotIn("<<<tool_call>>>", plan["body"].get("system") or "")
         self.assertNotIn("get_weather", plan["body"].get("system") or "")
+        self.assertEqual(plan["compatibility"]["cli_host_tools"], "mcp")
 
     def test_adapter_registered(self):
         from cli_routes import adapter_for
