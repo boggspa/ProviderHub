@@ -347,14 +347,7 @@ struct CompactShell: View {
             case .provider(let raw):
                 // devin-cli has no rail entry of its own; its routes focus
                 // under the provider that actually serves them.
-                let id = raw == "devin-cli" ? "devin" : raw
-                var providerID = id
-                if id == "devin", let route = focusedRoute,
-                   let entryProvider = model.modelEntry(route)?.provider_id,
-                   model.providerDefinitions.contains(where: { $0.id == entryProvider }) {
-                    providerID = entryProvider
-                }
-                if let provider = model.providerDefinitions.first(where: { $0.id == providerID }) {
+                if let provider = model.providerDefinitions.first(where: { $0.id == sideProviderID(tabID: raw) }) {
                     ProviderSide(model: model, provider: provider, focused: $focusedRoute)
                 }
             case .claude: AppSide(model: model, surface: .claude)
@@ -364,6 +357,18 @@ struct CompactShell: View {
             case .settings: EmptyView()
             }
         }.padding(.horizontal, 10).padding(.vertical, 6).frame(maxHeight: .infinity, alignment: .top)
+    }
+
+    /// The provider the side pane should describe for a provider tab: the
+    /// tab's own provider, except that a focused devin-cli route under the
+    /// Devin tab resolves to devin-cli so its rows get their own details.
+    private func sideProviderID(tabID raw: String) -> String {
+        let id = raw == "devin-cli" ? "devin" : raw
+        guard id == "devin", let route = focusedRoute,
+              let entryProvider = model.modelEntry(route)?.provider_id,
+              model.providerDefinitions.contains(where: { $0.id == entryProvider })
+        else { return id }
+        return entryProvider
     }
 
     // MARK: audit
