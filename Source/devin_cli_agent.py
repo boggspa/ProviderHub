@@ -498,6 +498,18 @@ def _iter_identities(payload: dict):
         value = payload.get(key)
         if isinstance(value, str) and value:
             yield value, payload, key
+    # Devin's ACP client reports the called tool only under ``_meta``:
+    # ``cognition.ai/toolName``/``inferenceToolName`` on tool_call updates and
+    # ``cognition.ai/permissionRule`` on session/request_permission payloads
+    # (observed on devin 3000.14). These are structured identities, so they
+    # outrank the free-text title but never preempt a rawInput/payload name.
+    meta = payload.get("_meta")
+    if isinstance(meta, dict):
+        for meta_key, value in meta.items():
+            leaf = str(meta_key).rsplit("/", 1)[-1].lower()
+            if isinstance(value, str) and value and (
+                    leaf.endswith("toolname") or leaf == "permissionrule"):
+                yield value, None, None
     title = payload.get("title")
     if isinstance(title, str) and title:
         yield title, None, None

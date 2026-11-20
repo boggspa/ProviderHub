@@ -273,7 +273,8 @@ class ProbeTests(unittest.TestCase):
         self.assertTrue(notes)
 
 
-def _tool_call_update(tool_call_id, *, title=None, kind=None, raw_input=None):
+def _tool_call_update(tool_call_id, *, title=None, kind=None, raw_input=None,
+                      meta=None):
     update = {"sessionUpdate": "tool_call", "toolCallId": tool_call_id}
     if title is not None:
         update["title"] = title
@@ -281,6 +282,8 @@ def _tool_call_update(tool_call_id, *, title=None, kind=None, raw_input=None):
         update["kind"] = kind
     if raw_input is not None:
         update["rawInput"] = raw_input
+    if meta is not None:
+        update["_meta"] = meta
     return {"jsonrpc": "2.0", "method": "session/update",
             "params": {"sessionId": "s1", "update": update}}
 
@@ -382,6 +385,39 @@ class TurnTests(unittest.TestCase):
             self.assertEqual(len(calls), 1, qualifier)
             self.assertEqual(calls[0]["name"], "get_weather", qualifier)
 
+    def test_host_tool_call_identity_from_meta_envelope(self):
+        # devin 3000.14 reports MCP calls only under _meta: the toolCall update
+        # carries cognition.ai/toolName + inferenceToolName, rawInput holds
+        # just the arguments, and the title is free text.
+        fake = self._scripted([
+            _tool_call_update(
+                "call-9", title="Calling get_weather from host",
+                raw_input={"city": "Paris"},
+                meta={"cognition.ai/toolName": "mcp__host__get_weather",
+                      "cognition.ai/inferenceToolName": "mcp__host__get_weather",
+                      "cognition.ai/eventType": "mcp_tool_call"}),
+        ])
+        events, _ = _run(fake, _tools_request())
+        calls = [e for e in events if e["type"] == "tool_call"]
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["name"], "get_weather")
+        self.assertEqual(calls[0]["input"], {"city": "Paris"})
+        self.assertEqual(events[-1]["stop_reason"], "tool_use")
+
+    def test_meta_identity_never_matches_devin_native_tools(self):
+        fake = self._scripted([
+            _tool_call_update(
+                "native-2", title="Running ls",
+                raw_input={"command": "ls"},
+                meta={"cognition.ai/inferenceToolName": "mcp_list_tools",
+                      "cognition.ai/eventType": "mcp_tool_call"}),
+            _update("agent_message_chunk", "done"),
+            _prompt_response(100, "end_turn"),
+        ])
+        events, _ = _run(fake, _tools_request())
+        self.assertNotIn("tool_call", [e["type"] for e in events])
+        self.assertEqual(events[-1]["stop_reason"], "end_turn")
+
     def test_devin_native_tool_call_is_not_a_host_call(self):
         fake = self._scripted([
             _tool_call_update("native-1", title="bash", kind="execute",
@@ -423,6 +459,24 @@ class TurnTests(unittest.TestCase):
                    (json.loads(s) for s in fake.sent) if "result" in a}
         self.assertEqual(answers[557]["result"]["outcome"]["optionId"], "allow1")
         self.assertEqual(answers[558]["result"]["outcome"]["optionId"], "deny2")
+
+    def test_permission_identity_from_meta_permission_rule(self):
+        # devin 3000.14's request_permission toolCall carries only the call id
+        # and _meta["cognition.ai/permissionRule"] — the qualified MCP name.
+        fake = self._scripted([
+            {"jsonrpc": "2.0", "id": 559, "method": "session/request_permission",
+             "params": {"sessionId": "s1",
+                        "toolCall": {"toolCallId": "c9",
+                                     "_meta": {"cognition.ai/permissionRule":
+                                               "mcp__host__get_weather"}},
+                        "options": [{"optionId": "allow9", "kind": "allow_once"},
+                                    {"optionId": "deny9", "kind": "reject_once"}]}},
+            _prompt_response(100),
+        ])
+        _run(fake, _tools_request())
+        answers = {a["id"]: a for a in
+                   (json.loads(s) for s in fake.sent) if "result" in a}
+        self.assertEqual(answers[559]["result"]["outcome"]["optionId"], "allow9")
 
     def test_tools_attach_list_only_host_mcp_server(self):
         fake = self._scripted([_prompt_response(100)])
