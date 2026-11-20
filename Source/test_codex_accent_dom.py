@@ -77,6 +77,20 @@ const cases = {
     assert.notEqual(await colour(page, 'label-text'), colours.kimi);
     assert.notEqual(await colour(page, 'label-chevron'), colours.kimi);
   },
+  async chatgpt_26_1111_tertiary_icon_wrapper_takes_the_accent(page) {
+    // 26.1111 built-in tool rows (Ran commands, Read files): bare svgs inside a
+    // text-tertiary wrapper, span.contents settled or span.inline-grid crossfading.
+    const row = `<main><div class="group/activity-header relative inline-flex"><span class="inline-flex min-w-0 gap-2"><span class="contents text-tertiary"><svg id="wrap-glyph" class="shrink-0"></svg></span><span id="wrap-label" class="text-tertiary">Ran commands</span></span><span class="pointer-events-none relative flex"><svg id="wrap-chevron" class="icon-2xs text-tertiary"></svg></span></div>
+      <div class="group/activity-header"><span class="inline-flex"><span class="inline-grid shrink-0 text-tertiary"><span class="inline-flex"><svg id="grid-glyph" class="icon-xs shrink-0"></svg></span></span><span id="grid-label">Reading</span></span></div>
+      <div class="text-tertiary"><span class="contents text-tertiary"><svg id="stray"></svg></span></div>
+      <button data-composer-navigation-target="reasoning" data-selected-reasoning-effort="high"><span><span id="wrap-model">Kimi for Coding</span></span></button></main>`;
+    await mount(page, row);
+    assert.equal(await colour(page, 'wrap-glyph'), colours.kimi);
+    assert.equal(await colour(page, 'grid-glyph'), colours.kimi);
+    assert.notEqual(await colour(page, 'wrap-label'), colours.kimi);
+    assert.notEqual(await colour(page, 'wrap-chevron'), colours.kimi);
+    assert.notEqual(await colour(page, 'stray'), colours.kimi);
+  },
   async visible_child_model_wins_during_reuse_and_late_worker_replies(page) {
     await mount(page, main() + agent('codex/gpt-6-astra · High'));
     await page.locator('#agent-model').evaluate((element, id) => {

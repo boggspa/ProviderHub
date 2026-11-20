@@ -189,7 +189,9 @@ class AccentMapTests(unittest.TestCase):
         self.assertEqual(selector, '[class~="group/activity-header"] span[class~="contents"] > svg[class~="text-text/60"],'
                                    '[class~="group/activity-header"] span[class~="contents"][class~="text-text/60"]'
                                    ' > svg:not([class*="text-"]):not([style*="color"]),'
-                                   '[class~="group/activity-header"] > span > svg[class~="shrink-0"][class~="text-text/60"]')
+                                   '[class~="group/activity-header"] > span > svg[class~="shrink-0"][class~="text-text/60"],'
+                                   '[class~="group/activity-header"] > span > :is(span[class~="contents"],span[class~="inline-grid"])'
+                                   '[class~="text-tertiary"]')
         css = activity_glyph_css()
         self.assertEqual(css, f'[{THEME_ATTRIBUTE}] :is({selector}):not([{THEME_ATTRIBUTE}="unknown"] *)'
                               f"{{color:var({ACCENT_PROPERTY},currentColor)!important}}")
@@ -213,7 +215,7 @@ class AccentMapTests(unittest.TestCase):
 
     def test_shimmer_gray_takes_the_accent_hue_and_the_sweep_stays_the_apps(self):
         css = shimmer_css()
-        self.assertEqual(css, f':where([{THEME_ATTRIBUTE}] :is(.loading-shimmer-pure-text,.loading-shimmer))'
+        self.assertEqual(css, f':where([{THEME_ATTRIBUTE}] :is(.loading-shimmer-pure-text,.loading-shimmer,[class*="cadencedShimmer-"]))'
                               f'{{--loading-shimmer-foreground:oklch(from var(--color-codex-description) l 0.07 var({HUE_PROPERTY}))}}')
         self.assertNotIn("--loading-shimmer-highlight", css)  # the sweep is the app's own again
         hues = hue_map({"kimi for coding": "#0073E6", "antigravity": "#308713", "gray": "#808080", "white": "#FFFFFF"})

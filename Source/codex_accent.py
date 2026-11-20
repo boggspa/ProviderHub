@@ -68,7 +68,11 @@ SHIMMER_HUE_FLOOR = 0.03
 # — a task row's meta cell while it loads, a subagent row's status, the
 # composer's permissions pill while its options arrive — and not the running
 # turn's own labels, which shimmer through a hashed CSS module instead.
-ACTIVITY_SHIMMER = ":is(.loading-shimmer-pure-text,.loading-shimmer)"
+# ChatGPT 26.1111's running tool labels use the cadenced shimmer, a hashed
+# CSS-module class ("cadencedShimmer-<hash>", the sweep and highlight spans
+# are "cadencedShimmerSweep-"/"-Highlight-" and do not match the dash form)
+# that derives its tones from the same --loading-shimmer-foreground knob.
+ACTIVITY_SHIMMER = ':is(.loading-shimmer-pure-text,.loading-shimmer,[class*="cadencedShimmer-"])'
 # The glyph that leads a settled tool-call row ("Ran commands", "Read files,
 # ran commands") takes the accent too. That row keeps no shimmer once the
 # call lands, so it is found by the two names the app wrote by hand: the
@@ -86,6 +90,14 @@ ACTIVITY_GLYPH_GREY = "text-text/60"
 # (an inline-flex span directly inside the header). Seen in the bundle's
 # renderAgentActivityIcon callbacks and the label component they feed.
 ACTIVITY_ICON = "shrink-0"
+# ChatGPT 26.1111 (bundle 461952 hFwT, 248411 umSm) moved the built-in tool
+# rows' grey off the glyph: exec/read/search/edit icons are bare svgs
+# ("shrink-0" or "icon-xs shrink-0", no colour class) and the grey is a
+# "text-tertiary" wrapper the icon crossfade component draws around them, a
+# `span.contents` when settled or an `span.inline-grid` while an alternate
+# animation can play. The wrapper sits first in the label span directly
+# under the header, so the wrapper itself is painted and the icon inherits.
+ACTIVITY_WRAPPER_GREY = "text-tertiary"
 # These are the app shell's authored tab hooks, shared by right and bottom
 # panels. Tab IDs distinguish conversation panes from browser/file tabs;
 # the main composer lives outside all such panels.
@@ -439,7 +451,10 @@ def activity_glyph_selector() -> str:
     return (f'{ACTIVITY_HEADER} {ACTIVITY_SLOT} > svg[class~="{ACTIVITY_GLYPH_GREY}"],'
             f'{ACTIVITY_HEADER} {ACTIVITY_SLOT}[class~="{ACTIVITY_GLYPH_GREY}"]'
             ' > svg:not([class*="text-"]):not([style*="color"]),'
-            f'{ACTIVITY_HEADER} > span > svg[class~="{ACTIVITY_ICON}"][class~="{ACTIVITY_GLYPH_GREY}"]')
+            f'{ACTIVITY_HEADER} > span > svg[class~="{ACTIVITY_ICON}"][class~="{ACTIVITY_GLYPH_GREY}"],'
+            # 26.1111 built-in tool rows: the grey lives on the icon's wrapper.
+            f'{ACTIVITY_HEADER} > span > :is(span[class~="contents"],span[class~="inline-grid"])'
+            f'[class~="{ACTIVITY_WRAPPER_GREY}"]')
 
 
 def activity_glyph_css() -> str:
@@ -1626,7 +1641,7 @@ def already_running(binary: Path) -> bool:
 
 def run(binary: Path, script: str, *, emit=None, arguments=(), environment=None, sidebar_accents=None,
         child_accents=None, recent_previews=None, quick_window=None, quick_host=None, host_input=None,
-        poll_interval=0.25, launch_timeout=45.0) -> int:
+        poll_interval=0.25, launch_timeout=45.0, bridge_factory=None) -> int:
     """Launch the app, install the watcher, then stay attached until it exits.
 
     Returns the app's exit status. SIGTERM and SIGHUP are ignored once the
@@ -1647,7 +1662,9 @@ def run(binary: Path, script: str, *, emit=None, arguments=(), environment=None,
     emit({"event": "launched", "pid": pid})
     for signum in (signal.SIGTERM, signal.SIGHUP):
         signal.signal(signum, signal.SIG_IGN)
-    bridge = AccentBridge(pipe, script, emit, sidebar_accents=sidebar_accents,
+    # Another Electron app (vibe_accent) reuses this loop with a bridge that
+    # admits its own document origin instead of Codex's app://-/.
+    bridge = (bridge_factory or AccentBridge)(pipe, script, emit, sidebar_accents=sidebar_accents,
                           child_accents=child_accents, recent_previews=recent_previews,
                           quick_window=quick_window, quick_host=quick_host)
     # The hub's commands arrive on this helper's stdin as JSON lines. A
