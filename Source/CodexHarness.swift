@@ -11,7 +11,7 @@ struct CodexModelOption: Decodable, Identifiable {
 extension BridgeModel: LaunchHost {
     var claudeLive: Bool { claudeRunning && profileActive }
     var codexLive: Bool { codexRunning && codexRecoveryNeeded }
-    var desktopOwnedHarnessRunning: Bool { claudeLive || codexLive }
+    var desktopOwnedHarnessRunning: Bool { claudeLive || codexLive || vibeLive }
     var anyOwnedHarnessRunning: Bool { desktopOwnedHarnessRunning || chatWindowOpen || chatBusy }
 
     func readCodexState(_ object: [String: Any]) {

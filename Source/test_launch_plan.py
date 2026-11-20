@@ -24,11 +24,13 @@ func check(_ yes: Bool, _ text: String) {
     var chatHasActiveWork = false
     var claudeLive = false
     var codexLive = false
+    var vibeLive = false
     var running = true
     var inFlight = 0
     var port = 0
     var fingerprint = ""
     var digest = ""
+    var vibeDigest = ""
     var events: [String] = []
     var writes: [String] = []
     var prepareError: String?
@@ -38,7 +40,8 @@ func check(_ yes: Bool, _ text: String) {
     init() { load() }
     static func fp(_ s: RouteSettings) -> String { "fp:" + (s.mappings["claude-opus-5"] ?? "") }
     static func dg(_ s: RouteSettings) -> String { "dg:" + (s.codex_model ?? "") + ":\(s.codex_goal_budget)" }
-    func load() { port = disk.port; fingerprint = Self.fp(disk); digest = Self.dg(disk) }
+    static func vd(_ s: RouteSettings) -> String { "vd:" + (s.vibe_model ?? "") }
+    func load() { port = disk.port; fingerprint = Self.fp(disk); digest = Self.dg(disk); vibeDigest = Self.vd(disk) }
     func refreshDesktopState() {}
     func waitForCatalogueRefresh() async {}
     func writeSettings() async throws {
@@ -52,13 +55,13 @@ func check(_ yes: Bool, _ text: String) {
     func gatewayStatus() async throws -> GatewayStatus? {
         events.append("status")
         guard running, savedSettings.port == port else { throw LaunchRefusal(message: "Unreachable") }
-        return GatewayStatus(active: inFlight, fingerprint: fingerprint, digest: digest)
+        return GatewayStatus(active: inFlight, fingerprint: fingerprint, digest: digest, vibeDigest: vibeDigest)
     }
     func refreshGateway(_ surface: LaunchSurface, expected: String) async throws -> GatewayStatus? {
         events.append("refresh")
         if let refreshError { throw LaunchRefusal(message: refreshError) }
         if !wrongRefresh { load() }
-        return GatewayStatus(active: inFlight, fingerprint: fingerprint, digest: digest)
+        return GatewayStatus(active: inFlight, fingerprint: fingerprint, digest: digest, vibeDigest: vibeDigest)
     }
     func startGateway() async throws { events.append("start"); running = true; load() }
     func stopGateway() async { events.append(inFlight > 0 ? "SEVERED" : "stop"); running = false }
@@ -67,7 +70,9 @@ func check(_ yes: Bool, _ text: String) {
             _ = try await prepareGatewayForLaunch(surface) {
                 events.append("prepare"); await onPrepare?()
                 if let prepareError { throw LaunchRefusal(message: prepareError) }
-                return surface == .claude ? ["catalogue_fingerprint": Self.fp(disk)] : ["catalogue_digest": Self.dg(disk)]
+                if surface == .claude { return ["catalogue_fingerprint": Self.fp(disk)] }
+                if surface == .vibe { return ["catalogue_digest": Self.vd(disk)] }
+                return ["catalogue_digest": Self.dg(disk)]
             }
             return nil
         } catch { return error.localizedDescription }
@@ -77,14 +82,15 @@ func check(_ yes: Bool, _ text: String) {
     @MainActor static func main() async throws {
         // A changed selection launches under every kind of current activity,
         // regardless of a stale active count in the UI's last poll.
-        for surface in [LaunchSurface.claude, .codex] {
+        for surface in [LaunchSurface.claude, .codex, .vibe] {
             for count in [0, 1, 8] {
                 let h = ScriptedHost()
                 h.chatWorking = true; h.chatHasActiveWork = true; h.chatWindowOpen = true
                 h.inFlight = count; h.activeRequests = 0
                 h.claudeLive = surface == .codex; h.codexLive = surface == .claude
                 if surface == .claude { h.settings.mappings["claude-opus-5"] = "kimi/k3" }
-                else { h.settings.codex_model = "mistral/new-model" }
+                else if surface == .codex { h.settings.codex_model = "mistral/new-model" }
+                else { h.settings.vibe_model = "mistral/new-model" }
                 let error = await h.launch(surface)
                 check(error == nil, "busy launch: \(error ?? "")")
                 check(h.events == ["write", "prepare", "status", "refresh"], "busy launch order: \(h.events)")
@@ -110,22 +116,24 @@ func check(_ yes: Bool, _ text: String) {
         check(mixedError == nil && mixed.fingerprint == ScriptedHost.fp(mixed.disk), "mixed launch failed")
 
         // Live app profile edits are still guarded independently of activity.
-        for surface in [LaunchSurface.claude, .codex] {
+        for surface in [LaunchSurface.claude, .codex, .vibe] {
             let h = ScriptedHost()
             if surface == .claude { h.claudeLive = true; h.settings.mappings["claude-opus-5"] = "kimi/k3" }
-            else { h.codexLive = true; h.settings.codex_model = "mistral/new" }
+            else if surface == .codex { h.codexLive = true; h.settings.codex_model = "mistral/new" }
+            else { h.vibeLive = true; h.settings.vibe_model = "mistral/new" }
             let error = await h.launch(surface)
             check(error?.hasPrefix("Quit") == true && h.events.isEmpty, "live profile overwritten")
         }
 
         // A pending port change never moves the endpoint under active peers
         // or blocks a launch. It remains a pending UI edit after launch.
-        for surface in [LaunchSurface.claude, .codex] {
+        for surface in [LaunchSurface.claude, .codex, .vibe] {
             let h = ScriptedHost(); let old = h.port
             h.inFlight = 2; h.chatWorking = true
             h.claudeLive = surface == .codex; h.codexLive = surface == .claude
             h.settings.port = old + 1
             if surface == .codex { h.settings.codex_model = "mistral/new" }
+            if surface == .vibe { h.settings.vibe_model = "mistral/new" }
             let error = await h.launch(surface)
             check(error == nil, "pending port blocked launch: \(error ?? "")")
             check(h.port == old && h.disk.port == old && h.savedSettings.port == old && h.settings.port == old + 1, "port moved")

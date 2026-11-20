@@ -42,6 +42,7 @@ See [Vibe configuration](https://github.com/mistralai/mistral-vibe#configuration
 | [Close-out cards](CLOSEOUT_CARDS.md) | File-editing tool projection and desktop diff cards |
 | [Claude picker context](docs/claude-picker-context.md) | Context metadata and picker presentation |
 | [Codex provider subagents](docs/codex-provider-subagents.md) | Host delegation, runtime probes, and activation limits |
+| [Vibe desktop harness](docs/vibe-harness.md) | Third desktop surface: Vibe config injection, the ML chip, restore, and items still to validate live |
 | [Chat in Provider Hub](docs/chat.md) | Lightweight native chat, local file/shell tools, approvals, and saved conversations |
 | [Peer mailboxes](docs/peer-messaging.md) | Opt-in thread discovery, attributed messages, MCP adapter, and delivery limits |
 | [AntiGravity tool handoff](docs/antigravity-host-handoff.md) | Native tool requests and desktop dispatch |

@@ -20,9 +20,11 @@ enum ChangeKind: String, Equatable {
     case prefs
     /// Only Codex / ChatGPT's selection or desktop preferences.
     case codexOnly
+    /// Only Vibe's selection.
+    case vibeOnly
     /// Claude's model selection (mappings, catalogue, branding).
     case claudeRouting
-    /// Both selections.
+    /// More than one selection.
     case mixed
     /// The port or a provider connection. The running gateway listens on the
     /// saved port; a launch defers a port edit while the listener is running.
@@ -56,26 +58,61 @@ func classifyChange(_ settings: RouteSettings, from saved: RouteSettings) -> Cha
     mine.codex_subagent_rank = saved.codex_subagent_rank
     mine.codex_subagent_route = saved.codex_subagent_route
     let codexChanged = mine != settings
-    var prefsOnly = mine
+    var withoutVibe = mine
+    withoutVibe.vibe_catalogue = saved.vibe_catalogue
+    withoutVibe.vibe_model = saved.vibe_model
+    let vibeChanged = withoutVibe != mine
+    var prefsOnly = withoutVibe
     prefsOnly.providers = saved.providers  // only CLI accounts can differ here
     prefsOnly.auto_stop = saved.auto_stop
     prefsOnly.auto_mode = saved.auto_mode
     prefsOnly.claude_features = saved.claude_features
     prefsOnly.claude_code_settings = saved.claude_code_settings
     prefsOnly.claude_workflows = saved.claude_workflows
-    if prefsOnly == saved { return codexChanged ? .codexOnly : .prefs }
-    return codexChanged ? .mixed : .claudeRouting
+    if prefsOnly == saved {
+        if codexChanged && vibeChanged { return .mixed }
+        return codexChanged ? .codexOnly : (vibeChanged ? .vibeOnly : .prefs)
+    }
+    return (codexChanged || vibeChanged) ? .mixed : .claudeRouting
 }
 
 enum LaunchSurface {
-    case claude, codex
+    case claude, codex, vibe
 
-    var label: String { self == .claude ? "Claude" : "Codex / ChatGPT" }
-    var otherLabel: String { self == .claude ? "Codex / ChatGPT" : "Claude" }
+    var label: String {
+        switch self {
+        case .claude: return "Claude"
+        case .codex: return "Codex / ChatGPT"
+        case .vibe: return "Vibe"
+        }
+    }
+    var otherLabel: String {
+        switch self {
+        case .claude: return "Codex / ChatGPT"
+        case .codex: return "Claude"
+        case .vibe: return "Claude and Codex / ChatGPT"
+        }
+    }
     /// The prepare command's result key for the snapshot this surface needs,
     /// and the gateway's own value for it.
     var preparedKey: String { self == .claude ? "catalogue_fingerprint" : "catalogue_digest" }
-    func serving(_ status: GatewayStatus) -> String? { self == .claude ? status.fingerprint : status.digest }
+    /// The key the gateway's refresh endpoint checks this surface's snapshot
+    /// against. It is the gateway's own name for the digest, not the prepare
+    /// command's.
+    var refreshKey: String {
+        switch self {
+        case .claude: return "catalogue_fingerprint"
+        case .codex: return "codex_catalogue_digest"
+        case .vibe: return "vibe_catalogue_digest"
+        }
+    }
+    func serving(_ status: GatewayStatus) -> String? {
+        switch self {
+        case .claude: return status.fingerprint
+        case .codex: return status.digest
+        case .vibe: return status.vibeDigest
+        }
+    }
 }
 
 /// The parts of `/_bridge/status` the launch flow reads. `active` is the
@@ -84,6 +121,7 @@ struct GatewayStatus {
     var active: Int?
     var fingerprint: String?
     var digest: String?
+    var vibeDigest: String? = nil
 }
 
 struct LaunchRefusal: LocalizedError {
@@ -104,6 +142,7 @@ protocol LaunchHost: AnyObject {
     /// Running on the profile the Hub activated for this gateway.
     var claudeLive: Bool { get }
     var codexLive: Bool { get }
+    var vibeLive: Bool { get }
     func refreshDesktopState()
     func waitForCatalogueRefresh() async
     /// Persist `settings` and make it the saved state.
@@ -124,13 +163,13 @@ extension LaunchHost {
     func startGatewayForUse(save: () async throws -> Void) async throws {
         guard !running else { return }
         refreshDesktopState()
-        if !(chatBusy || activeRequests > 0 || claudeLive || codexLive) { try await save() }
+        if !(chatBusy || activeRequests > 0 || claudeLive || codexLive || vibeLive) { try await save() }
         try await startGateway()
     }
 
     /// No surface is keeping the gateway alive and nothing is in flight.
     func mayStopGateway() -> Bool {
-        !(claudeLive || codexLive || chatWindowOpen || chatBusy) && activeRequests == 0
+        !(claudeLive || codexLive || vibeLive || chatWindowOpen || chatBusy) && activeRequests == 0
     }
 
     /// A live app's profile is never rewritten from under it.
@@ -138,10 +177,12 @@ extension LaunchHost {
         switch kind {
         case .codexOnly where codexLive:
             return "Quit Codex / ChatGPT before changing its model catalogue or default."
+        case .vibeOnly where vibeLive:
+            return "Quit Vibe before changing its model catalogue or default."
         case .claudeRouting where claudeLive:
             return "Quit Claude before changing its model or provider settings."
-        case .mixed where claudeLive || codexLive:
-            return "Quit the desktop sessions using this gateway before changing both apps' model settings."
+        case .mixed where claudeLive || codexLive || vibeLive:
+            return "Quit the desktop sessions using this gateway before changing the apps' model settings."
         default:
             return nil
         }

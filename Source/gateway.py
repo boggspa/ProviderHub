@@ -57,6 +57,8 @@ from protocol import (StreamTranslator, apply_mapping_options, apply_mistral_pre
 from responses_native import ResponseOwnership, handle_responses, NATIVE_PROVIDERS
 from codex_accent import bridge_command as codex_accent_bridge
 from codex_catalogue import catalogue_digest, choices as codex_choices, launch_settings as codex_launch_settings
+from vibe_catalogue import catalogue_digest as vibe_catalogue_digest, choices as vibe_choices, launch_settings as vibe_launch_settings
+from vibe_profile import VibeProfile
 from chat_catalogue import chat_choices, chat_connection, native_search_available
 from codex_profile import CodexProfile
 from codex_projects import disk_root_projects
@@ -147,6 +149,7 @@ class Runtime:
         self.replay_key = private_token(root, "reasoning-signing-key")
         self.response_ownership = ResponseOwnership(root)
         self.codex_catalogue_digest = catalogue_digest(self.settings, self.catalogue)
+        self.vibe_catalogue_digest = vibe_catalogue_digest(self.settings, self.catalogue)
         self.key = key
         self.source = "Provider-specific credentials"
         self.upstream_url = upstream_url
@@ -190,7 +193,9 @@ class Runtime:
         settings, catalogue = attach_model_specs(planned, self.root)
         fingerprint = catalogue_fingerprint(settings, self.root, model_specs=settings["_model_specs"])
         digest = catalogue_digest(settings, catalogue)
-        actual = {"catalogue_fingerprint": fingerprint, "codex_catalogue_digest": digest}
+        vibe_digest = vibe_catalogue_digest(settings, catalogue)
+        actual = {"catalogue_fingerprint": fingerprint, "codex_catalogue_digest": digest,
+                  "vibe_catalogue_digest": vibe_digest}
         if any(actual[key] != value for key, value in (expected or {}).items()):
             raise BridgeError("The prepared selection changed. Try launching again.")
         with self.lock:
@@ -200,6 +205,7 @@ class Runtime:
                 raise BridgeError("Keep the running gateway's port until its connected sessions close.")
             self.settings, self.catalogue = settings, catalogue
             self.catalogue_fingerprint, self.codex_catalogue_digest = fingerprint, digest
+            self.vibe_catalogue_digest = vibe_digest
             self.credential_cache = {}
             self._credential_settings = self._cli_account_settings = None
         return self.status()
@@ -607,6 +613,7 @@ class Runtime:
                     "credential_source": self.source, "uptime_seconds": int(time.time() - self.started), "pid": os.getpid(),
                     "catalogue_fingerprint": self.catalogue_fingerprint,
                     "codex_catalogue_digest": self.codex_catalogue_digest,
+                    "vibe_catalogue_digest": self.vibe_catalogue_digest,
                     "providers": {key: dict(value) for key, value in self.provider_counts.items()}}
 
     def usage_account(self, provider_id, connection=None, config_dir=None):
@@ -772,6 +779,7 @@ class RequestRuntime(Runtime):
     remain owned by the serving Runtime, including while a refresh happens.
     """
     _local = frozenset({"_owner", "settings", "catalogue", "catalogue_fingerprint", "codex_catalogue_digest",
+                        "vibe_catalogue_digest",
                         "credential_cache", "_credential_settings", "_cli_account_settings"})
 
     def __init__(self, owner):
@@ -1014,7 +1022,7 @@ class Handler(BaseHTTPRequestHandler):
             if not 0 < length <= 4096 or self.headers.get("Transfer-Encoding"):
                 raise ValueError("Send the prepared catalogue fingerprint or digest.")
             request = json.loads(self.rfile.read(length))
-            keys = {"catalogue_fingerprint", "codex_catalogue_digest"}
+            keys = {"catalogue_fingerprint", "codex_catalogue_digest", "vibe_catalogue_digest"}
             if (not isinstance(request, dict) or not request or not set(request) <= keys
                     or any(not isinstance(value, str) or not value for value in request.values())):
                 raise ValueError("Send the prepared catalogue fingerprint or digest.")
@@ -1798,6 +1806,7 @@ def catalogue_command_result(settings, root, lifecycle):
                             if key not in CATALOGUE_DETAIL_KEYS},
         "provider_definitions": provider_presentations(settings),
         "codex_models": codex_choices(settings, inventory),
+        "vibe_models": vibe_choices(settings, inventory),
         "catalogue_lifecycle": lifecycle,
         "catalogue_fingerprint": lifecycle.get("catalogue_fingerprint"),
     }
@@ -1805,7 +1814,7 @@ def catalogue_command_result(settings, root, lifecycle):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=["inspect", "validate", "save", "save-key-metadata", "save-key-accounts", "discover", "refresh-all", "prepare-launch", "activate", "restore", "serve", "codex-status", "codex-projects", "codex-prepare", "codex-activate", "codex-restore", "codex-accent", "cli-accounts", "prepare-vibe-account", "prepare-antigravity-account", "key-accounts"])
+    parser.add_argument("command", choices=["inspect", "validate", "save", "save-key-metadata", "save-key-accounts", "discover", "refresh-all", "prepare-launch", "activate", "restore", "serve", "codex-status", "codex-projects", "codex-prepare", "codex-activate", "codex-restore", "codex-accent", "vibe-status", "vibe-prepare", "vibe-activate", "vibe-restore", "cli-accounts", "prepare-vibe-account", "prepare-antigravity-account", "key-accounts"])
     parser.add_argument("--provider", choices=list(PROVIDERS), default="mistral")
     parser.add_argument("--parent-pipe", action="store_true")
     parser.add_argument("--detach", action="store_true", help="serve: run as a detached service, stopped only on request")
@@ -1883,6 +1892,50 @@ def main():
         result = CodexProfile(root).activate(settings, inventory)
     elif args.command == "codex-restore":
         result = CodexProfile(root).restore()
+    elif args.command == "vibe-status":
+        settings = load_settings(root)
+        result = {**VibeProfile(root).status(),
+                  "vibe_models": vibe_choices(settings, cached_catalogue(settings, root))}
+    elif args.command == "vibe-prepare":
+        settings = load_settings(root)
+        # Freshness-scoped preparation only, like the Codex surface: an
+        # unconditional refresh-all here would drift the catalogue digest
+        # away from a gateway already running for another harness.
+        lifecycle = require_launchable(prepare_launch(vibe_launch_settings(settings), root))
+        inventory = cached_catalogue(settings, root)
+        _, blocked = usable_providers(lifecycle)
+        settings, omissions = effective_launch_settings(settings, inventory, blocked=blocked)
+        shortfall = servable_shortfall(settings, inventory, blocked=blocked, surface="vibe")
+        if shortfall or not settings.get("vibe_model"):
+            raise BridgeError("No selected model is available for Vibe right now"
+                              + (": " + ", ".join(shortfall) if shortfall else "")
+                              + ". Refresh its provider or choose another listed model.")
+        write_plan(root, "vibe", lifecycle, omissions, lifecycle.get("checked_at", ""))
+        prepared = {"catalogue_digest": vibe_catalogue_digest(settings, inventory),
+                    "model": settings["vibe_model"]}
+        atomic_json(root / "vibe-prepared.json", prepared)
+        result = {**catalogue_command_result(settings, root, lifecycle), **prepared,
+                  "launch_omissions": omissions}
+    elif args.command == "vibe-activate":
+        settings = load_settings(root)
+        inventory = cached_catalogue(settings, root)
+        settings, _ = apply_plan(settings, inventory, root)
+        require_prepared(validate_prepared_launch(vibe_launch_settings(settings), root))
+        expected = vibe_catalogue_digest(settings, inventory)
+        prepared = read_json(root / "vibe-prepared.json")
+        if prepared != {"catalogue_digest": expected, "model": settings["vibe_model"]}:
+            raise BridgeError("Prepare the Vibe model catalogue again before switching.")
+        request = urllib.request.Request(f"http://127.0.0.1:{settings['port']}/_bridge/status", headers={"Authorization": "Bearer " + gateway_token(root)})
+        try:
+            with urllib.request.urlopen(request, timeout=3) as response:
+                status = json.load(response)
+            if not status.get("running") or status.get("vibe_catalogue_digest") != expected:
+                raise ValueError()
+        except Exception as exc:
+            raise BridgeError("Start the gateway with the prepared Vibe catalogue before switching.") from exc
+        result = VibeProfile(root).activate(settings, inventory)
+    elif args.command == "vibe-restore":
+        result = VibeProfile(root).restore()
     elif args.command in {"save-key-metadata", "save-key-accounts"}:
         settings = save_key_metadata(root, args.provider, json.load(sys.stdin),
                                      credential_saved=args.command == "save-key-metadata")

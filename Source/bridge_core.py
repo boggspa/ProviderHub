@@ -29,6 +29,7 @@ from hub_config import (CHAT_SOURCE_LABELS, CLAUDE_TIER_MODELS, SLOTS, chat_extr
                         project_catalogue, provider_display_name, provider_presentations,
                         qualify, split_route)
 from providers import PROVIDERS, discover
+from vibe_catalogue import PROVIDER_ID as VIBE_HUB_PROVIDER
 
 PROFILE_ID = str(uuid.UUID(os.environ.get("MISTRAL_BRIDGE_PROFILE_ID", "8a93d471-d0f9-428c-b203-48fce46277bc")))
 # Rows the hub adds to Claude Code's modelPicker carry this description
@@ -133,7 +134,13 @@ def vibe_settings(config_dir: str | None = None) -> dict:
     active = next((m for m in models if m.get("alias") == active_alias or m.get("name") == active_alias), None)
     if not active:
         active = {"name": active_alias, "alias": active_alias, "provider": "mistral"}
-    provider = next((p for p in raw.get("providers", []) if p.get("name") == active.get("provider")), {})
+    # The Hub's own Vibe profile points at the local gateway. It is a Hub
+    # artifact, not a Vibe credential source, so the Mistral key stays the
+    # one the user signed in with.
+    active_provider = active.get("provider")
+    if active_provider == VIBE_HUB_PROVIDER:
+        active_provider = "mistral"
+    provider = next((p for p in raw.get("providers", []) if p.get("name") == active_provider), {})
     endpoint = provider.get("api_base", "https://api.mistral.ai/v1")
     if endpoint.rstrip("/") != "https://api.mistral.ai/v1":
         raise BridgeError("Vibe is using a custom provider. This prototype supports api.mistral.ai; select a Mistral provider in Vibe first.")

@@ -8,7 +8,7 @@ import SwiftUI
 // designs edit the same unsaved settings and either can save or launch.
 // Spec: Source/HubUI/mockups/provider-hub-shell-v3.template.html.
 
-enum ShellTab: Hashable { case provider(String), claude, codex, settings }
+enum ShellTab: Hashable { case provider(String), claude, codex, vibe, settings }
 
 enum Chroma {
     static let one = Color(red: 0x5a / 255, green: 0x8c / 255, blue: 0xff / 255)
@@ -16,6 +16,7 @@ enum Chroma {
     static let three = Color(red: 0x41 / 255, green: 0xc7 / 255, blue: 0xe5 / 255)
     static let claude = Color(red: 0xd9 / 255, green: 0x7b / 255, blue: 0x3a / 255)
     static let codex = Color(red: 0x70 / 255, green: 0x5a / 255, blue: 0xff / 255)
+    static let vibe = Color(red: 0xf7 / 255, green: 0x6a / 255, blue: 0x2c / 255)
     static let ok = Color(red: 0x3e / 255, green: 0xcf / 255, blue: 0x8e / 255)
     static let warn = Color(red: 0xf5 / 255, green: 0xb6 / 255, blue: 0x42 / 255)
     static let bad = Color(red: 1, green: 0x5d / 255, blue: 0x5d / 255)
@@ -90,6 +91,11 @@ extension BridgeModel {
     }
     func claudeEntry(_ route: String) -> ClaudeCatalogueEntry? {
         settings.claude_catalogue == nil ? nil : claudeCatalogue.first { $0.route == route }
+    }
+    /// Whether a route is in Vibe's picker. A nil catalogue serves every
+    /// compatible route, so nothing is listed until one is chosen.
+    func vibeListed(_ route: String) -> Bool {
+        settings.vibe_catalogue?.contains(route) ?? false
     }
     func shellProviderState(_ id: String) -> (text: String, color: Color, on: Bool) {
         if id == "ollama" { return ("Local daemon", Chroma.ok, true) }
@@ -212,6 +218,7 @@ struct CompactShell: View {
             railSeparator("Apps")
             appTab(.claude, "Claude Desktop", Chroma.claude, logo: "claude", live: model.claudeRunning && model.profileActive, count: model.claudeCatalogue.count)
             appTab(.codex, "Codex / ChatGPT", Chroma.codex, logo: "codex", live: model.codexRunning && model.codexProfileActive, count: model.codexCuratedRoutes.count)
+            appTab(.vibe, "Vibe Desktop", Chroma.vibe, logo: "mistral", live: model.vibeRunning && model.vibeProfileActive, count: model.vibeRoutes.count)
             Button { withAnimation(.easeOut(duration: 0.2)) { railOpen.toggle() } } label: {
                 Image(systemName: railOpen ? "chevron.left" : "chevron.right").font(.system(size: 10, weight: .semibold)).foregroundStyle(.tertiary)
                     .frame(width: 24, height: 20)
@@ -295,6 +302,7 @@ struct CompactShell: View {
                         } else { Text("Choose a provider").foregroundStyle(.secondary).padding() }
                     case .claude: ClaudeShellPane(model: model, jump: jump)
                     case .codex: CodexShellPane(model: model, jump: jump)
+                    case .vibe: VibeShellPane(model: model, jump: jump)
                     case .settings: EmptyView()
                     }
                 }.padding(.horizontal, 10).padding(.vertical, 6).frame(maxWidth: .infinity, alignment: .topLeading)
@@ -322,8 +330,9 @@ struct CompactShell: View {
                 if let provider = model.providerDefinitions.first(where: { $0.id == id }) {
                     ProviderSide(model: model, provider: provider, focused: $focusedRoute)
                 }
-            case .claude: AppSide(model: model, isClaude: true)
-            case .codex: AppSide(model: model, isClaude: false)
+            case .claude: AppSide(model: model, surface: .claude)
+            case .codex: AppSide(model: model, surface: .codex)
+            case .vibe: AppSide(model: model, surface: .vibe)
             case .settings: EmptyView()
             }
         }.padding(.horizontal, 10).padding(.vertical, 6).frame(maxHeight: .infinity, alignment: .top)
@@ -423,7 +432,7 @@ private struct OptionRow: View {
     }
 }
 
-/// One model row: name, tier tag, CL/CX chips, fast bolt, check.
+/// One model row: name, tier tag, CL/CX/ML chips, fast bolt, check.
 private struct ModelRow: View {
     @ObservedObject var model: BridgeModel
     var entry: ModelEntry
@@ -433,7 +442,8 @@ private struct ModelRow: View {
     var body: some View {
         let claude = model.claudeEntry(entry.id)
         let inCodex = model.codexCuratedRoutes.contains(entry.id) && model.settings.codex_catalogue != nil
-        let listed = claude != nil || inCodex
+        let inVibe = model.vibeListed(entry.id)
+        let listed = claude != nil || inCodex || inVibe
         Button(action: onFocus) {
             HStack(spacing: 7) {
                 Text(model.modelLabel(entry.id)).font(.system(size: 12.5, weight: listed ? .medium : .regular)).foregroundStyle(listed ? .primary : .secondary).lineLimit(1)
@@ -444,6 +454,7 @@ private struct ModelRow: View {
                 }
                 chip("CL", claude != nil, Chroma.claude) { toggleClaude() }
                 chip("CX", inCodex, Chroma.codex) { model.codexMaterialise(); model.codexSetListed(entry.id, !inCodex) }
+                chip("ML", inVibe, Chroma.vibe) { model.vibeMaterialise(); model.vibeSetListed(entry.id, !inVibe) }
                 // One bolt for Fast, two when Ultrafast is offered too.
                 ChatSpeedGlyph(speed: entry.speed_options?.last?.id ?? "fast")
                     .foregroundStyle(accent.opacity(entry.fast_mode == true || entry.speed_options?.isEmpty == false ? 0.85 : 0))
@@ -482,7 +493,7 @@ private struct ProviderShellPane: View {
         let query = search.trimmingCharacters(in: .whitespaces)
         return query.isEmpty ? all : all.filter { (model.modelLabel($0.id) + " " + $0.id).localizedCaseInsensitiveContains(query) }
     }
-    var listedCount: Int { model.providerModels(provider.id).filter { model.claudeEntry($0.id) != nil || (model.settings.codex_catalogue?.contains($0.id) ?? false) }.count }
+    var listedCount: Int { model.providerModels(provider.id).filter { model.claudeEntry($0.id) != nil || (model.settings.codex_catalogue?.contains($0.id) ?? false) || model.vibeListed($0.id) }.count }
 
     var body: some View {
         let state = model.shellProviderState(provider.id)
@@ -700,6 +711,7 @@ private struct ProviderSide: View {
                 OptionRow(title: "Claude", isOn: Binding(get: { claude != nil }, set: { on in
                     if on { if model.settings.claude_catalogue == nil { model.settings.claude_catalogue = model.claudeCatalogue }; model.addClaudeRoute(entry.id) } else { model.removeClaudeRoute(entry.id) } }), accent: Chroma.claude)
                 OptionRow(title: "Codex", isOn: Binding(get: { inCodex }, set: { model.codexMaterialise(); model.codexSetListed(entry.id, $0) }), accent: Chroma.codex)
+                OptionRow(title: "Vibe", isOn: Binding(get: { model.vibeListed(entry.id) }, set: { model.vibeMaterialise(); model.vibeSetListed(entry.id, $0) }), accent: Chroma.vibe)
                 HStack { Text("Subagent priority").foregroundStyle(.secondary); Spacer()
                     Stepper("", value: Binding(get: { model.settings.codex_subagent_rank?[entry.id] ?? 0 }, set: { model.codexSetRank(entry.id, $0 == 0 ? nil : $0) }), in: 0...5).labelsHidden().controlSize(.mini)
                     Text(model.settings.codex_subagent_rank?[entry.id].map(String.init) ?? "auto").font(.system(size: 10.5, design: .monospaced)).frame(width: 30, alignment: .trailing) }
@@ -835,30 +847,93 @@ private struct CodexShellPane: View {
     }
 }
 
+/// The Vibe desktop app: the routes its picker offers and the one it opens
+/// on. Vibe reads both from its own configuration file, which the Hub writes
+/// when the app is launched from here.
+private struct VibeShellPane: View {
+    @ObservedObject var model: BridgeModel
+    var jump: (String) -> Void
+    var body: some View {
+        let presentation = model.providerDefinitions.first { $0.id == "mistral" }?.presentation
+        let running = model.vibeRunning && model.vibeProfileActive
+        VStack(alignment: .leading, spacing: 4) {
+            PaneHeader(presentation: presentation, title: "Vibe Desktop", subtitle: model.vibeAppPath == nil ? "not installed" : "desktop app", accent: Chroma.vibe,
+                       state: (running ? "Running" : "Closed", running ? Chroma.ok : Color.secondary))
+            SectionLabel(text: "Catalogue", trailing: "\(model.vibeRoutes.count) listed")
+            HStack(spacing: 6) {
+                ModeCard(title: "All compatible", code: "all_compatible", selected: model.vibeMode == "all", accent: Chroma.vibe) { model.setVibeMode("all") }
+                ModeCard(title: "Custom", code: "custom", selected: model.vibeMode == "custom", accent: Chroma.vibe) { model.setVibeMode("custom") }
+            }
+            SectionLabel(text: "Default model")
+            Picker("", selection: Binding(get: { model.settings.vibe_model ?? "" }, set: { model.vibeMaterialise(); model.settings.vibe_model = $0.isEmpty ? nil : $0 })) {
+                Text("Choose a model…").tag("")
+                ForEach(model.vibeRoutes, id: \.self) { route in Text(model.modelLabel(route)).tag(route) }
+            }.labelsHidden().controlSize(.small).frame(maxWidth: 260, alignment: .leading)
+            SectionLabel(text: "Listed models")
+            ForEach(model.vibeRoutes, id: \.self) { route in
+                HStack(spacing: 8) {
+                    if let presentation = model.modelEntry(route)?.presentation { ProviderMark(presentation: presentation, size: 16) }
+                    Text(model.modelLabel(route)).lineLimit(1)
+                    Spacer()
+                    Button("Change") { jump(route) }.buttonStyle(.borderless).font(.system(size: 10.5)).foregroundStyle(.secondary)
+                }.padding(.horizontal, 8).padding(.vertical, 4).hubCard(cornerRadius: 6, accent: Chroma.vibe)
+            }
+        }
+    }
+}
+
 private struct AppSide: View {
     @ObservedObject var model: BridgeModel
-    var isClaude: Bool
+    enum Surface { case claude, codex, vibe }
+    var surface: Surface
     var body: some View {
-        let accent = isClaude ? Chroma.claude : Chroma.codex
-        let count = isClaude ? model.claudeCatalogue.count : model.codexCuratedRoutes.count
-        let running = isClaude ? (model.claudeRunning && model.profileActive) : (model.codexRunning && model.codexProfileActive)
+        let accent: Color = surface == .claude ? Chroma.claude : (surface == .codex ? Chroma.codex : Chroma.vibe)
+        let title: String = surface == .claude ? "Claude" : (surface == .codex ? "Codex" : "Vibe")
+        let count = surface == .claude ? model.claudeCatalogue.count : (surface == .codex ? model.codexCuratedRoutes.count : model.vibeRoutes.count)
+        let running = surface == .claude ? (model.claudeRunning && model.profileActive)
+            : (surface == .codex ? (model.codexRunning && model.codexProfileActive) : (model.vibeRunning && model.vibeProfileActive))
+        let canLaunch = surface == .claude ? model.claudeInstalled
+            : (surface == .codex ? (model.codexAppPath != nil && model.settings.codex_model != nil)
+               : (model.vibeAppPath != nil && model.settings.vibe_model != nil))
+        let needsRestore = surface == .claude ? (!model.recoveryNeeded || model.claudeRunning)
+            : (surface == .codex ? (!model.codexRecoveryNeeded || model.codexRunning)
+               : (!model.vibeRecoveryNeeded || model.vibeRunning))
         VStack(alignment: .leading, spacing: 8) {
-            SectionLabel(text: isClaude ? "Claude" : "Codex")
+            SectionLabel(text: title)
             Text("\(count)").font(.system(size: 18, weight: .semibold))
             Text("in picker").font(.system(size: 10.5)).foregroundStyle(.secondary)
-            Button { Task { if isClaude { await model.launchClaude() } else { await model.launchCodex() } } } label: {
-                Text(running ? (isClaude ? "Show Claude" : "Show Codex") : (isClaude ? "Launch Claude" : "Launch Codex")).foregroundStyle(HubTheme.Control.ink).frame(maxWidth: .infinity)
+            Button { Task { await launch() } } label: {
+                Text(running ? "Show \(title)" : "Launch \(title)").foregroundStyle(HubTheme.Control.ink).frame(maxWidth: .infinity)
             }.buttonStyle(.borderedProminent).tint(accent).controlSize(.regular)
-                .disabled(model.busy || (isClaude ? !model.claudeInstalled : (model.codexAppPath == nil || model.settings.codex_model == nil)))
-            Button("Restore") { Task { if isClaude { await model.restore() } else { await model.restoreCodex() } } }.controlSize(.small)
-                .disabled(model.busy || (isClaude ? (!model.recoveryNeeded || model.claudeRunning) : (!model.codexRecoveryNeeded || model.codexRunning)))
-            if isClaude && model.claudeRunning && !model.profileActive {
+                .disabled(model.busy || !canLaunch)
+            Button("Restore") { Task { await restore() } }.controlSize(.small)
+                .disabled(model.busy || !needsRestore)
+            if surface == .claude && model.claudeRunning && !model.profileActive {
                 Text("Claude is open with another profile. Quit it first.").font(.system(size: 10.5)).foregroundStyle(Chroma.warn)
             }
-            if !isClaude && model.codexRunning && !model.codexProfileActive {
+            if surface == .codex && model.codexRunning && !model.codexProfileActive {
                 Text("The app is open. Launching asks before restarting it.").font(.system(size: 10.5)).foregroundStyle(Chroma.warn)
             }
+            if surface == .vibe && model.vibeRunning && !model.vibeProfileActive {
+                Text("Vibe is open. Quit it, then launch it here.").font(.system(size: 10.5)).foregroundStyle(Chroma.warn)
+            }
             Spacer()
+        }
+    }
+
+    private func launch() async {
+        switch surface {
+        case .claude: await model.launchClaude()
+        case .codex: await model.launchCodex()
+        case .vibe: await model.launchVibe()
+        }
+    }
+
+    private func restore() async {
+        switch surface {
+        case .claude: await model.restore()
+        case .codex: await model.restoreCodex()
+        case .vibe: await model.restoreVibe()
         }
     }
 }

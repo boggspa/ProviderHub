@@ -19,6 +19,7 @@ from pathlib import Path
 
 from codex_catalogue import choices as codex_choices
 from hub_config import SLOTS, _TIER_FALLBACKS, claude_routes, provider_label, split_route
+from vibe_catalogue import choices as vibe_choices
 
 PLAN_FILE = "launch-plan.json"
 
@@ -126,6 +127,15 @@ def effective_launch_settings(settings: dict, inventory: dict, *, blocked=None) 
                 omissions.append(_omission(settings, "codex", route, reason(route)))
         result["codex_catalogue"] = kept
 
+    if settings.get("vibe_catalogue") is not None:
+        kept = []
+        for route in settings["vibe_catalogue"]:
+            if usable(route):
+                kept.append(route)
+            else:
+                omissions.append(_omission(settings, "vibe", route, reason(route)))
+        result["vibe_catalogue"] = kept
+
     model = settings.get("codex_model")
     if isinstance(model, str) and model and not usable(model):
         available = [choice["id"] for choice in codex_choices(result, inventory) if usable(choice["id"])]
@@ -136,6 +146,17 @@ def effective_launch_settings(settings: dict, inventory: dict, *, blocked=None) 
                 existing["replacement"] = available[0]
             else:
                 omissions.append(_omission(settings, "codex", model, reason(model), replacement=available[0]))
+
+    model = settings.get("vibe_model")
+    if isinstance(model, str) and model and not usable(model):
+        available = [choice["id"] for choice in vibe_choices(result, inventory) if usable(choice["id"])]
+        if available:
+            result["vibe_model"] = available[0]
+            existing = next((item for item in omissions if item["surface"] == "vibe" and item["route"] == model), None)
+            if existing is not None:
+                existing["replacement"] = available[0]
+            else:
+                omissions.append(_omission(settings, "vibe", model, reason(model), replacement=available[0]))
     return result, omissions
 
 
@@ -154,9 +175,13 @@ def servable_shortfall(settings: dict, inventory: dict, *, blocked=None, surface
             selected = (saved or {}).get("claude_catalogue") or []
             return sorted({row["route"] for row in selected}) or ["(no Claude models left)"]
         routes = set(claude_routes(settings).values())
-    else:
+    elif surface == "codex":
         model = settings.get("codex_model")
         routes = {model} if isinstance(model, str) and model else set()
+    else:
+        model = settings.get("vibe_model")
+        routes = {model} if isinstance(model, str) and model else set()
+        routes.update(settings.get("vibe_catalogue") or [])
     return sorted(route for route in routes
                   if route not in advertised or split_route(route)[0] in blocked)
 

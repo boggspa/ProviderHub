@@ -665,6 +665,9 @@ def defaults(slots, vibe_model: str, port: int = 11436) -> dict:
             "codex_catalogue": None, "codex_chatgpt_account": False, "codex_apply_patch_all": False,
             "claude_features": {key: False for key in CLAUDE_FEATURE_KEYS},
             "claude_catalogue": None, "claude_code_settings": True, "claude_workflows": False,
+            # Vibe tab: the model Vibe starts on, and the catalogue it offers.
+            # A nil catalogue serves every compatible route.
+            "vibe_catalogue": None, "vibe_model": None,
             "codex_accent_slider": False, "codex_hide_usage_banner": False,
             "codex_unlock_composer": False, "codex_quick_composer": False, "codex_quick_composer_window": True,
             "codex_goal_budget": False, "codex_subagent_rank": None, "codex_subagent_route": None}
@@ -783,6 +786,25 @@ def normalize(value: dict, slots, vibe_model: str, port: int = 11436) -> dict:
                 raise ValueError(f"A Codex sub-agent rank must be a whole number from 1 to {SUBAGENT_POOL_SIZE}.")
             ranked[qualify(*split_route(route))] = rank
         result["codex_subagent_rank"] = ranked or None
+    # vibe_catalogue narrows the rows Vibe offers; a nil selection serves
+    # every compatible route, the same way the Codex catalogue does.
+    catalogue = value.get("vibe_catalogue")
+    if catalogue is not None:
+        if not isinstance(catalogue, list) or not catalogue:
+            raise ValueError("The Vibe catalogue selection must be a non-empty list of model routes.")
+        selected = []
+        for route in catalogue:
+            qualified = qualify(*split_route(route))
+            if qualified not in selected:
+                selected.append(qualified)
+        result["vibe_catalogue"] = selected
+    # vibe_model is the route Vibe opens on, and the route the Hub checks
+    # before launching it.
+    vibe_model = value.get("vibe_model")
+    if vibe_model is not None:
+        result["vibe_model"] = qualify(*split_route(vibe_model))
+        if result["vibe_catalogue"] is not None and result["vibe_model"] not in result["vibe_catalogue"]:
+            raise ValueError("Choose the Vibe default model from the catalogue selection.")
     # codex_subagent_route is the model a spawned sub-agent runs on when the
     # parent does not name one itself. Codex has a configuration key for this,
     # default_subagent_model, and on 26.908 it is inert - a real spawn with it

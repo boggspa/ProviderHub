@@ -104,6 +104,12 @@ final class BridgeModel: ObservableObject {
     @Published var codexRecoveryNeeded = false
     var observedOwnedCodex = false
     var codexLaunchTime = Date.distantPast
+    @Published var vibeAppPath: String?
+    @Published var vibeRunning = false
+    @Published var vibeProfileActive = false
+    @Published var vibeRecoveryNeeded = false
+    var observedOwnedVibe = false
+    var vibeLaunchTime = Date.distantPast
     @Published var activeRequests = 0
     @Published var completed = 0
     @Published var failures = 0
@@ -354,6 +360,7 @@ final class BridgeModel: ObservableObject {
 
     func readCatalogue(_ object: [String: Any], modelsKey: String) {
         readCodexState(object)
+        readVibeState(object)
         func decode<T: Decodable>(_ type: T.Type, _ raw: Any?) -> T? {
             guard let raw, let data = try? JSONSerialization.data(withJSONObject: raw) else { return nil }
             return try? JSONDecoder().decode(type, from: data)
@@ -624,6 +631,10 @@ final class BridgeModel: ObservableObject {
                 guard !codexLive else {
                     throw WorkerError(message: "Quit Codex / ChatGPT before changing its model catalogue or default.")
                 }
+            case .vibeOnly:
+                guard !vibeLive else {
+                    throw WorkerError(message: "Quit Mistral Vibe before changing its model catalogue or default.")
+                }
             case .claudeRouting:
                 guard !claudeLive else {
                     throw WorkerError(message: "Quit Claude before changing its provider settings.")
@@ -672,7 +683,8 @@ final class BridgeModel: ObservableObject {
         guard (response as? HTTPURLResponse)?.statusCode == 200,
               let status = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
         return GatewayStatus(active: status["active"] as? Int, fingerprint: status["catalogue_fingerprint"] as? String,
-                             digest: status["codex_catalogue_digest"] as? String)
+                             digest: status["codex_catalogue_digest"] as? String,
+                             vibeDigest: status["vibe_catalogue_digest"] as? String)
     }
 
     func refreshGateway(_ surface: LaunchSurface, expected: String) async throws -> GatewayStatus? {
@@ -680,7 +692,7 @@ final class BridgeModel: ObservableObject {
         request.httpMethod = "POST"
         request.timeoutInterval = 30
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        let key = surface == .claude ? "catalogue_fingerprint" : "codex_catalogue_digest"
+        let key = surface.refreshKey
         request.httpBody = try JSONSerialization.data(withJSONObject: [key: expected])
         let (data, response) = try await URLSession.shared.data(for: request)
         let value = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
@@ -689,12 +701,14 @@ final class BridgeModel: ObservableObject {
             throw WorkerError(message: error?["message"] as? String ?? "The gateway could not refresh its selection. Try launching again.")
         }
         return GatewayStatus(active: value["active"] as? Int, fingerprint: value["catalogue_fingerprint"] as? String,
-                             digest: value["codex_catalogue_digest"] as? String)
+                             digest: value["codex_catalogue_digest"] as? String,
+                             vibeDigest: value["vibe_catalogue_digest"] as? String)
     }
 
     func refreshDesktopState() {
         updateClaudeRunning()
         updateCodexRunning()
+        updateVibeRunning()
     }
 
     func checkIdleGateway() async throws {
@@ -918,6 +932,7 @@ final class BridgeModel: ObservableObject {
         guard !shuttingDown else { return }
         updateClaudeRunning()
         updateCodexRunning()
+        updateVibeRunning()
         let metaPath = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library/Application Support/Claude-3p/configLibrary/_meta.json")
         if let data = try? Data(contentsOf: metaPath), let meta = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
             profileActive = meta["appliedId"] as? String == hubProfileID
@@ -936,6 +951,7 @@ final class BridgeModel: ObservableObject {
             finishingSession = false
         }
         await pollCodexRecovery()
+        await pollVibeRecovery()
         if running && !checkingStatus { await refreshStatus() }
         loadActivity()
     }
@@ -1740,6 +1756,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     }
     @objc func launchClaude() { model.perform({ await self.model.launchClaude() }, attention: { [weak self] in self?.noticeAttention() }) }
     @objc func launchCodex() { model.perform({ await self.model.launchCodex() }, attention: { [weak self] in self?.noticeAttention() }) }
+    @objc func launchVibe() { model.perform({ await self.model.launchVibe() }, attention: { [weak self] in self?.noticeAttention() }) }
     @objc func toggleGateway() { Task { await model.toggleGateway() } }
     @objc func openVibe() { model.openVibe() }
     @objc func quit() { NSApp.terminate(nil) }
@@ -1751,6 +1768,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         menu.addItem(.separator())
         add(menu, "Launch Claude…", #selector(launchClaude), "l")
         add(menu, "Launch Codex / ChatGPT…", #selector(launchCodex), "")
+        add(menu, "Launch Vibe…", #selector(launchVibe), "")
         add(menu, "Chat with Model…", #selector(showChat), "k")
         if model.settings.codex_quick_composer && model.codexAccentInput != nil {
             add(menu, "Recent chats…", #selector(showQuickComposer), "")

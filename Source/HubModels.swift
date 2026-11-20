@@ -142,6 +142,10 @@ struct RouteSettings: Codable, Equatable {
     // enable its dynamic workflows while the profile is active.
     var claude_code_settings = true
     var claude_workflows = false
+    // Vibe tab: the route Vibe opens on, and the rows its picker offers.
+    // A nil catalogue serves every compatible route.
+    var vibe_catalogue: [String]?
+    var vibe_model: String?
     var codex_model: String?
     var codex_catalogue: [String]?
     var codex_chatgpt_account = false
