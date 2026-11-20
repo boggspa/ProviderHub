@@ -85,6 +85,7 @@ final class BridgeModel: ObservableObject {
     /// launched with the power-slider colour switch on.
     var codexAccentProcess: Process?
     var vibeAccentProcess: Process?
+    var antigravityAccentProcess: Process?
     /// The helper's stdin, carrying the quick-composer panel's commands.
     var codexAccentInput: Pipe?
     /// The floating recent-chat composer (QuickComposerPanel.swift).

@@ -154,6 +154,11 @@ struct RouteSettings: Codable, Equatable {
     // picker offers. A nil catalogue serves every compatible route.
     var antigravity_catalogue: [String]?
     var antigravity_model: String?
+    // Launch Antigravity through the DevTools-pipe helper that paints
+    // provider logos and accents in its picker, pill and tool groups (see
+    // antigravity_accent.py). On by default; off launches it through
+    // LaunchServices.
+    var antigravity_accent = true
     var codex_model: String?
     var codex_catalogue: [String]?
     var codex_chatgpt_account = false

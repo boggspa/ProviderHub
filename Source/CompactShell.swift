@@ -1152,6 +1152,10 @@ private struct SettingsPage: View {
                     PaneHeader(presentation: model.providerDefinitions.first { $0.id == "mistral" }?.presentation, title: "Vibe Desktop", subtitle: "app preferences", accent: Chroma.vibe, state: nil)
                     SectionLabel(text: "Appearance")
                     option("Provider accent colours and logos", "Launches Vibe through the DevTools-pipe helper that paints provider logos in its model picker and accents its tool steps. Unsupported by Mistral.", $model.settings.vibe_accent, Chroma.vibe)
+                    Spacer().frame(height: 10)
+                    PaneHeader(presentation: model.providerDefinitions.first { $0.id == "antigravity" }?.presentation, title: "Antigravity", subtitle: "app preferences", accent: Chroma.antigravity, state: nil)
+                    SectionLabel(text: "Appearance")
+                    option("Provider accent colours and logos", "Launches Antigravity through the DevTools-pipe helper that paints provider logos in its model picker and pill and accents its tool groups. Unsupported by Google.", $model.settings.antigravity_accent, Chroma.antigravity)
                 }.frame(maxWidth: .infinity, alignment: .topLeading)
                 VStack(alignment: .leading, spacing: 6) {
                     PaneHeader(presentation: model.providerDefinitions.first { $0.id == "codex" }?.presentation, title: "Codex / ChatGPT", subtitle: "app preferences", accent: Chroma.codex, state: nil)

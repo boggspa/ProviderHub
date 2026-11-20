@@ -111,16 +111,21 @@ extension BridgeModel {
             // The language server discovers labels and token limits from the
             // gateway's model-list endpoint. An environment allowlist would
             // take precedence and discard that metadata.
-            configuration.environment = ["AGY_LLM_GATEWAY_URL": baseURL,
-                                        "AGY_LLM_GATEWAY_API_KEY": try gatewayToken(),
-                                        "AGY_LLM_GATEWAY_WIRE_PROTOCOL": "genai"]
+            let gatewayEnvironment = ["AGY_LLM_GATEWAY_URL": baseURL,
+                                      "AGY_LLM_GATEWAY_API_KEY": try gatewayToken(),
+                                      "AGY_LLM_GATEWAY_WIRE_PROTOCOL": "genai"]
             var launchedPID: pid_t = 0
-            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-                NSWorkspace.shared.openApplication(at: URL(fileURLWithPath: appPath), configuration: configuration) { application, error in
-                    if let error { continuation.resume(throwing: error) }
-                    else {
-                        launchedPID = application?.processIdentifier ?? 0
-                        continuation.resume()
+            if savedSettings.antigravity_accent {
+                launchedPID = try await launchAntigravityWithAccentBridge(appPath: appPath, gateway: gatewayEnvironment)
+            } else {
+                configuration.environment = gatewayEnvironment
+                try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                    NSWorkspace.shared.openApplication(at: URL(fileURLWithPath: appPath), configuration: configuration) { application, error in
+                        if let error { continuation.resume(throwing: error) }
+                        else {
+                            launchedPID = application?.processIdentifier ?? 0
+                            continuation.resume()
+                        }
                     }
                 }
             }
@@ -144,6 +149,74 @@ extension BridgeModel {
             }
             tell(error.localizedDescription, error: true)
         }
+    }
+
+    /// Start Antigravity through the worker's antigravity-accent helper,
+    /// which holds a DevTools pipe into the app and paints provider logos and
+    /// accents in its picker, pill and tool groups. The helper lives as long
+    /// as the app and is never terminated once it runs: closing its pipe is
+    /// Antigravity's cue to quit. The gateway connection reaches the app
+    /// through the helper's environment, which forwards those three
+    /// variables and nothing else of the Hub's. Returns the app's pid.
+    func launchAntigravityWithAccentBridge(appPath: String, gateway: [String: String]) async throws -> pid_t {
+        guard let python else { throw WorkerError(message: "Provider Hub needs Python 3.11 or newer for the accent helper.") }
+        if let existing = antigravityAccentProcess, existing.isRunning {
+            throw WorkerError(message: "A previous Antigravity accent helper is still running. Quit Antigravity, then launch again.")
+        }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: python)
+        process.arguments = [helper.path, "antigravity-accent", "--app", appPath]
+        process.environment = workerEnvironment.merging(gateway) { _, new in new }
+        let output = Pipe(), errors = Pipe()
+        process.standardOutput = output; process.standardError = errors
+        process.standardInput = FileHandle.nullDevice
+        try process.run()
+        antigravityAccentProcess = process
+        // The helper reports the app's spawn (and its pid) as a JSON line;
+        // the reader keeps draining for the helper's life.
+        let launched = await withCheckedContinuation { (continuation: CheckedContinuation<pid_t, Never>) in
+            let lock = NSLock()
+            var finished = false
+            func finish(_ value: pid_t) {
+                lock.lock(); defer { lock.unlock() }
+                if !finished { finished = true; continuation.resume(returning: value) }
+            }
+            DispatchQueue.global(qos: .userInitiated).async {
+                var buffer = Data()
+                while true {
+                    let chunk = output.fileHandleForReading.availableData
+                    if chunk.isEmpty { break }
+                    buffer.append(chunk)
+                    while let newline = buffer.firstIndex(of: UInt8(ascii: "\n")) {
+                        let line = buffer[buffer.startIndex..<newline]
+                        buffer.removeSubrange(buffer.startIndex...newline)
+                        if let object = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any],
+                           object["event"] as? String == "launched" {
+                            finish(pid_t((object["pid"] as? Int) ?? 0))
+                        }
+                    }
+                }
+                finish(-1)
+            }
+            DispatchQueue.global(qos: .utility).async { _ = errors.fileHandleForReading.readDataToEndOfFile() }
+            DispatchQueue.global().asyncAfter(deadline: .now() + 20) { finish(-1) }
+        }
+        guard launched > 0 else {
+            if process.isRunning { process.terminate() }
+            antigravityAccentProcess = nil
+            throw WorkerError(message: "Antigravity did not start through the accent helper. Turn provider accents for Antigravity off to launch it the usual way.")
+        }
+        // A direct spawn is not activated the way a LaunchServices open is.
+        Task { @MainActor in
+            for _ in 0..<60 {
+                try? await Task.sleep(nanoseconds: 250_000_000)
+                if let app = NSWorkspace.shared.runningApplications.first(where: { $0.bundleIdentifier == "com.google.antigravity" }) {
+                    app.activate(options: [.activateAllWindows])
+                    return
+                }
+            }
+        }
+        return launched
     }
 
     func restoreAntigravity() async {

@@ -674,7 +674,7 @@ def defaults(slots, vibe_model: str, port: int = 11436) -> dict:
             # Antigravity tab: the model Antigravity starts on, and the
             # catalogue it offers. A nil catalogue serves every compatible
             # route.
-            "antigravity_catalogue": None, "antigravity_model": None,
+            "antigravity_catalogue": None, "antigravity_model": None, "antigravity_accent": True,
             "codex_accent_slider": False, "codex_hide_usage_banner": False,
             "codex_unlock_composer": False, "codex_quick_composer": False, "codex_quick_composer_window": True,
             "codex_goal_budget": False, "codex_subagent_rank": None, "codex_subagent_route": None}
@@ -895,6 +895,7 @@ def normalize(value: dict, slots, vibe_model: str, port: int = 11436) -> dict:
     # vibe_accent: launch Vibe through the DevTools-pipe helper that paints
     # provider accents and logos in its picker and tool steps (vibe_accent).
     # On by default; switching it off launches Vibe through LaunchServices.
+    # antigravity_accent: the same for Antigravity (antigravity_accent).
     # codex_goal_budget: leave the optional token budget on Codex's goal tools.
     # Off - the default - deletes the property, so a goal starts unlimited on
     # every route instead of wherever the model honoured Codex's "omit unless
@@ -904,7 +905,8 @@ def normalize(value: dict, slots, vibe_model: str, port: int = 11436) -> dict:
                           ("claude_workflows", False), ("codex_accent_slider", False),
                           ("codex_hide_usage_banner", False), ("codex_unlock_composer", False),
                           ("codex_quick_composer", False), ("codex_quick_composer_window", True),
-                          ("codex_goal_budget", False), ("vibe_accent", True)):
+                          ("codex_goal_budget", False), ("vibe_accent", True),
+                          ("antigravity_accent", True)):
         requested = value.get(key, fallback)
         if type(requested) is not bool:
             raise ValueError(f"{key} must be true or false.")

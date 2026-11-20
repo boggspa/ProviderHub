@@ -165,6 +165,8 @@ class SettingsMigrationTests(unittest.TestCase):
         self.assertIs(normalize({"vibe_accent": False}, SLOTS, "mistral-test")["vibe_accent"], False)
         with self.assertRaises(ValueError):
             normalize({"vibe_accent": "on"}, SLOTS, "mistral-test")
+        self.assertIs(normalize({}, SLOTS, "mistral-test")["antigravity_accent"], True)
+        self.assertIs(normalize({"antigravity_accent": False}, SLOTS, "mistral-test")["antigravity_accent"], False)
 
     def test_codex_catalogue_is_optional_deduped_and_binds_the_default(self):
         base = defaults(SLOTS, "mistral-test")

@@ -68,6 +68,7 @@ func classifyChange(_ settings: RouteSettings, from saved: RouteSettings) -> Cha
     var withoutAntigravity = withoutVibe
     withoutAntigravity.antigravity_catalogue = saved.antigravity_catalogue
     withoutAntigravity.antigravity_model = saved.antigravity_model
+    withoutAntigravity.antigravity_accent = saved.antigravity_accent
     let antigravityChanged = withoutAntigravity != withoutVibe
     var prefsOnly = withoutAntigravity
     prefsOnly.providers = saved.providers  // only CLI accounts can differ here
