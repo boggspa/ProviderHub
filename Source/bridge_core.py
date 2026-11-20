@@ -789,6 +789,10 @@ def inspect_state(root: Path) -> dict:
     result["provider_states"] = states
     result["provider_definitions"] = provider_presentations(settings)
     result["profile_id"] = PROFILE_ID
+    # Imported lazily: vibe_profile imports this module for BridgeError and the
+    # atomic writers, so a top-level import would be circular.
+    from vibe_profile import VibeProfile
+    result.update(VibeProfile(root).status())
     cached = cached_catalogue(settings, root)
     result["catalog"] = cached.get("models", [])
     result["catalog_summary"] = {k: v for k, v in cached.items() if k not in CATALOGUE_DETAIL_KEYS}

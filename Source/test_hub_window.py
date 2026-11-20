@@ -160,6 +160,9 @@ class SwitchAndTitleRowTests(unittest.TestCase):
         launch = between(self.window, "struct HubLaunchCluster: View {", "\n}\n")
         self.assertIn("await model.launchClaude()", launch)
         self.assertIn("await model.launchCodex()", launch)
+        self.assertIn("await model.launchVibe()", launch)
+        self.assertIn("mark(.vibe)", launch)
+        self.assertIn('case .vibe: return "mistral"', self.window)
         for duplicated in ("command(", "prepare-launch", "openApplication", "startGateway", "stopGateway"):
             self.assertNotIn(duplicated, self.window)
         # Running state reads as Show, closed as Launch.

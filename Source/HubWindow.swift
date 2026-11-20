@@ -232,10 +232,68 @@ struct HubGatewayControl: View {
     }
 }
 
-/// "Launch" plus the two app marks, each with its own light: green while
-/// the app runs on the hub profile, amber when it runs on another one,
-/// grey when closed. One click launches (or shows) the app with the
-/// current catalogue, as the app tab's button does.
+/// "Launch" plus the app marks, each with its own light: green while the app
+/// runs on the hub profile, amber when it runs on another one, grey when
+/// closed. One click launches (or shows) the app with the current catalogue,
+/// as the app tab's button does.
+private enum HubLaunchApp {
+    case claude, codex, vibe
+
+    var providerID: String {
+        switch self {
+        case .claude: return "claude"
+        case .codex: return "codex"
+        case .vibe: return "mistral"
+        }
+    }
+
+    var name: String {
+        switch self {
+        case .claude: return "Claude"
+        case .codex: return "Codex"
+        case .vibe: return "Vibe"
+        }
+    }
+
+    @MainActor func running(_ model: BridgeModel) -> Bool {
+        switch self {
+        case .claude: return model.claudeRunning
+        case .codex: return model.codexRunning
+        case .vibe: return model.vibeRunning
+        }
+    }
+
+    @MainActor func live(_ model: BridgeModel) -> Bool {
+        switch self {
+        case .claude: return model.claudeRunning && model.profileActive
+        case .codex: return model.codexRunning && model.codexProfileActive
+        case .vibe: return model.vibeRunning && model.vibeProfileActive
+        }
+    }
+
+    @MainActor func missing(_ model: BridgeModel) -> String? {
+        switch self {
+        case .claude:
+            return model.claudeInstalled ? nil : "Claude Desktop is not installed"
+        case .codex:
+            if model.codexAppPath == nil { return "Install the Codex / ChatGPT app first" }
+            return model.settings.codex_model == nil ? "Choose a model for Codex / ChatGPT first" : nil
+        case .vibe:
+            if model.vibeAppPath == nil { return "Install the Vibe desktop app first" }
+            return model.settings.vibe_model == nil ? "Choose a model for Vibe first" : nil
+        }
+    }
+
+    func detail(live: Bool, running: Bool) -> String {
+        if live { return " · running on the hub profile" }
+        guard running else { return "" }
+        switch self {
+        case .codex: return " · open with another profile; asks before restarting it"
+        case .claude, .vibe: return " · open with another profile; quit it first"
+        }
+    }
+}
+
 struct HubLaunchCluster: View {
     @ObservedObject var model: BridgeModel
     var attention: (@MainActor () -> Void)?
@@ -243,24 +301,30 @@ struct HubLaunchCluster: View {
     var body: some View {
         HStack(spacing: 4) {
             Text("Launch").font(.system(size: 10.5)).foregroundStyle(.secondary).padding(.trailing, 2)
-            mark(claude: true)
-            mark(claude: false)
+            mark(.claude)
+            mark(.codex)
+            mark(.vibe)
         }
     }
 
-    private func mark(claude isClaude: Bool) -> some View {
-        let presentation = model.providerDefinitions.first { $0.id == (isClaude ? "claude" : "codex") }?.presentation
-        let running = isClaude ? model.claudeRunning : model.codexRunning
-        let live = running && (isClaude ? model.profileActive : model.codexProfileActive)
+    private func mark(_ app: HubLaunchApp) -> some View {
+        let presentation = model.providerDefinitions.first { $0.id == app.providerID }?.presentation
+        let running = app.running(model)
+        let live = app.live(model)
         let led: Color = live ? Chroma.ok : (running ? Chroma.warn : Color.secondary.opacity(0.5))
-        let missing = isClaude ? (model.claudeInstalled ? nil : "Claude Desktop is not installed")
-            : (model.codexAppPath == nil ? "Install the Codex / ChatGPT app first"
-               : (model.settings.codex_model == nil ? "Choose a model for Codex / ChatGPT first" : nil))
-        let name = isClaude ? "Claude" : "Codex"
+        let missing = app.missing(model)
+        let name = app.name
         let action = live ? "Show " + name : "Launch " + name
-        let detail = live ? " · running on the hub profile"
-            : (running ? (isClaude ? " · open with another profile; quit it first" : " · open with another profile; asks before restarting it") : "")
-        return Button { model.perform({ if isClaude { await model.launchClaude() } else { await model.launchCodex() } }, attention: attention) } label: {
+        let detail = app.detail(live: live, running: running)
+        return Button {
+            model.perform({
+                switch app {
+                case .claude: await model.launchClaude()
+                case .codex: await model.launchCodex()
+                case .vibe: await model.launchVibe()
+                }
+            }, attention: attention)
+        } label: {
             ZStack(alignment: .bottomTrailing) {
                 Group {
                     if let presentation { ProviderMark(presentation: presentation, size: 16) }
