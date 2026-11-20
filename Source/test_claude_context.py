@@ -83,6 +83,7 @@ class ClaudeContextTests(unittest.TestCase):
         self.settings["providers"]["claude"]["credential_mode"] = "cli"
         cases = (
             ("claude", "claude-fable-5-1", 1_000_000),
+            ("claude", "claude-mythos-5-2", 1_000_000),
             ("claude", "opus", 1_000_000),
             ("claude", "claude-opus-5-5", 1_000_000),
             ("claude", "claude-opus-5", 1_000_000),

@@ -34,6 +34,7 @@ CLAUDE_MODEL_LABELS = {
     "claude-fable-5-2": "Claude Fable 5.2",
     "claude-fable-5-1": "Claude Fable 5.1 (Legacy)",
     "claude-fable-5": "Claude Fable 5 (Legacy)",
+    "claude-mythos-5-2": "Claude Mythos 5.2",
     "claude-opus-5-5": "Claude Opus 5.5",
     "claude-opus-5": "Claude Opus 5 (Legacy)",
     "claude-opus-4-8": "Claude Opus 4.8 (Legacy)",

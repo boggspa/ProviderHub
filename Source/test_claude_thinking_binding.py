@@ -45,7 +45,7 @@ class ThinkingBindingTests(unittest.TestCase):
                 self.assertIn(CLAUDE_THINKING_BINDING_BETA, result["headers"]["anthropic-beta"].split(","))
 
     def test_omitted_thinking_on_default_adaptive_models_negotiates_binding(self):
-        for model in ("claude-fable-5-1", "claude-mythos-5-1", "claude-opus-5-5",
+        for model in ("claude-fable-5-1", "claude-mythos-5-2", "claude-mythos-5-1", "claude-opus-5-5",
                       "claude-sonnet-5-5", "claude-haiku-5-5"):
             with self.subTest(model=model):
                 result = plan(prompt(), model)
