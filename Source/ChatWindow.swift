@@ -875,7 +875,8 @@ struct ChatTranscript: View {
         case "user":
             UserRow(entry: entry, accent: { model.accent(for: $0) }, onReact: react)
         case "assistant":
-            AssistantRow(entry: entry, accent: model.accent(for: entry.route), streaming: liveEntryIDs.contains(entry.id), onReact: react)
+            AssistantRow(entry: entry, accent: model.accent(for: entry.route), streaming: liveEntryIDs.contains(entry.id),
+                         onReact: react, mentionAccent: { model.accent(for: $0) })
         case "question":
             // A pending question is drawn by the pinned stack above the
             // composer, so it is not drawn twice. The answered ones stay in

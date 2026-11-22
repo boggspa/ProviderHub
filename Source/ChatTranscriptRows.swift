@@ -202,7 +202,23 @@ struct AssistantRow: View {
     var streaming: Bool
     /// The user's reaction toggle; nil shows reactions without one.
     var onReact: ((String, Bool) -> Void)? = nil
+    var mentionAccent: ((String) -> Color)? = nil
     @Environment(\.chatTextStyle) private var textStyle
+    @Environment(\.chatHues) private var hues
+
+    private func recipients(_ mentions: [ChatMention], accent: (String) -> Color) -> AttributedString {
+        var seen = Set<String>()
+        var tags = AttributedString()
+        for mention in mentions where !mention.id.isEmpty && !mention.name.isEmpty && seen.insert(mention.id).inserted {
+            let text = "@" + mention.name
+            var label = mention
+            label.start = 0
+            label.length = text.utf16.count
+            if !tags.characters.isEmpty { tags.append(AttributedString("  ")) }
+            tags.append(ChatMentions.marked(text, mentions: [label], accent: accent))
+        }
+        return tags
+    }
 
     var body: some View {
         let reply = ChatReplySources.split(entry.text)
@@ -211,6 +227,10 @@ struct AssistantRow: View {
                 if streaming { ChatShimmerText(text: "Thinking…", active: true, accent: accent).font(textStyle.font) }
             } else {
                 ChatTranscriptText(text: reply.body, streaming: streaming, message: entry.text)
+            }
+            if let mentionAccent, let mentions = entry.mentions, !mentions.isEmpty {
+                ChatSelectableText(text: recipients(mentions, accent: mentionAccent), font: textStyle.nsFont,
+                                   color: hues.textColor ?? Semantic.nsInk)
             }
             if !reply.links.isEmpty { ChatSourcesRow(links: reply.links) }
             // A quiet chip row under the reply; replies stay sections, never bubbles.

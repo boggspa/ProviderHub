@@ -2,8 +2,11 @@
 import json
 import unittest
 
+import cli_routes
 import grok_cli_agent
-from chat_runtime import CORRECTIONS, MAX_CORRECTIONS, ModelRequestError, corrected_payload, empty_response_error, retryable_request
+from chat_runtime import (CORRECTIONS, MAX_CORRECTIONS, ModelRequestError, corrected_payload, empty_response_error,
+                          entry, grok_recall, retryable_request)
+from cli_tool_call import TOOL_RESULTS_KEY
 from protocol import StreamTranslator, ToolOutputError, translate_response
 
 
@@ -48,6 +51,50 @@ class GrokPromptBudgetTests(unittest.TestCase):
             None)
         self.assertIn("a" * 50_000, surface["prompt"])
         self.assertNotIn("omitted", surface["prompt"])
+
+    def test_cold_prompt_reserves_standing_context_and_keeps_durable_findings(self):
+        old = entry("tool", tool="read_file", summary="Read placement.json", detail="Bay 3 is free",
+                    workspace="/project", memberID="grok", recorded=True)
+        entries = [old, {**old, "id": "duplicate"}, {**old, "id": "peer", "memberID": "claude"},
+                   {**old, "id": "unrecorded", "recorded": False}, {**old, "id": "failed", "isError": True}]
+        recall = grok_recall(entries, "grok", "/project")
+        self.assertEqual([item["source"] for item in recall], ["duplicate"])
+        messages = [turn("user", "Opening request"), {**turn("user", "Latest actual steer"),
+                     "_provider_hub_user_instruction": True}]
+        messages += [turn("assistant", str(i) + "x" * 8000) for i in range(10)]
+        messages += [turn("assistant", "current tool call"),
+                     {**turn("user", "current tool result"), TOOL_RESULTS_KEY: True}]
+        plan = {"system": "Standing instructions" * 1100, "messages": messages, "host_tools": [],
+                "tool_choice": None, "images": [], "conversation": "chat-1", "recall": recall}
+        surface = grok_cli_agent._surface(plan, None)
+        self.assertLessEqual(len((surface["system"] + surface["prompt"]).encode()), grok_cli_agent.PROMPT_EXCERPT_BUDGET)
+        for expected in ("duplicate", "placement.json", "Bay 3 is free", "Latest actual steer",
+                         "current tool call", "current tool result"):
+            self.assertIn(expected, surface["prompt"])
+        self.assertNotIn("workspace observations", grok_cli_agent._surface({**plan, "resume_delta": True}, None)["prompt"])
+
+
+class ClaudePromptBudgetTests(unittest.TestCase):
+    def test_chat_cold_replay_keeps_user_steer_and_current_cycle_but_native_history_is_complete(self):
+        messages = [turn("user", "Opening prompt"), turn("assistant", "Earlier reasoning " + "x" * 32_000),
+                    {**turn("user", "Latest user steer"), "_provider_hub_user_instruction": True},
+                    turn("user", "Synthetic contribution prompt"),
+                    {"role": "assistant", "content": [{"type": "tool_use", "name": "read_history", "id": "c",
+                                                       "input": {"entry_id": "source"}}]},
+                    {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "c",
+                                                  "content": "Requested history result"}]}]
+        payload = {"messages": messages, "_provider_hub_surface": "chat", "_provider_hub_conversation": "chat",
+                   "tools": [{"name": "read_history", "description": "Read a saved record", "input_schema": {"type": "object"}}]}
+        body = cli_routes.plan_turn("claude", "sonnet", payload, {}, wanted_output=4096)["body"]
+        wire = json.dumps(body["messages"])
+        self.assertNotIn("Earlier reasoning", wire)
+        self.assertIn("Latest user steer", wire)
+        self.assertIn("[tool call: read_history (c)", wire)
+        self.assertIn("Requested history result", wire)
+        self.assertEqual(body["history"], messages)
+        external = cli_routes.plan_turn("claude", "sonnet", {**payload, "_provider_hub_surface": "responses"},
+                                        {}, wanted_output=4096)["body"]
+        self.assertIn("Earlier reasoning", json.dumps(external["messages"]))
 
 
 class ColdReasonTests(unittest.TestCase):

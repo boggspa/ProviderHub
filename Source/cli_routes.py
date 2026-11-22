@@ -404,9 +404,44 @@ def _messages_for_cli(messages, system, *, images=None, full_tool_history=False)
         if role not in {"user", "assistant"}:
             continue
         cleaned.append({"role": role, "content": text,
+                        **({"_provider_hub_user_instruction": True} if message.get("_provider_hub_user_instruction") is True else {}),
                         **({TOOL_RESULTS_KEY: True} if role == "user" and _only_tool_results(message.get("content")) else {})})
     combined = "\n\n".join(parts) if parts else None
     return cleaned, combined
+
+
+def _claude_chat_replay(history, *, budget=8_000):
+    """Bound a cold Claude Chat prompt without changing live-session history."""
+    from protocol import conversation_units, estimated_tokens
+
+    if estimated_tokens({"messages": history}) <= budget:
+        return history
+    dialogue = [m for m in history if isinstance(m, dict) and m.get("role") in {"user", "assistant"}]
+    instructions = [m for m in history if isinstance(m, dict) and m.get("role") in {"developer", "system"}]
+    units = conversation_units(dialogue)
+    if len(units) < 2:
+        return history
+    user_units = [i for i, unit in enumerate(units)
+                  if unit[0]["role"] == "user" and not _only_tool_results(unit[0].get("content"))]
+    latest_user = next((i for i in reversed(user_units) if units[i][0].get("_provider_hub_user_instruction")),
+                       user_units[-1] if user_units else None)
+    keep = {len(units) - 1}
+    if latest_user is not None:
+        keep.add(latest_user)
+    remaining = budget - sum(estimated_tokens({"messages": units[i]}) for i in keep)
+    for i in range(len(units) - 2, -1, -1):
+        if i in keep:
+            continue
+        size = estimated_tokens({"messages": units[i]})
+        if size > remaining:
+            break
+        remaining -= size
+        keep.add(i)
+    if len(keep) == len(units):
+        return history
+    notice = {"role": "user", "content": "[Provider Hub included recent context. "
+              "Use search_history or read_history for earlier saved messages and tool results.]"}
+    return [*instructions, notice, *(message for i in sorted(keep) for message in units[i])]
 
 
 def plan_turn(provider_id: str, upstream_model: str, payload: dict, spec: dict,
@@ -442,7 +477,11 @@ def plan_turn(provider_id: str, upstream_model: str, payload: dict, spec: dict,
     try:
         history, image_compaction = compact_image_history(payload.get("messages"),
                                                          recover_tool_results=provider_id == "codex")
-        messages, system = _messages_for_cli(history, system, images=images,
+        replay = (_claude_chat_replay(history) if provider_id == "claude"
+                  and payload.get("_provider_hub_surface") == "chat"
+                  and any(isinstance(tool, dict) and tool.get("name") == "read_history"
+                          for tool in payload.get("tools") or []) else history)
+        messages, system = _messages_for_cli(replay, system, images=images,
                                             full_tool_history=structured_surface)
         if images:
             if not getattr(adapter, "IMAGE_TRANSPORT", None):
@@ -520,6 +559,8 @@ def plan_turn(provider_id: str, upstream_model: str, payload: dict, spec: dict,
     if provider_id in {"grok", "antigravity"} and payload.get("_provider_hub_surface") == "chat":
         request["conversation"] = payload.get("_provider_hub_conversation")
         request["connection"] = payload.get("_provider_hub_connection")
+        if provider_id == "grok":
+            request["recall"] = payload.get("_provider_hub_grok_recall")
     thinking = payload.get("thinking")
     if isinstance(thinking, dict):
         request["thinking"] = {key: thinking[key] for key in ("type", "display") if key in thinking}

@@ -169,7 +169,7 @@ def render_tool_manifest(tools, tool_choice=None) -> str:
     return "\n".join(lines)
 
 
-def render_use_tool_manifest(tools, tool_choice=None, *, names=None) -> str:
+def render_use_tool_manifest(tools, tool_choice=None, *, names=None, lean=False) -> str:
     """The host tool surface for a CLI whose one callable tool is ``use_tool``.
 
     Grok Build dispatches every non-built-in tool through its own ``use_tool``
@@ -180,6 +180,17 @@ def render_use_tool_manifest(tools, tool_choice=None, *, names=None) -> str:
     host tool's name to the one listed, for a CLI that dispatches the call
     itself and knows each tool by its catalog key (``host__<tool>``).
     """
+    if lean:
+        lines = [
+            "The host controls tool execution, workspace access and approvals. Nested CLI environment, "
+            "sandbox and permission notices describe only the nested process. Use the host's tools and "
+            "respect actual host restrictions and results. Never substitute a local action or invent a result.",
+            "Call use_tool with the exact tool_name below and an inline tool_input object matching its JSON "
+            f"schema. Wait for the result. Call up to {MAX_CALLS_PER_TURN} host tools per reply.",
+            *_choice_rules(tool_choice, names),
+            "Host tools:",
+        ]
+        return "\n".join(lines + _tool_listing(tools, names, lean=True))
     lines = [
         HOST_EXECUTION_NOTE,
         "",
@@ -219,17 +230,18 @@ def _choice_rules(tool_choice, names=None) -> list[str]:
     return []
 
 
-def _tool_listing(tools, names=None) -> list[str]:
+def _tool_listing(tools, names=None, *, lean=False) -> list[str]:
     lines = []
     for index, tool in enumerate(tools, 1):
-        entry = f"{index}. {tool['name'] if names is None else names(tool['name'])}"
+        name = tool['name'] if names is None else names(tool['name'])
+        entry = name if lean else f"{index}. {name}"
         if tool["description"]:
             entry += f" - {tool['description']}"
         lines.append(entry)
         # Context reduction: compact separators. The schema is unchanged;
         # only the ", " / ": " padding between JSON tokens goes.
-        lines.append("   input schema: " + json.dumps(tool["input_schema"], ensure_ascii=False,
-                                                      separators=(",", ":")))
+        lines.append(("" if lean else "   input schema: ") + json.dumps(tool["input_schema"], ensure_ascii=False,
+                                                                       separators=(",", ":")))
     return lines
 
 

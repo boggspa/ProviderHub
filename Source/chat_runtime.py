@@ -31,7 +31,7 @@ from bridge_core import gateway_token, load_settings, private_directory, state_r
 from chat_tools import ChatToolRunner, TOOL_DEFINITIONS
 from chat_peers import NAMES as PEER_TOOLS
 from chat_attachments import prepare_attachments, prepare_tool_content, bound_image_history
-from chat_history import portable_history
+from chat_history import attachment_content, portable_history
 import chat_blackboard
 import chat_memory
 import chat_execution
@@ -80,6 +80,29 @@ question answers are information, not tool-approval grants.
 
 def now():
     return datetime.now(timezone.utc).isoformat()
+
+
+def grok_recall(entries, member_id, workspace):
+    """A small cold-start reference from durable workspace observations."""
+    observations, seen = [], set()
+    for item in reversed(entries):
+        tool = item.get("tool")
+        if (item.get("kind") != "tool" or item.get("recorded") is False or item.get("isError")
+                or item.get("memberID") != member_id or item.get("workspace", workspace) != workspace
+                or tool not in {"read_file", "search_files", "apply_patch", "list_files"}):
+            continue
+        summary = (item.get("summary") or tool).encode("utf-8")[:240].decode("utf-8", "ignore")
+        detail = (item.get("detail") or "").encode("utf-8")
+        excerpt = (detail if len(detail) <= 950 else detail[:750] + b"\n[...]\n" + detail[-193:])
+        excerpt = excerpt.decode("utf-8", "ignore").strip()
+        key = (tool, summary, excerpt)
+        if not excerpt or key in seen:
+            continue
+        seen.add(key)
+        observations.append({"source": item["id"], "tool": tool, "summary": summary, "excerpt": excerpt})
+        if len(observations) == 5:
+            break
+    return observations[::-1]
 
 
 def entry(kind, text="", route="", **extra):
@@ -749,7 +772,7 @@ class ChatService:
     def apply_pending_update(chat):
         pending = chat.pop("pending_update", None)
         if pending and not chat_team.enabled(chat):
-            chat["messages"].append({"role": "user", "content": pending["content"]})
+            chat["messages"].append({"role": "user", "content": pending["content"], "_provider_hub_user_instruction": True})
         return pending
 
     def interrupt_with_update(self, command):
@@ -941,13 +964,23 @@ class ChatService:
                 # Archive the exact provider context, then begin a fresh native
                 # session using only portable transcript data. Never splice an
                 # earlier provider's encrypted/signed trace into a new route.
-                messages = portable_history(self.chat["entries"], vision=choice.get("vision") is not False)
+                vision = choice.get("vision") is not False
+                claude = choice["route"].split("/", 1)[0] == "claude"
+                if claude:
+                    messages = [{"role": "user", "content": [
+                        {"type": "text", "text": item["text"] or "Please review the attached files."},
+                        *attachment_content(item.get("attachments"), vision=vision)], "_provider_hub_user_instruction": True}
+                        for item in self.chat["entries"] if item.get("kind") == "user"]
+                else:
+                    messages = portable_history(self.chat["entries"], vision=vision)
                 archive = {key: copy.deepcopy(self.chat[key]) for key in ("route", "account", "scope", "effort", "messages")}
                 archive["ended"] = now()
                 self.chat.setdefault("archives", []).append(archive)
                 self.chat.update(route=choice["route"], account=choice["account"], scope=choice["scope"],
                                  effort=effort, speed=speed, messages=messages, status="ready")
-                self.add(entry("notice", "Switched to " + choice["label"] + ". Conversation and tool results carried over; earlier provider reasoning kept in the saved log.", choice["route"]))
+                summary = ("Earlier user messages carried over. Replies and tool results are available in chat history." if claude else
+                           "Conversation and tool results carried over; earlier provider reasoning kept in the saved log.")
+                self.add(entry("notice", "Switched to " + choice["label"] + ". " + summary, choice["route"]))
                 self.save(); self.publish()
             else:
                 self.create(choice["id"], folder, effort)
@@ -966,7 +999,8 @@ class ChatService:
                 update = self.prepare_update(command)
                 self.chat["delegationsThisTurn"] = 0
                 accepted_entry = update["entry"]
-                if not chat_team.enabled(self.chat): self.chat["messages"].append({"role": "user", "content": update["content"]})
+                if not chat_team.enabled(self.chat):
+                    self.chat["messages"].append({"role": "user", "content": update["content"], "_provider_hub_user_instruction": True})
                 self.chat["entries"].append(accepted_entry)
                 if self.chat["title"] == "New chat":
                     text = accepted_entry["text"]
@@ -1100,8 +1134,13 @@ class ChatService:
         memory_chat = self.team_parent.chat if self.role == "team" else chat
         memory_owner = self.team_parent if self.role == "team" else self
         with memory_owner._mutex:
+            if (choice.get("source") == "cli" and chat["route"].split("/", 1)[0] == "grok"
+                    and self.role in {"parent", "team"} and tools):
+                member_id = self.team_member["id"] if self.role == "team" else None
+                payload["_provider_hub_grok_recall"] = grok_recall(memory_chat["entries"], member_id, chat["workspace"])
             memory = chat_memory.memory_message(memory_chat) if self.role in {"parent", "team"} else None
-            board = chat_blackboard.digest_message(memory_chat) if self.role == "team" else None
+            board = (chat_blackboard.digest_message(memory_chat) if self.role == "team"
+                     and chat["route"].split("/", 1)[0] != "claude" else None)
             progress = chat_execution.progress(self.team_member) if self.role == "team" else None
             request_note = chat_team.request_reference(memory_chat, self.team_member) if self.role == "team" else None
             todos = (chat_todos.reference(memory_chat, self.team_member["id"] if self.role == "team" else chat_todos.MAIN,
@@ -1167,6 +1206,9 @@ class ChatService:
             # Projection only: never duplicate notebook text in saved provider
             # history. Reserve its budget before trimming complete tool cycles.
             payload = {**payload, "messages": [memory, *payload["messages"]]}
+        if choice.get("source") != "cli":
+            payload["messages"] = [{key: value for key, value in message.items() if key != "_provider_hub_user_instruction"}
+                                   if "_provider_hub_user_instruction" in message else message for message in payload["messages"]]
         return payload
 
     def approved(self, summary, detail=None, *, member=None):

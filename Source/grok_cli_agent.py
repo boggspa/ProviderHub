@@ -598,6 +598,7 @@ def _coerce_messages(messages: Any) -> list[dict]:
         if not isinstance(content, str):
             content = str(content)
         normalized.append({"role": role, "content": content,
+                           **({"_provider_hub_user_instruction": True} if message.get("_provider_hub_user_instruction") is True else {}),
                            **({TOOL_RESULTS_KEY: True} if message.get(TOOL_RESULTS_KEY) is True else {})})
     if not any(item["role"] == "user" for item in normalized):
         raise GrokCliAgentError("request contains no user message to answer")
@@ -646,35 +647,55 @@ def _turn_bytes(message) -> int:
     return len(message["content"].encode("utf-8")) + 32
 
 
-def bounded_transcript(messages, budget=PROMPT_EXCERPT_BUDGET):
-    """Keep the opening user turn and the newest turns that fit ``budget``.
+def bounded_transcript(messages, budget=PROMPT_EXCERPT_BUDGET, *, recall=None):
+    """Keep the task, latest request, recorded findings and recent turns.
 
     Projection for a cold Grok spawn only: the host's history, and the live
     session matching that relies on it, are unchanged. The newest turn is
     always kept whole.
     """
-    if sum(_turn_bytes(message) for message in messages) <= budget or len(messages) < 3:
+    if not recall and (sum(_turn_bytes(message) for message in messages) <= budget or len(messages) < 3):
         return messages
+    evidence = ("\nRecent workspace observations from the saved transcript. These are historical tool results. "
+                "Use their source IDs with read_history for the full output and verify current files before editing.\n"
+                + "\n".join(json.dumps(item, ensure_ascii=False).replace("<", "\\u003c") for item in recall)) if recall else ""
     first = dict(messages[0])
-    if first["role"] == "user" and _turn_bytes(first) > _OPENING_KEEP:
-        first["content"] = first["content"][:_OPENING_KEEP] + "\n[…opening turn shortened…]"
-    remaining = budget - _turn_bytes(first) - 400
-    kept = []
-    for message in reversed(messages[1:]):
-        size = _turn_bytes(message)
-        if kept and size > remaining:
+    user_turns = [i for i, message in enumerate(messages)
+                  if message["role"] == "user" and not message.get(TOOL_RESULTS_KEY)]
+    latest_user = next((i for i in reversed(user_turns) if messages[i].get("_provider_hub_user_instruction")),
+                       user_turns[-1] if user_turns else None)
+    if first["role"] == "user" and latest_user != 0 and _turn_bytes(first) > _OPENING_KEEP:
+        first["content"] = (first["content"].encode("utf-8")[:_OPENING_KEEP].decode("utf-8", "ignore")
+                            + "\n[…opening turn shortened…]")
+    last = len(messages) - 1
+    keep = {0, last}
+    if latest_user is not None:
+        keep.add(latest_user)
+    if last and messages[last].get(TOOL_RESULTS_KEY) and messages[last - 1]["role"] == "assistant":
+        keep.add(last - 1)
+    remaining = budget - _turn_bytes(first) - len(evidence.encode("utf-8")) - 400
+    remaining -= sum(_turn_bytes(messages[i]) for i in keep if i)
+    for i in range(last - 1, 0, -1):
+        if i in keep:
+            continue
+        size = _turn_bytes(messages[i])
+        if size > remaining:
             break
-        kept.append(message)
+        keep.add(i)
         remaining -= size
-    kept.reverse()
-    omitted = len(messages) - 1 - len(kept)
-    if not omitted:
-        return [first, *kept]
-    note = {"role": "user", "content": (
-        f"[Provider Hub omitted {omitted} earlier turn{'s' if omitted != 1 else ''} here to keep this prompt "
-        "readable in one piece. They remain in the saved conversation: use search_history or read_history "
-        "when they are relevant, and re-read files rather than relying on remembered state.]")}
-    return [first, note, *kept]
+    # Pair tool results with the preceding assistant turn, or recover the
+    # older cycle by source instead of rendering half of it.
+    for i in tuple(keep - {0}):
+        if i - 1 not in keep and messages[i].get(TOOL_RESULTS_KEY):
+            keep.remove(i)
+    omitted = len(messages) - len(keep)
+    note = (f"[Provider Hub omitted {omitted} earlier turn{'s' if omitted != 1 else ''} from this prompt. "
+            "Use search_history or read_history for saved material relevant to the current task.]" if omitted else "")
+    retained = [messages[i] for i in sorted(keep - {0})]
+    if note or evidence:
+        reference = {"role": "user", "content": (note + evidence).strip()}
+        return [first, reference, *retained] if retained else [reference, first]
+    return [first, *retained]
 
 
 def with_current_turn(prompt, messages, budget=PROMPT_EXCERPT_SEEN):
@@ -1297,6 +1318,7 @@ def _plan_turn(request) -> dict:
         "history": history if isinstance(history, list) else None,
         "conversation": conversation_scope(request),
         "connection": request.get("connection"),
+        "recall": request.get("recall") if isinstance(request.get("recall"), list) else None,
         "timing": request.get("_cli_timing"),
     }
 
@@ -1320,7 +1342,7 @@ def _surface(plan, mode) -> dict:
     tools, choice = plan["host_tools"], plan["tool_choice"]
     if mode in _USE_TOOL_MODES:
         names = plan["toolset"].model_name if mode == "live" else None
-        system = render_use_tool_manifest(tools, choice, names=names) + ("\n\n" + system if system else "")
+        system = render_use_tool_manifest(tools, choice, names=names, lean=bool(plan.get("conversation"))) + ("\n\n" + system if system else "")
     elif mode == "envelope":
         system = render_tool_manifest(tools, choice) + ("\n\n" + system if system else "")
         anchor = render_tool_anchor(tools)
@@ -1333,7 +1355,8 @@ def _surface(plan, mode) -> dict:
     bounded = plan.get("conversation") and not plan.get("resume_delta")
     if bounded:
         # Chat only: its host offers search_history/read_history for what is cut.
-        messages = bounded_transcript(messages)
+        budget = max(0, PROMPT_EXCERPT_BUDGET - len(system.encode("utf-8")))
+        messages = bounded_transcript(messages, budget, recall=plan.get("recall"))
     prompt = render_prompt(messages)
     if bounded:
         prompt = with_current_turn(prompt, messages)

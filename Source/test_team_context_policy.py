@@ -89,10 +89,35 @@ class TeamContextPolicyTests(unittest.TestCase):
                            else continuation(lease, after, images=provider != "grok"))
                 self.assertIsNotNone(matched)
                 self.assertIn("Updated notebook", str(matched))
-                self.assertIn("Updated peer evidence", str(matched))
+                if provider == "claude":
+                    self.assertNotIn("Updated peer evidence", str(matched))
+                else:
+                    self.assertIn("Updated peer evidence", str(matched))
                 self.assertNotIn("Updated notebook", str(self.reader.chat["messages"]))
         self.assertFalse(native_context({"source": "api", "route": "codex/test"}))
         self.assertFalse(native_context({"source": "cli", "route": "muse/test"}))
+
+    def test_claude_team_delivers_addressed_messages_and_peer_mentions(self):
+        member = self.reader.team_member
+        peer = self.children[1]
+        other_tag = {key: peer.team_member[key] for key in ("id", "name", "route")}
+        own_tag = {key: member[key] for key in ("id", "name", "route")}
+        self.parent.chat["entries"].extend([entry("user", "Team-wide instruction"),
+            entry("user", "User message to a different member", mentions=[other_tag]),
+            entry("user", "User message to Claude", mentions=[own_tag])])
+        routine_id = publish_peer(peer, "A routine peer finding")
+        mention_id = publish_peer(peer, "@Member 0 An explicit peer finding")
+        source = next(row for row in self.parent.chat["entries"] if row["id"] == mention_id)
+        chat_team_mentions.record(self.parent.chat, source)
+        choice = {**self.choice, "route": "claude/opus"}
+        wire = json.dumps(chat_team.shared_context(self.parent.chat, member, choice))
+        self.assertIn("Team-wide instruction", wire)
+        self.assertIn("User message to Claude", wire)
+        self.assertIn("An explicit peer finding", wire)
+        self.assertNotIn("User message to a different member", wire)
+        self.assertNotIn(routine_id, wire)
+        recovered = chat_memory.execute(self.parent.chat, "read_history", {"entry_id": routine_id})
+        self.assertIn("A routine peer finding", str(recovered))
 
     def test_compaction_leaves_room_for_subsequent_tool_rounds(self):
         reader = self.children[1]

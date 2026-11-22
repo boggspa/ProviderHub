@@ -16,16 +16,17 @@ from codex_session_pool import Lease, digest, history_blocks
 from test_chat_runtime import FakeTransport, model
 
 
-def team_fixture(root):
+def team_fixture(root, reader_route="codex/test"):
     transport = FakeTransport([])
     transport.rows = [{**model("claude/opus"), "source": "cli"},
                       {**model("codex/test"), "source": "cli"}]
     store = ChatStore(root, lock=False)
     parent = ChatService(store, transport, lambda event: None)
     parent.refresh(); parent.create(parent.models[0]["id"], str(root))
+    reader_choice = next(row["id"] for row in parent.models if row["route"] == reader_route)
     parent.handle({"command": "configure_team", "id": parent.chat["id"], "enabled": True,
                    "execution": {"mode": "task"}, "members": [
-                       {"choice": parent.models[0 if index == 0 else 1]["id"], "name": f"Member {index}",
+                       {"choice": reader_choice if index == 0 else parent.models[1]["id"], "name": f"Member {index}",
                         "effort": "high", "responsibility": "Inspect assigned files"} for index in range(6)]})
     parent.chat["entries"].append(entry("user", "Inspect the workspace together"))
     parent.chat["team"]["runID"] = "synthetic-team-run"
@@ -117,8 +118,8 @@ class TeamPeerContextTests(unittest.TestCase):
                              for block in message["content"] if block.get("type") == "tool_result"))
 
     def test_peer_references_remain_ordinary_messages_without_fresh_results_and_on_other_routes(self):
-        for source, route, finish_tool in [("cli", "claude/opus", False),
-                                            ("api", "claude/opus", True),
+        for source, route, finish_tool in [("cli", "codex/test", False),
+                                            ("api", "codex/test", True),
                                             ("cli", "muse/test", True)]:
             with self.subTest(source=source, route=route):
                 self.reader.chat["messages"] = [{"role": "user", "content": [{"type": "text", "text": "new request"}]}]
