@@ -119,6 +119,47 @@ class TeamContextPolicyTests(unittest.TestCase):
         recovered = chat_memory.execute(self.parent.chat, "read_history", {"entry_id": routine_id})
         self.assertIn("A routine peer finding", str(recovered))
 
+    def _replay(self, route, rounds=120):
+        """Real payload path: which rounds break a waiting CLI's continuation."""
+        from test_chat_team_peer_context import waiting
+        reader = self.children[1]
+        version = {"n": 0}
+        def memory(chat):
+            return {"role": "user", "content": [
+                {"type": "text", "text": "[Saved to-dos: progress notes]\n" + f"v{version['n']} " + "t" * 2000},
+                {"type": "text", "text": "[Saved decision notebook]\n" + "n" * 4000}]}
+        choice = {**reader.choice(), "source": "cli", "route": route, "context": 100000, "max_output": None}
+        self.parent.chat["team"]["execution"]["contextTokens"] = 64000
+        reader.chat.update(route=route, messages=[{"role": "user", "content": [{"type": "text", "text": "Pinned task"}]}])
+        breaks = []
+        with patch.object(chat_memory, "memory_message", memory):
+            previous = reader.payload(choice)["messages"]
+            for index in range(rounds):
+                version["n"] = index // 2
+                complete_tool(reader, f"call-{index}", content=f"result {index} " + "finding " * 900)
+                current = reader.payload(choice)["messages"]
+                if continuation(waiting(previous, f"call-{index}"), current, images=False) is None:
+                    breaks.append(index)
+                previous = current
+        return breaks, reader
+
+    def test_grok_keeps_its_live_session_across_host_trims_and_reference_changes(self):
+        breaks, reader = self._replay("grok/grok-4.7")
+        saved = json.dumps(reader.chat["messages"])
+        # Saved history was trimmed repeatedly, but the wire only resets near
+        # Grok's own window, and never on two rounds in a row.
+        self.assertEqual(saved.count("Provider Hub removed"), 1)
+        self.assertLessEqual(len(breaks), 8)
+        self.assertFalse(any(b - a == 1 for a, b in zip(breaks, breaks[1:])), breaks)
+        self.assertTrue(all(b - a >= 10 for a, b in zip(breaks, breaks[1:])), breaks)
+        self.assertIn("Pinned task", saved)
+
+    def test_a_reset_and_its_trim_share_one_break_on_other_native_clis(self):
+        breaks, reader = self._replay("claude/opus")
+        self.assertTrue(breaks)
+        self.assertFalse(any(b - a == 1 for a, b in zip(breaks, breaks[1:])), breaks)
+        self.assertEqual(json.dumps(reader.chat["messages"]).count("Provider Hub removed"), 1)
+
     def test_compaction_leaves_room_for_subsequent_tool_rounds(self):
         reader = self.children[1]
         choice = {**reader.choice(), "context": 64000, "max_output": 4096}

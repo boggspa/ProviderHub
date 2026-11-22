@@ -1265,37 +1265,54 @@ class ChatService:
         if speed and speed in {option.get("id") for option in choice.get("speeds") or []}:
             # The gateway's planners read this field and validate it per route.
             payload["speed"] = speed
-        if isinstance(context, int) and context > 0:
-            budget = max(1, int(context * .85) - payload["max_tokens"])
+        stable = chat_context.stable_reference_context(choice)
+        lineage = stable and chat_context.native_window_lineage(choice)
+        projection_key = (chat["id"], chat["workspace"], chat["route"], chat.get("account"), chat.get("scope"))
+        bounded = isinstance(context, int) and context > 0
+        compacted_now = False
+
+        def compact(target):
+            nonlocal payload, compacted_now
+            before = chat["messages"]
+            compacted = compact_conversation(payload, target)
+            if compacted["messages"] == before:
+                return
+            if lineage:
+                # Grok keeps what it already received; only saved history shrinks.
+                self.context_projection.rebase(before, compacted["messages"], key=projection_key)
+            # Routine near the limit, so it stays out of the transcript:
+            # a notice on every long-turn round only buried the work.
+            chat["messages"] = compacted["messages"]; payload = compacted; compacted_now = True
+            self.save()
+
+        if bounded:
+            reserve = estimated_tokens({"messages": [memory]}) if memory else 0
+            budget = max(1, int(context * .85) - payload["max_tokens"] - reserve)
             # Trim to a lower watermark rather than shaving one tool cycle
             # from a full history on every round (which defeats CLI reuse).
-            compact_budget = max(1, int(context * .60) - payload["max_tokens"])
-            if memory:
-                reserve = estimated_tokens({"messages": [memory]})
-                budget = max(1, budget - reserve)
-                compact_budget = max(1, compact_budget - reserve)
+            compact_budget = max(1, int(context * .60) - payload["max_tokens"] - reserve)
             if estimated_tokens(payload) >= budget:
-                compacted = compact_conversation(payload, compact_budget)
-                if compacted["messages"] != chat["messages"]:
-                    # Routine near the limit, so it stays out of the transcript:
-                    # a notice on every long-turn round only buried the work.
-                    chat["messages"] = compacted["messages"]; payload = compacted
-                    self.save()
-        if chat_context.stable_reference_context(choice):
+                compact(compact_budget)
+        if stable:
             # Keep saved history portable; the projection retains only this
             # service's current context and resets on edits/compaction/switches.
-            projection_key = (chat["id"], chat["workspace"], chat["route"], chat.get("account"), chat.get("scope"))
-            payload = {**payload, "messages": self.context_projection.apply(
-                payload["messages"], memory, key=projection_key)}
-            if isinstance(context, int) and context > 0 and estimated_tokens(payload) >= budget:
-                # Old projected snapshots consume context too. Resetting drops
-                # superseded snapshots and retains the latest one. A reset or
-                # actual compaction deliberately starts a fresh native query.
-                self.context_projection = chat_context.ContextProjection()
-                if self.role == "team":
-                    self.team_parent.team_context_projections[(self.team_parent.chat["id"], chat["id"])] = self.context_projection
-                payload = {**payload, "messages": self.context_projection.apply(
-                    chat["messages"], memory, key=projection_key)}
+            projected = self.context_projection.apply(payload["messages"], memory, key=projection_key)
+            if bounded:
+                ceiling = budget
+                advertised = choice.get("context")
+                if lineage and type(advertised) is int and advertised > 0:
+                    # The live process holds this wire, so its own window bounds it.
+                    ceiling = max(budget, int(advertised * .85) - payload["max_tokens"])
+                if estimated_tokens({**payload, "messages": projected}) >= ceiling:
+                    # One rewrite per round. Resetting drops superseded snapshots;
+                    # trimming saved history in the same round keeps the next
+                    # request from crossing the budget again and forcing a
+                    # second cold start immediately after this one.
+                    if not compacted_now and estimated_tokens(payload) >= compact_budget:
+                        compact(compact_budget)
+                    self.context_projection.reset()
+                    projected = self.context_projection.apply(chat["messages"], memory, key=projection_key)
+            payload = {**payload, "messages": projected}
         elif memory:
             # Projection only: never duplicate notebook text in saved provider
             # history. Reserve its budget before trimming complete tool cycles.

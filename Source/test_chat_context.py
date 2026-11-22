@@ -25,6 +25,46 @@ def waiting(history, identifier="call-1"):
 
 
 class ContextTests(unittest.TestCase):
+    def test_changed_reference_parts_ride_alone_and_removed_parts_are_named(self):
+        projector = ContextProjection()
+        both = {"role": "user", "content": [{"type": "text", "text": "[Saved to-dos]\nv1 " + "t" * 400},
+                                            {"type": "text", "text": "[Saved decision notebook]\n" + "N" * 4000}]}
+        saved = [reference("Task")]
+        first = projector.apply(saved, both, key="grok")
+        self.assertIn("N" * 4000, str(first))
+        saved = answer(saved)
+        changed = copy.deepcopy(both); changed["content"][0]["text"] = "[Saved to-dos]\nv2 done"
+        second = projector.apply(saved, changed, key="grok")
+        self.assertIsNotNone(continuation(waiting(first), second))
+        delta = str(second[len(first):])
+        self.assertIn("v2 done", delta)
+        self.assertNotIn("N" * 100, delta)
+        self.assertIn("earlier parts not repeated here still apply", delta)
+        saved = answer(saved, "call-2")
+        third = projector.apply(saved, {"role": "user", "content": [changed["content"][0]]}, key="grok")
+        self.assertIsNotNone(continuation(waiting(second, "call-2"), third))
+        self.assertIn("[No longer current: [Saved decision notebook]]", str(third[len(second):]))
+        projector.reset()
+        fresh = projector.apply(saved, changed, key="grok")
+        self.assertIn("This replaces the previous saved reference snapshot", str(fresh))
+        self.assertIn("N" * 4000, str(fresh))
+
+    def test_rebase_keeps_the_delivered_wire_after_a_host_trim(self):
+        projector = ContextProjection()
+        history = [reference("Task"), *answer([], "old")[0:], reference("older work " * 200)]
+        first = projector.apply(history, reference("[Notebook]\nv1"), key="grok")
+        grown = answer(history)
+        trimmed = [reference("[Provider Hub removed 3 earlier messages from this conversation so it fits "
+                             "the model's context window.]"), *copy.deepcopy(grown[-2:])]
+        self.assertTrue(projector.rebase(grown, trimmed, key="grok"))
+        wire = projector.apply(trimmed, reference("[Notebook]\nv1"), key="grok")
+        self.assertIsNotNone(continuation(waiting(first), wire))
+        self.assertIn("older work", str(wire))
+        # A trim that dropped undelivered blocks, or another identity, is refused.
+        other = ContextProjection(); other.apply(history, None, key="grok")
+        self.assertFalse(other.rebase(grown, [reference("only")], key="grok"))
+        self.assertFalse(other.rebase(grown, trimmed, key="codex"))
+
     def test_parallel_tool_batch_and_results_stay_whole_on_kimi_messages(self):
         from providers import prepare_request
         projector = ContextProjection()

@@ -5,6 +5,7 @@ import http.client
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
+import re
 import socket
 import tempfile
 import threading
@@ -502,6 +503,25 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(compacted["messages"][0]["role"], "user")
         self.assertIn("Provider Hub removed 2 earlier messages", compacted["messages"][0]["content"])
         self.assertTrue(compacted["messages"][0]["content"].endswith("L" * 10))
+
+    def test_repeated_compaction_keeps_one_cumulative_note(self):
+        for blocks in (False, True):
+            with self.subTest(blocks=blocks):
+                def text(value):
+                    return [{"type": "text", "text": value}] if blocks else value
+                messages = [{"role": "user", "content": text("opening task")}]
+                for round_number in range(6):
+                    messages += [{"role": "assistant", "content": text(f"reply {round_number} " + "R" * 3000)},
+                                 {"role": "user", "content": text(f"turn {round_number} " + "U" * 3000)}]
+                    body = compact_conversation(prompt(messages=messages), 2500)
+                    messages = body["messages"]
+                rendered = json.dumps(messages)
+                self.assertEqual(rendered.count("Provider Hub removed"), 1)
+                self.assertIn("opening task", rendered)
+                self.assertIn("turn 5", rendered)
+                self.assertRegex(rendered, r"Provider Hub removed (\d{2}) earlier messages")
+                count = int(re.search(r"Provider Hub removed (\d+)", rendered).group(1))
+                self.assertGreater(count, 6)
 
     def test_token_calibration_only_lowers_estimates_within_bounds(self):
         calibration = TokenCalibration()

@@ -1310,6 +1310,41 @@ def _append_note(message, note):
     return merged
 
 
+_REMOVED_NOTE = re.compile(r"\[Provider Hub removed ([\d,]+) earlier messages? from this conversation "
+                           r"so it fits the model's context window\.\]")
+
+
+def _without_removed_notes(message):
+    """``message`` minus earlier compaction notes, and how many messages they counted.
+
+    Each compaction used to add its own note in front of the kept history, so
+    a long conversation carried dozens of them. The caller writes one note
+    with the cumulative count instead.
+    """
+    if not isinstance(message, dict) or message.get("role") != "user":
+        return message, 0
+    body = message.get("content")
+    counted = 0
+    if isinstance(body, str):
+        found = _REMOVED_NOTE.findall(body)
+        if not found:
+            return message, 0
+        counted = sum(int(value.replace(",", "")) for value in found)
+        parts = [part for part in body.split("\n\n") if not _REMOVED_NOTE.fullmatch(part.strip())]
+        return {**message, "content": "\n\n".join(parts)}, counted
+    if not isinstance(body, list):
+        return message, 0
+    kept = []
+    for block in body:
+        text = block.get("text") if isinstance(block, dict) and block.get("type") == "text" else None
+        match = _REMOVED_NOTE.fullmatch(text.strip()) if isinstance(text, str) else None
+        if match:
+            counted += int(match.group(1).replace(",", ""))
+        else:
+            kept.append(block)
+    return ({**message, "content": kept}, counted) if counted else (message, 0)
+
+
 # Kept in front of a compacted tail only while it stays a small share of the
 # budget, so a huge opening paste cannot crowd out the recent turns.
 COMPACT_HEAD_SHARE = 0.25
@@ -1424,7 +1459,15 @@ def compact_conversation(payload: dict, max_tokens: int, estimate=None) -> dict:
     dropped = sum(len(unit) for unit in candidates[:len(candidates) - len(kept_units)])
     kept = [message for unit in kept_units for message in unit]
     if dropped:
-        note = (f"[Provider Hub removed {dropped} earlier message{'s' if dropped != 1 else ''} from this conversation "
+        earlier = 0
+        if head:
+            stripped, count = _without_removed_notes(head[0])
+            head, earlier = [stripped, *head[1:]], earlier + count
+        if kept:
+            kept[0], count = _without_removed_notes(kept[0])
+            earlier += count
+        total = dropped + earlier
+        note = (f"[Provider Hub removed {total} earlier message{'s' if total != 1 else ''} from this conversation "
                 "so it fits the model's context window.]")
         if kept and isinstance(kept[0], dict) and kept[0].get("role") == "user":
             kept[0] = _user_with_note(kept[0], note, prefix=head[0] if head else None)
