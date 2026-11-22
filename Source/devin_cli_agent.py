@@ -378,7 +378,8 @@ def _write_turn_config(workspace):
              f"if name not in {allowed!r} and not (isinstance(name, str) and name.startswith('mcp__host__')):\n"
              f"    print(json.dumps({{'decision': 'block', 'reason': {_NATIVE_GUARD_REASON!r}}}))")
     # A failing interpreter is a block too (hook exit code 2).
-    command = shlex.join([sys.executable, "-I", "-c", guard]) + " || exit 2"
+    # Isolated mode ignores PYTHONPYCACHEPREFIX. Keep the signed app sealed.
+    command = shlex.join([sys.executable, "-I", "-B", "-c", guard]) + " || exit 2"
     config.write_text(json.dumps({
         "version": 1, "permissions": {"ask": list(_NATIVE_ASK)},
         "subagents_enabled": False, "auto_update": False,

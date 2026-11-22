@@ -11,6 +11,7 @@ from __future__ import annotations
 import itertools
 import json
 from pathlib import Path
+import shlex
 import unittest
 from unittest import mock
 
@@ -523,7 +524,8 @@ class TurnTests(unittest.TestCase):
                 settings = json.loads(config.read_text())
                 self.assertEqual(set(settings["permissions"]["ask"]), {"exec", "read", "grep", "edit", "write"})
                 self.assertFalse(any(settings["read_config_from"].values()))
-                self.assertTrue(settings["hooks"]["PreToolUse"])
+                hook = settings["hooks"]["PreToolUse"][0]["hooks"][0]
+                self.assertEqual(shlex.split(hook["command"])[1:4], ["-I", "-B", "-c"])
             return original(method, params, timeout)
 
         fake.request = request
