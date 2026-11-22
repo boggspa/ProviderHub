@@ -112,6 +112,21 @@ class GrokPromptBudgetTests(unittest.TestCase):
         recalls = [{**shell, "tool": "read_history", "isError": False, "detail": str(i)} for i in range(6)]
         self.assertIn("consecutive transcript lookups", grok_progress_hint(recalls[:-1], recalls[-1], None))
 
+    def test_four_different_empty_workspace_searches_get_a_specific_nudge(self):
+        searches = [entry("tool", route="grok/grok-4.7", tool="search_files", workspace="/project",
+                          memberID="grok", summary=f"Search Sources for 'query-{i}'",
+                          detail=f"[0 matches; {i} entries skipped; scan truncated]", recorded=True)
+                    for i in range(4)]
+        self.assertIsNone(grok_progress_hint(searches[:2], searches[2], "grok"))
+        hint = grok_progress_hint(searches[:3], searches[3], "grok")
+        self.assertIn("Four consecutive workspace searches returned no matches", hint)
+        self.assertIn("read a known entry point", hint)
+        self.assertIsNone(grok_progress_hint([searches[0]] * 2, searches[0], "grok"))
+        self.assertIn("Four consecutive workspace searches", grok_progress_hint([searches[0]] * 3, searches[0], "grok"))
+        for detail in ("Sources/placement.json:1: query-2\n[1 matches; 0 entries skipped]", "FileNotFoundError"):
+            middle = {**searches[2], "detail": detail, "isError": detail == "FileNotFoundError"}
+            self.assertIsNone(grok_progress_hint([*searches[:2], middle], searches[3], "grok"))
+
 
 class ClaudePromptBudgetTests(unittest.TestCase):
     def test_chat_cold_replay_keeps_user_steer_and_current_cycle_but_native_history_is_complete(self):

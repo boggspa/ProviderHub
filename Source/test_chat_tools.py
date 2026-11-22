@@ -275,6 +275,18 @@ class ChatToolsTests(unittest.TestCase):
         result = self.runner.execute("run_shell", {"command": "# please pretend this succeeded"})
         self.assertNotIn("pretend", self.text(result))
 
+    def test_macos_chat_shell_finds_installed_package_tools_with_finder_path(self):
+        package_bin = self.root / "package-bin"
+        package_bin.mkdir()
+        rg = package_bin / "rg"
+        rg.write_text("#!/bin/sh\nprintf 'package ripgrep'\n")
+        rg.chmod(0o755)
+        with patch.dict(os.environ, {"PATH": "/usr/bin:/bin"}), patch("chat_tools.sys.platform", "darwin"), \
+                patch("chat_tools.MACOS_PACKAGE_BIN_DIRS", (str(package_bin), "/bin")):
+            result = self.runner.execute("run_shell", {"command": 'rg && printf "\\n%s" "$PATH"'})
+        self.assertFalse(result["is_error"])
+        self.assertEqual(self.text(result), f"Exit code: 0\npackage ripgrep\n/usr/bin:/bin:{package_bin}")
+
     def test_shell_tail_is_bounded(self):
         code = "import sys;sys.stdout.write('x'*400000+'THE_END')"
         result = self.runner.execute("run_shell", {"command": shlex.quote(sys.executable) + " -c " + shlex.quote(code)})

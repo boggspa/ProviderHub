@@ -16,6 +16,7 @@ import selectors
 import signal
 import stat
 import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -23,6 +24,7 @@ import uuid
 MAX_OUTPUT = 40_000
 MAX_FILE = 2_000_000
 MAX_SCAN = 5_000
+MACOS_PACKAGE_BIN_DIRS = ("/opt/homebrew/bin", "/usr/local/bin")
 PATCH_BEGIN = "*** Begin Patch"
 PATCH_END = "*** End Patch"
 PATCH_HEADERS = ("Add", "Update", "Delete")
@@ -68,7 +70,7 @@ TOOL_DEFINITIONS = [
     _tool("run_shell", "Run a command with /bin/sh in the workspace under the host's selected approval mode. This is not sandboxed. Output is bounded; timeout is seconds (0.1–300). For CLI compatibility, values 1000–600000 are treated as milliseconds and capped at 300 seconds. "
           "Set background to true for servers, watchers or long jobs: the command keeps running between turns, the call returns its first output and an id for read_process and stop_process, and timeout is not used. Stop background processes you no longer need. "
           "Without background, the command's whole process group ends when the call returns, so a trailing '&', nohup or disown keeps nothing running, and setsid would leave an untracked stray. "
-          "Exit code 127 means a command was not found on PATH: rg, 7z, ffprobe and similar tools are not bundled, so check with `command -v`, and use search_files for literal text in workspace files.", {
+          "Exit code 127 means a command was not found on PATH. Installed tools such as rg are available from standard macOS package directories. If a tool is missing, use grep, find or search_files for workspace searches.", {
         "command": {"type": "string"}, "timeout": {"type": "number", "minimum": 0.1, "maximum": 600000},
         "background": {"type": "boolean"}}, ["command"]),
     _tool("read_process", "Read new output and the status of a background process this chat started. wait is seconds (at most 30) to wait for it to finish first; it returns early when the process exits.", {
@@ -105,8 +107,15 @@ def _bounded(text):
 def _environment():
     # Retain operational PATH/HOME/locale, remove recognizable credentials.
     sensitive = ("KEY", "TOKEN", "SECRET", "PASSWORD", "PASSWD", "CREDENTIAL", "AUTH", "COOKIE")
-    return {key: value for key, value in os.environ.items()
-            if not any(word in key.upper() for word in sensitive)}
+    env = {key: value for key, value in os.environ.items()
+           if not any(word in key.upper() for word in sensitive)}
+    if sys.platform == "darwin":
+        # Finder-launched workers often inherit only the system directories.
+        # Keep the caller's lookup order and add the standard package paths.
+        paths = env.get("PATH", os.defpath).split(os.pathsep)
+        paths.extend(directory for directory in MACOS_PACKAGE_BIN_DIRS if directory not in paths)
+        env["PATH"] = os.pathsep.join(paths)
+    return env
 
 
 class ChatToolRunner:
@@ -599,8 +608,8 @@ class ChatToolRunner:
             prefix += "[earlier output truncated]\n"
         notes = ""
         if code == 127 and reason is None:
-            notes += ("\n[Exit code 127: a command was not found on PATH. Tools such as rg, 7z, ffprobe and bsdtar are not bundled; "
-                      "check with `command -v NAME`, use grep or find, or use search_files for literal text in workspace files.]")
+            notes += ("\n[Exit code 127: a command was not found on PATH. Use `command -v NAME` to check availability. "
+                      "For searches, switch to grep or find, or use search_files for literal text in workspace files.]")
         if _SETSID.search(args["command"]):
             notes += ("\n[setsid started a new session outside this call's process group, so whatever it launched may still be "
                       "running where nothing tracks it and stop_process cannot reach it. Use run_shell with background: true "

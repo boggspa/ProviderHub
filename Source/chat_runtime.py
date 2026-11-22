@@ -124,6 +124,12 @@ def grok_recall(entries, member_id, workspace):
 
 _GROK_HISTORY_TOOLS = {"read_history", "search_history"}
 _GROK_CHECK_TOOLS = _GROK_HISTORY_TOOLS | {"read_file", "search_files", "list_files", "run_shell"}
+_EMPTY_WORKSPACE_SEARCH = re.compile(r"\[0 matches; \d+ entries skipped(?:; scan truncated)?\]")
+
+
+def _grok_empty_search(row):
+    return (row.get("tool") == "search_files" and not row.get("isError")
+            and _EMPTY_WORKSPACE_SEARCH.fullmatch((row.get("detail") or "").strip()) is not None)
 
 
 def _grok_check_key(row):
@@ -152,6 +158,7 @@ def grok_progress_hint(entries, current, member_id):
     if key is None or current.get("changedFiles"):
         return None
     repeated, consecutive_recalls = 1, int(current["tool"] in _GROK_HISTORY_TOOLS)
+    consecutive_empty = int(_grok_empty_search(current))
     checks = 0
     for row in reversed(entries):
         if row.get("workspace", current["workspace"]) != current["workspace"]:
@@ -174,9 +181,14 @@ def grok_progress_hint(entries, current, member_id):
         repeated += prior_key == key
         if consecutive_recalls == checks and row["tool"] in _GROK_HISTORY_TOOLS:
             consecutive_recalls += 1
+        if consecutive_empty == checks and _grok_empty_search(row):
+            consecutive_empty += 1
         if checks == 15:
             break
-    if repeated >= 3:
+    if consecutive_empty >= 4:
+        reason = ("Four consecutive workspace searches returned no matches. Search scopes and globs can exclude the files you need. "
+                  "Check the glob against the file paths, list candidate files, or read a known entry point.")
+    elif repeated >= 3 and consecutive_empty < 3:
         reason = "This check repeated earlier results or failures."
     elif consecutive_recalls >= 6:
         reason = "Six or more consecutive transcript lookups have returned."
