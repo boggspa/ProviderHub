@@ -85,24 +85,106 @@ def now():
 def grok_recall(entries, member_id, workspace):
     """A small cold-start reference from durable workspace observations."""
     observations, seen = [], set()
+    shell_failure_seen = False
     for item in reversed(entries):
         tool = item.get("tool")
-        if (item.get("kind") != "tool" or item.get("recorded") is False or item.get("isError")
+        if (item.get("kind") != "tool" or item.get("recorded") is False
                 or item.get("memberID") != member_id or item.get("workspace", workspace) != workspace
-                or tool not in {"read_file", "search_files", "apply_patch", "list_files"}):
+                or tool not in {"read_file", "search_files", "apply_patch", "list_files", "run_shell"}):
             continue
-        summary = (item.get("summary") or tool).encode("utf-8")[:240].decode("utf-8", "ignore")
-        detail = (item.get("detail") or "").encode("utf-8")
+        detail = (item.get("detail") or "").strip()
+        header, _, output = detail.partition("\n")
+        shell = tool == "run_shell"
+        if shell and (not header.startswith("Exit code: ") or header == "Exit code: 0" and not output.strip()):
+            continue
+        failed = bool(item.get("isError"))
+        if failed and (not shell or shell_failure_seen):
+            continue
+        summary = (item.get("summary") or tool)
+        if shell:
+            # Use the command rather than spending the excerpt on the working directory.
+            summary = summary.partition("\n")[2] or summary
+        summary = summary.encode("utf-8")[:240].decode("utf-8", "ignore")
+        detail = detail.encode("utf-8")
         excerpt = (detail if len(detail) <= 950 else detail[:750] + b"\n[...]\n" + detail[-193:])
         excerpt = excerpt.decode("utf-8", "ignore").strip()
-        key = (tool, summary, excerpt)
+        key = (tool, "" if shell else summary, excerpt)
         if not excerpt or key in seen:
             continue
         seen.add(key)
-        observations.append({"source": item["id"], "tool": tool, "summary": summary, "excerpt": excerpt})
+        record = {"source": item["id"], "tool": tool, "summary": summary, "excerpt": excerpt}
+        if failed:
+            record["outcome"] = "failed"
+            shell_failure_seen = True
+        observations.append(record)
         if len(observations) == 5:
             break
     return observations[::-1]
+
+
+_GROK_HISTORY_TOOLS = {"read_history", "search_history"}
+_GROK_CHECK_TOOLS = _GROK_HISTORY_TOOLS | {"read_file", "search_files", "list_files", "run_shell"}
+
+
+def _grok_check_key(row):
+    tool, detail = row.get("tool"), (row.get("detail") or "").strip()
+    if not detail or tool not in _GROK_CHECK_TOOLS:
+        return None
+    if tool == "run_shell":
+        header, _, output = detail.partition("\n")
+        if not header.startswith("Exit code: "):
+            return None
+        if row.get("isError"):
+            return tool, row.get("summary"), "failed"
+        return (tool, output.strip()) if output.strip() else None
+    if tool == "search_history" and not row.get("isError"):
+        try:
+            matches = json.loads(detail)["matches"]
+            return tool, frozenset(match["id"] for match in matches)
+        except (ValueError, KeyError, TypeError):
+            pass
+    return tool, row.get("summary"), detail
+
+
+def grok_progress_hint(entries, current, member_id):
+    """Detect repeated observations within the current work, even after a cold start."""
+    key = _grok_check_key(current)
+    if key is None or current.get("changedFiles"):
+        return None
+    repeated, consecutive_recalls = 1, int(current["tool"] in _GROK_HISTORY_TOOLS)
+    checks = 0
+    for row in reversed(entries):
+        if row.get("workspace", current["workspace"]) != current["workspace"]:
+            continue
+        if row.get("kind") == "user":
+            targets = chat_team.addressees(row)
+            if not targets or member_id in targets:
+                break
+        if (row.get("kind") != "tool" or row.get("recorded") is False or row.get("memberID") != member_id
+                or row.get("route") != current.get("route")):
+            continue
+        if row.get("changedFiles"):
+            break
+        prior_key = _grok_check_key(row)
+        if prior_key is None:
+            continue
+        checks += 1
+        if checks <= 5 and row.get("grokLoopHint"):
+            return None
+        repeated += prior_key == key
+        if consecutive_recalls == checks and row["tool"] in _GROK_HISTORY_TOOLS:
+            consecutive_recalls += 1
+        if checks == 15:
+            break
+    if repeated >= 3:
+        reason = "This check repeated earlier results or failures."
+    elif consecutive_recalls >= 6:
+        reason = "Six or more consecutive transcript lookups have returned."
+    else:
+        return None
+    return (f"[Provider Hub progress check] {reason} Use the evidence already collected to take the next concrete step. "
+            "If a specific fact is still missing, try a different check. If you cannot proceed, state the precise blocker "
+            "and what would unblock it. Repeat a check only after something relevant changes.")
 
 
 def entry(kind, text="", route="", **extra):
@@ -1286,6 +1368,7 @@ class ChatService:
         self._delegations = min(4, max(0, used)) if type(used) is int else 4
         try:
             choice = self.choice()
+            grok_chat = choice.get("source") == "cli" and chat["route"].split("/", 1)[0] == "grok"
             # Attached folders widen the file tools to the project's secondary
             # roots under the same approvals; the argument stays optional so
             # injected test runners keep their two-parameter signature until
@@ -1478,12 +1561,22 @@ class ChatService:
                         except (ValueError, OSError, TypeError) as exc:
                             result = {"content": [{"type": "text", "text": "The tool completed but its output could not be retained: " + str(exc)}],
                                       "is_error": True, "summary": str(name), "changed_files": []}
-                    results["content"].append({"type": "tool_result", "tool_use_id": call["id"],
-                                              "is_error": result["is_error"], "content": result["content"]})
                     detail = "\n".join(part.get("text", "") for part in result["content"] if part.get("type") == "text")
                     chat_execution.evidence(self, name, arguments, result)
                     visible = entry("tool", route=chat["route"], tool=name, id=display_id, summary=result["summary"], detail=detail,
                                     isError=result["is_error"], changedFiles=result.get("changed_files") or [], workspace=chat["workspace"], recorded=True)
+                    provider_content = result["content"]
+                    if grok_chat and name in _GROK_CHECK_TOOLS:
+                        owner = self.team_parent if self.role == "team" else self
+                        member_id = self.team_member["id"] if self.role == "team" else None
+                        with owner._mutex:
+                            hint = grok_progress_hint(owner.chat["entries"], visible, member_id)
+                        if hint:
+                            # Put the check on a fresh result so a waiting CLI can resume normally.
+                            visible["grokLoopHint"] = True
+                            provider_content = [*provider_content, {"type": "text", "text": hint}]
+                    results["content"].append({"type": "tool_result", "tool_use_id": call["id"],
+                                              "is_error": result["is_error"], "content": provider_content})
                     if result.get("agent_id"): visible["agentID"] = result["agent_id"]
                     if result.get("agent_ids"): visible["agentIDs"] = result["agent_ids"]
                     if tool_attachments: visible["attachments"] = tool_attachments

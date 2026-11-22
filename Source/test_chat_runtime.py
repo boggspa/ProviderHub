@@ -191,6 +191,33 @@ class ChatRuntimeTests(unittest.TestCase):
         self.assertEqual(service.chat["status"], "ready")
         self.assertFalse(any("checkpoint reached" in e.get("text", "").lower() for e in service.chat["entries"]))
 
+    def test_grok_gets_repeat_guidance_through_the_fresh_tool_result(self):
+        from cli_live_session import continuation
+        from codex_session_pool import Lease, digest, history_blocks
+
+        (self.root / "placement.json").write_text("Bay 3 is free\n")
+        call = {"type": "tool_use", "id": "read", "name": "read_file", "input": {"path": "placement.json"}}
+        probe = {**response(""), "content": [call], "stop_reason": "tool_use"}
+        service, transport = self.service([probe, probe, probe, response("Moving on")])
+        transport.rows = [{**model("grok/grok-4.7"), "source": "cli"}]
+        service.refresh()
+        service.create(transport.rows[0]["id"], str(self.root))
+        self.send(service)
+        self.finish(service)
+
+        self.assertEqual(service.chat["status"], "ready")
+        first_results = transport.requests[2]["messages"]
+        self.assertNotIn("progress check", json.dumps(first_results))
+        blocks = history_blocks(first_results)
+        lease = Lease(key="test", pending={"prefix": digest(blocks), "prefix_count": len(blocks),
+                      "calls": {"read": {"name": "read_file", "arguments": call["input"]}}})
+        delta = continuation(lease, transport.requests[3]["messages"], images=False)
+        self.assertIsNotNone(delta)
+        self.assertIn("progress check", json.dumps(delta["read"]))
+        records = [row for row in service.chat["entries"] if row.get("tool") == "read_file"]
+        self.assertEqual([bool(row.get("grokLoopHint")) for row in records], [False, False, True])
+        self.assertNotIn("progress check", records[-1]["detail"])
+
     def test_web_search_default_toggle_and_unsupported_models(self):
         service, transport = self.service([response(), response(), response()])
         service.models[0]["supportsWebSearch"] = True

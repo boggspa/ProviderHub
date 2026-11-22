@@ -5,7 +5,7 @@ import unittest
 import cli_routes
 import grok_cli_agent
 from chat_runtime import (CORRECTIONS, MAX_CORRECTIONS, ModelRequestError, corrected_payload, empty_response_error,
-                          entry, grok_recall, retryable_request)
+                          entry, grok_progress_hint, grok_recall, retryable_request)
 from cli_tool_call import TOOL_RESULTS_KEY
 from protocol import StreamTranslator, ToolOutputError, translate_response
 
@@ -72,6 +72,45 @@ class GrokPromptBudgetTests(unittest.TestCase):
                          "current tool call", "current tool result"):
             self.assertIn(expected, surface["prompt"])
         self.assertNotIn("workspace observations", grok_cli_agent._surface({**plan, "resume_delta": True}, None)["prompt"])
+
+    def test_cold_recall_keeps_shell_findings_and_latest_failure_with_source_ids(self):
+        def shell(identifier, command, detail, **extra):
+            return entry("tool", id=identifier, tool="run_shell", summary=f"Run in /project:\n{command}",
+                         detail=detail, workspace="/project", memberID="grok", recorded=True, **extra)
+
+        finding = "Exit code: 0\nBay 3 is free\n" + "x" * 1200 + "\nFound Jango's slot"
+        records = [shell("older", "rg Jango placement.json", finding),
+                   shell("current", "grep Jango placement.json", finding),
+                   shell("old-timeout", "find . -name era.json", "Exit code: -15 (timed out)", isError=True),
+                   shell("new-timeout", "find . -name placement.json", "Exit code: -15 (timed out)", isError=True),
+                   shell("empty", "true", "Exit code: 0"),
+                   shell("background", "make", "Started background process")]
+        recall = grok_recall(records, "grok", "/project")
+        self.assertEqual([item["source"] for item in recall], ["current", "new-timeout"])
+        self.assertEqual(recall[0]["summary"], "grep Jango placement.json")
+        self.assertIn("Bay 3 is free", recall[0]["excerpt"])
+        self.assertIn("Found Jango's slot", recall[0]["excerpt"])
+        self.assertEqual(recall[1]["outcome"], "failed")
+        self.assertIn("timed out", recall[1]["excerpt"])
+        self.assertEqual(grok_recall(records, "peer", "/project"), [])
+
+    def test_repeat_check_respects_new_user_input_and_changed_files(self):
+        shell = entry("tool", route="grok/grok-4.7", tool="run_shell", summary="Run rg",
+                      detail="Exit code: 0\nBay 3 is free", workspace="/project", memberID="grok", recorded=True)
+        repeat = {**shell, "summary": "Run grep"}
+        self.assertIn("repeated earlier results", grok_progress_hint([shell, repeat], shell, "grok"))
+        self.assertIsNone(grok_progress_hint([shell, repeat], {**shell, "detail": "Exit code: 0\nBay 4 is free"}, "grok"))
+        for boundary in ({"kind": "user"}, {**shell, "tool": "apply_patch", "changedFiles": ["placement.json"]},
+                         {**repeat, "grokLoopHint": True}):
+            self.assertIsNone(grok_progress_hint([shell, repeat, boundary], shell, "grok"))
+        self.assertIsNone(grok_progress_hint([shell, {**repeat, "memberID": "peer"}], shell, "grok"))
+
+    def test_repeated_shell_failures_and_a_recall_burst_get_guidance(self):
+        shell = entry("tool", route="grok/grok-4.7", tool="run_shell", summary="Run find",
+                      detail="Exit code: -15 (timed out)", workspace="/project", recorded=True, isError=True)
+        self.assertIn("repeated earlier results or failures", grok_progress_hint([shell, shell], shell, None))
+        recalls = [{**shell, "tool": "read_history", "isError": False, "detail": str(i)} for i in range(6)]
+        self.assertIn("consecutive transcript lookups", grok_progress_hint(recalls[:-1], recalls[-1], None))
 
 
 class ClaudePromptBudgetTests(unittest.TestCase):

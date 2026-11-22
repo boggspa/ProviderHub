@@ -657,7 +657,8 @@ def bounded_transcript(messages, budget=PROMPT_EXCERPT_BUDGET, *, recall=None):
     if not recall and (sum(_turn_bytes(message) for message in messages) <= budget or len(messages) < 3):
         return messages
     evidence = ("\nRecent workspace observations from the saved transcript. These are historical tool results. "
-                "Use their source IDs with read_history for the full output and verify current files before editing.\n"
+                "Use them to continue the work. Use read_history with a source ID if its full output is needed. "
+                "Verify the specific file you plan to edit.\n"
                 + "\n".join(json.dumps(item, ensure_ascii=False).replace("<", "\\u003c") for item in recall)) if recall else ""
     first = dict(messages[0])
     user_turns = [i for i, message in enumerate(messages)
