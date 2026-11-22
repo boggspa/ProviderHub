@@ -62,9 +62,10 @@ TOOL_DEFINITIONS = [
           "Binary or non-UTF-8 files are refused, naming the offending byte; inspect those with run_shell (file, xxd, od -c, strings, iconv).", {
         "path": {"type": "string"}, "offset": {"type": "integer", "minimum": 1},
         "limit": {"type": "integer", "minimum": 1, "maximum": 2000}}, ["path"]),
-    _tool("search_files", "Search literal text in UTF-8 workspace files, including attached folders, excluding symlinks and .git. Bounded scan.", {
+    _tool("search_files", "Search literal text in UTF-8 workspace files, or set names_only to search for a literal substring of filenames. Excludes symlinks and .git. Bounded scan.", {
         "pattern": {"type": "string"}, "path": {"type": "string"},
-        "glob": {"type": "string"}, "max_results": {"type": "integer", "minimum": 1, "maximum": 500}}, ["pattern"]),
+        "glob": {"type": "string"}, "max_results": {"type": "integer", "minimum": 1, "maximum": 500},
+        "names_only": {"type": "boolean"}}, ["pattern"]),
     _tool("apply_patch", "Apply a Codex *** Begin Patch patch (Add/Update/Delete File, optional Move to) inside the workspace or an attached folder. All hunks are validated first. The host applies the selected approval mode. " + PATCH_FORMAT, {
         "patch": {"type": "string"}}, ["patch"]),
     _tool("run_shell", "Run a command with /bin/sh in the workspace under the host's selected approval mode. This is not sandboxed. Output is bounded; timeout is seconds (0.1–300). For CLI compatibility, values 1000–600000 are treated as milliseconds and capped at 300 seconds. "
@@ -269,7 +270,8 @@ class ChatToolRunner:
         elif name == "read_file":
             summary = f"Read {args['path']} (line {args.get('offset', 1)}, limit {args.get('limit', 500)})"
         else:
-            summary = f"Search {args.get('path', '.')} for {args['pattern']!r} (glob {args.get('glob', '*')})"
+            scope = "filenames in " if args.get("names_only") else ""
+            summary = f"Search {scope}{args.get('path', '.')} for {args['pattern']!r} (glob {args.get('glob', '*')})"
         return {"name": name, "summary": summary, "requires_approval": name in ("apply_patch", "run_shell")}
 
     def execute(self, name, args):
@@ -348,6 +350,12 @@ class ChatToolRunner:
                     os.close(parent)
                 continue
             if not fnmatch.fnmatch(str(path), args.get("glob", "*")):
+                continue
+            if args.get("names_only"):
+                if absolute.is_file() and args["pattern"] in path.name:
+                    results.append(str(path))
+                    if len(results) >= max_results or sum(map(len, results)) >= MAX_OUTPUT:
+                        return "\n".join(results) + "\n[search truncated]"
                 continue
             try:
                 content, _ = self._read(anchor, path)

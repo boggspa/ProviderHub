@@ -287,6 +287,14 @@ class ChatToolsTests(unittest.TestCase):
         self.assertFalse(result["is_error"])
         self.assertEqual(self.text(result), f"Exit code: 0\npackage ripgrep\n/usr/bin:/bin:{package_bin}")
 
+    def test_filename_search_returns_paths_without_reading_file_contents(self):
+        (self.root / "payload.bin").write_bytes(b"\xff\x00")
+        (self.root / "unrelated.txt").write_text("payload is only a word here")
+        (self.root / "payload-link.bin").symlink_to(self.root / "payload.bin")
+        result = self.runner.execute("search_files", {"pattern": "payload", "names_only": True})
+        self.assertFalse(result["is_error"])
+        self.assertEqual(self.text(result), "payload.bin\n[1 matches; 0 entries skipped]")
+
     def test_shell_tail_is_bounded(self):
         code = "import sys;sys.stdout.write('x'*400000+'THE_END')"
         result = self.runner.execute("run_shell", {"command": shlex.quote(sys.executable) + " -c " + shlex.quote(code)})

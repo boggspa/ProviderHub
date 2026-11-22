@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import itertools
 import json
+from pathlib import Path
 import unittest
 from unittest import mock
 
@@ -513,10 +514,94 @@ class TurnTests(unittest.TestCase):
 
     def test_argv_carries_model_and_acp(self):
         fake = self._scripted([_prompt_response(100)])
+        original = fake.request
+
+        def request(method, params=None, timeout=None):
+            if method == "initialize":
+                config = Path(fake.argv[2])
+                self.assertEqual(config.parent.parent, Path(fake.env["XDG_CONFIG_HOME"]))
+                settings = json.loads(config.read_text())
+                self.assertEqual(set(settings["permissions"]["ask"]), {"exec", "read", "grep", "edit", "write"})
+                self.assertFalse(any(settings["read_config_from"].values()))
+                self.assertTrue(settings["hooks"]["PreToolUse"])
+            return original(method, params, timeout)
+
+        fake.request = request
         _run(fake, {"model": "gpt-5.6-sol",
                     "messages": [{"role": "user", "content": "hi"}]})
-        self.assertEqual(fake.argv[1:], ["acp", "--model", "gpt-5.6-sol"])
+        self.assertEqual(fake.argv[1], "--config")
+        self.assertEqual(fake.argv[3:], ["acp", "--process-model", "in-process", "--model", "gpt-5.6-sol"])
         self.assertTrue(fake.argv[0].endswith("devin"))
+
+    def test_native_calls_transfer_only_at_a_permission_or_guard_boundary(self):
+        from chat_tools import TOOL_DEFINITIONS
+        from cli_lifecycle import TurnTiming
+
+        permission = {"jsonrpc": "2.0", "id": 7, "method": "session/request_permission",
+                      "params": {"sessionId": "s1", "toolCall": {"toolCallId": "native"},
+                                 "options": [{"kind": "allow_once", "optionId": "one"}]}}
+        guard = {"method": "session/update", "params": {"sessionId": "s1", "update": {
+            "sessionUpdate": "tool_call_update", "toolCallId": "native", "status": "failed",
+            "content": [{"type": "content", "content": {"type": "text",
+                         "text": "Tool rejected: " + m._NATIVE_GUARD_REASON}}]}}}
+        for name, raw, boundary, expected in (
+            ("exec", {"command": "printf fixture"}, permission, ("run_shell", {"command": "printf fixture"})),
+            ("read", {"file_path": "fixture.txt", "limit": 2}, permission, ("read_file", {"path": "fixture.txt", "limit": 2})),
+            ("grep", {"query": "witness"}, permission, ("search_files", {"pattern": "witness", "path": "."})),
+            ("find_file_by_name", {"query": "fixture.txt"}, guard,
+             ("search_files", {"pattern": "fixture.txt", "path": ".", "names_only": True})),
+            ("edit", {"file_path": "fixture.txt"}, permission, None),
+            ("exec", {"command": "printf fixture"}, _prompt_response(100), None),
+        ):
+            with self.subTest(name=name, boundary=boundary.get("method")):
+                announcement = _tool_call_update("native", raw_input=raw, meta={"cognition.ai/inferenceToolName": name})
+                fake = self._scripted([announcement, boundary])
+                timing = TurnTiming("devin-cli", "swe-2")
+                events, _ = _run(fake, {**_tools_request(), "tools": TOOL_DEFINITIONS, "_cli_timing": timing})
+                self.assertEqual(timing.values["devin_native_attempts"], 1)
+                self.assertFalse(any(json.loads(line).get("id") == 7 for line in fake.sent))
+                calls = [(e["name"], e["input"]) for e in events if e["type"] == "tool_call"]
+                self.assertEqual(calls, [expected] if expected else [])
+                if expected:
+                    self.assertEqual(timing.values["devin_native_forwarded"], 1)
+                    self.assertEqual(events[-1]["stop_reason"], "tool_use")
+                elif name == "edit":
+                    self.assertEqual(timing.values["devin_native_redirected"], 1)
+                    self.assertIn("The user did not deny it", events[-1]["message"])
+                    self.assertIn("mcp__host__apply_patch", events[-1]["message"])
+
+    def test_native_mapping_rebases_temporary_paths_and_rejects_unsupported_options(self):
+        from chat_tools import TOOL_DEFINITIONS
+
+        toolset = m.HostToolset(TOOL_DEFINITIONS, prefix="")
+        cwd = "/synthetic/devin"
+        self.assertEqual(m._translate_native("read", {"file_path": cwd + "/src/a.txt", "offset": 3}, cwd, toolset),
+                         ("read_file", {"path": "src/a.txt", "offset": 3}))
+        self.assertIsNone(m._translate_native("exec", {"command": "pwd", "workdir": "subfolder"}, cwd, toolset))
+        self.assertIsNone(m._translate_native("grep", {"query": "a|b"}, cwd, toolset))
+        self.assertIsNone(m._translate_native("read", {"file_path": "a.txt"}, cwd, None))
+
+    def test_unmapped_native_call_retries_with_a_provider_hub_explanation(self):
+        from cli_routes import _tool_turn
+
+        redirect = {"type": "error", "code": "devin_native_tool_redirect",
+                    "message": "Provider Hub stopped the built-in edit. The user did not deny it. Use the attached MCP tool."}
+        delivered = []
+
+        def run(request, *, timeout):
+            delivered.append(request)
+            if len(delivered) == 1:
+                yield redirect
+            else:
+                yield {"type": "text_delta", "text": "Recovered"}
+                yield {"type": "message_stop", "stop_reason": "end_turn"}
+
+        request = _tools_request()
+        with mock.patch.object(m, "run_turn", run):
+            events = list(_tool_turn(m, request, timeout=30))
+        self.assertEqual([e["type"] for e in events if e["type"] != "ping"], ["text_delta", "message_stop"])
+        self.assertEqual(delivered[1]["messages"][-1]["content"], redirect["message"])
+        self.assertEqual(len(request["messages"]), 1)
 
     def test_permission_request_is_denied_never_allowed(self):
         fake = self._scripted([

@@ -16,10 +16,9 @@ streams ``session/update`` notifications, and sends the client
 ``session/request_permission`` requests mid-turn. This v1 route is deliberately
 the minimal honest slice:
 
-* one ``devin acp --model <id>`` child per turn, in a fresh empty workspace
-  (the agent's own tools have nothing to touch and every permission request
-  for a non-host tool is answered with a reject/cancel outcome — never an
-  allow for Devin's own side effects);
+* one in-process ACP child per turn, with a temporary workspace and isolated
+  tool configuration. Supported native requests can be translated into host
+  calls. The child receives no native workspace approval;
 * the rendered transcript is the whole prompt, exactly like the other text
   adapters, and only ``agent_message_chunk``/``agent_thought_chunk`` updates
   become ``text_delta``/``thinking_delta`` events;
@@ -41,8 +40,11 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import shlex
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -83,6 +85,11 @@ _INITIALIZE_PARAMS = {
 
 _PERMISSION_METHOD = "session/request_permission"
 _METHOD_NOT_FOUND = -32601
+_NATIVE_HOST_TOOLS = {"exec": "run_shell", "read": "read_file", "grep": "search_files",
+                      "find_file_by_name": "search_files", "edit": "apply_patch", "write": "apply_patch"}
+_NATIVE_ASK = ("exec", "read", "grep", "edit", "write")
+_NATIVE_GUARD_REASON = "Provider Hub handles workspace tools and approvals. The user did not deny this call."
+_CONFIG_IMPORTS = "agents_standard cursor windsurf claude copilot codex kiro opencode zed".split()
 
 _ROLES = ("user", "assistant")
 
@@ -336,7 +343,7 @@ def _validate_model(model: str | None) -> str:
     return stripped
 
 
-def build_argv(model, *, effort=None, system=None, stream=True, **_ignored) -> list[str]:
+def build_argv(model, *, config=None, effort=None, system=None, stream=True, **_ignored) -> list[str]:
     """Full argv for one ACP turn. argv[0] is the bare binary name.
 
     ``effort`` is accepted and ignored on purpose: Devin bakes the reasoning
@@ -346,7 +353,39 @@ def build_argv(model, *, effort=None, system=None, stream=True, **_ignored) -> l
     dropped behaviour — no caller can request an effort this route honours.
     ``system`` never reaches argv (SYSTEM_PROMPT_TRANSPORT is "prompt").
     """
-    return ["devin", "acp", "--model", _validate_model(model)]
+    options = ["--config", str(config)] if config else []
+    process = ["--process-model", "in-process"] if config else []
+    return ["devin", *options, "acp", *process, "--model", _validate_model(model)]
+
+
+def _write_turn_config(workspace):
+    """Isolate user config and MCP discovery while keeping the CLI's login data root."""
+    root = Path(workspace) / "config"
+    folder = root / "devin"
+    folder.mkdir(parents=True, mode=0o700)
+    config = folder / "config.json"
+    # Devin can auto-run tools that ignore ask rules (observed for filename
+    # search). Block those before execution, including tools added by a future
+    # CLI. Only local MCP discovery and tool names with verified ask rules
+    # reach Devin's normal permission checks.
+    # File tools can fail in Devin's empty cwd before its permission phase.
+    # Intercept them at the hook and let the host check its own workspace.
+    # Keep shell requests behind Devin's explicit ask seam as well.
+    allowed = ("exec", "mcp_list_tools", "mcp_list_servers")
+    guard = ("import json,sys\n"
+             "try: name = json.load(sys.stdin).get('tool_name', '')\n"
+             "except (ValueError, AttributeError): name = ''\n"
+             f"if name not in {allowed!r} and not (isinstance(name, str) and name.startswith('mcp__host__')):\n"
+             f"    print(json.dumps({{'decision': 'block', 'reason': {_NATIVE_GUARD_REASON!r}}}))")
+    # A failing interpreter is a block too (hook exit code 2).
+    command = shlex.join([sys.executable, "-I", "-c", guard]) + " || exit 2"
+    config.write_text(json.dumps({
+        "version": 1, "permissions": {"ask": list(_NATIVE_ASK)},
+        "subagents_enabled": False, "auto_update": False,
+        "read_config_from": dict.fromkeys(_CONFIG_IMPORTS, False),
+        "hooks": {"PreToolUse": [{"hooks": [{"type": "command", "command": command}]}]},
+    }), encoding="utf-8")
+    return root, config
 
 
 # ---------------------------------------------------------------------------
@@ -538,6 +577,8 @@ def _host_tool_call(payload: dict, toolset: HostToolset | None):
     """
     if toolset is None or not isinstance(payload, dict):
         return None
+    if _native_identity(payload) in _NATIVE_HOST_TOOLS:
+        return None
     for qualified, container, key in _iter_identities(payload):
         host = _resolve_host_tool(toolset, qualified)
         if host is None:
@@ -568,8 +609,9 @@ def _host_tools_note(toolset: HostToolset, tool_choice=None) -> str:
         f"(server `{SERVER_NAME}`). Call them directly as tools — they may appear "
         f"qualified with the server name, e.g. `{SERVER_NAME}__{served}` for "
         f"`{example}`. Each call ends your turn: the host runs it and returns the "
-        "result on the next turn. They are the only tools that act on the host; "
-        "your own built-in tools are disabled.",
+        "result on the next turn. Use these tools for workspace actions. The CLI's own "
+        "workspace is temporary. Provider Hub may translate a supported built-in call into a host "
+        "call. A built-in tool blocked by this bridge is a routing restriction, not a user denial.",
     ]
     if isinstance(tool_choice, dict):
         kind = tool_choice.get("type")
@@ -584,16 +626,101 @@ def _host_tools_note(toolset: HostToolset, tool_choice=None) -> str:
     return " ".join(lines)
 
 
+def _native_identity(update):
+    meta = update.get("_meta")
+    name = meta.get("cognition.ai/inferenceToolName") if isinstance(meta, dict) else None
+    if isinstance(name, str) and re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{0,79}", name):
+        return name
+    return None
+
+
+def _host_path(value, cwd):
+    """Translate paths expanded by Devin inside its temporary working directory."""
+    if not isinstance(value, str) or not value or "\x00" in value:
+        raise ValueError("Invalid native path")
+    if os.path.isabs(value):
+        path = os.path.realpath(value)
+        if os.path.commonpath((path, cwd)) == cwd:
+            return os.path.relpath(path, cwd)
+    # The host validates absolute paths against its selected workspace and attachments.
+    return value
+
+
+def _translate_native(name, raw, cwd, toolset):
+    host = _NATIVE_HOST_TOOLS.get(name)
+    if not host or name in {"edit", "write"} or toolset is None or not isinstance(raw, dict):
+        return None
+    try:
+        toolset.model_name(host)
+        if name == "exec":
+            if set(raw) - {"command", "workdir"} or _host_path(raw.get("workdir", "."), cwd) != ".":
+                return None
+            command = raw.get("command")
+            if not isinstance(command, str) or not command.strip() or "\x00" in command or cwd in command:
+                return None
+            return host, {"command": command}
+        if name == "read":
+            if set(raw) - {"file_path", "offset", "limit"}:
+                return None
+            args = {"path": _host_path(raw.get("file_path"), cwd)}
+            for key, maximum in (("offset", 10**9), ("limit", 2000)):
+                if key in raw:
+                    if type(raw[key]) is not int or not 1 <= raw[key] <= maximum:
+                        return None
+                    args[key] = raw[key]
+            return host, args
+        if set(raw) - {"query", "path"}:
+            return None
+        query = raw.get("query")
+        if not isinstance(query, str) or not query.strip() or "\x00" in query:
+            return None
+        if name == "grep" and re.search(r"[.\\^$*+?{}\[\]|()]", query):
+            return None  # A regex must not silently become a literal search.
+        if name == "find_file_by_name" and re.search(r"[/\\*?{}\[\]]", query):
+            return None
+        args = {"pattern": query, "path": _host_path(raw.get("path", "."), cwd)}
+        if name == "find_file_by_name":
+            args["names_only"] = True
+        return host, args
+    except (ValueError, KeyError, OSError):
+        return None
+
+
+def _native_handoff(call_id, name, raw, cwd, toolset, timing):
+    mapped = _translate_native(name, raw, cwd, toolset)
+    if mapped:
+        if timing:
+            timing.increment("devin_native_forwarded")
+        host, arguments = mapped
+        yield {"type": "tool_call", "id": call_id, "name": host, "input": arguments}
+        yield {"type": "message_stop", "stop_reason": "tool_use"}
+        return
+    if timing:
+        timing.increment("devin_native_redirected")
+    host = _NATIVE_HOST_TOOLS.get(name)
+    if host and toolset is not None:
+        try:
+            target = f"Use the attached Provider Hub MCP tool mcp__host__{toolset.model_name(host)}."
+            if name in {"grep", "find_file_by_name"}:
+                target += " Use literal search arguments or request the host shell if a regex or glob is needed."
+        except KeyError:
+            target = "Choose an attached Provider Hub tool or report what capability is missing."
+    else:
+        target = "Choose an attached Provider Hub tool or report what capability is missing."
+    yield {"type": "error", "code": "devin_native_tool_redirect", "message":
+           f"Devin's built-in {name} call was stopped by Provider Hub before execution. "
+           f"The user did not deny it. {target} Continue from the existing host results and never repeat completed work."}
+
+
 def _update_events(item: dict, toolset: HostToolset | None = None,
                    state: dict | None = None) -> Iterator[dict]:
     """One session/update notification -> adapter events.
 
     Text/thinking chunks pass through as before. A ``tool_call`` update that
     resolves to one of this turn's host MCP tools becomes a ``tool_call``
-    event and sets ``state['host_call']`` so the driver ends the turn — the
-    harness executes the call and the next turn replays its result. Devin's
-    own tool calls resolve to nothing and stay invisible here (they are
-    denied at the permission seam regardless).
+    event and sets ``state['host_call']`` so the driver ends the turn. The
+    driver separately handles native announcements and their permission or
+    guard responses before releasing any translated calls.
     """
     params = item.get("params")
     update = params.get("update") if isinstance(params, dict) else None
@@ -643,22 +770,12 @@ def _reject_option(options: Any) -> str | None:
 
 
 def _allow_option(options: Any) -> str | None:
-    """Pick an allow optionId, preferring the one-shot kind."""
-    entries = options if isinstance(options, list) else []
-    kinds = []
-    for entry in entries:
-        if isinstance(entry, dict):
+    """Pick only a one-shot option. Never persist an ACP permission grant."""
+    for entry in options if isinstance(options, list) else []:
+        if isinstance(entry, dict) and entry.get("kind") == "allow_once":
             option_id = entry.get("optionId")
-            kind = entry.get("kind")
             if isinstance(option_id, str) and option_id:
-                kinds.append((option_id, str(kind or "")))
-    for wanted in ("allow_once",):
-        for option_id, kind in kinds:
-            if kind == wanted:
                 return option_id
-    for option_id, kind in kinds:
-        if kind.startswith("allow"):
-            return option_id
     return None
 
 
@@ -805,6 +922,9 @@ def _drive_turn(session: StdioSession, plan: dict, cwd: str,
     stop_reason = None
     prompt_error = None
     call_state: dict = {}
+    native_calls = {}
+    real_cwd = os.path.realpath(cwd)
+    timing = plan.get("timing")
     while stop_reason is None and prompt_error is None and not call_state.get("host_call"):
         remaining = deadline - time.monotonic()
         if remaining <= 0 or getattr(session, "_eof", False):
@@ -816,9 +936,42 @@ def _drive_turn(session: StdioSession, plan: dict, cwd: str,
                 continue  # raw diagnostic lines carry no protocol state
             method = item.get("method")
             if method is not None and "id" in item:
+                params = item.get("params")
+                if method == _PERMISSION_METHOD and isinstance(params, dict) and params.get("sessionId") == session_id:
+                    call = params.get("toolCall")
+                    identifier = call.get("toolCallId") if isinstance(call, dict) else None
+                    if isinstance(identifier, str) and identifier in native_calls and _allow_option(params.get("options")):
+                        name, raw = native_calls[identifier]
+                        # Leave Devin paused at the permission boundary. The host will
+                        # execute only after validating the translated call and its approval.
+                        yield from _native_handoff(identifier, name, raw, real_cwd, toolset, timing)
+                        return
                 _answer_inbound(session, item, toolset)
                 continue
             if method == "session/update":
+                params = item.get("params")
+                update = params.get("update") if isinstance(params, dict) and params.get("sessionId") == session_id else None
+                if isinstance(update, dict):
+                    identifier = update.get("toolCallId")
+                    name = _native_identity(update)
+                    if (update.get("sessionUpdate") == "tool_call" and isinstance(identifier, str) and identifier
+                            and name and name not in {"mcp_list_tools", "mcp_list_servers"} and not name.startswith("mcp__")
+                            and _host_tool_call(update, toolset) is None):
+                        if len(native_calls) >= 64:
+                            yield {"type": "error", "message": "Devin sent too many unresolved native tool calls."}
+                            return
+                        native_calls[identifier] = (name, update.get("rawInput"))
+                        if timing:
+                            timing.increment("devin_native_attempts")
+                        continue
+                    if (isinstance(identifier, str) and identifier in native_calls
+                            and update.get("sessionUpdate") == "tool_call_update" and update.get("status") == "failed"):
+                        name, raw = native_calls.pop(identifier)
+                        content = update.get("content") or []
+                        if any(isinstance(part, dict) and _content_text(part) == "Tool rejected: " + _NATIVE_GUARD_REASON
+                               for part in content):
+                            yield from _native_handoff(identifier, name, raw, real_cwd, toolset, timing)
+                            return
                 yield from _update_events(item, toolset, call_state)
                 if call_state.get("host_call"):
                     break
@@ -888,6 +1041,8 @@ def run_turn(request, *, spawner=None, timeout=300) -> Iterator[dict]:
         # still gets a real cwd the CLI requires. The host tool manifest lives
         # here too, owner-only, and dies with the directory.
         workspace_path = tempfile.mkdtemp(prefix="devin_cli_")
+        config_root, config = _write_turn_config(workspace_path)
+        plan["timing"] = request.get("_cli_timing")
         mcp_servers = []
         if plan.get("toolset") is not None:
             tools_path = plan["toolset"].write(workspace_path)
@@ -895,11 +1050,11 @@ def run_turn(request, *, spawner=None, timeout=300) -> Iterator[dict]:
             mcp_servers = [{"name": SERVER_NAME, "command": command[0],
                             "args": command[1:], "env": []}]
         stderr_handle = tempfile.TemporaryFile(mode="w+", encoding="utf-8")
-        argv = build_argv(plan["model"])
+        argv = build_argv(plan["model"], config=config)
         argv[0] = binary
         session = StdioSession(
             argv,
-            env={**minimal_env(), **_account_env(request.get("config_dir"))},
+            env={**minimal_env(), **_account_env(request.get("config_dir")), "XDG_CONFIG_HOME": str(config_root)},
             cwd=workspace_path,
             timeout=float(timeout),
             spawner=spawner,

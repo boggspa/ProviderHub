@@ -728,9 +728,10 @@ def _tool_turn(adapter, request, *, timeout):
                         and time.monotonic() < deadline:
                     restart = "protocol"
                     break
-                if event.get("code") == "cli_native_approval" and approval_redirects \
+                if event.get("code") in {"cli_native_approval", "devin_native_tool_redirect"} and approval_redirects \
                         and time.monotonic() < deadline:
-                    restart = "native_approval"
+                    restart = event["code"]
+                    redirect_detail = event.get("message", "")
                     break
                 kind = event.get("type")
                 if kind == "web_search" and not native and current.get("web_search") is not None:
@@ -790,7 +791,10 @@ def _tool_turn(adapter, request, *, timeout):
                     "complete: do not perform that work again or restate its outcome as new. Continue "
                     "from those results and issue only the call that comes next - or the final answer "
                     "if no call remains - " + convention + "Never simulate a result.")
-        elif restart == "native_approval":
+        elif restart == "devin_native_tool_redirect":
+            approval_redirects -= 1
+            note = redirect_detail
+        elif restart == "cli_native_approval":
             approval_redirects -= 1
             note = ("Your previous response tried to run a command with your own built-in shell tool. That "
                     "tool is switched off in this host and waited for an approval nobody can give, so the "
