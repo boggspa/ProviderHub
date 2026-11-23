@@ -730,6 +730,86 @@ class PlanTurnIntegrationTests(unittest.TestCase):
         self.assertEqual(module.TRANSPORT, "acp_stdio")
         self.assertEqual(module.SYSTEM_PROMPT_TRANSPORT, "prompt")
 
+    def test_only_chat_passes_a_conversation_scope(self):
+        from cli_routes import plan_turn
+
+        for surface in ("chat", "responses", "messages"):
+            with self.subTest(surface=surface):
+                messages = _tools_request()["messages"]
+                payload = {"messages": messages, "tools": _TOOLS, "_provider_hub_surface": surface,
+                           "_provider_hub_conversation": "chat:member", "_provider_hub_connection": "account"}
+                body = plan_turn("devin-cli", "swe-2", payload, {}, wanted_output=64)["body"]
+                self.assertEqual(body.get("conversation"), "chat:member" if surface == "chat" else None)
+                self.assertEqual(body.get("history"), messages)
+
+
+class LiveTurnTests(unittest.TestCase):
+    def test_mcp_result_and_follow_up_reuse_one_process(self):
+        from cli_host_bridge import HostCallBridge
+        from host_tools_mcp import exchange
+        from cli_routes import _messages_for_cli, relay_cli_turn, run_turn
+        from tempfile import TemporaryDirectory
+        from threading import Thread
+
+        with TemporaryDirectory(prefix="phd-test-", dir="/tmp") as workspace:
+            fake = FakeSession([])
+            bridge = HostCallBridge(workspace, lambda name: name)
+            self.addCleanup(bridge.close)
+            stderr = mock.Mock()
+            state = m._PromptState(stderr, session_id="s1", prompt_id=100)
+            live = m.cli_live_session.LiveSession(fake, workspace, bridge, state, interrupt=lambda session: None)
+            pool = m.SessionPool(m.cli_live_session.dispose, label="test Devin")
+            try:
+                call = _tool_call_update("weather", meta={"cognition.ai/inferenceToolName": "mcp__host__get_weather"},
+                                         raw_input={"city": "Paris"})
+                fake.lines.extend([call])
+                replies = []
+                request = {"params": {"name": "get_weather", "arguments": {"city": "Paris"}}}
+                worker = Thread(target=lambda: replies.append(exchange(request, bridge.endpoint)), daemon=True)
+                worker.start()
+
+                history = [{"role": "user", "content": "weather in Paris?"}]
+
+                def round_trip():
+                    messages, _ = _messages_for_cli(history, None)
+                    request = {**_tools_request(), "messages": messages, "history": history,
+                               "conversation": "probe:seat"}
+                    output = []
+                    turn = run_turn("devin-cli", request, parse_tool_calls=True, timeout=3)
+                    result = relay_cli_turn(turn, output.append, model="swe-2")
+                    return result, output, turn.timing
+
+                with mock.patch.object(m, "_POOL", pool), mock.patch.object(m, "_spawn_live", return_value=live) as spawn:
+                    result, events, timing = round_trip()
+                    self.assertEqual(result["stop_reason"], "tool_use")
+                    self.assertTrue(timing.delivered)
+                    blocks = [e["content_block"] for e in events if e["type"] == "content_block_start"]
+                    self.assertEqual(blocks[-1]["id"], "weather")
+                    self.assertFalse(replies)
+                    history.extend([{"role": "assistant", "content": [{"type": "tool_use", "id": "weather",
+                                     "name": "get_weather", "input": {"city": "Paris"}}]},
+                                    {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "weather",
+                                     "content": "Rain receipt", "is_error": True}]}])
+                    fake.lines.extend([_update("agent_message_chunk", "Rain receipt"), _prompt_response(100)])
+                    result, _, timing = round_trip()
+                    worker.join(1)
+                    self.assertEqual(replies, [{"isError": True, "content": [{"type": "text", "text": "Rain receipt"}]}])
+                    self.assertEqual(result["stop_reason"], "end_turn")
+                    self.assertEqual(timing.values["continuation_kind"], "tool_result")
+                    self.assertFalse(fake.sent)
+                    history.extend([{"role": "assistant", "content": "Rain receipt"},
+                                    {"role": "user", "content": "Repeat the receipt"}])
+                    fake._ids = itertools.count(101)
+                    fake.lines.extend([_update("agent_message_chunk", "Rain receipt"), _prompt_response(101)])
+                    result, _, timing = round_trip()
+                    self.assertEqual(result["stop_reason"], "end_turn")
+                    self.assertEqual(timing.values["continuation_kind"], "native_session")
+                    self.assertEqual(json.loads(fake.sent[0])["params"], {
+                        "sessionId": "s1", "prompt": [{"type": "text", "text": "Repeat the receipt"}]})
+                    spawn.assert_called_once()
+            finally:
+                pool.close()
+
 
 if __name__ == "__main__":
     unittest.main()

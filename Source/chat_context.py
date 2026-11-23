@@ -11,7 +11,7 @@ from codex_session_pool import digest, history_blocks
 
 def native_context(choice):
     return (choice.get("source") == "cli"
-            and choice.get("route", "").split("/", 1)[0] in {"claude", "codex", "grok"})
+            and choice.get("route", "").split("/", 1)[0] in {"claude", "codex", "grok", "devin-cli"})
 
 
 def stable_reference_context(choice):

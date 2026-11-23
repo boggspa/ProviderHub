@@ -16,19 +16,13 @@ streams ``session/update`` notifications, and sends the client
 ``session/request_permission`` requests mid-turn. This v1 route is deliberately
 the minimal honest slice:
 
-* one in-process ACP child per turn, with a temporary workspace and isolated
-  tool configuration. Supported native requests can be translated into host
-  calls. The child receives no native workspace approval;
-* the rendered transcript is the whole prompt, exactly like the other text
-  adapters, and only ``agent_message_chunk``/``agent_thought_chunk`` updates
-  become ``text_delta``/``thinking_delta`` events;
-* host tools ride ``session/new``'s ``mcpServers`` as a list-only
-  ``host_tools_mcp`` stdio server — Devin sees them as native MCP tools and
-  calls them itself, but the server executes nothing: the adapter translates
-  the ACP ``tool_call`` update into a ``tool_call`` event, ends the turn, and
-  the desktop harness runs the call and replays its result next turn. This is
-  the stateless Option-A shape; a live ``HostCallBridge`` continuation is a
-  documented follow-up, not v1.
+* isolated ACP children have temporary workspaces and receive no native
+  workspace approval. Supported native requests may transfer to host tools;
+* Chat can keep a child waiting at its MCP call. Only a checked continuation
+  can deliver host results, and only a checked new user turn can reuse a
+  completed ACP prompt. A fresh child receives a rendered transcript;
+* callers without a conversation scope and native translations retain the
+  transcript-replay path. Neither MCP transport executes workspace actions.
 
 fs capabilities are never claimed, so nothing outside the transcript and the
 attached host MCP server is exposed. ACP session resumption, ``--agent-type``
@@ -38,6 +32,8 @@ follow-ups, not v1 scope.
 """
 from __future__ import annotations
 
+import atexit
+from dataclasses import dataclass
 import json
 import os
 import re
@@ -50,11 +46,15 @@ import time
 from pathlib import Path
 from typing import Any, Iterator
 
+from cli_conversation import Receipt, completed_delta, scope as conversation_scope
+from cli_host_bridge import HostBridgeError, HostCallBridge
 from cli_host_mcp import SERVER_NAME, HostToolset, server_command
 from cli_lifecycle import cleanup_after_exit
-from cli_session import CliSessionError, StdioSession, minimal_env, resolve_binary
-from cli_tool_call import (HOST_EXECUTION_NOTE, TOOL_RESULTS_KEY,
+import cli_live_session
+from cli_session import StdioSession, minimal_env, resolve_binary
+from cli_tool_call import (HOST_EXECUTION_NOTE, MAX_CALLS_PER_TURN, TOOL_RESULTS_KEY,
                            normalize_tools, transcript_footer)
+from codex_session_pool import SessionPool, digest, history_blocks
 from devin_models import catalogue_rows
 
 PROVIDER_ID = "devin-cli"
@@ -64,6 +64,8 @@ SYSTEM_PROMPT_TRANSPORT = "prompt"
 #: Host tools reach Devin as native MCP tools on session/new, never as a
 #: rendered call protocol — the same surface claude_cli_agent declares.
 HOST_TOOL_TRANSPORT = "mcp"
+LIVE_HOST_CALLS = True
+_LIVE_QUIET_SECONDS = 0.5
 BINARY_NAMES = ("devin",)
 _EXTRA_BIN_DIRS = ("~/.local/bin",)
 
@@ -600,7 +602,7 @@ def _host_tool_call(payload: dict, toolset: HostToolset | None):
     return None
 
 
-def _host_tools_note(toolset: HostToolset, tool_choice=None) -> str:
+def _host_tools_note(toolset: HostToolset, tool_choice=None, *, live=False) -> str:
     """System text telling Devin how the attached host MCP tools are named."""
     example = toolset.tools[0]["name"]
     served = toolset.model_name(example)
@@ -609,10 +611,11 @@ def _host_tools_note(toolset: HostToolset, tool_choice=None) -> str:
         "The host application's tools are attached to this session as MCP tools "
         f"(server `{SERVER_NAME}`). Call them directly as tools — they may appear "
         f"qualified with the server name, e.g. `{SERVER_NAME}__{served}` for "
-        f"`{example}`. Each call ends your turn: the host runs it and returns the "
-        "result on the next turn. Use these tools for workspace actions. The CLI's own "
+        f"`{example}`. Use these tools for workspace actions. The CLI's own "
         "workspace is temporary. Provider Hub may translate a supported built-in call into a host "
         "call. A built-in tool blocked by this bridge is a routing restriction, not a user denial.",
+        ("Wait for each host result and continue the task in this session." if live else
+         "Each host call ends this step. The host runs the call and returns its result in the next prompt."),
     ]
     if isinstance(tool_choice, dict):
         kind = tool_choice.get("type")
@@ -843,7 +846,7 @@ def _rpc_error(response: Any, method: str) -> str | None:
     return None
 
 
-def _plan(request: Any) -> dict:
+def _plan(request: Any, *, live=False) -> dict:
     """Validate the request and render the ACP prompt content."""
     if not isinstance(request, dict):
         raise DevinCliAgentError("request must be an object")
@@ -856,74 +859,47 @@ def _plan(request: Any) -> dict:
     tool_choice = request.get("tool_choice")
     toolset = HostToolset(tools, prefix="") if tools else None
     if toolset is not None:
-        note = _host_tools_note(toolset, tool_choice)
+        note = _host_tools_note(toolset, tool_choice, live=live)
         system = note + ("\n\n" + system if system else "")
     return {"model": model, "prompt": render_prompt(messages, system=system),
             "tools": tools, "tool_choice": tool_choice, "toolset": toolset}
 
 
-def _drive_turn(session: StdioSession, plan: dict, cwd: str,
-                *, timeout: float,
-                mcp_servers: list | None = None,
-                toolset: HostToolset | None = None) -> Iterator[dict]:
-    """Run the ACP handshake + one prompt, yielding adapter events.
-
-    initialize -> session/new -> session/prompt, then a manual event loop:
-    ``session.request`` cannot be used for the prompt itself because the agent
-    sends ``session/request_permission`` *requests* mid-turn that must be
-    answered while the prompt is still outstanding. ``mcp_servers`` is the
-    list-only host tool server (empty when the request carried no tools) and
-    ``toolset`` resolves the tool names its calls report back as.
-    """
-    deadline = time.monotonic() + timeout
-    try:
-        remaining = max(0.01, deadline - time.monotonic())
-        response = session.request("initialize", _INITIALIZE_PARAMS,
-                                   timeout=min(60.0, remaining))
-    except CliSessionError as exc:
-        yield {"type": "error", "message": str(exc)}
-        return
+def _open_session(session, cwd, mcp_servers, deadline):
+    response = session.request("initialize", _INITIALIZE_PARAMS,
+                               timeout=min(60.0, max(0.01, deadline - time.monotonic())))
     failure = _rpc_error(response, "initialize")
     if failure:
-        yield {"type": "error", "message": failure}
-        return
+        raise DevinCliAgentError(failure)
 
     session.notify("initialized", {})
-    try:
-        remaining = max(0.01, deadline - time.monotonic())
-        response = session.request("session/new",
-                                   {"cwd": cwd, "mcpServers": mcp_servers or []},
-                                   timeout=min(60.0, remaining))
-    except CliSessionError as exc:
-        yield {"type": "error", "message": str(exc)}
-        return
+    response = session.request("session/new", {"cwd": cwd, "mcpServers": mcp_servers},
+                               timeout=min(60.0, max(0.01, deadline - time.monotonic())))
     failure = _rpc_error(response, "session/new")
     if failure:
-        yield {"type": "error", "message": failure}
-        return
+        raise DevinCliAgentError(failure)
     session_id = _session_id(response.get("result") if isinstance(response, dict) else None)
     if not session_id:
-        yield {"type": "error",
-               "message": "the devin CLI opened no ACP session (no sessionId in session/new)"}
-        return
+        raise DevinCliAgentError("the devin CLI opened no ACP session (no sessionId in session/new)")
+    return session_id
 
-    # The prompt id continues the session's own request-id sequence so it can
-    # never collide with the initialize/session/new ids request() already used.
+
+def _send_prompt(session, session_id, prompt):
     prompt_id = next(session._ids)
-    try:
-        session.send(json.dumps({
-            "jsonrpc": "2.0", "id": prompt_id, "method": "session/prompt",
-            "params": {"sessionId": session_id,
-                       "prompt": [{"type": "text", "text": plan["prompt"]}]},
-        }))
-    except (OSError, ValueError, BrokenPipeError) as exc:
-        yield {"type": "error", "message": f"could not write the ACP prompt: {exc}"}
-        return
+    session.send(json.dumps({"jsonrpc": "2.0", "id": prompt_id, "method": "session/prompt",
+                             "params": {"sessionId": session_id, "prompt": [{"type": "text", "text": prompt}]}}))
+    return prompt_id
 
+
+def _read_prompt(session, session_id, prompt_id, plan, cwd, deadline, *, bridge=None, hold=None):
+    """Stream one host leg of an outstanding ACP prompt."""
+    toolset = plan["toolset"]
     stop_reason = None
     prompt_error = None
     call_state: dict = {}
     native_calls = {}
+    host_calls = {}
+    last_call = 0.0
     real_cwd = os.path.realpath(cwd)
     timing = plan.get("timing")
     while stop_reason is None and prompt_error is None and not call_state.get("host_call"):
@@ -932,7 +908,7 @@ def _drive_turn(session: StdioSession, plan: dict, cwd: str,
             break
         if session.returncode is not None:
             break
-        for item in session.events(timeout=min(2.0, max(0.05, remaining))):
+        for item in session.events(timeout=min(0.2 if bridge else 2.0, remaining)):
             if not isinstance(item, dict):
                 continue  # raw diagnostic lines carry no protocol state
             method = item.get("method")
@@ -947,11 +923,20 @@ def _drive_turn(session: StdioSession, plan: dict, cwd: str,
                         # execute only after validating the translated call and its approval.
                         yield from _native_handoff(identifier, name, raw, real_cwd, toolset, timing)
                         return
-                _answer_inbound(session, item, toolset)
+                    if bridge and isinstance(identifier, str) and identifier in host_calls:
+                        last_call = time.monotonic()
+                        requested = _host_tool_call(call, toolset)
+                        announced = host_calls[identifier]
+                        if requested is not None and requested[0] == announced["name"]:
+                            _answer_inbound(session, item, toolset)
+                            continue
+                _answer_inbound(session, item, None if bridge else toolset)
                 continue
             if method == "session/update":
                 params = item.get("params")
                 update = params.get("update") if isinstance(params, dict) and params.get("sessionId") == session_id else None
+                if update is None:
+                    continue
                 if isinstance(update, dict):
                     identifier = update.get("toolCallId")
                     name = _native_identity(update)
@@ -973,6 +958,17 @@ def _drive_turn(session: StdioSession, plan: dict, cwd: str,
                                for part in content):
                             yield from _native_handoff(identifier, name, raw, real_cwd, toolset, timing)
                             return
+                if bridge:
+                    for event in _update_events(item, toolset):
+                        if event["type"] != "tool_call":
+                            yield event
+                        elif len(host_calls) >= MAX_CALLS_PER_TURN or event["id"] in host_calls:
+                            yield {"type": "error", "message": "Devin sent an invalid host tool batch."}
+                            return
+                        else:
+                            host_calls[event["id"]] = event
+                            last_call = time.monotonic()
+                    continue
                 yield from _update_events(item, toolset, call_state)
                 if call_state.get("host_call"):
                     break
@@ -988,6 +984,16 @@ def _drive_turn(session: StdioSession, plan: dict, cwd: str,
                     reason = result.get("stopReason") if isinstance(result, dict) else None
                     stop_reason = _map_stop_reason(reason)
                 break
+        if bridge and host_calls and not (stop_reason or prompt_error):
+            status = bridge.check(host_calls)
+            if status == "conflict":
+                yield {"type": "error", "message": "Devin's MCP call did not match its ACP announcement."}
+                return
+            if status == "ready" and time.monotonic() - last_call >= _LIVE_QUIET_SECONDS and session.returncode is None:
+                hold(host_calls)
+                yield from host_calls.values()
+                yield {"type": "message_stop", "stop_reason": "tool_use"}
+                return
         if getattr(session, "_eof", False):
             break
 
@@ -1001,6 +1007,9 @@ def _drive_turn(session: StdioSession, plan: dict, cwd: str,
         yield {"type": "message_stop", "stop_reason": "tool_use"}
         return
     if stop_reason is not None:
+        if host_calls:
+            yield {"type": "error", "message": "Devin finished before Provider Hub could confirm its waiting MCP call."}
+            return
         yield {"type": "message_stop", "stop_reason": stop_reason}
         return
     if deadline - time.monotonic() <= 0:
@@ -1010,14 +1019,151 @@ def _drive_turn(session: StdioSession, plan: dict, cwd: str,
         except Exception:  # noqa: BLE001
             pass
         yield {"type": "error",
-               "message": f"the devin CLI did not finish within {timeout:.0f}s; "
+           "message": "the devin CLI did not finish before its deadline; "
                           "Provider Hub stopped it"}
         return
     yield {"type": "error",
            "message": "the devin acp session ended before completing the turn"}
 
 
-def run_turn(request, *, spawner=None, timeout=300) -> Iterator[dict]:
+def _drive_turn(session, plan, cwd, *, timeout, mcp_servers):
+    deadline = time.monotonic() + timeout
+    session_id = _open_session(session, cwd, mcp_servers, deadline)
+    prompt_id = _send_prompt(session, session_id, plan["prompt"])
+    yield from _read_prompt(session, session_id, prompt_id, plan, cwd, deadline)
+
+
+@dataclass
+class _PromptState:
+    stderr_handle: Any
+    session_id: str = ""
+    prompt_id: int = 0
+
+    def next_leg(self):
+        # ACP keeps the same outstanding prompt id through each result batch.
+        pass
+
+
+def _interrupt(session):
+    if session.returncode is None and session.process is not None:
+        try:
+            session.process.terminate()
+        except OSError:
+            pass
+
+
+_POOL = SessionPool(cli_live_session.dispose, capacity=16, idle_ttl=0, pending_ttl=900, label="Devin")
+atexit.register(_POOL.close)
+
+
+def _spawn(request, plan, workspace, *, spawner, timeout, bridge=None):
+    binary = _resolve_binary()
+    if not binary:
+        raise DevinCliAgentError(
+            "the devin CLI was not found on PATH; install the Devin CLI and sign in with "
+            "`devin auth login`, or switch this route to API-key credentials")
+    config_root, config = _write_turn_config(workspace)
+    servers = []
+    if plan["toolset"] is not None:
+        command = server_command(plan["toolset"].write(workspace, bridge=bridge))
+        servers = [{"name": SERVER_NAME, "command": command[0], "args": command[1:], "env": []}]
+    argv = build_argv(plan["model"], config=config)
+    argv[0] = binary
+    stderr = tempfile.TemporaryFile(mode="w+", encoding="utf-8")
+    try:
+        session = StdioSession(argv, cwd=workspace, timeout=float(timeout), spawner=spawner, stderr=stderr,
+                               env={**minimal_env(), **_account_env(request.get("config_dir")),
+                                    "XDG_CONFIG_HOME": str(config_root)})
+    except BaseException:
+        stderr.close()
+        raise
+    return session, stderr, servers
+
+
+def _spawn_live(request, plan, deadline, spawner):
+    # Short explicit root because macOS's default TMPDIR can exhaust sun_path.
+    workspace = tempfile.mkdtemp(prefix="ph-devin-", dir="/tmp")
+    bridge = None
+    live = None
+    try:
+        bridge = HostCallBridge(workspace, plan["toolset"].host_name)
+        session, stderr, servers = _spawn(request, plan, workspace, bridge=bridge, spawner=spawner,
+                                          timeout=max(0.01, deadline - time.monotonic()))
+        state = _PromptState(stderr)
+        live = cli_live_session.LiveSession(session, workspace, bridge, state, interrupt=_interrupt)
+        state.session_id = _open_session(session, workspace, servers, deadline)
+        state.prompt_id = _send_prompt(session, state.session_id, plan["prompt"])
+        return live
+    except BaseException:
+        if live is not None:
+            live.close()
+        else:
+            if bridge is not None:
+                bridge.close()
+            shutil.rmtree(workspace, ignore_errors=True)
+        raise
+
+
+def _delta(lease, history):
+    return (completed_delta(lease, history) if lease.pending.get("completed")
+            else cli_live_session.continuation(lease, history, images=False))
+
+
+def _live_turn(request, plan, pool, *, timeout, spawner):
+    history = request["history"]
+    prefix = history_blocks(history)
+    key = digest((conversation_scope(request), request.get("connection"), request.get("config_dir"),
+                  plan["model"], request.get("system"), plan["tools"], plan["tool_choice"]))
+    deadline = time.monotonic() + timeout
+    lease, reuse = pool.acquire(key, match=lambda entry: _delta(entry, history) is not None,
+                                timeout=timeout, request_key=digest((key, prefix)))
+    timing = plan.get("timing")
+    try:
+        if reuse == "resumed":
+            live = lease.session
+            completed = lease.pending.get("completed")
+            delta = _delta(lease, history)
+            lease.pending = None
+            if completed:
+                from cli_routes import _messages_for_cli
+                messages, _ = _messages_for_cli(delta, None)
+                live.state.prompt_id = _send_prompt(live.session, live.state.session_id, render_prompt(messages))
+            elif not live.resume(delta):
+                return "replay"
+            if timing:
+                timing.label(reuse="resumed", continuation_kind="native_session" if completed else "tool_result",
+                             cli_pid=getattr(live.session.process, "pid", None))
+        else:
+            try:
+                live = _spawn_live(request, plan, deadline, spawner)
+            except HostBridgeError:
+                return "replay"
+            lease.session = live
+            if timing:
+                timing.label(reuse="cold")
+
+        def hold(calls):
+            lease.pending = {"calls": calls, "prefix": digest(prefix), "prefix_count": len(prefix)}
+
+        receipt = Receipt()
+        events = _read_prompt(live.session, live.state.session_id, live.state.prompt_id, plan, live.workspace,
+                              deadline, bridge=live.bridge, hold=hold)
+        try:
+            for event in events:
+                receipt.observe(event)
+                if event.get("type") == "message_stop" and event.get("stop_reason") == "end_turn":
+                    lease.pending = receipt.completed(history)
+                yield event
+        finally:
+            events.close()
+    finally:
+        keep = bool(lease.pending) and (timing is None or timing.delivered)
+        if not keep and lease.session is not None:
+            lease.session.close()
+        pool.release(lease, healthy=keep)
+
+
+def run_turn(request, *, spawner=None, timeout=300, pool=None) -> Iterator[dict]:
     """Stream one turn as text_delta / thinking_delta / message_stop / error.
 
     Always terminates with exactly one message_stop or error event, and never
@@ -1028,39 +1174,19 @@ def run_turn(request, *, spawner=None, timeout=300) -> Iterator[dict]:
     stderr_handle = None
     session = None
     try:
-        plan = _plan(request)
-        binary = _resolve_binary()
-        if not binary:
-            raise DevinCliAgentError(
-                "the devin CLI was not found on PATH; install the Devin CLI "
-                "(`curl -fsSL https://cli.devin.ai/install.sh | bash`) and sign "
-                "in with `devin auth login`, or switch this route to API-key "
-                "credentials"
-            )
-        # A fresh empty directory per turn: the agent's own tools (which this
-        # route cannot supervise) have no workspace to touch, and session/new
-        # still gets a real cwd the CLI requires. The host tool manifest lives
-        # here too, owner-only, and dies with the directory.
+        owner = pool if pool is not None else (_POOL if spawner is None else None)
+        live = (owner is not None and isinstance(request, dict) and conversation_scope(request)
+                and isinstance(request.get("history"), list) and bool(request.get("tools")))
+        if live:
+            plan = {**_plan(request, live=True), "timing": request.get("_cli_timing")}
+            if plan["toolset"] is not None:
+                deadline = time.monotonic() + timeout
+                if (yield from _live_turn(request, plan, owner, timeout=timeout, spawner=spawner)) != "replay":
+                    return
+                timeout = max(0.01, deadline - time.monotonic())
+        plan = {**_plan(request), "timing": request.get("_cli_timing")}
         workspace_path = tempfile.mkdtemp(prefix="devin_cli_")
-        config_root, config = _write_turn_config(workspace_path)
-        plan["timing"] = request.get("_cli_timing")
-        mcp_servers = []
-        if plan.get("toolset") is not None:
-            tools_path = plan["toolset"].write(workspace_path)
-            command = server_command(tools_path)
-            mcp_servers = [{"name": SERVER_NAME, "command": command[0],
-                            "args": command[1:], "env": []}]
-        stderr_handle = tempfile.TemporaryFile(mode="w+", encoding="utf-8")
-        argv = build_argv(plan["model"], config=config)
-        argv[0] = binary
-        session = StdioSession(
-            argv,
-            env={**minimal_env(), **_account_env(request.get("config_dir")), "XDG_CONFIG_HOME": str(config_root)},
-            cwd=workspace_path,
-            timeout=float(timeout),
-            spawner=spawner,
-            stderr=stderr_handle,
-        )
+        session, stderr_handle, mcp_servers = _spawn(request, plan, workspace_path, spawner=spawner, timeout=timeout)
     except Exception as exc:  # noqa: BLE001 - every setup failure is an event
         if workspace_path:
             shutil.rmtree(workspace_path, ignore_errors=True)
@@ -1077,9 +1203,7 @@ def run_turn(request, *, spawner=None, timeout=300) -> Iterator[dict]:
     try:
         with session:
             yield from _drive_turn(session, plan, workspace_path,
-                                   timeout=float(timeout),
-                                   mcp_servers=mcp_servers,
-                                   toolset=plan.get("toolset"))
+                                   timeout=float(timeout), mcp_servers=mcp_servers)
     except Exception as exc:  # noqa: BLE001
         yield {"type": "error", "message": str(exc)}
     finally:

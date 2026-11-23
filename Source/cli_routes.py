@@ -556,7 +556,7 @@ def plan_turn(provider_id: str, upstream_model: str, payload: dict, spec: dict,
         request["host_retries"] = request["lean_harness"] and payload.get("_provider_hub_host_retries") is True
         if request["lean_harness"]:
             request["conversation"] = payload.get("_provider_hub_conversation")
-    if provider_id in {"grok", "antigravity"} and payload.get("_provider_hub_surface") == "chat":
+    if provider_id in {"grok", "antigravity", "devin-cli"} and payload.get("_provider_hub_surface") == "chat":
         request["conversation"] = payload.get("_provider_hub_conversation")
         request["connection"] = payload.get("_provider_hub_connection")
         if provider_id == "grok":
@@ -814,6 +814,9 @@ def _tool_turn(adapter, request, *, timeout):
             note += (" The text you wrote before that point has already been shown to the user; "
                      "do not repeat it.")
         current = {**current, "messages": [*current.get("messages", []), {"role": "user", "content": note}]}
+        if getattr(adapter, "PROVIDER_ID", None) == "devin-cli":
+            # The correction exists only in this render, so deliver it in a fresh prompt.
+            current["conversation"] = None
 
 
 def _parse_tool_stream(events, *, tools=None, tool_choice=None, native=False):
