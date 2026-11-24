@@ -1155,7 +1155,7 @@ private struct SettingsPage: View {
                     Spacer().frame(height: 10)
                     PaneHeader(presentation: model.providerDefinitions.first { $0.id == "antigravity" }?.presentation, title: "Antigravity", subtitle: "app preferences", accent: Chroma.antigravity, state: nil)
                     SectionLabel(text: "Appearance")
-                    option("Provider accent colours and logos", "Launches Antigravity through the DevTools-pipe helper that paints provider logos in its model picker and pill and accents its tool groups. Unsupported by Google.", $model.settings.antigravity_accent, Chroma.antigravity)
+                    option("Provider accent colours and logos", "Shows provider logos and colours in the model picker, composer and tool groups.", $model.settings.antigravity_accent, Chroma.antigravity)
                 }.frame(maxWidth: .infinity, alignment: .topLeading)
                 VStack(alignment: .leading, spacing: 6) {
                     PaneHeader(presentation: model.providerDefinitions.first { $0.id == "codex" }?.presentation, title: "Codex / ChatGPT", subtitle: "app preferences", accent: Chroma.codex, state: nil)

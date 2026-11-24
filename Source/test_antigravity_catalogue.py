@@ -4,7 +4,7 @@ from __future__ import annotations
 import unittest
 
 from antigravity_catalogue import (catalogue_digest, choices, launch_settings,
-                                   project_antigravity, route_for_slug, slug_for)
+                                   effort_choices, project_antigravity, route_for_slug, slug_for)
 
 
 def entry(route, **extra):
@@ -56,6 +56,36 @@ class ProjectionTests(unittest.TestCase):
         # The rows are ordered by their label, the way the picker shows them.
         self.assertEqual([row["route"] for row in projected["models"]],
                          ["codex/gpt-5.2-codex", "mistral/large-3"])
+
+    def test_only_the_models_advertised_levels_are_selectable(self):
+        plain, reasoning = project_antigravity(self.settings, self.inventory)["models"]
+        self.assertEqual(list(effort_choices(plain)), [])
+        variants = list(effort_choices(reasoning))
+        self.assertEqual([row["effort"] for row in variants], ["low", "medium", "high"])
+        self.assertEqual(reasoning["default_effort"], "high")
+
+    def test_picker_shows_native_rungs_switches_and_fixed_models(self):
+        canonical = ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]
+        cases = (
+            ("antigravity/gemini-4-hydrogen", canonical, ["low", "medium", "high", "xhigh"],
+             ["Low", "Medium", "High", "Extra High"]),
+            ("antigravity/gpt-oss-120b", canonical, ["medium"], []),
+            ("kimi/kimi-for-coding-highspeed", ["high"], [], []),
+            ("minimax/MiniMax-M2.7-highspeed", ["high"], [], []),
+            ("minimax/MiniMax-M3", ["none", "high"], [], ["Off", "On"]),
+            ("mimo/mimo-v2.6-pro", ["none", "high"], [], ["Off", "On"]),
+            ("mistral/mistral-medium-latest", ["none", "low", "medium", "high", "max"], [],
+             ["Off", "On"]),
+            ("minimax/MiniMax-M3.1-Flash-Preview", ["low", "medium", "high", "xhigh", "max"], [],
+             ["Low", "Medium", "High", "Extra High", "Max"]),
+        )
+        for route, modes, native_modes, expected in cases:
+            with self.subTest(route=route):
+                inventory = {"models": [entry(route, reasoning=True, effort_modes=modes,
+                                              provider_effort_modes=native_modes)]}
+                row, = project_antigravity(self.settings, inventory)["models"]
+                self.assertEqual([variant["label"]
+                                  for variant in effort_choices(row)], expected)
 
     def test_a_saved_selection_narrows_the_list(self):
         settings = {**self.settings, "antigravity_catalogue": ["mistral/large-3"]}

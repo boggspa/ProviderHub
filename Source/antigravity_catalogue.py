@@ -6,8 +6,9 @@ import hashlib
 import json
 
 from catalogue import fits_desktop_baseline
-from effort_map import display_effort_modes
+from effort_map import EFFORT_ORDER
 from hub_config import MODEL_VARIANT_FIELDS, connection_signature, qualify, split_route
+from provider_registry import _KIMI_FIXED_THINKING_MODELS
 from providers import PROVIDERS
 
 
@@ -109,6 +110,24 @@ def _features(entry: dict) -> dict:
     }
 
 
+def _picker_effort_modes(entry: dict, provider_id: str, model_id: str) -> list[str]:
+    if entry.get("reasoning") is False:
+        return []
+    if provider_id == "antigravity":
+        native = entry.get("provider_effort_modes") or []
+        # The CLI maps Off to a reasoning rung. Single-rung families only
+        # implement other ranks as prompt guidance.
+        return list(native) if len(native) > 1 else []
+    if provider_id == "kimi" and model_id in _KIMI_FIXED_THINKING_MODELS:
+        return []
+    if provider_id == "minimax" and model_id.startswith("MiniMax-M2"):
+        return []
+    modes = list(entry.get("effort_modes") or [])
+    if provider_id in {"minimax", "mimo", "mistral"} and {"none", "high"} <= set(modes):
+        return ["none", "high"]
+    return modes
+
+
 def project_antigravity(settings: dict, inventory: dict) -> dict:
     """The Antigravity model entries for the catalogue, and what was left out.
 
@@ -133,7 +152,7 @@ def project_antigravity(settings: dict, inventory: dict) -> dict:
         entries = selected
     for entry in entries:
         route = entry["id"]
-        provider_id, _ = split_route(route)
+        provider_id, model_id = split_route(route)
         if provider_id not in PROVIDERS:
             continue
         if PROVIDERS[provider_id].get("protocol", "chat_completions") == "agent_session":
@@ -150,6 +169,7 @@ def project_antigravity(settings: dict, inventory: dict) -> dict:
         context = _context(entry)
         output = _output_cap(entry, context)
         slug = slug_for(route)
+        modes = [mode for mode in _picker_effort_modes(entry, provider_id, model_id) if mode in EFFORT_ORDER]
         models.append({
             "route": route,
             # What Antigravity sends upstream. The gateway turns it back into
@@ -160,12 +180,42 @@ def project_antigravity(settings: dict, inventory: dict) -> dict:
             "context": context,
             "max_output_tokens": output,
             "reasoning": entry.get("reasoning") is True,
-            "effort_modes": list(display_effort_modes(entry)),
+            "effort_modes": modes,
+            "default_effort": _default_effort(entry, modes),
             "features": _features(entry),
             "fits_desktop_baseline": fits_desktop_baseline(context),
         })
     models.sort(key=lambda row: (row["display_name"].casefold(), row["route"]))
     return {"models": models, "excluded": excluded}
+
+
+_EFFORT_LABELS = {"none": "Off", "xhigh": "Extra High"}
+
+
+def _default_effort(entry: dict, modes: list[str]) -> str | None:
+    """The level a conversation runs at until someone picks one."""
+    if not modes:
+        return None
+    chosen = entry.get("default_effort")
+    if chosen in modes:
+        return chosen
+    for fallback in ("high", "medium"):
+        if fallback in modes:
+            return fallback
+    return modes[-1]
+
+
+def effort_choices(row: dict) -> list[dict]:
+    """The levels a row's effort submenu offers, in ascending order.
+
+    A two-level ladder (off and high) reads as Off/On, the way providers that
+    only switch reasoning on or off describe it.
+    """
+    modes = set(row["effort_modes"])
+    binary = modes == {"none", "high"}
+    return [{"effort": effort,
+             "label": "On" if binary and effort == "high" else _EFFORT_LABELS.get(effort, effort.title())}
+            for effort in EFFORT_ORDER if effort in modes]
 
 
 def choices(settings: dict, inventory: dict) -> list[dict]:

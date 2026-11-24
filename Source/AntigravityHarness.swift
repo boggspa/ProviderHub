@@ -98,8 +98,6 @@ extension BridgeModel {
             }
             let activation = try await command("antigravity-activate")
             antigravityProfileActive = true; antigravityRecoveryNeeded = true
-            let configuration = NSWorkspace.OpenConfiguration()
-            configuration.activates = true
             // The endpoint and the key travel in the app's environment:
             // Antigravity's Gemini client reads both from there, and neither
             // ever reaches a file.
@@ -114,21 +112,8 @@ extension BridgeModel {
             let gatewayEnvironment = ["AGY_LLM_GATEWAY_URL": baseURL,
                                       "AGY_LLM_GATEWAY_API_KEY": try gatewayToken(),
                                       "AGY_LLM_GATEWAY_WIRE_PROTOCOL": "genai"]
-            var launchedPID: pid_t = 0
-            if savedSettings.antigravity_accent {
-                launchedPID = try await launchAntigravityWithAccentBridge(appPath: appPath, gateway: gatewayEnvironment)
-            } else {
-                configuration.environment = gatewayEnvironment
-                try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-                    NSWorkspace.shared.openApplication(at: URL(fileURLWithPath: appPath), configuration: configuration) { application, error in
-                        if let error { continuation.resume(throwing: error) }
-                        else {
-                            launchedPID = application?.processIdentifier ?? 0
-                            continuation.resume()
-                        }
-                    }
-                }
-            }
+            let launchedPID = try await launchAntigravityWithAccentBridge(
+                appPath: appPath, gateway: gatewayEnvironment, accent: savedSettings.antigravity_accent)
             // The gateway environment lives in the launched process, so the
             // Hub records which one it launched to tell its own session apart
             // from an Antigravity the user started themselves.
@@ -158,14 +143,14 @@ extension BridgeModel {
     /// Antigravity's cue to quit. The gateway connection reaches the app
     /// through the helper's environment, which forwards those three
     /// variables and nothing else of the Hub's. Returns the app's pid.
-    func launchAntigravityWithAccentBridge(appPath: String, gateway: [String: String]) async throws -> pid_t {
+    func launchAntigravityWithAccentBridge(appPath: String, gateway: [String: String], accent: Bool) async throws -> pid_t {
         guard let python else { throw WorkerError(message: "Provider Hub needs Python 3.11 or newer for the accent helper.") }
         if let existing = antigravityAccentProcess, existing.isRunning {
             throw WorkerError(message: "A previous Antigravity accent helper is still running. Quit Antigravity, then launch again.")
         }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: python)
-        process.arguments = [helper.path, "antigravity-accent", "--app", appPath]
+        process.arguments = [helper.path, "antigravity-accent", "--app", appPath] + (accent ? [] : ["--no-accent"])
         process.environment = workerEnvironment.merging(gateway) { _, new in new }
         let output = Pipe(), errors = Pipe()
         process.standardOutput = output; process.standardError = errors
@@ -204,7 +189,7 @@ extension BridgeModel {
         guard launched > 0 else {
             if process.isRunning { process.terminate() }
             antigravityAccentProcess = nil
-            throw WorkerError(message: "Antigravity did not start through the accent helper. Turn provider accents for Antigravity off to launch it the usual way.")
+            throw WorkerError(message: "Antigravity did not start through the accent helper.")
         }
         // A direct spawn is not activated the way a LaunchServices open is.
         Task { @MainActor in

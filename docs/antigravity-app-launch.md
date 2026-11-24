@@ -64,12 +64,17 @@ itself.
 
 ## Picker and effort
 
-The picker rows are whatever `project_antigravity` emits for the curated
-`antigravity_catalogue` (or every tool-capable route when the selection is
-"all"). The language server reads display names, context and output limits from
-the model-list response.
+`project_antigravity` supplies the curated `antigravity_catalogue`, or every
+compatible tool-capable route when the selection is "all". The language server
+reads display names, context and output limits from the model-list response.
 
-For v1 the app sends `thinkingConfig.thinkingBudget: 0` on gateway-discovered
-models, which `gemini_to_messages` maps to `thinking: disabled` upstream. The
-model-list shape does not currently expose per-model thinking levels to the
-picker, so Provider Hub effort selections do not yet surface inside Antigravity.
+Gateway discovery advertises one entry per model. Hover over a model with
+adjustable reasoning, or focus it and press Right Arrow, to open its Thinking
+effort menu. Binary switches show Off and On. Routes through the Antigravity
+CLI show the levels that provider exposes. The submenu works with provider
+colours and logos turned off.
+
+Provider Hub remembers effort selections per conversation and model. New
+conversations start with the last effort picked for that model, or its default.
+The gateway uses the selected level for conversation turns and preserves
+support for saved model IDs with an effort suffix.

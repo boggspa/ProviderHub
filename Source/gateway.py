@@ -1838,6 +1838,7 @@ def main():
     parser.add_argument("--parent-pipe", action="store_true")
     parser.add_argument("--detach", action="store_true", help="serve: run as a detached service, stopped only on request")
     parser.add_argument("--app", help="App bundle to launch for codex-accent, vibe-accent or antigravity-accent")
+    parser.add_argument("--no-accent", action="store_true", help="Disable Antigravity provider accents")
     args = parser.parse_args()
     root = state_root()
     bootstrap_metadata(root)
@@ -1875,7 +1876,9 @@ def main():
         from antigravity_accent import bridge_command as antigravity_accent_bridge
         settings = load_settings(root)
         private_directory(root)
-        sys.exit(antigravity_accent_bridge(args.app, settings, cached_catalogue(settings, root),
+        planned, _ = apply_plan(settings, cached_catalogue(settings, root), root)
+        planned, inventory = attach_model_specs(planned, root)
+        sys.exit(antigravity_accent_bridge(args.app, planned, inventory, accent=not args.no_accent,
                                            log_path=root / "antigravity-accent.log", state_root=root))
     if args.command == "inspect":
         result = inspect_state(root)

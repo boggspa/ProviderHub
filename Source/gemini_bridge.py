@@ -29,7 +29,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from antigravity_catalogue import project_antigravity, route_for_slug
+import antigravity_effort
+from antigravity_catalogue import effort_choices, project_antigravity, route_for_slug
 
 
 #: The path prefix Antigravity's Gemini client uses.
@@ -136,7 +137,7 @@ def _blocks(parts, calls: _ToolCalls) -> list[dict]:
     return blocks
 
 
-def gemini_to_messages(payload: dict, route: str) -> dict:
+def gemini_to_messages(payload: dict, route: str, *, effort: str | None = None) -> dict:
     """A Gemini request as an Anthropic Messages request for a Hub route."""
     calls = _ToolCalls()
     messages: list[dict] = []
@@ -172,15 +173,22 @@ def gemini_to_messages(payload: dict, route: str) -> dict:
     if isinstance(stops, list) and stops:
         request["stop_sequences"] = [stop for stop in stops if isinstance(stop, str)]
 
-    thinking = generation.get("thinkingConfig") or {}
-    budget = thinking.get("thinkingBudget")
-    if type(budget) is int:
-        # Anthropic's smallest enabled budget is 1024 tokens, and a zero
-        # budget is the explicit "do not think" spelling.
-        request["thinking"] = {"type": "enabled", "budget_tokens": max(1024, budget)} if budget > 0 else {"type": "disabled"}
-    level = str(thinking.get("thinkingLevel") or "").lower()
-    if level in {"minimal", "low", "medium", "high"}:
-        request["output_config"] = {"effort": level}
+    if effort is not None:
+        # The picker selection takes precedence over Antigravity's thinking
+        # config for discovered models, including its usual zero budget.
+        request["output_config"] = {"effort": effort}
+        if effort == "none":
+            request["thinking"] = {"type": "disabled"}
+    else:
+        thinking = generation.get("thinkingConfig") or {}
+        budget = thinking.get("thinkingBudget")
+        if type(budget) is int:
+            # Anthropic's smallest enabled budget is 1024 tokens, and zero
+            # is the explicit "do not think" spelling.
+            request["thinking"] = {"type": "enabled", "budget_tokens": max(1024, budget)} if budget > 0 else {"type": "disabled"}
+        level = str(thinking.get("thinkingLevel") or "").lower()
+        if level in {"minimal", "low", "medium", "high"}:
+            request["output_config"] = {"effort": level}
 
     tools = []
     for tool in payload.get("tools") or []:
@@ -474,12 +482,27 @@ def serve(handler) -> None:
     if not isinstance(payload, dict):
         handler.error(400, "The request must be a JSON object.")
         return
-    route = route_for_slug(model)
+    # One row per model; a ``.<effort>`` suffix is the alias earlier builds
+    # listed per level, still honoured for conversations that saved one.
+    base, separator, suffix = model.partition(".")
+    route = route_for_slug(base)
     if route is None:
         handler.error(404, f"Model {model!r} is not in the Provider Hub catalogue.")
         return
+    rows = project_antigravity(handler.runtime.settings, handler.runtime.catalogue)["models"]
+    row = next((row for row in rows if row["model_name"] == base), None)
+    effort = None
+    if separator:
+        if row is None or suffix not in {choice["effort"] for choice in effort_choices(row)}:
+            handler.error(404, f"Model {model!r} is not in the Provider Hub catalogue.")
+            return
+        effort = suffix
+    elif row is not None:
+        labels = payload.get("labels")
+        cascade = labels.get("cascade_id") if isinstance(labels, dict) else None
+        effort = antigravity_effort.resolve(handler.runtime.root, cascade, row)
     try:
-        request = gemini_to_messages(payload, route)
+        request = gemini_to_messages(payload, route, effort=effort)
     except (TypeError, ValueError, AttributeError) as error:
         handler.error(400, str(error))
         return

@@ -117,6 +117,16 @@ class RequestTests(unittest.TestCase):
             "mistral/large-3")
         self.assertEqual(request["thinking"], {"type": "disabled"})
 
+    def test_an_effort_selection_overrides_the_desktop_thinking_config(self):
+        payload = {"generationConfig": {"thinkingConfig": {"thinkingBudget": 0,
+                                                            "thinkingLevel": "LOW"}}}
+        request = gemini_to_messages(payload, "codex/gpt-6.2-sol", effort="xhigh")
+        self.assertEqual(request["output_config"], {"effort": "xhigh"})
+        self.assertNotIn("thinking", request)
+        request = gemini_to_messages(payload, "codex/gpt-6.2-sol", effort="none")
+        self.assertEqual(request["output_config"], {"effort": "none"})
+        self.assertEqual(request["thinking"], {"type": "disabled"})
+
 
 class ResponseTests(unittest.TestCase):
     def test_text_becomes_a_candidate_part(self):
@@ -193,7 +203,9 @@ class GatewayIntegrationTests(unittest.TestCase):
         self.fixture = GatewayHubHTTPTests(methodName="runTest")
         self.fixture.setUp()
         self.addCleanup(self.fixture.tearDown)
-        self.route = self.fixture.start_gateway("minimax", "MiniMax-M3", {"reasoning_history": "native"})
+        self.route = self.fixture.start_gateway("minimax", "MiniMax-M3", {
+            "reasoning_history": "native", "effort_modes": ["none", "high"],
+        })
 
     def request(self, method, path, body=None, token=True, host=None):
         connection = http.client.HTTPConnection("127.0.0.1", self.fixture.gateway.server_port, timeout=10)
@@ -236,6 +248,50 @@ class GatewayIntegrationTests(unittest.TestCase):
         })
         self.assertEqual(status, 200, raw)
         self.assertEqual(json.loads(raw)["candidates"][0]["content"]["parts"][0]["text"], "Native JSON complete.")
+
+    def test_discovery_lists_base_model_and_legacy_aliases_still_route(self):
+        from test_gateway_hub import MockProvider
+
+        slug = slug_for(self.route)
+        status, raw = self.request("GET", "/v1beta/models")
+        self.assertEqual(status, 200)
+        models = {row["name"]: row for row in json.loads(raw)["models"]}
+        self.assertIn(f"models/{slug}", models)
+        self.assertFalse(any(name.startswith(f"models/{slug}.") for name in models))
+        for effort, method, thinking in (
+            ("none", GENERATE, "disabled"),
+            ("high", STREAM, "adaptive"),
+        ):
+            with self.subTest(effort=effort):
+                status, raw = self.request("POST", f"/v1beta/models/{slug}.{effort}:{method}", {
+                    "contents": [{"role": "user", "parts": [{"text": "Hello"}]}],
+                    "generationConfig": {"thinkingConfig": {"thinkingBudget": 0}},
+                })
+                self.assertEqual(status, 200, raw)
+                self.assertEqual(MockProvider.requests[-1]["model"], "MiniMax-M3")
+                self.assertEqual(MockProvider.requests[-1]["thinking"], {"type": thinking})
+
+        count = len(MockProvider.requests)
+        for model in (f"{slug}.", f"{slug}.invalid", f"{slug_for('minimax/unlisted')}.high"):
+            with self.subTest(model=model):
+                status, _ = self.request("POST", f"/v1beta/models/{model}:{GENERATE}", {})
+                self.assertEqual(status, 404)
+        self.assertEqual(len(MockProvider.requests), count)
+
+    def test_saved_conversation_effort_reaches_upstream_but_title_uses_request_config(self):
+        from antigravity_effort import record
+        from test_gateway_hub import MockProvider
+
+        slug = slug_for(self.route)
+        record(self.fixture.runtime.root, [{"model": slug, "effort": "high", "cascade": "chat-1"}],
+               {slug: {"none", "high"}})
+        path = f"/v1beta/models/{slug}:{GENERATE}"
+        body = {"contents": [{"role": "user", "parts": [{"text": "Hello"}]}],
+                "generationConfig": {"thinkingConfig": {"thinkingBudget": 0}}}
+        for labels, expected in (({"cascade_id": "chat-1"}, "adaptive"), ({}, "disabled")):
+            status, raw = self.request("POST", path, {**body, "labels": labels})
+            self.assertEqual(status, 200, raw)
+            self.assertEqual(MockProvider.requests[-1]["thinking"], {"type": expected})
 
     def test_rejects_wrong_key_and_nonlocal_host(self):
         self.assertEqual(self.request("GET", "/v1beta/models", token=False)[0], 401)

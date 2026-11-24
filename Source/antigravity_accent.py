@@ -6,8 +6,7 @@ and its tool-call groups stay grey. This module gives them the Hub's
 presentation the way ``vibe_accent`` does for Vibe: the app is spawned as a
 child of the worker with Chromium's ``--remote-debugging-pipe`` switch (the
 pipe loop is ``codex_accent``'s) and a watcher script is installed in its
-windows. The watcher only sets attributes, custom properties and one
-stylesheet; it never reads cookies, storage or network traffic.
+windows. The watcher adds effort controls and provider styling to the picker.
 
 Antigravity's UI is not in its app bundle: the React app is embedded in its
 ``language_server`` binary and served from ``https://127.0.0.1:<port>/``,
@@ -37,9 +36,12 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
+from functools import partial
 from pathlib import Path
 
-from antigravity_catalogue import project_antigravity
+import antigravity_effort
+from antigravity_catalogue import effort_choices, project_antigravity
 from branding import resolve_presentation
 from codex_accent import AccentBridge, already_running, child_environment, executable_path, run
 from hub_config import split_route
@@ -61,13 +63,20 @@ NATIVE_PROVIDER = "antigravity"
 
 
 def accent_catalogue(settings: dict, inventory: dict, *, cache_dir: Path | None = None,
-                     logo_root: Path | None = None) -> dict:
+                     logo_root: Path | None = None, accent: bool = True) -> dict:
     """Labels -> entries for the Hub's rows, native brand rules, and logos."""
     logos = _Logos(cache_dir, logo_root or Path(__file__).resolve().parent)
     overrides = settings.get("branding_overrides")
     entries = {entry.get("id"): entry for entry in inventory.get("models", []) if isinstance(entry, dict)}
     labels: dict[str, dict] = {}
+    efforts = {}
     for row in project_antigravity(settings, inventory)["models"]:
+        choices = effort_choices(row)
+        if choices:
+            efforts.setdefault(row["display_name"], {"model": row["model_name"], "choices": choices,
+                                                     "default": row["default_effort"]})
+        if not accent:
+            continue
         route = row["route"]
         presentation = (entries.get(route) or {}).get("presentation")
         if not isinstance(presentation, dict) or "accent" not in presentation:
@@ -77,18 +86,18 @@ def accent_catalogue(settings: dict, inventory: dict, *, cache_dir: Path | None 
         if entry is not None:
             labels.setdefault(row["display_name"], entry)
     brands = []
-    for provider, pattern in NATIVE_BRANDS:
+    for provider, pattern in NATIVE_BRANDS if accent else ():
         entry = _entry(resolve_presentation(provider, None, overrides), logos)
         if entry is not None:
             brands.append({"pattern": pattern, "entry": entry})
-    native = _entry(resolve_presentation(NATIVE_PROVIDER, None, overrides), logos)
-    return {"labels": labels, "brands": brands, "native": native, "logos": logos.uris}
+    native = _entry(resolve_presentation(NATIVE_PROVIDER, None, overrides), logos) if accent else None
+    return {"labels": labels, "brands": brands, "native": native, "logos": logos.uris, "efforts": efforts}
 
 
 _WATCHER = r"""
 (() => {
   const DATA = __DATA__;
-  if (!new RegExp(__ORIGIN__).test(String(location.href))) return { installed: false };
+  if (window !== window.top || !new RegExp(__ORIGIN__).test(String(location.href))) return { installed: false };
   const existing = window.__providerHubAntigravity;
   if (existing) { existing.update(DATA); return existing.status(); }
 
@@ -107,6 +116,7 @@ _WATCHER = r"""
       -webkit-mask: var(--provider-hub-logo-light) center / var(--provider-hub-logo-size, 100%) no-repeat; }
     :is([role="menuitem"], ${PILL})[${MARK}="dot"]::before { content: ''; flex: none; width: 8px; height: 8px; border-radius: 50%;
       margin-inline: 4px 8px; background: var(--provider-hub-accent); }
+    ${PILL} > span:has(> [data-provider-hub-effort]) > span.opacity-70:not([data-provider-hub-effort]) { display: none; }
     ${PILL}[${MARK}] > span > span[class~="opacity-70"] { color: var(--provider-hub-accent) !important; opacity: 1 !important; }
     :root[${THEME}] :is([data-testid="tool-group-collapsible"], [data-testid="worked-for-collapsible"]) > svg {
       color: var(--provider-hub-agy-accent) !important; }
@@ -163,6 +173,132 @@ _WATCHER = r"""
     setAttribute(element, MARK, entry.logo.template ? 'template' : 'image');
   }
 
+  const ROW = '[data-testid="model-selector-item"][data-model-label]';
+  const decorated = new WeakSet();
+  let efforts = DATA.effortState || { conversations: {}, last: {} };
+  let popup, anchor, closeTimer, pendingPick;
+  const cascade = () => location.pathname.match(/^\/c\/([A-Za-z0-9_-]+)\/?$/)?.[1] ?? null;
+  const configFor = (row) => Object.hasOwn(data.efforts || {}, row.getAttribute('data-model-label'))
+    ? data.efforts[row.getAttribute('data-model-label')] : null;
+  function current(config) {
+    const value = efforts.conversations[cascade()]?.[config.model] ?? efforts.last[config.model];
+    return config.choices.find(choice => choice.effort === value)
+      ?? config.choices.find(choice => choice.effort === config.default);
+  }
+  function closeMenu() {
+    clearTimeout(closeTimer);
+    popup?.remove();
+    anchor?.setAttribute('aria-expanded', 'false');
+    popup = anchor = null;
+  }
+  function delayClose() { closeTimer = setTimeout(closeMenu, 180); }
+  function openMenu(row, keyboard = false) {
+    clearTimeout(closeTimer);
+    if (anchor !== row) {
+      closeMenu();
+      const config = configFor(row);
+      if (!config || !row.isConnected) return;
+      anchor = row;
+      anchor.setAttribute('aria-expanded', 'true');
+      popup = document.createElement('div');
+      popup.setAttribute('role', 'menu');
+      popup.setAttribute('aria-label', 'Thinking effort');
+      popup.dataset.providerHubEffortMenu = '';
+      popup.className = 'agy-overlay bg-card text-foreground border border-border shadow-md rounded-lg p-1';
+      Object.assign(popup.style, {position: 'fixed', zIndex: '6000', minWidth: '150px'});
+      const rect = row.getBoundingClientRect();
+      popup.style.left = `${rect.right + 2}px`;
+      popup.style.top = `${rect.top}px`;
+      const header = document.createElement('div');
+      header.className = 'px-2 py-1 text-sm text-muted-foreground';
+      header.textContent = 'Thinking effort';
+      popup.append(header);
+      for (const choice of config.choices) {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.setAttribute('role', 'menuitemradio');
+        const checked = choice.effort === current(config)?.effort;
+        button.setAttribute('aria-checked', String(checked));
+        button.className = 'agy-overlay-item flex w-full rounded px-2 py-1 text-left hover:bg-secondary focus:bg-secondary';
+        button.textContent = checked ? `${choice.label} ✓` : choice.label;
+        button.addEventListener('click', (event) => {
+          event.stopPropagation();
+          if (pendingPick || typeof window.providerHubAntigravityPick !== 'function') return;
+          const id = String(++pickSequence);
+          const conversation = cascade();
+          pendingPick = {id, row, conversation, timer: setTimeout(() => { pendingPick = null; }, 3000)};
+          window.providerHubAntigravityPick(JSON.stringify({id, model: config.model, effort: choice.effort, cascade: conversation}));
+        });
+        popup.append(button);
+      }
+      popup.addEventListener('pointerenter', () => clearTimeout(closeTimer));
+      popup.addEventListener('pointerleave', delayClose);
+      popup.addEventListener('pointerdown', event => event.stopPropagation());
+      popup.addEventListener('keydown', event => {
+        const buttons = [...popup.querySelectorAll('button')];
+        const index = buttons.indexOf(document.activeElement);
+        if (event.key === 'Escape' || event.key === 'ArrowLeft') {
+          row.focus();
+          closeMenu();
+        } else if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+          const step = event.key === 'ArrowDown' ? 1 : -1;
+          buttons[(index + step + buttons.length) % buttons.length].focus();
+        } else return;
+        event.preventDefault();
+        event.stopPropagation();
+      }, true);
+      // Mount beside the picker's popup, never inside it: the popup's
+      // backdrop-filter (surface-glass) makes it the containing block for
+      // fixed descendants and its overflow-y:auto then clips them, so the
+      // submenu sat hidden under Base UI's backdrop. Its parent is the
+      // positioner, which stays inside the menu's floating element.
+      const picker = row.closest('[role="menu"]');
+      (picker?.parentElement ?? row.parentElement).append(popup);
+      // The positioner may still establish a fixed-position containing block.
+      const placed = popup.getBoundingClientRect();
+      const offsetX = placed.left - rect.right - 2;
+      const offsetY = placed.top - rect.top;
+      popup.style.left = `${rect.right + 2 - offsetX}px`;
+      popup.style.top = `${rect.top - offsetY}px`;
+      if (popup.getBoundingClientRect().right > innerWidth)
+        popup.style.left = `${Math.max(0, rect.left - popup.offsetWidth - 2) - offsetX}px`;
+      if (popup.getBoundingClientRect().bottom > innerHeight)
+        popup.style.top = `${Math.max(0, innerHeight - popup.offsetHeight - 4) - offsetY}px`;
+    }
+    if (keyboard) (popup.querySelector('[aria-checked="true"]') ?? popup.querySelector('button'))?.focus();
+  }
+  let pickSequence = 0;
+  function decorate(row, config) {
+    if (!decorated.has(row)) {
+      decorated.add(row);
+      row.setAttribute('aria-haspopup', 'menu');
+      row.setAttribute('aria-expanded', 'false');
+      row.addEventListener('pointerenter', () => openMenu(row));
+      row.addEventListener('pointerleave', () => { if (anchor === row) delayClose(); });
+      row.addEventListener('keydown', event => {
+        if (event.key !== 'ArrowRight') return;
+        event.preventDefault();
+        event.stopPropagation();
+        openMenu(row, true);
+      }, true);
+    }
+    let detail = row.querySelector('[data-provider-hub-effort]');
+    if (!detail) {
+      detail = document.createElement('span');
+      detail.dataset.providerHubEffort = '';
+      detail.className = 'ml-auto shrink-0 opacity-70 text-sm';
+      row.append(detail);
+    }
+    const text = `${current(config)?.label ?? ''}  ›`;
+    if (detail.textContent !== text) detail.textContent = text;
+  }
+  document.addEventListener('pointerover', event => {
+    if (anchor && event.target instanceof Element) {
+      const item = event.target.closest('[role="menuitem"]');
+      if (item && item !== anchor && !popup.contains(item) && !item.matches(ROW)) closeMenu();
+    }
+  });
+
   function repaint() {
     try {
       if (!document.getElementById(STYLE_ID) && document.head) {
@@ -171,6 +307,7 @@ _WATCHER = r"""
         style.textContent = STYLE;
         document.head.appendChild(style);
       }
+      if (anchor && (!anchor.isConnected || !popup.isConnected)) closeMenu();
       let rows = 0;
       for (const item of document.querySelectorAll('[role="menuitem"]')) {
         const own = item.matches('[data-testid="model-selector-item"]') ? item.getAttribute('data-model-label') : null;
@@ -178,12 +315,31 @@ _WATCHER = r"""
         const label = own ?? base;
         if (label === null || label === undefined) continue;
         paint(item, entryForLabel(label));
+        const config = own === null ? null : configFor(item);
+        if (config) decorate(item, config);
         rows += 1;
       }
       stats.rows = rows;
       const pill = document.querySelector(PILL);
       const entry = pill ? entryForPill(pill) : null;
-      if (pill) paint(pill, entry);
+      if (pill) {
+        paint(pill, entry);
+        const label = clean((pill.getAttribute('aria-label') || '').replace(/^[^:]*:\s*/, ''));
+        const key = Object.keys(data.efforts || {}).sort((a, b) => b.length - a.length)
+          .find(known => label === known || label.startsWith(known + ' '));
+        const labelNode = pill.querySelector(':scope > span');
+        let detail = pill.querySelector('[data-provider-hub-effort]');
+        if (key && labelNode) {
+          if (!detail) {
+            detail = document.createElement('span');
+            detail.dataset.providerHubEffort = '';
+            detail.className = 'opacity-70';
+            labelNode.append(detail);
+          }
+          const text = ` ${current(data.efforts[key])?.label ?? ''}`;
+          if (detail.textContent !== text) detail.textContent = text;
+        } else detail?.remove();
+      }
       stats.pill = entry ? entry.accent : null;
       const root = document.documentElement;
       if (entry) {
@@ -219,6 +375,17 @@ _WATCHER = r"""
 
   window.__providerHubAntigravity = {
     update(next) { data = next; rebuild(); repaint(); },
+    setEfforts(next, id) {
+      efforts = next;
+      if (id && pendingPick?.id === id) {
+        const {row, conversation, timer} = pendingPick;
+        clearTimeout(timer);
+        pendingPick = null;
+        closeMenu();
+        if (row.isConnected && cascade() === conversation) row.click();
+      }
+      schedule();
+    },
     status() { return { installed: true, labels: labels.length, brands: brands.length, logos: Object.keys(data.logos).length,
                         native: Boolean(data.native), ...stats }; },
   };
@@ -240,6 +407,86 @@ class AntigravityBridge(AccentBridge):
     Built-in browser tabs are ``webview`` targets and are detached at once;
     the script checks the origin again on every document a kept page loads.
     """
+
+    def __init__(self, *args, state_root=None, choices=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.state_root = state_root
+        self.choices = choices or {}
+        self.effort_checks = {}
+        self.effort_next_refresh = 0.0
+        self.effort_sent = {}
+
+    def _attached(self, session_id, info):
+        if session_id and session_id not in self.injected and self.wanted(info) and self.choices:
+            self.pipe.send("Runtime.enable", session_id=session_id)
+            self.pipe.send("Runtime.addBinding", {"name": "providerHubAntigravityPick"}, session_id=session_id)
+        super()._attached(session_id, info)
+
+    def refresh_extras(self):
+        now = time.monotonic()
+        if not self.choices or self.state_root is None or now < self.effort_next_refresh:
+            return
+        self.effort_next_refresh = now + 1.0
+        state = json.dumps(antigravity_effort.load(self.state_root))
+        for session in self.effort_sent.keys() - self.injected:
+            del self.effort_sent[session]
+        for session in self.injected:
+            if self.effort_sent.get(session) != state:
+                self._sync_efforts(session, state)
+                self.effort_sent[session] = state
+
+    def _sync_efforts(self, session, state, *, context=None, pick=None):
+        expression = (f"if ({self.effort_origin}) "
+                      f"window.__providerHubAntigravity?.setEfforts({state}, {json.dumps(pick)})")
+        params = {"expression": expression}
+        if context is not None:
+            params["contextId"] = context
+        self.pipe.send("Runtime.evaluate", params, session_id=session)
+
+    def handle(self, message):
+        if message.get("method") in {"Page.loadEventFired", "Page.domContentEventFired", "Target.detachedFromTarget"}:
+            session = message.get("sessionId") or (message.get("params") or {}).get("sessionId")
+            self.effort_sent.pop(session, None)
+            if message.get("method") == "Target.detachedFromTarget":
+                self.effort_checks = {key: check for key, check in self.effort_checks.items() if check[0] != session}
+        check = self.effort_checks.pop(message.get("id"), None)
+        if check is not None:
+            session, context, event = check
+            result = (message.get("result") or {}).get("result") or {}
+            if session in self.injected and result.get("value") is True:
+                state = antigravity_effort.record(self.state_root, [event], self.choices)
+                self._sync_efforts(session, json.dumps(state), context=context, pick=event["id"])
+            return
+        if message.get("method") != "Runtime.bindingCalled":
+            return super().handle(message)
+        params = message.get("params") or {}
+        session = message.get("sessionId")
+        if session not in self.injected or self.state_root is None or params.get("name") != "providerHubAntigravityPick":
+            return
+        payload = params.get("payload")
+        if not isinstance(payload, str) or len(payload) > 2048:
+            return
+        try:
+            event = json.loads(payload)
+        except ValueError:
+            return
+        if not isinstance(event, dict) or not isinstance(event.get("id"), str):
+            return
+        model, effort, cascade = (event.get(key) for key in ("model", "effort", "cascade"))
+        if not isinstance(model, str) or not isinstance(effort, str) or effort not in self.choices.get(model, ()):
+            return
+        if cascade is not None and not antigravity_effort.valid_cascade(cascade):
+            return
+        context = params.get("executionContextId")
+        if not isinstance(context, int) or len(self.effort_checks) >= 32:
+            return
+        identifier = self.pipe.send("Runtime.evaluate", {
+            "expression": f"Boolean({self.effort_origin})", "contextId": context,
+            "returnByValue": True, "timeout": 1000,
+        }, session_id=session)
+        self.effort_checks[identifier] = (session, context, event)
+
+    effort_origin = f"window === window.top && new RegExp({json.dumps(_APP_ORIGIN_PATTERN)}).test(location.href)"
 
     @staticmethod
     def wanted(info: dict) -> bool:
@@ -265,7 +512,7 @@ def _print_event(event: dict) -> None:
 
 
 def bridge_command(app_path: str, settings: dict, inventory: dict, emit=None, log_path: Path | None = None,
-                   state_root: Path | None = None, **run_options) -> int:
+                   state_root: Path | None = None, accent: bool = True, **run_options) -> int:
     """Worker entry point: ``gateway.py antigravity-accent --app <bundle>``.
 
     Long-lived like ``vibe-accent``: the exit status is the app's, and events
@@ -298,11 +545,15 @@ def bridge_command(app_path: str, settings: dict, inventory: dict, emit=None, lo
             emit({"event": "error", "stage": "launch", "message": "Antigravity is already running; quit it first."})
             return 2
         cache_dir = state_root / "accent-logos" if state_root is not None else None
-        catalogue = accent_catalogue(settings, inventory, cache_dir=cache_dir)
+        catalogue = accent_catalogue(settings, inventory, cache_dir=cache_dir, accent=accent)
+        choices = {item["model"]: {choice["effort"] for choice in item["choices"]}
+                   for item in catalogue["efforts"].values()}
+        if state_root is not None:
+            catalogue["effortState"] = antigravity_effort.load(state_root)
         emit({"event": "accents", "labels": len(catalogue["labels"]), "logos": len(catalogue["logos"]),
               "native": catalogue["native"] is not None})
         run_options.setdefault("environment", antigravity_environment(bundle))
-        run_options.setdefault("bridge_factory", AntigravityBridge)
+        run_options.setdefault("bridge_factory", partial(AntigravityBridge, state_root=state_root, choices=choices))
         # Antigravity starts its language server before its first window.
         run_options.setdefault("launch_timeout", 90.0)
         return run(binary, watcher_script(catalogue), emit=emit, **run_options)
