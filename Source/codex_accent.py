@@ -98,6 +98,15 @@ ACTIVITY_ICON = "shrink-0"
 # animation can play. The wrapper sits first in the label span directly
 # under the header, so the wrapper itself is painted and the icon inherits.
 ACTIVITY_WRAPPER_GREY = "text-tertiary"
+ACTIVITY_WRAPPER = (f':is(span[class~="contents"],span[class~="inline-grid"])'
+                    f'[class~="{ACTIVITY_WRAPPER_GREY}"]')
+# ChatGPT 26.1120 (bundle 407859: EtR0 b/L, gSvk B, IgqH Z) draws a group's
+# header ("Explored 4 files, ran 2 commands") with the same wrapper, three
+# spans down: label span > summary span > icon row > wrapper. Some tools'
+# icons also keep a grey of their own inside the wrapper (dynamic tools'
+# "shrink-0 text-text/60", "icon-xs shrink-0 text-secondary", an app's
+# "shrink-0 text-tertiary" fallback), which an inherited accent cannot beat.
+ACTIVITY_WRAPPED_GREYS = ("text-text/60", "text-secondary", "text-tertiary")
 # These are the app shell's authored tab hooks, shared by right and bottom
 # panels. Tab IDs distinguish conversation panes from browser/file tabs;
 # the main composer lives outside all such panels.
@@ -184,6 +193,18 @@ def accent_map(settings: dict, inventory: dict, *, by_route: bool = False) -> di
         if isinstance(colour, str) and _HEX.match(colour):
             accents[model["slug"] if by_route else model["display_name"]] = colour.upper()
     return accents
+
+
+def route_label_map(settings: dict, inventory: dict) -> dict:
+    """Catalogue slug -> composer label for every published model.
+
+    ChatGPT 26.1120 names the selected model by slug on the composer pill
+    and the picker (``data-model-selection-label``) while its visible name
+    is rewritten (the "GPT-" prefix dropped), so the watcher resolves the
+    slug to the label :func:`accent_map` keyed its colour by.
+    """
+    return {model["slug"]: model["display_name"] for model in project_codex(settings, inventory)["models"]
+            if isinstance(model.get("slug"), str) and isinstance(model.get("display_name"), str)}
 
 
 def native_codex_labels(inventory: dict, cache_path: Path | None = None) -> list[str]:
@@ -446,15 +467,19 @@ def activity_glyph_selector() -> str:
     keeps the glyph a flex item of the row's gap. Match the grey on the glyph
     or its slot, while skipping glyphs with their own colour in the latter.
     From ChatGPT 26.1111 there is no slot: the grey icon is the first child
-    of the label span that sits directly in the header.
+    of the label span that sits directly in the header. From 26.1120 a
+    group's header nests the same icon wrapper deeper, and a grey-classed
+    icon inside the wrapper is painted as well.
     """
+    greys = ",".join(f'[class~="{grey}"]' for grey in ACTIVITY_WRAPPED_GREYS)
     return (f'{ACTIVITY_HEADER} {ACTIVITY_SLOT} > svg[class~="{ACTIVITY_GLYPH_GREY}"],'
             f'{ACTIVITY_HEADER} {ACTIVITY_SLOT}[class~="{ACTIVITY_GLYPH_GREY}"]'
             ' > svg:not([class*="text-"]):not([style*="color"]),'
             f'{ACTIVITY_HEADER} > span > svg[class~="{ACTIVITY_ICON}"][class~="{ACTIVITY_GLYPH_GREY}"],'
-            # 26.1111 built-in tool rows: the grey lives on the icon's wrapper.
-            f'{ACTIVITY_HEADER} > span > :is(span[class~="contents"],span[class~="inline-grid"])'
-            f'[class~="{ACTIVITY_WRAPPER_GREY}"]')
+            # 26.1111 built-in tool rows (and 26.1120 groups, nested deeper):
+            # the grey lives on the icon's wrapper.
+            f'{ACTIVITY_HEADER} {ACTIVITY_WRAPPER},'
+            f'{ACTIVITY_HEADER} {ACTIVITY_WRAPPER} svg:is({greys})')
 
 
 def activity_glyph_css() -> str:
@@ -544,6 +569,7 @@ _WATCHER = r"""
   try {
     const ACCENTS = __HUB_ACCENTS__;
     const ROUTES = __HUB_ROUTE_ACCENTS__;
+    const ROUTE_LABELS = __HUB_ROUTE_LABELS__;
     const ROUTE_HUES = __HUB_ROUTE_HUES__;
     const NATIVE_LABELS = __HUB_NATIVE_LABELS__;
     const ULTRA = __HUB_ULTRA__;
@@ -642,14 +668,36 @@ _WATCHER = r"""
     }
     try { installUnlock(); } catch (error) {}
     const norm = (text) => (text || "").replace(/\s+/g, " ").trim().toLowerCase();
+    const hasKey = (table, key) => !!key && Object.prototype.hasOwnProperty.call(table, key);
+    // ChatGPT 26.1120 drops the leading "GPT-" from model names in the
+    // composer pill and the picker ("GPT-6.2-Sol" reads "6.2 Sol"), after
+    // re-joining the name's parts with spaces. Labels that start with GPT
+    // are therefore also indexed without that prefix, punctuation-insensitive,
+    // and consulted only after an exact match failed.
+    const GPT_LABELS = {};
+    for (const key of Object.keys(ACCENTS)) {
+      const loose = key.replace(/[-\s]+/g, " ");
+      if (/^gpt /.test(loose) && !hasKey(GPT_LABELS, loose.slice(4))) { GPT_LABELS[loose.slice(4)] = key; }
+    }
     // Labels may carry a leading glyph (a bullet, a tier mark); match the words.
     const lookup = (text) => {
       const key = norm(text).replace(/^[^a-z0-9]+/, "").replace(/[^a-z0-9)\]]+$/, "");
-      if (key && Object.prototype.hasOwnProperty.call(ACCENTS, key)) { return key; }
+      if (hasKey(ACCENTS, key)) { return key; }
       // Exact Hub labels take precedence. Only names from the native
       // catalogue get punctuation-insensitive matching, never a prefix.
       const nativeKey = key.replace(/[-\s]+/g, " ");
-      return Object.prototype.hasOwnProperty.call(NATIVE_LABELS, nativeKey) ? NATIVE_LABELS[nativeKey] : "";
+      if (hasKey(NATIVE_LABELS, nativeKey)) { return NATIVE_LABELS[nativeKey]; }
+      return hasKey(GPT_LABELS, nativeKey) ? GPT_LABELS[nativeKey] : "";
+    };
+    // The pill and the picker's title row name the model by its slug in
+    // data-model-selection-label (ChatGPT 26.1120). That is the catalogue's
+    // own id, so it survives display-name rewrites and localisation: a Hub
+    // route resolves through its slug, a native model through its slug in
+    // the native table.
+    const slugLookup = (slug) => {
+      const key = norm(slug);
+      if (hasKey(ROUTE_LABELS, key) && hasKey(ACCENTS, ROUTE_LABELS[key])) { return ROUTE_LABELS[key]; }
+      return key ? lookup(key) : "";
     };
     const effortLabel = (container) => container.querySelector("[data-effort-only],[data-accent],[data-maximum]");
     const nativeModel = (key) => Object.prototype.hasOwnProperty.call(NATIVE_LABELS, key.replace(/[-\s]+/g, " "));
@@ -665,6 +713,12 @@ _WATCHER = r"""
       return !!title && norm(title.textContent) === "ultra";
     }
     function findModel(container, skip) {
+      const skipped = (element) => skip && (element === skip || skip.contains(element) || element.contains(skip));
+      for (const element of container.querySelectorAll("[data-model-selection-label]")) {
+        if (skipped(element)) { continue; }
+        const key = slugLookup(element.getAttribute("data-model-selection-label"));
+        if (key) { return { key: key, element: element }; }
+      }
       // The explicit-model layout shows the effort label (data-accent /
       // data-maximum) on one row and the model's display name on the next.
       for (const span of container.querySelectorAll("span")) {
@@ -794,7 +848,9 @@ _WATCHER = r"""
         const effort = norm(trigger.getAttribute("data-selected-reasoning-effort"));
         const labels = [];
         for (const layer of trigger.querySelectorAll("[data-reasoning-effort]")) {
-          const label = layer.closest("[data-composer-footer-collapse]") || (layer.parentElement && layer.parentElement.parentElement && layer.parentElement.parentElement.parentElement);
+          // 26.1120 dropped data-composer-footer-collapse from the effort
+          // label; its CSS-module name (hash suffixed) still marks it.
+          const label = layer.closest('[data-composer-footer-collapse],[class*="ModelPickerTriggerEffortLabel"]') || (layer.parentElement && layer.parentElement.parentElement && layer.parentElement.parentElement.parentElement);
           if (label && !labels.includes(label)) { labels.push(label); }
         }
         if (!labels.length) {
@@ -1247,9 +1303,13 @@ def _label_key(label: str) -> str:
 
 def watcher_script(accents: dict, property_name: str = PROPERTY, hide_usage_banner: bool = False,
                    native_labels=(), route_accents: dict | None = None, unlock_composer: bool = False,
-                   preserve_native_notices: bool = False) -> str:
+                   preserve_native_notices: bool = False, route_labels: dict | None = None) -> str:
     table = {_label_key(label): colour for label, colour in accents.items()}
     routes = {_label_key(route): colour for route, colour in (route_accents or {}).items()}
+    # Slug -> composer label, for the picker's data-model-selection-label.
+    # Only labels the accent table knows are kept.
+    slugs = {_label_key(route): _label_key(label) for route, label in (route_labels or {}).items()
+             if isinstance(route, str) and isinstance(label, str) and _label_key(label) in table}
     native = {}
     for label in native_labels:
         key = _label_key(label)
@@ -1267,6 +1327,7 @@ def watcher_script(accents: dict, property_name: str = PROPERTY, hide_usage_bann
     css = shimmer_css() + activity_glyph_css() + ultra_css() + sidebar_spinner_css() + (usage_banner_css(preserve_native_notices) if hide_usage_banner else "")
     return (_WATCHER.replace("__HUB_ACCENTS__", json.dumps(table, ensure_ascii=False))
             .replace("__HUB_ROUTE_ACCENTS__", json.dumps(routes, ensure_ascii=False))
+            .replace("__HUB_ROUTE_LABELS__", json.dumps(slugs, ensure_ascii=False))
             .replace("__HUB_ROUTE_HUES__", json.dumps(hue_map(routes)))
             .replace("__HUB_PALETTE_HUES__", json.dumps(palette_hues))
             .replace("__HUB_NATIVE_LABELS__", json.dumps(native, ensure_ascii=False))
@@ -1785,6 +1846,7 @@ def bridge_command(app_path: str, settings: dict, inventory: dict, emit=None, lo
             run_options.setdefault("child_accents", ChildAccents(routes, native_labels))
         script = watcher_script(accents, hide_usage_banner=hide_banner, unlock_composer=unlock,
                                 native_labels=native_labels, route_accents=routes,
+                                route_labels=route_label_map(settings, inventory),
                                 preserve_native_notices=settings.get("codex_chatgpt_account") is True) if colour_enabled else "({ installed: true, colours: false })"
         if quick_enabled:
             from codex_desktop_actions import desktop_actions_script

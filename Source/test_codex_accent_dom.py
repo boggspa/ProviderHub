@@ -630,6 +630,44 @@ const cases = {
     await flush(page);
     assert.equal(await page.locator('[data-side]').evaluate(el => el.getAttribute('style') || ''), '');
   },
+  async chatgpt_26_1120_pill_names_models_by_slug_without_gpt_prefix(page) {
+    // 26.1120: the pill drops "GPT-" from the visible name and names the
+    // selected model by slug; the effort label lost data-composer-footer-collapse.
+    const pill = (slug, text) => `<button data-composer-navigation-target="reasoning" data-selected-reasoning-effort="high"><span class="ModelPickerTriggerContent-x"><span class="ModelPickerTriggerLabel-x"><span class="ModelPickerTriggerModelGroup-uBOG5R"><span class="ModelPickerTriggerModelLabel-rz_zsL"${slug == null ? '' : ` data-model-selection-label="${slug}"`}><span class="flex min-w-0 items-center gap-1 tabular-nums"><span id="pill-text" class="truncate whitespace-nowrap">${text}</span></span></span></span><span id="pill-effort" class="min-w-0 ModelPickerTriggerEffortLabel-xGzgW7"><span class="sr-only">High</span><span class="ModelPickerTriggerEffortViewport-Dfg4Xz"><span class="ModelPickerTriggerEffortLayers-x"><span aria-hidden="true" data-reasoning-effort="low">Low</span><span aria-hidden="true" data-reasoning-effort="high">High</span></span></span></span></span></span></button>`;
+    const row = `<div class="group/activity-header"><span class="inline-flex"><span class="contents text-tertiary"><svg id="pill-glyph" class="shrink-0"></svg></span><span>Ran commands</span></span></div>`;
+    const extra = `<style>.text-tertiary{color:rgb(120,120,120)}</style>`;
+    for (const [slug, text, expected] of [
+      ['gpt-6-astra', '6 Astra', colours.parent],            // native, by slug
+      [null, '6 Astra', colours.parent],                       // native, stripped text only
+      ['ollama/qwen3:cloud', 'Renamed in the app', colours.qwen], // Hub route, by slug
+      ['unknown/model', 'Nothing known', colours.grey],
+    ]) {
+      // A fresh page each time: the watcher installs once per window.
+      const fresh = await page.context().browser().newPage();
+      try {
+        await mount(fresh, extra + `<main>${row}${pill(slug, text)}</main>`);
+        const glyph = await colour(fresh, 'pill-glyph');
+        assert.equal(glyph, expected === colours.grey ? 'rgb(120, 120, 120)' : expected, `${slug} ${text}`);
+        if (expected !== colours.grey) { assert.equal(await colour(fresh, 'pill-effort'), expected, `${slug} effort`); }
+      } finally { await fresh.close(); }
+    }
+  },
+  async chatgpt_26_1120_group_header_and_grey_icons_in_the_wrapper(page) {
+    // 26.1120 group header: label span > summary span > icon row > wrapper.
+    // Icons may keep their own grey class inside the wrapper.
+    const extra = `<style>.text-tertiary{color:rgb(120,120,120)} .text-secondary{color:rgb(130,130,130)}</style>`;
+    const group = `<div class="group/activity-header relative inline-flex"><button type="button" class="absolute inset-0"></button><span class="inline-flex min-w-0 gap-2 shrink truncate text-size-chat"><span class="text-tertiary flex min-w-0 max-w-full items-center truncate"><span class="inline-flex min-w-0 gap-2 align-top items-center max-w-full overflow-hidden"><span class="contents text-tertiary"><svg id="group-glyph" class="icon-xs shrink-0"></svg></span><span id="group-label" class="min-w-0 flex-1 truncate grid items-center">Explored 4 files</span></span></span></span><span class="pointer-events-none relative flex"><svg id="group-chevron" class="icon-2xs shrink-0 text-tertiary"></svg></span></div>`;
+    const running = `<div class="group/activity-header"><span class="inline-flex"><span class="text-tertiary flex"><span class="inline-flex"><span class="inline-grid shrink-0 place-items-center text-tertiary icon-xs"><span class="col-start-1 row-start-1 inline-flex"><svg id="running-glyph" class="icon-xs shrink-0 text-secondary"></svg></span></span><span id="running-label">Searching</span></span></span></span></div>`;
+    const tool = `<div class="group/activity-header"><span class="inline-flex"><span class="contents text-tertiary"><svg id="tool-glyph" class="shrink-0 text-text/60"></svg></span><span>Used a tool</span></span><svg id="tool-warning" class="text-warning"></svg></div>`;
+    await mount(page, extra + `<main>${group}${running}${tool}${composer('group-model', 'Kimi for Coding')}</main>`);
+    assert.equal(await colour(page, 'group-glyph'), colours.kimi);
+    assert.equal(await colour(page, 'running-glyph'), colours.kimi);
+    assert.equal(await colour(page, 'tool-glyph'), colours.kimi);
+    assert.notEqual(await colour(page, 'group-label'), colours.kimi);
+    assert.notEqual(await colour(page, 'running-label'), colours.kimi);
+    assert.notEqual(await colour(page, 'group-chevron'), colours.kimi);
+    assert.notEqual(await colour(page, 'tool-warning'), colours.kimi);
+  },
 };
 (async () => {
   let browser;
@@ -665,7 +703,7 @@ class PaneAccentBrowserTests(unittest.TestCase):
         options = dict(native_labels=["GPT-6-Astra", "gpt-6-astra"], route_accents={
             "mistral/mistral-vibe-cli-latest": "#D44404", "ollama/qwen3:cloud": "#8C52EF",
             "claude/fable": "#D97757",
-        })
+        }, route_labels={"ollama/qwen3:cloud": "Qwen 3", "kimi/kimi-for-coding": "Kimi for Coding"})
         script = watcher_script(accents, **options)
         unlock = watcher_script(accents, unlock_composer=True, **options)
         banner = watcher_script(accents, hide_usage_banner=True, **options)

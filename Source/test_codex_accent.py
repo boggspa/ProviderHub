@@ -190,8 +190,11 @@ class AccentMapTests(unittest.TestCase):
                                    '[class~="group/activity-header"] span[class~="contents"][class~="text-text/60"]'
                                    ' > svg:not([class*="text-"]):not([style*="color"]),'
                                    '[class~="group/activity-header"] > span > svg[class~="shrink-0"][class~="text-text/60"],'
-                                   '[class~="group/activity-header"] > span > :is(span[class~="contents"],span[class~="inline-grid"])'
-                                   '[class~="text-tertiary"]')
+                                   '[class~="group/activity-header"] :is(span[class~="contents"],span[class~="inline-grid"])'
+                                   '[class~="text-tertiary"],'
+                                   '[class~="group/activity-header"] :is(span[class~="contents"],span[class~="inline-grid"])'
+                                   '[class~="text-tertiary"] svg:is([class~="text-text/60"],[class~="text-secondary"],'
+                                   '[class~="text-tertiary"])')
         css = activity_glyph_css()
         self.assertEqual(css, f'[{THEME_ATTRIBUTE}] :is({selector}):not([{THEME_ATTRIBUTE}="unknown"] *)'
                               f"{{color:var({ACCENT_PROPERTY},currentColor)!important}}")
