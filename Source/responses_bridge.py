@@ -643,3 +643,89 @@ class MessagesResponsesAdapter:
             status = "incomplete" if self.stop_reason == "max_tokens" else "completed"
             return [self.event("response." + status, response=self.response(status))]
         raise BridgeError("The Messages adapter returned an unsupported stream event.")
+
+
+#: Responses message phases. Codex desktop shows ``commentary`` as progress
+#: inside the turn's activity and ``final_answer`` as the reply below it. An
+#: assistant message with no phase counts as the reply, so each new progress
+#: update used to replace the last one as the answer while the turn ran, and
+#: drop back into the activity when the next tool started.
+MESSAGE_PHASES = frozenset({"commentary", "final_answer"})
+PHASE_TERMINAL_EVENTS = frozenset({"response.completed", "response.incomplete", "response.failed", "error"})
+
+
+def _untagged_message(item):
+    return (isinstance(item, dict) and item.get("type") == "message"
+            and item.get("role", "assistant") == "assistant"
+            and item.get("phase") not in MESSAGE_PHASES)
+
+
+def tag_message_phases(output):
+    """Give each assistant message in a finished response its phase.
+
+    A message that anything follows is commentary: the model went on to
+    call a tool, search or write again. The last item, when it is a
+    message, is the final answer. A phase the provider sent is kept.
+    """
+    if not isinstance(output, list):
+        return output
+    for position, item in enumerate(output):
+        if _untagged_message(item):
+            item["phase"] = "commentary" if position + 1 < len(output) else "final_answer"
+    return output
+
+
+class MessagePhases:
+    """Tag assistant messages with a phase as a Responses stream passes through.
+
+    Whether a message is commentary is only known once something follows
+    it, which is after its text has streamed. Each message therefore opens
+    as commentary, so it streams in place among the activity. Its
+    ``output_item.done`` is held until the next item opens (the message
+    stays commentary) or the response ends (it becomes the final answer).
+    Only that one event waits, and items keep their order. Messages that
+    arrive with a phase pass through unchanged.
+    """
+
+    def __init__(self):
+        self.phases = {}
+        self.held = None
+
+    def _release(self, phase):
+        if self.held is None:
+            return []
+        event, self.held = self.held, None
+        event["item"]["phase"] = phase
+        self.phases[event["item"].get("id")] = phase
+        return [event]
+
+    def feed(self, event):
+        if not isinstance(event, dict):
+            return [event]
+        kind = event.get("type")
+        item = event.get("item")
+        if kind == "response.output_item.added":
+            released = self._release("commentary")
+            if _untagged_message(item):
+                item["phase"] = "commentary"
+                self.phases[item.get("id")] = None
+            return released + [event]
+        if (kind == "response.output_item.done" and isinstance(item, dict)
+                and item.get("type") == "message" and item.get("id") in self.phases):
+            if item.get("phase") in MESSAGE_PHASES:
+                self.phases[item.get("id")] = item["phase"]
+                return [event]
+            released = self._release("commentary")
+            self.held = event
+            return released
+        if kind in PHASE_TERMINAL_EVENTS:
+            released = self._release("final_answer")
+            response = event.get("response")
+            output = response.get("output") if isinstance(response, dict) else None
+            if isinstance(output, list):
+                for value in output:
+                    if isinstance(value, dict) and self.phases.get(value.get("id")) in MESSAGE_PHASES:
+                        value["phase"] = self.phases[value["id"]]
+                tag_message_phases(output)
+            return released + [event]
+        return [event]

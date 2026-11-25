@@ -906,7 +906,18 @@ class _TurnState:
         if kind == "text":
             self.emitted_text = True
             self.last_text_message = message
-        return {"type": kind + "_delta", "text": fragment}
+        # Each CLI message is its own source, so the relay opens a new block
+        # for it. Text from two messages (a progress note, then the answer
+        # after a step that shows nothing) is otherwise run together.
+        event = {"type": kind + "_delta", "text": fragment}
+        if isinstance(message.get("id"), str) and message["id"]:
+            event["source_id"] = message["id"]
+        return event
+
+    def text_source(self):
+        """The source of the last text, which result_suffix continues."""
+        message = self.last_text_message
+        return message.get("id") if message is not None else None
 
     def result_suffix(self):
         """The result is the final answer, potentially missing from snapshots."""
@@ -1107,6 +1118,12 @@ def _translate(payload: Any, state: _TurnState) -> list[dict]:
     # system/init, system/status, rate_limit_event, replayed user messages:
     # informational, never route output.
     return []
+
+
+def _sourced(event: dict, source) -> dict:
+    if isinstance(source, str) and source:
+        event["source_id"] = source
+    return event
 
 
 def _search_result(payload: dict) -> list[dict]:
@@ -1492,12 +1509,13 @@ def _stream(session, state, *, timeout, on_handoff=None, on_result=None):
             if (kind == "json" and payload.get("type") == "result" and state.terminal
                     and on_result is not None):
                 suffix = state.result_suffix()
+                source = state.text_source()
                 had_text = state.emitted_text or bool(suffix)
                 if on_result(payload):
                     # The callback resets query state. Preserve final-only
                     # output from the old query before reading the queued one.
-                    if suffix: yield {"type": "text_delta", "text": suffix}
-                    if had_text: yield {"type": "text_delta", "text": "\n\n"}
+                    if suffix: yield _sourced({"type": "text_delta", "text": suffix}, source)
+                    if had_text: yield _sourced({"type": "text_delta", "text": "\n\n"}, source)
                     continue
             if state.mcp_unavailable:
                 _interrupt(session)
@@ -1534,8 +1552,9 @@ def _stream(session, state, *, timeout, on_handoff=None, on_result=None):
                     return None
                 fallback = state.result_suffix()
                 if fallback:
+                    source = state.text_source()
                     state.emitted_text = True
-                    yield {"type": "text_delta", "text": fallback}
+                    yield _sourced({"type": "text_delta", "text": fallback}, source)
                 if not state.emitted_text:
                     yield {"type": "error", "message": "the claude CLI produced no output"}
                     return None
@@ -1558,8 +1577,9 @@ def _stream(session, state, *, timeout, on_handoff=None, on_result=None):
             return None
         fallback = state.result_suffix()
         if fallback:
+            source = state.text_source()
             state.emitted_text = True
-            yield {"type": "text_delta", "text": fallback}
+            yield _sourced({"type": "text_delta", "text": fallback}, source)
         if not state.emitted_text:
             yield {"type": "error", "message": "the claude CLI produced no output"}
             return None

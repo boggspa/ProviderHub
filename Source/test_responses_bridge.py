@@ -731,3 +731,90 @@ class ReasoningStoreCapTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MessagePhaseTests(unittest.TestCase):
+    """Codex desktop files commentary under the turn's activity and keeps the
+    final answer below it; a message without a phase is taken as the answer."""
+
+    def _relay(self, events):
+        from cli_routes import relay_cli_turn
+        from responses_bridge import MessagePhases
+        adapter = MessagesResponsesAdapter("claude/opus", None, "scope")
+        phases = MessagePhases()
+        wire = []
+
+        def emit(event):
+            for value in adapter.feed(event):
+                wire.extend(phases.feed(value))
+
+        result = relay_cli_turn(iter(events), emit, model="claude/opus")
+        self.assertIsNone(result["error"])
+        return wire
+
+    @staticmethod
+    def _items(wire, kind):
+        return [event["item"] for event in wire if event["type"] == kind and event["item"]["type"] == "message"]
+
+    def test_progress_before_a_tool_call_streams_and_finishes_as_commentary(self):
+        wire = self._relay([
+            {"type": "text_delta", "text": "Checking the mesh.", "source_id": "m1"},
+            {"type": "tool_call", "id": "call_1", "name": "exec_command", "input": {"cmd": "ls"}},
+            {"type": "message_stop", "stop_reason": "tool_use"}])
+        self.assertEqual([item["phase"] for item in self._items(wire, "response.output_item.added")], ["commentary"])
+        self.assertEqual([item["phase"] for item in self._items(wire, "response.output_item.done")], ["commentary"])
+        # The held done still lands before the call opens, so items keep order.
+        kinds = [(event["type"], event.get("item", {}).get("type")) for event in wire
+                 if event["type"].startswith("response.output_item.")]
+        self.assertEqual(kinds, [("response.output_item.added", "message"), ("response.output_item.done", "message"),
+                                 ("response.output_item.added", "function_call"),
+                                 ("response.output_item.done", "function_call")])
+        final = wire[-1]["response"]["output"]
+        self.assertEqual(final[0]["phase"], "commentary")
+
+    def test_two_cli_messages_stay_apart_and_only_the_last_is_the_answer(self):
+        # A progress note, then the answer from the next CLI message with no
+        # visible step between them, used to arrive as "sculpts.I couldn't".
+        wire = self._relay([
+            {"type": "text_delta", "text": "One more batch.", "source_id": "m1"},
+            {"type": "text_delta", "text": "I couldn't finish the check.", "source_id": "m2"},
+            {"type": "message_stop", "stop_reason": "end_turn"}])
+        done = self._items(wire, "response.output_item.done")
+        self.assertEqual([item["content"][0]["text"] for item in done],
+                         ["One more batch.", "I couldn't finish the check."])
+        self.assertEqual([item["phase"] for item in done], ["commentary", "final_answer"])
+        self.assertEqual([item["phase"] for item in self._items(wire, "response.output_item.added")],
+                         ["commentary", "commentary"])
+        self.assertEqual([item.get("phase") for item in wire[-1]["response"]["output"]],
+                         ["commentary", "final_answer"])
+        self.assertEqual(wire[-1]["type"], "response.completed")
+
+    def test_a_reply_with_no_tool_ends_as_the_final_answer(self):
+        wire = self._relay([{"type": "text_delta", "text": "Done."},
+                            {"type": "message_stop", "stop_reason": "end_turn"}])
+        done = self._items(wire, "response.output_item.done")
+        self.assertEqual([item["phase"] for item in done], ["final_answer"])
+        # The held done is released ahead of the terminal event.
+        self.assertEqual(wire[-2]["type"], "response.output_item.done")
+
+    def test_provider_phases_pass_through_untouched(self):
+        from responses_bridge import MessagePhases
+        phases = MessagePhases()
+        item = {"id": "msg_1", "type": "message", "role": "assistant", "phase": "final_answer", "content": []}
+        events = [{"type": "response.output_item.added", "item": copy.deepcopy(item)},
+                  {"type": "response.output_item.done", "item": copy.deepcopy(item)},
+                  {"type": "response.completed", "response": {"output": [copy.deepcopy(item)]}}]
+        out = [value for event in events for value in phases.feed(event)]
+        self.assertEqual([event["type"] for event in out], [event["type"] for event in events])
+        self.assertTrue(all(event.get("item", {"phase": "final_answer"})["phase"] == "final_answer" for event in out))
+
+    def test_buffered_responses_tag_by_position(self):
+        from responses_bridge import tag_message_phases
+        output = [{"type": "reasoning"},
+                  {"type": "message", "role": "assistant", "content": []},
+                  {"type": "function_call", "name": "x"},
+                  {"type": "message", "role": "assistant", "content": [], "phase": "commentary"},
+                  {"type": "message", "role": "assistant", "content": []}]
+        tag_message_phases(output)
+        self.assertEqual([item.get("phase") for item in output],
+                         [None, "commentary", None, "commentary", "final_answer"])

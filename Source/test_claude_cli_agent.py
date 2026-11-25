@@ -770,9 +770,11 @@ class RunTurnTests(unittest.TestCase):
         fake = self._stream([progress, progress, final, final, _result_event(result="Final answer.")])
         events, _, _ = self._run({"model": "sonnet", "messages": [
             {"role": "user", "content": "Inspect the file"}]}, fake)
-        self.assertEqual(events, [{"type": "text_delta", "text": "Progress."},
-                                  {"type": "thinking_delta", "text": "Published summary."},
-                                  {"type": "text_delta", "text": "Final answer."},
+        # Each message is its own source, so the relay keeps the progress
+        # note and the answer apart instead of running them together.
+        self.assertEqual(events, [{"type": "text_delta", "text": "Progress.", "source_id": "progress"},
+                                  {"type": "thinking_delta", "text": "Published summary.", "source_id": "final"},
+                                  {"type": "text_delta", "text": "Final answer.", "source_id": "final"},
                                   {"type": "message_stop", "stop_reason": "end_turn"}])
 
     def test_snapshot_recovers_missing_block_suffixes_once(self):
@@ -1087,7 +1089,7 @@ class LiveSessionTests(unittest.TestCase):
 
         second = self.turn(_answered(_TASK, [("toolu_1", "exec_command", {"cmd": "ls"})],
                                      [("toolu_1", "a.txt\nb.txt")]))
-        self.assertEqual(second, [{"type": "text_delta", "text": "Two files."},
+        self.assertEqual(second, [{"type": "text_delta", "text": "Two files.", "source_id": "msg_2"},
                                   {"type": "message_stop", "stop_reason": "end_turn"}])
         self.assertEqual(len(self.spawned), 1)
         self.assertEqual(cli.results["toolu_1"], {"content": [{"type": "text", "text": "a.txt\nb.txt"}],

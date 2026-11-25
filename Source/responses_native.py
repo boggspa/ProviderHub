@@ -24,7 +24,8 @@ from cli_lifecycle import is_context_overflow
 from responses_tools import (flatten_tools, input_names, normalize_custom_calls, output_names, register,
                              restore_custom_call, split_hosted_search, strip_goal_budget,
                              strip_sealed_keyword)
-from responses_bridge import ENVELOPE_PREFIX, MessagesResponsesAdapter, ReasoningEnvelope, image_generation_message, to_messages
+from responses_bridge import (ENVELOPE_PREFIX, MessagePhases, MessagesResponsesAdapter, ReasoningEnvelope,
+                              image_generation_message, tag_message_phases, to_messages)
 from responses_compact import expand_items
 from responses_visualize import VisualizeRewriter, wrap_message_item, wrap_output, wrap_text
 from openrouter_provider import OpenRouterError, finalize as openrouter_finalize, app_headers as openrouter_app_headers
@@ -906,6 +907,12 @@ def prepare_native(runtime, payload):
         body["input"] = [item for item in body["input"] if not (
             isinstance(item, dict) and item.get("type") == "reasoning"
             and str(item.get("encrypted_content", "")).startswith(ENVELOPE_PREFIX))]
+        # Codex echoes the phase the gateway put on each assistant message.
+        # It is display metadata for the desktop, and providers outside
+        # OpenAI's own API do not accept it in history.
+        for item in body["input"]:
+            if isinstance(item, dict) and item.get("type", "message") == "message":
+                item.pop("phase", None)
     if provider_id == "openrouter":
         try:
             openrouter_finalize(body, spec, key, responses=True, search=search)
@@ -1244,6 +1251,7 @@ def handle_responses(handler):
             if not restore_custom_call(item, plan["tool_map"]):
                 output_names(item, plan["tool_map"])
                 apply_subagent_model(item, plan.get("subagent_route"))
+        tag_message_phases(value["output"])
         if value.get("error"):
             value["error"] = clean_error(value["error"])
         # plan["body"] is the Responses body for native routes but the
@@ -1455,6 +1463,7 @@ def handle_responses(handler):
             threading.Thread(target=ping, daemon=True).start()
             lines = []
             count = 0
+            phases = MessagePhases()
             while True:
                 line = response.readline(MAX_BODY + 1)
                 if not line:
@@ -1484,9 +1493,13 @@ def handle_responses(handler):
                             continue
                         if kind == "error":
                             event = {"type": "error", "code": "provider_error", "message": redact(event.get("message", "Provider stream error.")), "param": None}
+                        # A message's done event can wait here until the
+                        # next item shows whether it was commentary.
+                        outgoing = phases.feed(event)
                         if kind in TERMINAL_EVENTS and kind != "error":
                             finish_response(event.get("response"))
-                        emit(event)
+                        for value in outgoing:
+                            emit(value)
                         if kind in TERMINAL_EVENTS:
                             terminal = kind
                             final = event.get("response")

@@ -120,6 +120,30 @@ class CustomApplyPatchUnitTests(unittest.TestCase):
             plan = responses_native.prepare_native(runtime, payload)
         return {tool["name"]: tool for tool in plan["body"]["tools"]}, payload
 
+    def test_native_history_drops_the_desktop_message_phase(self):
+        """The gateway tags messages for Codex's display; Codex echoes the
+        tag back, and only OpenAI's own API reads it in history."""
+        from types import SimpleNamespace
+        import responses_native
+        route = "grok/grok-4.6"
+        runtime = SimpleNamespace(
+            settings={"providers": {"grok": {"base_url": "https://x.invalid"}},
+                      "_model_specs": {route: {"context": 500000}}},
+            replay_key="replay", token="token", upstream_url=None,
+            provider_key=lambda provider_id: "provider-key")
+        payload = {"model": route, "store": False, "stream": False, "input": [
+            {"role": "user", "content": "go"},
+            {"type": "message", "role": "assistant", "phase": "commentary",
+             "content": [{"type": "output_text", "text": "Looking."}]},
+            {"role": "assistant", "phase": "final_answer", "content": "Done."}]}
+        with patch.object(responses_native, "validate_connection",
+                          return_value={"base_url": "https://x.invalid"}), \
+                patch.object(responses_native, "_auth_headers", return_value={}), \
+                patch.object(responses_native, "connection_signature", return_value="sig"):
+            plan = responses_native.prepare_native(runtime, payload)
+        self.assertFalse(any("phase" in item for item in plan["body"]["input"]))
+        self.assertEqual(plan["body"]["input"][1]["content"][0]["text"], "Looking.")
+
     def test_goal_tools_lose_their_token_budget_by_default(self):
         """A goal the model cannot budget is a goal that runs to its objective."""
         tools, payload = self._goal_plan(allow_budget=False)
